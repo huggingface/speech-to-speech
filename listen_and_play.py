@@ -3,6 +3,7 @@ import numpy as np
 import threading
 from queue import Queue
 from dataclasses import dataclass, field
+import sounddevice as sd
 from transformers import HfArgumentParser
 
 
@@ -26,19 +27,19 @@ class ListenAndPlayArguments:
             "help": "The size of data chunks (in bytes). Default is 1024."
         }
     )
-    listen_play_host: str = field(
+    host: str = field(
         default="localhost",
         metadata={
             "help": "The hostname or IP address for listening and playing. Default is 'localhost'."
         }
     )
-    listen_play_send_port: int = field(
+    send_port: int = field(
         default=12345,
         metadata={
             "help": "The network port for sending data. Default is 12345."
         }
     )
-    listen_play_recv_port: int = field(
+    recv_port: int = field(
         default=12346,
         metadata={
             "help": "The network port for receiving data. Default is 12346."
@@ -50,17 +51,16 @@ def listen_and_play(
     send_rate=16000,
     recv_rate=44100,
     list_play_chunk_size=1024,
-    listen_play_host="localhost",
-    listen_play_send_port=12345,
-    listen_play_recv_port=12346,
+    host="localhost",
+    send_port=12345,
+    recv_port=12346,
 ):
-    import sounddevice as sd
   
     send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    send_socket.connect((listen_play_host, listen_play_send_port))
+    send_socket.connect((host, send_port))
 
     recv_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    recv_socket.connect((listen_play_host, listen_play_recv_port))
+    recv_socket.connect((host, recv_port))
 
     print("Recording and streaming...")
 

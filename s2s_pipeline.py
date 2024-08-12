@@ -34,10 +34,9 @@ from utils import (
     int2float,
 )
 
-from listen_and_play import ListenAndPlayArguments
-
 
 console = Console()
+
 
 @dataclass
 class ModuleArguments:
@@ -647,7 +646,6 @@ def main():
         WhisperSTTHandlerArguments,
         LanguageModelHandlerArguments,
         ParlerTTSHandlerArguments,
-        ListenAndPlayArguments
     ))
 
     # 0. Parse CLI arguments
@@ -661,7 +659,6 @@ def main():
             whisper_stt_handler_kwargs, 
             language_model_handler_kwargs, 
             parler_tts_handler_kwargs,
-            listen_and_play_kwargs,
         ) = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         # Parse arguments from command line if no JSON file is provided
@@ -673,7 +670,6 @@ def main():
             whisper_stt_handler_kwargs, 
             language_model_handler_kwargs, 
             parler_tts_handler_kwargs,
-            listen_and_play_kwargs
         ) = parser.parse_args_into_dataclasses()
 
     global logger
@@ -753,10 +749,16 @@ def main():
 
         if module_kwargs.client:
             from listen_and_play import listen_and_play
+            
+            kwargs = {
+                "host": "localhost",
+                "send_port": socket_sender_kwargs.send_port,
+                "recv_port": socket_receiver_kwargs.recv_port,
+            }
 
             listen_and_play_process = multiprocessing.Process(
                 target=listen_and_play, 
-                kwargs=vars(listen_and_play_kwargs),
+                kwargs=kwargs,
             )
             listen_and_play_process.start()
 
