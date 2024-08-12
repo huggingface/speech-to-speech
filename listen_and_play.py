@@ -3,6 +3,8 @@ import numpy as np
 import threading
 from queue import Queue
 from dataclasses import dataclass, field
+from transformers import HfArgumentParser
+
 
 @dataclass
 class ListenAndPlayArguments:
@@ -127,3 +129,10 @@ def listen_and_play(
         send_socket.close()
         recv_socket.close()
         print("Connection closed.")
+
+
+if __name__ == "__main__":
+    parser = HfArgumentParser((ListenAndPlayArguments,))
+    listen_and_play_kwargs = parser.parse_args_into_dataclasses()
+    listen_and_play(**vars(listen_and_play_kwargs))
+
