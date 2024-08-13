@@ -672,12 +672,7 @@ def main():
 
     prepare_args(whisper_stt_handler_kwargs, "stt")
     prepare_args(language_model_handler_kwargs, "llm")
-    prepare_args(parler_tts_handler_kwargs, "tts")
-
-    if not module_kwargs.client and not module_kwargs.server:
-        # is equivalent as behaving as both client and server
-        module_kwargs.client = True
-        module_kwargs.server = True
+    prepare_args(parler_tts_handler_kwargs, "tts") 
 
     stop_event = Event()
     should_listen = Event()
