@@ -121,7 +121,7 @@ Other generation parameters of the model's generate method can be set using the 
 ```
 
 ### Distil-Whisper
-```
+```bibtex
 @misc{gandhi2023distilwhisper,
       title={Distil-Whisper: Robust Knowledge Distillation via Large-Scale Pseudo Labelling},
       author={Sanchit Gandhi and Patrick von Platen and Alexander M. Rush},
@@ -133,7 +133,7 @@ Other generation parameters of the model's generate method can be set using the 
 ```
 
 ### Parler-TTS
-```
+```bibtex
 @misc{lacombe-etal-2024-parler-tts,
   author = {Yoach Lacombe and Vaibhav Srivastav and Sanchit Gandhi},
   title = {Parler-TTS},
