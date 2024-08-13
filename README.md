@@ -107,7 +107,7 @@ Other generation parameters of the model's generate method can be set using the 
 ## Citations
 
 ### Silero VAD
-```
+```bibtex
 @misc{Silero VAD,
   author = {Silero Team},
   title = {Silero VAD: pre-trained enterprise-grade Voice Activity Detector (VAD), Number Detector and Language Classifier},
