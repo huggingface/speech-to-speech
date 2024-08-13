@@ -418,7 +418,7 @@ class WhisperSTTHandler(BaseHandler):
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         torch.cuda.synchronize()
-        if self.compile_mode:
+        if self.compile_mode not in (None, "default"):
             # generating more tokens than previously will trigger CUDA graphs capture
             # one should warmup with a number of generated tokens above max tokens targeted for subsequent generation
             warmup_gen_kwargs = {
