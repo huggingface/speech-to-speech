@@ -1,4 +1,4 @@
-# Speech to Speech: An Open-Sourced and Modular GPT-4 Pipeline
+# Speech To Speech: an effort for an open-sourced and modular GPT4-o
 
 ## Approach
 
