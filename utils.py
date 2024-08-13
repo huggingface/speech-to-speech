@@ -12,16 +12,9 @@ from time import perf_counter
 from parler_tts import ParlerTTSForConditionalGeneration
 from transformers.generation.streamers import BaseStreamer
 
-# def get_perf_counter(device):
-#     if device == "cpu":
-#         return perf_counter()
-    
-#     elif "cuda" in device:
 
-
-#     else:
-#         raise NotImplementedError(f"{device} not handled")
-
+def next_power_of_2(x):  
+    return 1 if x == 0 else 2**(x - 1).bit_length()
 
 
 def int2float(sound):
