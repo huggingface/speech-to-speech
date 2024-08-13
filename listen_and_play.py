@@ -121,11 +121,7 @@ def listen_and_play(
     finally:
         stop_event.set()
         recv_thread.join()
-        print("1")
-
         send_thread.join()
-        print("2")
-
         send_socket.close()
         recv_socket.close()
         print("Connection closed.")
