@@ -14,7 +14,7 @@ The pipeline aims to provide a fully open and modular approach, leveraging model
 - **VAD**: Uses the implementation from [Silero's repo](https://github.com/snakers4/silero-vad).
 - **STT**: Uses Whisper models exclusively; however, any Whisper checkpoint can be used, enabling options like [Distil-Whisper](https://huggingface.co/distil-whisper/distil-large-v3) and [French Distil-Whisper](https://huggingface.co/eustlb/distil-large-v3-fr).
 - **LM**: This part is fully modular and can be changed by simply modifying the Hugging Face hub model ID. Users need to select an instruct model since the usage here involves interacting with it.
-- **TTS**: The mini architecture of Parler-TTS is standard, but different checkpoints, including fine-tuned multilingual checkpoints, are supported.
+- **TTS**: The mini architecture of Parler-TTS is standard, but different checkpoints, including fine-tuned multilingual checkpoints, can be used.
 
 The code is designed to facilitate easy modification. Each component is implemented as a class and can be re-implemented to match specific needs.
 
@@ -86,7 +86,7 @@ Other generation parameters of the model's generate method can be set using the 
 - `--init_chat_prompt`: Defaults to `"You are a helpful AI assistant."` Required when setting `--init_chat_role`.
 
 #### Speech to Text
-- `--description`: Sets the description for Parler-TTS generated voice, with defaults describing the vocal qualities and environment of the speaker.
+- `--description`: Sets the description for Parler-TTS generated voice. Defaults to: `"A female speaker with a slightly low-pitched voice delivers her words quite expressively, in a very confined sounding environment with clear audio quality. She speaks very fast."`
 
 - `--play_steps_s`: Specifies the duration of the first chunk sent during streaming output from Parler-TTS, impacting readiness and decoding steps.
 
