@@ -1,16 +1,5 @@
-import torch
-import numpy as np
-
-import math
-from queue import Queue
-from typing import Optional
-
 import numpy as np
 import torch
-from time import perf_counter
-
-from parler_tts import ParlerTTSForConditionalGeneration
-from transformers.generation.streamers import BaseStreamer
 
 
 def next_power_of_2(x):  
@@ -18,6 +7,10 @@ def next_power_of_2(x):
 
 
 def int2float(sound):
+    """
+    Taken from https://github.com/snakers4/silero-vad
+    """
+
     abs_max = np.abs(sound).max()
     sound = sound.astype('float32')
     if abs_max > 0:
@@ -36,6 +29,7 @@ class VADIterator:
                  ):
 
         """
+        Mainly taken from https://github.com/snakers4/silero-vad
         Class for stream imitation
 
         Parameters
