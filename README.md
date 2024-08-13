@@ -106,6 +106,20 @@ Other generation parameters of the model's generate method can be set using the 
 
 ## Citations
 
+### Silero VAD
+```
+@misc{Silero VAD,
+  author = {Silero Team},
+  title = {Silero VAD: pre-trained enterprise-grade Voice Activity Detector (VAD), Number Detector and Language Classifier},
+  year = {2021},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/snakers4/silero-vad}},
+  commit = {insert_some_commit_here},
+  email = {hello@silero.ai}
+}
+```
+
 ### Distil-Whisper
 ```
 @misc{gandhi2023distilwhisper,
@@ -118,16 +132,14 @@ Other generation parameters of the model's generate method can be set using the 
 }
 ```
 
-### Silero VAD
+### Parler-TTS
 ```
-@misc{Silero VAD,
-  author = {Silero Team},
-  title = {Silero VAD: pre-trained enterprise-grade Voice Activity Detector (VAD), Number Detector and Language Classifier},
-  year = {2021},
+@misc{lacombe-etal-2024-parler-tts,
+  author = {Yoach Lacombe and Vaibhav Srivastav and Sanchit Gandhi},
+  title = {Parler-TTS},
+  year = {2024},
   publisher = {GitHub},
   journal = {GitHub repository},
-  howpublished = {\url{https://github.com/snakers4/silero-vad}},
-  commit = {insert_some_commit_here},
-  email = {hello@silero.ai}
+  howpublished = {\url{https://github.com/huggingface/parler-tts}}
 }
 ```
