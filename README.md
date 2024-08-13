@@ -1,5 +1,19 @@
 # Speech To Speech: an effort for an open-sourced and modular GPT4-o
 
+
+## 📖 Quick Index
+* [Approach](#approach)
+  - [Structure](#structure)
+  - [Modularity](#modularity)
+* [Setup](#setup)
+* [Usage](#usage)
+  - [Server/Client approach](#serverclient-approach)
+  - [Local approach](#local-approach)
+* [Command-line usage](#command-line-usage)
+  - [Model parameters](#model-parameters)
+  - [Generation parameters](#generation-parameters)
+  - [Notable parameters](#notable-parameters)
+
 ## Approach
 
 ### Structure
