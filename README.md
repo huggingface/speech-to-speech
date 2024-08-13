@@ -55,7 +55,7 @@ The pipeline can be run in two ways:
 
 To run the pipeline on the server:
 ```bash
-python s2s_pipeline.py --recv_host "0.0.0.0" --send_host "0.0.0.0"
+python s2s_pipeline.py --recv_host 0.0.0.0 --send_host 0.0.0.0
 ```
 
 Then run the client locally to handle sending microphone input and receiving generated audio:
