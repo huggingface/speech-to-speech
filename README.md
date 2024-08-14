@@ -19,9 +19,9 @@
 ### Structure
 This repository implements a speech-to-speech cascaded pipeline with consecutive parts:
 1. **Voice Activity Detection (VAD)**: [silero VAD v5](https://github.com/snakers4/silero-vad)
-2. **Speech to Text (STT)**: Whisper models (including distilled versions)
-3. **Language Model (LM)**: Any instruct model available on the [Hugging Face Hub](https://huggingface.co/models)! 🤗
-4. **Text to Speech (TTS)**: [Parler-TTS](https://github.com/huggingface/parler-tts)
+2. **Speech to Text (STT)**: Whisper checkpoints (including [distilled versions](https://huggingface.co/distil-whisper))
+3. **Language Model (LM)**: Any instruct model available on the [Hugging Face Hub](https://huggingface.co/models?pipeline_tag=text-generation&sort=trending)! 🤗
+4. **Text to Speech (TTS)**: [Parler-TTS](https://github.com/huggingface/parler-tts)🤗
 
 ### Modularity
 The pipeline aims to provide a fully open and modular approach, leveraging models available on the Transformers library via the Hugging Face hub. The level of modularity intended for each part is as follows:
