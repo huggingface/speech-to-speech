@@ -70,6 +70,24 @@ python s2s_pipeline.py --recv_host localhost --send_host localhost
 python listen_and_play.py --host localhost
 ```
 
+### Recommended usage
+
+Leverage Torch Compile for Whisper and Parler-TTS:
+
+```bash
+python s2s_pipeline.py \
+	--recv_host 0.0.0.0 \
+	--send_host 0.0.0.0 \
+	--lm_model_name microsoft/Phi-3-mini-4k-instruct \
+	--init_chat_role system \
+	--stt_compile_mode reduce-overhead \
+	--tts_compile_mode default 
+```
+
+For the moment, modes capturing CUDA Graphs are not compatible with streaming Parler-TTS (`reduce-overhead`, `max-autotune`).
+
+
+
 ## Command-line Usage
 
 ### Model Parameters
