@@ -284,7 +284,7 @@ class VADHandlerArguments:
         }
     )
     min_speech_ms: int = field(
-        default=500,
+        default=750,
         metadata={
             "help": "Minimum length of speech segments to be considered valid speech. Measured in milliseconds. Default is 500 ms."
         }
@@ -668,7 +668,7 @@ class LanguageModelHandler(BaseHandler):
         self.chat.append(
             {"role": self.user_role, "content": prompt}
         )
-x       thread = Thread(target=self.pipe, args=(self.chat.to_list(),), kwargs=self.gen_kwargs)
+        thread = Thread(target=self.pipe, args=(self.chat.to_list(),), kwargs=self.gen_kwargs)
         thread.start()
 
         generated_text, printable_text = "", ""
