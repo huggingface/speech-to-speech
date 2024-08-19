@@ -70,6 +70,8 @@ python s2s_pipeline.py --recv_host localhost --send_host localhost
 python listen_and_play.py --host localhost
 ```
 
+You can pass `--device mps` to run it locally on a Mac.
+
 ### Recommended usage
 
 Leverage Torch Compile for Whisper and Parler-TTS:
@@ -85,8 +87,6 @@ python s2s_pipeline.py \
 ```
 
 For the moment, modes capturing CUDA Graphs are not compatible with streaming Parler-TTS (`reduce-overhead`, `max-autotune`).
-
-
 
 ## Command-line Usage
 
