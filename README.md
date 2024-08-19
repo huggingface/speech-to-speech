@@ -1,3 +1,8 @@
+<div align="center">
+  <div>&nbsp;</div>
+  <img src="logo.png" width="600"/> 
+</div>
+
 # Speech To Speech: an effort for an open-sourced and modular GPT4-o
 
 
