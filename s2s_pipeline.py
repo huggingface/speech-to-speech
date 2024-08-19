@@ -11,6 +11,7 @@ from threading import Event, Thread
 from time import perf_counter
 from typing import Optional
 
+from LLM.mlx_lm import MLXLanguageModelHandler
 from TTS.melotts import MeloTTSHandler
 from baseHandler import BaseHandler
 from STT.lightning_whisper_mlx_handler import LightningWhisperSTTHandler
@@ -484,13 +485,13 @@ class LanguageModelHandlerArguments:
         },
     )
     init_chat_role: str = field(
-        default=None,
+        default='system',
         metadata={
             "help": "Initial role for setting up the chat context. Default is 'system'."
         },
     )
     init_chat_prompt: str = field(
-        default="You are a helpful AI assistant.",
+        default="You are a helpful and friendly AI assistant. You are polite, respectful, and aim to provide concise responses of less than 20 words.",
         metadata={
             "help": "The initial chat prompt to establish context for the language model. Default is 'You are a helpful AI assistant.'"
         },
@@ -514,7 +515,7 @@ class LanguageModelHandlerArguments:
         },
     )
     chat_size: int = field(
-        default=1,
+        default=2,
         metadata={
             "help": "Number of interactions assitant-user to keep for the chat. None for no limitations."
         },
@@ -1015,7 +1016,7 @@ def main():
         queue_out=text_prompt_queue,
         setup_kwargs=vars(whisper_stt_handler_kwargs),
     )
-    lm = LanguageModelHandler(
+    lm = MLXLanguageModelHandler(
         stop_event,
         queue_in=text_prompt_queue,
         queue_out=lm_response_queue,
