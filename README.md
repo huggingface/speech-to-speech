@@ -21,7 +21,7 @@ This repository implements a speech-to-speech cascaded pipeline with consecutive
 1. **Voice Activity Detection (VAD)**: [silero VAD v5](https://github.com/snakers4/silero-vad)
 2. **Speech to Text (STT)**: Whisper checkpoints (including [distilled versions](https://huggingface.co/distil-whisper))
 3. **Language Model (LM)**: Any instruct model available on the [Hugging Face Hub](https://huggingface.co/models?pipeline_tag=text-generation&sort=trending)! 🤗
-4. **Text to Speech (TTS)**: [Parler-TTS](https://github.com/huggingface/parler-tts)
+4. **Text to Speech (TTS)**: [Parler-TTS](https://github.com/huggingface/parler-tts)🤗
 
 ### Modularity
 The pipeline aims to provide a fully open and modular approach, leveraging models available on the Transformers library via the Hugging Face hub. The level of modularity intended for each part is as follows:
@@ -71,6 +71,22 @@ python listen_and_play.py --host localhost
 ```
 
 You can pass `--device mps` to run it locally on a Mac.
+
+### Recommended usage
+
+Leverage Torch Compile for Whisper and Parler-TTS:
+
+```bash
+python s2s_pipeline.py \
+	--recv_host 0.0.0.0 \
+	--send_host 0.0.0.0 \
+	--lm_model_name microsoft/Phi-3-mini-4k-instruct \
+	--init_chat_role system \
+	--stt_compile_mode reduce-overhead \
+	--tts_compile_mode default 
+```
+
+For the moment, modes capturing CUDA Graphs are not compatible with streaming Parler-TTS (`reduce-overhead`, `max-autotune`).
 
 ## Command-line Usage
 
