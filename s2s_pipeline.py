@@ -496,7 +496,7 @@ class LanguageModelHandlerArguments:
         },
     )
     lm_gen_max_new_tokens: int = field(
-        default=64,
+        default=128,
         metadata={
             "help": "Maximum number of new tokens to generate in a single completion. Default is 128."
         },
@@ -644,6 +644,7 @@ class LanguageModelHandler(BaseHandler):
             for new_text in self.streamer:
                 generated_text += new_text
             printable_text = generated_text
+            torch.mps.empty_cache()
         else:
             generated_text, printable_text = "", ""
             for new_text in self.streamer:

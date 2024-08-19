@@ -4,7 +4,7 @@ from baseHandler import BaseHandler
 from lightning_whisper_mlx import LightningWhisperMLX
 import numpy as np
 from rich.console import Console
-
+import torch
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
@@ -28,7 +28,7 @@ class LightningWhisperSTTHandler(BaseHandler):
     ):
         self.device = device
         self.model = LightningWhisperMLX(
-            model="distil-medium.en", batch_size=12, quant=None
+            model="distil-large-v3", batch_size=6, quant=None
         )
         self.warmup()
 
@@ -49,6 +49,7 @@ class LightningWhisperSTTHandler(BaseHandler):
         pipeline_start = perf_counter()
 
         pred_text = self.model.transcribe(spoken_prompt)["text"].strip()
+        torch.mps.empty_cache()
 
         logger.debug("finished whisper inference")
         console.print(f"[yellow]USER: {pred_text}")

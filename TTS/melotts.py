@@ -36,7 +36,11 @@ class MeloTTSHandler(BaseHandler):
     def process(self, llm_sentence):
         console.print(f"[green]ASSISTANT: {llm_sentence}")
         if self.device == "mps":
+            import time
+            start = time.time()
             torch.mps.synchronize()  # Waits for all kernels in all streams on the MPS device to complete.
+            torch.mps.empty_cache()  # Frees all memory allocated by the MPS device.
+            time_it_took = time.time()-start  # Removing this line makes it fail more often. I'm looking into it.
 
         audio_chunk = self.model.tts_to_file(llm_sentence, self.speaker_id, quiet=True)
         if len(audio_chunk) == 0:
