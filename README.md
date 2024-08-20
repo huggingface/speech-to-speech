@@ -12,6 +12,7 @@
   - [Modularity](#modularity)
 * [Setup](#setup)
 * [Usage](#usage)
+  - [Docker Server approach](#docker-server)
   - [Server/Client approach](#serverclient-approach)
   - [Local approach](#local-approach)
 * [Command-line usage](#command-line-usage)
@@ -55,6 +56,15 @@ pip install -r requirements.txt
 The pipeline can be run in two ways:
 - **Server/Client approach**: Models run on a server, and audio input/output are streamed from a client.
 - **Local approach**: Uses the same client/server method but with the loopback address.
+
+### Docker Server
+
+#### Install the NVIDIA Container Toolkit
+
+https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
+
+#### Start the docker container
+```docker compose up```
 
 ### Server/Client Approach
 
