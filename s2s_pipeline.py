@@ -44,9 +44,6 @@ except (LookupError, OSError):
 # see https://docs.google.com/document/d/1y5CRfMLdwEoF1nTk9q8qEu1mgMUuUtvhklPKJ2emLU8/edit#heading=h.o2asbxsrp1ma
 CURRENT_DIR = Path(__file__).resolve().parent
 os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(CURRENT_DIR, "tmp")
-# torch._inductor.config.fx_graph_cache = True
-# # mind about this parameter ! should be >= 2 * number of padded prompt sizes for TTS
-# torch._dynamo.config.cache_size_limit = 15
 
 
 console = Console()
@@ -62,6 +59,12 @@ class ModuleArguments:
         default="local",
         metadata={
             "help": "The mode to run the pipeline in. Either 'local' or 'socket'. Default is 'local'."
+        },
+    )
+    tts: Optional[str] =  field(
+        default="parler",
+        metadata={
+            "help": "The TTS to use. Either 'parler' or 'melo'. Default is 'parler'"
         },
     )
     log_level: str = field(
@@ -1022,19 +1025,27 @@ def main():
         queue_out=lm_response_queue,
         setup_kwargs=vars(language_model_handler_kwargs),
     )
-    # tts = ParlerTTSHandler(
-    #     stop_event,
-    #     queue_in=lm_response_queue,
-    #     queue_out=send_audio_chunks_queue,
-    #     setup_args=(should_listen,),
-    #     setup_kwargs=vars(parler_tts_handler_kwargs),
-    # )
-    tts = MeloTTSHandler(
-        stop_event,
-        queue_in=lm_response_queue,
-        queue_out=send_audio_chunks_queue,
-        setup_args=(should_listen,),
-    )
+    if module_kwargs.tts == 'parler':
+        torch._inductor.config.fx_graph_cache = True
+        # mind about this parameter ! should be >= 2 * number of padded prompt sizes for TTS
+        torch._dynamo.config.cache_size_limit = 15
+        tts = ParlerTTSHandler(
+            stop_event,
+            queue_in=lm_response_queue,
+            queue_out=send_audio_chunks_queue,
+            setup_args=(should_listen,),
+            setup_kwargs=vars(parler_tts_handler_kwargs),
+        )
+        
+    elif module_kwargs.tts == 'melo':
+        tts = MeloTTSHandler(
+            stop_event,
+            queue_in=lm_response_queue,
+            queue_out=send_audio_chunks_queue,
+            setup_args=(should_listen,),
+        )
+    else:
+        raise ValueError("The TTS should be either parler or melo")
 
     # 4. Run the pipeline
     try:
