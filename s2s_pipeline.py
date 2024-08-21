@@ -17,6 +17,7 @@ from baseHandler import BaseHandler
 from STT.lightning_whisper_mlx_handler import LightningWhisperSTTHandler
 import numpy as np
 import torch
+import nltk
 from nltk.tokenize import sent_tokenize
 from rich.console import Console
 from transformers import (
