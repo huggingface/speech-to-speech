@@ -41,7 +41,7 @@ The code is designed to facilitate easy modification. Each component is implemen
 
 Clone the repository:
 ```bash
-git clone https://github.com/eustlb/speech-to-speech.git
+git clone https://github.com/huggingface/speech-to-speech.git
 cd speech-to-speech
 ```
 
