@@ -867,7 +867,7 @@ class ParlerTTSHandler(BaseHandler):
         thread.start()
 
         for i, audio_chunk in enumerate(streamer):
-            if i == 0:
+            if i == 0 and 'pipeline_start' in globals():
                 logger.info(
                     f"Time to first audio: {perf_counter() - pipeline_start:.3f}"
                 )
