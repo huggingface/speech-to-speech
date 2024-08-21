@@ -40,7 +40,7 @@ from utils import (
 # Ensure that the necessary NLTK resources are available
 try:
     nltk.data.find('tokenizers/punkt_tab')
-except LookupError:
+except (LookupError, OSError):
     nltk.download('punkt_tab')
 
 # caching allows ~50% compilation time reduction
