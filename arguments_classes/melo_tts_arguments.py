@@ -1,6 +1,4 @@
-
 from dataclasses import dataclass, field
-from typing import List
 
 
 @dataclass
@@ -23,4 +21,3 @@ class MeloTTSHandlerArguments:
             "help": "Mapping of speaker names to speaker IDs. Default is ['EN-Newest']."
         },
     )
-

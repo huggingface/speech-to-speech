@@ -5,6 +5,7 @@ from lightning_whisper_mlx import LightningWhisperMLX
 import numpy as np
 from rich.console import Console
 import torch
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
@@ -26,12 +27,10 @@ class LightningWhisperSTTHandler(BaseHandler):
         compile_mode=None,
         gen_kwargs={},
     ):
-        if len(model_name.split('/')) > 1:
-            model_name = model_name.split('/')[-1]
+        if len(model_name.split("/")) > 1:
+            model_name = model_name.split("/")[-1]
         self.device = device
-        self.model = LightningWhisperMLX(
-            model=model_name, batch_size=6, quant=None
-        )
+        self.model = LightningWhisperMLX(model=model_name, batch_size=6, quant=None)
         self.warmup()
 
     def warmup(self):

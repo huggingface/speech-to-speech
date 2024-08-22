@@ -84,7 +84,7 @@ class VADIterator:
         if not torch.is_tensor(x):
             try:
                 x = torch.Tensor(x)
-            except:
+            except Exception:
                 raise TypeError("Audio cannot be casted to tensor. Cast it manually")
 
         window_size_samples = len(x[0]) if x.dim() == 2 else len(x)

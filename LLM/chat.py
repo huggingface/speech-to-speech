@@ -1,6 +1,3 @@
-
-
-
 class Chat:
     """
     Handles the chat using to avoid OOM issues.

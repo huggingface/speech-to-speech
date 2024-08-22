@@ -4,12 +4,14 @@ from baseHandler import BaseHandler
 from mlx_lm import load, stream_generate, generate
 from rich.console import Console
 import torch
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
 console = Console()
+
 
 class MLXLanguageModelHandler(BaseHandler):
     """
@@ -28,7 +30,7 @@ class MLXLanguageModelHandler(BaseHandler):
         init_chat_prompt="You are a helpful AI assistant.",
     ):
         self.model_name = model_name
-        model_id = 'microsoft/Phi-3-mini-4k-instruct'
+        model_id = "microsoft/Phi-3-mini-4k-instruct"
         self.model, self.tokenizer = load(model_id)
         self.gen_kwargs = gen_kwargs
 
@@ -48,28 +50,40 @@ class MLXLanguageModelHandler(BaseHandler):
 
         dummy_input_text = "Write me a poem about Machine Learning."
         dummy_chat = [{"role": self.user_role, "content": dummy_input_text}]
-        
+
         n_steps = 2
 
         for _ in range(n_steps):
             prompt = self.tokenizer.apply_chat_template(dummy_chat, tokenize=False)
-            generate(self.model, self.tokenizer, prompt=prompt, max_tokens=self.gen_kwargs["max_new_tokens"], verbose=False)
-
+            generate(
+                self.model,
+                self.tokenizer,
+                prompt=prompt,
+                max_tokens=self.gen_kwargs["max_new_tokens"],
+                verbose=False,
+            )
 
     def process(self, prompt):
         logger.debug("infering language model...")
 
         self.chat.append({"role": self.user_role, "content": prompt})
-        prompt = self.tokenizer.apply_chat_template(self.chat.to_list(), tokenize=False, add_generation_prompt=True)
+        prompt = self.tokenizer.apply_chat_template(
+            self.chat.to_list(), tokenize=False, add_generation_prompt=True
+        )
         output = ""
         curr_output = ""
-        for t in stream_generate(self.model, self.tokenizer, prompt, max_tokens=self.gen_kwargs["max_new_tokens"]):
+        for t in stream_generate(
+            self.model,
+            self.tokenizer,
+            prompt,
+            max_tokens=self.gen_kwargs["max_new_tokens"],
+        ):
             output += t
             curr_output += t
-            if curr_output.endswith(('.', '?', '!', '<|end|>')):
-                yield curr_output.replace('<|end|>', '')
+            if curr_output.endswith((".", "?", "!", "<|end|>")):
+                yield curr_output.replace("<|end|>", "")
                 curr_output = ""
-        generated_text = output.replace('<|end|>', '')
+        generated_text = output.replace("<|end|>", "")
         torch.mps.empty_cache()
 
         self.chat.append({"role": "assistant", "content": generated_text})
