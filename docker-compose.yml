@@ -1,0 +1,40 @@
+---
+version: "3.8"
+services:
+
+  pipeline:
+    build:
+      context: .
+    command: 
+      - python3 
+      - s2s_pipeline.py 
+      - --recv_host 
+      - 0.0.0.0 
+      - --send_host 
+      - 0.0.0.0 
+      - --lm_model_name 
+      - microsoft/Phi-3-mini-4k-instruct 
+      - --init_chat_role 
+      - system
+      - --init_chat_prompt
+      - "You are a helpful assistant"
+      - --stt_compile_mode 
+      - reduce-overhead 
+      - --tts_compile_mode 
+      - default
+    expose:
+      - 12345/tcp
+      - 12346/tcp
+    ports:
+      - 12345:12345/tcp
+      - 12346:12346/tcp
+    volumes:
+      - ./cache/:/root/.cache/
+      - ./s2s_pipeline.py:/usr/src/app/s2s_pipeline.py
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]

@@ -1,4 +1,4 @@
-nltk==3.8.1
+nltk==3.9.1
 parler_tts @ git+https://github.com/huggingface/parler-tts.git
 torch==2.4.0
 sounddevice==0.5.0
