@@ -2,8 +2,8 @@ import numpy as np
 import torch
 
 
-def next_power_of_2(x):  
-    return 1 if x == 0 else 2**(x - 1).bit_length()
+def next_power_of_2(x):
+    return 1 if x == 0 else 2 ** (x - 1).bit_length()
 
 
 def int2float(sound):
@@ -12,22 +12,22 @@ def int2float(sound):
     """
 
     abs_max = np.abs(sound).max()
-    sound = sound.astype('float32')
+    sound = sound.astype("float32")
     if abs_max > 0:
-        sound *= 1/32768
+        sound *= 1 / 32768
     sound = sound.squeeze()  # depends on the use case
     return sound
 
 
 class VADIterator:
-    def __init__(self,
-                 model,
-                 threshold: float = 0.5,
-                 sampling_rate: int = 16000,
-                 min_silence_duration_ms: int = 100,
-                 speech_pad_ms: int = 30
-                 ):
-
+    def __init__(
+        self,
+        model,
+        threshold: float = 0.5,
+        sampling_rate: int = 16000,
+        min_silence_duration_ms: int = 100,
+        speech_pad_ms: int = 30,
+    ):
         """
         Mainly taken from https://github.com/snakers4/silero-vad
         Class for stream imitation
@@ -57,14 +57,15 @@ class VADIterator:
         self.buffer = []
 
         if sampling_rate not in [8000, 16000]:
-            raise ValueError('VADIterator does not support sampling rates other than [8000, 16000]')
+            raise ValueError(
+                "VADIterator does not support sampling rates other than [8000, 16000]"
+            )
 
         self.min_silence_samples = sampling_rate * min_silence_duration_ms / 1000
         self.speech_pad_samples = sampling_rate * speech_pad_ms / 1000
         self.reset_states()
 
     def reset_states(self):
-
         self.model.reset_states()
         self.triggered = False
         self.temp_end = 0
@@ -107,11 +108,11 @@ class VADIterator:
                 # end of speak
                 self.temp_end = 0
                 self.triggered = False
-                spoken_utterance = self.buffer 
+                spoken_utterance = self.buffer
                 self.buffer = []
                 return spoken_utterance
-            
+
         if self.triggered:
             self.buffer.append(x)
-                
+
         return None
