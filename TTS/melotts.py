@@ -20,12 +20,15 @@ class MeloTTSHandler(BaseHandler):
         should_listen,
         device="mps",
         language="EN_NEWEST",
+        speaker_to_id="EN-Newest",
+        gen_kwargs={},  # Unused
         blocksize=512,
     ):
+        print(device)
         self.should_listen = should_listen
         self.device = device
         self.model = TTS(language=language, device=device)
-        self.speaker_id = self.model.hps.data.spk2id["EN-Newest"]
+        self.speaker_id = self.model.hps.data.spk2id[speaker_to_id]
         self.blocksize = blocksize
         self.warmup()
 

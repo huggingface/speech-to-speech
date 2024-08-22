@@ -20,15 +20,17 @@ class LightningWhisperSTTHandler(BaseHandler):
 
     def setup(
         self,
-        model_name="distil-whisper/distil-large-v3",
+        model_name="distil-large-v3",
         device="cuda",
         torch_dtype="float16",
         compile_mode=None,
         gen_kwargs={},
     ):
+        if len(model_name.split('/')) > 1:
+            model_name = model_name.split('/')[-1]
         self.device = device
         self.model = LightningWhisperMLX(
-            model="distil-large-v3", batch_size=6, quant=None
+            model=model_name, batch_size=6, quant=None
         )
         self.warmup()
 

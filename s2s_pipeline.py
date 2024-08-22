@@ -14,6 +14,7 @@ from sys import platform
 from LLM.mlx_lm import MLXLanguageModelHandler
 from baseHandler import BaseHandler
 from STT.lightning_whisper_mlx_handler import LightningWhisperSTTHandler
+from handlers.melo_tts_handler import MeloTTSHandlerArguments
 import numpy as np
 import torch
 import nltk
@@ -56,9 +57,21 @@ class ModuleArguments:
         metadata={"help": "If specified, overrides the device for all handlers."},
     )
     mode: Optional[str] = field(
-        default="local",
+        default="socket",
         metadata={
             "help": "The mode to run the pipeline in. Either 'local' or 'socket'. Default is 'local'."
+        },
+    )
+    local_mac_optimal_settings: bool = field(
+        default=False,
+        metadata={
+            "help": "If specified, sets the optimal settings for Mac OS. Hence whisper-mlx, MLX LM and MeloTTS will be used."
+        },
+    )
+    stt: Optional[str] = field(
+        default="whisper",
+        metadata={
+            "help": "The STT to use. Either 'whisper' or 'whisper-mlx'. Default is 'whisper'."
         },
     )
     llm: Optional[str] =  field(
@@ -916,6 +929,7 @@ def main():
             WhisperSTTHandlerArguments,
             LanguageModelHandlerArguments,
             ParlerTTSHandlerArguments,
+            MeloTTSHandlerArguments,
         )
     )
 
@@ -930,6 +944,7 @@ def main():
             whisper_stt_handler_kwargs,
             language_model_handler_kwargs,
             parler_tts_handler_kwargs,
+            melo_tts_handler_kwargs,
         ) = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         # Parse arguments from command line if no JSON file is provided
@@ -941,6 +956,7 @@ def main():
             whisper_stt_handler_kwargs,
             language_model_handler_kwargs,
             parler_tts_handler_kwargs,
+            melo_tts_handler_kwargs,
         ) = parser.parse_args_into_dataclasses()
 
     # 1. Handle logger
@@ -954,6 +970,26 @@ def main():
     # torch compile logs
     if module_kwargs.log_level == "debug":
         torch._logging.set_logs(graph_breaks=True, recompiles=True, cudagraphs=True)
+
+
+    def optimal_mac_settings(mac_optimal_settings: Optional[str], *handler_kwargs):
+        if mac_optimal_settings:
+            for kwargs in handler_kwargs:
+                if hasattr(kwargs, "device"):
+                    kwargs.device = "mps"
+                if hasattr(kwargs, "mode"):
+                    kwargs.mode = "local"
+                if hasattr(kwargs, "stt"):
+                    kwargs.stt = "whisper-mlx"
+                if hasattr(kwargs, "llm"):
+                    kwargs.llm = "mlx-lm"
+                if hasattr(kwargs, "tts"):
+                    kwargs.tts = "melo"
+
+    optimal_mac_settings(
+        module_kwargs.local_mac_optimal_settings,
+        module_kwargs,
+    )
 
     if platform == "darwin":
         if module_kwargs.device == "cuda":
@@ -991,6 +1027,7 @@ def main():
     prepare_args(whisper_stt_handler_kwargs, "stt")
     prepare_args(language_model_handler_kwargs, "lm")
     prepare_args(parler_tts_handler_kwargs, "tts")
+    prepare_args(melo_tts_handler_kwargs, "melo")
 
     # 3. Build the pipeline
     stop_event = Event()
@@ -1033,12 +1070,22 @@ def main():
         setup_args=(should_listen,),
         setup_kwargs=vars(vad_handler_kwargs),
     )
-    stt = LightningWhisperSTTHandler(
-        stop_event,
+    if module_kwargs.stt == 'whisper':
+        stt = WhisperSTTHandler(
+           stop_event,
         queue_in=spoken_prompt_queue,
         queue_out=text_prompt_queue,
         setup_kwargs=vars(whisper_stt_handler_kwargs),
     )
+    elif module_kwargs.stt == 'whisper-mlx':
+        stt = LightningWhisperSTTHandler(
+            stop_event,
+            queue_in=spoken_prompt_queue,
+            queue_out=text_prompt_queue,
+            setup_kwargs=vars(whisper_stt_handler_kwargs),
+        )
+    else:
+        raise ValueError("The STT should be either whisper or whisper-mlx")
     if module_kwargs.llm == 'transformers':
         lm = LanguageModelHandler(
         stop_event,
@@ -1078,6 +1125,7 @@ def main():
             queue_in=lm_response_queue,
             queue_out=send_audio_chunks_queue,
             setup_args=(should_listen,),
+            setup_kwargs=vars(melo_tts_handler_kwargs),
         )
     else:
         raise ValueError("The TTS should be either parler or melo")
