@@ -1,4 +1,4 @@
-from MeloTTS.melo.api import TTS
+from melo.api import TTS
 import logging
 from baseHandler import BaseHandler
 import librosa

@@ -962,7 +962,7 @@ def main():
             )
         if module_kwargs.llm != "mlx-lm":
             logger.warning(
-                "For macOS users, it is recommended to use mlx-lm."
+                "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm mlx-lm."
             )
         if module_kwargs.tts != "melo":
             logger.warning(
@@ -1068,7 +1068,11 @@ def main():
         )
         
     elif module_kwargs.tts == 'melo':
-        from TTS.melotts import MeloTTSHandler
+        try:
+            from TTS.melotts import MeloTTSHandler
+        except RuntimeError as e:
+            logger.error(f"Error importing MeloTTSHandler. You might need to run: python -m unidic download")
+            raise e
         tts = MeloTTSHandler(
             stop_event,
             queue_in=lm_response_queue,
