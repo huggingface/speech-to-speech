@@ -12,7 +12,6 @@ from time import perf_counter
 from typing import Optional
 from sys import platform
 from LLM.mlx_lm import MLXLanguageModelHandler
-from TTS.melotts import MeloTTSHandler
 from baseHandler import BaseHandler
 from STT.lightning_whisper_mlx_handler import LightningWhisperSTTHandler
 import numpy as np
@@ -1069,6 +1068,7 @@ def main():
         )
         
     elif module_kwargs.tts == 'melo':
+        from TTS.melotts import MeloTTSHandler
         tts = MeloTTSHandler(
             stop_event,
             queue_in=lm_response_queue,
