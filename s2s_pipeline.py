@@ -10,7 +10,6 @@ from threading import Event, Thread
 from time import perf_counter
 from typing import Optional
 from sys import platform
-from LLM.mlx_lm import MLXLanguageModelHandler
 from arguments_classes.language_model_arguments import LanguageModelHandlerArguments
 from arguments_classes.module_arguments import ModuleArguments
 from arguments_classes.parler_tts_arguments import ParlerTTSHandlerArguments
@@ -19,7 +18,6 @@ from arguments_classes.socket_sender_arguments import SocketSenderArguments
 from arguments_classes.vad_arguments import VADHandlerArguments
 from arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
 from baseHandler import BaseHandler
-from STT.lightning_whisper_mlx_handler import LightningWhisperSTTHandler
 from arguments_classes.melo_tts_arguments import MeloTTSHandlerArguments
 import numpy as np
 import torch
@@ -780,6 +778,7 @@ def main():
             setup_kwargs=vars(whisper_stt_handler_kwargs),
         )
     elif module_kwargs.stt == "whisper-mlx":
+        from STT.lightning_whisper_mlx_handler import LightningWhisperSTTHandler
         stt = LightningWhisperSTTHandler(
             stop_event,
             queue_in=spoken_prompt_queue,
@@ -796,6 +795,7 @@ def main():
             setup_kwargs=vars(language_model_handler_kwargs),
         )
     elif module_kwargs.llm == "mlx-lm":
+        from LLM.mlx_lm import MLXLanguageModelHandler
         lm = MLXLanguageModelHandler(
             stop_event,
             queue_in=text_prompt_queue,

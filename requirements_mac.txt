@@ -3,3 +3,5 @@ parler_tts @ git+https://github.com/huggingface/parler-tts.git
 melotts @ git+https://github.com/andimarafioti/MeloTTS.git#egg=MeloTTS  # made a copy of MeloTTS to have compatible versions of transformers
 torch==2.4.0
 sounddevice==0.5.0
+lightning-whisper-mlx>=0.0.10
+mlx-lm>=0.14.0
