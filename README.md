@@ -46,9 +46,9 @@ git clone https://github.com/huggingface/speech-to-speech.git
 cd speech-to-speech
 ```
 
-Install the required dependencies:
+Install the required dependencies using [uv](https://github.com/astral-sh/uv):
 ```bash
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
 ## Usage
