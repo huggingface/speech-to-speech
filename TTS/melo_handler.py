@@ -24,7 +24,6 @@ class MeloTTSHandler(BaseHandler):
         gen_kwargs={},  # Unused
         blocksize=512,
     ):
-        print(device)
         self.should_listen = should_listen
         self.device = device
         self.model = TTS(language=language, device=device)
