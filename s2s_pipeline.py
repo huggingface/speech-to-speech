@@ -11,6 +11,7 @@ from time import perf_counter
 from typing import Optional
 from sys import platform
 from arguments_classes.language_model_arguments import LanguageModelHandlerArguments
+from arguments_classes.mlx_language_model_arguments import MLXLanguageModelHandlerArguments
 from arguments_classes.module_arguments import ModuleArguments
 from arguments_classes.parler_tts_arguments import ParlerTTSHandlerArguments
 from arguments_classes.socket_receiver_arguments import SocketReceiverArguments
@@ -629,6 +630,7 @@ def main():
             VADHandlerArguments,
             WhisperSTTHandlerArguments,
             LanguageModelHandlerArguments,
+            MLXLanguageModelHandlerArguments,
             ParlerTTSHandlerArguments,
             MeloTTSHandlerArguments,
         )
@@ -644,6 +646,7 @@ def main():
             vad_handler_kwargs,
             whisper_stt_handler_kwargs,
             language_model_handler_kwargs,
+            mlx_language_model_handler_kwargs,
             parler_tts_handler_kwargs,
             melo_tts_handler_kwargs,
         ) = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
@@ -656,6 +659,7 @@ def main():
             vad_handler_kwargs,
             whisper_stt_handler_kwargs,
             language_model_handler_kwargs,
+            mlx_language_model_handler_kwargs,
             parler_tts_handler_kwargs,
             melo_tts_handler_kwargs,
         ) = parser.parse_args_into_dataclasses()
@@ -720,12 +724,14 @@ def main():
     overwrite_device_argument(
         module_kwargs.device,
         language_model_handler_kwargs,
+        mlx_language_model_handler_kwargs,
         parler_tts_handler_kwargs,
         whisper_stt_handler_kwargs,
     )
 
     prepare_args(whisper_stt_handler_kwargs, "stt")
     prepare_args(language_model_handler_kwargs, "lm")
+    prepare_args(mlx_language_model_handler_kwargs, "mlx_lm")
     prepare_args(parler_tts_handler_kwargs, "tts")
     prepare_args(melo_tts_handler_kwargs, "melo")
 
@@ -800,7 +806,7 @@ def main():
             stop_event,
             queue_in=text_prompt_queue,
             queue_out=lm_response_queue,
-            setup_kwargs=vars(language_model_handler_kwargs),
+            setup_kwargs=vars(mlx_language_model_handler_kwargs),
         )
     else:
         raise ValueError("The LLM should be either transformers or mlx-lm")

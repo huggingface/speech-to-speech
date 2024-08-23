@@ -34,7 +34,7 @@ class VADHandlerArguments:
         },
     )
     speech_pad_ms: int = field(
-        default=250,
+        default=500,
         metadata={
             "help": "Amount of padding added to the beginning and end of detected speech segments. Measured in milliseconds. Default is 250 ms."
         },
