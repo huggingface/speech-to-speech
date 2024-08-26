@@ -37,7 +37,6 @@ from transformers import (
 from parler_tts import ParlerTTSForConditionalGeneration, ParlerTTSStreamer
 import librosa
 
-from local_audio_streamer import LocalAudioStreamer
 from utils import VADIterator, int2float, next_power_of_2
 
 # Ensure that the necessary NLTK resources are available
@@ -746,6 +745,8 @@ def main():
     lm_response_queue = Queue()
 
     if module_kwargs.mode == "local":
+        from local_audio_streamer import LocalAudioStreamer
+
         local_audio_streamer = LocalAudioStreamer(
             input_queue=recv_audio_chunks_queue, output_queue=send_audio_chunks_queue
         )
