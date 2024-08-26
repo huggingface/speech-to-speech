@@ -9,7 +9,7 @@ from transformers import HfArgumentParser
 @dataclass
 class ListenAndPlayArguments:
     send_rate: int = field(default=16000, metadata={"help": "In Hz. Default is 16000."})
-    recv_rate: int = field(default=44100, metadata={"help": "In Hz. Default is 44100."})
+    recv_rate: int = field(default=16000, metadata={"help": "In Hz. Default is 16000."})
     list_play_chunk_size: int = field(
         default=1024,
         metadata={"help": "The size of data chunks (in bytes). Default is 1024."},
