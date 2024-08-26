@@ -66,13 +66,15 @@ class MLXLanguageModelHandler(BaseHandler):
         logger.debug("infering language model...")
 
         self.chat.append({"role": self.user_role, "content": prompt})
-        
+
         # Remove system messages if using a Gemma model
         if "gemma" in self.model_name.lower():
-            chat_messages = [msg for msg in self.chat.to_list() if msg["role"] != "system"]
+            chat_messages = [
+                msg for msg in self.chat.to_list() if msg["role"] != "system"
+            ]
         else:
             chat_messages = self.chat.to_list()
-        
+
         prompt = self.tokenizer.apply_chat_template(
             chat_messages, tokenize=False, add_generation_prompt=True
         )
