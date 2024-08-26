@@ -243,6 +243,14 @@ def main():
             queue_out=text_prompt_queue,
             setup_kwargs=vars(whisper_stt_handler_kwargs),
         )
+    elif module_kwargs.stt == "paraformer":
+        from STT.paraformer_handler import ParaformerSTTHandler
+        stt = ParaformerSTTHandler(
+            stop_event,
+            queue_in=spoken_prompt_queue,
+            queue_out=text_prompt_queue,
+            # setup_kwargs=vars(whisper_stt_handler_kwargs),
+        )
     else:
         raise ValueError("The STT should be either whisper or whisper-mlx")
     if module_kwargs.llm == "transformers":
