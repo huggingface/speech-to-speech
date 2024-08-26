@@ -73,9 +73,9 @@ To run the pipeline on the server:
 python s2s_pipeline.py --recv_host 0.0.0.0 --send_host 0.0.0.0
 ```
 
-Then run the pipeline locally:
+Then run the client locally to handle sending microphone input and receiving generated audio:
 ```bash
-python s2s_pipeline.py --mode local
+python listen_and_play.py --host <IP address of your server>
 ```
 
 ### Running on Mac
