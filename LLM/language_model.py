@@ -75,7 +75,7 @@ class LanguageModelHandler(BaseHandler):
         dummy_input_text = "Write me a poem about Machine Learning."
         dummy_chat = [{"role": self.user_role, "content": dummy_input_text}]
         warmup_gen_kwargs = {
-            "min_new_tokens": self.gen_kwargs["max_new_tokens"],
+            "min_new_tokens": self.gen_kwargs["min_new_tokens"],
             "max_new_tokens": self.gen_kwargs["max_new_tokens"],
             **self.gen_kwargs,
         }
