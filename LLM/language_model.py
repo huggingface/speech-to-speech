@@ -13,9 +13,6 @@ from rich.console import Console
 import logging
 from nltk import sent_tokenize
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 console = Console()

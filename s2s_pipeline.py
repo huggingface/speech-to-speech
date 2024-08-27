@@ -43,8 +43,8 @@ except (LookupError, OSError):
 CURRENT_DIR = Path(__file__).resolve().parent
 os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(CURRENT_DIR, "tmp")
 
-
 console = Console()
+logging.getLogger("numba").setLevel(logging.WARNING)  # quiet down numba logs
 
 
 def prepare_args(args, prefix):
