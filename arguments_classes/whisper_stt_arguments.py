@@ -33,12 +33,6 @@ class WhisperSTTHandlerArguments:
             "help": "The maximum number of new tokens to generate. Default is 128."
         },
     )
-    stt_gen_min_new_tokens: int = field(
-        default=0,
-        metadata={
-            "help": "The minimum number of new tokens to generate. Default is 0."
-        },
-    )
     stt_gen_num_beams: int = field(
         default=1,
         metadata={
