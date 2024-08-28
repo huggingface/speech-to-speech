@@ -7,3 +7,4 @@ lightning-whisper-mlx>=0.0.10
 mlx-lm>=0.14.0
 funasr
 modelscope
+ChatTTS

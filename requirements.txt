@@ -5,3 +5,4 @@ torch==2.4.0
 sounddevice==0.5.0
 funasr
 modelscope
+ChatTTS
