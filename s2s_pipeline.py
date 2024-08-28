@@ -13,6 +13,7 @@ from arguments_classes.mlx_language_model_arguments import (
     MLXLanguageModelHandlerArguments,
 )
 from arguments_classes.module_arguments import ModuleArguments
+from arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
 from arguments_classes.parler_tts_arguments import ParlerTTSHandlerArguments
 from arguments_classes.socket_receiver_arguments import SocketReceiverArguments
 from arguments_classes.socket_sender_arguments import SocketSenderArguments
@@ -73,6 +74,7 @@ def main():
             SocketSenderArguments,
             VADHandlerArguments,
             WhisperSTTHandlerArguments,
+            ParaformerSTTHandlerArguments,
             LanguageModelHandlerArguments,
             MLXLanguageModelHandlerArguments,
             ParlerTTSHandlerArguments,
@@ -89,6 +91,7 @@ def main():
             socket_sender_kwargs,
             vad_handler_kwargs,
             whisper_stt_handler_kwargs,
+            paraformer_stt_handler_kwargs,
             language_model_handler_kwargs,
             mlx_language_model_handler_kwargs,
             parler_tts_handler_kwargs,
@@ -102,6 +105,7 @@ def main():
             socket_sender_kwargs,
             vad_handler_kwargs,
             whisper_stt_handler_kwargs,
+            paraformer_stt_handler_kwargs,
             language_model_handler_kwargs,
             mlx_language_model_handler_kwargs,
             parler_tts_handler_kwargs,
@@ -163,6 +167,8 @@ def main():
                     kwargs.tts_device = common_device
                 if hasattr(kwargs, "stt_device"):
                     kwargs.stt_device = common_device
+                if hasattr(kwargs, "paraformer_stt_device"):
+                    kwargs.paraformer_stt_device = common_device
 
     # Call this function with the common device and all the handlers
     overwrite_device_argument(
@@ -171,9 +177,11 @@ def main():
         mlx_language_model_handler_kwargs,
         parler_tts_handler_kwargs,
         whisper_stt_handler_kwargs,
+        paraformer_stt_handler_kwargs,
     )
 
     prepare_args(whisper_stt_handler_kwargs, "stt")
+    prepare_args(paraformer_stt_handler_kwargs, "paraformer_stt")
     prepare_args(language_model_handler_kwargs, "lm")
     prepare_args(mlx_language_model_handler_kwargs, "mlx_lm")
     prepare_args(parler_tts_handler_kwargs, "tts")
@@ -243,8 +251,19 @@ def main():
             queue_out=text_prompt_queue,
             setup_kwargs=vars(whisper_stt_handler_kwargs),
         )
+    elif module_kwargs.stt == "paraformer":
+        from STT.paraformer_handler import ParaformerSTTHandler
+
+        stt = ParaformerSTTHandler(
+            stop_event,
+            queue_in=spoken_prompt_queue,
+            queue_out=text_prompt_queue,
+            setup_kwargs=vars(paraformer_stt_handler_kwargs),
+        )
     else:
-        raise ValueError("The STT should be either whisper or whisper-mlx")
+        raise ValueError(
+            "The STT should be either whisper, whisper-mlx, or paraformer."
+        )
     if module_kwargs.llm == "transformers":
         from LLM.language_model import LanguageModelHandler
 
