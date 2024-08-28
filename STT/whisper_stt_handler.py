@@ -30,6 +30,7 @@ class WhisperSTTHandler(BaseHandler):
         self.torch_dtype = getattr(torch, torch_dtype)
         self.compile_mode = compile_mode
         self.gen_kwargs = gen_kwargs
+        del self.gen_kwargs["language"]
 
         self.processor = AutoProcessor.from_pretrained(model_name)
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
