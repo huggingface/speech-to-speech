@@ -58,7 +58,7 @@ class ChatTTSHandler(BaseHandler):
         if self.stream:
             wavs = [np.array([])]
             for gen in wavs_gen:
-                if len(gen[0]) == 0:
+                if gen[0] is None or len(gen[0]) == 0:
                     self.should_listen.set()
                     return
                 audio_chunk = librosa.resample(gen[0], orig_sr=24000, target_sr=16000)
