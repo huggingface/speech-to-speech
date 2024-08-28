@@ -8,6 +8,7 @@ import torch
 from baseHandler import BaseHandler
 from rich.console import Console
 import logging
+from shared_variables import current_language
 
 logger = logging.getLogger(__name__)
 console = Console()

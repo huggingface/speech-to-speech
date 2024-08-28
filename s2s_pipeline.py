@@ -48,7 +48,6 @@ os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(CURRENT_DIR, "tmp")
 console = Console()
 logging.getLogger("numba").setLevel(logging.WARNING)  # quiet down numba logs
 
-current_language = "en"
 
 
 def prepare_args(args, prefix):

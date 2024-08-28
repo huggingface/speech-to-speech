@@ -5,6 +5,7 @@ import librosa
 import numpy as np
 from rich.console import Console
 import torch
+from shared_variables import current_language
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,6 @@ class MeloTTSHandler(BaseHandler):
 
     def process(self, llm_sentence):
         console.print(f"[green]ASSISTANT: {llm_sentence}")
-        global current_language
         if self.language != current_language:
             self.model = TTS(language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[self.language], device=self.device)
             self.speaker_id = self.model.hps.data.spk2id[WHISPER_LANGUAGE_TO_MELO_SPEAKER[self.language]]
