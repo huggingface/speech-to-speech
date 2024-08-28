@@ -18,15 +18,15 @@ class ChatTTSHandler(BaseHandler):
     def setup(
         self,
         should_listen,
-        device="mps",
+        device="cuda",
         gen_kwargs={},  # Unused
         stream=True,
         chunk_size=512,
     ):
         self.should_listen = should_listen
         self.device = device
-        self.model  = ChatTTS.Chat()
-        self.model.load(compile=True) # Set to True for better performance
+        self.model = ChatTTS.Chat()
+        self.model.load(compile=False)  # Doesn't work for me with True
         self.chunk_size = chunk_size
         self.stream = stream
         rnd_spk_emb = self.model.sample_random_speaker()
@@ -37,8 +37,7 @@ class ChatTTSHandler(BaseHandler):
 
     def warmup(self):
         logger.info(f"Warming up {self.__class__.__name__}")
-        _= self.model.infer("text")
-
+        _ = self.model.infer("text")
 
     def process(self, llm_sentence):
         console.print(f"[green]ASSISTANT: {llm_sentence}")
@@ -52,36 +51,32 @@ class ChatTTSHandler(BaseHandler):
                 time.time() - start
             )  # Removing this line makes it fail more often. I'm looking into it.
 
-        wavs_gen = self.model.infer(llm_sentence,params_infer_code=self.params_infer_code, stream=self.stream)
+        wavs_gen = self.model.infer(
+            llm_sentence, params_infer_code=self.params_infer_code, stream=self.stream
+        )
 
         if self.stream:
             wavs = [np.array([])]
             for gen in wavs_gen:
-                print('new chunk gen', len(gen[0]))
                 if len(gen[0]) == 0:
                     self.should_listen.set()
                     return
                 audio_chunk = librosa.resample(gen[0], orig_sr=24000, target_sr=16000)
-                audio_chunk = (audio_chunk * 32768).astype(np.int16)
-                print('audio_chunk:', audio_chunk.shape)
+                audio_chunk = (audio_chunk * 32768).astype(np.int16)[0]
                 while len(audio_chunk) > self.chunk_size:
-                    yield audio_chunk[:self.chunk_size]  # 返回前 chunk_size 字节的数据
-                    audio_chunk = audio_chunk[self.chunk_size:]  # 移除已返回的数据
-                yield np.pad(audio_chunk, (0,self.chunk_size-len(audio_chunk)))
+                    yield audio_chunk[: self.chunk_size]  # 返回前 chunk_size 字节的数据
+                    audio_chunk = audio_chunk[self.chunk_size :]  # 移除已返回的数据
+                yield np.pad(audio_chunk, (0, self.chunk_size - len(audio_chunk)))
         else:
-            print('check result', wavs_gen)
             wavs = wavs_gen
             if len(wavs[0]) == 0:
                 self.should_listen.set()
                 return
             audio_chunk = librosa.resample(wavs[0], orig_sr=24000, target_sr=16000)
             audio_chunk = (audio_chunk * 32768).astype(np.int16)
-            print('audio_chunk:', audio_chunk.shape)
             for i in range(0, len(audio_chunk), self.chunk_size):
                 yield np.pad(
                     audio_chunk[i : i + self.chunk_size],
                     (0, self.chunk_size - len(audio_chunk[i : i + self.chunk_size])),
                 )
         self.should_listen.set()
-
-

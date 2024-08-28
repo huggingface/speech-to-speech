@@ -80,7 +80,7 @@ def main():
             MLXLanguageModelHandlerArguments,
             ParlerTTSHandlerArguments,
             MeloTTSHandlerArguments,
-            ChatTTSHandlerArguments
+            ChatTTSHandlerArguments,
         )
     )
 
@@ -190,7 +190,7 @@ def main():
     prepare_args(mlx_language_model_handler_kwargs, "mlx_lm")
     prepare_args(parler_tts_handler_kwargs, "tts")
     prepare_args(melo_tts_handler_kwargs, "melo")
-    prepare_args(chat_tts_handler_kwargs,"chat_tts")
+    prepare_args(chat_tts_handler_kwargs, "chat_tts")
 
     # 3. Build the pipeline
     stop_event = Event()
@@ -319,9 +319,7 @@ def main():
         try:
             from TTS.chatTTS_handler import ChatTTSHandler
         except RuntimeError as e:
-            logger.error(
-                "Error importing ChatTTSHandler"
-            )
+            logger.error("Error importing ChatTTSHandler")
             raise e
         tts = ChatTTSHandler(
             stop_event,
@@ -331,7 +329,7 @@ def main():
             setup_kwargs=vars(chat_tts_handler_kwargs),
         )
     else:
-        raise ValueError("The TTS should be either parler or melo")
+        raise ValueError("The TTS should be either parler, melo or chatTTS")
 
     # 4. Run the pipeline
     try:
