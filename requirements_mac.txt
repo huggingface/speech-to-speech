@@ -5,3 +5,4 @@ torch==2.4.0
 sounddevice==0.5.0
 lightning-whisper-mlx>=0.0.10
 mlx-lm>=0.14.0
+ChatTTS
