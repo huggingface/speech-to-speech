@@ -5,9 +5,6 @@ from mlx_lm import load, stream_generate, generate
 from rich.console import Console
 import torch
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 console = Console()
