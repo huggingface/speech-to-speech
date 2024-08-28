@@ -105,6 +105,12 @@ class WhisperSTTHandler(BaseHandler):
         pred_text = self.processor.batch_decode(
             pred_ids, skip_special_tokens=True, decode_with_timestamps=False
         )[0]
+        language_id = self.processor.tokenizer.decode(pred_ids[0, 1])
+        for char in "<>|":
+            language_id = language_id.replace(char, "") # remove special tokens
+
+        global current_language
+        current_language = language_id
 
         logger.debug("finished whisper inference")
         console.print(f"[yellow]USER: {pred_text}")

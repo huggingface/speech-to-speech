@@ -10,21 +10,40 @@ logger = logging.getLogger(__name__)
 
 console = Console()
 
+WHISPER_LANGUAGE_TO_MELO_LANGUAGE = {
+    "en": "EN_NEWEST",
+    "fr": "FR",
+    "es": "ES",
+    "zh": "ZH",
+    "ja": "JP",
+    "ko": "KR",
+}
+
+WHISPER_LANGUAGE_TO_MELO_SPEAKER = {
+    "en": "EN-Newest",
+    "fr": "FR",
+    "es": "ES",
+    "zh": "ZH",
+    "ja": "JP",
+    "ko": "KR",
+}
+
 
 class MeloTTSHandler(BaseHandler):
     def setup(
         self,
         should_listen,
         device="mps",
-        language="EN_NEWEST",
-        speaker_to_id="EN-Newest",
+        language="en",
+        speaker_to_id="en",
         gen_kwargs={},  # Unused
         blocksize=512,
     ):
         self.should_listen = should_listen
         self.device = device
-        self.model = TTS(language=language, device=device)
-        self.speaker_id = self.model.hps.data.spk2id[speaker_to_id]
+        self.language = language
+        self.model = TTS(language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[language], device=device)
+        self.speaker_id = self.model.hps.data.spk2id[WHISPER_LANGUAGE_TO_MELO_SPEAKER[speaker_to_id]]
         self.blocksize = blocksize
         self.warmup()
 
@@ -34,6 +53,11 @@ class MeloTTSHandler(BaseHandler):
 
     def process(self, llm_sentence):
         console.print(f"[green]ASSISTANT: {llm_sentence}")
+        global current_language
+        if self.language != current_language:
+            self.model = TTS(language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[self.language], device=self.device)
+            self.speaker_id = self.model.hps.data.spk2id[WHISPER_LANGUAGE_TO_MELO_SPEAKER[self.language]]
+
         if self.device == "mps":
             import time
 
