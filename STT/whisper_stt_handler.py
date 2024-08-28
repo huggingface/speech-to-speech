@@ -66,8 +66,9 @@ class WhisperSTTHandler(BaseHandler):
         if self.compile_mode not in (None, "default"):
             # generating more tokens than previously will trigger CUDA graphs capture
             # one should warmup with a number of generated tokens above max tokens targeted for subsequent generation
+            # hence, having min_new_tokens < max_new_tokens in the future doesn't make sense
             warmup_gen_kwargs = {
-                "min_new_tokens": self.gen_kwargs["min_new_tokens"],
+                "min_new_tokens": self.gen_kwargs["max_new_tokens"],  # Yes, assign max_new_tokens to min_new_tokens
                 "max_new_tokens": self.gen_kwargs["max_new_tokens"],
                 **self.gen_kwargs,
             }

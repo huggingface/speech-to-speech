@@ -6,3 +6,5 @@ sounddevice==0.5.0
 lightning-whisper-mlx>=0.0.10
 mlx-lm>=0.14.0
 ChatTTS
+funasr>=1.1.6
+modelscope>=1.17.1
