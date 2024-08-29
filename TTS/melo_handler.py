@@ -54,7 +54,7 @@ class MeloTTSHandler(BaseHandler):
 
     def process(self, llm_sentence):
         language_id = None
-        
+
         if isinstance(llm_sentence, tuple):
             print("llm sentence is tuple!")
             llm_sentence, language_id = llm_sentence
@@ -62,6 +62,7 @@ class MeloTTSHandler(BaseHandler):
         console.print(f"[green]ASSISTANT: {llm_sentence}")
 
         if language_id is not None and self.language != language_id:
+            self.language = language_id
             self.model = TTS(language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[self.language], device=self.device)
             self.speaker_id = self.model.hps.data.spk2id[WHISPER_LANGUAGE_TO_MELO_SPEAKER[self.language]]
 
