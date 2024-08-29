@@ -55,8 +55,8 @@ class MeloTTSHandler(BaseHandler):
     def process(self, llm_sentence):
         console.print(f"[green]ASSISTANT: {llm_sentence}")
         language_id = None
-        if isinstance(prompt, tuple):
-            prompt, language_id = prompt
+        if isinstance(llm_sentence, tuple):
+            llm_sentence, language_id = llm_sentence
 
         if language_id is not None and self.language != language_id:
             self.model = TTS(language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[self.language], device=self.device)
