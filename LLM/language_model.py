@@ -69,7 +69,7 @@ class LanguageModelHandler(BaseHandler):
     def warmup(self):
         logger.info(f"Warming up {self.__class__.__name__}")
 
-        dummy_input_text = "Write me a poem about Machine Learning."
+        dummy_input_text = "Repeat the word 'home'."
         dummy_chat = [{"role": self.user_role, "content": dummy_input_text}]
         warmup_gen_kwargs = {
             "min_new_tokens": self.gen_kwargs["min_new_tokens"],
