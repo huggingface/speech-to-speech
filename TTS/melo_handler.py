@@ -52,8 +52,11 @@ class MeloTTSHandler(BaseHandler):
         logger.info(f"Warming up {self.__class__.__name__}")
         _ = self.model.tts_to_file("text", self.speaker_id, quiet=True)
 
-    def process(self, llm_sentence, language_id=None):
+    def process(self, llm_sentence):
         console.print(f"[green]ASSISTANT: {llm_sentence}")
+        language_id = None
+        if isinstance(prompt, tuple):
+            prompt, language_id = prompt
 
         if language_id is not None and self.language != language_id:
             self.model = TTS(language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[self.language], device=self.device)

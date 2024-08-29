@@ -101,8 +101,11 @@ class LanguageModelHandler(BaseHandler):
                 f"{self.__class__.__name__}:  warmed up! time: {start_event.elapsed_time(end_event) * 1e-3:.3f} s"
             )
 
-    def process(self, prompt, language_id=None):
+    def process(self, prompt):
         logger.debug("infering language model...")
+        language_id = None
+        if isinstance(prompt, tuple):
+            prompt, language_id = prompt
 
         self.chat.append({"role": self.user_role, "content": prompt})
         thread = Thread(
