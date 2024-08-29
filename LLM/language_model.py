@@ -101,7 +101,7 @@ class LanguageModelHandler(BaseHandler):
                 f"{self.__class__.__name__}:  warmed up! time: {start_event.elapsed_time(end_event) * 1e-3:.3f} s"
             )
 
-    def process(self, prompt):
+    def process(self, prompt, language_id=None):
         logger.debug("infering language model...")
 
         self.chat.append({"role": self.user_role, "content": prompt})
@@ -128,4 +128,4 @@ class LanguageModelHandler(BaseHandler):
         self.chat.append({"role": "assistant", "content": generated_text})
 
         # don't forget last sentence
-        yield printable_text
+        yield (printable_text, language_id)

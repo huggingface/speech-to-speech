@@ -12,21 +12,21 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 WHISPER_LANGUAGE_TO_MELO_LANGUAGE = {
-    "en": "EN_NEWEST",
-    "fr": "FR",
-    "es": "ES",
-    "zh": "ZH",
-    "ja": "JP",
-    "ko": "KR",
+    "<|en|>": "EN_NEWEST",
+    "<|fr|>": "FR",
+    "<|es|>": "ES",
+    "<|zh|>": "ZH",
+    "<|ja|>": "JP",
+    "<|ko|>": "KR",
 }
 
 WHISPER_LANGUAGE_TO_MELO_SPEAKER = {
-    "en": "EN-Newest",
-    "fr": "FR",
-    "es": "ES",
-    "zh": "ZH",
-    "ja": "JP",
-    "ko": "KR",
+    "<|en|>": "EN-Newest",
+    "<|fr|>": "FR",
+    "<|es|>": "ES",
+    "<|zh|>": "ZH",
+    "<|ja|>": "JP",
+    "<|ko|>": "KR",
 }
 
 
@@ -42,7 +42,7 @@ class MeloTTSHandler(BaseHandler):
     ):
         self.should_listen = should_listen
         self.device = device
-        self.language = language
+        self.language = "<|" + language + "|>"  # 'Tokenize' the language code to do less operations
         self.model = TTS(language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[language], device=device)
         self.speaker_id = self.model.hps.data.spk2id[WHISPER_LANGUAGE_TO_MELO_SPEAKER[speaker_to_id]]
         self.blocksize = blocksize
@@ -52,9 +52,10 @@ class MeloTTSHandler(BaseHandler):
         logger.info(f"Warming up {self.__class__.__name__}")
         _ = self.model.tts_to_file("text", self.speaker_id, quiet=True)
 
-    def process(self, llm_sentence):
+    def process(self, llm_sentence, language_id=None):
         console.print(f"[green]ASSISTANT: {llm_sentence}")
-        if self.language != current_language:
+
+        if language_id is not None and self.language != language_id:
             self.model = TTS(language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[self.language], device=self.device)
             self.speaker_id = self.model.hps.data.spk2id[WHISPER_LANGUAGE_TO_MELO_SPEAKER[self.language]]
 
