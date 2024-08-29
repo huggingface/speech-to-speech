@@ -43,8 +43,8 @@ class MeloTTSHandler(BaseHandler):
         self.should_listen = should_listen
         self.device = device
         self.language = "<|" + language + "|>"  # 'Tokenize' the language code to do less operations
-        self.model = TTS(language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[language], device=device)
-        self.speaker_id = self.model.hps.data.spk2id[WHISPER_LANGUAGE_TO_MELO_SPEAKER[speaker_to_id]]
+        self.model = TTS(language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[self.language], device=device)
+        self.speaker_id = self.model.hps.data.spk2id[WHISPER_LANGUAGE_TO_MELO_SPEAKER["<|" + speaker_to_id + "|>"]]
         self.blocksize = blocksize
         self.warmup()
 
