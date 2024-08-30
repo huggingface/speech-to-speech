@@ -8,7 +8,6 @@ import torch
 from baseHandler import BaseHandler
 from rich.console import Console
 import logging
-from shared_variables import current_language
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -109,10 +108,8 @@ class WhisperSTTHandler(BaseHandler):
         )[0]
         language_id = self.processor.tokenizer.decode(pred_ids[0, 1])
 
-        print("WHISPER curr lang", language_id)
-
         logger.debug("finished whisper inference")
         console.print(f"[yellow]USER: {pred_text}")
-        console.print(f"[red]Language ID Whisper: {language_id}")
+        logger.debug(f"Language ID Whisper: {language_id}")
 
         yield (pred_text, language_id)
