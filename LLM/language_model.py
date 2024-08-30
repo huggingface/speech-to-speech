@@ -18,6 +18,15 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
+WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
+    "<|en|>": "english",
+    "<|fr|>": "french",
+    "<|es|>": "spanish",
+    "<|zh|>": "chinese",
+    "<|ja|>": "japanese",
+    "<|ko|>": "korean",
+}
+
 class LanguageModelHandler(BaseHandler):
     """
     Handles the language model part.
@@ -106,6 +115,7 @@ class LanguageModelHandler(BaseHandler):
         language_id = None
         if isinstance(prompt, tuple):
             prompt, language_id = prompt
+            prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_id]}. " + prompt
 
         self.chat.append({"role": self.user_role, "content": prompt})
         thread = Thread(
@@ -125,7 +135,7 @@ class LanguageModelHandler(BaseHandler):
                 printable_text += new_text
                 sentences = sent_tokenize(printable_text)
                 if len(sentences) > 1:
-                    yield (sentences[0])
+                    yield (sentences[0], language_id)
                     printable_text = new_text
 
         self.chat.append({"role": "assistant", "content": generated_text})
