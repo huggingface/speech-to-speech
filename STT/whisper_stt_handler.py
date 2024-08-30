@@ -40,6 +40,8 @@ class WhisperSTTHandler(BaseHandler):
         self.torch_dtype = getattr(torch, torch_dtype)
         self.compile_mode = compile_mode
         self.gen_kwargs = gen_kwargs
+        if language == 'None':
+            language = None
         self.last_language = language
         if self.last_language is not None:
             self.gen_kwargs["language"] = self.last_language

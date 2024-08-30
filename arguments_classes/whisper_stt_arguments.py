@@ -59,8 +59,12 @@ class WhisperSTTHandlerArguments:
         },
     )
     language: Optional[str] = field(
-        default=None,
+        default='en',
         metadata={
-            "help": "The language for the conversation. Default is None."
+            "help": """The language for the conversation. 
+            Choose between 'en' (english), 'fr' (french), 'es' (spanish), 
+            'zh' (chinese), 'ko' (korean), 'ja' (japanese), or 'None'.
+            If using None, the language is automatically detected and can
+            change during the conversation. Default is 'en'."""
         },
     )
