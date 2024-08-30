@@ -1,8 +1,15 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
 class WhisperSTTHandlerArguments:
+    language: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "The language for the conversation. Default is None."
+        },
+    )
     stt_model_name: str = field(
         default="distil-whisper/distil-large-v3",
         metadata={
@@ -51,9 +58,9 @@ class WhisperSTTHandlerArguments:
             "help": "The task to perform, typically 'transcribe' for transcription. Default is 'transcribe'."
         },
     )
-    stt_gen_language: str = field(
-        default="en",
+    language: Optional[str] = field(
+        default=None,
         metadata={
-            "help": "The language of the speech to transcribe. Default is 'en' for English."
+            "help": "The language for the conversation. Default is None."
         },
     )
