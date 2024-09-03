@@ -51,6 +51,17 @@ Install the required dependencies using [uv](https://github.com/astral-sh/uv):
 uv pip install -r requirements.txt
 ```
 
+For Mac users, use the `requirements_mac.txt` file instead:
+```bash
+uv pip install -r requirements_mac.txt
+```
+
+If you want to use Melo TTS, you also need to run:
+```bash
+python -m unidic download
+```
+
+
 ## Usage
 
 The pipeline can be run in two ways:
