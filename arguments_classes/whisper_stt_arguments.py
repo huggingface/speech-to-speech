@@ -4,12 +4,6 @@ from typing import Optional
 
 @dataclass
 class WhisperSTTHandlerArguments:
-    language: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "The language for the conversation. Default is None."
-        },
-    )
     stt_model_name: str = field(
         default="distil-whisper/distil-large-v3",
         metadata={
