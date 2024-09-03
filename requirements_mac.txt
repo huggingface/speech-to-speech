@@ -8,3 +8,5 @@ mlx-lm>=0.14.0
 ChatTTS>=0.1.1
 funasr>=1.1.6
 modelscope>=1.17.1
+deepfilternet>=0.5.6
+
