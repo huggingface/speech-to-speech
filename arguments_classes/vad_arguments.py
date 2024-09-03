@@ -39,8 +39,8 @@ class VADHandlerArguments:
             "help": "Amount of padding added to the beginning and end of detected speech segments. Measured in milliseconds. Default is 250 ms."
         },
     )
-    audio_enhancement:bool = field(
-        default=True,
+    audio_enhancement: bool = field(
+        default=False,
         metadata={
             "help": "improves sound quality by applying techniques like noise reduction, equalization, and echo cancellation. Default is True."
         },

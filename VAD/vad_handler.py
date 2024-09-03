@@ -29,7 +29,7 @@ class VADHandler(BaseHandler):
         min_speech_ms=500,
         max_speech_ms=float("inf"),
         speech_pad_ms=30,
-        audio_enhancement=True
+        audio_enhancement=False,
     ):
         self.should_listen = should_listen
         self.sample_rate = sample_rate
@@ -65,11 +65,24 @@ class VADHandler(BaseHandler):
                 logger.debug("Stop listening")
                 if self.audio_enhancement:
                     if self.sample_rate != self.df_state.sr():
-                        audio_float32 = torchaudio.functional.resample(torch.from_numpy(array),orig_freq=self.sample_rate,
-                                                                       new_freq=self.df_state.sr())
-                        enhanced = enhance(self.enhanced_model, self.df_state, audio_float32.unsqueeze(0))
-                        enhanced = torchaudio.functional.resample(enhanced, orig_freq=self.df_state.sr(),new_freq=self.sample_rate)
+                        audio_float32 = torchaudio.functional.resample(
+                            torch.from_numpy(array),
+                            orig_freq=self.sample_rate,
+                            new_freq=self.df_state.sr(),
+                        )
+                        enhanced = enhance(
+                            self.enhanced_model,
+                            self.df_state,
+                            audio_float32.unsqueeze(0),
+                        )
+                        enhanced = torchaudio.functional.resample(
+                            enhanced,
+                            orig_freq=self.df_state.sr(),
+                            new_freq=self.sample_rate,
+                        )
                     else:
-                        enhanced = enhance(self.enhanced_model, self.df_state, audio_float32)
+                        enhanced = enhance(
+                            self.enhanced_model, self.df_state, audio_float32
+                        )
                     array = enhanced.numpy().squeeze()
                 yield array
