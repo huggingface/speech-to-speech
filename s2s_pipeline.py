@@ -21,6 +21,7 @@ from arguments_classes.socket_sender_arguments import SocketSenderArguments
 from arguments_classes.vad_arguments import VADHandlerArguments
 from arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
 from arguments_classes.melo_tts_arguments import MeloTTSHandlerArguments
+from arguments_classes.facebookmms_tts_arguments import FacebookMMSTTSHandlerArguments
 import torch
 import nltk
 from rich.console import Console
@@ -81,6 +82,7 @@ def main():
             ParlerTTSHandlerArguments,
             MeloTTSHandlerArguments,
             ChatTTSHandlerArguments,
+            FacebookMMSTTSHandlerArguments,
         )
     )
 
@@ -99,6 +101,7 @@ def main():
             parler_tts_handler_kwargs,
             melo_tts_handler_kwargs,
             chat_tts_handler_kwargs,
+            facebook_mms_tts_handler_kwargs,
         ) = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         # Parse arguments from command line if no JSON file is provided
@@ -114,6 +117,7 @@ def main():
             parler_tts_handler_kwargs,
             melo_tts_handler_kwargs,
             chat_tts_handler_kwargs,
+            facebook_mms_tts_handler_kwargs,
         ) = parser.parse_args_into_dataclasses()
 
     # 1. Handle logger
@@ -191,6 +195,7 @@ def main():
     prepare_args(parler_tts_handler_kwargs, "tts")
     prepare_args(melo_tts_handler_kwargs, "melo")
     prepare_args(chat_tts_handler_kwargs, "chat_tts")
+    prepare_args(facebook_mms_tts_handler_kwargs, "facebook_mms_tts")
 
     # 3. Build the pipeline
     stop_event = Event()
@@ -327,6 +332,15 @@ def main():
             queue_out=send_audio_chunks_queue,
             setup_args=(should_listen,),
             setup_kwargs=vars(chat_tts_handler_kwargs),
+        )
+    elif module_kwargs.tts == "facebookmms":
+        from TTS.facebookmms_handler import FacebookMMSTTSHandler
+        tts = FacebookMMSTTSHandler(
+            stop_event,
+            queue_in=lm_response_queue,
+            queue_out=send_audio_chunks_queue,
+            setup_args=(should_listen,),
+            setup_kwargs=vars(facebook_mms_tts_handler_kwargs),
         )
     else:
         raise ValueError("The TTS should be either parler, melo or chatTTS")

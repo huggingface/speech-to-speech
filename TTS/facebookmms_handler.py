@@ -1,0 +1,129 @@
+from transformers import VitsModel, AutoTokenizer
+import torch
+import numpy as np
+import librosa
+from rich.console import Console
+from baseHandler import BaseHandler
+import logging
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.DEBUG
+)
+logger = logging.getLogger(__name__)
+
+console = Console()
+
+WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE = {
+    "<|en|>": "eng",
+    "<|fr|>": "fra",
+    "<|es|>": "spa",
+    "<|ko|>": "kor",
+    "<|hi|>": "hin",
+}
+
+class FacebookMMSTTSHandler(BaseHandler):
+    def setup(
+        self,
+        should_listen,
+        facebook_mms_device="cuda",
+        facebook_mms_torch_dtype="float32",
+        language="en",
+        tts_language=None,  # Added tts_language flag
+        stream=True,
+        chunk_size=512,
+        **kwargs
+    ):
+        self.should_listen = should_listen
+        self.device = facebook_mms_device
+        self.torch_dtype = getattr(torch, facebook_mms_torch_dtype)
+        self.stream = stream
+        self.chunk_size = chunk_size
+        self.language = "<|" + (tts_language if tts_language else language) + "|>"  # Use tts_language if provided
+
+        self.load_model(self.language)
+
+    def load_model(self, language_id):
+        model_name = f"facebook/mms-tts-{WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE[language_id]}"
+        logger.info(f"Loading model: {model_name}")
+        self.model = VitsModel.from_pretrained(model_name).to(self.device)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.language = language_id
+
+    def generate_audio(self, text):
+        if not text:
+            logger.warning("Received empty text input")
+            return None
+
+        try:
+            logger.debug(f"Tokenizing text: {text}")
+            logger.debug(f"Current language: {self.language}")
+            logger.debug(f"Tokenizer: {self.tokenizer}")
+            
+            inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True)
+            input_ids = inputs.input_ids.to(self.device).long()
+            attention_mask = inputs.attention_mask.to(self.device)
+            
+            logger.debug(f"Input IDs shape: {input_ids.shape}, dtype: {input_ids.dtype}")
+            logger.debug(f"Input IDs: {input_ids}")
+            
+            if input_ids.numel() == 0:
+                logger.error("Input IDs tensor is empty")
+                return None
+
+            with torch.no_grad():
+                output = self.model(input_ids=input_ids, attention_mask=attention_mask)
+            
+            logger.debug(f"Output waveform shape: {output.waveform.shape}")
+            return output.waveform
+        except Exception as e:
+            logger.error(f"Error in generate_audio: {str(e)}")
+            logger.exception("Full traceback:")
+            return None
+
+    def process(self, llm_sentence):
+        language_id = None
+
+        if isinstance(llm_sentence, tuple):
+            llm_sentence, language_id = llm_sentence
+
+        console.print(f"[green]ASSISTANT: {llm_sentence}")
+        logger.debug(f"Processing text: {llm_sentence}")
+        logger.debug(f"Language ID: {language_id}")
+
+        if language_id is not None and self.language != language_id:
+            try:
+                logger.info(f"Switching language from {self.language} to {language_id}")
+                self.load_model(language_id)
+            except KeyError:
+                console.print(f"[red]Language {language_id} not supported by Facebook MMS. Using {self.language} instead.")
+                logger.warning(f"Unsupported language: {language_id}")
+
+        audio_output = self.generate_audio(llm_sentence)
+        
+        if audio_output is None or audio_output.numel() == 0:
+            logger.warning("No audio output generated")
+            self.should_listen.set()
+            return
+
+        audio_numpy = audio_output.cpu().numpy().squeeze()
+        logger.debug(f"Raw audio shape: {audio_numpy.shape}, dtype: {audio_numpy.dtype}")
+        
+        audio_resampled = librosa.resample(audio_numpy, orig_sr=self.model.config.sampling_rate, target_sr=16000)
+        logger.debug(f"Resampled audio shape: {audio_resampled.shape}, dtype: {audio_resampled.dtype}")
+        
+        audio_int16 = (audio_resampled * 32768).astype(np.int16)
+        logger.debug(f"Final audio shape: {audio_int16.shape}, dtype: {audio_int16.dtype}")
+
+        if self.stream:
+            for i in range(0, len(audio_int16), self.chunk_size):
+                chunk = audio_int16[i:i + self.chunk_size]
+                yield np.pad(chunk, (0, self.chunk_size - len(chunk)))
+        else:
+            for i in range(0, len(audio_int16), self.chunk_size):
+                yield np.pad(
+                    audio_int16[i : i + self.chunk_size],
+                    (0, self.chunk_size - len(audio_int16[i : i + self.chunk_size])),
+                )
+
+        self.should_listen.set()
