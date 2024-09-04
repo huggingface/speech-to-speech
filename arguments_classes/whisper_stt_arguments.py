@@ -58,7 +58,7 @@ class WhisperSTTHandlerArguments:
             "help": """The language for the conversation. 
             Choose between 'en' (english), 'fr' (french), 'es' (spanish), 
             'zh' (chinese), 'ko' (korean), 'ja' (japanese), or 'None'.
-            If using None, the language is automatically detected and can
+            If using 'auto', the language is automatically detected and can
             change during the conversation. Default is 'en'."""
         },
     )
