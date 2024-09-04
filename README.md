@@ -14,7 +14,7 @@
 * [Usage](#usage)
   - [Docker Server approach](#docker-server)
   - [Server/Client approach](#serverclient-approach)
-  - [Local approach](#local-approach)
+  - [Local approach](#local-approach-running-on-mac)
 * [Command-line usage](#command-line-usage)
   - [Model parameters](#model-parameters)
   - [Generation parameters](#generation-parameters)
@@ -89,7 +89,7 @@ Then run the client locally to handle sending microphone input and receiving gen
 python listen_and_play.py --host <IP address of your server>
 ```
 
-### Running on Mac
+### Local approach (running on Mac)
 To run on mac, we recommend setting the flag `--local_mac_optimal_settings`:
 ```bash
 python s2s_pipeline.py --local_mac_optimal_settings
