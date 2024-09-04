@@ -10,21 +10,44 @@ logger = logging.getLogger(__name__)
 
 console = Console()
 
+WHISPER_LANGUAGE_TO_MELO_LANGUAGE = {
+    "en": "EN_NEWEST",
+    "fr": "FR",
+    "es": "ES",
+    "zh": "ZH",
+    "ja": "JP",
+    "ko": "KR",
+}
+
+WHISPER_LANGUAGE_TO_MELO_SPEAKER = {
+    "en": "EN-Newest",
+    "fr": "FR",
+    "es": "ES",
+    "zh": "ZH",
+    "ja": "JP",
+    "ko": "KR",
+}
+
 
 class MeloTTSHandler(BaseHandler):
     def setup(
         self,
         should_listen,
         device="mps",
-        language="EN_NEWEST",
-        speaker_to_id="EN-Newest",
+        language="en",
+        speaker_to_id="en",
         gen_kwargs={},  # Unused
         blocksize=512,
     ):
         self.should_listen = should_listen
         self.device = device
-        self.model = TTS(language=language, device=device)
-        self.speaker_id = self.model.hps.data.spk2id[speaker_to_id]
+        self.language = language
+        self.model = TTS(
+            language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[self.language], device=device
+        )
+        self.speaker_id = self.model.hps.data.spk2id[
+            WHISPER_LANGUAGE_TO_MELO_SPEAKER[speaker_to_id]
+        ]
         self.blocksize = blocksize
         self.warmup()
 
@@ -33,7 +56,28 @@ class MeloTTSHandler(BaseHandler):
         _ = self.model.tts_to_file("text", self.speaker_id, quiet=True)
 
     def process(self, llm_sentence):
+        language_code = None
+
+        if isinstance(llm_sentence, tuple):
+            llm_sentence, language_code = llm_sentence
+
         console.print(f"[green]ASSISTANT: {llm_sentence}")
+
+        if language_code is not None and self.language != language_code:
+            try:
+                self.model = TTS(
+                    language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[language_code],
+                    device=self.device,
+                )
+                self.speaker_id = self.model.hps.data.spk2id[
+                    WHISPER_LANGUAGE_TO_MELO_SPEAKER[language_code]
+                ]
+                self.language = language_code
+            except KeyError:
+                console.print(
+                    f"[red]Language {language_code} not supported by Melo. Using {self.language} instead."
+                )
+
         if self.device == "mps":
             import time
 
@@ -44,7 +88,13 @@ class MeloTTSHandler(BaseHandler):
                 time.time() - start
             )  # Removing this line makes it fail more often. I'm looking into it.
 
-        audio_chunk = self.model.tts_to_file(llm_sentence, self.speaker_id, quiet=True)
+        try:
+            audio_chunk = self.model.tts_to_file(
+                llm_sentence, self.speaker_id, quiet=True
+            )
+        except (AssertionError, RuntimeError) as e:
+            logger.error(f"Error in MeloTTSHandler: {e}")
+            audio_chunk = np.array([])
         if len(audio_chunk) == 0:
             self.should_listen.set()
             return

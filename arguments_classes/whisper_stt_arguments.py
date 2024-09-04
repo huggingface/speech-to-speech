@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -51,9 +52,13 @@ class WhisperSTTHandlerArguments:
             "help": "The task to perform, typically 'transcribe' for transcription. Default is 'transcribe'."
         },
     )
-    stt_gen_language: str = field(
-        default="en",
+    language: Optional[str] = field(
+        default='en',
         metadata={
-            "help": "The language of the speech to transcribe. Default is 'en' for English."
+            "help": """The language for the conversation. 
+            Choose between 'en' (english), 'fr' (french), 'es' (spanish), 
+            'zh' (chinese), 'ko' (korean), 'ja' (japanese), or 'None'.
+            If using 'auto', the language is automatically detected and can
+            change during the conversation. Default is 'en'."""
         },
     )

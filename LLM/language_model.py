@@ -18,6 +18,15 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
+WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
+    "en": "english",
+    "fr": "french",
+    "es": "spanish",
+    "zh": "chinese",
+    "ja": "japanese",
+    "ko": "korean",
+}
+
 class LanguageModelHandler(BaseHandler):
     """
     Handles the language model part.
@@ -69,7 +78,7 @@ class LanguageModelHandler(BaseHandler):
     def warmup(self):
         logger.info(f"Warming up {self.__class__.__name__}")
 
-        dummy_input_text = "Write me a poem about Machine Learning."
+        dummy_input_text = "Repeat the word 'home'."
         dummy_chat = [{"role": self.user_role, "content": dummy_input_text}]
         warmup_gen_kwargs = {
             "min_new_tokens": self.gen_kwargs["min_new_tokens"],
@@ -103,6 +112,10 @@ class LanguageModelHandler(BaseHandler):
 
     def process(self, prompt):
         logger.debug("infering language model...")
+        language_code = None
+        if isinstance(prompt, tuple):
+            prompt, language_code = prompt
+            prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
 
         self.chat.append({"role": self.user_role, "content": prompt})
         thread = Thread(
@@ -122,10 +135,10 @@ class LanguageModelHandler(BaseHandler):
                 printable_text += new_text
                 sentences = sent_tokenize(printable_text)
                 if len(sentences) > 1:
-                    yield (sentences[0])
+                    yield (sentences[0], language_code)
                     printable_text = new_text
 
         self.chat.append({"role": "assistant", "content": generated_text})
 
         # don't forget last sentence
-        yield printable_text
+        yield (printable_text, language_code)

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 @dataclass
 class MeloTTSHandlerArguments:
     melo_language: str = field(
-        default="EN_NEWEST",
+        default="en",
         metadata={
             "help": "The language of the text to be synthesized. Default is 'EN_NEWEST'."
         },
@@ -16,7 +16,7 @@ class MeloTTSHandlerArguments:
         },
     )
     melo_speaker_to_id: str = field(
-        default="EN-Newest",
+        default="en",
         metadata={
             "help": "Mapping of speaker names to speaker IDs. Default is ['EN-Newest']."
         },
