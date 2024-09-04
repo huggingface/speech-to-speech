@@ -21,6 +21,7 @@ from arguments_classes.socket_sender_arguments import SocketSenderArguments
 from arguments_classes.vad_arguments import VADHandlerArguments
 from arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
 from arguments_classes.melo_tts_arguments import MeloTTSHandlerArguments
+from arguments_classes.open_api_language_model_arguments import OpenApiLanguageModelHandlerArguments
 import torch
 import nltk
 from rich.console import Console
@@ -77,6 +78,7 @@ def main():
             WhisperSTTHandlerArguments,
             ParaformerSTTHandlerArguments,
             LanguageModelHandlerArguments,
+            OpenApiLanguageModelHandlerArguments,
             MLXLanguageModelHandlerArguments,
             ParlerTTSHandlerArguments,
             MeloTTSHandlerArguments,
@@ -95,6 +97,7 @@ def main():
             whisper_stt_handler_kwargs,
             paraformer_stt_handler_kwargs,
             language_model_handler_kwargs,
+            open_api_language_model_handler_kwargs,
             mlx_language_model_handler_kwargs,
             parler_tts_handler_kwargs,
             melo_tts_handler_kwargs,
@@ -110,6 +113,7 @@ def main():
             whisper_stt_handler_kwargs,
             paraformer_stt_handler_kwargs,
             language_model_handler_kwargs,
+            open_api_language_model_handler_kwargs,
             mlx_language_model_handler_kwargs,
             parler_tts_handler_kwargs,
             melo_tts_handler_kwargs,
@@ -187,6 +191,7 @@ def main():
     prepare_args(whisper_stt_handler_kwargs, "stt")
     prepare_args(paraformer_stt_handler_kwargs, "paraformer_stt")
     prepare_args(language_model_handler_kwargs, "lm")
+    prepare_args(open_api_language_model_handler_kwargs, "open_api")
     prepare_args(mlx_language_model_handler_kwargs, "mlx_lm")
     prepare_args(parler_tts_handler_kwargs, "tts")
     prepare_args(melo_tts_handler_kwargs, "melo")
@@ -278,15 +283,26 @@ def main():
             queue_out=lm_response_queue,
             setup_kwargs=vars(language_model_handler_kwargs),
         )
+
+    elif module_kwargs.llm == "open_api":
+        from LLM.openai_api_language_model import OpenApiModelHandler
+
+        lm = OpenApiModelHandler(
+            stop_event,
+            queue_in=text_prompt_queue,
+            queue_out=lm_response_queue,
+            setup_kwargs=vars(open_api_language_model_handler_kwargs),
+        )
+
     elif module_kwargs.llm == "mlx-lm":
         from LLM.mlx_language_model import MLXLanguageModelHandler
-
         lm = MLXLanguageModelHandler(
             stop_event,
             queue_in=text_prompt_queue,
             queue_out=lm_response_queue,
             setup_kwargs=vars(mlx_language_model_handler_kwargs),
         )
+
     else:
         raise ValueError("The LLM should be either transformers or mlx-lm")
     if module_kwargs.tts == "parler":
