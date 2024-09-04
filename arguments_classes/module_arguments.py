@@ -11,7 +11,7 @@ class ModuleArguments:
     mode: Optional[str] = field(
         default="socket",
         metadata={
-            "help": "The mode to run the pipeline in. Either 'local' or 'socket'. Default is 'local'."
+            "help": "The mode to run the pipeline in. Either 'local' or 'socket'. Default is 'socket'."
         },
     )
     local_mac_optimal_settings: bool = field(
