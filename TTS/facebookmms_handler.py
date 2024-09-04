@@ -15,11 +15,11 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE = {
-    "<|en|>": "eng",
-    "<|fr|>": "fra",
-    "<|es|>": "spa",
-    "<|ko|>": "kor",
-    "<|hi|>": "hin",
+    "en": "eng",
+    "fr": "fra",
+    "es": "spa",
+    "ko": "kor",
+    "hi": "hin",
 }
 
 class FacebookMMSTTSHandler(BaseHandler):
@@ -29,6 +29,7 @@ class FacebookMMSTTSHandler(BaseHandler):
         facebook_mms_device="cuda",
         facebook_mms_torch_dtype="float32",
         language="en",
+        speaker_to_id="en",  # Added for consistency with MeloTTSHandler
         stream=True,
         chunk_size=512,
         **kwargs
@@ -38,16 +39,20 @@ class FacebookMMSTTSHandler(BaseHandler):
         self.torch_dtype = getattr(torch, facebook_mms_torch_dtype)
         self.stream = stream
         self.chunk_size = chunk_size
-        self.language = "<|" + language + "|>"
+        self.language = language
 
         self.load_model(self.language)
 
-    def load_model(self, language_id):
-        model_name = f"facebook/mms-tts-{WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE[language_id]}"
-        logger.info(f"Loading model: {model_name}")
-        self.model = VitsModel.from_pretrained(model_name).to(self.device)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.language = language_id
+    def load_model(self, language_code):
+        try:
+            model_name = f"facebook/mms-tts-{WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE[language_code]}"
+            logger.info(f"Loading model: {model_name}")
+            self.model = VitsModel.from_pretrained(model_name).to(self.device)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.language = language_code
+        except KeyError:
+            logger.warning(f"Unsupported language: {language_code}. Falling back to English.")
+            self.load_model("en")
 
     def generate_audio(self, text):
         if not text:
@@ -81,22 +86,22 @@ class FacebookMMSTTSHandler(BaseHandler):
             return None
 
     def process(self, llm_sentence):
-        language_id = None
+        language_code = None
 
         if isinstance(llm_sentence, tuple):
-            llm_sentence, language_id = llm_sentence
+            llm_sentence, language_code = llm_sentence
 
         console.print(f"[green]ASSISTANT: {llm_sentence}")
         logger.debug(f"Processing text: {llm_sentence}")
-        logger.debug(f"Language ID: {language_id}")
+        logger.debug(f"Language code: {language_code}")
 
-        if language_id is not None and self.language != language_id:
+        if language_code is not None and self.language != language_code:
             try:
-                logger.info(f"Switching language from {self.language} to {language_id}")
-                self.load_model(language_id)
+                logger.info(f"Switching language from {self.language} to {language_code}")
+                self.load_model(language_code)
             except KeyError:
-                console.print(f"[red]Language {language_id} not supported by Facebook MMS. Using {self.language} instead.")
-                logger.warning(f"Unsupported language: {language_id}")
+                console.print(f"[red]Language {language_code} not supported by Facebook MMS. Using {self.language} instead.")
+                logger.warning(f"Unsupported language: {language_code}")
 
         audio_output = self.generate_audio(llm_sentence)
         
