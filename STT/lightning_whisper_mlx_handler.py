@@ -22,6 +22,7 @@ class LightningWhisperSTTHandler(BaseHandler):
         device="cuda",
         torch_dtype="float16",
         compile_mode=None,
+        language=None,
         gen_kwargs={},
     ):
         if len(model_name.split("/")) > 1:
