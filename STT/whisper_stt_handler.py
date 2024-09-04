@@ -13,12 +13,12 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 SUPPORTED_LANGUAGES = [
-    "<|en|>",
-    "<|fr|>",
-    "<|es|>",
-    "<|zh|>",
-    "<|ja|>",
-    "<|ko|>",
+    "en",
+    "fr",
+    "es",
+    "zh",
+    "ja",
+    "ko",
 ]
 
 
@@ -117,24 +117,24 @@ class WhisperSTTHandler(BaseHandler):
 
         input_features = self.prepare_model_inputs(spoken_prompt)
         pred_ids = self.model.generate(input_features, **self.gen_kwargs)
-        language_id = self.processor.tokenizer.decode(pred_ids[0, 1])
+        language_code = self.processor.tokenizer.decode(pred_ids[0, 1])[2:-2]  # remove "<|" and "|>"
 
-        if language_id not in SUPPORTED_LANGUAGES:  # reprocess with the last language
-            logger.warning("Whisper detected unsupported language:", language_id)
+        if language_code not in SUPPORTED_LANGUAGES:  # reprocess with the last language
+            logger.warning("Whisper detected unsupported language:", language_code)
             gen_kwargs = copy(self.gen_kwargs)
             gen_kwargs['language'] = self.last_language
-            language_id = self.last_language
+            language_code = self.last_language
             pred_ids = self.model.generate(input_features, **gen_kwargs)
         else:
-            self.last_language = language_id
+            self.last_language = language_code
         
         pred_text = self.processor.batch_decode(
             pred_ids, skip_special_tokens=True, decode_with_timestamps=False
         )[0]
-        language_id = self.processor.tokenizer.decode(pred_ids[0, 1])
+        language_code = self.processor.tokenizer.decode(pred_ids[0, 1])[2:-2] # remove "<|" and "|>"
 
         logger.debug("finished whisper inference")
         console.print(f"[yellow]USER: {pred_text}")
-        logger.debug(f"Language ID Whisper: {language_id}")
+        logger.debug(f"Language Code Whisper: {language_code}")
 
-        yield (pred_text, language_id)
+        yield (pred_text, language_code)

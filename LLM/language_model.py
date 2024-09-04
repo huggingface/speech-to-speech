@@ -19,12 +19,12 @@ console = Console()
 
 
 WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
-    "<|en|>": "english",
-    "<|fr|>": "french",
-    "<|es|>": "spanish",
-    "<|zh|>": "chinese",
-    "<|ja|>": "japanese",
-    "<|ko|>": "korean",
+    "en": "english",
+    "fr": "french",
+    "es": "spanish",
+    "zh": "chinese",
+    "ja": "japanese",
+    "ko": "korean",
 }
 
 class LanguageModelHandler(BaseHandler):
@@ -112,10 +112,10 @@ class LanguageModelHandler(BaseHandler):
 
     def process(self, prompt):
         logger.debug("infering language model...")
-        language_id = None
+        language_code = None
         if isinstance(prompt, tuple):
-            prompt, language_id = prompt
-            prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_id]}. " + prompt
+            prompt, language_code = prompt
+            prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
 
         self.chat.append({"role": self.user_role, "content": prompt})
         thread = Thread(
@@ -135,10 +135,10 @@ class LanguageModelHandler(BaseHandler):
                 printable_text += new_text
                 sentences = sent_tokenize(printable_text)
                 if len(sentences) > 1:
-                    yield (sentences[0], language_id)
+                    yield (sentences[0], language_code)
                     printable_text = new_text
 
         self.chat.append({"role": "assistant", "content": generated_text})
 
         # don't forget last sentence
-        yield (printable_text, language_id)
+        yield (printable_text, language_code)

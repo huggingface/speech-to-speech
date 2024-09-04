@@ -11,21 +11,21 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 WHISPER_LANGUAGE_TO_MELO_LANGUAGE = {
-    "<|en|>": "EN_NEWEST",
-    "<|fr|>": "FR",
-    "<|es|>": "ES",
-    "<|zh|>": "ZH",
-    "<|ja|>": "JP",
-    "<|ko|>": "KR",
+    "en": "EN_NEWEST",
+    "fr": "FR",
+    "es": "ES",
+    "zh": "ZH",
+    "ja": "JP",
+    "ko": "KR",
 }
 
 WHISPER_LANGUAGE_TO_MELO_SPEAKER = {
-    "<|en|>": "EN-Newest",
-    "<|fr|>": "FR",
-    "<|es|>": "ES",
-    "<|zh|>": "ZH",
-    "<|ja|>": "JP",
-    "<|ko|>": "KR",
+    "en": "EN-Newest",
+    "fr": "FR",
+    "es": "ES",
+    "zh": "ZH",
+    "ja": "JP",
+    "ko": "KR",
 }
 
 
@@ -41,14 +41,12 @@ class MeloTTSHandler(BaseHandler):
     ):
         self.should_listen = should_listen
         self.device = device
-        self.language = (
-            "<|" + language + "|>"
-        )  # 'Tokenize' the language code to do less operations
+        self.language = language
         self.model = TTS(
             language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[self.language], device=device
         )
         self.speaker_id = self.model.hps.data.spk2id[
-            WHISPER_LANGUAGE_TO_MELO_SPEAKER["<|" + speaker_to_id + "|>"]
+            WHISPER_LANGUAGE_TO_MELO_SPEAKER[speaker_to_id]
         ]
         self.blocksize = blocksize
         self.warmup()
@@ -58,26 +56,26 @@ class MeloTTSHandler(BaseHandler):
         _ = self.model.tts_to_file("text", self.speaker_id, quiet=True)
 
     def process(self, llm_sentence):
-        language_id = None
+        language_code = None
 
         if isinstance(llm_sentence, tuple):
-            llm_sentence, language_id = llm_sentence
+            llm_sentence, language_code = llm_sentence
 
         console.print(f"[green]ASSISTANT: {llm_sentence}")
 
-        if language_id is not None and self.language != language_id:
+        if language_code is not None and self.language != language_code:
             try:
                 self.model = TTS(
-                    language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[language_id],
+                    language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[language_code],
                     device=self.device,
                 )
                 self.speaker_id = self.model.hps.data.spk2id[
-                    WHISPER_LANGUAGE_TO_MELO_SPEAKER[language_id]
+                    WHISPER_LANGUAGE_TO_MELO_SPEAKER[language_code]
                 ]
-                self.language = language_id
+                self.language = language_code
             except KeyError:
                 console.print(
-                    f"[red]Language {language_id} not supported by Melo. Using {self.language} instead."
+                    f"[red]Language {language_code} not supported by Melo. Using {self.language} instead."
                 )
 
         if self.device == "mps":
