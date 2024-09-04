@@ -29,7 +29,6 @@ class FacebookMMSTTSHandler(BaseHandler):
         facebook_mms_device="cuda",
         facebook_mms_torch_dtype="float32",
         language="en",
-        speaker_to_id="en",  # Added for consistency with MeloTTSHandler
         stream=True,
         chunk_size=512,
         **kwargs
