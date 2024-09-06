@@ -147,6 +147,9 @@ class ParlerTTSHandler(BaseHandler):
             )
 
     def process(self, llm_sentence):
+        if isinstance(llm_sentence, tuple):
+            llm_sentence, _ = llm_sentence
+            
         console.print(f"[green]ASSISTANT: {llm_sentence}")
         nb_tokens = len(self.prompt_tokenizer(llm_sentence).input_ids)
 

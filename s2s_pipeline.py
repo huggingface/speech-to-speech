@@ -304,7 +304,6 @@ def main():
             setup_args=(should_listen,),
             setup_kwargs=vars(parler_tts_handler_kwargs),
         )
-
     elif module_kwargs.tts == "melo":
         try:
             from TTS.melo_handler import MeloTTSHandler
