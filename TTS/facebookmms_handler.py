@@ -15,11 +15,45 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE = {
-    "en": "eng",
-    "fr": "fra",
-    "es": "spa",
-    "ko": "kor",
-    "hi": "hin",
+    "en": "eng", # English
+    "fr": "fra", # French
+    "es": "spa", # Spanish
+    "ko": "kor", # Korean
+    "hi": "hin", # Hindi
+    "ar": "ara", # Arabic
+    "ar": "hyw", # Armenian
+    "az": "azb", # Azerbaijani
+    "bu": "bul", # Bulgarian
+    "ca": "cat", # Catalan
+    "nl": "nld", # Dutch
+    "fi": "fin", # Finnish
+    "fr": "fra", # French
+    "de": "deu", # German
+    "el": "ell", # Greek
+    "he": "heb", # Hebrew
+    "hu": "hun", # Hungarian
+    "is": "isl", # Icelandic
+    "id": "ind", # Indonesian
+    "ka": "kan", # Kannada
+    "kk": "kaz", # Kazakh
+    "lv": "lav", # Latvian
+    "zl": "zlm", # Malay
+    "ma": "mar", # Marathi
+    "fa": "fas", # Persian
+    "po": "pol", # Polish
+    "pt": "por", # Portuguese
+    "ro": "ron", # Romanian
+    "ru": "rus", # Russian
+    "sw": "swh", # Swahili
+    "sv": "swe", # Swedish
+    "tg": "tgl", # Tagalog
+    "ta": "tam", # Tamil
+    "th": "tha", # Thai
+    "tu": "tur", # Turkish
+    "uk": "ukr", # Ukrainian
+    "ur": "urd", # Urdu
+    "vi": "vie", # Vietnamese
+    "cy": "cym", # Welsh
 }
 
 class FacebookMMSTTSHandler(BaseHandler):
