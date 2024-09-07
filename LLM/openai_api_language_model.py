@@ -7,7 +7,7 @@ import time
 logger = logging.getLogger(__name__)
 
 console = Console()
-
+from nltk import sent_tokenize
 
 class OpenApiModelHandler(BaseHandler):
     """
