@@ -9,6 +9,14 @@ logger = logging.getLogger(__name__)
 
 console = Console()
 
+WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
+    "en": "english",
+    "fr": "french",
+    "es": "spanish",
+    "zh": "chinese",
+    "ja": "japanese",
+    "ko": "korean",
+}
 
 class MLXLanguageModelHandler(BaseHandler):
     """
@@ -61,6 +69,11 @@ class MLXLanguageModelHandler(BaseHandler):
 
     def process(self, prompt):
         logger.debug("infering language model...")
+        language_code = None
+
+        if isinstance(prompt, tuple):
+            prompt, language_code = prompt
+            prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
 
         self.chat.append({"role": self.user_role, "content": prompt})
 
@@ -89,6 +102,10 @@ class MLXLanguageModelHandler(BaseHandler):
                 yield curr_output.replace("<|end|>", "")
                 curr_output = ""
         generated_text = output.replace("<|end|>", "")
+        printable_text = generated_text
         torch.mps.empty_cache()
 
         self.chat.append({"role": "assistant", "content": generated_text})
+
+        # don't forget last sentence
+        yield (printable_text, language_code)
