@@ -99,13 +99,9 @@ class MLXLanguageModelHandler(BaseHandler):
             output += t
             curr_output += t
             if curr_output.endswith((".", "?", "!", "<|end|>")):
-                yield curr_output.replace("<|end|>", "")
+                yield (curr_output.replace("<|end|>", ""), language_code)
                 curr_output = ""
         generated_text = output.replace("<|end|>", "")
-        printable_text = generated_text
         torch.mps.empty_cache()
 
         self.chat.append({"role": "assistant", "content": generated_text})
-
-        # don't forget last sentence
-        yield (printable_text, language_code)
