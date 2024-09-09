@@ -14,6 +14,7 @@ from utils.utils import next_power_of_2
 from transformers.utils.import_utils import (
     is_flash_attn_2_available,
 )
+from .STV.speech_to_visemes import SpeechToVisemes
 
 torch._inductor.config.fx_graph_cache = True
 # mind about this parameter ! should be >= 2 * number of padded prompt sizes for TTS
@@ -47,6 +48,7 @@ class ParlerTTSHandler(BaseHandler):
         ),
         play_steps_s=1,
         blocksize=512,
+        viseme_flag = True
     ):
         self.should_listen = should_listen
         self.device = device
@@ -77,6 +79,10 @@ class ParlerTTSHandler(BaseHandler):
             self.model.forward = torch.compile(
                 self.model.forward, mode=self.compile_mode, fullgraph=True
             )
+
+        self.viseme_flag = viseme_flag
+        if self.viseme_flag:
+            self.speech_to_visemes = SpeechToVisemes()
 
         self.warmup()
 
@@ -179,10 +185,25 @@ class ParlerTTSHandler(BaseHandler):
                 )
             audio_chunk = librosa.resample(audio_chunk, orig_sr=44100, target_sr=16000)
             audio_chunk = (audio_chunk * 32768).astype(np.int16)
+
+            if self.viseme_flag:
+                visemes = self.speech_to_visemes.process(audio_chunk)
+                for viseme in visemes:
+                    console.print(f"[blue]ASSISTANT_MOUTH_SHAPE: {viseme['viseme']} -- {viseme['timestamp']}")
+            else:
+                visemes = None
+
             for i in range(0, len(audio_chunk), self.blocksize):
-                yield np.pad(
-                    audio_chunk[i : i + self.blocksize],
-                    (0, self.blocksize - len(audio_chunk[i : i + self.blocksize])),
-                )
+                chunk_data = {
+                    "audio": np.pad(
+                        audio_chunk[i : i + self.blocksize],
+                        (0, self.blocksize - len(audio_chunk[i : i + self.blocksize]))
+                    )
+                }
+                # For the first chunk, include text and visemes
+                if i == 0:
+                    chunk_data["text"] = llm_sentence
+                    chunk_data["visemes"] = visemes            
+                yield chunk_data
 
         self.should_listen.set()
