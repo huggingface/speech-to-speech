@@ -36,7 +36,8 @@ class BaseHandler:
             start_time = perf_counter()
             for output in self.process(input):
                 self._times.append(perf_counter() - start_time)
-                logger.debug(f"{self.__class__.__name__}: {self.last_time: .3f} s")
+                if self.last_time > self.min_time_to_debug:
+                    logger.debug(f"{self.__class__.__name__}: {self.last_time: .3f} s")
                 self.queue_out.put(output)
                 start_time = perf_counter()
 
@@ -46,6 +47,10 @@ class BaseHandler:
     @property
     def last_time(self):
         return self._times[-1]
+    
+    @property
+    def min_time_to_debug(self):
+        return 0.001
 
     def cleanup(self):
         pass
