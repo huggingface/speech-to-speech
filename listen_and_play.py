@@ -50,8 +50,6 @@ def listen_and_play(
     send_queue = Queue()
 
     def callback_recv(outdata, frames, time, status):
-        if status:
-            logging.warning(f"Receive callback status: {status}")
         if not recv_queue.empty():
             data = recv_queue.get()
             # Convert bytes to numpy array
@@ -62,10 +60,8 @@ def listen_and_play(
             reduced_data = audio_array.tobytes()
             outdata[: len(reduced_data)] = reduced_data
             outdata[len(reduced_data) :] = b"\x00" * (len(outdata) - len(reduced_data))
-            logging.debug(f"Received and adjusted {len(data)} bytes of audio data")
         else:
             outdata[:] = b"\x00" * len(outdata)
-            logging.debug("Receive queue empty, playing silence")
 
     def callback_send(indata, frames, time, status):
         if recv_queue.empty():
