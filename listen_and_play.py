@@ -122,6 +122,7 @@ def listen_and_play(
             dtype="int16",
             blocksize=list_play_chunk_size,
             callback=callback_recv,
+            device=0,
         )
         logging.debug(f"Created receive stream with rate {recv_rate} Hz")
 
