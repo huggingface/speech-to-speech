@@ -3,7 +3,7 @@ import threading
 from queue import Queue
 from dataclasses import dataclass, field
 import sounddevice as sd
-from transformers import HfArgumentParser
+import argparse
 
 
 @dataclass
@@ -109,7 +109,9 @@ def listen_and_play(
         input("Press Enter to stop...")
 
     except KeyboardInterrupt:
-        print("Finished streaming.")
+        print("\nProgram interrupted by user. Exiting...")
+    except Exception as e:
+        print(f"An error occurred: {e}")
 
     finally:
         stop_event.set()
@@ -123,6 +125,13 @@ def listen_and_play(
 
 
 if __name__ == "__main__":
-    parser = HfArgumentParser((ListenAndPlayArguments,))
-    (listen_and_play_kwargs,) = parser.parse_args_into_dataclasses()
-    listen_and_play(**vars(listen_and_play_kwargs))
+    parser = argparse.ArgumentParser(description="Listen and Play Audio")
+    parser.add_argument("--send_rate", type=int, default=16000, help="In Hz. Default is 16000.")
+    parser.add_argument("--recv_rate", type=int, default=16000, help="In Hz. Default is 16000.")
+    parser.add_argument("--list_play_chunk_size", type=int, default=1024, help="The size of data chunks (in bytes). Default is 1024.")
+    parser.add_argument("--host", type=str, default="localhost", help="The hostname or IP address for listening and playing. Default is 'localhost'.")
+    parser.add_argument("--send_port", type=int, default=12345, help="The network port for sending data. Default is 12345.")
+    parser.add_argument("--recv_port", type=int, default=12346, help="The network port for receiving data. Default is 12346.")
+    
+    args = parser.parse_args()
+    listen_and_play(**vars(args))
