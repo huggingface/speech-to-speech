@@ -4,6 +4,7 @@ from queue import Queue
 from dataclasses import dataclass, field
 import sounddevice as sd
 import argparse
+import numpy as np
 
 @dataclass
 class ListenAndPlayArguments:
@@ -49,12 +50,22 @@ def listen_and_play(
     send_queue = Queue()
 
     def callback_recv(outdata, frames, time, status):
+        if status:
+            logging.warning(f"Receive callback status: {status}")
         if not recv_queue.empty():
             data = recv_queue.get()
-            outdata[: len(data)] = data
-            outdata[len(data) :] = b"\x00" * (len(outdata) - len(data))
+            # Convert bytes to numpy array
+            audio_array = np.frombuffer(data, dtype=np.int16)
+            # Reduce volume to 30%
+            audio_array = (audio_array * 0.3).astype(np.int16)
+            # Convert back to bytes
+            reduced_data = audio_array.tobytes()
+            outdata[: len(reduced_data)] = reduced_data
+            outdata[len(reduced_data) :] = b"\x00" * (len(outdata) - len(reduced_data))
+            logging.debug(f"Received and adjusted {len(data)} bytes of audio data")
         else:
             outdata[:] = b"\x00" * len(outdata)
+            logging.debug("Receive queue empty, playing silence")
 
     def callback_send(indata, frames, time, status):
         if recv_queue.empty():
