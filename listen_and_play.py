@@ -109,7 +109,9 @@ def listen_and_play(
         input("Press Enter to stop...")
 
     except KeyboardInterrupt:
-        print("Finished streaming.")
+        print("\nProgram interrupted by user. Exiting...")
+    except Exception as e:
+        print(f"An error occurred: {e}")
 
     finally:
         stop_event.set()
