@@ -24,7 +24,7 @@ class OpenApiLanguageModelHandlerArguments:
     )
     open_api_init_chat_prompt: str = field(
         # default="You are a helpful and friendly AI assistant. You are polite, respectful, and aim to provide concise responses of less than 20 words.",
-        default="你是一位乐于助人且友好的 AI 助手。您彬彬有礼、尊重他人.",
+        default="You are a helpful and friendly AI assistant. You are polite, respectful, and aim to provide concise responses of less than 20 words.",
         metadata={
             "help": "The initial chat prompt to establish context for the language model. Default is 'You are a helpful AI assistant.'"
         },
