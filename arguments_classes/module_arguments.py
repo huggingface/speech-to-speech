@@ -23,7 +23,7 @@ class ModuleArguments:
     stt: Optional[str] = field(
         default="whisper",
         metadata={
-            "help": "The STT to use. Either 'whisper', 'whisper-mlx', and 'paraformer'. Default is 'whisper'."
+            "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'faster-whisper', and 'paraformer'. Default is 'whisper'."
         },
     )
     llm: Optional[str] = field(

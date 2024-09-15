@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class FasterWhisperSTTHandlerArguments:
-    stt_model_name: str = field(
+    faster_whisper_stt_model_name: str = field(
         default="tiny.en",
         metadata={
             "help": """The pretrained Faster Whisper model to use.
@@ -11,7 +11,7 @@ class FasterWhisperSTTHandlerArguments:
             Default is 'small'."""
         },
     )
-    stt_device: str = field(
+    faster_whisper_stt_device: str = field(
         default="auto",
         metadata={
             "help": """The device type on which the model will run.
@@ -19,7 +19,7 @@ class FasterWhisperSTTHandlerArguments:
             Default is 'auto'."""
         },
     )
-    stt_compute_type: str = field(
+    faster_whisper_stt_compute_type: str = field(
         default="auto",
         metadata={
             "help": """The data type to use for computation.
@@ -28,31 +28,31 @@ class FasterWhisperSTTHandlerArguments:
             Refer to 'https://opennmt.net/CTranslate2/quantization.html#quantize-on-model-loading'"""
         },
     )
-    stt_gen_max_new_tokens: int = field(
+    faster_whisper_stt_gen_max_new_tokens: int = field(
         default=128,
         metadata={
             "help": "The maximum number of new tokens to generate. Default is 128."
         },
     )
-    stt_gen_beam_size: int = field(
+    faster_whisper_stt_gen_beam_size: int = field(
         default=1,
         metadata={
             "help": "The number of beams for beam search. Default is 1, implying greedy decoding."
         },
     )
-    stt_gen_return_timestamps: bool = field(
+    faster_whisper_stt_gen_return_timestamps: bool = field(
         default=False,
         metadata={
             "help": "Whether to return timestamps with transcriptions. Default is False."
         },
     )
-    stt_gen_task: str = field(
+    faster_whisper_stt_gen_task: str = field(
         default="transcribe",
         metadata={
             "help": "The task to perform, typically 'transcribe' for transcription. Default is 'transcribe'."
         },
     )
-    stt_gen_language: str = field(
+    faster_whisper_stt_gen_language: str = field(
         default="en",
         metadata={
             "help": "The language of the speech to transcribe. Default is 'en' for English."
