@@ -41,6 +41,6 @@ class ModuleArguments:
     log_level: str = field(
         default="info",
         metadata={
-            "help": "Provide logging level. Example --log_level debug, default=warning."
+            "help": "Provide logging level. Example --log_level debug, default=info."
         },
     )
