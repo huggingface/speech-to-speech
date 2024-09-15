@@ -51,6 +51,8 @@ class FasterWhisperSTTHandler(BaseHandler):
             console.print(f"[yellow]USER: {pred_text}")
 
             yield pred_text
+        else:
+            logger.debug("no text detected. skipping...")
 
     def cleanup(self):
         print("Stopping FasterWhisperSTTHandler")

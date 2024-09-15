@@ -7,6 +7,7 @@ lightning-whisper-mlx>=0.0.10
 mlx-lm>=0.14.0
 ChatTTS>=0.1.1
 funasr>=1.1.6
+faster-whisper>=1.0.3
 modelscope>=1.17.1
 deepfilternet>=0.5.6
 
