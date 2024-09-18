@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 WHISPER_LANGUAGE_TO_MELO_LANGUAGE = {
-    "en": "EN_NEWEST",
+    "en": "EN",
     "fr": "FR",
     "es": "ES",
     "zh": "ZH",
@@ -20,7 +20,7 @@ WHISPER_LANGUAGE_TO_MELO_LANGUAGE = {
 }
 
 WHISPER_LANGUAGE_TO_MELO_SPEAKER = {
-    "en": "EN-Newest",
+    "en": "EN-BR",
     "fr": "FR",
     "es": "ES",
     "zh": "ZH",
