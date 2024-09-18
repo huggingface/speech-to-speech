@@ -68,7 +68,7 @@ class ParlerTTSHandler(BaseHandler):
 
         if self.compile_mode not in (None, "default"):
             logger.warning(
-                "Torch compilation modes that captures CUDA graphs are not yet compatible with the STT part. Reverting to 'default'"
+                "Torch compilation modes that captures CUDA graphs are not yet compatible with the TTS part. Reverting to 'default'"
             )
             self.compile_mode = "default"
 
