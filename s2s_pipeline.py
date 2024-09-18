@@ -164,6 +164,18 @@ def prepare_all_args(
     prepare_args(chat_tts_handler_kwargs, "chat_tts")
 
 
+def initialize_queues_and_events():
+    return {
+        "stop_event": Event(),
+        "should_listen": Event(),
+        "recv_audio_chunks_queue": Queue(),
+        "send_audio_chunks_queue": Queue(),
+        "spoken_prompt_queue": Queue(),
+        "text_prompt_queue": Queue(),
+        "lm_response_queue": Queue(),
+    }
+
+
 def build_pipeline(
     module_kwargs,
     socket_receiver_kwargs,
@@ -176,15 +188,15 @@ def build_pipeline(
     parler_tts_handler_kwargs,
     melo_tts_handler_kwargs,
     chat_tts_handler_kwargs,
+    queues_and_events,
 ):
-    stop_event = Event()
-    # used to stop putting received audio chunks in queue until all setences have been processed by the TTS
-    should_listen = Event()
-    recv_audio_chunks_queue = Queue()
-    send_audio_chunks_queue = Queue()
-    spoken_prompt_queue = Queue()
-    text_prompt_queue = Queue()
-    lm_response_queue = Queue()
+    stop_event = queues_and_events["stop_event"]
+    should_listen = queues_and_events["should_listen"]
+    recv_audio_chunks_queue = queues_and_events["recv_audio_chunks_queue"]
+    send_audio_chunks_queue = queues_and_events["send_audio_chunks_queue"]
+    spoken_prompt_queue = queues_and_events["spoken_prompt_queue"]
+    text_prompt_queue = queues_and_events["text_prompt_queue"]
+    lm_response_queue = queues_and_events["lm_response_queue"]
 
     if module_kwargs.mode == "local":
         from connections.local_audio_streamer import LocalAudioStreamer
@@ -365,6 +377,8 @@ def main():
         chat_tts_handler_kwargs,
     )
 
+    queues_and_events = initialize_queues_and_events()
+
     pipeline_manager = build_pipeline(
         module_kwargs,
         socket_receiver_kwargs,
@@ -377,6 +391,7 @@ def main():
         parler_tts_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
+        queues_and_events,
     )
 
     try:
