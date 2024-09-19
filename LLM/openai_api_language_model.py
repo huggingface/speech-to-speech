@@ -56,9 +56,14 @@ class OpenApiModelHandler(BaseHandler):
         )
 
 
-    def process(self, prompt):
+def process(self, prompt):
         logger.debug("call api language model...")
         self.chat.append({"role": self.user_role, "content": prompt})
+
+        language_code = None
+        if isinstance(prompt, tuple):
+            prompt, language_code = prompt
+
         response = self.client.chat.completions.create(
             model=self.model_name,
             messages=[
@@ -66,6 +71,20 @@ class OpenApiModelHandler(BaseHandler):
             ],
             stream=self.stream
         )
-        generated_text = response.choices[0].message.content
-        self.chat.append({"role": "assistant", "content": generated_text})
-        yield generated_text
+        if self.stream:
+            generated_text, printable_text = "", ""
+            for chunk in response:
+                new_text = chunk.choices[0].delta.content or ""
+                generated_text += new_text
+                printable_text += new_text
+                sentences = sent_tokenize(printable_text)
+                if len(sentences) > 1:
+                    yield sentences[0], language_code
+                    printable_text = new_text
+            self.chat.append({"role": "assistant", "content": generated_text})
+            # don't forget last sentence
+            yield printable_text, language_code
+        else:
+            generated_text = response.choices[0].message.content
+            self.chat.append({"role": "assistant", "content": generated_text})
+            yield generated_text, language_code
