@@ -21,7 +21,7 @@ class EndpointHandler:
             self.parler_tts_handler_kwargs,
             self.melo_tts_handler_kwargs,
             self.chat_tts_handler_kwargs,
-        ) = get_default_arguments(device='cpu', mode='none', tts='melo')
+        ) = get_default_arguments(mode='none', tts='melo')
         setup_logger(self.module_kwargs.log_level)
 
         prepare_all_args(
