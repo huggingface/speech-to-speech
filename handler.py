@@ -1,3 +1,6 @@
+import os
+os.system("python -m unidic download")
+
 from typing import Dict, Any, List, Generator
 import torch
 import os
