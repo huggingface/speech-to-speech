@@ -189,3 +189,4 @@ class ParlerTTSHandler(BaseHandler):
                 )
 
         self.should_listen.set()
+        yield b"END"
