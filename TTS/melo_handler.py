@@ -107,3 +107,4 @@ class MeloTTSHandler(BaseHandler):
             )
 
         self.should_listen.set()
+        yield b"END"
