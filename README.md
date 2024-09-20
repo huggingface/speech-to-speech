@@ -14,7 +14,7 @@
 * [Usage](#usage)
   - [Docker Server approach](#docker-server)
   - [Server/Client approach](#serverclient-approach)
-  - [Local approach](#local-approach)
+  - [Local approach](#local-approach-running-on-mac)
 * [Command-line usage](#command-line-usage)
   - [Model parameters](#model-parameters)
   - [Generation parameters](#generation-parameters)
@@ -79,27 +79,28 @@ https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install
 
 ### Server/Client Approach
 
-To run the pipeline on the server:
-```bash
-python s2s_pipeline.py --recv_host 0.0.0.0 --send_host 0.0.0.0
-```
+1. Run the pipeline on the server:
+   ```bash
+   python s2s_pipeline.py --recv_host 0.0.0.0 --send_host 0.0.0.0
+   ```
 
-Then run the client locally to handle sending microphone input and receiving generated audio:
-```bash
-python listen_and_play.py --host <IP address of your server>
-```
+2. Run the client locally to handle microphone input and receive generated audio:
+   ```bash
+   python listen_and_play.py --host <IP address of your server>
+   ```
 
-### Running on Mac
-To run on mac, we recommend setting the flag `--local_mac_optimal_settings`:
-```bash
-python s2s_pipeline.py --local_mac_optimal_settings
-```
+### Local Approach (Mac)
 
-You can also pass `--device mps` to have all the models set to device mps.
-The local mac optimal settings set the mode to be local as explained above and change the models to:
-- LightningWhisperMLX
-- MLX LM
-- MeloTTS
+1. For optimal settings on Mac:
+   ```bash
+   python s2s_pipeline.py --local_mac_optimal_settings
+   ```
+
+This setting:
+   - Adds `--device mps` to use MPS for all models.
+     - Sets LightningWhisperMLX for STT
+     - Sets MLX LM for language model
+     - Sets MeloTTS for TTS
 
 ### Recommended usage with Cuda
 
@@ -116,6 +117,57 @@ python s2s_pipeline.py \
 ```
 
 For the moment, modes capturing CUDA Graphs are not compatible with streaming Parler-TTS (`reduce-overhead`, `max-autotune`).
+
+
+### Multi-language Support
+
+The pipeline supports multiple languages, allowing for automatic language detection or specific language settings. Here are examples for both local (Mac) and server setups:
+
+#### With the server version:
+
+
+For automatic language detection:
+
+```bash
+python s2s_pipeline.py \
+    --stt_model_name large-v3 \
+    --language zh \
+    --mlx_lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct \
+```
+
+Or for one language in particular, chinese in this example
+
+```bash
+python s2s_pipeline.py \
+    --stt_model_name large-v3 \
+    --language zh \
+    --mlx_lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct \
+```
+
+#### Local Mac Setup
+
+For automatic language detection:
+
+```bash
+python s2s_pipeline.py \
+    --local_mac_optimal_settings \
+    --device mps \
+    --stt_model_name large-v3 \
+    --language zh \
+    --mlx_lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct-4bit \
+```
+
+Or for one language in particular, chinese in this example
+
+```bash
+python s2s_pipeline.py \
+    --local_mac_optimal_settings \
+    --device mps \
+    --stt_model_name large-v3 \
+    --language zh \
+    --mlx_lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct-4bit \
+```
+
 
 ## Command-line Usage
 
