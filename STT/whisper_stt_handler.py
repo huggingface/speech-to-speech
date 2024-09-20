@@ -137,4 +137,7 @@ class WhisperSTTHandler(BaseHandler):
         console.print(f"[yellow]USER: {pred_text}")
         logger.debug(f"Language Code Whisper: {language_code}")
 
+        if self.language is None:
+            language_code += "-auto"
+            
         yield (pred_text, language_code)
