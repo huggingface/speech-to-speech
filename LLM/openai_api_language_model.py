@@ -76,8 +76,6 @@ class OpenApiModelHandler(BaseHandler):
                 if language_code[-5:] == "-auto":
                     language_code = language_code[:-5]
                     prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
-
-            logger.info(prompt)
             
             response = self.client.chat.completions.create(
                 model=self.model_name,
