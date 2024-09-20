@@ -82,4 +82,7 @@ class LightningWhisperSTTHandler(BaseHandler):
         console.print(f"[yellow]USER: {pred_text}")
         logger.debug(f"Language Code Whisper: {language_code}")
 
+        if self.start_language == "auto":
+                    language_code += "-auto"
+                    
         yield (pred_text, language_code)
