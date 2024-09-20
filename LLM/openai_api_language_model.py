@@ -54,7 +54,6 @@ class OpenApiModelHandler(BaseHandler):
         logger.info(
             f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s"
         )
-
     def process(self, prompt):
             logger.debug("call api language model...")
             self.chat.append({"role": self.user_role, "content": prompt})
@@ -87,3 +86,4 @@ class OpenApiModelHandler(BaseHandler):
                 generated_text = response.choices[0].message.content
                 self.chat.append({"role": "assistant", "content": generated_text})
                 yield generated_text, language_code
+

@@ -180,6 +180,7 @@ def prepare_all_args(
         chat_tts_handler_kwargs,
     )
 
+
     rename_args(whisper_stt_handler_kwargs, "stt")
     rename_args(paraformer_stt_handler_kwargs, "paraformer_stt")
     rename_args(language_model_handler_kwargs, "lm")
@@ -224,7 +225,6 @@ def build_pipeline(
     spoken_prompt_queue = queues_and_events["spoken_prompt_queue"]
     text_prompt_queue = queues_and_events["text_prompt_queue"]
     lm_response_queue = queues_and_events["lm_response_queue"]
-
     if module_kwargs.mode == "local":
         from connections.local_audio_streamer import LocalAudioStreamer
 
@@ -323,6 +323,7 @@ def get_llm_handler(
             queue_out=lm_response_queue,
             setup_kwargs=vars(open_api_language_model_handler_kwargs),
         )
+
     elif module_kwargs.llm == "mlx-lm":
         from LLM.mlx_language_model import MLXLanguageModelHandler
         return MLXLanguageModelHandler(
@@ -331,6 +332,7 @@ def get_llm_handler(
             queue_out=lm_response_queue,
             setup_kwargs=vars(mlx_language_model_handler_kwargs),
         )
+
     else:
         raise ValueError("The LLM should be either transformers or mlx-lm")
 
