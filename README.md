@@ -124,9 +124,9 @@ Leverage Torch Compile for Whisper and Parler-TTS. **The usage of Parler-TTS all
 
 ```bash
 python s2s_pipeline.py \
-	--transformers_lm_model_name microsoft/Phi-3-mini-4k-instruct \
-	--whisper_compile_mode reduce-overhead \
-	--parler_compile_mode default \
+	--lm_model_name microsoft/Phi-3-mini-4k-instruct \
+	--stt_compile_mode reduce-overhead \
+	--tts_compile_mode default \
   --recv_host 0.0.0.0 \
 	--send_host 0.0.0.0 
 ```
@@ -149,7 +149,7 @@ For automatic language detection:
 
 ```bash
 python s2s_pipeline.py \
-    --whisper_model_name large-v3 \
+    --stt_model_name large-v3 \
     --language auto \
     --mlx_lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct \
 ```
@@ -158,7 +158,7 @@ Or for one language in particular, chinese in this example
 
 ```bash
 python s2s_pipeline.py \
-    --whisper_model_name large-v3 \
+    --stt_model_name large-v3 \
     --language zh \
     --mlx_lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct \
 ```
@@ -171,7 +171,7 @@ For automatic language detection:
 python s2s_pipeline.py \
     --local_mac_optimal_settings \
     --device mps \
-    --whisper_model_name large-v3 \
+    --stt_model_name large-v3 \
     --language auto \
     --mlx_lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct-4bit \
 ```
@@ -182,7 +182,7 @@ Or for one language in particular, chinese in this example
 python s2s_pipeline.py \
     --local_mac_optimal_settings \
     --device mps \
-    --whisper_model_name large-v3 \
+    --stt_model_name large-v3 \
     --language zh \
     --mlx_lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct-4bit \
 ```
@@ -209,7 +209,7 @@ See [VADHandlerArguments](https://github.com/huggingface/speech-to-speech/blob/d
 
 ### STT, LM and TTS parameters
 
-`model_name`, `torch_dtype`, and `device` are exposed for each implementation of the Speech to Text, Language Model, and Text to Speech. Specify the targeted pipeline part with the corresponding prefix (e.g. `whisper`, `transformers_ml` or `parler`, check the implementations' [arguments classes](https://github.com/huggingface/speech-to-speech/tree/d5e460721e578fef286c7b64e68ad6a57a25cf1b/arguments_classes) for more details).
+`model_name`, `torch_dtype`, and `device` are exposed for each implementation of the Speech to Text, Language Model, and Text to Speech. Specify the targeted pipeline part with the corresponding prefix (e.g. `stt`, `lm` or `tts`, check the implementations' [arguments classes](https://github.com/huggingface/speech-to-speech/tree/d5e460721e578fef286c7b64e68ad6a57a25cf1b/arguments_classes) for more details).
 
 For example:
 ```bash
@@ -218,7 +218,7 @@ For example:
 
 ### Generation parameters
 
-Other generation parameters of the model's generate method can be set using the part's prefix + `_gen_`, e.g., `--whisper_gen_max_new_tokens 128`. These parameters can be added to the pipeline part's arguments class if not already exposed.
+Other generation parameters of the model's generate method can be set using the part's prefix + `_gen_`, e.g., `--stt_gen_max_new_tokens 128`. These parameters can be added to the pipeline part's arguments class if not already exposed.
 
 ## Citations
 
