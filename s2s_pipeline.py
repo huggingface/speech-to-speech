@@ -9,7 +9,7 @@ from typing import Optional
 from sys import platform
 from VAD.vad_handler import VADHandler
 from arguments_classes.chat_tts_arguments import ChatTTSHandlerArguments
-from arguments_classes.language_model_arguments import LanguageModelHandlerArguments
+from arguments_classes.transformers_language_model_arguments import TransformersLanguageModelHandlerArguments
 from arguments_classes.mlx_language_model_arguments import (
     MLXLanguageModelHandlerArguments,
 )
@@ -76,7 +76,7 @@ def parse_arguments():
             VADHandlerArguments,
             WhisperSTTHandlerArguments,
             ParaformerSTTHandlerArguments,
-            LanguageModelHandlerArguments,
+            TransformersLanguageModelHandlerArguments,
             OpenApiLanguageModelHandlerArguments,
             MLXLanguageModelHandlerArguments,
             ParlerTTSHandlerArguments,
@@ -161,7 +161,7 @@ def prepare_all_args(
     module_kwargs,
     whisper_stt_handler_kwargs,
     paraformer_stt_handler_kwargs,
-    language_model_handler_kwargs,
+    transformers_language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
     mlx_language_model_handler_kwargs,
     parler_tts_handler_kwargs,
@@ -172,7 +172,7 @@ def prepare_all_args(
         module_kwargs,
         whisper_stt_handler_kwargs,
         paraformer_stt_handler_kwargs,
-        language_model_handler_kwargs,
+        transformers_language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
         parler_tts_handler_kwargs,
@@ -181,12 +181,12 @@ def prepare_all_args(
     )
 
 
-    rename_args(whisper_stt_handler_kwargs, "stt")
+    rename_args(whisper_stt_handler_kwargs, "whisper")
     rename_args(paraformer_stt_handler_kwargs, "paraformer_stt")
-    rename_args(language_model_handler_kwargs, "lm")
+    rename_args(transformers_language_model_handler_kwargs, "transformers_lm")
     rename_args(mlx_language_model_handler_kwargs, "mlx_lm")
     rename_args(open_api_language_model_handler_kwargs, "open_api")
-    rename_args(parler_tts_handler_kwargs, "tts")
+    rename_args(parler_tts_handler_kwargs, "parler")
     rename_args(melo_tts_handler_kwargs, "melo")
     rename_args(chat_tts_handler_kwargs, "chat_tts")
 
@@ -210,7 +210,7 @@ def build_pipeline(
     vad_handler_kwargs,
     whisper_stt_handler_kwargs,
     paraformer_stt_handler_kwargs,
-    language_model_handler_kwargs,
+    transformers_language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
     mlx_language_model_handler_kwargs,
     parler_tts_handler_kwargs,
@@ -262,14 +262,45 @@ def build_pipeline(
         setup_kwargs=vars(vad_handler_kwargs),
     )
 
-    stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs)
-    lm = get_llm_handler(module_kwargs, stop_event, text_prompt_queue, lm_response_queue, language_model_handler_kwargs, open_api_language_model_handler_kwargs, mlx_language_model_handler_kwargs)
-    tts = get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs)
+    stt = get_stt_handler(
+        module_kwargs, 
+        stop_event, 
+        spoken_prompt_queue, 
+        text_prompt_queue, 
+        whisper_stt_handler_kwargs, 
+        paraformer_stt_handler_kwargs
+    )
+    lm = get_llm_handler(
+        module_kwargs, 
+        stop_event, 
+        text_prompt_queue, 
+        lm_response_queue, 
+        transformers_language_model_handler_kwargs, 
+        open_api_language_model_handler_kwargs, 
+        mlx_language_model_handler_kwargs
+    )
+    tts = get_tts_handler(
+        module_kwargs, 
+        stop_event, 
+        lm_response_queue, 
+        send_audio_chunks_queue, 
+        should_listen, 
+        parler_tts_handler_kwargs, 
+        melo_tts_handler_kwargs, 
+        chat_tts_handler_kwargs
+    )
 
     return ThreadManager([*comms_handlers, vad, stt, lm, tts])
 
 
-def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs):
+def get_stt_handler(
+    module_kwargs, 
+    stop_event, 
+    spoken_prompt_queue, 
+    text_prompt_queue, 
+    whisper_stt_handler_kwargs, 
+    paraformer_stt_handler_kwargs
+):
     if module_kwargs.stt == "whisper":
         from STT.whisper_stt_handler import WhisperSTTHandler
         return WhisperSTTHandler(
@@ -337,7 +368,16 @@ def get_llm_handler(
         raise ValueError("The LLM should be either transformers or mlx-lm")
 
 
-def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs):
+def get_tts_handler(
+    module_kwargs, 
+    stop_event, 
+    lm_response_queue, 
+    send_audio_chunks_queue, 
+    should_listen, 
+    parler_tts_handler_kwargs, 
+    melo_tts_handler_kwargs, 
+    chat_tts_handler_kwargs
+):
     if module_kwargs.tts == "parler":
         from TTS.parler_handler import ParlerTTSHandler
         return ParlerTTSHandler(
@@ -387,7 +427,7 @@ def main():
         vad_handler_kwargs,
         whisper_stt_handler_kwargs,
         paraformer_stt_handler_kwargs,
-        language_model_handler_kwargs,
+        transformers_language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
         parler_tts_handler_kwargs,
@@ -401,14 +441,14 @@ def main():
         module_kwargs,
         whisper_stt_handler_kwargs,
         paraformer_stt_handler_kwargs,
-        language_model_handler_kwargs,
+        transformers_language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
         parler_tts_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
     )
-
+    
     queues_and_events = initialize_queues_and_events()
 
     pipeline_manager = build_pipeline(
@@ -418,7 +458,7 @@ def main():
         vad_handler_kwargs,
         whisper_stt_handler_kwargs,
         paraformer_stt_handler_kwargs,
-        language_model_handler_kwargs,
+        transformers_language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
         parler_tts_handler_kwargs,
