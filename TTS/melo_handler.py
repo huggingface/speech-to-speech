@@ -6,6 +6,8 @@ import numpy as np
 from rich.console import Console
 import torch
 
+from .STV.speech_to_visemes import SpeechToVisemes
+
 logger = logging.getLogger(__name__)
 
 console = Console()
@@ -28,7 +30,6 @@ WHISPER_LANGUAGE_TO_MELO_SPEAKER = {
     "ko": "KR",
 }
 
-
 class MeloTTSHandler(BaseHandler):
     def setup(
         self,
@@ -38,6 +39,7 @@ class MeloTTSHandler(BaseHandler):
         speaker_to_id="en",
         gen_kwargs={},  # Unused
         blocksize=512,
+        viseme_flag = True # To obtain timestamped visemes
     ):
         self.should_listen = should_listen
         self.device = device
@@ -49,6 +51,11 @@ class MeloTTSHandler(BaseHandler):
             WHISPER_LANGUAGE_TO_MELO_SPEAKER[speaker_to_id]
         ]
         self.blocksize = blocksize
+
+        self.viseme_flag = viseme_flag
+        if self.viseme_flag:
+            self.speech_to_visemes = SpeechToVisemes()
+
         self.warmup()
 
     def warmup(self):
@@ -100,10 +107,25 @@ class MeloTTSHandler(BaseHandler):
             return
         audio_chunk = librosa.resample(audio_chunk, orig_sr=44100, target_sr=16000)
         audio_chunk = (audio_chunk * 32768).astype(np.int16)
+
+        if self.viseme_flag:
+            visemes = self.speech_to_visemes.process(audio_chunk)
+            for viseme in visemes:
+                console.print(f"[blue]ASSISTANT_MOUTH_SHAPE: {viseme['viseme']} -- {viseme['timestamp']}")
+        else:
+            visemes = None
+
         for i in range(0, len(audio_chunk), self.blocksize):
-            yield np.pad(
-                audio_chunk[i : i + self.blocksize],
-                (0, self.blocksize - len(audio_chunk[i : i + self.blocksize])),
-            )
+            chunk_data = {
+                "audio": np.pad(
+                    audio_chunk[i : i + self.blocksize],
+                    (0, self.blocksize - len(audio_chunk[i : i + self.blocksize]))
+                )
+            }
+            # For the first chunk, include text and visemes
+            if i == 0:
+                chunk_data["text"] = llm_sentence
+                chunk_data["visemes"] = visemes            
+            yield chunk_data
 
         self.should_listen.set()
