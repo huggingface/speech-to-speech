@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 @dataclass
 class AudioStreamingClientArguments:
     sample_rate: int = field(default=16000, metadata={"help": "Audio sample rate in Hz. Default is 16000."})
-    chunk_size: int = field(default=512, metadata={"help": "The size of audio chunks in samples. Default is 1024."})
+    chunk_size: int = field(default=2048, metadata={"help": "The size of audio chunks in samples. Default is 1024."})
     api_url: str = field(default="https://yxfmjcvuzgi123sw.us-east-1.aws.endpoints.huggingface.cloud", metadata={"help": "The URL of the API endpoint."})
     auth_token: str = field(default="your_auth_token", metadata={"help": "Authentication token for the API."})
 
@@ -55,14 +55,16 @@ class AudioStreamingClient:
         buffer = b''
         while not self.stop_event.is_set():
             if self.session_state != "processing" and not self.send_queue.empty():
-                chunk = self.send_queue.get().tobytes()
-                buffer += chunk
+                while not self.send_queue.empty():  # Clear the send_queue
+                    chunk = self.send_queue.get().tobytes()
+                    buffer += chunk               
                 if len(buffer) >= self.args.chunk_size * 2:  # * 2 because of int16
                     self.send_request(buffer)
                     buffer = b''
+                    time.sleep(self.args.chunk_size/self.args.sample_rate)
             else:
                 self.send_request()
-                time.sleep(0.1)
+                time.sleep(self.args.chunk_size/self.args.sample_rate)
 
     def send_request(self, audio_data=None):
         payload = {"input_type": "speech",
@@ -105,8 +107,8 @@ class AudioStreamingClient:
                 self.session_id = None
                 while not self.recv_queue.empty():
                     time.sleep(0.01)  # wait for the queue to empty
-                while not self.send_queue.empty():
-                    _ = self.send_queue.get()  # Clear the queue
+                with self.send_queue.mutex:
+                    self.send_queue.queue.clear()  # Clear the queue
 
         except Exception as e:
             print(f"Error sending request: {e}")
