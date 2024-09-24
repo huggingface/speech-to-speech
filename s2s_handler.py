@@ -63,6 +63,30 @@ class EndpointHandler:
         self.vad_chunk_size = 512  # Set the chunk size required by the VAD model
         self.sample_rate = 16000  # Set the expected sample rate
 
+    def process_streaming_data(self, data: bytes) -> bytes:
+        audio_array = np.frombuffer(data, dtype=np.int16)
+
+        # Process the audio data in chunks
+        chunks = [audio_array[i:i+self.vad_chunk_size] for i in range(0, len(audio_array), self.vad_chunk_size)]
+        
+        for chunk in chunks:
+            if len(chunk) == self.vad_chunk_size:
+                self.queues_and_events['recv_audio_chunks_queue'].put(chunk.tobytes())
+            elif len(chunk) < self.vad_chunk_size:
+                # Pad the last chunk if it's smaller than the required size
+                padded_chunk = np.pad(chunk, (0, self.vad_chunk_size - len(chunk)), 'constant')
+                self.queues_and_events['recv_audio_chunks_queue'].put(padded_chunk.tobytes())
+
+        # Collect the output, if any
+        try:
+            output = self.queues_and_events['send_audio_chunks_queue'].get_nowait()
+            if isinstance(output, np.ndarray):
+                return output.tobytes()
+            else:
+                return output
+        except Empty:
+            return None
+
     def _process_audio_chunk(self, audio_data: bytes, session_id: str):
         audio_array = np.frombuffer(audio_data, dtype=np.int16)
 
