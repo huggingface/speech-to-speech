@@ -58,7 +58,8 @@ class MeloTTSHandler(BaseHandler):
     def process(self, llm_sentence):
         if llm_sentence == b"DONE":
             self.should_listen.set()
-            return b"DONE"
+            yield b"DONE"
+            return
         
         language_code = None
 
