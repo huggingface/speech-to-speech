@@ -6,6 +6,9 @@ import requests
 import base64
 import time
 from dataclasses import dataclass, field
+import websocket
+import threading
+import ssl
 
 @dataclass
 class AudioStreamingClientArguments:
@@ -30,7 +33,21 @@ class AudioStreamingClient:
 
     def start(self):
         print("Starting audio streaming...")
-        
+
+        ws_url = self.args.api_url.replace("http", "ws") + "/ws"
+
+        self.ws = websocket.WebSocketApp(
+            ws_url,
+            header=[f"{key}: {value}" for key, value in self.headers.items()],
+            on_open=self.on_open,
+            on_message=self.on_message,
+            on_error=self.on_error,
+            on_close=self.on_close
+        )
+
+        ws_thread = threading.Thread(target=self.ws.run_forever, kwargs={'sslopt': {"cert_reqs": ssl.CERT_NONE}})
+        ws_thread.start()
+
         send_thread = threading.Thread(target=self.send_audio)
         play_thread = threading.Thread(target=self.play_audio)
 
@@ -46,24 +63,36 @@ class AudioStreamingClient:
                 self.stop_event.set()
                 send_thread.join()
                 play_thread.join()
+                self.ws.close()
+                ws_thread.join()
                 print("Audio streaming stopped.")
+
+    def on_open(self, ws):
+        print("WebSocket connection opened.")
+
+    def on_message(self, ws, message):
+        # message is bytes
+        audio_np = np.frombuffer(message, dtype=np.int16)
+        for i in range(0, len(audio_np), self.args.chunk_size):
+            chunk = audio_np[i:i+self.args.chunk_size]
+            self.recv_queue.put(chunk)
+
+    def on_error(self, ws, error):
+        print(f"WebSocket error: {error}")
+
+    def on_close(self, ws, close_status_code, close_msg):
+        print("WebSocket connection closed.")
 
     def audio_callback(self, indata, frames, time, status):
         self.send_queue.put(indata.copy())
 
     def send_audio(self):
-        buffer = b''
         while not self.stop_event.is_set():
-            if self.session_state != "processing" and not self.send_queue.empty():
-                while not self.send_queue.empty():  # Clear the send_queue
-                    chunk = self.send_queue.get().tobytes()
-                    buffer += chunk               
-                if len(buffer) >= self.args.chunk_size * 2:  # * 2 because of int16
-                    self.send_request(buffer)
-                    buffer = b''
+            if not self.send_queue.empty():
+                chunk = self.send_queue.get()
+                self.ws.send(chunk.tobytes(), opcode=websocket.ABNF.OPCODE_BINARY)
             else:
-                self.send_request()
-            time.sleep(self.args.chunk_size/self.args.sample_rate)
+                time.sleep(0.01)
 
     def send_request(self, audio_data=None):
         payload = {"input_type": "speech",
