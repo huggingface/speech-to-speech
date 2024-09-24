@@ -1,13 +1,25 @@
-from openai import OpenAI
-from LLM.chat import Chat
-from baseHandler import BaseHandler
-from rich.console import Console
 import logging
 import time
+
+from nltk import sent_tokenize
+from rich.console import Console
+from openai import OpenAI
+
+from baseHandler import BaseHandler
+from LLM.chat import Chat
+
 logger = logging.getLogger(__name__)
 
 console = Console()
-from nltk import sent_tokenize
+
+WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
+    "en": "english",
+    "fr": "french",
+    "es": "spanish",
+    "zh": "chinese",
+    "ja": "japanese",
+    "ko": "korean",
+}
 
 class OpenApiModelHandler(BaseHandler):
     """
@@ -61,7 +73,10 @@ class OpenApiModelHandler(BaseHandler):
             language_code = None
             if isinstance(prompt, tuple):
                 prompt, language_code = prompt
-
+                if language_code[-5:] == "-auto":
+                    language_code = language_code[:-5]
+                    prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
+            
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[
