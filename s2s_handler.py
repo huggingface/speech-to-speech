@@ -1,6 +1,3 @@
-import subprocess
-subprocess.run("pip install flash-attn --no-build-isolation", shell=True, check=True)
-       
 from typing import Dict, Any, List, Generator
 import torch
 import os
@@ -11,9 +8,12 @@ from queue import Queue, Empty
 import threading
 import base64
 import uuid
+import torch
 
 class EndpointHandler:
     def __init__(self, path=""):
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        lm_model_name = os.getenv('LM_MODEL_NAME', 'meta-llama/Meta-Llama-3.1-8B-Instruct')
         (
             self.module_kwargs,
             self.socket_receiver_kwargs,
@@ -26,7 +26,7 @@ class EndpointHandler:
             self.parler_tts_handler_kwargs,
             self.melo_tts_handler_kwargs,
             self.chat_tts_handler_kwargs,
-        ) = get_default_arguments(mode='none', log_level='DEBUG', lm_model_name='meta-llama/Meta-Llama-3.1-8B-Instruct')
+        ) = get_default_arguments(mode='none', log_level='DEBUG', lm_model_name=lm_model_name, tts='melo', device=device)
         setup_logger(self.module_kwargs.log_level)
 
         prepare_all_args(
@@ -57,8 +57,6 @@ class EndpointHandler:
             self.queues_and_events,
         )
 
-        self.pipeline_manager.start()
-
         # Add a new queue for collecting the final output
         self.final_output_queue = Queue()
         self.sessions = {}  # Store session information
@@ -83,7 +81,7 @@ class EndpointHandler:
         while True:
             try:
                 output = self.queues_and_events['send_audio_chunks_queue'].get(timeout=2)
-                if isinstance(output, (str, bytes)) and output in (b"END", "END"):
+                if isinstance(output, (str, bytes)) and output in (b"END", "END", b"DONE"):
                     self.sessions[session_id]['status'] = 'completed'
                     break
                 elif isinstance(output, np.ndarray):
