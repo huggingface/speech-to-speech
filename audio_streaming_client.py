@@ -61,10 +61,9 @@ class AudioStreamingClient:
                 if len(buffer) >= self.args.chunk_size * 2:  # * 2 because of int16
                     self.send_request(buffer)
                     buffer = b''
-                    time.sleep(self.args.chunk_size/self.args.sample_rate)
             else:
                 self.send_request()
-                time.sleep(self.args.chunk_size/self.args.sample_rate)
+            time.sleep(self.args.chunk_size/self.args.sample_rate)
 
     def send_request(self, audio_data=None):
         payload = {"input_type": "speech",
@@ -81,7 +80,12 @@ class AudioStreamingClient:
             payload["request_type"] = "start"
 
         try:
+            start_time = time.time()  # Record the start time
             response = requests.post(self.args.api_url, headers=self.headers, json=payload)
+            end_time = time.time()  # Record the end time
+            response_time = end_time - start_time  # Calculate the response time
+            print(f"Response time: {response_time:.2f} seconds")  # Print the response time
+
             response_data = response.json()
 
             if "session_id" in response_data:
