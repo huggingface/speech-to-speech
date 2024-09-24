@@ -56,6 +56,10 @@ class MeloTTSHandler(BaseHandler):
         _ = self.model.tts_to_file("text", self.speaker_id, quiet=True)
 
     def process(self, llm_sentence):
+        if llm_sentence == b"DONE":
+            self.should_listen.set()
+            return b"DONE"
+        
         language_code = None
 
         if isinstance(llm_sentence, tuple):
@@ -107,4 +111,3 @@ class MeloTTSHandler(BaseHandler):
             )
 
         self.should_listen.set()
-        yield b"END"
