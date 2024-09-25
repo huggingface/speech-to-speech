@@ -213,7 +213,7 @@ See [VADHandlerArguments](https://github.com/huggingface/speech-to-speech/blob/d
 
 For example:
 ```bash
---transformers_lm_model_name google/gemma-2b-it
+--lm_model_name google/gemma-2b-it
 ```
 
 ### Generation parameters
