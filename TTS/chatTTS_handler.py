@@ -64,8 +64,8 @@ class ChatTTSHandler(BaseHandler):
                 audio_chunk = librosa.resample(gen[0], orig_sr=24000, target_sr=16000)
                 audio_chunk = (audio_chunk * 32768).astype(np.int16)[0]
                 while len(audio_chunk) > self.chunk_size:
-                    yield audio_chunk[: self.chunk_size]  # 返回前 chunk_size 字节的数据
-                    audio_chunk = audio_chunk[self.chunk_size :]  # 移除已返回的数据
+                    yield audio_chunk[: self.chunk_size]  # Return the first chunk_size samples of the audio data
+                    audio_chunk = audio_chunk[self.chunk_size :]  # Remove the samples that have already been returned
                 yield np.pad(audio_chunk, (0, self.chunk_size - len(audio_chunk)))
         else:
             wavs = wavs_gen
