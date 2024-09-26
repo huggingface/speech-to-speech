@@ -7,7 +7,7 @@ class OpenApiLanguageModelHandlerArguments:
         # default="HuggingFaceTB/SmolLM-360M-Instruct",
         default="deepseek-chat",
         metadata={
-            "help": "The pretrained language model to use. Default is 'microsoft/Phi-3-mini-4k-instruct'."
+            "help": "The pretrained language model to use. Default is 'deepseek-chat'."
         },
     )
     open_api_user_role: str = field(
