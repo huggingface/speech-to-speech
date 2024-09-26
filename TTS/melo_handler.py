@@ -99,10 +99,11 @@ class MeloTTSHandler(BaseHandler):
             )
         except (AssertionError, RuntimeError) as e:
             logger.error(f"Error in MeloTTSHandler: {e}")
-            audio_chunk = np.array([])
-        if len(audio_chunk) == 0:
-            self.should_listen.set()
-            return
+            audio_chunk = np.zeros([self.blocksize])
+        except Exception as e:
+            logger.error(f"Unknown error in MeloTTSHandler: {e}")
+            audio_chunk = np.zeros([self.blocksize])
+
         audio_chunk = librosa.resample(audio_chunk, orig_sr=44100, target_sr=16000)
         audio_chunk = (audio_chunk * 32768).astype(np.int16)
         for i in range(0, len(audio_chunk), self.blocksize):
