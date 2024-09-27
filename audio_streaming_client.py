@@ -82,7 +82,6 @@ class AudioStreamingClient:
             self.session_state = "listen"
         else:
             print("processing")
-            print("recv queue size: ", self.recv_queue.qsize())
             self.session_state = "processing"
             audio_np = np.frombuffer(message, dtype=np.int16)
             self.recv_queue.put(audio_np)
