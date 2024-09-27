@@ -51,25 +51,15 @@ class AudioStreamingClient:
         
         # Wait for the WebSocket to be ready
         self.ws_ready.wait()
+        self.start_audio_streaming()
 
-        send_thread = threading.Thread(target=self.send_audio)
-        play_thread = threading.Thread(target=self.play_audio)
+    def start_audio_streaming(self):
+        self.send_thread = threading.Thread(target=self.send_audio)
+        self.play_thread = threading.Thread(target=self.play_audio)
 
         with sd.InputStream(samplerate=self.args.sample_rate, channels=1, dtype='int16', callback=self.audio_input_callback, blocksize=self.args.chunk_size):
-            send_thread.start()
-            play_thread.start()
-
-            try:
-                input("Press Enter to stop streaming...")
-            except KeyboardInterrupt:
-                print("\nStreaming interrupted by user.")
-            finally:
-                self.stop_event.set()
-                send_thread.join()
-                play_thread.join()
-                self.ws.close()
-                ws_thread.join()
-                print("Audio streaming stopped.")
+            self.send_thread.start()
+            self.play_thread.start()
 
     def on_open(self, ws):
         print("WebSocket connection opened.")
@@ -91,6 +81,14 @@ class AudioStreamingClient:
 
     def on_close(self, ws, close_status_code, close_msg):
         print("WebSocket connection closed.")
+
+    def on_shutdown(self):
+        self.stop_event.set()
+        self.send_thread.join()
+        self.play_thread.join()
+        self.ws.close()
+        self.ws_thread.join()
+        print("Service shutdown.")
 
     def send_audio(self):
         while not self.stop_event.is_set():
