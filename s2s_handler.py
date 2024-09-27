@@ -77,7 +77,7 @@ class EndpointHandler:
 
         # Collect the output, if any
         try:
-            output = self.queues_and_events['send_audio_chunks_queue'].get_nowait()
+            output = self.queues_and_events['send_audio_chunks_queue'].get_nowait()  # improvement idea, group all available output chunks
             if isinstance(output, np.ndarray):
                 return output.tobytes()
             else:
