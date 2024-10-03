@@ -73,7 +73,9 @@ class MLXLanguageModelHandler(BaseHandler):
 
         if isinstance(prompt, tuple):
             prompt, language_code = prompt
-            prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
+            if language_code[-5:] == "-auto":
+                language_code = language_code[:-5]
+                prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
 
         self.chat.append({"role": self.user_role, "content": prompt})
 

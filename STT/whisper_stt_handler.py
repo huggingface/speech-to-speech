@@ -40,9 +40,8 @@ class WhisperSTTHandler(BaseHandler):
         self.torch_dtype = getattr(torch, torch_dtype)
         self.compile_mode = compile_mode
         self.gen_kwargs = gen_kwargs
-        if language == 'auto':
-            language = None
-        self.last_language = language
+        self.start_language = language
+        self.last_language = language if language != "auto" else None
         if self.last_language is not None:
             self.gen_kwargs["language"] = self.last_language
 
@@ -137,4 +136,7 @@ class WhisperSTTHandler(BaseHandler):
         console.print(f"[yellow]USER: {pred_text}")
         logger.debug(f"Language Code Whisper: {language_code}")
 
+        if self.start_language == "auto":
+            language_code += "-auto"
+            
         yield (pred_text, language_code)
