@@ -57,6 +57,6 @@ class ParlerTTSHandlerArguments:
     max_prompt_pad_length: int = field(
         default=8,
         metadata={
-            "help": "When using compilation, the prompt as to be padded to closest power of 2. This parameters sets the maximun power of 2 possible."
+            "help": "When using compilation, the prompt as to be padded to closest power of 2. This parameters sets the maximum power of 2 possible."
         },
     )

@@ -4,7 +4,6 @@ from baseHandler import BaseHandler
 from lightning_whisper_mlx import LightningWhisperMLX
 import numpy as np
 from rich.console import Console
-from copy import copy
 import torch
 
 logger = logging.getLogger(__name__)
@@ -55,7 +54,7 @@ class LightningWhisperSTTHandler(BaseHandler):
             _ = self.model.transcribe(dummy_input)["text"].strip()
 
     def process(self, spoken_prompt):
-        logger.debug("infering whisper...")
+        logger.debug("inferring whisper...")
 
         global pipeline_start
         pipeline_start = perf_counter()

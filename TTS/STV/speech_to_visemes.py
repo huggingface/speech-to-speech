@@ -1,10 +1,10 @@
 """This module contains the SpeechToVisemes class, which handles the conversion of speech to visemes."""
+from typing import List, Dict, Any
 from transformers import pipeline
 import logging
 import json
 
 logger = logging.getLogger(__name__)
-from typing import List, Dict, Any
 
 class SpeechToVisemes():
     """
