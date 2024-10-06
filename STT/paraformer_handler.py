@@ -45,7 +45,7 @@ class ParaformerSTTHandler(BaseHandler):
             _ = self.model.generate(dummy_input)[0]["text"].strip().replace(" ", "")
 
     def process(self, spoken_prompt):
-        logger.debug("infering paraformer...")
+        logger.debug("inferring paraformer...")
 
         global pipeline_start
         pipeline_start = perf_counter()

@@ -1,0 +1,12 @@
+repos:
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.2.5  # Specify the latest stable version
+    hooks:
+      - id: codespell
+        args: ["-w"]  # The -w flag tells codespell to automatically apply fixes
+
+  - repo: https://github.com/charliermarsh/ruff-pre-commit
+    rev: v0.1.1  # Replace with the latest stable version of ruff-pre-commit
+    hooks:
+      - id: ruff
+        args: ["--fix"]  # This will automatically fix linting issues
