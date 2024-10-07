@@ -8,6 +8,7 @@ from threading import Event
 from typing import Optional
 from sys import platform
 from VAD.vad_handler import VADHandler
+from STV.w2v_stv_handler import Wav2Vec2STVHandler
 from arguments_classes.chat_tts_arguments import ChatTTSHandlerArguments
 from arguments_classes.language_model_arguments import LanguageModelHandlerArguments
 from arguments_classes.mlx_language_model_arguments import (
@@ -22,6 +23,7 @@ from arguments_classes.vad_arguments import VADHandlerArguments
 from arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
 from arguments_classes.melo_tts_arguments import MeloTTSHandlerArguments
 from arguments_classes.open_api_language_model_arguments import OpenApiLanguageModelHandlerArguments
+from arguments_classes.w2v_stv_arguments import Wav2Vec2STVHandlerArguments
 import torch
 import nltk
 from rich.console import Console
@@ -82,6 +84,7 @@ def parse_arguments():
             ParlerTTSHandlerArguments,
             MeloTTSHandlerArguments,
             ChatTTSHandlerArguments,
+            Wav2Vec2STVHandlerArguments,
         )
     )
 
@@ -148,6 +151,8 @@ def overwrite_device_argument(common_device: Optional[str], *handler_kwargs):
                 kwargs.stt_device = common_device
             if hasattr(kwargs, "paraformer_stt_device"):
                 kwargs.paraformer_stt_device = common_device
+            if hasattr(kwargs, "stv_device"):
+                kwargs.stv_device = common_device
 
 
 def prepare_module_args(module_kwargs, *handler_kwargs):
@@ -167,6 +172,7 @@ def prepare_all_args(
     parler_tts_handler_kwargs,
     melo_tts_handler_kwargs,
     chat_tts_handler_kwargs,
+    stv_handler_kwargs,
 ):
     prepare_module_args(
         module_kwargs,
@@ -178,6 +184,7 @@ def prepare_all_args(
         parler_tts_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
+        stv_handler_kwargs
     )
 
 
@@ -189,6 +196,7 @@ def prepare_all_args(
     rename_args(parler_tts_handler_kwargs, "tts")
     rename_args(melo_tts_handler_kwargs, "melo")
     rename_args(chat_tts_handler_kwargs, "chat_tts")
+    rename_args(stv_handler_kwargs, "stv")
 
 
 def initialize_queues_and_events():
@@ -200,6 +208,7 @@ def initialize_queues_and_events():
         "spoken_prompt_queue": Queue(),
         "text_prompt_queue": Queue(),
         "lm_response_queue": Queue(),
+        "send_viseme_queue": Queue(),
     }
 
 
@@ -216,6 +225,7 @@ def build_pipeline(
     parler_tts_handler_kwargs,
     melo_tts_handler_kwargs,
     chat_tts_handler_kwargs,
+    stv_handler_kwargs,
     queues_and_events,
 ):
     stop_event = queues_and_events["stop_event"]
@@ -225,11 +235,13 @@ def build_pipeline(
     spoken_prompt_queue = queues_and_events["spoken_prompt_queue"]
     text_prompt_queue = queues_and_events["text_prompt_queue"]
     lm_response_queue = queues_and_events["lm_response_queue"]
+    send_viseme_queue = queues_and_events["send_viseme_queue"]
+
     if module_kwargs.mode == "local":
         from connections.local_audio_streamer import LocalAudioStreamer
 
         local_audio_streamer = LocalAudioStreamer(
-            input_queue=recv_audio_chunks_queue, output_queue=send_audio_chunks_queue
+            input_queue=recv_audio_chunks_queue, output_queue=send_viseme_queue
         )
         comms_handlers = [local_audio_streamer]
         should_listen.set()
@@ -248,7 +260,7 @@ def build_pipeline(
             ),
             SocketSender(
                 stop_event,
-                send_audio_chunks_queue,
+                send_viseme_queue,
                 host=socket_sender_kwargs.send_host,
                 port=socket_sender_kwargs.send_port,
             ),
@@ -264,9 +276,17 @@ def build_pipeline(
 
     stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs)
     lm = get_llm_handler(module_kwargs, stop_event, text_prompt_queue, lm_response_queue, language_model_handler_kwargs, open_api_language_model_handler_kwargs, mlx_language_model_handler_kwargs)
-    tts = get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs)
+    tts = get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs)
 
-    return ThreadManager([*comms_handlers, vad, stt, lm, tts])
+    stv = Wav2Vec2STVHandler(
+        stop_event,
+        queue_in=send_audio_chunks_queue,
+        queue_out=send_viseme_queue,
+        setup_args=(should_listen,),
+        setup_kwargs=vars(stv_handler_kwargs),
+    )
+
+    return ThreadManager([*comms_handlers, vad, stt, lm, tts, stv])
 
 
 def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs):
@@ -337,14 +357,14 @@ def get_llm_handler(
         raise ValueError("The LLM should be either transformers or mlx-lm")
 
 
-def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs):
+def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs):
     if module_kwargs.tts == "parler":
         from TTS.parler_handler import ParlerTTSHandler
         return ParlerTTSHandler(
             stop_event,
             queue_in=lm_response_queue,
             queue_out=send_audio_chunks_queue,
-            setup_args=(should_listen,),
+            setup_args=(),
             setup_kwargs=vars(parler_tts_handler_kwargs),
         )
     elif module_kwargs.tts == "melo":
@@ -355,11 +375,12 @@ def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chu
                 "Error importing MeloTTSHandler. You might need to run: python -m unidic download"
             )
             raise e
+            
         return MeloTTSHandler(
             stop_event,
             queue_in=lm_response_queue,
             queue_out=send_audio_chunks_queue,
-            setup_args=(should_listen,),
+            setup_args=(),
             setup_kwargs=vars(melo_tts_handler_kwargs),
         )
     elif module_kwargs.tts == "chatTTS":
@@ -372,7 +393,7 @@ def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chu
             stop_event,
             queue_in=lm_response_queue,
             queue_out=send_audio_chunks_queue,
-            setup_args=(should_listen,),
+            setup_args=(),
             setup_kwargs=vars(chat_tts_handler_kwargs),
         )
     else:
@@ -393,6 +414,7 @@ def main():
         parler_tts_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
+        stv_handler_kwargs,
     ) = parse_arguments()
 
     setup_logger(module_kwargs.log_level)
@@ -407,6 +429,7 @@ def main():
         parler_tts_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
+        stv_handler_kwargs
     )
 
     queues_and_events = initialize_queues_and_events()
@@ -424,6 +447,7 @@ def main():
         parler_tts_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
+        stv_handler_kwargs,
         queues_and_events,
     )
 

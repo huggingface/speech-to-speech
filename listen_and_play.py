@@ -92,17 +92,10 @@ def listen_and_play(
             serialized_packet = receive_full_chunk(recv_socket, packet_length)
             if serialized_packet:
                 # Step 4: Deserialize the packet using pickle
-                packet = pickle.loads(serialized_packet)
-                # Step 5: Extract the packet contents
-                if 'text' in packet:
-                    pass
-                    # print(packet['text'])
-                if 'visemes' in packet:
-                    pass
-                    # print(packet['visemes'])
-                
-                # Step 6: Put the packet audio data into the queue for sending
-                recv_queue.put(packet['audio'].tobytes())
+                packet = pickle.loads(serialized_packet)                
+                # Step 5: Put the packet audio data into the queue for sending, if any
+                if 'audio' in packet and packet['audio'] is not None and 'waveform' in packet['audio'] and packet['audio']['waveform'] is not None:
+                    recv_queue.put(packet['audio']['waveform'].tobytes())
 
     try:
         send_stream = sd.RawInputStream(

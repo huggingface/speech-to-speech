@@ -38,7 +38,7 @@ class LocalAudioStreamer:
                     visemes = data['visemes']
                     logger.info(f"Visemes: {visemes}")
                 """
-                outdata[:] = data['audio'][:, np.newaxis]
+                outdata[:] = data['audio']['waveform'][:, np.newaxis]
 
         logger.debug("Available devices:")
         logger.debug(sd.query_devices())
