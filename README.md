@@ -28,6 +28,7 @@ This repository implements a speech-to-speech cascaded pipeline consisting of th
 2. **Speech to Text (STT)**
 3. **Language Model (LM)**
 4. **Text to Speech (TTS)**
+5. **Speech to Visemes (STV)**
 
 ### Modularity
 The pipeline provides a fully open and modular approach, with a focus on leveraging models available through the Transformers library on the Hugging Face hub. The code is designed for easy modification, and we already support device-specific and external library implementations:
@@ -49,6 +50,9 @@ The pipeline provides a fully open and modular approach, with a focus on leverag
 - [Parler-TTS](https://github.com/huggingface/parler-tts) 🤗
 - [MeloTTS](https://github.com/myshell-ai/MeloTTS)
 - [ChatTTS](https://github.com/2noise/ChatTTS?tab=readme-ov-file)
+
+**STV**
+- [Wav2Vec2Phoneme](https://huggingface.co/docs/transformers/en/model_doc/wav2vec2_phoneme) + [Phoneme to viseme mapping](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-speech-synthesis-viseme?tabs=visemeid&pivots=programming-language-python#map-phonemes-to-visemes)
 
 ## Setup
 
@@ -215,6 +219,13 @@ For example:
 ```bash
 --lm_model_name google/gemma-2b-it
 ```
+
+
+### STV parameters
+See [Wav2Vec2STVHandlerArguments](arguments_classes/w2v_stv_arguments.py) class. Notably:
+- `stv_model_name` is by default `bookbot/wav2vec2-ljspeech-gruut` and has been chosen because accurate and fast enough
+- `stv_skip`, flag it to `True` if you don't need visemes
+
 
 ### Generation parameters
 

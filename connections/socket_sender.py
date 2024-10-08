@@ -33,7 +33,7 @@ class SocketSender:
             packet = {}
             if 'audio' in data and data['audio'] is not None:
                 audio_chunk = data['audio']
-                packet['audio'] = data['audio']
+                packet['audio'] = audio_chunk
             if 'text' in data and data['text'] is not None:
                 packet['text'] = data['text']
             if 'visemes' in data and data['visemes'] is not None:

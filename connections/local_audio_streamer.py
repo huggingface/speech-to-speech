@@ -28,17 +28,7 @@ class LocalAudioStreamer:
                 outdata[:] = 0 * outdata
             else:
                 data = self.output_queue.get()
-                """
-                # Check if text data is present and log it
-                if data.get('text') is not None:
-                    text = data['text']
-                    logger.info(f"Text: {text}")
-                # Check if viseme data is present and log it
-                if data.get('visemes') is not None:
-                    visemes = data['visemes']
-                    logger.info(f"Visemes: {visemes}")
-                """
-                outdata[:] = data['audio'][:, np.newaxis]
+                outdata[:] = data['audio']['waveform'][:, np.newaxis]
 
         logger.debug("Available devices:")
         logger.debug(sd.query_devices())

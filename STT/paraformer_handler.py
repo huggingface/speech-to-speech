@@ -28,7 +28,6 @@ class ParaformerSTTHandler(BaseHandler):
         device="cuda",
         gen_kwargs={},
     ):
-        print(model_name)
         if len(model_name.split("/")) > 1:
             model_name = model_name.split("/")[-1]
         self.device = device
