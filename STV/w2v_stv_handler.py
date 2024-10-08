@@ -60,6 +60,7 @@ class Wav2Vec2STVHandler(BaseHandler):
         self.skip = skip
 
         # Load phoneme-to-viseme map from the JSON file
+        # inspired by https://learn.microsoft.com/en-us/azure/ai-services/speech-service/speech-ssml-phonetic-sets
         phoneme_viseme_map_file = "STV/phoneme_viseme_map.json"
         with open(phoneme_viseme_map_file, "r") as f:
             self.phoneme_viseme_map = json.load(f)
@@ -250,8 +251,3 @@ class Wav2Vec2STVHandler(BaseHandler):
         if self.should_listen_flag:
             self.should_listen.set()
             self.should_listen_flag = False
-
-
-# TODO: Test in all modalities and TTS models**: Ensure compatibility with the different models. This requires integration testing with your models and modalities.
-# in s2s_pipeline change some names
-# remove some prints
