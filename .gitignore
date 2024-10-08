@@ -1,3 +1,6 @@
 __pycache__
 tmp
 cache
+mlx_models/
+asset/
+config/

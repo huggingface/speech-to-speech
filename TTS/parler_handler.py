@@ -14,7 +14,6 @@ from utils.utils import next_power_of_2
 from transformers.utils.import_utils import (
     is_flash_attn_2_available,
 )
-
 torch._inductor.config.fx_graph_cache = True
 # mind about this parameter ! should be >= 2 * number of padded prompt sizes for TTS
 torch._dynamo.config.cache_size_limit = 15
@@ -34,7 +33,6 @@ if not is_flash_attn_2_available() and torch.cuda.is_available():
 class ParlerTTSHandler(BaseHandler):
     def setup(
         self,
-        should_listen,
         model_name="ylacombe/parler-tts-mini-jenny-30H",
         device="cuda",
         torch_dtype="float16",
@@ -48,7 +46,6 @@ class ParlerTTSHandler(BaseHandler):
         play_steps_s=1,
         blocksize=512,
     ):
-        self.should_listen = should_listen
         self.device = device
         self.torch_dtype = getattr(torch, torch_dtype)
         self.gen_kwargs = gen_kwargs
@@ -77,6 +74,7 @@ class ParlerTTSHandler(BaseHandler):
             self.model.forward = torch.compile(
                 self.model.forward, mode=self.compile_mode, fullgraph=True
             )
+        self.output_sampling_rate = 16000
 
         self.warmup()
 
@@ -180,12 +178,24 @@ class ParlerTTSHandler(BaseHandler):
                 logger.info(
                     f"Time to first audio: {perf_counter() - pipeline_start:.3f}"
                 )
-            audio_chunk = librosa.resample(audio_chunk, orig_sr=44100, target_sr=16000)
+            audio_chunk = librosa.resample(audio_chunk, orig_sr=44100, target_sr=self.output_sampling_rate)
             audio_chunk = (audio_chunk * 32768).astype(np.int16)
-            for i in range(0, len(audio_chunk), self.blocksize):
-                yield np.pad(
-                    audio_chunk[i : i + self.blocksize],
-                    (0, self.blocksize - len(audio_chunk[i : i + self.blocksize])),
-                )
 
-        self.should_listen.set()
+            for i in range(0, len(audio_chunk), self.blocksize):
+                chunk_data = {
+                    "audio": {
+                        "waveform": np.pad(
+                            audio_chunk[i : i + self.blocksize],
+                            (0, self.blocksize - len(audio_chunk[i : i + self.blocksize]))
+                        ), 
+                        "sampling_rate": self.output_sampling_rate
+                    }
+                }
+                # For the first chunk, include text
+                if i == 0:
+                    chunk_data["text"] = llm_sentence
+                if i >= len(audio_chunk) - self.blocksize:
+                    # This is the last round
+                    chunk_data["sentence_end"] = True
+
+                yield chunk_data

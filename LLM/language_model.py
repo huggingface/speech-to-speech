@@ -68,7 +68,7 @@ class LanguageModelHandler(BaseHandler):
         if init_chat_role:
             if not init_chat_prompt:
                 raise ValueError(
-                    "An initial promt needs to be specified when setting init_chat_role."
+                    "An initial prompt needs to be specified when setting init_chat_role."
                 )
             self.chat.init_chat({"role": init_chat_role, "content": init_chat_prompt})
         self.user_role = user_role
@@ -111,7 +111,7 @@ class LanguageModelHandler(BaseHandler):
             )
 
     def process(self, prompt):
-        logger.debug("infering language model...")
+        logger.debug("inferring language model...")
         language_code = None
         if isinstance(prompt, tuple):
             prompt, language_code = prompt

@@ -4,15 +4,16 @@ from queue import Queue
 from dataclasses import dataclass, field
 import sounddevice as sd
 from transformers import HfArgumentParser
-
+import struct
+import pickle
 
 @dataclass
 class ListenAndPlayArguments:
     send_rate: int = field(default=16000, metadata={"help": "In Hz. Default is 16000."})
     recv_rate: int = field(default=16000, metadata={"help": "In Hz. Default is 16000."})
     list_play_chunk_size: int = field(
-        default=1024,
-        metadata={"help": "The size of data chunks (in bytes). Default is 1024."},
+        default=512,
+        metadata={"help": "The size of data chunks (in bytes). Default is 512."},
     )
     host: str = field(
         default="localhost",
@@ -33,7 +34,7 @@ class ListenAndPlayArguments:
 def listen_and_play(
     send_rate=16000,
     recv_rate=44100,
-    list_play_chunk_size=1024,
+    list_play_chunk_size=512,
     host="localhost",
     send_port=12345,
     recv_port=12346,
@@ -79,9 +80,22 @@ def listen_and_play(
             return data
 
         while not stop_event.is_set():
-            data = receive_full_chunk(recv_socket, list_play_chunk_size * 2)
-            if data:
-                recv_queue.put(data)
+            # Step 1: Receive the first 4 bytes to get the packet length
+            length_data = receive_full_chunk(recv_socket, 4)
+            if not length_data:
+                continue  # Handle disconnection or data not available
+
+            # Step 2: Unpack the length (4 bytes)
+            packet_length = struct.unpack('!I', length_data)[0]
+
+            # Step 3: Receive the full packet based on the length
+            serialized_packet = receive_full_chunk(recv_socket, packet_length)
+            if serialized_packet:
+                # Step 4: Deserialize the packet using pickle
+                packet = pickle.loads(serialized_packet)                
+                # Step 5: Put the packet audio data into the queue for sending, if any
+                if 'audio' in packet and packet['audio'] is not None and 'waveform' in packet['audio'] and packet['audio']['waveform'] is not None:
+                    recv_queue.put(packet['audio']['waveform'].tobytes())
 
     try:
         send_stream = sd.RawInputStream(
