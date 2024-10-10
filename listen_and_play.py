@@ -113,6 +113,8 @@ def listen_and_play(
 
     finally:
         stop_event.set()
+        # Given that socket::recv is blocking in receive_data_chunk, shut it down to allow the thread to continue.
+        recv_socket.shutdown(socket.SHUT_RDWR)
         recv_thread.join()
         send_thread.join()
         send_socket.close()
