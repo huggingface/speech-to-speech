@@ -86,3 +86,7 @@ class VADHandler(BaseHandler):
                         )
                     array = enhanced.numpy().squeeze()
                 yield array
+
+    @property
+    def min_time_to_debug(self):
+        return 0.00001

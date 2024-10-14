@@ -6,7 +6,7 @@ class MLXLanguageModelHandlerArguments:
     mlx_lm_model_name: str = field(
         default="mlx-community/SmolLM-360M-Instruct",
         metadata={
-            "help": "The pretrained language model to use. Default is 'microsoft/Phi-3-mini-4k-instruct'."
+            "help": "The pretrained language model to use. Default is 'mlx-community/SmolLM-360M-Instruct'."
         },
     )
     mlx_lm_device: str = field(
