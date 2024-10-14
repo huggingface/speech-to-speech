@@ -60,21 +60,22 @@ class FacebookMMSTTSHandler(BaseHandler):
     def setup(
         self,
         should_listen,
-        facebook_mms_device="cuda",
-        facebook_mms_torch_dtype="float32",
+        device="cuda",
+        torch_dtype="float32",
         language="en",
         stream=True,
         chunk_size=512,
         **kwargs
     ):
         self.should_listen = should_listen
-        self.device = facebook_mms_device
-        self.torch_dtype = getattr(torch, facebook_mms_torch_dtype)
+        self.device = device
+        self.torch_dtype = getattr(torch, torch_dtype)
         self.stream = stream
         self.chunk_size = chunk_size
         self.language = language
 
         self.load_model(self.language)
+        self.warmup()
 
     def load_model(self, language_code):
         try:
@@ -86,6 +87,10 @@ class FacebookMMSTTSHandler(BaseHandler):
         except KeyError:
             logger.warning(f"Unsupported language: {language_code}. Falling back to English.")
             self.load_model("en")
+
+    def warmup(self):
+        logger.info(f"Warming up {self.__class__.__name__}")
+        output = self.generate_audio("Hello, this is a test")
 
     def generate_audio(self, text):
         if not text:

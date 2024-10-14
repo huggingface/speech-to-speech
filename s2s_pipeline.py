@@ -150,6 +150,8 @@ def overwrite_device_argument(common_device: Optional[str], *handler_kwargs):
                 kwargs.stt_device = common_device
             if hasattr(kwargs, "paraformer_stt_device"):
                 kwargs.paraformer_stt_device = common_device
+            if hasattr(kwargs, "facebook_mms_device"):
+                kwargs.facebook_mms_device = common_device
 
 
 def prepare_module_args(module_kwargs, *handler_kwargs):
@@ -380,9 +382,9 @@ def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chu
             setup_args=(should_listen,),
             setup_kwargs=vars(chat_tts_handler_kwargs),
         )
-    elif module_kwargs.tts == "facebookmms":
+    elif module_kwargs.tts == "facebookMMS":
         from TTS.facebookmms_handler import FacebookMMSTTSHandler
-        tts = FacebookMMSTTSHandler(
+        return FacebookMMSTTSHandler(
             stop_event,
             queue_in=lm_response_queue,
             queue_out=send_audio_chunks_queue,
