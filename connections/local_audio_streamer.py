@@ -27,7 +27,8 @@ class LocalAudioStreamer:
                 self.input_queue.put(indata.copy())
                 outdata[:] = 0 * outdata
             else:
-                outdata[:] = self.output_queue.get()[:, np.newaxis]
+                data = self.output_queue.get()
+                outdata[:] = data['audio']['waveform'][:, np.newaxis]
 
         logger.debug("Available devices:")
         logger.debug(sd.query_devices())

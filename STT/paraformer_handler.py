@@ -28,7 +28,6 @@ class ParaformerSTTHandler(BaseHandler):
         device="cuda",
         gen_kwargs={},
     ):
-        print(model_name)
         if len(model_name.split("/")) > 1:
             model_name = model_name.split("/")[-1]
         self.device = device
@@ -45,7 +44,7 @@ class ParaformerSTTHandler(BaseHandler):
             _ = self.model.generate(dummy_input)[0]["text"].strip().replace(" ", "")
 
     def process(self, spoken_prompt):
-        logger.debug("infering paraformer...")
+        logger.debug("inferring paraformer...")
 
         global pipeline_start
         pipeline_start = perf_counter()

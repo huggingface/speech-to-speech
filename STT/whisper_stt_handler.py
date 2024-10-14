@@ -109,7 +109,7 @@ class WhisperSTTHandler(BaseHandler):
             )
 
     def process(self, spoken_prompt):
-        logger.debug("infering whisper...")
+        logger.debug("inferring whisper...")
 
         global pipeline_start
         pipeline_start = perf_counter()

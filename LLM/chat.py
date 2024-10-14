@@ -6,7 +6,7 @@ class Chat:
     def __init__(self, size):
         self.size = size
         self.init_chat_message = None
-        # maxlen is necessary pair, since a each new step we add an prompt and assitant answer
+        # maxlen is necessary pair, since a each new step we add an prompt and assistant answer
         self.buffer = []
 
     def append(self, item):

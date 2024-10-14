@@ -28,18 +28,15 @@ WHISPER_LANGUAGE_TO_MELO_SPEAKER = {
     "ko": "KR",
 }
 
-
 class MeloTTSHandler(BaseHandler):
     def setup(
         self,
-        should_listen,
-        device="mps",
+        device="auto",
         language="en",
         speaker_to_id="en",
         gen_kwargs={},  # Unused
         blocksize=512,
     ):
-        self.should_listen = should_listen
         self.device = device
         self.language = language
         self.model = TTS(
@@ -49,6 +46,8 @@ class MeloTTSHandler(BaseHandler):
             WHISPER_LANGUAGE_TO_MELO_SPEAKER[speaker_to_id]
         ]
         self.blocksize = blocksize
+        self.output_sampling_rate = 16000
+
         self.warmup()
 
     def warmup(self):
@@ -96,14 +95,27 @@ class MeloTTSHandler(BaseHandler):
             logger.error(f"Error in MeloTTSHandler: {e}")
             audio_chunk = np.array([])
         if len(audio_chunk) == 0:
-            self.should_listen.set()
-            return
-        audio_chunk = librosa.resample(audio_chunk, orig_sr=44100, target_sr=16000)
+            return {
+                "text": llm_sentence,
+                "sentence_end": True
+            }
+        audio_chunk = librosa.resample(audio_chunk, orig_sr=44100, target_sr=self.output_sampling_rate)
         audio_chunk = (audio_chunk * 32768).astype(np.int16)
-        for i in range(0, len(audio_chunk), self.blocksize):
-            yield np.pad(
-                audio_chunk[i : i + self.blocksize],
-                (0, self.blocksize - len(audio_chunk[i : i + self.blocksize])),
-            )
 
-        self.should_listen.set()
+        for i in range(0, len(audio_chunk), self.blocksize):
+            chunk_data = {
+                "audio": {
+                    "waveform": np.pad(
+                        audio_chunk[i : i + self.blocksize],
+                        (0, self.blocksize - len(audio_chunk[i : i + self.blocksize]))
+                    ), 
+                    "sampling_rate": self.output_sampling_rate
+                }
+            }
+            # For the first chunk, include text
+            if i == 0:
+                chunk_data["text"] = llm_sentence
+            if i >= len(audio_chunk) - self.blocksize:
+                # This is the last round
+                chunk_data["sentence_end"] = True
+            yield chunk_data
