@@ -35,7 +35,7 @@ class ModuleArguments:
     tts: Optional[str] = field(
         default="parler",
         metadata={
-            "help": "The TTS to use. Either 'parler', 'melo', or 'chatTTS'. Default is 'parler'"
+            "help": "The TTS to use. Either 'parler', 'melo', 'chatTTS' or 'facebookMMS'. Default is 'parler'"
         },
     )
     log_level: str = field(
