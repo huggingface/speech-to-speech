@@ -145,3 +145,4 @@ class LanguageModelHandler(BaseHandler):
 
         # don't forget last sentence
         yield (printable_text, language_code)
+        yield b"DONE"
