@@ -169,6 +169,7 @@ def prepare_all_args(
     module_kwargs,
     whisper_stt_handler_kwargs,
     paraformer_stt_handler_kwargs,
+    faster_whisper_stt_handler_kwargs,
     language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
     mlx_language_model_handler_kwargs,
@@ -311,7 +312,7 @@ def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_
     elif module_kwargs.stt == "faster-whisper":
         from STT.faster_whisper_handler import FasterWhisperSTTHandler
 
-        stt = FasterWhisperSTTHandler(
+        return FasterWhisperSTTHandler(
             stop_event,
             queue_in=spoken_prompt_queue,
             queue_out=text_prompt_queue,
@@ -419,6 +420,7 @@ def main():
         vad_handler_kwargs,
         whisper_stt_handler_kwargs,
         paraformer_stt_handler_kwargs,
+        faster_whisper_stt_handler_kwargs,  # Add this line
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
@@ -434,6 +436,7 @@ def main():
         module_kwargs,
         whisper_stt_handler_kwargs,
         paraformer_stt_handler_kwargs,
+        faster_whisper_stt_handler_kwargs,  # Add this line
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
@@ -451,6 +454,7 @@ def main():
         socket_sender_kwargs,
         vad_handler_kwargs,
         whisper_stt_handler_kwargs,
+        faster_whisper_stt_handler_kwargs,  # Add this line
         paraformer_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
