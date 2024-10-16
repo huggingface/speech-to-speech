@@ -20,6 +20,9 @@ from arguments_classes.socket_receiver_arguments import SocketReceiverArguments
 from arguments_classes.socket_sender_arguments import SocketSenderArguments
 from arguments_classes.vad_arguments import VADHandlerArguments
 from arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
+from arguments_classes.faster_whisper_stt_arguments import (
+    FasterWhisperSTTHandlerArguments,
+)
 from arguments_classes.melo_tts_arguments import MeloTTSHandlerArguments
 from arguments_classes.open_api_language_model_arguments import OpenApiLanguageModelHandlerArguments
 from arguments_classes.facebookmms_tts_arguments import FacebookMMSTTSHandlerArguments
@@ -77,6 +80,7 @@ def parse_arguments():
             VADHandlerArguments,
             WhisperSTTHandlerArguments,
             ParaformerSTTHandlerArguments,
+            FasterWhisperSTTHandlerArguments,
             LanguageModelHandlerArguments,
             OpenApiLanguageModelHandlerArguments,
             MLXLanguageModelHandlerArguments,
@@ -165,6 +169,7 @@ def prepare_all_args(
     module_kwargs,
     whisper_stt_handler_kwargs,
     paraformer_stt_handler_kwargs,
+    faster_whisper_stt_handler_kwargs,
     language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
     mlx_language_model_handler_kwargs,
@@ -176,6 +181,7 @@ def prepare_all_args(
     prepare_module_args(
         module_kwargs,
         whisper_stt_handler_kwargs,
+        faster_whisper_stt_handler_kwargs,
         paraformer_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
@@ -187,6 +193,7 @@ def prepare_all_args(
     )
 
     rename_args(whisper_stt_handler_kwargs, "stt")
+    rename_args(faster_whisper_stt_handler_kwargs, "faster_whisper_stt")
     rename_args(paraformer_stt_handler_kwargs, "paraformer_stt")
     rename_args(language_model_handler_kwargs, "lm")
     rename_args(mlx_language_model_handler_kwargs, "mlx_lm")
@@ -215,6 +222,7 @@ def build_pipeline(
     socket_sender_kwargs,
     vad_handler_kwargs,
     whisper_stt_handler_kwargs,
+    faster_whisper_stt_handler_kwargs,
     paraformer_stt_handler_kwargs,
     language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
@@ -269,14 +277,14 @@ def build_pipeline(
         setup_kwargs=vars(vad_handler_kwargs),
     )
 
-    stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs)
+    stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs)
     lm = get_llm_handler(module_kwargs, stop_event, text_prompt_queue, lm_response_queue, language_model_handler_kwargs, open_api_language_model_handler_kwargs, mlx_language_model_handler_kwargs)
     tts = get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs)
 
     return ThreadManager([*comms_handlers, vad, stt, lm, tts])
 
 
-def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs):
+def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs):
     if module_kwargs.stt == "whisper":
         from STT.whisper_stt_handler import WhisperSTTHandler
         return WhisperSTTHandler(
@@ -300,6 +308,15 @@ def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_
             queue_in=spoken_prompt_queue,
             queue_out=text_prompt_queue,
             setup_kwargs=vars(paraformer_stt_handler_kwargs),
+        )
+    elif module_kwargs.stt == "faster-whisper":
+        from STT.faster_whisper_handler import FasterWhisperSTTHandler
+
+        return FasterWhisperSTTHandler(
+            stop_event,
+            queue_in=spoken_prompt_queue,
+            queue_out=text_prompt_queue,
+            setup_kwargs=vars(faster_whisper_stt_handler_kwargs),
         )
     else:
         raise ValueError("The STT should be either whisper, whisper-mlx, or paraformer.")
@@ -403,6 +420,7 @@ def main():
         vad_handler_kwargs,
         whisper_stt_handler_kwargs,
         paraformer_stt_handler_kwargs,
+        faster_whisper_stt_handler_kwargs,  # Add this line
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
@@ -418,6 +436,7 @@ def main():
         module_kwargs,
         whisper_stt_handler_kwargs,
         paraformer_stt_handler_kwargs,
+        faster_whisper_stt_handler_kwargs,  # Add this line
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
@@ -435,6 +454,7 @@ def main():
         socket_sender_kwargs,
         vad_handler_kwargs,
         whisper_stt_handler_kwargs,
+        faster_whisper_stt_handler_kwargs,  # Add this line
         paraformer_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
