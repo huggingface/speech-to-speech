@@ -78,11 +78,14 @@ def get_default_arguments(**kwargs):
         VADHandlerArguments(),
         WhisperSTTHandlerArguments(),
         ParaformerSTTHandlerArguments(),
+        FasterWhisperSTTHandlerArguments(),
         LanguageModelHandlerArguments(),
+        OpenApiLanguageModelHandlerArguments(),
         MLXLanguageModelHandlerArguments(),
         ParlerTTSHandlerArguments(),
         MeloTTSHandlerArguments(),
         ChatTTSHandlerArguments(),
+        FacebookMMSTTSHandlerArguments(),
     ]
     # Update arguments with provided kwargs
     for arg_obj in default_args:
@@ -343,7 +346,7 @@ def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_
             setup_kwargs=vars(faster_whisper_stt_handler_kwargs),
         )
     else:
-        raise ValueError("The STT should be either whisper, whisper-mlx, or paraformer.")
+        raise ValueError("The STT should be either whisper, whisper-mlx, faster-whisper, or paraformer.")
 
 
 def get_llm_handler(

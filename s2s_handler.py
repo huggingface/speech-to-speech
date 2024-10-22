@@ -14,6 +14,8 @@ class EndpointHandler:
     def __init__(self, path=""):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         lm_model_name = os.getenv('LM_MODEL_NAME', 'meta-llama/Meta-Llama-3.1-8B-Instruct')
+        chat_size = int(os.getenv('CHAT_SIZE', 10))
+
         (
             self.module_kwargs,
             self.socket_receiver_kwargs,
@@ -21,24 +23,30 @@ class EndpointHandler:
             self.vad_handler_kwargs,
             self.whisper_stt_handler_kwargs,
             self.paraformer_stt_handler_kwargs,
+            self.faster_whisper_stt_handler_kwargs,
             self.language_model_handler_kwargs,
+            self.open_api_language_model_handler_kwargs,
             self.mlx_language_model_handler_kwargs,
             self.parler_tts_handler_kwargs,
             self.melo_tts_handler_kwargs,
             self.chat_tts_handler_kwargs,
+            self.facebook_mm_stts_handler_kwargs,
         ) = get_default_arguments(mode='none', log_level='DEBUG', lm_model_name=lm_model_name, 
-            tts="melo", device=device)
+            tts="melo", device=device, chat_size=chat_size)
         setup_logger(self.module_kwargs.log_level)
 
         prepare_all_args(
             self.module_kwargs,
             self.whisper_stt_handler_kwargs,
             self.paraformer_stt_handler_kwargs,
+            self.faster_whisper_stt_handler_kwargs,
             self.language_model_handler_kwargs,
+            self.open_api_language_model_handler_kwargs,
             self.mlx_language_model_handler_kwargs,
             self.parler_tts_handler_kwargs,
             self.melo_tts_handler_kwargs,
             self.chat_tts_handler_kwargs,
+            self.facebook_mm_stts_handler_kwargs,
         )
 
         self.queues_and_events = initialize_queues_and_events()
@@ -50,11 +58,14 @@ class EndpointHandler:
             self.vad_handler_kwargs,
             self.whisper_stt_handler_kwargs,
             self.paraformer_stt_handler_kwargs,
+            self.faster_whisper_stt_handler_kwargs,
             self.language_model_handler_kwargs,
+            self.open_api_language_model_handler_kwargs,
             self.mlx_language_model_handler_kwargs,
             self.parler_tts_handler_kwargs,
             self.melo_tts_handler_kwargs,
             self.chat_tts_handler_kwargs,
+            self.facebook_mm_stts_handler_kwargs,
             self.queues_and_events,
         )
 
