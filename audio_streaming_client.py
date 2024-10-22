@@ -80,7 +80,7 @@ class AudioStreamingClient:
         ):
             self.send_thread.start()
             self.play_thread.start()
-            input("Press Enter to stop streaming...")
+            input("Press Enter to stop streaming... \n")
             self.on_shutdown()
 
     def on_open(self, ws):
@@ -93,7 +93,8 @@ class AudioStreamingClient:
             print("listen")
             self.session_state = "listen"
         else:
-            print("processing")
+            if self.session_state != "processing":
+                print("processing")
             self.session_state = "processing"
             audio_np = np.frombuffer(message, dtype=np.int16)
             self.recv_queue.put(audio_np)
