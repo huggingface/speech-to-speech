@@ -3,8 +3,8 @@ import threading
 from queue import Queue
 from dataclasses import dataclass, field
 import sounddevice as sd
-import argparse
-import numpy as np
+from transformers import HfArgumentParser
+
 
 @dataclass
 class ListenAndPlayArguments:
@@ -29,6 +29,7 @@ class ListenAndPlayArguments:
         metadata={"help": "The network port for receiving data. Default is 12346."},
     )
 
+
 def listen_and_play(
     send_rate=16000,
     recv_rate=44100,
@@ -52,14 +53,8 @@ def listen_and_play(
     def callback_recv(outdata, frames, time, status):
         if not recv_queue.empty():
             data = recv_queue.get()
-            # Convert bytes to numpy array
-            audio_array = np.frombuffer(data, dtype=np.int16)
-            # Reduce volume to 30%
-            audio_array = (audio_array * 0.3).astype(np.int16)
-            # Convert back to bytes
-            reduced_data = audio_array.tobytes()
-            outdata[: len(reduced_data)] = reduced_data
-            outdata[len(reduced_data) :] = b"\x00" * (len(outdata) - len(reduced_data))
+            outdata[: len(data)] = data
+            outdata[len(data) :] = b"\x00" * (len(outdata) - len(data))
         else:
             outdata[:] = b"\x00" * len(outdata)
 
@@ -79,7 +74,7 @@ def listen_and_play(
             while len(data) < chunk_size:
                 packet = conn.recv(chunk_size - len(data))
                 if not packet:
-                    return None
+                    return None  # Connection has been closed
                 data += packet
             return data
 
@@ -96,16 +91,13 @@ def listen_and_play(
             blocksize=list_play_chunk_size,
             callback=callback_send,
         )
-
         recv_stream = sd.RawOutputStream(
             samplerate=recv_rate,
             channels=1,
             dtype="int16",
             blocksize=list_play_chunk_size,
             callback=callback_recv,
-            device=0,
         )
-
         threading.Thread(target=send_stream.start).start()
         threading.Thread(target=recv_stream.start).start()
 
@@ -117,9 +109,7 @@ def listen_and_play(
         input("Press Enter to stop...")
 
     except KeyboardInterrupt:
-        print("\nProgram interrupted by user. Exiting...")
-    except Exception as e:
-        print(f"An error occurred: {e}")
+        print("Finished streaming.")
 
     finally:
         stop_event.set()
@@ -131,14 +121,8 @@ def listen_and_play(
         recv_socket.close()
         print("Connection closed.")
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Listen and Play Audio")
-    parser.add_argument("--send_rate", type=int, default=16000, help="In Hz. Default is 16000.")
-    parser.add_argument("--recv_rate", type=int, default=16000, help="In Hz. Default is 16000.")
-    parser.add_argument("--list_play_chunk_size", type=int, default=1024, help="The size of data chunks (in bytes). Default is 1024.")
-    parser.add_argument("--host", type=str, default="localhost", help="The hostname or IP address for listening and playing. Default is 'localhost'.")
-    parser.add_argument("--send_port", type=int, default=12345, help="The network port for sending data. Default is 12345.")
-    parser.add_argument("--recv_port", type=int, default=12346, help="The network port for receiving data. Default is 12346.")
-    
-    args = parser.parse_args()
-    listen_and_play(**vars(args))
+    parser = HfArgumentParser((ListenAndPlayArguments,))
+    (listen_and_play_kwargs,) = parser.parse_args_into_dataclasses()
+    listen_and_play(**vars(listen_and_play_kwargs))
