@@ -70,6 +70,30 @@ def rename_args(args, prefix):
 
     args.__dict__["gen_kwargs"] = gen_kwargs
 
+def get_default_arguments(**kwargs):
+    default_args = [
+        ModuleArguments(),
+        SocketReceiverArguments(),
+        SocketSenderArguments(),
+        VADHandlerArguments(),
+        WhisperSTTHandlerArguments(),
+        ParaformerSTTHandlerArguments(),
+        FasterWhisperSTTHandlerArguments(),
+        LanguageModelHandlerArguments(),
+        OpenApiLanguageModelHandlerArguments(),
+        MLXLanguageModelHandlerArguments(),
+        ParlerTTSHandlerArguments(),
+        MeloTTSHandlerArguments(),
+        ChatTTSHandlerArguments(),
+        FacebookMMSTTSHandlerArguments(),
+    ]
+    # Update arguments with provided kwargs
+    for arg_obj in default_args:
+        for key, value in kwargs.items():
+            if hasattr(arg_obj, key):
+                setattr(arg_obj, key, value)
+
+    return tuple(default_args)
 
 def parse_arguments():
     parser = HfArgumentParser(
@@ -248,7 +272,7 @@ def build_pipeline(
         )
         comms_handlers = [local_audio_streamer]
         should_listen.set()
-    else:
+    elif module_kwargs.mode == "socket":
         from connections.socket_receiver import SocketReceiver
         from connections.socket_sender import SocketSender
 
@@ -268,6 +292,9 @@ def build_pipeline(
                 port=socket_sender_kwargs.send_port,
             ),
         ]
+    else:
+        comms_handlers = []
+        should_listen.set()
 
     vad = VADHandler(
         stop_event,
@@ -319,7 +346,7 @@ def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_
             setup_kwargs=vars(faster_whisper_stt_handler_kwargs),
         )
     else:
-        raise ValueError("The STT should be either whisper, whisper-mlx, or paraformer.")
+        raise ValueError("The STT should be either whisper, whisper-mlx, faster-whisper, or paraformer.")
 
 
 def get_llm_handler(
