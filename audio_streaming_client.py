@@ -95,7 +95,7 @@ class AudioStreamingClient:
         else:
             if self.session_state != "processing":
                 print("processing")
-            self.session_state = "processing"
+                self.session_state = "processing"
             audio_np = np.frombuffer(message, dtype=np.int16)
             self.recv_queue.put(audio_np)
 
