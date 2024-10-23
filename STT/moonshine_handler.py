@@ -1,3 +1,6 @@
+import os
+os.environ['KERAS_BACKEND'] = 'torch'
+
 from time import perf_counter
 import moonshine
 import torch
