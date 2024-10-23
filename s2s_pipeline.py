@@ -120,7 +120,7 @@ def optimal_mac_settings(mac_optimal_settings: Optional[str], *handler_kwargs):
             if hasattr(kwargs, "mode"):
                 kwargs.mode = "local"
             if hasattr(kwargs, "stt"):
-                kwargs.stt = "whisper-mlx"
+                kwargs.stt = "moonshine"
             if hasattr(kwargs, "llm"):
                 kwargs.llm = "mlx-lm"
             if hasattr(kwargs, "tts"):
@@ -285,6 +285,13 @@ def build_pipeline(
 
 
 def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs):
+    if module_kwargs.stt == "moonshine":
+        from STT.moonshine_handler import MoonshineSTTHandler
+        return MoonshineSTTHandler(
+            stop_event,
+            queue_in=spoken_prompt_queue,
+            queue_out=text_prompt_queue,
+        )
     if module_kwargs.stt == "whisper":
         from STT.whisper_stt_handler import WhisperSTTHandler
         return WhisperSTTHandler(
