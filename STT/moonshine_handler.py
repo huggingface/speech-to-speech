@@ -1,17 +1,12 @@
 from time import perf_counter
 import moonshine
 import torch
-from copy import copy
 from baseHandler import BaseHandler
 from rich.console import Console
 import logging
 
 logger = logging.getLogger(__name__)
 console = Console()
-
-SUPPORTED_LANGUAGES = [
-    "en",
-]
 
 
 class MoonshineSTTHandler(BaseHandler):
@@ -36,7 +31,6 @@ class MoonshineSTTHandler(BaseHandler):
     def warmup(self):
         logger.info(f"Warming up {self.__class__.__name__}")
 
-        # 2 warmup steps for no compile or compile mode with CUDA graphs capture
         n_steps = 2
         dummy_input = torch.randn(
             (1, 16000),
@@ -72,4 +66,4 @@ class MoonshineSTTHandler(BaseHandler):
         logger.debug("finished whisper inference")
         console.print(f"[yellow]USER: {pred_text}")
 
-        yield (pred_text, 'en')
+        yield (pred_text, "en")
