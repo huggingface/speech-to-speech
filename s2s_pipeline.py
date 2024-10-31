@@ -122,7 +122,7 @@ def optimal_mac_settings(mac_optimal_settings: Optional[str], *handler_kwargs):
             if hasattr(kwargs, "stt"):
                 kwargs.stt = "moonshine"
             if hasattr(kwargs, "llm"):
-                kwargs.llm = "mlx-lm"
+                kwargs.llm = "mlx-agent"
             if hasattr(kwargs, "tts"):
                 kwargs.tts = "melo"
 
@@ -363,7 +363,14 @@ def get_llm_handler(
             queue_out=lm_response_queue,
             setup_kwargs=vars(mlx_language_model_handler_kwargs),
         )
-
+    elif module_kwargs.llm == "mlx-agent":
+        from LLM.mlx_agent_model import MLXAgentModelHandler
+        return MLXAgentModelHandler(
+            stop_event,
+            queue_in=text_prompt_queue,
+            queue_out=lm_response_queue,
+        )
+    
     else:
         raise ValueError("The LLM should be either transformers or mlx-lm")
 
