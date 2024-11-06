@@ -16,7 +16,7 @@ class VADHandlerArguments:
         },
     )
     min_silence_ms: int = field(
-        default=250,
+        default=150,
         metadata={
             "help": "Minimum length of silence intervals to be used for segmenting speech. Measured in milliseconds. Default is 250 ms."
         },
@@ -34,14 +34,14 @@ class VADHandlerArguments:
         },
     )
     speech_pad_ms: int = field(
-        default=500,
+        default=30,
         metadata={
-            "help": "Amount of padding added to the beginning and end of detected speech segments. Measured in milliseconds. Default is 500 ms."
+            "help": "Amount of padding added to the beginning and end of detected speech segments. Measured in milliseconds. Default is 250 ms."
         },
     )
     audio_enhancement: bool = field(
         default=False,
         metadata={
-            "help": "improves sound quality by applying techniques like noise reduction, equalization, and echo cancellation. Default is False."
+            "help": "improves sound quality by applying techniques like noise reduction, equalization, and echo cancellation. Default is True."
         },
     )

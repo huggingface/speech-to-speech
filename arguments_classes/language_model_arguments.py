@@ -6,7 +6,7 @@ class LanguageModelHandlerArguments:
     lm_model_name: str = field(
         default="HuggingFaceTB/SmolLM-360M-Instruct",
         metadata={
-            "help": "The pretrained language model to use. Default is 'HuggingFaceTB/SmolLM-360M-Instruct'."
+            "help": "The pretrained language model to use. Default is 'microsoft/Phi-3-mini-4k-instruct'."
         },
     )
     lm_device: str = field(

@@ -25,7 +25,7 @@ class VADHandler(BaseHandler):
         should_listen,
         thresh=0.3,
         sample_rate=16000,
-        min_silence_ms=1000,
+        min_silence_ms=150,
         min_speech_ms=500,
         max_speech_ms=float("inf"),
         speech_pad_ms=30,
@@ -86,7 +86,3 @@ class VADHandler(BaseHandler):
                         )
                     array = enhanced.numpy().squeeze()
                 yield array
-
-    @property
-    def min_time_to_debug(self):
-        return 0.00001

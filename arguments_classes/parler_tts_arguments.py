@@ -30,13 +30,13 @@ class ParlerTTSHandlerArguments:
     tts_gen_min_new_tokens: int = field(
         default=64,
         metadata={
-            "help": "Maximum number of new tokens to generate in a single completion. Default is 64, which corresponds to ~0.64 secs"
+            "help": "Maximum number of new tokens to generate in a single completion. Default is 10, which corresponds to ~0.1 secs"
         },
     )
     tts_gen_max_new_tokens: int = field(
         default=512,
         metadata={
-            "help": "Maximum number of new tokens to generate in a single completion. Default is 512, which corresponds to ~12 secs"
+            "help": "Maximum number of new tokens to generate in a single completion. Default is 256, which corresponds to ~6 secs"
         },
     )
     description: str = field(
@@ -51,7 +51,7 @@ class ParlerTTSHandlerArguments:
     play_steps_s: float = field(
         default=1.0,
         metadata={
-            "help": "The time interval in seconds for playing back the generated speech in steps. Default is 1.0 seconds."
+            "help": "The time interval in seconds for playing back the generated speech in steps. Default is 0.5 seconds."
         },
     )
     max_prompt_pad_length: int = field(

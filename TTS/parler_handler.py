@@ -68,7 +68,7 @@ class ParlerTTSHandler(BaseHandler):
 
         if self.compile_mode not in (None, "default"):
             logger.warning(
-                "Torch compilation modes that captures CUDA graphs are not yet compatible with the TTS part. Reverting to 'default'"
+                "Torch compilation modes that captures CUDA graphs are not yet compatible with the STT part. Reverting to 'default'"
             )
             self.compile_mode = "default"
 
@@ -147,9 +147,6 @@ class ParlerTTSHandler(BaseHandler):
             )
 
     def process(self, llm_sentence):
-        if isinstance(llm_sentence, tuple):
-            llm_sentence, _ = llm_sentence
-            
         console.print(f"[green]ASSISTANT: {llm_sentence}")
         nb_tokens = len(self.prompt_tokenizer(llm_sentence).input_ids)
 
