@@ -5,29 +5,29 @@ import librosa
 import numpy as np
 from rich.console import Console
 import torch
+from langdetect import detect
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
-
 console = Console()
 
 WHISPER_LANGUAGE_TO_MELO_LANGUAGE = {
     "en": "EN",
-    "fr": "FR",
-    "es": "ES",
-    "zh": "ZH",
-    "ja": "JP",
-    "ko": "KR",
+    #"fr": "FR",
+    #"es": "ES",
+    #"zh": "ZH",
+    #"ja": "JP",
+    #"ko": "KR",
 }
 
 WHISPER_LANGUAGE_TO_MELO_SPEAKER = {
     "en": "EN-BR",
-    "fr": "FR",
-    "es": "ES",
-    "zh": "ZH",
-    "ja": "JP",
-    "ko": "KR",
+    #"fr": "FR",
+    #"es": "ES",
+    #"zh": "ZH",
+    #"ja": "JP",
+    #"ko": "KR",
 }
-
 
 class MeloTTSHandler(BaseHandler):
     def setup(
@@ -36,70 +36,74 @@ class MeloTTSHandler(BaseHandler):
         device="mps",
         language="en",
         speaker_to_id="en",
-        gen_kwargs={},  # Unused
+        gen_kwargs={},
         blocksize=512,
     ):
         self.should_listen = should_listen
         self.device = device
         self.language = language
+        self.blocksize = blocksize
+        self.initialize_model(language, speaker_to_id)
+        self.warmup()
+
+    def initialize_model(self, language, speaker_to_id):
+        logger.debug(f"Initializing model: {language}")
         self.model = TTS(
-            language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[self.language], device=device
+            language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[language], device=self.device
         )
         self.speaker_id = self.model.hps.data.spk2id[
             WHISPER_LANGUAGE_TO_MELO_SPEAKER[speaker_to_id]
         ]
-        self.blocksize = blocksize
-        self.warmup()
 
     def warmup(self):
-        logger.info(f"Warming up {self.__class__.__name__}")
-        _ = self.model.tts_to_file("text", self.speaker_id, quiet=True)
+        logger.debug(f"Warming up {self.__class__.__name__}")
+        _ = self.model.tts_to_file("Text", self.speaker_id, quiet=True)
+
+    def detect_language(self, text):
+        try:
+            detected = detect(text)
+            return detected if detected in WHISPER_LANGUAGE_TO_MELO_LANGUAGE else 'en'
+        except:
+            return 'en'
 
     def process(self, llm_sentence):
         language_code = None
-
         if isinstance(llm_sentence, tuple):
             llm_sentence, language_code = llm_sentence
+        
+        if language_code is None:
+            language_code = self.detect_language(llm_sentence)
 
-        console.print(f"[green]ASSISTANT: {llm_sentence}")
+        tts_timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        console.print(f"[blue]POLY ({language_code.upper()})[{tts_timestamp}]: {llm_sentence}")
 
-        if language_code is not None and self.language != language_code:
+        if language_code != self.language:
+            logger.info(f"Switching language: {self.language} -> {language_code}")
             try:
-                self.model = TTS(
-                    language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[language_code],
-                    device=self.device,
-                )
-                self.speaker_id = self.model.hps.data.spk2id[
-                    WHISPER_LANGUAGE_TO_MELO_SPEAKER[language_code]
-                ]
+                self.initialize_model(language_code, language_code)
                 self.language = language_code
             except KeyError:
-                console.print(
-                    f"[red]Language {language_code} not supported by Melo. Using {self.language} instead."
-                )
+                logger.warning(f"Unsupported language: {language_code}. Using {self.language}.")
 
         if self.device == "mps":
-            import time
-
-            start = time.time()
-            torch.mps.synchronize()  # Waits for all kernels in all streams on the MPS device to complete.
-            torch.mps.empty_cache()  # Frees all memory allocated by the MPS device.
-            _ = (
-                time.time() - start
-            )  # Removing this line makes it fail more often. I'm looking into it.
+            torch.mps.synchronize()
+            torch.mps.empty_cache()
 
         try:
             audio_chunk = self.model.tts_to_file(
                 llm_sentence, self.speaker_id, quiet=True
             )
         except (AssertionError, RuntimeError) as e:
-            logger.error(f"Error in MeloTTSHandler: {e}")
+            logger.error(f"TTS error: {e}")
             audio_chunk = np.array([])
+
         if len(audio_chunk) == 0:
             self.should_listen.set()
             return
+
         audio_chunk = librosa.resample(audio_chunk, orig_sr=44100, target_sr=16000)
         audio_chunk = (audio_chunk * 32768).astype(np.int16)
+
         for i in range(0, len(audio_chunk), self.blocksize):
             yield np.pad(
                 audio_chunk[i : i + self.blocksize],
@@ -107,3 +111,8 @@ class MeloTTSHandler(BaseHandler):
             )
 
         self.should_listen.set()
+
+def configure_logging():
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.getLogger("melo").setLevel(logging.WARNING)
+    logging.getLogger("torch").setLevel(logging.WARNING)

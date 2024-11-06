@@ -1,5 +1,6 @@
 import logging
 from time import perf_counter
+from datetime import datetime
 from baseHandler import BaseHandler
 from lightning_whisper_mlx import LightningWhisperMLX
 import numpy as np
@@ -19,7 +20,6 @@ SUPPORTED_LANGUAGES = [
     "ja",
     "ko",
 ]
-
 
 class LightningWhisperSTTHandler(BaseHandler):
     """
@@ -47,7 +47,6 @@ class LightningWhisperSTTHandler(BaseHandler):
     def warmup(self):
         logger.info(f"Warming up {self.__class__.__name__}")
 
-        # 2 warmup steps for no compile or compile mode with CUDA graphs capture
         n_steps = 1
         dummy_input = np.array([0] * 512)
 
@@ -67,7 +66,7 @@ class LightningWhisperSTTHandler(BaseHandler):
             language_code = transcription_dict["language"]
             if language_code not in SUPPORTED_LANGUAGES:
                 logger.warning(f"Whisper detected unsupported language: {language_code}")
-                if self.last_language in SUPPORTED_LANGUAGES:  # reprocess with the last language
+                if self.last_language in SUPPORTED_LANGUAGES:
                     transcription_dict = self.model.transcribe(spoken_prompt, language=self.last_language)
                 else:
                     transcription_dict = {"text": "", "language": "en"}
@@ -79,7 +78,8 @@ class LightningWhisperSTTHandler(BaseHandler):
         torch.mps.empty_cache()
 
         logger.debug("finished whisper inference")
-        console.print(f"[yellow]USER: {pred_text}")
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        console.print(f"[yellow]USER [{timestamp}]: {pred_text}")
         logger.debug(f"Language Code Whisper: {language_code}")
 
         if self.start_language == "auto":

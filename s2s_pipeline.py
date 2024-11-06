@@ -20,12 +20,8 @@ from arguments_classes.socket_receiver_arguments import SocketReceiverArguments
 from arguments_classes.socket_sender_arguments import SocketSenderArguments
 from arguments_classes.vad_arguments import VADHandlerArguments
 from arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
-from arguments_classes.faster_whisper_stt_arguments import (
-    FasterWhisperSTTHandlerArguments,
-)
 from arguments_classes.melo_tts_arguments import MeloTTSHandlerArguments
-from arguments_classes.open_api_language_model_arguments import OpenApiLanguageModelHandlerArguments
-from arguments_classes.facebookmms_tts_arguments import FacebookMMSTTSHandlerArguments
+from TTS.melo_handler import MeloTTSHandler, configure_logging
 import torch
 import nltk
 from rich.console import Console
@@ -54,10 +50,11 @@ console = Console()
 logging.getLogger("numba").setLevel(logging.WARNING)  # quiet down numba logs
 
 
-def rename_args(args, prefix):
+def prepare_args(args, prefix):
     """
     Rename arguments by removing the prefix and prepares the gen_kwargs.
     """
+
     gen_kwargs = {}
     for key in copy(args.__dict__):
         if key.startswith(prefix):
@@ -71,7 +68,7 @@ def rename_args(args, prefix):
     args.__dict__["gen_kwargs"] = gen_kwargs
 
 
-def parse_arguments():
+def main():
     parser = HfArgumentParser(
         (
             ModuleArguments,
@@ -80,54 +77,77 @@ def parse_arguments():
             VADHandlerArguments,
             WhisperSTTHandlerArguments,
             ParaformerSTTHandlerArguments,
-            FasterWhisperSTTHandlerArguments,
             LanguageModelHandlerArguments,
-            OpenApiLanguageModelHandlerArguments,
             MLXLanguageModelHandlerArguments,
             ParlerTTSHandlerArguments,
             MeloTTSHandlerArguments,
             ChatTTSHandlerArguments,
-            FacebookMMSTTSHandlerArguments,
         )
     )
 
+    # 0. Parse CLI arguments
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # Parse configurations from a JSON file if specified
-        return parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+        (
+            module_kwargs,
+            socket_receiver_kwargs,
+            socket_sender_kwargs,
+            vad_handler_kwargs,
+            whisper_stt_handler_kwargs,
+            paraformer_stt_handler_kwargs,
+            language_model_handler_kwargs,
+            mlx_language_model_handler_kwargs,
+            parler_tts_handler_kwargs,
+            melo_tts_handler_kwargs,
+            chat_tts_handler_kwargs,
+        ) = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         # Parse arguments from command line if no JSON file is provided
-        return parser.parse_args_into_dataclasses()
+        (
+            module_kwargs,
+            socket_receiver_kwargs,
+            socket_sender_kwargs,
+            vad_handler_kwargs,
+            whisper_stt_handler_kwargs,
+            paraformer_stt_handler_kwargs,
+            language_model_handler_kwargs,
+            mlx_language_model_handler_kwargs,
+            parler_tts_handler_kwargs,
+            melo_tts_handler_kwargs,
+            chat_tts_handler_kwargs,
+        ) = parser.parse_args_into_dataclasses()
 
-
-def setup_logger(log_level):
+    # 1. Handle logger
     global logger
     logging.basicConfig(
-        level=log_level.upper(),
+        level=module_kwargs.log_level.upper(),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
     logger = logging.getLogger(__name__)
 
     # torch compile logs
-    if log_level == "debug":
+    if module_kwargs.log_level == "debug":
         torch._logging.set_logs(graph_breaks=True, recompiles=True, cudagraphs=True)
 
+    def optimal_mac_settings(mac_optimal_settings: Optional[str], *handler_kwargs):
+        if mac_optimal_settings:
+            for kwargs in handler_kwargs:
+                if hasattr(kwargs, "device"):
+                    kwargs.device = "mps"
+                if hasattr(kwargs, "mode"):
+                    kwargs.mode = "local"
+                if hasattr(kwargs, "stt"):
+                    kwargs.stt = "whisper-mlx"
+                if hasattr(kwargs, "llm"):
+                    kwargs.llm = "mlx-lm"
+                if hasattr(kwargs, "tts"):
+                    kwargs.tts = "melo"
 
-def optimal_mac_settings(mac_optimal_settings: Optional[str], *handler_kwargs):
-    if mac_optimal_settings:
-        for kwargs in handler_kwargs:
-            if hasattr(kwargs, "device"):
-                kwargs.device = "mps"
-            if hasattr(kwargs, "mode"):
-                kwargs.mode = "local"
-            if hasattr(kwargs, "stt"):
-                kwargs.stt = "moonshine"
-            if hasattr(kwargs, "llm"):
-                kwargs.llm = "mlx-lm"
-            if hasattr(kwargs, "tts"):
-                kwargs.tts = "melo"
+    optimal_mac_settings(
+        module_kwargs.local_mac_optimal_settings,
+        module_kwargs,
+    )
 
-
-def check_mac_settings(module_kwargs):
     if platform == "darwin":
         if module_kwargs.device == "cuda":
             raise ValueError(
@@ -142,104 +162,47 @@ def check_mac_settings(module_kwargs):
                 "If you experiences issues generating the voice, considering setting the tts to melo."
             )
 
+    # 2. Prepare each part's arguments
+    def overwrite_device_argument(common_device: Optional[str], *handler_kwargs):
+        if common_device:
+            for kwargs in handler_kwargs:
+                if hasattr(kwargs, "lm_device"):
+                    kwargs.lm_device = common_device
+                if hasattr(kwargs, "tts_device"):
+                    kwargs.tts_device = common_device
+                if hasattr(kwargs, "stt_device"):
+                    kwargs.stt_device = common_device
+                if hasattr(kwargs, "paraformer_stt_device"):
+                    kwargs.paraformer_stt_device = common_device
 
-def overwrite_device_argument(common_device: Optional[str], *handler_kwargs):
-    if common_device:
-        for kwargs in handler_kwargs:
-            if hasattr(kwargs, "lm_device"):
-                kwargs.lm_device = common_device
-            if hasattr(kwargs, "tts_device"):
-                kwargs.tts_device = common_device
-            if hasattr(kwargs, "stt_device"):
-                kwargs.stt_device = common_device
-            if hasattr(kwargs, "paraformer_stt_device"):
-                kwargs.paraformer_stt_device = common_device
-            if hasattr(kwargs, "facebook_mms_device"):
-                kwargs.facebook_mms_device = common_device
-
-
-def prepare_module_args(module_kwargs, *handler_kwargs):
-    optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs)
-    if platform == "darwin":
-        check_mac_settings(module_kwargs)
-    overwrite_device_argument(module_kwargs.device, *handler_kwargs)
-
-
-def prepare_all_args(
-    module_kwargs,
-    whisper_stt_handler_kwargs,
-    paraformer_stt_handler_kwargs,
-    faster_whisper_stt_handler_kwargs,
-    language_model_handler_kwargs,
-    open_api_language_model_handler_kwargs,
-    mlx_language_model_handler_kwargs,
-    parler_tts_handler_kwargs,
-    melo_tts_handler_kwargs,
-    chat_tts_handler_kwargs,
-    facebook_mms_tts_handler_kwargs,
-):
-    prepare_module_args(
-        module_kwargs,
-        whisper_stt_handler_kwargs,
-        faster_whisper_stt_handler_kwargs,
-        paraformer_stt_handler_kwargs,
+    # Call this function with the common device and all the handlers
+    overwrite_device_argument(
+        module_kwargs.device,
         language_model_handler_kwargs,
-        open_api_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
         parler_tts_handler_kwargs,
-        melo_tts_handler_kwargs,
-        chat_tts_handler_kwargs,
-        facebook_mms_tts_handler_kwargs,
+        whisper_stt_handler_kwargs,
+        paraformer_stt_handler_kwargs,
     )
 
-    rename_args(whisper_stt_handler_kwargs, "stt")
-    rename_args(faster_whisper_stt_handler_kwargs, "faster_whisper_stt")
-    rename_args(paraformer_stt_handler_kwargs, "paraformer_stt")
-    rename_args(language_model_handler_kwargs, "lm")
-    rename_args(mlx_language_model_handler_kwargs, "mlx_lm")
-    rename_args(open_api_language_model_handler_kwargs, "open_api")
-    rename_args(parler_tts_handler_kwargs, "tts")
-    rename_args(melo_tts_handler_kwargs, "melo")
-    rename_args(chat_tts_handler_kwargs, "chat_tts")
-    rename_args(facebook_mms_tts_handler_kwargs, "facebook_mms")
+    prepare_args(whisper_stt_handler_kwargs, "stt")
+    prepare_args(paraformer_stt_handler_kwargs, "paraformer_stt")
+    prepare_args(language_model_handler_kwargs, "lm")
+    prepare_args(mlx_language_model_handler_kwargs, "mlx_lm")
+    prepare_args(parler_tts_handler_kwargs, "tts")
+    prepare_args(melo_tts_handler_kwargs, "melo")
+    prepare_args(chat_tts_handler_kwargs, "chat_tts")
 
+    # 3. Build the pipeline
+    stop_event = Event()
+    # used to stop putting received audio chunks in queue until all setences have been processed by the TTS
+    should_listen = Event()
+    recv_audio_chunks_queue = Queue()
+    send_audio_chunks_queue = Queue()
+    spoken_prompt_queue = Queue()
+    text_prompt_queue = Queue()
+    lm_response_queue = Queue()
 
-def initialize_queues_and_events():
-    return {
-        "stop_event": Event(),
-        "should_listen": Event(),
-        "recv_audio_chunks_queue": Queue(),
-        "send_audio_chunks_queue": Queue(),
-        "spoken_prompt_queue": Queue(),
-        "text_prompt_queue": Queue(),
-        "lm_response_queue": Queue(),
-    }
-
-
-def build_pipeline(
-    module_kwargs,
-    socket_receiver_kwargs,
-    socket_sender_kwargs,
-    vad_handler_kwargs,
-    whisper_stt_handler_kwargs,
-    faster_whisper_stt_handler_kwargs,
-    paraformer_stt_handler_kwargs,
-    language_model_handler_kwargs,
-    open_api_language_model_handler_kwargs,
-    mlx_language_model_handler_kwargs,
-    parler_tts_handler_kwargs,
-    melo_tts_handler_kwargs,
-    chat_tts_handler_kwargs,
-    facebook_mms_tts_handler_kwargs,
-    queues_and_events,
-):
-    stop_event = queues_and_events["stop_event"]
-    should_listen = queues_and_events["should_listen"]
-    recv_audio_chunks_queue = queues_and_events["recv_audio_chunks_queue"]
-    send_audio_chunks_queue = queues_and_events["send_audio_chunks_queue"]
-    spoken_prompt_queue = queues_and_events["spoken_prompt_queue"]
-    text_prompt_queue = queues_and_events["text_prompt_queue"]
-    lm_response_queue = queues_and_events["lm_response_queue"]
     if module_kwargs.mode == "local":
         from connections.local_audio_streamer import LocalAudioStreamer
 
@@ -276,25 +239,10 @@ def build_pipeline(
         setup_args=(should_listen,),
         setup_kwargs=vars(vad_handler_kwargs),
     )
-
-    stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs)
-    lm = get_llm_handler(module_kwargs, stop_event, text_prompt_queue, lm_response_queue, language_model_handler_kwargs, open_api_language_model_handler_kwargs, mlx_language_model_handler_kwargs)
-    tts = get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs)
-
-    return ThreadManager([*comms_handlers, vad, stt, lm, tts])
-
-
-def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs):
-    if module_kwargs.stt == "moonshine":
-        from STT.moonshine_handler import MoonshineSTTHandler
-        return MoonshineSTTHandler(
-            stop_event,
-            queue_in=spoken_prompt_queue,
-            queue_out=text_prompt_queue,
-        )
     if module_kwargs.stt == "whisper":
         from STT.whisper_stt_handler import WhisperSTTHandler
-        return WhisperSTTHandler(
+
+        stt = WhisperSTTHandler(
             stop_event,
             queue_in=spoken_prompt_queue,
             queue_out=text_prompt_queue,
@@ -302,7 +250,8 @@ def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_
         )
     elif module_kwargs.stt == "whisper-mlx":
         from STT.lightning_whisper_mlx_handler import LightningWhisperSTTHandler
-        return LightningWhisperSTTHandler(
+
+        stt = LightningWhisperSTTHandler(
             stop_event,
             queue_in=spoken_prompt_queue,
             queue_out=text_prompt_queue,
@@ -310,68 +259,41 @@ def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_
         )
     elif module_kwargs.stt == "paraformer":
         from STT.paraformer_handler import ParaformerSTTHandler
-        return ParaformerSTTHandler(
+
+        stt = ParaformerSTTHandler(
             stop_event,
             queue_in=spoken_prompt_queue,
             queue_out=text_prompt_queue,
             setup_kwargs=vars(paraformer_stt_handler_kwargs),
         )
-    elif module_kwargs.stt == "faster-whisper":
-        from STT.faster_whisper_handler import FasterWhisperSTTHandler
-
-        return FasterWhisperSTTHandler(
-            stop_event,
-            queue_in=spoken_prompt_queue,
-            queue_out=text_prompt_queue,
-            setup_kwargs=vars(faster_whisper_stt_handler_kwargs),
-        )
     else:
-        raise ValueError("The STT should be either whisper, whisper-mlx, or paraformer.")
-
-
-def get_llm_handler(
-    module_kwargs, 
-    stop_event, 
-    text_prompt_queue, 
-    lm_response_queue, 
-    language_model_handler_kwargs,
-    open_api_language_model_handler_kwargs,
-    mlx_language_model_handler_kwargs
-):
+        raise ValueError(
+            "The STT should be either whisper, whisper-mlx, or paraformer."
+        )
     if module_kwargs.llm == "transformers":
         from LLM.language_model import LanguageModelHandler
-        return LanguageModelHandler(
+
+        lm = LanguageModelHandler(
             stop_event,
             queue_in=text_prompt_queue,
             queue_out=lm_response_queue,
             setup_kwargs=vars(language_model_handler_kwargs),
         )
-    elif module_kwargs.llm == "open_api":
-        from LLM.openai_api_language_model import OpenApiModelHandler
-        return OpenApiModelHandler(
-            stop_event,
-            queue_in=text_prompt_queue,
-            queue_out=lm_response_queue,
-            setup_kwargs=vars(open_api_language_model_handler_kwargs),
-        )
-
     elif module_kwargs.llm == "mlx-lm":
         from LLM.mlx_language_model import MLXLanguageModelHandler
-        return MLXLanguageModelHandler(
+
+        lm = MLXLanguageModelHandler(
             stop_event,
             queue_in=text_prompt_queue,
             queue_out=lm_response_queue,
             setup_kwargs=vars(mlx_language_model_handler_kwargs),
         )
-
     else:
         raise ValueError("The LLM should be either transformers or mlx-lm")
-
-
-def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs):
     if module_kwargs.tts == "parler":
         from TTS.parler_handler import ParlerTTSHandler
-        return ParlerTTSHandler(
+
+        tts = ParlerTTSHandler(
             stop_event,
             queue_in=lm_response_queue,
             queue_out=send_audio_chunks_queue,
@@ -386,7 +308,7 @@ def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chu
                 "Error importing MeloTTSHandler. You might need to run: python -m unidic download"
             )
             raise e
-        return MeloTTSHandler(
+        tts = MeloTTSHandler(
             stop_event,
             queue_in=lm_response_queue,
             queue_out=send_audio_chunks_queue,
@@ -399,82 +321,21 @@ def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chu
         except RuntimeError as e:
             logger.error("Error importing ChatTTSHandler")
             raise e
-        return ChatTTSHandler(
+        tts = ChatTTSHandler(
             stop_event,
             queue_in=lm_response_queue,
             queue_out=send_audio_chunks_queue,
             setup_args=(should_listen,),
             setup_kwargs=vars(chat_tts_handler_kwargs),
         )
-    elif module_kwargs.tts == "facebookMMS":
-        from TTS.facebookmms_handler import FacebookMMSTTSHandler
-        return FacebookMMSTTSHandler(
-            stop_event,
-            queue_in=lm_response_queue,
-            queue_out=send_audio_chunks_queue,
-            setup_args=(should_listen,),
-            setup_kwargs=vars(facebook_mms_tts_handler_kwargs),
-        )
     else:
         raise ValueError("The TTS should be either parler, melo or chatTTS")
 
-
-def main():
-    (
-        module_kwargs,
-        socket_receiver_kwargs,
-        socket_sender_kwargs,
-        vad_handler_kwargs,
-        whisper_stt_handler_kwargs,
-        paraformer_stt_handler_kwargs,
-        faster_whisper_stt_handler_kwargs,  # Add this line
-        language_model_handler_kwargs,
-        open_api_language_model_handler_kwargs,
-        mlx_language_model_handler_kwargs,
-        parler_tts_handler_kwargs,
-        melo_tts_handler_kwargs,
-        chat_tts_handler_kwargs,
-        facebook_mms_tts_handler_kwargs,
-    ) = parse_arguments()
-
-    setup_logger(module_kwargs.log_level)
-
-    prepare_all_args(
-        module_kwargs,
-        whisper_stt_handler_kwargs,
-        paraformer_stt_handler_kwargs,
-        faster_whisper_stt_handler_kwargs,  # Add this line
-        language_model_handler_kwargs,
-        open_api_language_model_handler_kwargs,
-        mlx_language_model_handler_kwargs,
-        parler_tts_handler_kwargs,
-        melo_tts_handler_kwargs,
-        chat_tts_handler_kwargs,
-        facebook_mms_tts_handler_kwargs,
-    )
-
-    queues_and_events = initialize_queues_and_events()
-
-    pipeline_manager = build_pipeline(
-        module_kwargs,
-        socket_receiver_kwargs,
-        socket_sender_kwargs,
-        vad_handler_kwargs,
-        whisper_stt_handler_kwargs,
-        faster_whisper_stt_handler_kwargs,  # Add this line
-        paraformer_stt_handler_kwargs,
-        language_model_handler_kwargs,
-        open_api_language_model_handler_kwargs,
-        mlx_language_model_handler_kwargs,
-        parler_tts_handler_kwargs,
-        melo_tts_handler_kwargs,
-        chat_tts_handler_kwargs,
-        facebook_mms_tts_handler_kwargs,
-        queues_and_events,
-    )
-
+    # 4. Run the pipeline
     try:
+        pipeline_manager = ThreadManager([*comms_handlers, vad, stt, lm, tts])
         pipeline_manager.start()
+
     except KeyboardInterrupt:
         pipeline_manager.stop()
 

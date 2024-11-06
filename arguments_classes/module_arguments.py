@@ -23,7 +23,7 @@ class ModuleArguments:
     stt: Optional[str] = field(
         default="whisper",
         metadata={
-            "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'faster-whisper', and 'paraformer'. Default is 'whisper'."
+            "help": "The STT to use. Either 'whisper', 'whisper-mlx', and 'paraformer'. Default is 'whisper'."
         },
     )
     llm: Optional[str] = field(
@@ -35,12 +35,12 @@ class ModuleArguments:
     tts: Optional[str] = field(
         default="parler",
         metadata={
-            "help": "The TTS to use. Either 'parler', 'melo', 'chatTTS' or 'facebookMMS'. Default is 'parler'"
+            "help": "The TTS to use. Either 'parler', 'melo', or 'chatTTS'. Default is 'parler'"
         },
     )
     log_level: str = field(
         default="info",
         metadata={
-            "help": "Provide logging level. Example --log_level debug, default=info."
+            "help": "Provide logging level. Example --log_level debug, default=warning."
         },
     )
