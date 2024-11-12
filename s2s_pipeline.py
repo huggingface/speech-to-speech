@@ -475,9 +475,13 @@ def main():
 
     try:
         pipeline_manager.start()
+        pipeline_manager.join_all()
     except KeyboardInterrupt:
-        pipeline_manager.stop()
+        print("Stopping server..")
 
+    finally:
+        pipeline_manager.stop()
+        print("Server closed.")
 
 if __name__ == "__main__":
     main()
