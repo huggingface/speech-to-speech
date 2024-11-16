@@ -1,10 +1,12 @@
-import ChatTTS
 import logging
-from baseHandler import BaseHandler
+
+import ChatTTS
 import librosa
 import numpy as np
-from rich.console import Console
 import torch
+from rich.console import Console
+
+from baseHandler import BaseHandler
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -40,6 +42,8 @@ class ChatTTSHandler(BaseHandler):
         _ = self.model.infer("text")
 
     def process(self, llm_sentence):
+        if isinstance(llm_sentence, tuple):
+            llm_sentence, language_code = llm_sentence
         console.print(f"[green]ASSISTANT: {llm_sentence}")
         if self.device == "mps":
             import time
@@ -62,7 +66,7 @@ class ChatTTSHandler(BaseHandler):
                     self.should_listen.set()
                     return
                 audio_chunk = librosa.resample(gen[0], orig_sr=24000, target_sr=16000)
-                audio_chunk = (audio_chunk * 32768).astype(np.int16)[0]
+                audio_chunk = (audio_chunk * 32768).astype(np.int16)
                 while len(audio_chunk) > self.chunk_size:
                     yield audio_chunk[: self.chunk_size]  # Return the first chunk_size samples of the audio data
                     audio_chunk = audio_chunk[self.chunk_size :]  # Remove the samples that have already been returned
