@@ -29,7 +29,6 @@ class OpenApiLanguageModelHandlerArguments:
             "help": "The initial chat prompt to establish context for the language model. Default is 'You are a helpful AI assistant.'"
         },
     )
-
     open_api_chat_size: int = field(
         default=2,
         metadata={
