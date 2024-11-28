@@ -98,8 +98,8 @@ class MLXLanguageModelHandler(BaseHandler):
             prompt,
             max_tokens=self.gen_kwargs["max_new_tokens"],
         ):
-            output += t
-            curr_output += t
+            output += t.text
+            curr_output += t.text
             if curr_output.endswith((".", "?", "!", "<|end|>")):
                 yield (curr_output.replace("<|end|>", ""), language_code)
                 curr_output = ""
