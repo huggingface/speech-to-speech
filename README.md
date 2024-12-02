@@ -80,7 +80,7 @@ The pipeline can be run in two ways:
 - **Server/Client approach**: Models run on a server, and audio input/output are streamed from a client.
 - **Local approach**: Runs locally.
 
-### Recommanded setup 
+### Recommended setup 
 
 ### Server/Client Approach
 
@@ -120,7 +120,7 @@ https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install
 
 ### Recommended usage with Cuda
 
-Leverage Torch Compile for Whisper and Parler-TTS. **The usage of Parler-TTS allows for audio output streaming, futher reducing the overeall latency** 🚀:
+Leverage Torch Compile for Whisper and Parler-TTS. **The usage of Parler-TTS allows for audio output streaming, further reducing the overall latency** 🚀:
 
 ```bash
 python s2s_pipeline.py \
