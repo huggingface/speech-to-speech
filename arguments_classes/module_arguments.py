@@ -23,13 +23,13 @@ class ModuleArguments:
     stt: Optional[str] = field(
         default="whisper",
         metadata={
-            "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'faster-whisper', and 'paraformer'. Default is 'whisper'."
+            "help": "The STT to use. Either 'moonshine', 'whisper', 'whisper-mlx', 'faster-whisper', and 'paraformer'. Default is 'whisper'."
         },
     )
     llm: Optional[str] = field(
         default="transformers",
         metadata={
-            "help": "The LLM to use. Either 'transformers' or 'mlx-lm'. Default is 'transformers'"
+            "help": "The LLM to use. Either 'transformers', 'mlx-lm', 'openai' or 'ollama'. Default is 'transformers'"
         },
     )
     tts: Optional[str] = field(
