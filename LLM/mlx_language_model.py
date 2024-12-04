@@ -16,12 +16,6 @@ WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
     "zh": "chinese",
     "ja": "japanese",
     "ko": "korean",
-    "hi": "hindi",
-    "de": "german",
-    "pt": "portuguese",
-    "pl": "polish",
-    "it": "italian",
-    "nl": "dutch",
 }
 
 class MLXLanguageModelHandler(BaseHandler):
