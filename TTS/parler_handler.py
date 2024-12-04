@@ -31,6 +31,18 @@ if not is_flash_attn_2_available() and torch.cuda.is_available():
     )
 
 
+WHISPER_LANGUAGE_TO_PARLER_SPEAKER = {
+    "en": "Jason",
+    "fr": "Christine",
+    "es": "Steven",
+    "de": "Nicole",
+    "pt": "Sophia",
+    "pl": "Alex",
+    "it": "Richard",
+    "nl": "Mark",
+}
+
+
 class ParlerTTSHandler(BaseHandler):
     def setup(
         self,
@@ -53,6 +65,7 @@ class ParlerTTSHandler(BaseHandler):
         self.gen_kwargs = gen_kwargs
         self.compile_mode = compile_mode
         self.max_prompt_pad_length = max_prompt_pad_length
+        self.speaker = None
         self.description = description
 
         self.model = ParlerTTSForConditionalGeneration.from_pretrained(
@@ -92,7 +105,7 @@ class ParlerTTSHandler(BaseHandler):
         )
 
         tokenized_description = self.description_tokenizer(
-            self.description, return_tensors="pt"
+            self.speaker + " " + self.description, return_tensors="pt"
         ).to(self.device)
         input_ids = tokenized_description.input_ids
         attention_mask = tokenized_description.attention_mask
@@ -149,7 +162,8 @@ class ParlerTTSHandler(BaseHandler):
 
     def process(self, llm_sentence):
         if isinstance(llm_sentence, tuple):
-            llm_sentence, _ = llm_sentence
+            llm_sentence, language_code = llm_sentence
+            self.speaker = WHISPER_LANGUAGE_TO_PARLER_SPEAKER[language_code]
             
         console.print(f"[green]ASSISTANT: {llm_sentence}")
         nb_tokens = len(self.prompt_tokenizer(llm_sentence).input_ids)
