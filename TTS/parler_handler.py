@@ -184,7 +184,7 @@ class ParlerTTSHandler(BaseHandler):
                 )
             audio_chunk = librosa.resample(audio_chunk, orig_sr=44100, target_sr=16000)
             audio_chunk = (audio_chunk * 32768).astype(np.int16)
-            for i in range(0, len(audio_chunk), self.blocksize):
+            for i in range(0, len(audio_chunk) + self.blocksize, self.blocksize):
                 yield np.pad(
                     audio_chunk[i : i + self.blocksize],
                     (0, self.blocksize - len(audio_chunk[i : i + self.blocksize])),
