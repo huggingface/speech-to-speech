@@ -19,7 +19,12 @@ SUPPORTED_LANGUAGES = [
     "zh",
     "ja",
     "ko",
-    "hi"
+    "hi",
+    "de",
+    "pt",
+    "pl",
+    "it",
+    "nl",
 ]
 
 
