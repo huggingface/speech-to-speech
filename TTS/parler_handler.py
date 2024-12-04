@@ -31,6 +31,18 @@ if not is_flash_attn_2_available() and torch.cuda.is_available():
     )
 
 
+WHISPER_LANGUAGE_TO_PARLER_SPEAKER = {
+    "en": "Jason",
+    "fr": "Christine",
+    "es": "Steven",
+    "de": "Nicole",
+    "pt": "Sophia",
+    "pl": "Alex",
+    "it": "Richard",
+    "nl": "Mark",
+}
+
+
 class ParlerTTSHandler(BaseHandler):
     def setup(
         self,
@@ -46,6 +58,7 @@ class ParlerTTSHandler(BaseHandler):
         ),
         play_steps_s=1,
         blocksize=512,
+        use_default_speakers_list=True,
     ):
         self.should_listen = should_listen
         self.device = device
@@ -53,6 +66,11 @@ class ParlerTTSHandler(BaseHandler):
         self.gen_kwargs = gen_kwargs
         self.compile_mode = compile_mode
         self.max_prompt_pad_length = max_prompt_pad_length
+        self.use_default_speakers_list = use_default_speakers_list
+        if self.use_default_speakers_list:
+            description = description.replace("Jenny", "")
+
+        self.speaker = "Jason"
         self.description = description
 
         self.model = ParlerTTSForConditionalGeneration.from_pretrained(
@@ -91,8 +109,12 @@ class ParlerTTSHandler(BaseHandler):
             {"padding": "max_length", "max_length": max_length_prompt} if pad else {}
         )
 
+        description = self.description
+        if self.use_default_speakers_list:
+            description = self.speaker + " " + self.description
+
         tokenized_description = self.description_tokenizer(
-            self.description, return_tensors="pt"
+            description, return_tensors="pt"
         ).to(self.device)
         input_ids = tokenized_description.input_ids
         attention_mask = tokenized_description.attention_mask
@@ -149,7 +171,8 @@ class ParlerTTSHandler(BaseHandler):
 
     def process(self, llm_sentence):
         if isinstance(llm_sentence, tuple):
-            llm_sentence, _ = llm_sentence
+            llm_sentence, language_code = llm_sentence
+            self.speaker = WHISPER_LANGUAGE_TO_PARLER_SPEAKER.get(language_code, "Jason")
             
         console.print(f"[green]ASSISTANT: {llm_sentence}")
         nb_tokens = len(self.prompt_tokenizer(llm_sentence).input_ids)
