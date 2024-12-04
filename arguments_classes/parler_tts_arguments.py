@@ -30,13 +30,13 @@ class ParlerTTSHandlerArguments:
     tts_gen_min_new_tokens: int = field(
         default=64,
         metadata={
-            "help": "Maximum number of new tokens to generate in a single completion. Default is 64, which corresponds to ~0.64 secs"
+            "help": "Maximum number of new tokens to generate in a single completion. Default is 64, which corresponds to ~0.74 secs"
         },
     )
     tts_gen_max_new_tokens: int = field(
-        default=512,
+        default=1024,
         metadata={
-            "help": "Maximum number of new tokens to generate in a single completion. Default is 512, which corresponds to ~12 secs"
+            "help": "Maximum number of new tokens to generate in a single completion. Default is 1024, which corresponds to ~12 secs"
         },
     )
     description: str = field(

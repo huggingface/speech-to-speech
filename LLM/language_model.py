@@ -26,6 +26,10 @@ WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
     "ja": "japanese",
     "ko": "korean",
     "hi": "hindi",
+    "de": "german",
+    "pt": "portuguese",
+    "po": "polish",
+    "it": "italian",
 }
 
 class LanguageModelHandler(BaseHandler):
