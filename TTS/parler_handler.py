@@ -56,11 +56,13 @@ class ParlerTTSHandler(BaseHandler):
         self.max_prompt_pad_length = max_prompt_pad_length
         self.description = description
 
-        self.description_tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.prompt_tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = ParlerTTSForConditionalGeneration.from_pretrained(
             model_name, torch_dtype=self.torch_dtype
         ).to(device)
+        
+        self.description_tokenizer = AutoTokenizer.from_pretrained(self.model.config.text_encoder._name_or_path)
+        self.prompt_tokenizer = AutoTokenizer.from_pretrained(model_name)
+
 
         framerate = self.model.audio_encoder.config.frame_rate
         self.play_steps = int(framerate * play_steps_s)
@@ -92,15 +94,15 @@ class ParlerTTSHandler(BaseHandler):
 
         tokenized_description = self.description_tokenizer(
             self.description, return_tensors="pt"
-        )
-        input_ids = tokenized_description.input_ids.to(self.device)
-        attention_mask = tokenized_description.attention_mask.to(self.device)
+        ).to(self.device)
+        input_ids = tokenized_description.input_ids
+        attention_mask = tokenized_description.attention_mask
 
         tokenized_prompt = self.prompt_tokenizer(
             prompt, return_tensors="pt", **pad_args_prompt
-        )
-        prompt_input_ids = tokenized_prompt.input_ids.to(self.device)
-        prompt_attention_mask = tokenized_prompt.attention_mask.to(self.device)
+        ).to(self.device)
+        prompt_input_ids = tokenized_prompt.input_ids
+        prompt_attention_mask = tokenized_prompt.attention_mask
 
         gen_kwargs = {
             "input_ids": input_ids,
