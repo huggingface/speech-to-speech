@@ -35,15 +35,14 @@ class ParlerTTSHandler(BaseHandler):
     def setup(
         self,
         should_listen,
-        model_name="ylacombe/parler-tts-mini-jenny-30H",
+        model_name="parler-tts/parler-mini-v1-jenny",
         device="cuda",
         torch_dtype="float16",
         compile_mode=None,
         gen_kwargs={},
         max_prompt_pad_length=8,
         description=(
-            "A female speaker with a slightly low-pitched voice delivers her words quite expressively, in a very confined sounding environment with clear audio quality. "
-            "She speaks very fast."
+            "Jenny speaks at a slightly slow pace with an animated delivery with clear audio quality."
         ),
         play_steps_s=1,
         blocksize=512,
