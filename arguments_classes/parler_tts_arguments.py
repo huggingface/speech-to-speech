@@ -60,7 +60,7 @@ class ParlerTTSHandlerArguments:
         },
     )
     use_default_speakers_list: bool = field(
-        default=True,
+        default=False,
         metadata={
             "help": "Whether to use the default list of speakers or not."
         },
