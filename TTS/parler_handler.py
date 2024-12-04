@@ -115,7 +115,7 @@ class ParlerTTSHandler(BaseHandler):
 
         tokenized_description = self.description_tokenizer(
             description, return_tensors="pt"
-            ).to(self.device)
+        ).to(self.device)
         input_ids = tokenized_description.input_ids
         attention_mask = tokenized_description.attention_mask
 
