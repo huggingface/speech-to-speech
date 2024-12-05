@@ -31,7 +31,7 @@ class BaseHandler:
             input = self.queue_in.get()
             if isinstance(input, bytes) and input == b"END":
                 # sentinelle signal to avoid queue deadlock
-                logger.debug("Stopping thread")
+                logger.debug(f"{self.__class__.__name__}: Received END message, stopping thread")
                 break
             start_time = perf_counter()
             for output in self.process(input):
@@ -43,6 +43,10 @@ class BaseHandler:
 
         self.cleanup()
         self.queue_out.put(b"END")
+
+    def stop(self):
+        logger.debug(f"{self.__class__.__name__}: Stopping pipeline component..")
+        self.stop_event.set()
 
     @property
     def last_time(self):
