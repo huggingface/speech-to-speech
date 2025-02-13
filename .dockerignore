@@ -1,0 +1,6 @@
+tmp
+cache
+Dockerfile
+docker-compose.yml
+.dockerignore
+.gitignore
