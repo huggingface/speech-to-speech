@@ -416,7 +416,7 @@ def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chu
             setup_kwargs=vars(facebook_mms_tts_handler_kwargs),
         )
     else:
-        raise ValueError("The TTS should be either parler, melo or chatTTS")
+        raise ValueError("The TTS should be either parler, melo, chatTTS or facebookMMS")
 
 
 def main():
