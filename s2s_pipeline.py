@@ -13,6 +13,9 @@ from arguments_classes.language_model_arguments import LanguageModelHandlerArgum
 from arguments_classes.mlx_language_model_arguments import (
     MLXLanguageModelHandlerArguments,
 )
+from arguments_classes.ollama_language_model_arguments import (
+    OllamaLanguageModelHandlerArguments,
+)
 from arguments_classes.module_arguments import ModuleArguments
 from arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
 from arguments_classes.parler_tts_arguments import ParlerTTSHandlerArguments
@@ -84,6 +87,7 @@ def parse_arguments():
             LanguageModelHandlerArguments,
             OpenApiLanguageModelHandlerArguments,
             MLXLanguageModelHandlerArguments,
+            OllamaLanguageModelHandlerArguments,
             ParlerTTSHandlerArguments,
             MeloTTSHandlerArguments,
             ChatTTSHandlerArguments,
@@ -173,6 +177,7 @@ def prepare_all_args(
     language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
     mlx_language_model_handler_kwargs,
+    ollama_language_model_handler_kwargs,
     parler_tts_handler_kwargs,
     melo_tts_handler_kwargs,
     chat_tts_handler_kwargs,
@@ -186,6 +191,7 @@ def prepare_all_args(
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
+        ollama_language_model_handler_kwargs,
         parler_tts_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
@@ -197,6 +203,7 @@ def prepare_all_args(
     rename_args(paraformer_stt_handler_kwargs, "paraformer_stt")
     rename_args(language_model_handler_kwargs, "lm")
     rename_args(mlx_language_model_handler_kwargs, "mlx_lm")
+    rename_args(ollama_language_model_handler_kwargs, "ollama")
     rename_args(open_api_language_model_handler_kwargs, "open_api")
     rename_args(parler_tts_handler_kwargs, "tts")
     rename_args(melo_tts_handler_kwargs, "melo")
@@ -227,6 +234,7 @@ def build_pipeline(
     language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
     mlx_language_model_handler_kwargs,
+    ollama_language_model_handler_kwargs,
     parler_tts_handler_kwargs,
     melo_tts_handler_kwargs,
     chat_tts_handler_kwargs,
@@ -278,7 +286,7 @@ def build_pipeline(
     )
 
     stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs)
-    lm = get_llm_handler(module_kwargs, stop_event, text_prompt_queue, lm_response_queue, language_model_handler_kwargs, open_api_language_model_handler_kwargs, mlx_language_model_handler_kwargs)
+    lm = get_llm_handler(module_kwargs, stop_event, text_prompt_queue, lm_response_queue, language_model_handler_kwargs, open_api_language_model_handler_kwargs, mlx_language_model_handler_kwargs, ollama_language_model_handler_kwargs)
     tts = get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs)
 
     return ThreadManager([*comms_handlers, vad, stt, lm, tts])
@@ -326,7 +334,7 @@ def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_
             setup_kwargs=vars(faster_whisper_stt_handler_kwargs),
         )
     else:
-        raise ValueError("The STT should be either whisper, whisper-mlx, or paraformer.")
+        raise ValueError("The STT should be either moonshine, whisper, whisper-mlx, paraformer or faster-whisper.")
 
 
 def get_llm_handler(
@@ -336,7 +344,8 @@ def get_llm_handler(
     lm_response_queue, 
     language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
-    mlx_language_model_handler_kwargs
+    mlx_language_model_handler_kwargs,
+    ollama_language_model_handler_kwargs,
 ):
     if module_kwargs.llm == "transformers":
         from LLM.language_model import LanguageModelHandler
@@ -354,7 +363,6 @@ def get_llm_handler(
             queue_out=lm_response_queue,
             setup_kwargs=vars(open_api_language_model_handler_kwargs),
         )
-
     elif module_kwargs.llm == "mlx-lm":
         from LLM.mlx_language_model import MLXLanguageModelHandler
         return MLXLanguageModelHandler(
@@ -363,9 +371,17 @@ def get_llm_handler(
             queue_out=lm_response_queue,
             setup_kwargs=vars(mlx_language_model_handler_kwargs),
         )
+    elif module_kwargs.llm == "ollama":
+        from LLM.ollama_language_model import OllamaLanguageModelHandler
+        return OllamaLanguageModelHandler(
+            stop_event,
+            queue_in=text_prompt_queue,
+            queue_out=lm_response_queue,
+            setup_kwargs=vars(ollama_language_model_handler_kwargs),
+        )
 
     else:
-        raise ValueError("The LLM should be either transformers or mlx-lm")
+        raise ValueError("The LLM should be either transformers, open_ai, mlx-lm or ollama")
 
 
 def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs):
@@ -431,6 +447,7 @@ def main():
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
+        ollama_language_model_handler_kwargs,
         parler_tts_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
@@ -447,6 +464,7 @@ def main():
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
+        ollama_language_model_handler_kwargs,
         parler_tts_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
@@ -466,6 +484,7 @@ def main():
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
+        ollama_language_model_handler_kwargs,
         parler_tts_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,

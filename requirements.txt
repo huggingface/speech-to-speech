@@ -10,3 +10,4 @@ modelscope>=1.17.1
 deepfilternet>=0.5.6
 openai>=1.40.1
 useful-moonshine @ git+https://github.com/andimarafioti/moonshine.git
+ollama>=0.3.3
