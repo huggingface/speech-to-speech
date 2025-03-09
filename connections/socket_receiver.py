@@ -45,7 +45,7 @@ class SocketReceiver:
         self.socket.listen(1)
         logger.info("Receiver waiting to be connected...")
         self.conn, _ = self.socket.accept()
-        logger.info("receiver connected")
+        logger.info("Receiver connected")
 
         self.should_listen.set()
         while not self.stop_event.is_set():
@@ -58,3 +58,8 @@ class SocketReceiver:
                 self.queue_out.put(audio_chunk)
         self.conn.close()
         logger.info("Receiver closed")
+
+    def stop(self):
+        logger.debug("Receiver is in stopping process. Sending END message to the next component to initiate server termination..")
+        self.queue_out.put(b"END")
+        self.stop_event.set()
