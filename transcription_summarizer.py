@@ -12,6 +12,7 @@ import sounddevice as sd
 import librosa
 from mlx_lm import load, generate
 from melo.api import TTS
+import requests  # Add for API requests
 
 class TranscriptionSummarizer:
     def __init__(self, args):
@@ -22,6 +23,9 @@ class TranscriptionSummarizer:
         self.max_interval = args.max_interval * 60  # Convert to seconds
         self.speak_summary = args.speak_summary
         self.tts_device = args.tts_device
+        self.use_api = args.use_api
+        self.api_key = args.api_key
+        self.api_url = args.api_url
         
         # Create summaries directory if it doesn't exist
         os.makedirs(self.summaries_dir, exist_ok=True)
@@ -30,10 +34,13 @@ class TranscriptionSummarizer:
         self.processed_files = {}
         self.pending_transcripts = set()
         
-        # Initialize the MLX LM model
-        print(f"Loading language model: {args.model_name}")
-        self.model, self.tokenizer = load(args.model_name)
-        print("Language model loaded!")
+        # Initialize the MLX LM model only if not using API
+        if not self.use_api:
+            print(f"Loading language model: {args.model_name}")
+            self.model, self.tokenizer = load(args.model_name)
+            print("Language model loaded!")
+        else:
+            print(f"Using API for language model: {self.api_url}")
         
         # Initialize TTS if enabled
         if self.speak_summary:
@@ -46,7 +53,7 @@ class TranscriptionSummarizer:
         
         # Cache for storing transcript contents
         self.transcript_cache = {}
-          
+        
     def read_transcript_file(self, file_path):
         """Read a transcript file and extract content without timestamps"""
         if file_path in self.transcript_cache:
@@ -92,31 +99,74 @@ class TranscriptionSummarizer:
         return prompt
     
     def generate_summary(self, transcript_text):
-        """Generate a summary of the transcript using MLX LM"""
+        """Generate a summary of the transcript using MLX LM or API"""
         try:
             prompt = self.create_prompt(transcript_text)
             
-            # Generate the summary
-            output = generate(
-                self.model,
-                self.tokenizer,
-                prompt=prompt,
-                max_tokens=512,
-                verbose=False
-            )
-            
-            # Clean up the output
-            summary = output.strip()
-            
-            # Clear MPS cache if using MPS
-            if torch.backends.mps.is_available():
-                torch.mps.empty_cache()
+            if self.use_api:
+                # Use the external API (Gemini) for summarization
+                summary = self.generate_summary_api(prompt)
+            else:
+                # Generate the summary using local model
+                output = generate(
+                    self.model,
+                    self.tokenizer,
+                    prompt=prompt,
+                    max_tokens=512,
+                    verbose=False
+                )
+                # Clean up the output
+                summary = output.strip()
                 
+                # Clear MPS cache if using MPS
+                if torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+                    
             return summary, prompt
             
         except Exception as e:
             print(f"Error generating summary: {e}")
             return "Error generating summary.", "Error generating prompt."
+    
+    def generate_summary_api(self, prompt):
+        """Generate a summary using the Gemini API"""
+        try:
+            headers = {
+                "Content-Type": "application/json"
+            }
+            
+            # Prepare the request payload
+            payload = {
+                "contents": [{
+                    "parts": [{"text": prompt}]
+                }]
+            }
+            
+            # Construct the URL with the API key
+            url = f"{self.api_url}?key={self.api_key}"
+            
+            # Make the API request
+            response = requests.post(url, headers=headers, json=payload)
+            
+            # Check for successful response
+            if response.status_code == 200:
+                result = response.json()
+                # Extract the generated text from the response
+                if 'candidates' in result and len(result['candidates']) > 0:
+                    content = result['candidates'][0]['content']
+                    if 'parts' in content and len(content['parts']) > 0:
+                        return content['parts'][0]['text']
+                
+                # Fallback if the expected structure is not found
+                return str(result)
+            else:
+                print(f"API request failed with status code {response.status_code}")
+                print(f"Response: {response.text}")
+                return f"Error: API request failed with status code {response.status_code}"
+                
+        except Exception as e:
+            print(f"Error calling API: {e}")
+            return f"Error calling API: {str(e)}"
     
     def speak_text(self, text, interval_mins):
         """Use MeloTTS to speak out the text"""
@@ -230,6 +280,7 @@ class TranscriptionSummarizer:
         print(f"Summaries will be saved to: {self.summaries_dir}")
         print(f"Summary interval: {self.min_interval/60}-{self.max_interval/60} minutes")
         print(f"Speaking summaries: {self.speak_summary}")
+        print(f"Using API: {self.use_api}")
         
         try:
             # Initial processing of existing files
@@ -268,6 +319,15 @@ def main():
     parser.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-7B-Instruct-1M", 
                         help="MLX language model name")
     
+    # API parameters
+    parser.add_argument("--use-api", action="store_true", 
+                        help="Use external API instead of local model")
+    parser.add_argument("--api-key", type=str, default="", 
+                        help="API key for the language model service")
+    parser.add_argument("--api-url", type=str, 
+                        default="https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent", 
+                        help="URL for the language model API")
+    
     # TTS parameters
     parser.add_argument("--speak-summary", action="store_true", default=True,
                         help="Speak out the summary using MeloTTS")
@@ -275,6 +335,10 @@ def main():
                         help="Device to use for TTS model (mps or cpu)")
     
     args = parser.parse_args()
+    
+    # Validate API settings
+    if args.use_api and not args.api_key:
+        parser.error("--api-key is required when using --use-api")
     
     summarizer = TranscriptionSummarizer(args)
     summarizer.run()
