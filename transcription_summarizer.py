@@ -26,13 +26,10 @@ class TranscriptionSummarizer:
         self.use_api = args.use_api
         self.api_key = args.api_key
         self.api_url = args.api_url
+        self.time_window_minutes = args.time_window  # New parameter for time window
         
         # Create summaries directory if it doesn't exist
         os.makedirs(self.summaries_dir, exist_ok=True)
-        
-        # Keep track of processed files and their timestamps
-        self.processed_files = {}
-        self.pending_transcripts = set()
         
         # Initialize the MLX LM model only if not using API
         if not self.use_api:
@@ -65,7 +62,7 @@ class TranscriptionSummarizer:
             
             # Get current time for determining age of transcriptions
             current_time = datetime.datetime.now()
-            cutoff_time = current_time - datetime.timedelta(minutes=15)
+            cutoff_time = current_time - datetime.timedelta(minutes=self.time_window_minutes)
             
             # Extract content by filtering by timestamp and removing timestamp markers
             transcript_content = []
@@ -76,7 +73,7 @@ class TranscriptionSummarizer:
                     timestamp_str = timestamp_match.group(1)
                     timestamp = datetime.datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
                     
-                    # Only include lines from the last 15 minutes
+                    # Only include lines from within the time window
                     if timestamp >= cutoff_time:
                         # Remove timestamp pattern and get content
                         content = re.sub(r'\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*', '', line).strip()
@@ -168,7 +165,7 @@ class TranscriptionSummarizer:
             print(f"Error calling API: {e}")
             return f"Error calling API: {str(e)}"
     
-    def speak_text(self, text, interval_mins):
+    def speak_text(self, text):
         """Use MeloTTS to speak out the text"""
         if not self.speak_summary:
             return
@@ -202,7 +199,7 @@ class TranscriptionSummarizer:
         except Exception as e:
             print(f"Error speaking summary: {e}")
     
-    def save_summary(self, summary_data, files, interval_mins):
+    def save_summary(self, summary_data, files):
         """Save the generated summary to a file"""
         summary, prompt = summary_data
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -229,69 +226,58 @@ class TranscriptionSummarizer:
         
         # Speak the summary if enabled
         if self.speak_summary:
-            self.speak_text(summary, interval_mins)
+            self.speak_text(summary)
     
-    def process_new_files(self):
-        """Process any new transcription files"""
+    def process_all_transcripts(self):
+        """Process all transcription files from the specified time window"""
         # Get all transcript files
         transcript_files = list(self.transcripts_dir.glob("transcription_*.txt"))
-        new_files = []
         
-        # Check for new files
+        if not transcript_files:
+            print("No transcript files found.")
+            return
+            
+        # Combine all transcripts from within the time window
+        all_text = ""
+        processed_files = []
+        
         for file_path in transcript_files:
-            if file_path not in self.processed_files:
-                self.pending_transcripts.add(file_path)
-                self.processed_files[file_path] = file_path.stat().st_mtime
-                new_files.append(file_path)
-        
-        if new_files:
-            print(f"Added {len(new_files)} new transcript file(s) to pending queue")
-    
-    def process_pending_transcripts(self):
-        """Process pending transcripts and generate summaries if interval has passed"""
-        
-        if self.pending_transcripts:
-            print(f"Time for a new summary! Processing {len(self.pending_transcripts)} transcript(s)")
-            
-            # Combine all pending transcripts
-            all_text = ""
-            for file_path in self.pending_transcripts:
-                transcript_text = self.read_transcript_file(file_path)
+            transcript_text = self.read_transcript_file(file_path)
+            if transcript_text.strip():
                 all_text += transcript_text + " "
-            
-            # Generate summary if there's text to summarize
-            if all_text.strip():
-                # Set next interval randomly between min and max
-                next_interval = random.uniform(self.min_interval, self.max_interval)
-                interval_mins = next_interval / 60
-                
-                summary, prompt = self.generate_summary(all_text)
-                self.save_summary((summary, prompt), self.pending_transcripts, interval_mins)
-                
-                # Clear the pending transcripts
-                self.pending_transcripts = set()
-                
-                # Report next interval
-                print(f"Next summary in {interval_mins:.1f} minutes")
+                processed_files.append(file_path)
+        
+        # Generate summary if there's text to summarize
+        if all_text.strip():
+            print(f"Processing {len(processed_files)} transcript file(s) from the last {self.time_window_minutes} minutes")
+            summary, prompt = self.generate_summary(all_text)
+            self.save_summary((summary, prompt), processed_files)
+        else:
+            print(f"No content found within the {self.time_window_minutes} minute window.")
     
     def run(self):
         """Run the summarization process"""
         print(f"Monitoring transcript directory: {self.transcripts_dir}")
         print(f"Summaries will be saved to: {self.summaries_dir}")
         print(f"Summary interval: {self.min_interval/60}-{self.max_interval/60} minutes")
+        print(f"Time window: {self.time_window_minutes} minutes")
         print(f"Speaking summaries: {self.speak_summary}")
         print(f"Using API: {self.use_api}")
         
         try:
-            # Initial processing of existing files
-            self.process_new_files()
-            
             while True:
-                # Process pending transcripts
-                self.process_pending_transcripts()
+                # Process all transcripts from the time window
+                self.process_all_transcripts()
+                
+                # Clear the transcript cache to ensure fresh content next time
+                self.transcript_cache = {}
                 
                 # Sleep to avoid high CPU usage
                 random_interval = random.uniform(self.min_interval, self.max_interval)
+                interval_mins = random_interval / 60
+                # Report next interval
+                print(f"Next summary in {interval_mins:.1f} minutes")
+
                 time.sleep(random_interval)
                 
         except KeyboardInterrupt:
@@ -314,6 +300,8 @@ def main():
                         help="Minimum interval between summaries (minutes)")
     parser.add_argument("--max-interval", type=float, default=12, 
                         help="Maximum interval between summaries (minutes)")
+    parser.add_argument("--time-window", type=int, default=15,
+                        help="Time window for processing transcripts (minutes)")
     
     # Model parameters
     parser.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-7B-Instruct-1M", 
