@@ -42,8 +42,8 @@ class TranscriptionSummarizer:
         # Initialize TTS if enabled
         if self.speak_summary:
             print("Initializing MeloTTS...")
-            self.tts_model = TTS(language="EN", device=self.tts_device)
-            self.speaker_id = self.tts_model.hps.data.spk2id["EN-BR"]
+            self.tts_model = TTS(language="FR", device=self.tts_device)
+            self.speaker_id = self.tts_model.hps.data.spk2id["FR"]
             # Warm up TTS model
             _ = self.tts_model.tts_to_file("Warming up", self.speaker_id, quiet=True)
             print("MeloTTS initialized!")
