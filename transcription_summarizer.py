@@ -90,9 +90,10 @@ class TranscriptionSummarizer:
     
     def create_prompt(self, transcript_text):
         """Create a prompt for the language model based on the transcript"""
-        prompt = "Please make a short summary of the main points from the following transcript. Use the same language as the transcript:\n"       
+        prompt = "Écrit une intervention succinte qui résume les points les plus intéressants de la transcription suivante. Parle comme si tu étais une étudiante très attentive de la classe. Utilise le français. Ne réponds que dans cette langue. Ignore les remerciements dans différentes langues. Ignore les interruptions. Ignore ce qui ne fait pas partie du cours lui-même, mais concerne l'organisation, la discipline, des questions pratiques de gestion de la classe et de la salle. Ton intervention doit pouvir être lu en 1 minute maximum, et doit donc ne pas dépasser 150 mots:\n"  
+        rompt += "\nTranscription :"     
         prompt += transcript_text
-        prompt += "\nSummary:"
+        prompt += "\nIntervention :"
         return prompt
     
     def generate_summary(self, transcript_text):
@@ -172,7 +173,7 @@ class TranscriptionSummarizer:
         
         try:
             # Prepare intro text
-            intro_text = "The summary of transcriptions from the last 15 minutes is: "
+            intro_text = "Puis-je prendre la parole ?"
             full_text = intro_text + text
             
             print(f"Speaking summary...")
