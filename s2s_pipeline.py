@@ -34,6 +34,7 @@ from transformers import (
 )
 
 from AEC.livekit_aec_handler import LivekitAecHandler
+from STT.openai_whisper_handler import OpenAIWhisperHandler
 
 from utils.thread_manager import ThreadManager
 
@@ -290,6 +291,12 @@ def build_pipeline(
     stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs)
     lm = get_llm_handler(module_kwargs, stop_event, text_prompt_queue, lm_response_queue, language_model_handler_kwargs, open_api_language_model_handler_kwargs, mlx_language_model_handler_kwargs)
     tts = get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs)
+
+    stt = OpenAIWhisperHandler(
+        stop_event,
+        queue_in=spoken_prompt_queue,
+        queue_out=text_prompt_queue
+    )
 
     return ThreadManager([*comms_handlers, aec, vad, stt, lm, tts])
 
