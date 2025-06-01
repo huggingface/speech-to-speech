@@ -1,15 +1,82 @@
+"""
+test_aec.py
+---------------------------------
+使用本地麦克风实时测试 **LivekitAecHandler** 的示例脚本。
+
+> **更新 2025‑05‑31**
+> • 彻底排空 `queue_out`，解决只生成约 1 s 音频的问题。
+> • 代码整理：简化 flush/dump 逻辑。
+
+步骤
+~~~~
+1. **采集** – 以 16 kHz / 16‑bit 单声道抓麦克风，10 ms 一块放入 `queue_in`。
+2. **处理** – 后台线程不断 `handler.process()`，结果写入 `queue_out`。
+3. **回放** – 主线程实时消费 `queue_out`，用 `sd.play()` 听消回声后音频。
+4. **保存** – 录制结束后排空余下 `queue_out`，再连同 `handler.flush()` 的残帧写成 WAV。
+
+依赖
+----
+```bash
+pip install sounddevice numpy
+```
+
+用法
+----
+```bash
+python test_aec.py               # 默认录 10 s
+python test_aec.py --seconds 30  # 录 30 s
+```
+"""
+
+from __future__ import annotations
+
 import argparse
 import queue
+import threading
 import time
 import wave
 from pathlib import Path
+from typing import Iterable, Union, Any
 
 import numpy as np
 import sounddevice as sd
 
-# 将 AEC 处理器所在路径加入 PYTHONPATH，或把项目根目录放到环境变量里
+# 请把包含 LivekitAecHandler 的路径加入 PYTHONPATH
 from AEC.livekit_aec_handler import LivekitAecHandler
 
+BytesLike = Union[bytes, bytearray]
+
+# ---------------------------------------------------------------------------
+# 工具函数
+# ---------------------------------------------------------------------------
+
+def _iter_flush_result(result: Any) -> Iterable[BytesLike]:
+    """把 `handler.flush()` 的各种返回形态转换成 bytes 块序列。"""
+    if result is None:
+        return []
+
+    if isinstance(result, (bytes, bytearray)):
+        return [result]
+
+    if isinstance(result, np.ndarray):
+        return [result.astype(np.int16).tobytes()]
+
+    if isinstance(result, (list, tuple)):
+        out: list[BytesLike] = []
+        for item in result:
+            if isinstance(item, (bytes, bytearray)):
+                out.append(item)
+            elif isinstance(item, (int, np.integer)):
+                out.append(np.array([item], dtype=np.int16).tobytes())
+            elif isinstance(item, np.ndarray):
+                out.append(item.astype(np.int16).tobytes())
+        return out
+
+    return []
+
+# ---------------------------------------------------------------------------
+# 主逻辑
+# ---------------------------------------------------------------------------
 
 def test_livekit_aec(
     seconds: int = 10,
@@ -17,33 +84,32 @@ def test_livekit_aec(
     chunk_ms: int = 10,
     output_wav: str | Path = "aec_output.wav",
 ):
-    """
-    使用 LivekitAecHandler 对麦克风输入做 AEC 处理，并保存结果。
+    stop_event = threading.Event()
+    queue_in: queue.Queue[BytesLike] = queue.Queue()
+    queue_out: queue.Queue[BytesLike] = queue.Queue()
 
-    Args:
-        seconds: 采集/处理时长（秒）
-        sample_rate: 采样率，需与 AEC handler 保持一致 (16 kHz)
-        chunk_ms: 送入 AEC 的块大小，单位 ms。LivekitAecHandler 需 10 ms（=320 B）
-        output_wav: 输出 WAV 文件路径
-    """
-    handler = LivekitAecHandler()
+    handler = LivekitAecHandler(stop_event, queue_in, queue_out)
     handler.setup()
 
-    # 计算每块的采样点数
+    # 处理线程
+    def worker() -> None:
+        while not stop_event.is_set() or not queue_in.empty():
+            try:
+                raw = queue_in.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            for processed in handler.process(raw):
+                queue_out.put(processed)
+
+    threading.Thread(target=worker, daemon=True).start()
+
     chunk_samples = int(sample_rate * chunk_ms / 1000)
-    # sounddevice 既支持 int16 ndarray，也可 bytes；我们用 int16 方便后续拼接
-    in_queue: queue.Queue[np.ndarray] = queue.Queue()
     processed_frames: list[np.ndarray] = []
 
-    def audio_callback(indata, frames, time_info, status):
-        """
-        输入流回调函数，将麦克风块放进队列。
-        """
-        if status:
-            print(f"[StreamWarning] {status}", flush=True)
-        # 这里的 indata shape: (frames, channels)
-        in_queue.put(indata.copy())
+    def audio_callback(indata, frames, *_):
+        queue_in.put(indata.copy().tobytes())
 
+    # ------------------- 录制/实时播放 ------------------- #
     with sd.InputStream(
         channels=1,
         samplerate=sample_rate,
@@ -51,54 +117,51 @@ def test_livekit_aec(
         dtype="int16",
         callback=audio_callback,
     ):
-        print(f"⏺️  正在录制并实时处理 {seconds}s ...")
-        t0 = time.time()
-        while time.time() - t0 < seconds:
+        print(f"⏺️  正在录制并实时处理 {seconds}s …")
+        end_time = time.time() + seconds
+        while time.time() < end_time:
             try:
-                block = in_queue.get(timeout=0.1)  # ndarray(int16)
+                block = queue_out.get(timeout=0.1)
             except queue.Empty:
                 continue
+            processed_frames.append(np.frombuffer(block, dtype=np.int16))
+            sd.play(processed_frames[-1], sample_rate, blocking=False)
 
-            # ndarray → bytes
-            raw_bytes = block.tobytes()
+    # ------------------- 收尾：排空队列 ------------------- #
+    stop_event.set()
 
-            for processed_block in handler.process(raw_bytes):
-                processed_frames.append(
-                    np.frombuffer(processed_block, dtype=np.int16)
-                )
-                # 实时回放（可注释）
-                sd.play(
-                    processed_frames[-1],
-                    sample_rate,
-                    blocking=False,
-                )
+    # 等 worker 把残余 queue_in 消化完
+    time.sleep(0.2)
 
-        # flush 未完成的残余数据
-        leftover = handler.flush()
-        if leftover:
-            processed_frames.append(np.frombuffer(leftover, dtype=np.int16))
+    # 把 queue_out 里剩下的全部拿出来
+    while not queue_out.empty():
+        processed_frames.append(
+            np.frombuffer(queue_out.get_nowait(), dtype=np.int16)
+        )
 
-    # 拼接所有块
+    # flush() 里可能还有帧
+    for leftover in _iter_flush_result(handler.flush()):
+        processed_frames.append(np.frombuffer(leftover, dtype=np.int16))
+
+    # ------------------- 写文件 ------------------- #
     if processed_frames:
         audio_out = np.concatenate(processed_frames)
-        # 保存 WAV
         with wave.open(str(output_wav), "wb") as wf:
             wf.setnchannels(1)
-            wf.setsampwidth(2)  # int16
+            wf.setsampwidth(2)
             wf.setframerate(sample_rate)
             wf.writeframes(audio_out.tobytes())
-        print(f"✅ 完成！输出文件已保存: {output_wav}")
+        print(f"✅ 完成！已保存 {len(audio_out)/sample_rate:.2f}s 到: {output_wav}")
     else:
         print("⚠️ 未捕获到任何处理数据")
 
-    # 确保所有播放停止
     sd.stop()
-
-    return Path(output_wav)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Test Livekit AEC handler with microphone input")
-    parser.add_argument("--seconds", type=int, default=10, help="录制/处理时长，单位秒")
+    parser = argparse.ArgumentParser("Test Livekit AEC handler with microphone input")
+    parser.add_argument("--seconds", type=int, default=10, help="录制/处理时长（秒）")
     parser.add_argument("--output", type=str, default="aec_output.wav", help="输出文件名")
     args = parser.parse_args()
+
+    test_livekit_aec(seconds=args.seconds, output_wav=args.output)
