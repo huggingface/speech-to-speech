@@ -1,6 +1,6 @@
 import ChatTTS
 import logging
-from baseHandler import BaseHandler
+from TTS.base_tts_handler import BaseTTSHandler
 import librosa
 import numpy as np
 from rich.console import Console
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-class ChatTTSHandler(BaseHandler):
+class ChatTTSHandler(BaseTTSHandler):
     def setup(
         self,
         should_listen,

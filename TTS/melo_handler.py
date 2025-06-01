@@ -5,6 +5,7 @@ import librosa
 import numpy as np
 from rich.console import Console
 import torch
+from TTS.base_tts_handler import BaseTTSHandler
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ WHISPER_LANGUAGE_TO_MELO_SPEAKER = {
 }
 
 
-class MeloTTSHandler(BaseHandler):
+class MeloTTSHandler(BaseTTSHandler):
     def setup(
         self,
         should_listen,

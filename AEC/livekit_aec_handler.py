@@ -1,3 +1,4 @@
+import numpy as np
 from baseHandler import BaseHandler
 from livekit import rtc
 
@@ -33,15 +34,21 @@ class LivekitAecHandler(BaseHandler):
             yield bytes(buf[:FRAME_BYTES])
             del buf[:FRAME_BYTES]
 
-    def process(self, capture_chunk: bytes, render_chunk: bytes | None = None):
+    def feed_render(
+        self, pcm: bytes | np.ndarray, *, sample_rate: int = 16000
+    ) -> None:
+        # 如果传进来的是 ndarray，就转成 bytes
+        if isinstance(pcm, np.ndarray):
+            pcm = pcm.astype(np.int16).tobytes()
+
+        for r in self._slice_into_frames(self._render_buf, pcm):  # 320 B = 10 ms@16 k
+            frame = self._bytes_to_frame(r, sample_rate=sample_rate)
+            self.apm.process_reverse_stream(frame)
+
+    def process(self, capture_chunk: bytes):
         """
         主处理方法：返回 1024B 为单位的 AEC 后 PCM 数据块。
         """
-        # 1) 可选：先处理 render 参考
-        if render_chunk:
-            for r in self._slice_into_frames(self._render_buf, render_chunk):
-                self.apm.process_reverse_stream(self._bytes_to_frame(r))
-
         # 2) capture 侧帧处理并缓存结果
         for c in self._slice_into_frames(self._capture_buf, capture_chunk):
             frame = self._bytes_to_frame(c)

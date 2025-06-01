@@ -34,7 +34,7 @@ from transformers import (
 )
 
 from AEC.livekit_aec_handler import LivekitAecHandler
-from STT.openai_whisper_handler import OpenAIWhisperHandler
+from STT.openai_whisper_handler import OpenAITTSHandler
 
 from utils.thread_manager import ThreadManager
 
@@ -291,9 +291,9 @@ def build_pipeline(
     # for now, use api
     # stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs)
     lm = get_llm_handler(module_kwargs, stop_event, text_prompt_queue, lm_response_queue, language_model_handler_kwargs, open_api_language_model_handler_kwargs, mlx_language_model_handler_kwargs)
-    tts = get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs)
+    tts = get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, aec, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs)
 
-    stt = OpenAIWhisperHandler(
+    stt = OpenAITTSHandler(
         stop_event,
         queue_in=spoken_prompt_queue,
         queue_out=text_prompt_queue
@@ -386,7 +386,18 @@ def get_llm_handler(
         raise ValueError("The LLM should be either transformers or mlx-lm")
 
 
-def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs):
+def get_tts_handler(
+        module_kwargs, 
+        stop_event, 
+        lm_response_queue, 
+        send_audio_chunks_queue, 
+        should_listen,
+        aec_handler,
+        parler_tts_handler_kwargs, 
+        melo_tts_handler_kwargs, 
+        chat_tts_handler_kwargs, 
+        facebook_mms_tts_handler_kwargs
+    ):
     if module_kwargs.tts == "parler":
         from TTS.parler_handler import ParlerTTSHandler
         return ParlerTTSHandler(
@@ -394,6 +405,7 @@ def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chu
             queue_in=lm_response_queue,
             queue_out=send_audio_chunks_queue,
             setup_args=(should_listen,),
+            aec_handler=aec_handler,
             setup_kwargs=vars(parler_tts_handler_kwargs),
         )
     elif module_kwargs.tts == "melo":
@@ -409,6 +421,7 @@ def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chu
             queue_in=lm_response_queue,
             queue_out=send_audio_chunks_queue,
             setup_args=(should_listen,),
+            aec_handler=aec_handler,
             setup_kwargs=vars(melo_tts_handler_kwargs),
         )
     elif module_kwargs.tts == "chatTTS":
@@ -422,6 +435,7 @@ def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chu
             queue_in=lm_response_queue,
             queue_out=send_audio_chunks_queue,
             setup_args=(should_listen,),
+            aec_handler=aec_handler,
             setup_kwargs=vars(chat_tts_handler_kwargs),
         )
     elif module_kwargs.tts == "facebookMMS":
@@ -431,6 +445,7 @@ def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chu
             queue_in=lm_response_queue,
             queue_out=send_audio_chunks_queue,
             setup_args=(should_listen,),
+            aec_handler=aec_handler,
             setup_kwargs=vars(facebook_mms_tts_handler_kwargs),
         )
     else:

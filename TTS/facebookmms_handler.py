@@ -3,7 +3,7 @@ import torch
 import numpy as np
 import librosa
 from rich.console import Console
-from baseHandler import BaseHandler
+from TTS.base_tts_handler import BaseTTSHandler
 import logging
 
 logging.basicConfig(
@@ -56,7 +56,7 @@ WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE = {
     "cy": "cym", # Welsh
 }
 
-class FacebookMMSTTSHandler(BaseHandler):
+class FacebookMMSTTSHandler(BaseTTSHandler):
     def setup(
         self,
         should_listen,
