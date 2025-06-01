@@ -33,6 +33,8 @@ from transformers import (
     HfArgumentParser,
 )
 
+from AEC.livekit_aec_handler import LivekitAecHandler
+
 from utils.thread_manager import ThreadManager
 
 # Ensure that the necessary NLTK resources are available
@@ -209,6 +211,7 @@ def initialize_queues_and_events():
         "stop_event": Event(),
         "should_listen": Event(),
         "recv_audio_chunks_queue": Queue(),
+        "aec_to_vad_queue": Queue(),
         "send_audio_chunks_queue": Queue(),
         "spoken_prompt_queue": Queue(),
         "text_prompt_queue": Queue(),
@@ -240,6 +243,7 @@ def build_pipeline(
     spoken_prompt_queue = queues_and_events["spoken_prompt_queue"]
     text_prompt_queue = queues_and_events["text_prompt_queue"]
     lm_response_queue = queues_and_events["lm_response_queue"]
+    aec_to_vad_queue = queues_and_events["aec_to_vad_queue"]
     if module_kwargs.mode == "local":
         from connections.local_audio_streamer import LocalAudioStreamer
 
@@ -269,9 +273,15 @@ def build_pipeline(
             ),
         ]
 
-    vad = VADHandler(
+    # I know it's ugly, but for now let's make it ez
+    aec = LivekitAecHandler(
         stop_event,
         queue_in=recv_audio_chunks_queue,
+        queue_out=aec_to_vad_queue
+    )
+    vad = VADHandler(
+        stop_event,
+        queue_in=aec_to_vad_queue,
         queue_out=spoken_prompt_queue,
         setup_args=(should_listen,),
         setup_kwargs=vars(vad_handler_kwargs),
@@ -281,7 +291,7 @@ def build_pipeline(
     lm = get_llm_handler(module_kwargs, stop_event, text_prompt_queue, lm_response_queue, language_model_handler_kwargs, open_api_language_model_handler_kwargs, mlx_language_model_handler_kwargs)
     tts = get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs)
 
-    return ThreadManager([*comms_handlers, vad, stt, lm, tts])
+    return ThreadManager([*comms_handlers, aec, vad, stt, lm, tts])
 
 
 def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs):

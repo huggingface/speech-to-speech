@@ -1,7 +1,11 @@
 nltk==3.9.1
-parler_tts @ git+https://github.com/huggingface/parler-tts.git
+lightning-whisper-mlx==0.0.10
+parler_tts @ git+https://github.com/newsbreakDuadua9/parler-tts
 melotts @ git+https://github.com/andimarafioti/MeloTTS.git#egg=MeloTTS  # made a copy of MeloTTS to have compatible versions of transformers
-torch>=2.4.0
+orpheus-speech @ git+https://github.com/canopyai/Orpheus-TTS.git@main#egg=orpheus-speech&subdirectory=orpheus_tts_pypi
+torch==2.5.1
+torchaudio==2.5.1
+xformers==0.0.29
 sounddevice==0.5.0
 ChatTTS>=0.1.1
 funasr>=1.1.6
@@ -9,4 +13,6 @@ faster-whisper>=1.0.3
 modelscope>=1.17.1
 deepfilternet>=0.5.6
 openai>=1.40.1
+triton==3.1.0
+livekit==1.0.8
 useful-moonshine @ git+https://github.com/andimarafioti/moonshine.git
