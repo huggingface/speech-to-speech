@@ -37,10 +37,10 @@ class OpenAIWhisperHandler(BaseHandler):
                 file=buffer,
                 language=self.language,
             )
-            yield response, self.language if self.language else "en"
+            yield response.text
         except Exception as e:
             logger.error("❌ Whisper API request failed: %s", e)
-            yield "", "error"
+            yield ""
 
     # ── helpers ──────────────────────────────────────────────────────────────
     def _numpy_to_wav_buffer(self, audio_np: np.ndarray) -> io.BytesIO:
@@ -52,5 +52,5 @@ class OpenAIWhisperHandler(BaseHandler):
         buf = io.BytesIO()
         sf.write(buf, audio_np, self.sample_rate, format="WAV", subtype="PCM_16")
         buf.seek(0)
-        buf.name = "chunk.wav"                # critical!
+        buf.name = "chunk.wav"
         return buf
