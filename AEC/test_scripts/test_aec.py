@@ -160,7 +160,7 @@ def test_livekit_aec(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Test Livekit AEC handler with microphone input")
-    parser.add_argument("--seconds", type=int, default=10, help="录制/处理时长（秒）")
+    parser.add_argument("--seconds", type=int, default=4, help="录制/处理时长（秒）")
     parser.add_argument("--output", type=str, default="aec_output.wav", help="输出文件名")
     args = parser.parse_args()
 
