@@ -74,7 +74,7 @@ def out_cb(outdata, frames, t, status):
             buf.extend(q_render.get_nowait())
         except Empty:
             buf.extend(gen_tone_frame())
-    outdata[:, 0] = np.frombuffer(buf[:bytes_needed], dtype=np.int16)
+    outdata[:] = np.frombuffer(buf[:bytes_needed], dtype=np.int16)
     # 分帧送 AEC
     for i in range(0, bytes_needed, FRAME_BYTES):
         aec.feed_render(buf[i:i+FRAME_BYTES])
@@ -84,7 +84,7 @@ def out_cb(outdata, frames, t, status):
 def in_cb(indata, frames, t, status):
     aec.in_delay = t.currentTime - t.inputBufferAdcTime
     total_delay_ms = int((aec.out_delay + aec.in_delay) * 1000)
-    pcm_bytes = indata[:, 0].tobytes()
+    pcm_bytes = indata.tobytes()
     for i in range(0, len(pcm_bytes), FRAME_BYTES):
         raw_chunk = pcm_bytes[i:i+FRAME_BYTES]
         clean_chunk = aec.process_capture(raw_chunk, total_delay_ms)
