@@ -8,7 +8,7 @@ MIN_OUTPUT_BYTES = 1024   # 最小输出块：64 ms / 512 samples
 class LivekitAecHandler(BaseHandler):
     def setup(self):
         self.apm = rtc.AudioProcessingModule(
-            echo_cancellation=True,
+            echo_cancellation=False, # We don't do echo cancel on server side.
             noise_suppression=True,
             auto_gain_control=True,
         )

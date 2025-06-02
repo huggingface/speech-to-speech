@@ -1,127 +1,162 @@
-import socket
-import threading
-from queue import Queue
-from dataclasses import dataclass, field
+#!/usr/bin/env python3
+# listen_and_play_aec.py  ------------------------------------
+# 录音 → 本地 WebRTC-AEC → (可选) 发送到服务器
+# 同时接收服务器下行音频 → 播放并持续喂 render 帧
+#
+#   普通模式：与服务器交互
+#   --dry-run ：完全本地跑通链路，验证 AEC 逻辑
+#
+# 依赖：
+#   pip install sounddevice livekit-rtc numpy
+# ------------------------------------------------------------
+
+import argparse, socket, threading, time, logging
+from queue import Queue, Empty
+
 import sounddevice as sd
-from transformers import HfArgumentParser
+from livekit import rtc
 
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("listen_play_aec")
 
-@dataclass
-class ListenAndPlayArguments:
-    send_rate: int = field(default=16000, metadata={"help": "In Hz. Default is 16000."})
-    recv_rate: int = field(default=16000, metadata={"help": "In Hz. Default is 16000."})
-    list_play_chunk_size: int = field(
-        default=1024,
-        metadata={"help": "The size of data chunks (in bytes). Default is 1024."},
-    )
-    host: str = field(
-        default="localhost",
-        metadata={
-            "help": "The hostname or IP address for listening and playing. Default is 'localhost'."
-        },
-    )
-    send_port: int = field(
-        default=12345,
-        metadata={"help": "The network port for sending data. Default is 12345."},
-    )
-    recv_port: int = field(
-        default=12346,
-        metadata={"help": "The network port for receiving data. Default is 12346."},
-    )
+# ───────────────────────── 工具 ─────────────────────────
+def silence(samples: int) -> bytes:
+    return b"\x00\x00" * samples        # int16 静音
 
+# ─────────────────── AEC 封装 ──────────────────────────
+class LocalAEC:
+    def __init__(self, sr: int, frame_ms: int):
+        self.sr      = sr
+        self.samp    = sr * frame_ms // 1000
+        self.byt     = self.samp * 2
+        self.apm     = rtc.AudioProcessingModule(
+            echo_cancellation=True,
+            noise_suppression=True,
+            auto_gain_control=True,
+            high_pass_filter=True,
+        )
+        self.o_delay = 0.0
+        self.i_delay = 0.0
 
-def listen_and_play(
-    send_rate=16000,
-    recv_rate=44100,
-    list_play_chunk_size=1024,
-    host="localhost",
-    send_port=12345,
-    recv_port=12346,
-):
-    send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    send_socket.connect((host, send_port))
+    def feed_render(self, pcm: bytes):
+        f = rtc.AudioFrame(data=pcm, sample_rate=self.sr,
+                           num_channels=1, samples_per_channel=self.samp)
+        self.apm.process_reverse_stream(f)
 
-    recv_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    recv_socket.connect((host, recv_port))
+    def proc_capture(self, pcm: bytes, d_ms: int) -> bytes:
+        self.apm.set_stream_delay_ms(d_ms)
+        f = rtc.AudioFrame(data=pcm, sample_rate=self.sr,
+                           num_channels=1, samples_per_channel=self.samp)
+        self.apm.process_stream(f)
+        return bytes(f.data)
 
-    print("Recording and streaming...")
+# ─────────────────── 主流程 ────────────────────────────
+def listen_and_play(sample_rate: int, frame_ms: int,
+                    host: str, send_port: int, recv_port: int,
+                    q_timeout: float, dry_run: bool):
+    fs      = sample_rate * frame_ms // 1000     # 每帧采样数
+    fb      = fs * 2                             # 每帧字节数
+    aec     = LocalAEC(sample_rate, frame_ms)
 
-    stop_event = threading.Event()
-    recv_queue = Queue()
-    send_queue = Queue()
+    # socket（dry-run 时跳过）
+    if not dry_run:
+        sock_tx = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock_tx.connect((host, send_port))
+        sock_rx = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock_rx.connect((host, recv_port))
+    else:
+        sock_tx = sock_rx = None
+        log.info("🟡 Dry-run：不连服务器，只本地验证 AEC")
 
-    def callback_recv(outdata, frames, time, status):
-        if not recv_queue.empty():
-            data = recv_queue.get()
-            outdata[: len(data)] = data
-            outdata[len(data) :] = b"\x00" * (len(outdata) - len(data))
-        else:
-            outdata[:] = b"\x00" * len(outdata)
+    q_tx, q_rx, stop = Queue(), Queue(), threading.Event()
 
-    def callback_send(indata, frames, time, status):
-        data = bytes(indata)
-        send_queue.put(data)
+    # ── 播放回调 ──
+    def cb_out(outdata, frames, timing, status):
+        need = frames * 2
+        buf  = bytearray()
+        while len(buf) < need:
+            try:
+                buf.extend(q_rx.get_nowait())
+            except Empty:
+                buf.extend(silence(fs))
+        outdata[:] = buf[:need]                         # 必须 bytes
+        for i in range(0, need, fb):
+            aec.feed_render(buf[i:i+fb])
+        aec.o_delay = timing.outputBufferDacTime - timing.currentTime
 
-    def send(stop_event, send_queue):
-        while not stop_event.is_set():
-            data = send_queue.get()
-            send_socket.sendall(data)
+    # ── 录音回调 ──
+    def cb_in(indata, frames, timing, status):
+        aec.i_delay = timing.currentTime - timing.inputBufferAdcTime
+        d_ms = int((aec.o_delay + aec.i_delay) * 1000)
+        pcm  = bytes(indata)
+        for i in range(0, len(pcm), fb):
+            clean = aec.proc_capture(pcm[i:i+fb], d_ms)
+            if dry_run:
+                q_rx.put(clean)            # 回放处理后音
+            else:
+                q_tx.put(clean)
 
-    def recv(stop_event, recv_queue):
-        def receive_full_chunk(conn, chunk_size):
-            data = b""
-            while len(data) < chunk_size:
-                packet = conn.recv(chunk_size - len(data))
-                if not packet:
-                    return None  # Connection has been closed
-                data += packet
-            return data
+    # ── 发送 / 接收线程（dry-run 跳过） ──
+    def th_send():
+        while not stop.is_set():
+            try:
+                chunk = q_tx.get(timeout=q_timeout)
+            except Empty:
+                chunk = silence(fs)
+            sock_tx.sendall(chunk)
 
-        while not stop_event.is_set():
-            data = receive_full_chunk(recv_socket, list_play_chunk_size * 2)
-            if data:
-                recv_queue.put(data)
+    def th_recv():
+        while not stop.is_set():
+            chunk = sock_rx.recv(fb)
+            if not chunk:
+                break
+            if len(chunk) < fb:
+                chunk += silence(fs - len(chunk)//2)
+            q_rx.put(chunk)
 
+    # ── 启动音频流 ──
+    out_stream = sd.RawOutputStream(samplerate=sample_rate, channels=1,
+                                    dtype="int16", blocksize=fs*4,
+                                    callback=cb_out)
+    in_stream  = sd.RawInputStream (samplerate=sample_rate, channels=1,
+                                    dtype="int16", blocksize=fs*4,
+                                    callback=cb_in)
+    out_stream.start();  in_stream.start()
+
+    if not dry_run:
+        threading.Thread(target=th_send, daemon=True).start()
+        threading.Thread(target=th_recv, daemon=True).start()
+
+    log.info("🎧 AEC 运行中%s  (Ctrl-C 退出)",
+             " [dry-run]" if dry_run else "")
     try:
-        send_stream = sd.RawInputStream(
-            samplerate=send_rate,
-            channels=1,
-            dtype="int16",
-            blocksize=list_play_chunk_size,
-            callback=callback_send,
-        )
-        recv_stream = sd.RawOutputStream(
-            samplerate=recv_rate,
-            channels=1,
-            dtype="int16",
-            blocksize=list_play_chunk_size,
-            callback=callback_recv,
-        )
-        threading.Thread(target=send_stream.start).start()
-        threading.Thread(target=recv_stream.start).start()
-
-        send_thread = threading.Thread(target=send, args=(stop_event, send_queue))
-        send_thread.start()
-        recv_thread = threading.Thread(target=recv, args=(stop_event, recv_queue))
-        recv_thread.start()
-
-        input("Press Enter to stop...")
-
+        while True:
+            time.sleep(1)
     except KeyboardInterrupt:
-        print("Finished streaming.")
-
+        log.info("⏹ 退出")
     finally:
-        stop_event.set()
-        # Given that socket::recv is blocking in receive_data_chunk, shut it down to allow the thread to continue.
-        recv_socket.shutdown(socket.SHUT_RDWR)
-        recv_thread.join()
-        send_thread.join()
-        send_socket.close()
-        recv_socket.close()
-        print("Connection closed.")
+        stop.set()
+        if sock_tx: sock_tx.close();  # 为空则 dry-run
+        if sock_rx: sock_rx.close()
+        in_stream.stop();  out_stream.stop()
+        in_stream.close(); out_stream.close()
 
-
+# ─────────────────── CLI ───────────────────────────────
 if __name__ == "__main__":
-    parser = HfArgumentParser((ListenAndPlayArguments,))
-    (listen_and_play_kwargs,) = parser.parse_args_into_dataclasses()
-    listen_and_play(**vars(listen_and_play_kwargs))
+    p = argparse.ArgumentParser(description="Listen + Play with local WebRTC-AEC")
+    p.add_argument("--sample-rate", type=int, default=24000)
+    p.add_argument("--frame-ms",   type=int, default=10)
+    p.add_argument("--host",       default="localhost")
+    p.add_argument("--send-port",  type=int, default=12345)
+    p.add_argument("--recv-port",  type=int, default=12346)
+    p.add_argument("--queue-timeout", type=float, default=0.02)
+    p.add_argument("--dry-run", action="store_true", help="本地 dry-run，不连服务器")
+    args = p.parse_args()
+
+    listen_and_play(sample_rate=args.sample_rate,
+                    frame_ms=args.frame_ms,
+                    host=args.host,
+                    send_port=args.send_port,
+                    recv_port=args.recv_port,
+                    q_timeout=args.queue_timeout,
+                    dry_run=args.dry_run)
