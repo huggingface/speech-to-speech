@@ -34,6 +34,7 @@ from transformers import (
 )
 
 from AEC.livekit_aec_handler import LivekitAecHandler
+from resample_handler import ResampleHandler
 from STT.openai_whisper_handler import OpenAITTSHandler
 
 from utils.thread_manager import ThreadManager
@@ -212,6 +213,7 @@ def initialize_queues_and_events():
         "stop_event": Event(),
         "should_listen": Event(),
         "recv_audio_chunks_queue": Queue(),
+        "resampled_audio_chunks_queue": Queue(),
         "aec_to_vad_queue": Queue(),
         "send_audio_chunks_queue": Queue(),
         "spoken_prompt_queue": Queue(),
@@ -240,6 +242,7 @@ def build_pipeline(
     stop_event = queues_and_events["stop_event"]
     should_listen = queues_and_events["should_listen"]
     recv_audio_chunks_queue = queues_and_events["recv_audio_chunks_queue"]
+    resampled_audio_chunks_queue = queues_and_events["resampled_audio_chunks_queue"]
     send_audio_chunks_queue = queues_and_events["send_audio_chunks_queue"]
     spoken_prompt_queue = queues_and_events["spoken_prompt_queue"]
     text_prompt_queue = queues_and_events["text_prompt_queue"]
@@ -275,9 +278,18 @@ def build_pipeline(
         ]
 
     # I know it's ugly, but for now let's make it ez
-    aec = LivekitAecHandler(
+    resampler = ResampleHandler(
         stop_event,
         queue_in=recv_audio_chunks_queue,
+        queue_out=resampled_audio_chunks_queue,
+        setup_kwargs=dict(
+            input_rate=module_kwargs.input_sample_rate,
+            output_rate=16000,
+        ),
+    )
+    aec = LivekitAecHandler(
+        stop_event,
+        queue_in=resampled_audio_chunks_queue,
         queue_out=aec_to_vad_queue
     )
     vad = VADHandler(
@@ -299,7 +311,7 @@ def build_pipeline(
         queue_out=text_prompt_queue
     )
 
-    return ThreadManager([*comms_handlers, aec, vad, stt, lm, tts])
+    return ThreadManager([*comms_handlers, resampler, aec, vad, stt, lm, tts])
 
 
 def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs):
