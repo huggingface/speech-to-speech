@@ -18,4 +18,5 @@ livekit==1.0.8
 websockets==13.1
 rich==14.0.0
 aiohttp==3.12.6
+numpy==1.26.4
 useful-moonshine @ git+https://github.com/andimarafioti/moonshine.git
