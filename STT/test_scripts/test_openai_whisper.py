@@ -18,7 +18,7 @@ import time
 import numpy as np
 import sounddevice as sd
 
-from STT.openai_whisper_handler import OpenAIWhisperHandler
+from STT.openai_whisper_handler import OpenAITTSHandler
 
 SAMPLE_RATE = 16_000
 CHUNK_MS = 1000
@@ -32,7 +32,7 @@ def main():
     q_out: queue.Queue[tuple[str, str] | bytes] = queue.Queue()
 
     # ---------- Handler 实例 ---------- #
-    handler = OpenAIWhisperHandler(
+    handler = OpenAITTSHandler(
         stop_evt,
         q_in,
         q_out,
