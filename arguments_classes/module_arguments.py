@@ -45,7 +45,7 @@ class ModuleArguments:
         },
     )
     input_sample_rate: int = field(
-        default=16000,
+        default=48000,
         metadata={
             "help": "Sample rate of incoming audio from the client. Audio is resampled to 16 kHz internally.",
         },
