@@ -61,8 +61,13 @@ class VADHandler(BaseHandler):
                     f"audio input of duration: {len(array) / self.sample_rate}s, skipping"
                 )
             else:
-                self.should_listen.clear()
-                logger.debug("Stop listening")
+                # hack一个，暂时支持全双工
+                # self.should_listen.clear()
+                # logger.debug("Stop listening")
+                # interrupt!
+                self.interrupt_event.set()
+                logger.info("Interrupt!")
+
                 if self.audio_enhancement:
                     if self.sample_rate != self.df_state.sr():
                         audio_float32 = torchaudio.functional.resample(

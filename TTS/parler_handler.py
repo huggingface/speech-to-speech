@@ -6,7 +6,6 @@ import torch
 from transformers import (
     AutoTokenizer,
 )
-from TTS.base_tts_handler import BaseTTSHandler
 from parler_tts import ParlerTTSForConditionalGeneration, ParlerTTSStreamer
 import librosa
 import logging
@@ -44,7 +43,7 @@ WHISPER_LANGUAGE_TO_PARLER_SPEAKER = {
 }
 
 
-class ParlerTTSHandler(BaseTTSHandler):
+class ParlerTTSHandler(BaseHandler):
     def setup(
         self,
         should_listen,
@@ -212,8 +211,6 @@ class ParlerTTSHandler(BaseTTSHandler):
                     audio_chunk[i : i + self.blocksize],
                     (0, self.blocksize - len(audio_chunk[i : i + self.blocksize])),
                 )
-                if self.aec_handler:
-                    self.aec_handler.feed_render(block)           
                 yield block
 
         self.should_listen.set()

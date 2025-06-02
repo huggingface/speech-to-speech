@@ -11,18 +11,17 @@ from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
-class OpenAIWhisperHandler(BaseHandler):
+class OpenAITTSHandler(BaseHandler):
     """
     OpenAI Whisper / GPT-4o Transcription Handler (non-streaming chunks)
     """
 
     def setup(
         self,
-        model: str = "whisper-1",
+        model: str = "gpt-4o-mini-transcribe",
         language: Optional[str] = None,
     ):
         self.model = model
-        self.sample_rate = 16000
         self.language = language
         self.openai_client = OpenAI(
             api_key=OPENAI_API_KEY
@@ -30,16 +29,18 @@ class OpenAIWhisperHandler(BaseHandler):
 
     # ── core ──────────────────────────────────────────────────────────────────
     def process(self, audio_chunk: Union[np.ndarray, bytes]) -> Generator[Tuple[str, str], None, None]:
+        logger.info("OpenAI TTS Recieved Data!")
         try:
+            # debug Set to English for now
             buffer = self._numpy_to_wav_buffer(audio_chunk)
             response = self.openai_client.audio.transcriptions.create(
                 model=self.model,
                 file=buffer,
-                language=self.language,
+                language="en",
             )
             yield response.text
         except Exception as e:
-            logger.error("❌ Whisper API request failed: %s", e)
+            logger.error("❌ OpenAI TTS API request failed: %s", e)
             yield ""
 
     # ── helpers ──────────────────────────────────────────────────────────────
@@ -50,7 +51,9 @@ class OpenAIWhisperHandler(BaseHandler):
         can infer the MIME type.
         """
         buf = io.BytesIO()
-        sf.write(buf, audio_np, self.sample_rate, format="WAV", subtype="PCM_16")
+        sf.write(buf, audio_np, 16000, format="WAV", subtype="PCM_16")
+        with open(f"{int(time.time())}.wav", "wb") as f:
+            sf.write(f, audio_np, 16000, format="WAV", subtype="PCM_16")
         buf.seek(0)
         buf.name = "chunk.wav"
         return buf
