@@ -44,3 +44,9 @@ class ModuleArguments:
             "help": "Provide logging level. Example --log_level debug, default=info."
         },
     )
+    input_sample_rate: int = field(
+        default=16000,
+        metadata={
+            "help": "Sample rate of incoming audio from the client. Audio is resampled to 16 kHz internally.",
+        },
+    )
