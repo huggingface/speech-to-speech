@@ -31,9 +31,9 @@ class LocalAEC:
         self.byt     = self.samp * 2
         self.apm     = rtc.AudioProcessingModule(
             echo_cancellation=True,
-            noise_suppression=True,
-            auto_gain_control=True,
-            high_pass_filter=True,
+            noise_suppression=False,
+            auto_gain_control=False, # 教给server
+            high_pass_filter=False,
         )
         self.o_delay = 0.0
         self.i_delay = 0.0
@@ -144,7 +144,7 @@ def listen_and_play(sample_rate: int, frame_ms: int,
 # ─────────────────── CLI ───────────────────────────────
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Listen + Play with local WebRTC-AEC")
-    p.add_argument("--sample-rate", type=int, default=24000)
+    p.add_argument("--sample-rate", type=int, default=16000)
     p.add_argument("--frame-ms",   type=int, default=10)
     p.add_argument("--host",       default="localhost")
     p.add_argument("--send-port",  type=int, default=12345)
