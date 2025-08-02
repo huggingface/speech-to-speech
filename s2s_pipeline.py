@@ -326,7 +326,7 @@ def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_
             setup_kwargs=vars(faster_whisper_stt_handler_kwargs),
         )
     else:
-        raise ValueError("The STT should be either whisper, whisper-mlx, or paraformer.")
+        raise ValueError("The STT should be either moonshine, whisper, whisper-mlx, paraformer, or faster-whisper.")
 
 
 def get_llm_handler(
@@ -365,7 +365,7 @@ def get_llm_handler(
         )
 
     else:
-        raise ValueError("The LLM should be either transformers or mlx-lm")
+        raise ValueError("The LLM should be either transformers, open_api, or mlx-lm")
 
 
 def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs):
