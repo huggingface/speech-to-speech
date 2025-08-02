@@ -120,7 +120,7 @@ def optimal_mac_settings(mac_optimal_settings: Optional[str], *handler_kwargs):
             if hasattr(kwargs, "mode"):
                 kwargs.mode = "local"
             if hasattr(kwargs, "stt"):
-                kwargs.stt = "moonshine"
+                kwargs.stt = "whisper-mlx"
             if hasattr(kwargs, "llm"):
                 kwargs.llm = "mlx-lm"
             if hasattr(kwargs, "tts"):
