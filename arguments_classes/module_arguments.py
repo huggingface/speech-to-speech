@@ -11,7 +11,7 @@ class ModuleArguments:
     mode: Optional[str] = field(
         default="socket",
         metadata={
-            "help": "The mode to run the pipeline in. Either 'local' or 'socket'. Default is 'socket'."
+            "help": "The mode to run the pipeline in. Either 'local', 'socket', or 'websocket'. Default is 'socket'."
         },
     )
     local_mac_optimal_settings: bool = field(
@@ -23,7 +23,7 @@ class ModuleArguments:
     stt: Optional[str] = field(
         default="whisper",
         metadata={
-            "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'faster-whisper', and 'paraformer'. Default is 'whisper'."
+            "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', 'parakeet-tdt', 'moonshine', or 'paraformer'. Default is 'whisper'."
         },
     )
     llm: Optional[str] = field(
@@ -35,12 +35,30 @@ class ModuleArguments:
     tts: Optional[str] = field(
         default="parler",
         metadata={
-            "help": "The TTS to use. Either 'parler', 'melo', 'chatTTS' or 'facebookMMS'. Default is 'parler'"
+            "help": "The TTS to use. Either 'parler', 'melo', 'chatTTS', 'facebookMMS', 'pocket', 'kokoro', or 'kokoro-mlx'. Default is 'parler'"
         },
     )
     log_level: str = field(
         default="info",
         metadata={
             "help": "Provide logging level. Example --log_level debug, default=info."
+        },
+    )
+    enable_live_transcription: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable live transcription display while user is speaking (only works with parakeet-tdt on MLX/MPS)"
+        },
+    )
+    live_transcription_update_interval: float = field(
+        default=0.25,
+        metadata={
+            "help": "Update interval for live transcription in seconds (default: 0.25s = 250ms)"
+        },
+    )
+    live_transcription_min_silence_ms: int = field(
+        default=500,
+        metadata={
+            "help": "Minimum silence duration (ms) before ending speech when live transcription is enabled (default: 500ms)"
         },
     )

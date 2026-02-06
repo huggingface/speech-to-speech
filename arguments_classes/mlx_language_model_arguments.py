@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 @dataclass
 class MLXLanguageModelHandlerArguments:
     mlx_lm_model_name: str = field(
-        default="mlx-community/SmolLM-360M-Instruct",
+        default="mlx-community/SmolLM3-3B-4bit",
         metadata={
             "help": "The pretrained language model to use. Default is 'mlx-community/SmolLM-360M-Instruct'."
         },

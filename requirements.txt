@@ -1,3 +1,4 @@
+langdetect>=1.0.9
 nltk==3.9.1
 parler_tts @ git+https://github.com/huggingface/parler-tts.git
 melotts @ git+https://github.com/andimarafioti/MeloTTS.git#egg=MeloTTS  # made a copy of MeloTTS to have compatible versions of transformers
@@ -10,3 +11,5 @@ modelscope>=1.17.1
 deepfilternet>=0.5.6
 openai>=1.40.1
 useful-moonshine @ git+https://github.com/andimarafioti/moonshine.git
+nemo_toolkit[asr]>=2.0.0  # For Parakeet TDT on CUDA
+kokoro>=0.9.2  # For Kokoro TTS on CUDA/CPU
