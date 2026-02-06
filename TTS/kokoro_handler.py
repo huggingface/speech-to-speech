@@ -8,7 +8,7 @@ console = Console()
 
 # Language code mapping from Whisper language codes to Kokoro lang codes
 WHISPER_LANGUAGE_TO_KOKORO_LANG = {
-    "en": "b",  # American English
+    "en": "b",  # British English (to match bm_fable voice)
     "ja": "j",  # Japanese
     "zh": "z",  # Chinese
     "fr": "f",  # French
@@ -40,7 +40,7 @@ class KokoroTTSHandler(BaseHandler):
         self.model_name = model_name
         self.device = device
         self.voice = voice
-        self.lang_code = "b"
+        self.lang_code = lang_code
         self.speed = speed
         self.blocksize = blocksize
 
