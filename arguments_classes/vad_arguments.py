@@ -16,7 +16,7 @@ class VADHandlerArguments:
         },
     )
     min_silence_ms: int = field(
-        default=250,
+        default=300,
         metadata={
             "help": "Minimum length of silence intervals to be used for segmenting speech. Measured in milliseconds. Default is 250 ms."
         },
@@ -43,5 +43,17 @@ class VADHandlerArguments:
         default=False,
         metadata={
             "help": "improves sound quality by applying techniques like noise reduction, equalization, and echo cancellation. Default is False."
+        },
+    )
+    enable_realtime_transcription: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable progressive audio release for live transcription during speech. Default is False."
+        },
+    )
+    realtime_processing_pause: float = field(
+        default=0.2,
+        metadata={
+            "help": "Interval (in seconds) for releasing progressive audio chunks during speech. Default is 0.2s."
         },
     )

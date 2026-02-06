@@ -1,4 +1,5 @@
 from time import perf_counter
+from queue import Empty
 import logging
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,12 @@ class BaseHandler:
 
     def run(self):
         while not self.stop_event.is_set():
-            input = self.queue_in.get()
+            try:
+                # Use timeout to check stop_event periodically
+                input = self.queue_in.get(timeout=0.1)
+            except Empty:
+                continue
+
             if isinstance(input, bytes) and input == b"END":
                 # sentinelle signal to avoid queue deadlock
                 logger.debug("Stopping thread")

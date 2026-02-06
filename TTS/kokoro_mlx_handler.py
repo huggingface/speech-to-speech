@@ -2,6 +2,7 @@ import logging
 import numpy as np
 from baseHandler import BaseHandler
 from rich.console import Console
+from utils.mlx_lock import MLXLockContext
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -140,73 +141,75 @@ class KokoroMLXTTSHandler(BaseHandler):
         """
         from scipy.signal import resample_poly
 
-        language_code = None
-        if isinstance(llm_sentence, tuple):
-            llm_sentence, language_code = llm_sentence
-            # Map Whisper language code to Kokoro language code
-            new_lang_code = WHISPER_LANGUAGE_TO_KOKORO_LANG.get(
-                language_code, self.lang_code
-            )
-            # If language changed, get new pipeline and switch to appropriate voice
-            if new_lang_code != self.lang_code:
-                # Get the default voice for this language
-                new_voice = KOKORO_LANG_DEFAULT_VOICES.get(new_lang_code, self.voice)
-                logger.info(f"Language change detected: {self.lang_code} -> {new_lang_code}, voice: {self.voice} -> {new_voice}")
-                try:
-                    new_pipeline = self.model._get_pipeline(new_lang_code)
-                    new_voice_tensor = new_pipeline.load_voice(new_voice)
-                    # Only update state after successful loading
-                    self.lang_code = new_lang_code
-                    self.voice = new_voice
-                    self._pipeline = new_pipeline
-                    self._voice_tensor = new_voice_tensor
-                except Exception as e:
-                    logger.warning(f"Failed to switch language/voice: {e}. Keeping current language: {self.lang_code}")
-                    # Continue with existing pipeline and voice
+        # Acquire global MLX lock to prevent concurrent access with STT
+        with MLXLockContext(handler_name="KokoroTTS", timeout=10.0):
+            language_code = None
+            if isinstance(llm_sentence, tuple):
+                llm_sentence, language_code = llm_sentence
+                # Map Whisper language code to Kokoro language code
+                new_lang_code = WHISPER_LANGUAGE_TO_KOKORO_LANG.get(
+                    language_code, self.lang_code
+                )
+                # If language changed, get new pipeline and switch to appropriate voice
+                if new_lang_code != self.lang_code:
+                    # Get the default voice for this language
+                    new_voice = KOKORO_LANG_DEFAULT_VOICES.get(new_lang_code, self.voice)
+                    logger.info(f"Language change detected: {self.lang_code} -> {new_lang_code}, voice: {self.voice} -> {new_voice}")
+                    try:
+                        new_pipeline = self.model._get_pipeline(new_lang_code)
+                        new_voice_tensor = new_pipeline.load_voice(new_voice)
+                        # Only update state after successful loading
+                        self.lang_code = new_lang_code
+                        self.voice = new_voice
+                        self._pipeline = new_pipeline
+                        self._voice_tensor = new_voice_tensor
+                    except Exception as e:
+                        logger.warning(f"Failed to switch language/voice: {e}. Keeping current language: {self.lang_code}")
+                        # Continue with existing pipeline and voice
 
-        console.print(f"[green]ASSISTANT: {llm_sentence}")
+            console.print(f"[green]ASSISTANT: {llm_sentence}")
 
-        # Generate audio using the preloaded pipeline directly
-        # This avoids the voice reload that happens in model.generate()
-        for result in self._pipeline(
-            text=llm_sentence,
-            voice=self.voice,
-            speed=self.speed,
-        ):
-            if result.audio is None:
-                continue
-            # result.audio is an mx.array with shape (1, samples), convert to numpy and squeeze
-            audio = np.array(result.audio, dtype=np.float32).squeeze(0)
+            # Generate audio using the preloaded pipeline directly
+            # This avoids the voice reload that happens in model.generate()
+            for result in self._pipeline(
+                text=llm_sentence,
+                voice=self.voice,
+                speed=self.speed,
+            ):
+                if result.audio is None:
+                    continue
+                # result.audio is an mx.array with shape (1, samples), convert to numpy and squeeze
+                audio = np.array(result.audio, dtype=np.float32).squeeze(0)
 
-            # Trim silence from start and end of audio
-            # Kokoro generates ~250ms of silence at the start and variable silence at the end
-            threshold = 0.01
-            abs_audio = np.abs(audio)
-            # Find first and last samples above threshold
-            above_threshold = abs_audio > threshold
-            if np.any(above_threshold):
-                start_idx = np.argmax(above_threshold)
-                end_idx = len(audio) - np.argmax(above_threshold[::-1])
-                # Add small padding (5ms = 120 samples at 24kHz) to avoid cutting speech
-                padding = 120
-                start_idx = max(0, start_idx - padding)
-                end_idx = min(len(audio), end_idx + padding)
-                audio = audio[start_idx:end_idx]
+                # Trim silence from start and end of audio
+                # Kokoro generates ~250ms of silence at the start and variable silence at the end
+                threshold = 0.01
+                abs_audio = np.abs(audio)
+                # Find first and last samples above threshold
+                above_threshold = abs_audio > threshold
+                if np.any(above_threshold):
+                    start_idx = np.argmax(above_threshold)
+                    end_idx = len(audio) - np.argmax(above_threshold[::-1])
+                    # Add small padding (5ms = 120 samples at 24kHz) to avoid cutting speech
+                    padding = 120
+                    start_idx = max(0, start_idx - padding)
+                    end_idx = min(len(audio), end_idx + padding)
+                    audio = audio[start_idx:end_idx]
 
-            # Kokoro outputs at 24kHz, resample to 16kHz for the pipeline
-            # Using scipy's polyphase resampling (fast and high quality)
-            # 16000/24000 = 2/3, so up=2, down=3
-            audio = resample_poly(audio, up=2, down=3)
+                # Kokoro outputs at 24kHz, resample to 16kHz for the pipeline
+                # Using scipy's polyphase resampling (fast and high quality)
+                # 16000/24000 = 2/3, so up=2, down=3
+                audio = resample_poly(audio, up=2, down=3)
 
-            # Convert to int16 format
-            audio = (audio * 32768).astype(np.int16)
+                # Convert to int16 format
+                audio = (audio * 32768).astype(np.int16)
 
-            # Yield audio in fixed-size chunks
-            for i in range(0, len(audio), self.blocksize):
-                chunk = audio[i : i + self.blocksize]
-                # Pad the last chunk if necessary
-                if len(chunk) < self.blocksize:
-                    chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
-                yield chunk
+                # Yield audio in fixed-size chunks
+                for i in range(0, len(audio), self.blocksize):
+                    chunk = audio[i : i + self.blocksize]
+                    # Pad the last chunk if necessary
+                    if len(chunk) < self.blocksize:
+                        chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
+                    yield chunk
 
         self.should_listen.set()

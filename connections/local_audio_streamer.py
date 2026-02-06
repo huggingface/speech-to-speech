@@ -23,11 +23,24 @@ class LocalAudioStreamer:
 
     def run(self):
         def callback(indata, outdata, frames, time, status):
+            # During shutdown, just output silence
+            if self.stop_event.is_set():
+                outdata[:] = 0 * outdata
+                return
+
             if self.output_queue.empty():
                 self.input_queue.put(indata.copy())
                 outdata[:] = 0 * outdata
             else:
-                outdata[:] = self.output_queue.get()[:, np.newaxis]
+                try:
+                    audio_chunk = self.output_queue.get_nowait()
+                    # Validate audio chunk is numpy array
+                    if isinstance(audio_chunk, np.ndarray):
+                        outdata[:] = audio_chunk[:, np.newaxis]
+                    else:
+                        outdata[:] = 0 * outdata
+                except Exception:
+                    outdata[:] = 0 * outdata
 
         logger.debug("Available devices:")
         logger.debug(sd.query_devices())
