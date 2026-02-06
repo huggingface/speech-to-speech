@@ -58,6 +58,12 @@ git clone https://github.com/huggingface/speech-to-speech.git
 cd speech-to-speech
 ```
 
+Create a new python virtual environment using using [uv](https://github.com/astral-sh/uv) and install pip:
+```bash
+uv init
+uv add pip
+```
+
 Install the required dependencies using [uv](https://github.com/astral-sh/uv):
 ```bash
 uv pip install -r requirements.txt
