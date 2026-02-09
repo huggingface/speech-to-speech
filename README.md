@@ -38,6 +38,8 @@ The pipeline provides a fully open and modular approach, with a focus on leverag
 **STT**
 - Any [Whisper](https://huggingface.co/docs/transformers/en/model_doc/whisper) model checkpoint on the Hugging Face Hub through Transformers 🤗, including [whisper-large-v3](https://huggingface.co/openai/whisper-large-v3) and [distil-large-v3](https://huggingface.co/distil-whisper/distil-large-v3)
 - [Lightning Whisper MLX](https://github.com/mustafaaljadery/lightning-whisper-mlx?tab=readme-ov-file#lightning-whisper-mlx)
+- [MLX Audio Whisper](https://github.com/huggingface/mlx-audio) - Fast Whisper inference on Apple Silicon
+- [Parakeet TDT](https://huggingface.co/nvidia/parakeet-tdt-1.1b) - Real-time streaming STT with sub-100ms latency on Apple Silicon
 - [Paraformer - FunASR](https://github.com/modelscope/FunASR)
 
 **LLM**
@@ -49,6 +51,7 @@ The pipeline provides a fully open and modular approach, with a focus on leverag
 - [Parler-TTS](https://github.com/huggingface/parler-tts) 🤗
 - [MeloTTS](https://github.com/myshell-ai/MeloTTS)
 - [ChatTTS](https://github.com/2noise/ChatTTS?tab=readme-ov-file)
+- [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) - Fast and high-quality TTS optimized for Apple Silicon
 
 ## Setup
 
