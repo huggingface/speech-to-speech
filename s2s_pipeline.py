@@ -19,6 +19,7 @@ from arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArgum
 from arguments_classes.parler_tts_arguments import ParlerTTSHandlerArguments
 from arguments_classes.socket_receiver_arguments import SocketReceiverArguments
 from arguments_classes.socket_sender_arguments import SocketSenderArguments
+from arguments_classes.websocket_streamer_arguments import WebSocketStreamerArguments
 from arguments_classes.vad_arguments import VADHandlerArguments
 from arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
 from arguments_classes.faster_whisper_stt_arguments import (
@@ -86,6 +87,7 @@ def parse_arguments():
             ModuleArguments,
             SocketReceiverArguments,
             SocketSenderArguments,
+            WebSocketStreamerArguments,
             VADHandlerArguments,
             WhisperSTTHandlerArguments,
             ParaformerSTTHandlerArguments,
@@ -244,6 +246,7 @@ def build_pipeline(
     module_kwargs,
     socket_receiver_kwargs,
     socket_sender_kwargs,
+    websocket_streamer_kwargs,
     vad_handler_kwargs,
     whisper_stt_handler_kwargs,
     faster_whisper_stt_handler_kwargs,
@@ -284,8 +287,8 @@ def build_pipeline(
             input_queue=recv_audio_chunks_queue,
             output_queue=send_audio_chunks_queue,
             should_listen=should_listen,
-            host=socket_receiver_kwargs.recv_host,
-            port=socket_receiver_kwargs.recv_port,
+            host=websocket_streamer_kwargs.ws_host,
+            port=websocket_streamer_kwargs.ws_port,
         )
         comms_handlers = [websocket_streamer]
     else:
@@ -513,6 +516,7 @@ def main():
         module_kwargs,
         socket_receiver_kwargs,
         socket_sender_kwargs,
+        websocket_streamer_kwargs,
         vad_handler_kwargs,
         whisper_stt_handler_kwargs,
         paraformer_stt_handler_kwargs,
@@ -556,6 +560,7 @@ def main():
         module_kwargs,
         socket_receiver_kwargs,
         socket_sender_kwargs,
+        websocket_streamer_kwargs,
         vad_handler_kwargs,
         whisper_stt_handler_kwargs,
         faster_whisper_stt_handler_kwargs,

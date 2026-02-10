@@ -82,8 +82,9 @@ python -m unidic download
 
 ## Usage
 
-The pipeline can be run in two ways:
-- **Server/Client approach**: Models run on a server, and audio input/output are streamed from a client.
+The pipeline can be run in three ways:
+- **Server/Client approach**: Models run on a server, and audio input/output are streamed from a client using TCP sockets.
+- **WebSocket approach**: Models run on a server, and audio input/output are streamed from a client using WebSockets.
 - **Local approach**: Runs locally.
 
 ### Recommended setup 
@@ -99,6 +100,17 @@ The pipeline can be run in two ways:
    ```bash
    python listen_and_play.py --host <IP address of your server>
    ```
+
+### WebSocket Approach
+
+1. Run the pipeline with WebSocket mode:
+   ```bash
+   python s2s_pipeline.py --mode websocket --ws_host 0.0.0.0 --ws_port 8765
+   ```
+
+2. Connect to the WebSocket server from your client application at `ws://<server-ip>:8765`. The server handles bidirectional audio streaming:
+   - Send raw audio bytes to the server (16kHz, int16, mono)
+   - Receive generated audio bytes from the server
 
 ### Local Approach (Mac)
 
