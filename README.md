@@ -51,6 +51,7 @@ The pipeline provides a fully open and modular approach, with a focus on leverag
 - [Parler-TTS](https://github.com/huggingface/parler-tts) 🤗
 - [MeloTTS](https://github.com/myshell-ai/MeloTTS)
 - [ChatTTS](https://github.com/2noise/ChatTTS?tab=readme-ov-file)
+- [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) - Streaming TTS with voice cloning from Kyutai Labs
 - [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) - Fast and high-quality TTS optimized for Apple Silicon
 
 ## Setup
@@ -75,6 +76,8 @@ If you want to use Melo TTS, you also need to run:
 ```bash
 python -m unidic download
 ```
+
+**Note on DeepFilterNet:** DeepFilterNet (used for optional audio enhancement in VAD) is currently incompatible with Pocket TTS due to numpy version constraints. DeepFilterNet requires numpy<2, while Pocket TTS requires numpy>=2. If you need audio enhancement, you can install DeepFilterNet separately by commenting out pocket-tts in requirements and uncommenting deepfilternet.
 
 
 ## Usage
@@ -189,6 +192,19 @@ python s2s_pipeline.py \
     --language zh \
     --mlx_lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct-4bit \
 ```
+
+### Using Pocket TTS
+
+Pocket TTS from Kyutai Labs provides streaming TTS with voice cloning capabilities. To use it:
+
+```bash
+python s2s_pipeline.py \
+    --tts pocket \
+    --pocket_tts_voice jean \
+    --pocket_tts_device cpu
+```
+
+Available voice presets: `alba`, `marius`, `javert`, `jean`, `fantine`, `cosette`, `eponine`, `azelma`. You can also use custom voice files or HuggingFace paths.
 
 ## Command-line Usage
 
