@@ -41,19 +41,25 @@ class LMOutputProcessor(BaseHandler):
             Tuple of (text, language_code) for TTS
         """
         text_chunk, language_code, tools = lm_output
+        logger.debug(f"LM processor: text='{text_chunk}', tools={tools}")
 
         # Send text + tools to WebSocket clients
         if tools:
-            self.text_output_queue.put({
+            message = {
                 "type": "assistant_text",
                 "text": text_chunk,
                 "tools": tools
-            })
+            }
+            logger.info(f"Sending to clients: text='{text_chunk}', tools={[t['name'] for t in tools]}")
+            self.text_output_queue.put(message)
         else:
-            self.text_output_queue.put({
+            message = {
                 "type": "assistant_text",
                 "text": text_chunk
-            })
+            }
+            logger.debug(f"Sending to clients: text='{text_chunk}' (no tools)")
+            self.text_output_queue.put(message)
 
         # Forward clean text to TTS (yield to maintain streaming)
+        logger.debug(f"Forwarding to TTS: '{text_chunk}'")
         yield (text_chunk, language_code)

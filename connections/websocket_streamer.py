@@ -96,18 +96,34 @@ class WebSocketStreamer:
         # Enable listening when first client connects
         if len(self.clients) == 1:
             self.should_listen.set()
+            logger.debug(f"Listening enabled (should_listen.set())")
 
         try:
+            logger.debug(f"Client {client_id}: Starting message receive loop")
             async for message in websocket:
                 if isinstance(message, bytes):
+                    logger.debug(f"Client {client_id}: Received {len(message)} bytes of audio")
                     if self.should_listen.is_set():
-                        self.input_queue.put(message)
+                        # Split into 512-sample (1024 bytes) chunks for VAD
+                        chunk_size_bytes = 512 * 2  # 512 samples * 2 bytes per int16
+                        num_chunks = 0
+                        for i in range(0, len(message), chunk_size_bytes):
+                            chunk = message[i:i + chunk_size_bytes]
+                            # Only queue complete 512-sample chunks
+                            if len(chunk) == chunk_size_bytes:
+                                self.input_queue.put(chunk)
+                                num_chunks += 1
+                            else:
+                                logger.debug(f"Client {client_id}: Skipping incomplete chunk ({len(chunk)} bytes)")
+                        logger.debug(f"Client {client_id}: Queued {num_chunks} chunks for processing")
+                    else:
+                        logger.debug(f"Client {client_id}: Skipping audio (should_listen not set)")
 
         except Exception as e:
-            logger.debug(f"Client {client_id} disconnected: {e}")
+            logger.error(f"Client {client_id} error: {type(e).__name__}: {e}", exc_info=True)
         finally:
             self.clients.discard(websocket)
-            logger.info(f"Client {client_id} disconnected")
+            logger.info(f"Client {client_id} disconnected (finally block)")
 
             if len(self.clients) == 0:
                 self.input_queue.put(b"END")

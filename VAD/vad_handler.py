@@ -68,9 +68,12 @@ class VADHandler(BaseHandler):
         self.last_process_time = 0
 
     def process(self, audio_chunk):
+        logger.debug(f"VAD received {len(audio_chunk)} bytes")
         audio_int16 = np.frombuffer(audio_chunk, dtype=np.int16)
+        logger.debug(f"VAD processing {len(audio_int16)} samples")
         audio_float32 = int2float(audio_int16)
         vad_output = self.iterator(torch.from_numpy(audio_float32))
+        logger.debug(f"VAD output: {vad_output}")
 
         if self.enable_realtime_transcription:
             # Progressive mode: yield audio chunks while speaking
