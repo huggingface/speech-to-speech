@@ -1,3 +1,4 @@
+pip>=24.0
 langdetect>=1.0.9
 nltk==3.9.1
 parler_tts @ git+https://github.com/huggingface/parler-tts.git

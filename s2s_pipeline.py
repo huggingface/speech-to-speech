@@ -239,6 +239,8 @@ def initialize_queues_and_events():
         "spoken_prompt_queue": Queue(),
         "text_prompt_queue": Queue(),
         "lm_response_queue": Queue(),
+        "lm_processed_queue": Queue(),  # NEW: LLM -> LM processor -> TTS
+        "text_output_queue": Queue(),  # NEW: for text messages to WebSocket
     }
 
 
@@ -271,6 +273,8 @@ def build_pipeline(
     spoken_prompt_queue = queues_and_events["spoken_prompt_queue"]
     text_prompt_queue = queues_and_events["text_prompt_queue"]
     lm_response_queue = queues_and_events["lm_response_queue"]
+    lm_processed_queue = queues_and_events["lm_processed_queue"]
+    text_output_queue = queues_and_events["text_output_queue"]
     if module_kwargs.mode == "local":
         from connections.local_audio_streamer import LocalAudioStreamer
 
@@ -287,6 +291,7 @@ def build_pipeline(
             input_queue=recv_audio_chunks_queue,
             output_queue=send_audio_chunks_queue,
             should_listen=should_listen,
+            text_output_queue=text_output_queue,
             host=websocket_streamer_kwargs.ws_host,
             port=websocket_streamer_kwargs.ws_port,
         )
@@ -327,9 +332,19 @@ def build_pipeline(
 
     stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs)
     lm = get_llm_handler(module_kwargs, stop_event, text_prompt_queue, lm_response_queue, language_model_handler_kwargs, open_api_language_model_handler_kwargs, mlx_language_model_handler_kwargs)
-    tts = get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs)
 
-    return ThreadManager([*comms_handlers, vad, stt, lm, tts])
+    # Add LM output processor to extract tools and forward clean text to TTS
+    from LLM.lm_output_processor import LMOutputProcessor
+    lm_processor = LMOutputProcessor(
+        stop_event,
+        queue_in=lm_response_queue,
+        queue_out=lm_processed_queue,
+        setup_kwargs={"text_output_queue": text_output_queue},
+    )
+
+    tts = get_tts_handler(module_kwargs, stop_event, lm_processed_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs)
+
+    return ThreadManager([*comms_handlers, vad, stt, lm, lm_processor, tts])
 
 
 def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs):
