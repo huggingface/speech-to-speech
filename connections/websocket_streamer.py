@@ -141,7 +141,7 @@ class WebSocketStreamer:
                     if self.clients:
                         if hasattr(audio_chunk, 'tobytes'):
                             audio_chunk = audio_chunk.tobytes()
-
+                        logger.info(f"Sending {len(audio_chunk)} bytes of audio to {len(self.clients)} client(s)")
                         await asyncio.gather(
                             *[client.send(audio_chunk) for client in self.clients],
                             return_exceptions=True
