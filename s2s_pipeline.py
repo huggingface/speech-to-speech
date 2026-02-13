@@ -322,12 +322,16 @@ def build_pipeline(
         vad_handler_kwargs.enable_realtime_transcription = True
         vad_handler_kwargs.realtime_processing_pause = module_kwargs.live_transcription_update_interval
 
+    # Add text_output_queue to VAD setup for speech_started/stopped events
+    vad_setup_kwargs = vars(vad_handler_kwargs)
+    vad_setup_kwargs["text_output_queue"] = text_output_queue
+
     vad = VADHandler(
         stop_event,
         queue_in=recv_audio_chunks_queue,
         queue_out=spoken_prompt_queue,
         setup_args=(should_listen,),
-        setup_kwargs=vars(vad_handler_kwargs),
+        setup_kwargs=vad_setup_kwargs,
     )
 
     stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs)
