@@ -22,14 +22,16 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "Qwen3-TTS-12Hz-0.6B-Base"
 DEFAULT_REF_TEXT = "This is a reference audio sample for voice cloning."
+PIPELINE_SR = 16000
 
 
 class Qwen3TTSHandler(BaseHandler):
     """
     Handles Text-to-Speech using Qwen3-TTS models.
-    
+
     Supports voice cloning via reference audio and multilingual synthesis.
     Optionally uses CUDA graphs for real-time performance on NVIDIA GPUs.
+    With CUDA graphs, uses streaming generation for low time-to-first-audio.
     """
 
     def setup(
@@ -44,6 +46,8 @@ class Qwen3TTSHandler(BaseHandler):
         language="English",
         use_cuda_graphs=False,
         blocksize=512,
+        streaming_chunk_size=8,
+        max_new_tokens=200,
     ):
         """
         Initialize the Qwen3-TTS model.
@@ -58,7 +62,9 @@ class Qwen3TTSHandler(BaseHandler):
             ref_text: Transcription of the reference audio
             language: Target language for synthesis
             use_cuda_graphs: Use CUDA graphs for faster inference (NVIDIA GPUs only)
-            blocksize: Audio chunk size for streaming
+            blocksize: Audio chunk size for streaming output
+            streaming_chunk_size: Codec steps per streaming chunk (8 = ~667ms)
+            max_new_tokens: Maximum codec tokens to generate (~12 tokens per second of audio)
         """
         self.should_listen = should_listen
         self.model_name = model_name
@@ -69,6 +75,8 @@ class Qwen3TTSHandler(BaseHandler):
         self.attn_implementation = attn_implementation
         self.use_cuda_graphs = use_cuda_graphs
         self.blocksize = blocksize
+        self.streaming_chunk_size = streaming_chunk_size
+        self.max_new_tokens = max_new_tokens
 
         try:
             import torch
@@ -107,7 +115,7 @@ class Qwen3TTSHandler(BaseHandler):
         import torch
 
         logger.info(f"Loading Qwen3-TTS model: {self.model_name}")
-        
+
         # Try to load from HuggingFace Hub first, fall back to local path
         try:
             self.model = Qwen3TTSModel.from_pretrained(
@@ -124,7 +132,7 @@ class Qwen3TTSHandler(BaseHandler):
                     f"Model not found on HuggingFace Hub or as local path: {self.model_name}\n"
                     f"HuggingFace error: {hub_error}"
                 )
-            
+
             logger.info(f"Loading from local path: {model_path}")
             self.model = Qwen3TTSModel.from_pretrained(
                 str(model_path),
@@ -140,7 +148,7 @@ class Qwen3TTSHandler(BaseHandler):
         """Setup using CUDA graphs backend for real-time performance."""
         try:
             from qwen3_tts_cuda_graphs import Qwen3TTSCudaGraphs
-        except ImportError as e:
+        except ImportError:
             logger.warning(
                 "qwen3-tts-cuda-graphs not available, falling back to standard backend. "
                 "For real-time performance on NVIDIA GPUs, install: "
@@ -152,7 +160,7 @@ class Qwen3TTSHandler(BaseHandler):
         import torch
 
         logger.info(f"Loading Qwen3-TTS model with CUDA graphs: {self.model_name}")
-        
+
         try:
             self.model = Qwen3TTSCudaGraphs.from_pretrained(
                 self.model_name,
@@ -169,99 +177,130 @@ class Qwen3TTSHandler(BaseHandler):
     def warmup(self):
         """Warm up the model with a dummy inference."""
         logger.info(f"Warming up {self.__class__.__name__}")
-        
+
         warmup_text = "Hello, this is a warmup."
-        
+
         try:
-            # Run dummy inference
             for _ in self.process(warmup_text):
                 pass
             logger.info(f"{self.__class__.__name__} warmed up")
         except Exception as e:
             logger.warning(f"Warmup failed (this may happen if no reference audio is provided): {e}")
 
+    def _to_int16(self, audio):
+        """Convert float audio to int16."""
+        if audio.dtype != np.int16:
+            return (audio * 32768).astype(np.int16)
+        return audio
+
+    def _resample_to_pipeline_sr(self, audio, sr):
+        """Resample audio to pipeline sample rate (16kHz) if needed."""
+        if sr == PIPELINE_SR:
+            return audio
+        from scipy.signal import resample_poly
+        gcd = np.gcd(PIPELINE_SR, sr)
+        return resample_poly(audio, up=PIPELINE_SR // gcd, down=sr // gcd)
+
+    def _yield_chunks(self, audio):
+        """Yield audio in blocksize chunks, padding the last one."""
+        for i in range(0, len(audio), self.blocksize):
+            chunk = audio[i : i + self.blocksize]
+            if len(chunk) < self.blocksize:
+                chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
+            yield chunk
+
     def process(self, llm_sentence):
         """
         Process text input and generate audio output.
+
+        Uses streaming generation with CUDA graphs backend for low latency,
+        or batch generation with standard backend.
 
         Args:
             llm_sentence: Either a string or tuple of (text, language_code)
 
         Yields:
-            Audio chunks as numpy int16 arrays
+            Audio chunks as numpy int16 arrays at 16kHz
         """
-        import torch
-
-        language_code = None
         if isinstance(llm_sentence, tuple):
-            llm_sentence, language_code = llm_sentence
-            # Map language code to Qwen3-TTS language names if needed
-            # For now, use the configured language
-        
+            llm_sentence, _language_code = llm_sentence
+
         if not llm_sentence:
             llm_sentence = "Hello."
 
-        start = perf_counter()
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-
         try:
-            # Generate audio using voice cloning if reference audio provided
-            if self.ref_audio:
-                wavs, sr = self.model.generate_voice_clone(
-                    text=llm_sentence,
-                    language=self.language,
-                    ref_audio=self.ref_audio,
-                    ref_text=self.ref_text,
-                )
+            if self.backend == "cuda_graphs" and self.ref_audio:
+                yield from self._process_streaming(llm_sentence)
             else:
-                # Generate with default voice
-                wavs, sr = self.model.generate(
-                    text=llm_sentence,
-                    language=self.language,
-                )
-
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-
-            audio = wavs[0]
-            
-            # Convert to int16 format
-            if audio.dtype != np.int16:
-                audio = (audio * 32768).astype(np.int16)
-
-            generation_time = perf_counter() - start
-            audio_duration = len(audio) / sr
-            rtf = audio_duration / generation_time if generation_time > 0 else 0
-
-            logger.info(
-                f"Qwen3-TTS generated {audio_duration:.2f}s audio in {generation_time:.2f}s "
-                f"(RTF: {rtf:.2f}, {'real-time' if rtf >= 1.0 else 'slower than real-time'})"
-            )
-
-            # Resample to 16kHz if needed (speech-to-speech pipeline expects 16kHz)
-            if sr != 16000:
-                from scipy.signal import resample_poly
-                # Calculate resampling ratio
-                gcd = np.gcd(16000, sr)
-                up = 16000 // gcd
-                down = sr // gcd
-                audio = resample_poly(audio, up=up, down=down)
-
-            # Yield audio in chunks
-            for i in range(0, len(audio), self.blocksize):
-                chunk = audio[i : i + self.blocksize]
-                # Pad the last chunk if necessary
-                if len(chunk) < self.blocksize:
-                    chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
-                yield chunk
-
+                yield from self._process_batch(llm_sentence)
         except Exception as e:
             logger.error(f"Error during Qwen3-TTS generation: {e}", exc_info=True)
-            # Yield silence on error to avoid breaking the pipeline
             yield np.zeros(self.blocksize, dtype=np.int16)
 
         self.should_listen.set()
+
+    def _process_streaming(self, text):
+        """Stream audio using CUDA graphs streaming generation."""
+        start = perf_counter()
+        total_samples = 0
+        first_chunk = True
+
+        for audio_chunk, sr, timing in self.model.generate_voice_clone_streaming(
+            text=text,
+            language=self.language,
+            ref_audio=self.ref_audio,
+            ref_text=self.ref_text,
+            chunk_size=self.streaming_chunk_size,
+            max_new_tokens=self.max_new_tokens,
+        ):
+            if first_chunk:
+                ttfa = perf_counter() - start
+                logger.info(f"Qwen3-TTS TTFA: {ttfa:.2f}s (streaming, cuda_graphs)")
+                first_chunk = False
+
+            audio_chunk = self._to_int16(audio_chunk)
+            audio_chunk = self._resample_to_pipeline_sr(audio_chunk, sr)
+            total_samples += len(audio_chunk)
+            yield from self._yield_chunks(audio_chunk)
+
+        generation_time = perf_counter() - start
+        audio_duration = total_samples / PIPELINE_SR
+        rtf = audio_duration / generation_time if generation_time > 0 else 0
+        logger.info(
+            f"Qwen3-TTS generated {audio_duration:.2f}s audio in {generation_time:.2f}s "
+            f"(RTF: {rtf:.2f}, streaming, cuda_graphs)"
+        )
+
+    def _process_batch(self, text):
+        """Generate all audio at once, then yield in chunks."""
+        start = perf_counter()
+
+        if self.ref_audio:
+            wavs, sr = self.model.generate_voice_clone(
+                text=text,
+                language=self.language,
+                ref_audio=self.ref_audio,
+                ref_text=self.ref_text,
+                max_new_tokens=self.max_new_tokens,
+            )
+        else:
+            wavs, sr = self.model.generate(
+                text=text,
+                language=self.language,
+            )
+
+        audio = self._to_int16(wavs[0])
+        audio = self._resample_to_pipeline_sr(audio, sr)
+
+        generation_time = perf_counter() - start
+        audio_duration = len(audio) / PIPELINE_SR
+        rtf = audio_duration / generation_time if generation_time > 0 else 0
+        logger.info(
+            f"Qwen3-TTS generated {audio_duration:.2f}s audio in {generation_time:.2f}s "
+            f"(RTF: {rtf:.2f}, batch, {self.backend})"
+        )
+
+        yield from self._yield_chunks(audio)
 
     def cleanup(self):
         """Clean up model resources."""
