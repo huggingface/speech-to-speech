@@ -104,14 +104,11 @@ def stream_llm_sentences(text: str, model: str = "gpt-4o-mini", base_url: str = 
         **extra_kwargs,
     )
 
-    token_times = []
     for chunk in stream:
         if chunk.choices and chunk.choices[0].delta.content:
             token = chunk.choices[0].delta.content
-            now = perf_counter() - t0
             if ttft is None:
-                ttft = now
-            token_times.append((now, len(token), token[:20]))
+                ttft = perf_counter() - t0
             buffer += token
 
             # Yield on sentence boundary
@@ -127,12 +124,6 @@ def stream_llm_sentences(text: str, model: str = "gpt-4o-mini", base_url: str = 
                 sentence = buffer[:idx].strip()
                 buffer = buffer[idx:]
                 if sentence:
-                    # Debug: show token streaming pattern
-                    if len(token_times) <= 20:
-                        for t, l, tok in token_times[:10]:
-                            print(f"    token @{t:.3f}s len={l} '{tok}'", flush=True)
-                        if len(token_times) > 10:
-                            print(f"    ... ({len(token_times)} tokens total)", flush=True)
                     yield sentence, perf_counter() - t0, ttft
 
     if buffer.strip():
