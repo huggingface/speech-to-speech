@@ -238,6 +238,7 @@ def main():
     parser.add_argument("--reasoning-effort", default=None, choices=["low", "medium", "high"], help="Reasoning effort for thinking models")
     parser.add_argument("--local-llm", action="store_true", help="Use local transformers model instead of API")
     parser.add_argument("--load-in-4bit", action="store_true", help="Load local LLM in 4-bit quantization")
+    parser.add_argument("--no-unload", action="store_true", help="Don't unload Ollama model between runs (accept GPU contention)")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--output", default="e2e_output.wav", help="Save final audio")
     args = parser.parse_args()
@@ -313,8 +314,8 @@ def main():
                 full_response = sentence
                 print(f"🧠 LLM 1st sentence ({elapsed:.3f}s): \"{sentence}\"")
 
-                # Free Ollama GPU memory before TTS if using Ollama
-                if not args.local_llm and ("localhost" in args.llm_base_url or "127.0.0.1" in args.llm_base_url):
+                # Free Ollama GPU memory before TTS if using Ollama (skip with --no-unload)
+                if not args.local_llm and not args.no_unload and ("localhost" in args.llm_base_url or "127.0.0.1" in args.llm_base_url):
                     try:
                         import urllib.request
                         req = urllib.request.Request(
