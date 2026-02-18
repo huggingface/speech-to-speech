@@ -39,6 +39,18 @@ SENTENCE_ENDERS = re.compile(r'[.!?]')
 def load_stt_model():
     import nemo.collections.asr as nemo_asr
     model = nemo_asr.models.ASRModel.from_pretrained('nvidia/parakeet-tdt-0.6b-v2')
+    # Disable NeMo's internal CUDA graphs for decoding — avoids NVRTC/cuda-python
+    # version conflicts. Our TTS CUDA graphs are separate and unaffected.
+    try:
+        if hasattr(model, 'decoding') and hasattr(model.decoding, 'decoding'):
+            dec = model.decoding.decoding
+            if hasattr(dec, 'use_cuda_graph_decoder'):
+                dec.use_cuda_graph_decoder = False
+            # Also check the loop labels computer
+            if hasattr(dec, '_decoding_computer') and hasattr(dec._decoding_computer, 'use_cuda_graphs'):
+                dec._decoding_computer.use_cuda_graphs = False
+    except Exception:
+        pass
     model.eval()
     model = model.cuda()
     return model
