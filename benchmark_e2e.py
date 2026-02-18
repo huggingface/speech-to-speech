@@ -90,13 +90,18 @@ def stream_llm_sentences(text: str, model: str = "gpt-4o-mini", base_url: str = 
     ttft = None
 
     extra_kwargs = {}
-    if reasoning_effort:
+    is_ollama = base_url and "localhost" in base_url or "127.0.0.1" in (base_url or "")
+    system_prompt = LLM_SYSTEM_PROMPT
+    if reasoning_effort and is_ollama:
+        # Ollama doesn't support reasoning_effort API param; use /no_think tag
+        system_prompt = LLM_SYSTEM_PROMPT + " /no_think"
+    elif reasoning_effort:
         extra_kwargs["extra_body"] = {"reasoning_effort": reasoning_effort}
 
     stream = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": LLM_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": text},
         ],
         max_tokens=150,
