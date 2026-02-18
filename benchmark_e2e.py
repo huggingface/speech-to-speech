@@ -42,13 +42,8 @@ def load_stt_model():
     # Disable NeMo's internal CUDA graphs for decoding — avoids NVRTC/cuda-python
     # version conflicts. Our TTS CUDA graphs are separate and unaffected.
     try:
-        if hasattr(model, 'decoding') and hasattr(model.decoding, 'decoding'):
-            dec = model.decoding.decoding
-            if hasattr(dec, 'use_cuda_graph_decoder'):
-                dec.use_cuda_graph_decoder = False
-            # Also check the loop labels computer
-            if hasattr(dec, '_decoding_computer') and hasattr(dec._decoding_computer, 'use_cuda_graphs'):
-                dec._decoding_computer.use_cuda_graphs = False
+        comp = model.decoding.decoding._decoding_computer
+        comp.cuda_graphs_mode = None  # Forces loop_labels_torch path in __call__
     except Exception:
         pass
     model.eval()
