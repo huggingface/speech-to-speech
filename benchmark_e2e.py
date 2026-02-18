@@ -72,11 +72,99 @@ def run_stt(model, audio_path: str) -> tuple:
 
 # ── LLM (streaming, yields sentences) ─────────────────────────────────────
 
-def stream_llm_sentences(text: str, model: str = "gpt-4o-mini", base_url: str = "https://api.openai.com/v1", api_key_env: str = "OPENAI_API_KEY", reasoning_effort: str = None):
+_local_llm_model = None
+_local_llm_tokenizer = None
+_local_llm_pipe = None
+
+
+def load_local_llm(model_name: str, load_in_4bit: bool = False):
+    """Load a local transformers LLM. Cached after first call."""
+    global _local_llm_model, _local_llm_tokenizer, _local_llm_pipe
+    if _local_llm_pipe is not None:
+        return
+
+    from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+
+    print(f"Loading local LLM: {model_name} (4-bit={load_in_4bit})...")
+
+    kwargs = {"trust_remote_code": True, "torch_dtype": torch.bfloat16}
+    if load_in_4bit:
+        from transformers import BitsAndBytesConfig
+        kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+    else:
+        kwargs["device_map"] = "cuda"
+
+    _local_llm_tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    _local_llm_model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
+    _local_llm_pipe = pipeline(
+        "text-generation", model=_local_llm_model, tokenizer=_local_llm_tokenizer,
+    )
+    print(f"Local LLM loaded: {model_name}")
+
+
+def stream_local_llm_sentences(text: str, model: str = None):
+    """Stream sentences from a local transformers model. Yields (sentence, elapsed, ttft)."""
+    from threading import Thread
+    from transformers import TextIteratorStreamer
+
+    streamer = TextIteratorStreamer(
+        _local_llm_tokenizer, skip_prompt=True, skip_special_tokens=True,
+    )
+    messages = [
+        {"role": "system", "content": LLM_SYSTEM_PROMPT},
+        {"role": "user", "content": text},
+    ]
+    gen_kwargs = {
+        "streamer": streamer,
+        "max_new_tokens": 150,
+        "return_full_text": False,
+    }
+
+    t0 = perf_counter()
+    thread = Thread(target=_local_llm_pipe, args=(messages,), kwargs=gen_kwargs)
+    thread.start()
+
+    buffer = ""
+    ttft = None
+
+    for new_text in streamer:
+        if not new_text:
+            continue
+        if ttft is None:
+            ttft = perf_counter() - t0
+        buffer += new_text
+
+        match = SENTENCE_ENDERS.search(buffer)
+        if match:
+            idx = match.end()
+            while True:
+                m = SENTENCE_ENDERS.search(buffer, idx)
+                if m:
+                    idx = m.end()
+                else:
+                    break
+            sentence = buffer[:idx].strip()
+            buffer = buffer[idx:]
+            if sentence:
+                yield sentence, perf_counter() - t0, ttft
+
+    thread.join()
+    if buffer.strip():
+        yield buffer.strip(), perf_counter() - t0, ttft
+
+
+def stream_llm_sentences(text: str, model: str = "gpt-4o-mini", base_url: str = "https://api.openai.com/v1", api_key_env: str = "OPENAI_API_KEY", reasoning_effort: str = None, local_llm: bool = False):
     """
     Stream LLM response, yielding complete sentences as they arrive.
     Yields (sentence, elapsed_since_start, ttft).
     """
+    if local_llm:
+        yield from stream_local_llm_sentences(text, model=model)
+        return
+
     from openai import OpenAI
 
     api_key = os.environ.get(api_key_env)
@@ -148,6 +236,8 @@ def main():
     parser.add_argument("--llm-base-url", default="https://api.openai.com/v1", help="LLM API base URL")
     parser.add_argument("--llm-api-key-env", default="OPENAI_API_KEY", help="Env var for LLM API key")
     parser.add_argument("--reasoning-effort", default=None, choices=["low", "medium", "high"], help="Reasoning effort for thinking models")
+    parser.add_argument("--local-llm", action="store_true", help="Use local transformers model instead of API")
+    parser.add_argument("--load-in-4bit", action="store_true", help="Load local LLM in 4-bit quantization")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--output", default="e2e_output.wav", help="Save final audio")
     args = parser.parse_args()
@@ -181,9 +271,11 @@ def main():
     ):
         pass
 
-    # Warmup LLM
+    # Load & warmup LLM
+    if args.local_llm:
+        load_local_llm(args.llm, load_in_4bit=args.load_in_4bit)
     print(f"Warming up LLM ({args.llm})...")
-    for _ in stream_llm_sentences("Hello", model=args.llm, base_url=args.llm_base_url, api_key_env=args.llm_api_key_env, reasoning_effort=args.reasoning_effort):
+    for _ in stream_llm_sentences("Hello", model=args.llm, base_url=args.llm_base_url, api_key_env=args.llm_api_key_env, reasoning_effort=args.reasoning_effort, local_llm=args.local_llm):
         pass
 
     print(f"\nRunning {args.runs} end-to-end benchmark(s)...\n")
@@ -213,7 +305,7 @@ def main():
         tts_start = None
         tts_ttfa = None
 
-        for sentence, elapsed, ttft in stream_llm_sentences(stt_text, model=args.llm, base_url=args.llm_base_url, api_key_env=args.llm_api_key_env, reasoning_effort=args.reasoning_effort):
+        for sentence, elapsed, ttft in stream_llm_sentences(stt_text, model=args.llm, base_url=args.llm_base_url, api_key_env=args.llm_api_key_env, reasoning_effort=args.reasoning_effort, local_llm=args.local_llm):
             if llm_ttft is None:
                 llm_ttft = ttft
             if llm_first_sentence_time is None:
@@ -221,8 +313,8 @@ def main():
                 full_response = sentence
                 print(f"🧠 LLM 1st sentence ({elapsed:.3f}s): \"{sentence}\"")
 
-                # Free Ollama GPU memory before TTS if using local LLM
-                if "localhost" in args.llm_base_url or "127.0.0.1" in args.llm_base_url:
+                # Free Ollama GPU memory before TTS if using Ollama
+                if not args.local_llm and ("localhost" in args.llm_base_url or "127.0.0.1" in args.llm_base_url):
                     try:
                         import urllib.request
                         req = urllib.request.Request(
