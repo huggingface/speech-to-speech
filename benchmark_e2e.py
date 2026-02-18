@@ -135,6 +135,7 @@ def stream_llm_sentences(text: str, model: str = "gpt-4o-mini", base_url: str = 
 def main():
     parser = argparse.ArgumentParser(description="E2E speech-to-speech benchmark")
     parser.add_argument("--audio", default=TTS_REF_AUDIO, help="Input audio file")
+    parser.add_argument("--tts-model", default=TTS_MODEL_PATH, help="Path to Qwen3-TTS model")
     parser.add_argument("--ref-audio", default=TTS_REF_AUDIO)
     parser.add_argument("--ref-text", default=TTS_REF_TEXT)
     parser.add_argument("--attn", default="flash_attention_2", choices=["flash_attention_2", "sdpa"])
@@ -162,7 +163,7 @@ def main():
     print(f"Loading TTS (Qwen3-TTS 0.6B, {args.attn})...")
     from qwen3_tts_cuda_graphs import Qwen3TTSCudaGraphs
     tts_model = Qwen3TTSCudaGraphs.from_pretrained(
-        TTS_MODEL_PATH, device="cuda", dtype=torch.bfloat16,
+        args.tts_model, device="cuda", dtype=torch.bfloat16,
         attn_implementation=args.attn,
     )
 
