@@ -105,7 +105,7 @@ def load_local_llm(model_name: str, load_in_4bit: bool = False):
     print(f"Local LLM loaded: {model_name}")
 
 
-def stream_local_llm_sentences(text: str, model: str = None):
+def stream_local_llm_sentences(text: str, model: str = None, no_think: bool = False):
     """Stream sentences from a local transformers model. Yields (sentence, elapsed, ttft)."""
     from threading import Thread
     from transformers import TextIteratorStreamer
@@ -122,6 +122,8 @@ def stream_local_llm_sentences(text: str, model: str = None):
         "max_new_tokens": 150,
         "return_full_text": False,
     }
+    if no_think:
+        gen_kwargs["tokenizer_encode_kwargs"] = {"enable_thinking": False}
 
     t0 = perf_counter()
     thread = Thread(target=_local_llm_pipe, args=(messages,), kwargs=gen_kwargs)
@@ -156,13 +158,13 @@ def stream_local_llm_sentences(text: str, model: str = None):
         yield buffer.strip(), perf_counter() - t0, ttft
 
 
-def stream_llm_sentences(text: str, model: str = "gpt-4o-mini", base_url: str = "https://api.openai.com/v1", api_key_env: str = "OPENAI_API_KEY", reasoning_effort: str = None, local_llm: bool = False):
+def stream_llm_sentences(text: str, model: str = "gpt-4o-mini", base_url: str = "https://api.openai.com/v1", api_key_env: str = "OPENAI_API_KEY", reasoning_effort: str = None, local_llm: bool = False, no_think: bool = False):
     """
     Stream LLM response, yielding complete sentences as they arrive.
     Yields (sentence, elapsed_since_start, ttft).
     """
     if local_llm:
-        yield from stream_local_llm_sentences(text, model=model)
+        yield from stream_local_llm_sentences(text, model=model, no_think=no_think)
         return
 
     from openai import OpenAI
@@ -238,6 +240,7 @@ def main():
     parser.add_argument("--reasoning-effort", default=None, choices=["low", "medium", "high"], help="Reasoning effort for thinking models")
     parser.add_argument("--local-llm", action="store_true", help="Use local transformers model instead of API")
     parser.add_argument("--load-in-4bit", action="store_true", help="Load local LLM in 4-bit quantization")
+    parser.add_argument("--no-think", action="store_true", help="Disable thinking for Qwen3 models (local or API)")
     parser.add_argument("--no-unload", action="store_true", help="Don't unload Ollama model between runs (accept GPU contention)")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--output", default="e2e_output.wav", help="Save final audio")
@@ -276,7 +279,7 @@ def main():
     if args.local_llm:
         load_local_llm(args.llm, load_in_4bit=args.load_in_4bit)
     print(f"Warming up LLM ({args.llm})...")
-    for _ in stream_llm_sentences("Hello", model=args.llm, base_url=args.llm_base_url, api_key_env=args.llm_api_key_env, reasoning_effort=args.reasoning_effort, local_llm=args.local_llm):
+    for _ in stream_llm_sentences("Hello", model=args.llm, base_url=args.llm_base_url, api_key_env=args.llm_api_key_env, reasoning_effort=args.reasoning_effort, local_llm=args.local_llm, no_think=args.no_think):
         pass
 
     print(f"\nRunning {args.runs} end-to-end benchmark(s)...\n")
@@ -306,7 +309,7 @@ def main():
         tts_start = None
         tts_ttfa = None
 
-        for sentence, elapsed, ttft in stream_llm_sentences(stt_text, model=args.llm, base_url=args.llm_base_url, api_key_env=args.llm_api_key_env, reasoning_effort=args.reasoning_effort, local_llm=args.local_llm):
+        for sentence, elapsed, ttft in stream_llm_sentences(stt_text, model=args.llm, base_url=args.llm_base_url, api_key_env=args.llm_api_key_env, reasoning_effort=args.reasoning_effort, local_llm=args.local_llm, no_think=args.no_think):
             if llm_ttft is None:
                 llm_ttft = ttft
             if llm_first_sentence_time is None:
