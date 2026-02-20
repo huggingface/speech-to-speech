@@ -130,6 +130,10 @@ class WebSocketStreamer:
 
     async def _send_loop(self):
         """Send audio and text from queues to all connected clients."""
+        # Buffer audio until we have at least 100ms worth (3200 bytes = 1600 samples at 16kHz int16)
+        MIN_AUDIO_BYTES = 3200
+        audio_buffer = bytearray()
+
         while not self.stop_event.is_set():
             try:
                 # Check for audio
@@ -141,13 +145,26 @@ class WebSocketStreamer:
                     if self.clients:
                         if hasattr(audio_chunk, 'tobytes'):
                             audio_chunk = audio_chunk.tobytes()
-                        logger.info(f"Sending {len(audio_chunk)} bytes of audio to {len(self.clients)} client(s)")
+                        audio_buffer.extend(audio_chunk)
+
+                        if len(audio_buffer) >= MIN_AUDIO_BYTES:
+                            data = bytes(audio_buffer)
+                            audio_buffer.clear()
+                            logger.debug(f"Sending {len(data)} bytes of audio to {len(self.clients)} client(s)")
+                            await asyncio.gather(
+                                *[client.send(data) for client in self.clients],
+                                return_exceptions=True
+                            )
+                except Empty:
+                    # Flush any buffered audio when queue is empty
+                    if audio_buffer and self.clients:
+                        data = bytes(audio_buffer)
+                        audio_buffer.clear()
+                        logger.debug(f"Flushing {len(data)} bytes of audio to {len(self.clients)} client(s)")
                         await asyncio.gather(
-                            *[client.send(audio_chunk) for client in self.clients],
+                            *[client.send(data) for client in self.clients],
                             return_exceptions=True
                         )
-                except Empty:
-                    pass
 
                 # Check for text/tool messages
                 if self.text_output_queue:
