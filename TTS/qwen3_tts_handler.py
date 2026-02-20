@@ -17,8 +17,10 @@ from time import perf_counter
 from pathlib import Path
 import numpy as np
 from baseHandler import BaseHandler
+from rich.console import Console
 
 logger = logging.getLogger(__name__)
+console = Console()
 
 DEFAULT_MODEL = "Qwen3-TTS-12Hz-0.6B-Base"
 DEFAULT_REF_TEXT = "This is a reference audio sample for voice cloning."
@@ -45,9 +47,9 @@ class Qwen3TTSHandler(BaseHandler):
         ref_text=DEFAULT_REF_TEXT,
         language="English",
         use_cuda_graphs=False,
-        blocksize=512,
         streaming_chunk_size=8,
         max_new_tokens=200,
+        gen_kwargs=None,
     ):
         """
         Initialize the Qwen3-TTS model.
@@ -62,7 +64,6 @@ class Qwen3TTSHandler(BaseHandler):
             ref_text: Transcription of the reference audio
             language: Target language for synthesis
             use_cuda_graphs: Use CUDA graphs for faster inference (NVIDIA GPUs only)
-            blocksize: Audio chunk size for streaming output
             streaming_chunk_size: Codec steps per streaming chunk (8 = ~667ms)
             max_new_tokens: Maximum codec tokens to generate (~12 tokens per second of audio)
         """
@@ -74,7 +75,6 @@ class Qwen3TTSHandler(BaseHandler):
         self.language = language
         self.attn_implementation = attn_implementation
         self.use_cuda_graphs = use_cuda_graphs
-        self.blocksize = blocksize
         self.streaming_chunk_size = streaming_chunk_size
         self.max_new_tokens = max_new_tokens
 
@@ -201,14 +201,6 @@ class Qwen3TTSHandler(BaseHandler):
         gcd = np.gcd(PIPELINE_SR, sr)
         return resample_poly(audio, up=PIPELINE_SR // gcd, down=sr // gcd)
 
-    def _yield_chunks(self, audio):
-        """Yield audio in blocksize chunks, padding the last one."""
-        for i in range(0, len(audio), self.blocksize):
-            chunk = audio[i : i + self.blocksize]
-            if len(chunk) < self.blocksize:
-                chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
-            yield chunk
-
     def process(self, llm_sentence):
         """
         Process text input and generate audio output.
@@ -227,6 +219,8 @@ class Qwen3TTSHandler(BaseHandler):
 
         if not llm_sentence:
             llm_sentence = "Hello."
+
+        console.print(f"[green]ASSISTANT: {llm_sentence}")
 
         try:
             if self.backend == "cuda_graphs" and self.ref_audio:
@@ -258,10 +252,10 @@ class Qwen3TTSHandler(BaseHandler):
                 logger.info(f"Qwen3-TTS TTFA: {ttfa:.2f}s (streaming, cuda_graphs)")
                 first_chunk = False
 
-            audio_chunk = self._to_int16(audio_chunk)
             audio_chunk = self._resample_to_pipeline_sr(audio_chunk, sr)
+            audio_chunk = self._to_int16(audio_chunk)
             total_samples += len(audio_chunk)
-            yield from self._yield_chunks(audio_chunk)
+            yield audio_chunk
 
         generation_time = perf_counter() - start
         audio_duration = total_samples / PIPELINE_SR
@@ -289,8 +283,8 @@ class Qwen3TTSHandler(BaseHandler):
                 language=self.language,
             )
 
-        audio = self._to_int16(wavs[0])
-        audio = self._resample_to_pipeline_sr(audio, sr)
+        audio = self._resample_to_pipeline_sr(wavs[0], sr)
+        audio = self._to_int16(audio)
 
         generation_time = perf_counter() - start
         audio_duration = len(audio) / PIPELINE_SR
@@ -300,7 +294,7 @@ class Qwen3TTSHandler(BaseHandler):
             f"(RTF: {rtf:.2f}, batch, {self.backend})"
         )
 
-        yield from self._yield_chunks(audio)
+        yield audio
 
     def cleanup(self):
         """Clean up model resources."""
