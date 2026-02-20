@@ -24,6 +24,9 @@ EMOJI_PATTERN = re.compile(
     "]+", flags=re.UNICODE
 )
 
+# Tool call pattern for extraction
+TOOL_PATTERN = re.compile(r'\[TOOL:(\w+)(?:\|([^\]]+))?\]')
+
 WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
     "en": "english",
     "fr": "french",
@@ -38,6 +41,31 @@ WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
     "it": "italian",
     "nl": "dutch",
 }
+
+
+def parse_tool_calls(text):
+    """Extract tool calls from text and return cleaned text + tool calls."""
+    tools = []
+
+    for match in TOOL_PATTERN.finditer(text):
+        tool_name = match.group(1)
+        params_str = match.group(2) or ""
+
+        # Parse params: key1:val1|key2:val2
+        params = {}
+        if params_str:
+            for param in params_str.split('|'):
+                if ':' in param:
+                    key, val = param.split(':', 1)
+                    params[key] = val
+
+        tools.append({"name": tool_name, "parameters": params})
+
+    # Remove tool markers from text
+    clean_text = TOOL_PATTERN.sub('', text).strip()
+
+    return clean_text, tools
+
 
 class MLXLanguageModelHandler(BaseHandler):
     """
@@ -143,18 +171,21 @@ class MLXLanguageModelHandler(BaseHandler):
                     curr_output = self.remove_special_tokens(curr_output)
                     curr_output = self.remove_emojis(curr_output)
                     if len(curr_output.strip()) > 0:
-                        yield (curr_output.strip(), language_code)
+                        clean_text, tools = parse_tool_calls(curr_output.strip())
+                        yield (clean_text, language_code, tools)
                     end_of_turn = True
                     break
 
                 if curr_output.endswith((".", "?", "!")):
                     if len(curr_output) > 0:
-                        yield (curr_output, language_code)
+                        clean_text, tools = parse_tool_calls(curr_output)
+                        yield (clean_text, language_code, tools)
                     curr_output = ""
 
             # Yield any remaining content if we didn't hit end of turn
             if not end_of_turn and len(curr_output.strip()) > 0:
-                yield (curr_output.strip(), language_code)
+                clean_text, tools = parse_tool_calls(curr_output.strip())
+                yield (clean_text, language_code, tools)
 
         # Clean up the full output for chat history
         generated_text = self.remove_special_tokens(output).strip()

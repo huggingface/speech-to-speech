@@ -1,5 +1,6 @@
 import logging
 import time
+import re
 
 from nltk import sent_tokenize
 from rich.console import Console
@@ -12,6 +13,9 @@ logger = logging.getLogger(__name__)
 
 console = Console()
 
+# Tool call pattern for extraction
+TOOL_PATTERN = re.compile(r'\[TOOL:(\w+)(?:\|([^\]]+))?\]')
+
 WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
     "en": "english",
     "fr": "french",
@@ -20,6 +24,31 @@ WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
     "ja": "japanese",
     "ko": "korean",
 }
+
+
+def parse_tool_calls(text):
+    """Extract tool calls from text and return cleaned text + tool calls."""
+    tools = []
+
+    for match in TOOL_PATTERN.finditer(text):
+        tool_name = match.group(1)
+        params_str = match.group(2) or ""
+
+        # Parse params: key1:val1|key2:val2
+        params = {}
+        if params_str:
+            for param in params_str.split('|'):
+                if ':' in param:
+                    key, val = param.split(':', 1)
+                    params[key] = val
+
+        tools.append({"name": tool_name, "parameters": params})
+
+    # Remove tool markers from text
+    clean_text = TOOL_PATTERN.sub('', text).strip()
+
+    return clean_text, tools
+
 
 class OpenApiModelHandler(BaseHandler):
     """
@@ -92,13 +121,16 @@ class OpenApiModelHandler(BaseHandler):
                     printable_text += new_text
                     sentences = sent_tokenize(printable_text)
                     if len(sentences) > 1:
-                        yield sentences[0], language_code
+                        clean_text, tools = parse_tool_calls(sentences[0])
+                        yield clean_text, language_code, tools
                         printable_text = new_text
                 self.chat.append({"role": "assistant", "content": generated_text})
                 # don't forget last sentence
-                yield printable_text, language_code
+                clean_text, tools = parse_tool_calls(printable_text)
+                yield clean_text, language_code, tools
             else:
                 generated_text = response.choices[0].message.content
                 self.chat.append({"role": "assistant", "content": generated_text})
-                yield generated_text, language_code
+                clean_text, tools = parse_tool_calls(generated_text)
+                yield clean_text, language_code, tools
 

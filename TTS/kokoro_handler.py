@@ -296,6 +296,7 @@ class KokoroTTSHandler(BaseHandler):
                     # Pad the last chunk if necessary
                     if len(chunk) < self.blocksize:
                         chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
+                    logger.info(f"TTS yielding audio chunk: {len(chunk)} samples")
                     yield chunk
 
     def _process_kokoro(self, llm_sentence):
