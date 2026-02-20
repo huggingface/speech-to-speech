@@ -156,6 +156,18 @@ class ParakeetTDTSTTHandler(BaseHandler):
             # Set eval mode
             self.model.eval()
 
+            # Disable CUDA graphs in the decoder to avoid conflicts with other
+            # CUDA graph users (e.g. Qwen3 TTS) on the same GPU
+            try:
+                greedy_decoder = self.model.decoding.decoding
+                greedy_decoder.disable_cuda_graphs()
+                if hasattr(greedy_decoder, '_decoding_computer'):
+                    greedy_decoder._decoding_computer.allow_cuda_graphs = False
+                    greedy_decoder._decoding_computer.cuda_graphs_mode = None
+                logger.info("Disabled CUDA graphs in NeMo decoder")
+            except AttributeError:
+                logger.debug("No CUDA graphs to disable in NeMo decoder")
+
             logger.info(f"NeMo Parakeet model loaded successfully on {self.device}")
         except ImportError as e:
             raise ImportError(

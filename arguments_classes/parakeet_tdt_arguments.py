@@ -39,9 +39,3 @@ class ParakeetTDTSTTHandlerArguments:
             "auto-detect the language. Supports 25 European languages."
         },
     )
-    parakeet_tdt_gen_kwargs: dict = field(
-        default_factory=dict,
-        metadata={
-            "help": "Additional generation kwargs to pass to the model. Default is an empty dict."
-        },
-    )
