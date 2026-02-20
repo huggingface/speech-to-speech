@@ -28,6 +28,7 @@ class BaseHandler:
         raise NotImplementedError
 
     def run(self):
+        logger.debug(f"{self.__class__.__name__}: Handler thread started")
         while not self.stop_event.is_set():
             try:
                 # Use timeout to check stop_event periodically
@@ -40,12 +41,15 @@ class BaseHandler:
                 logger.debug("Stopping thread")
                 break
             start_time = perf_counter()
-            for output in self.process(input):
-                self._times.append(perf_counter() - start_time)
-                if self.last_time > self.min_time_to_debug:
-                    logger.debug(f"{self.__class__.__name__}: {self.last_time: .3f} s")
-                self.queue_out.put(output)
-                start_time = perf_counter()
+            try:
+                for output in self.process(input):
+                    self._times.append(perf_counter() - start_time)
+                    if self.last_time > self.min_time_to_debug:
+                        logger.debug(f"{self.__class__.__name__}: {self.last_time: .3f} s")
+                    self.queue_out.put(output)
+                    start_time = perf_counter()
+            except Exception as e:
+                logger.error(f"{self.__class__.__name__}: Error in process(): {type(e).__name__}: {e}", exc_info=True)
 
         self.cleanup()
         self.queue_out.put(b"END")

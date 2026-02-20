@@ -39,6 +39,7 @@ class VADHandler(BaseHandler):
         audio_enhancement=False,
         enable_realtime_transcription=False,
         realtime_processing_pause=0.25,
+        text_output_queue=None,
     ):
         self.should_listen = should_listen
         self.sample_rate = sample_rate
@@ -47,6 +48,7 @@ class VADHandler(BaseHandler):
         self.max_speech_ms = max_speech_ms
         self.enable_realtime_transcription = enable_realtime_transcription
         self.realtime_processing_pause = realtime_processing_pause
+        self.text_output_queue = text_output_queue
         self.model, _ = torch.hub.load("snakers4/silero-vad", "silero_vad")
         self.iterator = VADIterator(
             self.model,
@@ -68,9 +70,24 @@ class VADHandler(BaseHandler):
         self.last_process_time = 0
 
     def process(self, audio_chunk):
+        logger.debug(f"VAD received {len(audio_chunk)} bytes")
         audio_int16 = np.frombuffer(audio_chunk, dtype=np.int16)
+        logger.debug(f"VAD processing {len(audio_int16)} samples")
         audio_float32 = int2float(audio_int16)
+
+        # Check speech state BEFORE processing
+        was_triggered_before = self.iterator.triggered
+
         vad_output = self.iterator(torch.from_numpy(audio_float32))
+        logger.debug(f"VAD output: {vad_output}")
+
+        # Check if speech state changed AFTER processing
+        is_triggered_now = self.iterator.triggered
+        if is_triggered_now and not was_triggered_before:
+            # Speech started
+            if self.text_output_queue:
+                self.text_output_queue.put({"type": "speech_started"})
+                logger.debug("Speech started - sent event")
 
         if self.enable_realtime_transcription:
             # Progressive mode: yield audio chunks while speaking
@@ -111,6 +128,10 @@ class VADHandler(BaseHandler):
             else:
                 self.should_listen.clear()
                 logger.debug("Stop listening")
+                # Send speech_stopped event
+                if self.text_output_queue:
+                    self.text_output_queue.put({"type": "speech_stopped"})
+                    logger.debug("Speech stopped - sent event")
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
                 # Yield with final flag
@@ -130,6 +151,10 @@ class VADHandler(BaseHandler):
             else:
                 self.should_listen.clear()
                 logger.debug("Stop listening")
+                # Send speech_stopped event
+                if self.text_output_queue:
+                    self.text_output_queue.put({"type": "speech_stopped"})
+                    logger.debug("Speech stopped - sent event")
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
                 yield array
