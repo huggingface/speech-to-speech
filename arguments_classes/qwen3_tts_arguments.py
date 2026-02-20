@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 @dataclass
 class Qwen3TTSHandlerArguments:
     qwen3_tts_model_name: str = field(
-        default="/home/andi/Documents/qwen3-tts-cuda-graphs/models/Qwen3-TTS-12Hz-0.6B-Base",
+        default="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
         metadata={
             "help": "The Qwen3-TTS model to use (HuggingFace Hub ID or local path)."
         },
@@ -28,7 +28,7 @@ class Qwen3TTSHandlerArguments:
         },
     )
     qwen3_tts_ref_audio: str = field(
-        default="/home/andi/Documents/qwen3-tts-cuda-graphs/ref_audio.wav",
+        default="TTS/ref_audio.wav",
         metadata={
             "help": "Path to reference audio file for voice cloning."
         },
@@ -49,12 +49,6 @@ class Qwen3TTSHandlerArguments:
         default=True,
         metadata={
             "help": "Use CUDA graphs for real-time inference. Requires NVIDIA GPU. Default is True."
-        },
-    )
-    qwen3_tts_blocksize: int = field(
-        default=512,
-        metadata={
-            "help": "Audio chunk size in samples for streaming output. Default is 512."
         },
     )
     qwen3_tts_streaming_chunk_size: int = field(
