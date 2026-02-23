@@ -61,7 +61,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
             model_name: Model identifier. Defaults are:
                 - MPS: "mlx-community/parakeet-tdt-0.6b-v3"
                 - CUDA/CPU: "nvidia/parakeet-tdt-0.6b-v3"
-                - CUDA/CPU also supports a local .nemo file path
             device: Device to use ("auto", "cuda", "mps", "cpu")
             compute_type: Compute precision ("float16", "float32")
             language: Target language code (optional, model auto-detects)
@@ -141,9 +140,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
         """Setup for CUDA/CPU using nano-parakeet."""
         try:
             import torch
-            from pathlib import Path
-            from nano_parakeet import ParakeetTDT, from_pretrained
-            from nano_parakeet._loader import get_bundled_tokenizer_proto, load_nemo_state_dict, remap_state_dict
+            from nano_parakeet import from_pretrained
 
             self.backend = "nano"
 
@@ -151,28 +148,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 logger.warning("CUDA requested but not available. Falling back to CPU for nano-parakeet.")
                 self.device = "cpu"
 
-            if model_name.endswith(".nemo") or Path(model_name).exists():
-                nemo_path = Path(model_name)
-                if not nemo_path.exists():
-                    raise FileNotFoundError(f"Parakeet .nemo file not found: {model_name}")
-
-                self.model = ParakeetTDT()
-                state_dict = load_nemo_state_dict(str(nemo_path), map_location="cpu")
-                state_dict = remap_state_dict(state_dict)
-                missing, _ = self.model.load_state_dict(state_dict, strict=False)
-                if missing:
-                    raise RuntimeError(f"Missing keys in state_dict: {missing[:10]}")
-                self.model = self.model.to(self.device).eval()
-
-                import sentencepiece as spm
-                sp = spm.SentencePieceProcessor()
-                sp.LoadFromSerializedProto(get_bundled_tokenizer_proto())
-                self.model.sp = sp
-
-                if hasattr(self.model, "warmup"):
-                    self.model.warmup()
-            else:
-                self.model = from_pretrained(model_name=model_name, device=self.device)
+            self.model = from_pretrained(model_name=model_name, device=self.device)
 
             logger.info(f"nano-parakeet model loaded successfully on {self.device}")
             self._skip_warmup = True

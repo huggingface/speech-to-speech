@@ -16,8 +16,7 @@ class ParakeetTDTSTTHandlerArguments:
         default=None,
         metadata={
             "help": "The Parakeet TDT model to use. Defaults to 'mlx-community/parakeet-tdt-0.6b-v3' "
-            "for MPS or 'nvidia/parakeet-tdt-0.6b-v3' for CUDA/CPU. "
-            "Can also be a path to a local .nemo file."
+            "for MPS or 'nvidia/parakeet-tdt-0.6b-v3' for CUDA/CPU."
         },
     )
     parakeet_tdt_device: str = field(
