@@ -20,6 +20,23 @@ class BaseHandler:
         self.queue_out = queue_out
         self.setup(*setup_args, **setup_kwargs)
         self._times = []
+        self._last_timing_log_time = 0.0
+        self._last_timing_value = None
+
+    @property
+    def timing_log_interval_s(self):
+        # Log at most once every 5 seconds per handler
+        return 5.0
+
+    @property
+    def timing_log_min_s(self):
+        # Skip extremely fast no-op logs
+        return 0.01
+
+    @property
+    def timing_log_change_ratio(self):
+        # Log if duration changes >50% vs last logged duration
+        return 0.5
 
     def setup(self):
         pass
@@ -57,10 +74,23 @@ class BaseHandler:
                 total_time = perf_counter() - input_start
                 if first_output_time is None:
                     first_output_time = total_time
-                logger.info(
-                    f"{self.__class__.__name__}: processed {output_count} output(s) "
-                    f"in {total_time:.3f}s (ttfo {first_output_time:.3f}s)"
-                )
+                now = perf_counter()
+                should_log = total_time >= self.timing_log_min_s
+                if should_log:
+                    if now - self._last_timing_log_time < self.timing_log_interval_s:
+                        should_log = False
+                    if self._last_timing_value is not None:
+                        if self._last_timing_value > 0:
+                            change_ratio = abs(total_time - self._last_timing_value) / self._last_timing_value
+                            if change_ratio >= self.timing_log_change_ratio:
+                                should_log = True
+                if should_log:
+                    logger.info(
+                        f"{self.__class__.__name__}: processed {output_count} output(s) "
+                        f"in {total_time:.3f}s (ttfo {first_output_time:.3f}s)"
+                    )
+                    self._last_timing_log_time = now
+                    self._last_timing_value = total_time
             except Exception as e:
                 logger.error(f"{self.__class__.__name__}: Error in process(): {type(e).__name__}: {e}", exc_info=True)
 
