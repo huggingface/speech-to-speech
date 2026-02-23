@@ -217,7 +217,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
             audio_input = audio_input.astype(np.float32)
 
         # Handle progressive updates (live transcription display only)
-        if self.enable_live_transcription and self.backend in ("mlx", "nano_parakeet") and is_progressive:
+        if self.enable_live_transcription and is_progressive:
             # Ignore progressive updates if we're already processing final audio
             if self.backend == "mlx" and self.processing_final:
                 logger.debug("Skipping stale progressive update (final audio already received)")
