@@ -235,10 +235,11 @@ class SmartProgressiveStreamingHandler:
 
 class SmartProgressiveStreamingTextHandler:
     """
-    Progressive streaming for text-only decoders (no sentence timestamps).
+    Progressive streaming for decoders that return timestamped segments.
 
-    Uses repeated full-buffer transcriptions and locks stable sentence prefixes
-    when they repeat across updates.
+    If timestamped segments are available, uses them to split fixed vs active
+    text. If not, falls back to repeated full-buffer transcriptions and locks
+    stable sentence prefixes when they repeat across updates.
     """
 
     def __init__(
