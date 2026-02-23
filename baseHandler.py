@@ -40,14 +40,27 @@ class BaseHandler:
                 # sentinelle signal to avoid queue deadlock
                 logger.debug("Stopping thread")
                 break
-            start_time = perf_counter()
+            input_start = perf_counter()
+            start_time = input_start
+            first_output_time = None
+            output_count = 0
             try:
                 for output in self.process(input):
+                    if first_output_time is None:
+                        first_output_time = perf_counter() - start_time
                     self._times.append(perf_counter() - start_time)
                     if self.last_time > self.min_time_to_debug:
                         logger.debug(f"{self.__class__.__name__}: {self.last_time: .3f} s")
                     self.queue_out.put(output)
+                    output_count += 1
                     start_time = perf_counter()
+                total_time = perf_counter() - input_start
+                if first_output_time is None:
+                    first_output_time = total_time
+                logger.info(
+                    f"{self.__class__.__name__}: processed {output_count} output(s) "
+                    f"in {total_time:.3f}s (ttfo {first_output_time:.3f}s)"
+                )
             except Exception as e:
                 logger.error(f"{self.__class__.__name__}: Error in process(): {type(e).__name__}: {e}", exc_info=True)
 
