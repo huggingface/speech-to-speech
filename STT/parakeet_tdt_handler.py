@@ -111,6 +111,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 sentence_buffer=2.0,
             )
             self.processing_final = False  # Track if we're processing final audio
+            self.last_progressive_time = 0.0
             logger.info(f"Live transcription enabled for Parakeet TDT ({self.backend})")
 
         self.warmup()
@@ -207,7 +208,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
         # Handle progressive updates (live transcription display only)
         if self.enable_live_transcription and is_progressive:
             # Ignore progressive updates if we're already processing final audio
-            if self.backend == "mlx" and self.processing_final:
+            if self.processing_final:
                 logger.debug("Skipping stale progressive update (final audio already received)")
                 return
 
@@ -223,18 +224,28 @@ class ParakeetTDTSTTHandler(BaseHandler):
                     else:
                         logger.debug("Skipping progressive update (MLX busy)")
             else:
+                # Throttle progressive updates if we are falling behind
+                import time
+
+                now = time.time()
+                if (now - self.last_progressive_time) < self.live_transcription_update_interval:
+                    logger.debug("Skipping progressive update (throttled)")
+                    return
                 try:
                     self._show_progressive_transcription(audio_input)
                 except Exception as e:
                     logger.debug(f"Progressive transcription failed: {e}")
+                finally:
+                    self.last_progressive_time = now
             return  # Don't yield to queue
 
         # Handle final transcription (send to LLM)
         try:
-            if self.enable_live_transcription and self.backend == "mlx":
+            if self.enable_live_transcription:
                 # Mark that we're processing final audio (ignore stale progressive updates)
                 self.processing_final = True
 
+            if self.backend == "mlx":
                 # Acquire MLX lock with longer timeout for final transcription
                 with MLXLockContext(handler_name="ParakeetSTT-Final", timeout=5.0) as acquired:
                     if not acquired:
@@ -267,7 +278,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
         yield (pred_text, language_code)
 
         # Reset processing_final flag for next utterance
-        if self.enable_live_transcription and self.backend == "mlx":
+        if self.enable_live_transcription:
             self.processing_final = False
 
     def _detect_language_from_text(self, text):
