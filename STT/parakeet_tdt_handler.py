@@ -101,8 +101,11 @@ class ParakeetTDTSTTHandler(BaseHandler):
 
         # Setup streaming handler if live transcription is enabled
         if self.enable_live_transcription:
+            from STT.smart_progressive_streaming import (
+                SmartProgressiveStreamingHandler,
+                SmartProgressiveStreamingTextHandler,
+            )
             if self.backend == "mlx":
-                from STT.smart_progressive_streaming import SmartProgressiveStreamingHandler
                 self.streaming_handler = SmartProgressiveStreamingHandler(
                     self.model,
                     emission_interval=self.live_transcription_update_interval,
@@ -112,8 +115,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 self.processing_final = False  # Track if we're processing final audio
                 logger.info("Live transcription enabled for Parakeet TDT (MLX)")
             elif self.backend == "nano_parakeet":
-                from STT.smart_progressive_streaming import SmartProgressiveStreamingTextHandler
-
                 def _transcribe_fn(audio_np):
                     return self.model.transcribe(audio_np)
 
