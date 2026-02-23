@@ -64,7 +64,7 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
   - `en`, `de`, `fr`, `es`, `it`, `pt`, `nl`, `pl`, `ru`, `uk`, `cs`, `sk`, `hu`, `ro`, `bg`, `hr`, `sl`, `sr`, `da`, `no`, `sv`, `fi`, `et`, `lv`, `lt`
 - Backend behavior:
   - On macOS/MPS: MLX (`mlx-community/parakeet-tdt-0.6b-v3`)
-  - On CUDA/CPU: NeMo (`nvidia/parakeet-tdt-0.6b-v3`)
+  - On CUDA/CPU: nano-parakeet (`nvidia/parakeet-tdt-0.6b-v3`)
 
 ### 6) Moonshine (`--stt moonshine`)
 
