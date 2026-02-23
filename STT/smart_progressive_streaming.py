@@ -9,7 +9,8 @@ Provides frequent partial transcriptions (every 250ms) with:
 """
 
 import numpy as np
-from typing import Generator, Tuple, List, Callable
+from types import SimpleNamespace
+from typing import Generator, Tuple, List
 from dataclasses import dataclass
 
 @dataclass
@@ -19,29 +20,6 @@ class PartialTranscription:
     active_text: str  # Current partial transcription
     timestamp: float  # Current position in audio
     is_final: bool  # True if this is the last update
-
-
-def _join_segments(segments: List[dict]) -> str:
-    return " ".join(seg.get("segment", "").strip() for seg in segments if seg.get("segment")).strip()
-
-
-def _split_fixed_segments(
-    segments: List[dict],
-    total_duration: float,
-    max_window_size: float,
-    sentence_buffer: float,
-) -> Tuple[List[dict], List[dict]]:
-    if total_duration < max_window_size:
-        return [], segments
-
-    cutoff = max(0.0, total_duration - sentence_buffer)
-    fixed = []
-    for seg in segments:
-        if seg.get("end", 0.0) <= cutoff:
-            fixed.append(seg)
-        else:
-            break
-    return fixed, segments[len(fixed):]
 
 
 class SmartProgressiveStreamingHandler:
@@ -83,6 +61,26 @@ class SmartProgressiveStreamingHandler:
         self.fixed_end_time = 0.0
         self.last_transcribed_length = 0
 
+    def _decode_window(self, audio_window: np.ndarray):
+        """
+        Decode an audio window and return an object with:
+          - text: full transcript for the window
+          - sentences: list of objects with .text and .end (seconds)
+        """
+        if hasattr(self.model, "decode_chunk"):
+            import mlx.core as mx
+            audio_mx = mx.array(audio_window, dtype=mx.float32)
+            return self.model.decode_chunk(audio_mx, verbose=False)
+
+        # nano-parakeet: use timestamps from transcribe
+        result = self.model.transcribe(audio_window, timestamps=True)
+        segments = result.timestamp.get("segment", []) if hasattr(result, "timestamp") else []
+        sentences = [
+            SimpleNamespace(text=seg.get("segment", "").strip(), end=seg.get("end", 0.0))
+            for seg in segments
+        ]
+        return SimpleNamespace(text=getattr(result, "text", ""), sentences=sentences)
+
     def transcribe_incremental(self, audio: np.ndarray) -> PartialTranscription:
         """
         Transcribe audio incrementally (for live streaming).
@@ -116,53 +114,41 @@ class SmartProgressiveStreamingHandler:
         audio_window = audio[window_start_samples:]
 
         # Transcribe current window
-        import mlx.core as mx
-        audio_mx = mx.array(audio_window, dtype=mx.float32)
-        result = self.model.decode_chunk(audio_mx, verbose=False)
+        result = self._decode_window(audio_window)
 
         # Check if window exceeds max_window_size
         window_duration = len(audio_window) / self.sample_rate
 
-        segments_rel = [
-            {
-                "segment": sentence.text.strip(),
-                "start": getattr(sentence, "start", 0.0),
-                "end": sentence.end,
-            }
-            for sentence in getattr(result, "sentences", []) or []
-        ]
+        if window_duration >= self.max_window_size and len(result.sentences) > 1:
+            # Window is too large - fix some sentences
+            cutoff_time = window_duration - self.sentence_buffer
 
-        if window_duration >= self.max_window_size and len(segments_rel) > 1:
-            fixed_rel, _active_rel = _split_fixed_segments(
-                segments_rel,
-                window_duration,
-                self.max_window_size,
-                self.sentence_buffer,
-            )
+            # Find sentences to fix
+            new_fixed_sentences = []
+            new_fixed_end_time = self.fixed_end_time
 
-            if fixed_rel:
-                self.fixed_sentences.extend([seg["segment"] for seg in fixed_rel if seg.get("segment")])
-                self.fixed_end_time += fixed_rel[-1]["end"]
+            for sentence in result.sentences:
+                sentence_abs_time = self.fixed_end_time + sentence.end
+
+                if sentence.end < cutoff_time:
+                    # Fix this sentence
+                    new_fixed_sentences.append(sentence.text.strip())
+                    new_fixed_end_time = sentence_abs_time
+                else:
+                    break
+
+            if new_fixed_sentences:
+                self.fixed_sentences.extend(new_fixed_sentences)
+                self.fixed_end_time = new_fixed_end_time
 
                 # Re-transcribe from new fixed point
                 window_start_samples = int(self.fixed_end_time * self.sample_rate)
                 audio_window = audio[window_start_samples:]
-                import mlx.core as mx
-                audio_mx = mx.array(audio_window, dtype=mx.float32)
-                result = self.model.decode_chunk(audio_mx, verbose=False)
-
-                segments_rel = [
-                    {
-                        "segment": sentence.text.strip(),
-                        "start": getattr(sentence, "start", 0.0),
-                        "end": sentence.end,
-                    }
-                    for sentence in getattr(result, "sentences", []) or []
-                ]
+                result = self._decode_window(audio_window)
 
         # Build output
         fixed_text = " ".join(self.fixed_sentences)
-        active_text = _join_segments(segments_rel) or result.text.strip()
+        active_text = result.text.strip()
         timestamp = len(audio) / self.sample_rate
 
         return PartialTranscription(
@@ -207,53 +193,43 @@ class SmartProgressiveStreamingHandler:
             audio_window = audio[window_start_samples:window_end]
 
             # Transcribe current window
-            import mlx.core as mx
-            audio_mx = mx.array(audio_window, dtype=mx.float32)
-            result = self.model.decode_chunk(audio_mx, verbose=False)
+            result = self._decode_window(audio_window)
 
             # Check if window exceeds max_window_size
             window_duration = (window_end - window_start_samples) / self.sample_rate
 
-            segments_rel = [
-                {
-                    "segment": sentence.text.strip(),
-                    "start": getattr(sentence, "start", 0.0),
-                    "end": sentence.end,
-                }
-                for sentence in getattr(result, "sentences", []) or []
-            ]
+            if window_duration >= self.max_window_size and len(result.sentences) > 1:
+                # Window is too large - need to fix some sentences
+                # Strategy: Keep sentences up to (max_window - sentence_buffer) as fixed
+                cutoff_time = window_duration - self.sentence_buffer
 
-            if window_duration >= self.max_window_size and len(segments_rel) > 1:
-                fixed_rel, _active_rel = _split_fixed_segments(
-                    segments_rel,
-                    window_duration,
-                    self.max_window_size,
-                    self.sentence_buffer,
-                )
+                # Find sentences that are completed and before cutoff
+                new_fixed_sentences = []
+                new_fixed_end_time = fixed_end_time
 
-                if fixed_rel:
-                    fixed_sentences.extend([seg["segment"] for seg in fixed_rel if seg.get("segment")])
-                    fixed_end_time += fixed_rel[-1]["end"]
+                for sentence in result.sentences:
+                    sentence_abs_time = fixed_end_time + sentence.end
+
+                    if sentence.end < cutoff_time:
+                        # This sentence is complete and old enough to fix
+                        new_fixed_sentences.append(sentence.text.strip())
+                        new_fixed_end_time = sentence_abs_time
+                    else:
+                        # Stop here - keep remaining sentences as active
+                        break
+
+                if new_fixed_sentences:
+                    fixed_sentences.extend(new_fixed_sentences)
+                    fixed_end_time = new_fixed_end_time
 
                     # Re-transcribe from new fixed_end_time
                     window_start_samples = int(fixed_end_time * self.sample_rate)
                     audio_window = audio[window_start_samples:window_end]
-                    import mlx.core as mx
-                    audio_mx = mx.array(audio_window, dtype=mx.float32)
-                    result = self.model.decode_chunk(audio_mx, verbose=False)
-
-                    segments_rel = [
-                        {
-                            "segment": sentence.text.strip(),
-                            "start": getattr(sentence, "start", 0.0),
-                            "end": sentence.end,
-                        }
-                        for sentence in getattr(result, "sentences", []) or []
-                    ]
+                    result = self._decode_window(audio_window)
 
             # Build output
             fixed_text = " ".join(fixed_sentences)
-            active_text = _join_segments(segments_rel) or result.text.strip()
+            active_text = result.text.strip()
             timestamp = window_end / self.sample_rate
 
             yield PartialTranscription(
@@ -269,116 +245,6 @@ class SmartProgressiveStreamingHandler:
             if is_final:
                 break
 
-
-class SmartProgressiveStreamingTextHandler:
-    """
-    Progressive streaming for decoders that return timestamped segments.
-
-    If timestamped segments are available, uses them to split fixed vs active
-    text. If not, falls back to repeated full-buffer transcriptions and locks
-    stable sentence prefixes when they repeat across updates.
-    """
-
-    def __init__(
-        self,
-        transcribe_fn: Callable[[np.ndarray], str],
-        emission_interval: float = 0.25,
-        max_window_size: float = 15.0,
-        sentence_buffer: float = 2.0,
-    ):
-        self.transcribe_fn = transcribe_fn
-        self.emission_interval = emission_interval
-        self.max_window_size = max_window_size
-        self.sentence_buffer = sentence_buffer
-        self.sample_rate = 16000
-        self.reset()
-
-    def reset(self):
-        self.fixed_text = ""
-        self.last_text = ""
-        self.last_transcribed_length = 0
-        self._pending_fixed = ""
-        self._pending_fixed_hits = 0
-
-    def _sentence_cutoff(self, text: str) -> str:
-        # Find a stable sentence boundary in a prefix
-        last_punct = max(text.rfind("."), text.rfind("!"), text.rfind("?"))
-        if last_punct == -1:
-            return ""
-        return text[: last_punct + 1].strip()
-
-    def _longest_common_prefix(self, a: str, b: str) -> str:
-        limit = min(len(a), len(b))
-        idx = 0
-        while idx < limit and a[idx] == b[idx]:
-            idx += 1
-        return a[:idx]
-
-    def transcribe_incremental(self, audio: np.ndarray) -> PartialTranscription:
-        current_length = len(audio)
-        if current_length < self.sample_rate * 0.5:
-            return PartialTranscription(
-                fixed_text=self.fixed_text,
-                active_text="",
-                timestamp=current_length / self.sample_rate,
-                is_final=False,
-            )
-
-        if current_length == self.last_transcribed_length:
-            return PartialTranscription(
-                fixed_text=self.fixed_text,
-                active_text="",
-                timestamp=current_length / self.sample_rate,
-                is_final=False,
-            )
-
-        self.last_transcribed_length = current_length
-
-        # Transcribe the full buffer.
-        result = self.transcribe_fn(audio)
-        if hasattr(result, "timestamp") and isinstance(result.timestamp, dict):
-            segments = result.timestamp.get("segment") or []
-            duration = current_length / self.sample_rate
-
-            fixed_segments, active_segments = _split_fixed_segments(
-                segments,
-                duration,
-                self.max_window_size,
-                self.sentence_buffer,
-            )
-
-            self.fixed_text = _join_segments(fixed_segments)
-            active_text = _join_segments(active_segments)
-            if not active_text:
-                text = getattr(result, "text", "") or ""
-                active_text = text[len(self.fixed_text) :].strip() if self.fixed_text else text.strip()
-        else:
-            text = (result or "").strip()
-
-            # Determine stable prefix
-            common = self._longest_common_prefix(self.last_text, text)
-            candidate_fixed = self._sentence_cutoff(common)
-
-            if candidate_fixed and candidate_fixed.startswith(self.fixed_text):
-                if candidate_fixed == self._pending_fixed:
-                    self._pending_fixed_hits += 1
-                else:
-                    self._pending_fixed = candidate_fixed
-                    self._pending_fixed_hits = 1
-
-                if self._pending_fixed_hits >= 2 and len(candidate_fixed) > len(self.fixed_text):
-                    self.fixed_text = candidate_fixed
-
-            self.last_text = text
-
-            active_text = text[len(self.fixed_text) :].strip() if self.fixed_text else text
-
-        return PartialTranscription(
-            fixed_text=self.fixed_text,
-            active_text=active_text,
-            timestamp=current_length / self.sample_rate,
-            is_final=False,
-        )
 
 def demo_smart_progressive():
     """Demonstrate smart progressive streaming."""
