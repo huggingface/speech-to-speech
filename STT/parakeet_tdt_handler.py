@@ -177,13 +177,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 audio_mx = mx.array(dummy_audio, dtype=mx.float32)
                 _ = self.model.decode_chunk(audio_mx, verbose=False)
             else:
-                # NeMo expects file paths or tensors, so we use a temporary approach
-                import tempfile
-                import soundfile as sf
-
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as f:
-                    sf.write(f.name, dummy_audio, 16000)
-                    _ = self.model.transcribe([f.name], verbose=False)
+                _ = self.model.transcribe([dummy_audio], batch_size=1, verbose=False)
 
             logger.info("Model warmed up and ready")
         except Exception as e:
@@ -459,20 +453,13 @@ class ParakeetTDTSTTHandler(BaseHandler):
 
     def _process_nemo(self, audio_input):
         """Process audio using NeMo backend."""
-        import tempfile
-        import soundfile as sf
-
-        # NeMo's transcribe expects file paths, so write to temp file
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as f:
-            sf.write(f.name, audio_input, 16000)
-
-            # Transcribe with optional timestamps
-            output = self.model.transcribe(
-                [f.name],
-                batch_size=1,
-                verbose=False,
-                **self.gen_kwargs
-            )
+        # Transcribe directly from the audio array
+        output = self.model.transcribe(
+            [audio_input],
+            batch_size=1,
+            verbose=False,
+            **self.gen_kwargs
+        )
 
         # Extract transcription
         if hasattr(output[0], "text"):
