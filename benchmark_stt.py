@@ -1,12 +1,12 @@
 """
 STT Benchmarking Script
 
-This script benchmarks Parakeet TDT STT performance.
-Measures: inference time, warmup time, and transcription quality.
+This script benchmarks different Speech-to-Text (STT) handlers to compare their performance.
+Measures: inference time, warmup time, memory usage, and transcription quality.
 
 Usage:
     python benchmark_stt.py --audio_file path/to/audio.wav --iterations 10
-    python benchmark_stt.py --audio_file path/to/audio.wav --handlers parakeet-tdt
+    python benchmark_stt.py --audio_file path/to/audio.wav --handlers whisper mlx-audio-whisper
 """
 
 import argparse
@@ -19,8 +19,6 @@ import json
 from queue import Queue
 from threading import Event
 import soundfile as sf
-
-SUPPORTED_HANDLERS = {"parakeet-tdt"}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,7 +33,6 @@ class BenchmarkResult:
     def __init__(self, handler_name: str):
         self.handler_name = handler_name
         self.warmup_time = 0.0
-        self.audio_duration_s = None
         self.inference_times = []
         self.time_to_first_token = []
         self.transcriptions = []
@@ -70,10 +67,6 @@ class BenchmarkResult:
             "errors": self.errors,
             "sample_transcription": self.transcriptions[0] if self.transcriptions else None,
         }
-
-        if self.audio_duration_s:
-            stats["audio_duration_s"] = self.audio_duration_s
-            stats["rtf"] = self.audio_duration_s / stats["avg_inference_time"]
 
         # Add time to first token stats if available
         if self.time_to_first_token:
@@ -129,11 +122,86 @@ def benchmark_handler(
 
         # Import and instantiate handler
         handler = None
-        if handler_name == "parakeet-tdt":
+        if handler_name == "whisper":
+            from STT.whisper_stt_handler import WhisperSTTHandler
+            setup_kwargs = handler_kwargs or {
+                "model_name": "distil-whisper/distil-large-v3",
+                "device": "cuda",
+                "torch_dtype": "float16",
+            }
+            handler = WhisperSTTHandler(
+                stop_event,
+                queue_in=queue_in,
+                queue_out=queue_out,
+                setup_kwargs=setup_kwargs
+            )
+
+        elif handler_name == "whisper-mlx":
+            from STT.lightning_whisper_mlx_handler import LightningWhisperSTTHandler
+            setup_kwargs = handler_kwargs or {
+                "model_name": "large-v3",
+                "device": "mps",
+            }
+            handler = LightningWhisperSTTHandler(
+                stop_event,
+                queue_in=queue_in,
+                queue_out=queue_out,
+                setup_kwargs=setup_kwargs
+            )
+
+        elif handler_name == "mlx-audio-whisper":
+            from STT.mlx_audio_whisper_handler import MLXAudioWhisperSTTHandler
+            setup_kwargs = handler_kwargs or {
+                "model_name": "mlx-community/whisper-large-v3-turbo",
+            }
+            handler = MLXAudioWhisperSTTHandler(
+                stop_event,
+                queue_in=queue_in,
+                queue_out=queue_out,
+                setup_kwargs=setup_kwargs
+            )
+
+        elif handler_name == "faster-whisper":
+            from STT.faster_whisper_handler import FasterWhisperSTTHandler
+            setup_kwargs = handler_kwargs or {
+                "model_name": "large-v3",
+                "device": "auto",
+                "compute_type": "float16",
+            }
+            handler = FasterWhisperSTTHandler(
+                stop_event,
+                queue_in=queue_in,
+                queue_out=queue_out,
+                setup_kwargs=setup_kwargs
+            )
+
+        elif handler_name == "moonshine":
+            from STT.moonshine_handler import MoonshineSTTHandler
+            handler = MoonshineSTTHandler(
+                stop_event,
+                queue_in=queue_in,
+                queue_out=queue_out,
+            )
+
+        elif handler_name == "parakeet-tdt":
             from STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
             setup_kwargs = handler_kwargs or {
-                "device": "auto",
+                "device": "mps",
                 "enable_live_transcription": False,
+            }
+            handler = ParakeetTDTSTTHandler(
+                stop_event,
+                queue_in=queue_in,
+                queue_out=queue_out,
+                setup_kwargs=setup_kwargs
+            )
+
+        elif handler_name == "parakeet-tdt-progressive":
+            from STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
+            setup_kwargs = handler_kwargs or {
+                "device": "mps",
+                "enable_live_transcription": True,
+                "live_transcription_update_interval": 0.25,
             }
             handler = ParakeetTDTSTTHandler(
                 stop_event,
@@ -146,15 +214,6 @@ def benchmark_handler(
 
         # Warmup is done in handler setup
         logger.info(f"Handler {handler_name} initialized and warmed up")
-
-        # Record audio duration for RTF calculations
-        result.audio_duration_s = len(audio) / 16000.0
-
-        # Additional warmup pass using the real audio (excluded from timings)
-        warmup_start = time.perf_counter()
-        for _ in handler.process(audio):
-            pass
-        result.warmup_time = time.perf_counter() - warmup_start
 
         # Run benchmark iterations
         for i in range(iterations):
@@ -218,8 +277,6 @@ def print_results(results: List[BenchmarkResult]):
         print(f"  Min Inference Time:   {stats['min_inference_time']:.4f}s")
         print(f"  Max Inference Time:   {stats['max_inference_time']:.4f}s")
         print(f"  Std Deviation:        {stats['std_inference_time']:.4f}s")
-        if stats.get("rtf") is not None:
-            print(f"  RTF (avg):            {stats['rtf']:.2f}x")
 
         # Print time to first token stats if available
         if 'avg_time_to_first_token' in stats:
@@ -277,8 +334,8 @@ def main():
     parser.add_argument(
         "--handlers",
         nargs="+",
-        default=["parakeet-tdt"],
-        help="List of handlers to benchmark (default: parakeet-tdt)"
+        default=["whisper", "whisper-mlx", "mlx-audio-whisper", "faster-whisper", "parakeet-tdt", "parakeet-tdt-progressive"],
+        help="List of handlers to benchmark (default: all)"
     )
     parser.add_argument(
         "--iterations",
@@ -307,9 +364,6 @@ def main():
     # Run benchmarks
     results = []
     for handler_name in args.handlers:
-        if handler_name not in SUPPORTED_HANDLERS:
-            logger.error(f"Unsupported handler: {handler_name}. Supported: {sorted(SUPPORTED_HANDLERS)}")
-            continue
         result = benchmark_handler(handler_name, audio, args.iterations)
         results.append(result)
 
