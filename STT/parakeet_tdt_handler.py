@@ -147,11 +147,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
             if model_name.endswith(".nemo"):
                 self.model = nemo_asr.models.ASRModel.restore_from(restore_path=model_name)
             else:
-                # Parakeet TDT uses EncDecRNNTBPEModel
-                if hasattr(nemo_asr.models, "EncDecRNNTBPEModel"):
-                    self.model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained(model_name=model_name)
-                else:
-                    self.model = nemo_asr.models.ASRModel.from_pretrained(model_name=model_name)
+                self.model = nemo_asr.models.ASRModel.from_pretrained(model_name=model_name)
 
             # Move to appropriate device
             if self.device == "cuda" and torch.cuda.is_available():
