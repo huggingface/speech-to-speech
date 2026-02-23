@@ -116,12 +116,16 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 logger.info("Live transcription enabled for Parakeet TDT (MLX)")
             elif self.backend == "nano_parakeet":
                 def _transcribe_fn(audio_np):
-                    return self.model.transcribe(audio_np)
+                    try:
+                        return self.model.transcribe(audio_np, timestamps=True)
+                    except TypeError:
+                        return self.model.transcribe(audio_np)
 
                 self.streaming_handler = SmartProgressiveStreamingTextHandler(
                     _transcribe_fn,
                     emission_interval=self.live_transcription_update_interval,
                     max_window_size=15.0,
+                    sentence_buffer=2.0,
                 )
                 logger.info("Live transcription enabled for Parakeet TDT (nano-parakeet)")
 

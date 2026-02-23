@@ -246,10 +246,12 @@ class SmartProgressiveStreamingTextHandler:
         transcribe_fn: Callable[[np.ndarray], str],
         emission_interval: float = 0.25,
         max_window_size: float = 15.0,
+        sentence_buffer: float = 2.0,
     ):
         self.transcribe_fn = transcribe_fn
         self.emission_interval = emission_interval
         self.max_window_size = max_window_size
+        self.sentence_buffer = sentence_buffer
         self.sample_rate = 16000
         self.reset()
 
@@ -259,6 +261,7 @@ class SmartProgressiveStreamingTextHandler:
         self.last_transcribed_length = 0
         self._pending_fixed = ""
         self._pending_fixed_hits = 0
+        self.fixed_end_time = 0.0
 
     def _sentence_cutoff(self, text: str) -> str:
         # Find a stable sentence boundary in a prefix
@@ -294,27 +297,47 @@ class SmartProgressiveStreamingTextHandler:
 
         self.last_transcribed_length = current_length
 
-        # For now, transcribe the full buffer (simple and stable).
-        # If needed, we can add a sliding window with max_window_size later.
-        text = (self.transcribe_fn(audio) or "").strip()
+        # Transcribe the full buffer.
+        result = self.transcribe_fn(audio)
+        if hasattr(result, "timestamp") and isinstance(result.timestamp, dict):
+            segments = result.timestamp.get("segment") or []
+            text = getattr(result, "text", "") or ""
+            duration = current_length / self.sample_rate
 
-        # Determine stable prefix
-        common = self._longest_common_prefix(self.last_text, text)
-        candidate_fixed = self._sentence_cutoff(common)
+            fixed_segments = []
+            if duration >= self.max_window_size:
+                cutoff = max(0.0, duration - self.sentence_buffer)
+                for seg in segments:
+                    if seg.get("end", 0.0) <= cutoff:
+                        fixed_segments.append(seg)
+                    else:
+                        break
 
-        if candidate_fixed and candidate_fixed.startswith(self.fixed_text):
-            if candidate_fixed == self._pending_fixed:
-                self._pending_fixed_hits += 1
-            else:
-                self._pending_fixed = candidate_fixed
-                self._pending_fixed_hits = 1
+            self.fixed_text = " ".join(seg.get("segment", "").strip() for seg in fixed_segments).strip()
+            active_segments = segments[len(fixed_segments) :]
+            active_text = " ".join(seg.get("segment", "").strip() for seg in active_segments).strip()
+            if not active_text:
+                active_text = text[len(self.fixed_text) :].strip() if self.fixed_text else text.strip()
+        else:
+            text = (result or "").strip()
 
-            if self._pending_fixed_hits >= 2 and len(candidate_fixed) > len(self.fixed_text):
-                self.fixed_text = candidate_fixed
+            # Determine stable prefix
+            common = self._longest_common_prefix(self.last_text, text)
+            candidate_fixed = self._sentence_cutoff(common)
 
-        self.last_text = text
+            if candidate_fixed and candidate_fixed.startswith(self.fixed_text):
+                if candidate_fixed == self._pending_fixed:
+                    self._pending_fixed_hits += 1
+                else:
+                    self._pending_fixed = candidate_fixed
+                    self._pending_fixed_hits = 1
 
-        active_text = text[len(self.fixed_text) :].strip() if self.fixed_text else text
+                if self._pending_fixed_hits >= 2 and len(candidate_fixed) > len(self.fixed_text):
+                    self.fixed_text = candidate_fixed
+
+            self.last_text = text
+
+            active_text = text[len(self.fixed_text) :].strip() if self.fixed_text else text
 
         return PartialTranscription(
             fixed_text=self.fixed_text,
