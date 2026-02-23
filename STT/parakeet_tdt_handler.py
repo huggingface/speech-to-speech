@@ -97,7 +97,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
         if self.device == "mps":
             self._setup_mlx(model_name)
         else:
-            self._setup_nano(model_name)
+            self._setup_nano_parakeet(model_name)
 
         # Setup streaming handler if live transcription is enabled
         if self.enable_live_transcription:
@@ -136,13 +136,13 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 "Install with: pip install mlx-audio"
             ) from e
 
-    def _setup_nano(self, model_name):
+    def _setup_nano_parakeet(self, model_name):
         """Setup for CUDA/CPU using nano-parakeet."""
         try:
             import torch
             from nano_parakeet import from_pretrained
 
-            self.backend = "nano"
+            self.backend = "nano_parakeet"
 
             if self.device == "cuda" and not torch.cuda.is_available():
                 logger.warning("CUDA requested but not available. Falling back to CPU for nano-parakeet.")
@@ -174,7 +174,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 # Convert to mx.array and call decode_chunk directly
                 audio_mx = mx.array(dummy_audio, dtype=mx.float32)
                 _ = self.model.decode_chunk(audio_mx, verbose=False)
-            elif self.backend == "nano":
+            elif self.backend == "nano_parakeet":
                 _ = self.model.transcribe(dummy_audio)
             else:
                 _ = self.model.transcribe([dummy_audio], batch_size=1, verbose=False)
@@ -251,7 +251,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 with MLXLockContext(handler_name="ParakeetSTT", timeout=5.0):
                     pred_text, language_code = self._process_mlx(audio_input)
             else:
-                pred_text, language_code = self._process_nano(audio_input)
+                pred_text, language_code = self._process_nano_parakeet(audio_input)
 
             # Validate and update language
             if language_code and language_code in SUPPORTED_LANGUAGES:
@@ -451,7 +451,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
 
         return pred_text, language_code
 
-    def _process_nano(self, audio_input):
+    def _process_nano_parakeet(self, audio_input):
         """Process audio using nano-parakeet backend."""
         pred_text = self.model.transcribe(audio_input).strip()
 
