@@ -111,12 +111,28 @@ class ParakeetTDTSTTHandler(BaseHandler):
                         sentence_buffer=2.0,
                     )
                     self.processing_final = False  # Track if we're processing final audio
-                    logger.info("Live transcription enabled for Parakeet TDT")
+                    logger.info("Live transcription enabled for Parakeet TDT (MLX)")
                 except ImportError:
                     logger.warning("SmartProgressiveStreamingHandler not available, disabling live transcription")
                     self.enable_live_transcription = False
+            elif self.backend == "nano_parakeet":
+                try:
+                    from STT.smart_progressive_streaming import SmartProgressiveStreamingTextHandler
+
+                    def _transcribe_fn(audio_np):
+                        return self.model.transcribe(audio_np)
+
+                    self.streaming_handler = SmartProgressiveStreamingTextHandler(
+                        _transcribe_fn,
+                        emission_interval=self.live_transcription_update_interval,
+                        max_window_size=15.0,
+                    )
+                    logger.info("Live transcription enabled for Parakeet TDT (nano-parakeet)")
+                except ImportError:
+                    logger.warning("SmartProgressiveStreamingTextHandler not available, disabling live transcription")
+                    self.enable_live_transcription = False
             else:
-                logger.warning("Live transcription only supported with MLX backend, disabling")
+                logger.warning("Live transcription only supported with MLX or nano-parakeet backend, disabling")
                 self.enable_live_transcription = False
 
         self.warmup()
@@ -211,21 +227,28 @@ class ParakeetTDTSTTHandler(BaseHandler):
             audio_input = audio_input.astype(np.float32)
 
         # Handle progressive updates (live transcription display only)
-        if self.enable_live_transcription and self.backend == "mlx" and is_progressive:
+        if self.enable_live_transcription and self.backend in ("mlx", "nano_parakeet") and is_progressive:
             # Ignore progressive updates if we're already processing final audio
-            if self.processing_final:
+            if self.backend == "mlx" and self.processing_final:
                 logger.debug("Skipping stale progressive update (final audio already received)")
                 return
 
             # Try to acquire MLX lock with short timeout - skip if busy (TTS might be using it)
-            with MLXLockContext(handler_name="ParakeetSTT-Progressive", timeout=0.01) as acquired:
-                if acquired:
-                    try:
-                        self._show_progressive_transcription(audio_input)
-                    except Exception as e:
-                        logger.debug(f"Progressive transcription failed: {e}")
-                else:
-                    logger.debug("Skipping progressive update (MLX busy)")
+            if self.backend == "mlx":
+                # Try to acquire MLX lock with short timeout - skip if busy (TTS might be using it)
+                with MLXLockContext(handler_name="ParakeetSTT-Progressive", timeout=0.01) as acquired:
+                    if acquired:
+                        try:
+                            self._show_progressive_transcription(audio_input)
+                        except Exception as e:
+                            logger.debug(f"Progressive transcription failed: {e}")
+                    else:
+                        logger.debug("Skipping progressive update (MLX busy)")
+            else:
+                try:
+                    self._show_progressive_transcription(audio_input)
+                except Exception as e:
+                    logger.debug(f"Progressive transcription failed: {e}")
             return  # Don't yield to queue
 
         # Handle final transcription (send to LLM)

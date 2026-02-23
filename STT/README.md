@@ -156,7 +156,7 @@ python s2s_pipeline.py --stt parakeet-tdt --parakeet_tdt_device auto
 python s2s_pipeline.py --stt parakeet-tdt --parakeet_tdt_language de
 ```
 
-With live transcription (MLX backend):
+With live transcription (MLX or CUDA/nano-parakeet backend):
 
 ```bash
 python s2s_pipeline.py --stt parakeet-tdt \

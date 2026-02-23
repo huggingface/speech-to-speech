@@ -9,8 +9,7 @@ Provides frequent partial transcriptions (every 250ms) with:
 """
 
 import numpy as np
-import mlx.core as mx
-from typing import Generator, Tuple, List
+from typing import Generator, Tuple, List, Callable
 from dataclasses import dataclass
 
 @dataclass
@@ -94,6 +93,7 @@ class SmartProgressiveStreamingHandler:
         audio_window = audio[window_start_samples:]
 
         # Transcribe current window
+        import mlx.core as mx
         audio_mx = mx.array(audio_window, dtype=mx.float32)
         result = self.model.decode_chunk(audio_mx, verbose=False)
 
@@ -125,6 +125,7 @@ class SmartProgressiveStreamingHandler:
                 # Re-transcribe from new fixed point
                 window_start_samples = int(self.fixed_end_time * self.sample_rate)
                 audio_window = audio[window_start_samples:]
+                import mlx.core as mx
                 audio_mx = mx.array(audio_window, dtype=mx.float32)
                 result = self.model.decode_chunk(audio_mx, verbose=False)
 
@@ -175,6 +176,7 @@ class SmartProgressiveStreamingHandler:
             audio_window = audio[window_start_samples:window_end]
 
             # Transcribe current window
+            import mlx.core as mx
             audio_mx = mx.array(audio_window, dtype=mx.float32)
             result = self.model.decode_chunk(audio_mx, verbose=False)
 
@@ -208,6 +210,7 @@ class SmartProgressiveStreamingHandler:
                     # Re-transcribe from new fixed_end_time
                     window_start_samples = int(fixed_end_time * self.sample_rate)
                     audio_window = audio[window_start_samples:window_end]
+                    import mlx.core as mx
                     audio_mx = mx.array(audio_window, dtype=mx.float32)
                     result = self.model.decode_chunk(audio_mx, verbose=False)
 
@@ -229,6 +232,96 @@ class SmartProgressiveStreamingHandler:
             if is_final:
                 break
 
+
+class SmartProgressiveStreamingTextHandler:
+    """
+    Progressive streaming for text-only decoders (no sentence timestamps).
+
+    Uses repeated full-buffer transcriptions and locks stable sentence prefixes
+    when they repeat across updates.
+    """
+
+    def __init__(
+        self,
+        transcribe_fn: Callable[[np.ndarray], str],
+        emission_interval: float = 0.25,
+        max_window_size: float = 15.0,
+    ):
+        self.transcribe_fn = transcribe_fn
+        self.emission_interval = emission_interval
+        self.max_window_size = max_window_size
+        self.sample_rate = 16000
+        self.reset()
+
+    def reset(self):
+        self.fixed_text = ""
+        self.last_text = ""
+        self.last_transcribed_length = 0
+        self._pending_fixed = ""
+        self._pending_fixed_hits = 0
+
+    def _sentence_cutoff(self, text: str) -> str:
+        # Find a stable sentence boundary in a prefix
+        last_punct = max(text.rfind("."), text.rfind("!"), text.rfind("?"))
+        if last_punct == -1:
+            return ""
+        return text[: last_punct + 1].strip()
+
+    def _longest_common_prefix(self, a: str, b: str) -> str:
+        limit = min(len(a), len(b))
+        idx = 0
+        while idx < limit and a[idx] == b[idx]:
+            idx += 1
+        return a[:idx]
+
+    def transcribe_incremental(self, audio: np.ndarray) -> PartialTranscription:
+        current_length = len(audio)
+        if current_length < self.sample_rate * 0.5:
+            return PartialTranscription(
+                fixed_text=self.fixed_text,
+                active_text="",
+                timestamp=current_length / self.sample_rate,
+                is_final=False,
+            )
+
+        if current_length == self.last_transcribed_length:
+            return PartialTranscription(
+                fixed_text=self.fixed_text,
+                active_text="",
+                timestamp=current_length / self.sample_rate,
+                is_final=False,
+            )
+
+        self.last_transcribed_length = current_length
+
+        # For now, transcribe the full buffer (simple and stable).
+        # If needed, we can add a sliding window with max_window_size later.
+        text = (self.transcribe_fn(audio) or "").strip()
+
+        # Determine stable prefix
+        common = self._longest_common_prefix(self.last_text, text)
+        candidate_fixed = self._sentence_cutoff(common)
+
+        if candidate_fixed and candidate_fixed.startswith(self.fixed_text):
+            if candidate_fixed == self._pending_fixed:
+                self._pending_fixed_hits += 1
+            else:
+                self._pending_fixed = candidate_fixed
+                self._pending_fixed_hits = 1
+
+            if self._pending_fixed_hits >= 2 and len(candidate_fixed) > len(self.fixed_text):
+                self.fixed_text = candidate_fixed
+
+        self.last_text = text
+
+        active_text = text[len(self.fixed_text) :].strip() if self.fixed_text else text
+
+        return PartialTranscription(
+            fixed_text=self.fixed_text,
+            active_text=active_text,
+            timestamp=current_length / self.sample_rate,
+            is_final=False,
+        )
 
 def demo_smart_progressive():
     """Demonstrate smart progressive streaming."""
