@@ -119,8 +119,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 logger.warning("Live transcription only supported with MLX backend, disabling")
                 self.enable_live_transcription = False
 
-        if not getattr(self, "_skip_warmup", False):
-            self.warmup()
+        self.warmup()
 
     def _setup_mlx(self, model_name):
         """Setup for Apple Silicon using mlx-audio."""
@@ -151,7 +150,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
             self.model = from_pretrained(model_name=model_name, device=self.device)
 
             logger.info(f"nano-parakeet model loaded successfully on {self.device}")
-            self._skip_warmup = True
         except ImportError as e:
             raise ImportError(
                 "nano-parakeet is required for Parakeet TDT on CUDA/CPU. "
@@ -160,9 +158,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
 
     def warmup(self):
         """Warm up the model with a dummy input."""
-        if getattr(self, "_skip_warmup", False):
-            logger.info("Warmup skipped (handled by nano-parakeet)")
-            return
         logger.info(f"Warming up {self.__class__.__name__}")
 
         # Create 1 second of silence at 16kHz
