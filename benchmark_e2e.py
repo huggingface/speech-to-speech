@@ -22,8 +22,8 @@ import soundfile as sf
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
-TTS_MODEL_PATH = "/home/andi/Documents/qwen3-tts/models/Qwen3-TTS-12Hz-0.6B-Base"
-TTS_REF_AUDIO = "/home/andi/Documents/qwen3-tts-cuda-graphs/ref_audio.wav"
+TTS_MODEL_PATH = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+TTS_REF_AUDIO = "ref_audio.wav"
 TTS_REF_TEXT = "This is a reference audio sample for voice cloning."
 
 LLM_SYSTEM_PROMPT = (
@@ -260,8 +260,8 @@ def main():
 
     # Load TTS
     print(f"Loading TTS (Qwen3-TTS 0.6B, {args.attn})...")
-    from qwen3_tts_cuda_graphs import Qwen3TTSCudaGraphs
-    tts_model = Qwen3TTSCudaGraphs.from_pretrained(
+    from faster_qwen3_tts import FasterQwen3TTS
+    tts_model = FasterQwen3TTS.from_pretrained(
         args.tts_model, device="cuda", dtype=torch.bfloat16,
         attn_implementation=args.attn,
     )

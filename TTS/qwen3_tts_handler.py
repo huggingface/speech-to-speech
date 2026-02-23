@@ -8,8 +8,8 @@ Requires:
 - qwen-tts library (pip install qwen-tts)
 - torch with CUDA support for optimal performance
 
-Optional: For real-time performance on NVIDIA GPUs, install qwen3-tts-cuda-graphs:
-  pip install git+https://github.com/andimarafioti/qwen3-tts-cuda-graphs.git
+Optional: For real-time performance on NVIDIA GPUs, install faster-qwen3-tts:
+  pip install faster-qwen3-tts
 """
 
 import logging
@@ -46,6 +46,8 @@ class Qwen3TTSHandler(BaseHandler):
         ref_audio=None,
         ref_text=DEFAULT_REF_TEXT,
         language="English",
+        speaker=None,
+        instruct=None,
         use_cuda_graphs=False,
         streaming_chunk_size=8,
         max_new_tokens=200,
@@ -73,10 +75,14 @@ class Qwen3TTSHandler(BaseHandler):
         self.ref_audio = ref_audio
         self.ref_text = ref_text
         self.language = language
+        self.speaker = speaker
+        self.instruct = instruct
         self.attn_implementation = attn_implementation
         self.use_cuda_graphs = use_cuda_graphs
         self.streaming_chunk_size = streaming_chunk_size
         self.max_new_tokens = max_new_tokens
+        self.base_model = None
+        self.cuda_graphs_model = None
 
         try:
             import torch
@@ -142,17 +148,19 @@ class Qwen3TTSHandler(BaseHandler):
             )
 
         self.backend = "standard"
+        self.base_model = self.model
+        self.cuda_graphs_model = None
         logger.info("Qwen3-TTS model loaded (standard backend)")
 
     def _setup_cuda_graphs(self):
         """Setup using CUDA graphs backend for real-time performance."""
         try:
-            from qwen3_tts_cuda_graphs import Qwen3TTSCudaGraphs
+            from faster_qwen3_tts import FasterQwen3TTS
         except ImportError:
             logger.warning(
-                "qwen3-tts-cuda-graphs not available, falling back to standard backend. "
+                "faster-qwen3-tts not available, falling back to standard backend. "
                 "For real-time performance on NVIDIA GPUs, install: "
-                "pip install git+https://github.com/andimarafioti/qwen3-tts-cuda-graphs.git"
+                "pip install faster-qwen3-tts"
             )
             self._setup_standard()
             return
@@ -162,13 +170,15 @@ class Qwen3TTSHandler(BaseHandler):
         logger.info(f"Loading Qwen3-TTS model with CUDA graphs: {self.model_name}")
 
         try:
-            self.model = Qwen3TTSCudaGraphs.from_pretrained(
+            self.model = FasterQwen3TTS.from_pretrained(
                 self.model_name,
                 device=self.device,
                 dtype=self.dtype,
                 attn_implementation=self.attn_implementation,
             )
             self.backend = "cuda_graphs"
+            self.cuda_graphs_model = self.model
+            self.base_model = self.model.model
             logger.info("Qwen3-TTS model loaded (CUDA graphs backend)")
         except Exception as e:
             logger.warning(f"CUDA graphs initialization failed: {e}. Falling back to standard backend.")
@@ -223,8 +233,13 @@ class Qwen3TTSHandler(BaseHandler):
         console.print(f"[green]ASSISTANT: {llm_sentence}")
 
         try:
-            if self.backend == "cuda_graphs" and self.ref_audio:
-                yield from self._process_streaming(llm_sentence)
+            if self.backend == "cuda_graphs":
+                if self.ref_audio:
+                    yield from self._process_streaming(llm_sentence)
+                elif self._can_stream_custom_voice():
+                    yield from self._process_streaming_custom_voice(llm_sentence)
+                else:
+                    yield from self._process_batch(llm_sentence)
             else:
                 yield from self._process_batch(llm_sentence)
         except Exception as e:
@@ -239,7 +254,7 @@ class Qwen3TTSHandler(BaseHandler):
         total_samples = 0
         first_chunk = True
 
-        for audio_chunk, sr, timing in self.model.generate_voice_clone_streaming(
+        for audio_chunk, sr, timing in self.cuda_graphs_model.generate_voice_clone_streaming(
             text=text,
             language=self.language,
             ref_audio=self.ref_audio,
@@ -265,23 +280,139 @@ class Qwen3TTSHandler(BaseHandler):
             f"(RTF: {rtf:.2f}, streaming, cuda_graphs)"
         )
 
+    def _process_streaming_custom_voice(self, text):
+        """Stream audio using CUDA graphs custom voice generation."""
+        start = perf_counter()
+        total_samples = 0
+        first_chunk = True
+
+        speaker = self._resolve_speaker()
+        if not speaker:
+            raise ValueError(
+                "CustomVoice generation requires a speaker. "
+                "Set qwen3_tts_speaker or use a voice-clone model with ref_audio."
+            )
+
+        for audio_chunk, sr, timing in self.cuda_graphs_model.generate_custom_voice_streaming(
+            text=text,
+            speaker=speaker,
+            language=self.language,
+            instruct=self.instruct,
+            chunk_size=self.streaming_chunk_size,
+            max_new_tokens=self.max_new_tokens,
+        ):
+            if first_chunk:
+                ttfa = perf_counter() - start
+                logger.info(f"Qwen3-TTS TTFA: {ttfa:.2f}s (streaming, cuda_graphs, custom_voice)")
+                first_chunk = False
+
+            audio_chunk = self._resample_to_pipeline_sr(audio_chunk, sr)
+            audio_chunk = self._to_int16(audio_chunk)
+            total_samples += len(audio_chunk)
+            yield audio_chunk
+
+        generation_time = perf_counter() - start
+        audio_duration = total_samples / PIPELINE_SR
+        rtf = audio_duration / generation_time if generation_time > 0 else 0
+        logger.info(
+            f"Qwen3-TTS generated {audio_duration:.2f}s audio in {generation_time:.2f}s "
+            f"(RTF: {rtf:.2f}, streaming, cuda_graphs, custom_voice)"
+        )
+
+    def _resolve_speaker(self):
+        if self.speaker:
+            return self.speaker
+        if not self.base_model:
+            return None
+        model = getattr(self.base_model, "model", None)
+        get_speakers = getattr(model, "get_supported_speakers", None)
+        if callable(get_speakers):
+            speakers = list(get_speakers() or [])
+            if speakers:
+                return speakers[0]
+        return None
+
+    def _model_type(self):
+        if not self.base_model:
+            return None
+        model = getattr(self.base_model, "model", None)
+        return getattr(model, "tts_model_type", None)
+
+    def _can_stream_custom_voice(self):
+        if self.backend != "cuda_graphs":
+            return False
+        if not self.cuda_graphs_model:
+            return False
+        if not hasattr(self.cuda_graphs_model, "generate_custom_voice_streaming"):
+            return False
+        return self._model_type() == "custom_voice"
+
     def _process_batch(self, text):
         """Generate all audio at once, then yield in chunks."""
         start = perf_counter()
 
+        backend_label = self.backend
+        model_type = self._model_type()
         if self.ref_audio:
-            wavs, sr = self.model.generate_voice_clone(
-                text=text,
-                language=self.language,
-                ref_audio=self.ref_audio,
-                ref_text=self.ref_text,
-                max_new_tokens=self.max_new_tokens,
-            )
+            if self.backend == "cuda_graphs":
+                wavs, sr = self.cuda_graphs_model.generate_voice_clone(
+                    text=text,
+                    language=self.language,
+                    ref_audio=self.ref_audio,
+                    ref_text=self.ref_text,
+                    max_new_tokens=self.max_new_tokens,
+                )
+            else:
+                wavs, sr = self.base_model.generate_voice_clone(
+                    text=text,
+                    language=self.language,
+                    ref_audio=self.ref_audio,
+                    ref_text=self.ref_text,
+                    max_new_tokens=self.max_new_tokens,
+                )
         else:
-            wavs, sr = self.model.generate(
-                text=text,
-                language=self.language,
-            )
+            if model_type == "custom_voice":
+                speaker = self._resolve_speaker()
+                if not speaker:
+                    raise ValueError(
+                        "CustomVoice generation requires a speaker. "
+                        "Set qwen3_tts_speaker or use a voice-clone model with ref_audio."
+                    )
+                if self.backend == "cuda_graphs":
+                    wavs, sr = self.cuda_graphs_model.generate_custom_voice(
+                        text=text,
+                        speaker=speaker,
+                        language=self.language,
+                        instruct=self.instruct,
+                        max_new_tokens=self.max_new_tokens,
+                    )
+                else:
+                    wavs, sr = self.base_model.generate_custom_voice(
+                        text=text,
+                        speaker=speaker,
+                        language=self.language,
+                        instruct=self.instruct,
+                        max_new_tokens=self.max_new_tokens,
+                    )
+            elif model_type == "voice_design":
+                if not self.instruct:
+                    raise ValueError(
+                        "VoiceDesign generation requires qwen3_tts_instruct. "
+                        "Set it or use a different model type."
+                    )
+                if self.backend == "cuda_graphs":
+                    backend_label = "standard (no ref_audio)"
+                wavs, sr = self.base_model.generate_voice_design(
+                    text=text,
+                    instruct=self.instruct,
+                    language=self.language,
+                    max_new_tokens=self.max_new_tokens,
+                )
+            else:
+                raise ValueError(
+                    "Qwen3-TTS Base model requires ref_audio for voice cloning. "
+                    "Provide qwen3_tts_ref_audio or use a CustomVoice/VoiceDesign model."
+                )
 
         audio = self._resample_to_pipeline_sr(wavs[0], sr)
         audio = self._to_int16(audio)
@@ -291,7 +422,7 @@ class Qwen3TTSHandler(BaseHandler):
         rtf = audio_duration / generation_time if generation_time > 0 else 0
         logger.info(
             f"Qwen3-TTS generated {audio_duration:.2f}s audio in {generation_time:.2f}s "
-            f"(RTF: {rtf:.2f}, batch, {self.backend})"
+            f"(RTF: {rtf:.2f}, batch, {backend_label})"
         )
 
         yield audio
