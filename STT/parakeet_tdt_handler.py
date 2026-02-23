@@ -104,23 +104,14 @@ class ParakeetTDTSTTHandler(BaseHandler):
             from STT.smart_progressive_streaming import (
                 SmartProgressiveStreamingHandler,
             )
-            if self.backend == "mlx":
-                self.streaming_handler = SmartProgressiveStreamingHandler(
-                    self.model,
-                    emission_interval=self.live_transcription_update_interval,
-                    max_window_size=15.0,
-                    sentence_buffer=2.0,
-                )
-                self.processing_final = False  # Track if we're processing final audio
-                logger.info("Live transcription enabled for Parakeet TDT (MLX)")
-            elif self.backend == "nano_parakeet":
-                self.streaming_handler = SmartProgressiveStreamingHandler(
-                    self.model,
-                    emission_interval=self.live_transcription_update_interval,
-                    max_window_size=15.0,
-                    sentence_buffer=2.0,
-                )
-                logger.info("Live transcription enabled for Parakeet TDT (nano-parakeet)")
+            self.streaming_handler = SmartProgressiveStreamingHandler(
+                self.model,
+                emission_interval=self.live_transcription_update_interval,
+                max_window_size=15.0,
+                sentence_buffer=2.0,
+            )
+            self.processing_final = False  # Track if we're processing final audio
+            logger.info(f"Live transcription enabled for Parakeet TDT ({self.backend})")
 
         self.warmup()
 
