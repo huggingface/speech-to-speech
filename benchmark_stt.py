@@ -215,6 +215,10 @@ def benchmark_handler(
         # Warmup is done in handler setup
         logger.info(f"Handler {handler_name} initialized and warmed up")
 
+        # Additional warmup on the actual audio (excluded from timings)
+        for _ in handler.process(audio):
+            pass
+
         # Run benchmark iterations
         for i in range(iterations):
             logger.info(f"Iteration {i+1}/{iterations} for {handler_name}")

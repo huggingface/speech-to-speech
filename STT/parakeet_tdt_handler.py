@@ -3,7 +3,7 @@ Parakeet TDT Speech-to-Text Handler
 
 Supports NVIDIA Parakeet TDT model for high-quality multilingual ASR.
 - On Apple Silicon (MPS): Uses mlx-audio with mlx-community/parakeet-tdt-0.6b-v3
-- On CUDA: Uses NVIDIA NeMo with nvidia/parakeet-tdt-0.6b-v3
+- On CUDA/CPU: Uses nano-parakeet (pure PyTorch) with nvidia/parakeet-tdt-0.6b-v3
 
 Model supports 25 European languages with automatic language detection.
 """
@@ -38,7 +38,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
     Handles Speech-to-Text using NVIDIA Parakeet TDT model.
 
     On Apple Silicon (MPS): Uses mlx-audio with the MLX-converted model.
-    On CUDA: Uses NVIDIA NeMo for optimal performance.
+    On CUDA/CPU: Uses nano-parakeet (pure PyTorch) for NeMo-free inference.
 
     Parakeet TDT 0.6B v3 is a 600M parameter multilingual ASR model
     supporting 25 European languages with automatic language detection.
@@ -60,7 +60,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
         Args:
             model_name: Model identifier. Defaults are:
                 - MPS: "mlx-community/parakeet-tdt-0.6b-v3"
-                - CUDA: "nvidia/parakeet-tdt-0.6b-v3"
+                - CUDA/CPU: "nvidia/parakeet-tdt-0.6b-v3"
             device: Device to use ("auto", "cuda", "mps", "cpu")
             compute_type: Compute precision ("float16", "float32")
             language: Target language code (optional, model auto-detects)
@@ -97,7 +97,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
         if self.device == "mps":
             self._setup_mlx(model_name)
         else:
-            self._setup_nemo(model_name)
+            self._setup_nano_parakeet(model_name)
 
         # Setup streaming handler if live transcription is enabled
         if self.enable_live_transcription:
@@ -135,32 +135,25 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 "Install with: pip install mlx-audio"
             ) from e
 
-    def _setup_nemo(self, model_name):
-        """Setup for CUDA using NVIDIA NeMo."""
+    def _setup_nano_parakeet(self, model_name):
+        """Setup for CUDA/CPU using nano-parakeet."""
         try:
-            import nemo.collections.asr as nemo_asr
             import torch
+            from nano_parakeet import from_pretrained
 
-            self.backend = "nemo"
+            self.backend = "nano_parakeet"
 
-            # Load model from HuggingFace or local path
-            if model_name.endswith(".nemo"):
-                self.model = nemo_asr.models.ASRModel.restore_from(restore_path=model_name)
-            else:
-                self.model = nemo_asr.models.ASRModel.from_pretrained(model_name=model_name)
+            if self.device == "cuda" and not torch.cuda.is_available():
+                logger.warning("CUDA requested but not available. Falling back to CPU for nano-parakeet.")
+                self.device = "cpu"
 
-            # Move to appropriate device
-            if self.device == "cuda" and torch.cuda.is_available():
-                self.model = self.model.cuda()
+            self.model = from_pretrained(model_name=model_name, device=self.device)
 
-            # Set eval mode
-            self.model.eval()
-
-            logger.info(f"NeMo Parakeet model loaded successfully on {self.device}")
+            logger.info(f"nano-parakeet model loaded successfully on {self.device}")
         except ImportError as e:
             raise ImportError(
-                "NVIDIA NeMo is required for Parakeet TDT on CUDA. "
-                "Install with: pip install nemo_toolkit[asr]"
+                "nano-parakeet is required for Parakeet TDT on CUDA/CPU. "
+                "Install with: pip install nano-parakeet"
             ) from e
 
     def warmup(self):
@@ -176,6 +169,8 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 # Convert to mx.array and call decode_chunk directly
                 audio_mx = mx.array(dummy_audio, dtype=mx.float32)
                 _ = self.model.decode_chunk(audio_mx, verbose=False)
+            elif self.backend == "nano_parakeet":
+                _ = self.model.transcribe(dummy_audio)
             else:
                 _ = self.model.transcribe([dummy_audio], batch_size=1, verbose=False)
 
@@ -251,7 +246,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 with MLXLockContext(handler_name="ParakeetSTT", timeout=5.0):
                     pred_text, language_code = self._process_mlx(audio_input)
             else:
-                pred_text, language_code = self._process_nemo(audio_input)
+                pred_text, language_code = self._process_nano_parakeet(audio_input)
 
             # Validate and update language
             if language_code and language_code in SUPPORTED_LANGUAGES:
@@ -451,21 +446,9 @@ class ParakeetTDTSTTHandler(BaseHandler):
 
         return pred_text, language_code
 
-    def _process_nemo(self, audio_input):
-        """Process audio using NeMo backend."""
-        # Transcribe directly from the audio array
-        output = self.model.transcribe(
-            [audio_input],
-            batch_size=1,
-            verbose=False,
-            **self.gen_kwargs
-        )
-
-        # Extract transcription
-        if hasattr(output[0], "text"):
-            pred_text = output[0].text.strip()
-        else:
-            pred_text = str(output[0]).strip()
+    def _process_nano_parakeet(self, audio_input):
+        """Process audio using nano-parakeet backend."""
+        pred_text = self.model.transcribe(audio_input).strip()
 
         # Parakeet TDT auto-detects language but doesn't always expose it
         # Default to last known or English

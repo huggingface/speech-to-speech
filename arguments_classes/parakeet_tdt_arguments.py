@@ -9,14 +9,14 @@ class ParakeetTDTSTTHandlerArguments:
 
     Parakeet TDT 0.6B v3 is a 600M parameter multilingual ASR model from NVIDIA.
     - On MPS (Apple Silicon): Uses mlx-audio with mlx-community/parakeet-tdt-0.6b-v3
-    - On CUDA: Uses NVIDIA NeMo with nvidia/parakeet-tdt-0.6b-v3
+    - On CUDA/CPU: Uses nano-parakeet (pure PyTorch) with nvidia/parakeet-tdt-0.6b-v3
     """
 
     parakeet_tdt_model_name: Optional[str] = field(
         default=None,
         metadata={
             "help": "The Parakeet TDT model to use. Defaults to 'mlx-community/parakeet-tdt-0.6b-v3' "
-            "for MPS or 'nvidia/parakeet-tdt-0.6b-v3' for CUDA. Can also be a path to a .nemo file."
+            "for MPS or 'nvidia/parakeet-tdt-0.6b-v3' for CUDA/CPU."
         },
     )
     parakeet_tdt_device: str = field(
