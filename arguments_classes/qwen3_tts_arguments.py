@@ -39,6 +39,18 @@ class Qwen3TTSHandlerArguments:
             "help": "Transcription of the reference audio for voice cloning."
         },
     )
+    qwen3_tts_speaker: str = field(
+        default=None,
+        metadata={
+            "help": "Speaker name for CustomVoice models (optional). If not provided, the first supported speaker is used when available."
+        },
+    )
+    qwen3_tts_instruct: str = field(
+        default=None,
+        metadata={
+            "help": "Instruction text for VoiceDesign models (optional, required for voice design)."
+        },
+    )
     qwen3_tts_language: str = field(
         default="English",
         metadata={

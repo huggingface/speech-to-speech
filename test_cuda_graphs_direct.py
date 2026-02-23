@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
-"""Test CUDA graphs using the Qwen3TTSCudaGraphs wrapper."""
+"""Test CUDA graphs using faster-qwen3-tts."""
 
-import sys
-import os
 import torch
 import time
 import soundfile as sf
 
-# Add qwen3-tts-cuda-graphs to path
-sys.path.insert(0, "/home/andi/Documents/qwen3-tts-cuda-graphs")
+from faster_qwen3_tts import FasterQwen3TTS
 
-from qwen3_tts_cuda_graphs import Qwen3TTSCudaGraphs
-
-MODEL_PATH = "/home/andi/Documents/qwen3-tts-cuda-graphs/models/Qwen3-TTS-12Hz-0.6B-Base"
-ref_audio = "/home/andi/Documents/qwen3-tts-cuda-graphs/ref_audio.wav"
+MODEL_PATH = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+ref_audio = "ref_audio.wav"
 ref_text = "I'm confused why some people have super short timelines."
 text = "Hello from the CUDA graphs direct test. This should be real-time."
 
 print("Loading model with CUDA graphs...")
-model = Qwen3TTSCudaGraphs.from_pretrained(
+model = FasterQwen3TTS.from_pretrained(
     MODEL_PATH,
     device='cuda',
     dtype=torch.bfloat16,
