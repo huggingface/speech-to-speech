@@ -214,7 +214,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 logger.debug("Skipping stale progressive update (final audio already received)")
                 return
 
-            # Try to acquire MLX lock with short timeout - skip if busy (TTS might be using it)
             # Try to acquire lock with short timeout - skip if busy
             with self._compute_lock_context(handler_name="ParakeetSTT-Progressive", timeout=0.01) as acquired:
                 if acquired:
@@ -241,7 +240,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 elif self.backend == "mlx":
                     pred_text, language_code = self._process_mlx_final(audio_input)
                 else:
-                    pred_text, language_code = self._process_nano_parakeet(audio_input)
+                pred_text, language_code = self._process_nano_parakeet_final(audio_input)
 
             # Validate and update language
             if language_code and language_code in SUPPORTED_LANGUAGES:
@@ -455,15 +454,24 @@ class ParakeetTDTSTTHandler(BaseHandler):
 
         return pred_text, language_code
 
-    def _process_nano_parakeet(self, audio_input):
-        """Process audio using nano-parakeet backend."""
+    def _process_nano_parakeet_final(self, audio_input):
+        """Process audio using nano-parakeet backend (final transcription)."""
         pred_text = self.model.transcribe(audio_input).strip()
 
-        # Parakeet TDT auto-detects language but doesn't always expose it
-        # Default to last known or English
-        language_code = self.last_language
+        if self.start_language and self.start_language != "auto":
+            language_code = self.start_language
+        else:
+            detected_lang = self._detect_language_from_text(pred_text)
+            if detected_lang:
+                language_code = detected_lang
+            else:
+                language_code = self.last_language
 
         return pred_text, language_code
+
+    def _process_nano_parakeet(self, audio_input):
+        """Process audio using nano-parakeet backend."""
+        return self._process_nano_parakeet_final(audio_input)
 
     def cleanup(self):
         """Clean up model resources."""
