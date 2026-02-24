@@ -9,7 +9,6 @@ Model supports 25 European languages with automatic language detection.
 """
 
 import logging
-from time import perf_counter
 from sys import platform
 from threading import Lock
 from contextlib import contextmanager
@@ -73,6 +72,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
         self.last_language = language if language else "en"
         self.enable_live_transcription = enable_live_transcription
         self.live_transcription_update_interval = live_transcription_update_interval
+        self.compute_lock = Lock()
 
         # Determine device
         if device == "auto":
@@ -113,7 +113,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 sentence_buffer=2.0,
             )
             self.processing_final = False  # Track if we're processing final audio
-            self.compute_lock = Lock()
             logger.info(f"Live transcription enabled for Parakeet TDT ({self.backend})")
 
         self.warmup()
@@ -188,18 +187,13 @@ class ParakeetTDTSTTHandler(BaseHandler):
         """
         logger.debug("Inferring Parakeet TDT...")
 
-        global pipeline_start
-        pipeline_start = perf_counter()
-
         # Check if this is progressive audio from VAD
         is_progressive = False
         if isinstance(spoken_prompt, tuple) and len(spoken_prompt) == 2:
             mode, audio_input = spoken_prompt
             is_progressive = (mode == "progressive")
-            is_final = (mode == "final")
         else:
             audio_input = spoken_prompt
-            is_final = True
 
         # Ensure audio is float32 numpy array
         if not isinstance(audio_input, np.ndarray):
@@ -335,39 +329,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 console.print(text, end="\r")
         except Exception as e:
             logger.debug(f"Progressive transcription failed: {e}")
-
-    def _process_mlx_streaming(self, audio_input, is_final=False):
-        """Process audio using MLX backend with live transcription display."""
-        # Use streaming handler for progressive transcription
-        result = self.streaming_handler.transcribe_incremental(audio_input)
-
-        if is_final:
-            # Clear the live transcription line
-            console.print(" " * 100, end="\r")
-
-        # Get final combined text
-        if result.fixed_text and result.active_text:
-            pred_text = f"{result.fixed_text} {result.active_text}".strip()
-        elif result.fixed_text:
-            pred_text = result.fixed_text.strip()
-        else:
-            pred_text = result.active_text.strip()
-
-        # Detect language
-        if self.start_language and self.start_language != "auto":
-            language_code = self.start_language
-        else:
-            detected_lang = self._detect_language_from_text(pred_text)
-            if detected_lang:
-                language_code = detected_lang
-            else:
-                language_code = self.last_language
-
-        # Reset streaming handler for next audio
-        if is_final:
-            self.streaming_handler.reset()
-
-        return pred_text, language_code
 
     def _process_mlx_final(self, audio_input):
         """Process final audio using MLX backend with streaming handler."""
