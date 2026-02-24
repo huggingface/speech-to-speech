@@ -11,7 +11,6 @@ Model supports 25 European languages with automatic language detection.
 import logging
 from time import perf_counter
 from sys import platform
-from queue import Empty
 from threading import Lock
 from contextlib import contextmanager
 from baseHandler import BaseHandler
@@ -202,12 +201,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
             audio_input = spoken_prompt
             is_final = True
 
-        # If we're receiving progressive updates and there's backlog, skip this one.
-        if self.enable_live_transcription and is_progressive:
-            if not self.queue_in.empty():
-                logger.debug("Skipping progressive update (queue not empty)")
-                return
-
         # Ensure audio is float32 numpy array
         if not isinstance(audio_input, np.ndarray):
             audio_input = np.array(audio_input, dtype=np.float32)
@@ -238,9 +231,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
             if self.enable_live_transcription:
                 # Mark that we're processing final audio (ignore stale progressive updates)
                 self.processing_final = True
-
-            if is_final:
-                self._drain_queue()
 
             # Acquire lock with longer timeout for final transcription
             with self._compute_lock_context(handler_name="ParakeetSTT-Final", timeout=5.0) as acquired:
@@ -304,24 +294,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
         except LangDetectException as e:
             logger.debug(f"Language detection failed: {e}")
             return None
-
-    def _drain_queue(self):
-        """Drain any queued STT inputs (progressives) before final processing."""
-        drained = 0
-        while True:
-            try:
-                nxt = self.queue_in.get_nowait()
-            except Empty:
-                break
-
-            if isinstance(nxt, bytes) and nxt == b"END":
-                self.queue_in.put(nxt)
-                break
-
-            drained += 1
-
-        if drained:
-            logger.debug(f"Drained {drained} queued STT updates")
 
     @contextmanager
     def _compute_lock_context(self, handler_name: str, timeout: float):
