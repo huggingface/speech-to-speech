@@ -11,6 +11,7 @@ Model supports 25 European languages with automatic language detection.
 import logging
 from time import perf_counter
 from sys import platform
+from queue import Empty
 from baseHandler import BaseHandler
 import numpy as np
 from rich.console import Console
@@ -111,8 +112,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 sentence_buffer=2.0,
             )
             self.processing_final = False  # Track if we're processing final audio
-            self.last_progressive_time = 0.0
-            self.last_progressive_audio_secs = 0.0
             logger.info(f"Live transcription enabled for Parakeet TDT ({self.backend})")
 
         self.warmup()
@@ -200,6 +199,12 @@ class ParakeetTDTSTTHandler(BaseHandler):
             audio_input = spoken_prompt
             is_final = True
 
+        # If we're receiving progressive updates, drop stale ones and keep the most recent
+        if self.enable_live_transcription and is_progressive:
+            mode, audio_input = self._coalesce_progressive_updates(mode, audio_input)
+            is_progressive = (mode == "progressive")
+            is_final = (mode == "final")
+
         # Ensure audio is float32 numpy array
         if not isinstance(audio_input, np.ndarray):
             audio_input = np.array(audio_input, dtype=np.float32)
@@ -225,12 +230,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
                     else:
                         logger.debug("Skipping progressive update (MLX busy)")
             else:
-                # Throttle by audio time to avoid jitter from wall-clock scheduling
-                audio_secs = len(audio_input) / 16000.0
-                if (audio_secs - self.last_progressive_audio_secs) < self.live_transcription_update_interval:
-                    logger.debug("Skipping progressive update (throttled)")
-                    return
-                self.last_progressive_audio_secs = audio_secs
                 try:
                     self._show_progressive_transcription(audio_input)
                 except Exception as e:
@@ -278,7 +277,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
         # Reset processing_final flag for next utterance
         if self.enable_live_transcription:
             self.processing_final = False
-            self.last_progressive_audio_secs = 0.0
 
     def _detect_language_from_text(self, text):
         """
@@ -310,6 +308,46 @@ class ParakeetTDTSTTHandler(BaseHandler):
         except LangDetectException as e:
             logger.debug(f"Language detection failed: {e}")
             return None
+
+    def _coalesce_progressive_updates(self, mode, audio_input):
+        """
+        Drain queued STT inputs and keep only the most recent update.
+        If a final update arrives, it takes precedence over progressives.
+        """
+        latest_mode = mode
+        latest_audio = audio_input
+        saw_final = (mode == "final")
+        drained = 0
+
+        while True:
+            try:
+                nxt = self.queue_in.get_nowait()
+            except Empty:
+                break
+
+            if isinstance(nxt, bytes) and nxt == b"END":
+                # Put sentinel back for the main loop to handle
+                self.queue_in.put(nxt)
+                break
+
+            drained += 1
+
+            if isinstance(nxt, tuple) and len(nxt) == 2:
+                nxt_mode, nxt_audio = nxt
+                if nxt_mode == "final":
+                    saw_final = True
+                    latest_mode, latest_audio = nxt_mode, nxt_audio
+                elif not saw_final:
+                    latest_mode, latest_audio = nxt_mode, nxt_audio
+            else:
+                # Non-tuple inputs are treated as final audio
+                saw_final = True
+                latest_mode, latest_audio = "final", nxt
+
+        if drained:
+            logger.debug(f"Coalesced {drained} queued STT updates")
+
+        return latest_mode, latest_audio
 
     def _show_progressive_transcription(self, audio_input):
         """Show progressive transcription without yielding result."""
