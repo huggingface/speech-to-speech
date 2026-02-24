@@ -12,6 +12,8 @@ import logging
 from time import perf_counter
 from sys import platform
 from queue import Empty
+from threading import Lock
+from contextlib import contextmanager
 from baseHandler import BaseHandler
 import numpy as np
 from rich.console import Console
@@ -112,6 +114,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 sentence_buffer=2.0,
             )
             self.processing_final = False  # Track if we're processing final audio
+            self.compute_lock = Lock()
             logger.info(f"Live transcription enabled for Parakeet TDT ({self.backend})")
 
         self.warmup()
@@ -219,21 +222,15 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 return
 
             # Try to acquire MLX lock with short timeout - skip if busy (TTS might be using it)
-            if self.backend == "mlx":
-                # Try to acquire MLX lock with short timeout - skip if busy (TTS might be using it)
-                with MLXLockContext(handler_name="ParakeetSTT-Progressive", timeout=0.01) as acquired:
-                    if acquired:
-                        try:
-                            self._show_progressive_transcription(audio_input)
-                        except Exception as e:
-                            logger.debug(f"Progressive transcription failed: {e}")
-                    else:
-                        logger.debug("Skipping progressive update (MLX busy)")
-            else:
-                try:
-                    self._show_progressive_transcription(audio_input)
-                except Exception as e:
-                    logger.debug(f"Progressive transcription failed: {e}")
+            # Try to acquire lock with short timeout - skip if busy
+            with self._compute_lock_context(handler_name="ParakeetSTT-Progressive", timeout=0.01) as acquired:
+                if acquired:
+                    try:
+                        self._show_progressive_transcription(audio_input)
+                    except Exception as e:
+                        logger.debug(f"Progressive transcription failed: {e}")
+                else:
+                    logger.debug("Skipping progressive update (compute busy)")
             return  # Don't yield to queue
 
         # Handle final transcription (send to LLM)
@@ -245,17 +242,16 @@ class ParakeetTDTSTTHandler(BaseHandler):
             if is_final:
                 self._drain_queue()
 
-            if self.backend == "mlx":
-                # Acquire MLX lock with longer timeout for final transcription
-                with MLXLockContext(handler_name="ParakeetSTT-Final", timeout=5.0) as acquired:
-                    if not acquired:
-                        logger.error("Failed to acquire MLX lock for final transcription")
-                        pred_text = ""
-                        language_code = self.last_language
-                    else:
-                        pred_text, language_code = self._process_mlx_final(audio_input)
-            else:
-                pred_text, language_code = self._process_nano_parakeet(audio_input)
+            # Acquire lock with longer timeout for final transcription
+            with self._compute_lock_context(handler_name="ParakeetSTT-Final", timeout=5.0) as acquired:
+                if not acquired:
+                    logger.error("Failed to acquire compute lock for final transcription")
+                    pred_text = ""
+                    language_code = self.last_language
+                elif self.backend == "mlx":
+                    pred_text, language_code = self._process_mlx_final(audio_input)
+                else:
+                    pred_text, language_code = self._process_nano_parakeet(audio_input)
 
             # Validate and update language
             if language_code and language_code in SUPPORTED_LANGUAGES:
@@ -326,6 +322,20 @@ class ParakeetTDTSTTHandler(BaseHandler):
 
         if drained:
             logger.debug(f"Drained {drained} queued STT updates")
+
+    @contextmanager
+    def _compute_lock_context(self, handler_name: str, timeout: float):
+        if self.backend == "mlx":
+            with MLXLockContext(handler_name=handler_name, timeout=timeout) as acquired:
+                yield acquired
+            return
+
+        acquired = self.compute_lock.acquire(timeout=timeout)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                self.compute_lock.release()
 
     def _show_progressive_transcription(self, audio_input):
         """Show progressive transcription without yielding result."""
