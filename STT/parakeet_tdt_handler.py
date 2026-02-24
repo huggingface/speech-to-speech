@@ -227,16 +227,15 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 # Throttle progressive updates if we are falling behind
                 import time
 
-                now = time.time()
+                now = time.monotonic()
                 if (now - self.last_progressive_time) < self.live_transcription_update_interval:
                     logger.debug("Skipping progressive update (throttled)")
                     return
+                self.last_progressive_time = now
                 try:
                     self._show_progressive_transcription(audio_input)
                 except Exception as e:
                     logger.debug(f"Progressive transcription failed: {e}")
-                finally:
-                    self.last_progressive_time = now
             return  # Don't yield to queue
 
         # Handle final transcription (send to LLM)

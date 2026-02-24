@@ -79,7 +79,16 @@ class VADHandler(BaseHandler):
         was_triggered_before = self.iterator.triggered
 
         vad_output = self.iterator(torch.from_numpy(audio_float32))
-        logger.debug(f"VAD output: {vad_output}")
+        if vad_output is None or len(vad_output) == 0:
+            logger.debug("VAD output: None")
+        else:
+            try:
+                total_samples = sum(len(t) for t in vad_output)
+                logger.debug(
+                    f"VAD output: {len(vad_output)} chunks, {total_samples} samples"
+                )
+            except Exception:
+                logger.debug(f"VAD output: {type(vad_output)}")
 
         # Check if speech state changed AFTER processing
         is_triggered_now = self.iterator.triggered
