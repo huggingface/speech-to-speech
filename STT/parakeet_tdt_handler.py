@@ -199,11 +199,17 @@ class ParakeetTDTSTTHandler(BaseHandler):
             audio_input = spoken_prompt
             is_final = True
 
-        # If we're receiving progressive updates, drop stale ones and keep the most recent
+        # If we're receiving progressive updates and the queue isn't empty,
+        # skip this one unless there's a final waiting (in which case we process final).
         if self.enable_live_transcription and is_progressive:
-            mode, audio_input = self._coalesce_progressive_updates(mode, audio_input)
-            is_progressive = (mode == "progressive")
-            is_final = (mode == "final")
+            final = self._drain_queue_for_final()
+            if final is None and not self.queue_in.empty():
+                logger.debug("Skipping progressive update (queue not empty)")
+                return
+            if final is not None:
+                mode, audio_input = final
+                is_progressive = False
+                is_final = True
 
         # Ensure audio is float32 numpy array
         if not isinstance(audio_input, np.ndarray):
@@ -241,6 +247,9 @@ class ParakeetTDTSTTHandler(BaseHandler):
             if self.enable_live_transcription:
                 # Mark that we're processing final audio (ignore stale progressive updates)
                 self.processing_final = True
+
+            if is_final:
+                audio_input = self._drain_queue_for_latest_final(audio_input)
 
             if self.backend == "mlx":
                 # Acquire MLX lock with longer timeout for final transcription
@@ -309,14 +318,12 @@ class ParakeetTDTSTTHandler(BaseHandler):
             logger.debug(f"Language detection failed: {e}")
             return None
 
-    def _coalesce_progressive_updates(self, mode, audio_input):
+    def _drain_queue_for_final(self):
         """
-        Drain queued STT inputs and keep only the most recent update.
-        If a final update arrives, it takes precedence over progressives.
+        Drain queued STT inputs looking for a final update.
+        Returns (mode, audio) if a final is found, otherwise None.
         """
-        latest_mode = mode
-        latest_audio = audio_input
-        saw_final = (mode == "final")
+        found_final = None
         drained = 0
 
         while True:
@@ -326,7 +333,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 break
 
             if isinstance(nxt, bytes) and nxt == b"END":
-                # Put sentinel back for the main loop to handle
                 self.queue_in.put(nxt)
                 break
 
@@ -335,19 +341,46 @@ class ParakeetTDTSTTHandler(BaseHandler):
             if isinstance(nxt, tuple) and len(nxt) == 2:
                 nxt_mode, nxt_audio = nxt
                 if nxt_mode == "final":
-                    saw_final = True
-                    latest_mode, latest_audio = nxt_mode, nxt_audio
-                elif not saw_final:
-                    latest_mode, latest_audio = nxt_mode, nxt_audio
+                    found_final = (nxt_mode, nxt_audio)
             else:
-                # Non-tuple inputs are treated as final audio
-                saw_final = True
-                latest_mode, latest_audio = "final", nxt
+                found_final = ("final", nxt)
 
         if drained:
-            logger.debug(f"Coalesced {drained} queued STT updates")
+            logger.debug(f"Drained {drained} queued STT updates")
 
-        return latest_mode, latest_audio
+        return found_final
+
+    def _drain_queue_for_latest_final(self, audio_input):
+        """
+        Drain queued STT inputs and keep the latest final audio.
+        Progressives are discarded once final is being processed.
+        """
+        latest_final = audio_input
+        drained = 0
+
+        while True:
+            try:
+                nxt = self.queue_in.get_nowait()
+            except Empty:
+                break
+
+            if isinstance(nxt, bytes) and nxt == b"END":
+                self.queue_in.put(nxt)
+                break
+
+            drained += 1
+
+            if isinstance(nxt, tuple) and len(nxt) == 2:
+                nxt_mode, nxt_audio = nxt
+                if nxt_mode == "final":
+                    latest_final = nxt_audio
+            else:
+                latest_final = nxt
+
+        if drained:
+            logger.debug(f"Drained {drained} queued STT updates before final")
+
+        return latest_final
 
     def _show_progressive_transcription(self, audio_input):
         """Show progressive transcription without yielding result."""
