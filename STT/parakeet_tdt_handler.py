@@ -112,6 +112,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
             )
             self.processing_final = False  # Track if we're processing final audio
             self.last_progressive_time = 0.0
+            self.last_progressive_audio_secs = 0.0
             logger.info(f"Live transcription enabled for Parakeet TDT ({self.backend})")
 
         self.warmup()
@@ -224,14 +225,12 @@ class ParakeetTDTSTTHandler(BaseHandler):
                     else:
                         logger.debug("Skipping progressive update (MLX busy)")
             else:
-                # Throttle progressive updates if we are falling behind
-                import time
-
-                now = time.monotonic()
-                if (now - self.last_progressive_time) < self.live_transcription_update_interval:
+                # Throttle by audio time to avoid jitter from wall-clock scheduling
+                audio_secs = len(audio_input) / 16000.0
+                if (audio_secs - self.last_progressive_audio_secs) < self.live_transcription_update_interval:
                     logger.debug("Skipping progressive update (throttled)")
                     return
-                self.last_progressive_time = now
+                self.last_progressive_audio_secs = audio_secs
                 try:
                     self._show_progressive_transcription(audio_input)
                 except Exception as e:
@@ -279,6 +278,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
         # Reset processing_final flag for next utterance
         if self.enable_live_transcription:
             self.processing_final = False
+            self.last_progressive_audio_secs = 0.0
 
     def _detect_language_from_text(self, text):
         """
