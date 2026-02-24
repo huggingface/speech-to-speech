@@ -260,9 +260,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
                         language_code = self.last_language
                     else:
                         pred_text, language_code = self._process_mlx_final(audio_input)
-            elif self.backend == "mlx":
-                with MLXLockContext(handler_name="ParakeetSTT", timeout=5.0):
-                    pred_text, language_code = self._process_mlx(audio_input)
             else:
                 pred_text, language_code = self._process_nano_parakeet(audio_input)
 
