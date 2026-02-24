@@ -16,3 +16,4 @@ useful-moonshine @ git+https://github.com/andimarafioti/moonshine.git
 nano-parakeet>=0.1.0  # For Parakeet TDT on CUDA/CPU (NeMo-free)
 kokoro>=0.9.2  # For Kokoro TTS on CUDA/CPU
 pocket-tts>=0.1.0  # For Pocket TTS from Kyutai Labs
+faster-qwen3-tts>=0.1.0  # CUDA graphs backend for Qwen3-TTS
