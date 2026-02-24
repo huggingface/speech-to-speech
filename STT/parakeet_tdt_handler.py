@@ -240,7 +240,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 elif self.backend == "mlx":
                     pred_text, language_code = self._process_mlx_final(audio_input)
                 else:
-                pred_text, language_code = self._process_nano_parakeet_final(audio_input)
+                pred_text, language_code = self._process_nano_parakeet(audio_input)
 
             # Validate and update language
             if language_code and language_code in SUPPORTED_LANGUAGES:
@@ -454,8 +454,8 @@ class ParakeetTDTSTTHandler(BaseHandler):
 
         return pred_text, language_code
 
-    def _process_nano_parakeet_final(self, audio_input):
-        """Process audio using nano-parakeet backend (final transcription)."""
+    def _process_nano_parakeet(self, audio_input):
+        """Process audio using nano-parakeet backend."""
         pred_text = self.model.transcribe(audio_input).strip()
 
         if self.start_language and self.start_language != "auto":
@@ -468,10 +468,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 language_code = self.last_language
 
         return pred_text, language_code
-
-    def _process_nano_parakeet(self, audio_input):
-        """Process audio using nano-parakeet backend."""
-        return self._process_nano_parakeet_final(audio_input)
 
     def cleanup(self):
         """Clean up model resources."""
