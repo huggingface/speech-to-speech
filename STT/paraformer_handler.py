@@ -53,7 +53,10 @@ class ParaformerSTTHandler(BaseHandler):
         pred_text = (
             self.model.generate(spoken_prompt)[0]["text"].strip().replace(" ", "")
         )
-        torch.mps.empty_cache()
+        if self.device == "cuda":
+            torch.cuda.empty_cache()
+        elif self.device == "mps":
+            torch.mps.empty_cache()
 
         logger.debug("finished paraformer inference")
         console.print(f"[yellow]USER: {pred_text}")
