@@ -234,7 +234,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 elif self.backend == "mlx":
                     pred_text, language_code = self._process_mlx_final(audio_input)
                 else:
-                pred_text, language_code = self._process_nano_parakeet(audio_input)
+                    pred_text, language_code = self._process_nano_parakeet(audio_input)
 
             # Validate and update language
             if language_code and language_code in SUPPORTED_LANGUAGES:
