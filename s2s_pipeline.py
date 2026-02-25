@@ -296,6 +296,19 @@ def build_pipeline(
             port=websocket_streamer_kwargs.ws_port,
         )
         comms_handlers = [websocket_streamer]
+    elif module_kwargs.mode == "realtime":
+        from api.openai_realtime.connection import RealtimeConnection
+
+        realtime_conn = RealtimeConnection(
+            stop_event,
+            input_queue=recv_audio_chunks_queue,
+            output_queue=send_audio_chunks_queue,
+            should_listen=should_listen,
+            text_output_queue=text_output_queue,
+            host=websocket_streamer_kwargs.ws_host,
+            port=websocket_streamer_kwargs.ws_port,
+        )
+        comms_handlers = [realtime_conn]
     else:
         from connections.socket_receiver import SocketReceiver
         from connections.socket_sender import SocketSender
