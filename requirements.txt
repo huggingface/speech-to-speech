@@ -13,6 +13,6 @@ modelscope>=1.17.1
 # deepfilternet>=0.5.6  # Optional: for audio enhancement. Incompatible with pocket-tts due to numpy<2 constraint
 openai>=1.40.1
 useful-moonshine @ git+https://github.com/andimarafioti/moonshine.git
-nano-parakeet>=0.1.0  # For Parakeet TDT on CUDA/CPU (NeMo-free)
+nano-parakeet>=0.2.0  # For Parakeet TDT on CUDA/CPU (timestamps)
 kokoro>=0.9.2  # For Kokoro TTS on CUDA/CPU
 pocket-tts>=0.1.0  # For Pocket TTS from Kyutai Labs
