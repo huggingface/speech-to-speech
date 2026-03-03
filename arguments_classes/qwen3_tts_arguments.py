@@ -57,12 +57,6 @@ class Qwen3TTSHandlerArguments:
             "help": "Target language for synthesis. Default is 'English'."
         },
     )
-    qwen3_tts_use_cuda_graphs: bool = field(
-        default=True,
-        metadata={
-            "help": "Use CUDA graphs for real-time inference. Requires NVIDIA GPU. Default is True."
-        },
-    )
     qwen3_tts_streaming_chunk_size: int = field(
         default=8,
         metadata={
@@ -70,8 +64,8 @@ class Qwen3TTSHandlerArguments:
         },
     )
     qwen3_tts_max_new_tokens: int = field(
-        default=200,
+        default=360,
         metadata={
-            "help": "Maximum codec tokens to generate (~12 tokens per second of audio). Default is 200."
+            "help": "Maximum codec tokens to generate (~12 tokens per second of audio, ~30s max). Default is 360."
         },
     )
