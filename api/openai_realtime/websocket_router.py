@@ -1,18 +1,24 @@
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from queue import Empty, Queue
 from threading import Event as ThreadingEvent
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from api.openai_realtime.protocol import (
-    InputAudioBufferAppend,
-    InputAudioBufferCommit,
-    SessionCreated,
-    SessionUpdate,
-    ServerEvent,
+
+from api.openai_realtime.service import RealtimeService, ServerEvent
+
+from openai.types.realtime import (
+    InputAudioBufferAppendEvent,
+    InputAudioBufferCommitEvent,
+    SessionUpdateEvent,
+    ConversationItemCreateEvent,
+    ResponseCreateEvent,
+    ResponseCancelEvent,
+    SessionCreatedEvent,
+    RealtimeSessionCreateRequest
 )
-from api.openai_realtime.service import RealtimeService
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +30,9 @@ async def _send_event(ws: WebSocket, event: ServerEvent) -> None:
         logger.error(f"Failed to send event to client: {e}")
 
 
-async def _broadcast(clients: set[WebSocket], events: list[ServerEvent]) -> None:
-    """Send a list of events to every connected client, in order."""
+async def _send_events(ws: WebSocket, events: list[ServerEvent]) -> None:
     for event in events:
-        await asyncio.gather(
-            *[_send_event(ws, event) for ws in clients],
-            return_exceptions=True,
-        )
+        await _send_event(ws, event)
 
 
 def create_app(
@@ -41,22 +43,51 @@ def create_app(
     should_listen: ThreadingEvent,
     stop_event: ThreadingEvent,
 ) -> FastAPI:
-    app = FastAPI()
-    app.state.clients: set[WebSocket] = set()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.websockets = {}
+        app.state.send_task = asyncio.create_task(_send_loop())
+        yield
+        app.state.send_task.cancel()
+        try:
+            await app.state.send_task
+        except asyncio.CancelledError:
+            pass
+        for ws in list(app.state.websockets.values()):
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+    app = FastAPI(lifespan=lifespan)
 
     @app.websocket("/v1/realtime")
     async def realtime_endpoint(ws: WebSocket):
         await ws.accept()
-        client_id = id(ws)
-        app.state.clients.add(ws)
-        logger.info(f"Client {client_id} connected")
 
-        if len(app.state.clients) == 1:
-            should_listen.set()
-            logger.debug("Listening enabled (should_listen.set())")
+        if app.state.websockets:
+            logger.warning("Rejected connection: a session is already active")
+            await _send_event(
+                ws,
+                service.make_error(
+                    "Only one concurrent session is supported. "
+                    "Disconnect the existing client first.",
+                    code="session_limit_reached",
+                ),
+            )
+            await ws.close(code=1008, reason="Only one concurrent session is supported")
+            return
+
+        conn_id = str(id(ws))
+        service.register(conn_id)
+        app.state.websockets[conn_id] = ws
+        logger.info(f"Client {conn_id} connected")
+
+        should_listen.set()
 
         try:
-            await _send_event(ws, SessionCreated())
+            await _send_event(ws, SessionCreatedEvent(event_id=conn_id, session=RealtimeSessionCreateRequest(type="realtime")))
 
             while not stop_event.is_set():
                 try:
@@ -67,63 +98,82 @@ def create_app(
                 event = service.parse_client_event(raw)
                 if event is None:
                     await _send_event(
-                        ws, service.make_error(f"Unknown or invalid event: {raw.get('type')}")
+                        ws, service.make_error(f"Unknown or invalid event: {raw.get('type')}", "unknown_or_invalid_event", conn_id)
                     )
                     continue
 
-                if isinstance(event, InputAudioBufferAppend):
+                if isinstance(event, InputAudioBufferAppendEvent):
                     if should_listen.is_set():
-                        chunks = service.handle_audio_append(event)
+                        chunks = service.handle_audio_append(conn_id, event)
                         for chunk in chunks:
                             input_queue.put(chunk)
-                        logger.debug(f"Client {client_id}: queued {len(chunks)} audio chunks")
                     else:
-                        logger.debug(f"Client {client_id}: skipping audio (not listening)")
+                        logger.debug(f"Client {conn_id}: skipping audio (not listening)")
 
-                elif isinstance(event, InputAudioBufferCommit):
-                    logger.debug(f"Client {client_id}: audio buffer commit (VAD handles segmentation)")
+                elif isinstance(event, InputAudioBufferCommitEvent):
+                    err = service.handle_audio_commit(conn_id)
+                    if err:
+                        await _send_event(ws, err)
 
-                elif isinstance(event, SessionUpdate):
+                elif isinstance(event, SessionUpdateEvent):
                     service.handle_session_update(event)
 
+                elif isinstance(event, ConversationItemCreateEvent):
+                    events = service.handle_conversation_item_create(conn_id, event)
+                    if events:
+                        await _send_events(ws, events)
+
+                elif isinstance(event, ResponseCreateEvent):
+                    err = service.handle_response_create(conn_id, event)
+                    if err:
+                        await _send_event(ws, err)
+
+                elif isinstance(event, ResponseCancelEvent):
+                    events = service.handle_response_cancel(conn_id)
+                    if events:
+                        await _send_events(ws, events)
+
         except WebSocketDisconnect:
-            logger.info(f"Client {client_id} disconnected")
+            logger.info(f"Client {conn_id} disconnected")
         except Exception as e:
-            logger.error(f"Client {client_id} error: {type(e).__name__}: {e}", exc_info=True)
+            logger.error(f"Client {conn_id} error: {type(e).__name__}: {e}", exc_info=True)
         finally:
-            app.state.clients.discard(ws)
-            logger.info(f"Client {client_id} removed ({len(app.state.clients)} remaining)")
-            if len(app.state.clients) == 0:
-                input_queue.put(b"END")
+            service.unregister(conn_id)
+            app.state.websockets.pop(conn_id, None)
+            logger.info(f"Client {conn_id} removed")
+            input_queue.put(b"END")
 
     async def _send_loop():
-        """Poll pipeline output queues and broadcast to all connected clients."""
+        """Poll pipeline output queues and send to each connected client."""
         while not stop_event.is_set():
             try:
-                # Audio output
                 try:
                     audio_chunk = output_queue.get_nowait()
                     if isinstance(audio_chunk, bytes) and audio_chunk == b"END":
-                        if app.state.clients:
-                            await _broadcast(app.state.clients, service.finish_audio_response())
+                        for cid in service.connection_ids:
+                            ws = app.state.websockets.get(cid)
+                            if ws:
+                                await _send_events(ws, service.finish_audio_response(cid))
                         break
 
-                    if app.state.clients:
-                        if hasattr(audio_chunk, "tobytes"):
-                            audio_chunk = audio_chunk.tobytes()
-                        events = service.encode_audio_chunk(audio_chunk)
-                        await _broadcast(app.state.clients, events)
+                    if hasattr(audio_chunk, "tobytes"):
+                        audio_chunk = audio_chunk.tobytes()
+                    for cid in service.connection_ids:
+                        ws = app.state.websockets.get(cid)
+                        if ws:
+                            await _send_events(ws, service.encode_audio_chunk(cid, audio_chunk))
                 except Empty:
                     pass
 
-                # Text / tool output
                 if text_output_queue:
                     try:
                         text_msg = text_output_queue.get_nowait()
-                        if app.state.clients:
-                            events = service.translate_pipeline_text(text_msg)
-                            if events:
-                                await _broadcast(app.state.clients, events)
+                        for cid in service.connection_ids:
+                            ws = app.state.websockets.get(cid)
+                            if ws:
+                                events = service.translate_pipeline_text(cid, text_msg)
+                                if events:
+                                    await _send_events(ws, events)
                     except Empty:
                         pass
 
@@ -133,25 +183,5 @@ def create_app(
                 break
             except Exception as e:
                 logger.error(f"Send loop error: {e}")
-
-    @app.on_event("startup")
-    async def on_startup():
-        app.state.send_task = asyncio.create_task(_send_loop())
-
-    @app.on_event("shutdown")
-    async def on_shutdown():
-        task = getattr(app.state, "send_task", None)
-        if task:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-        for ws in list(app.state.clients):
-            try:
-                await ws.close()
-            except Exception:
-                pass
 
     return app

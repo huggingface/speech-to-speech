@@ -237,6 +237,7 @@ def initialize_queues_and_events():
         "recv_audio_chunks_queue": Queue(),
         "send_audio_chunks_queue": Queue(),
         "spoken_prompt_queue": Queue(),
+        "stt_output_queue": Queue(),
         "text_prompt_queue": Queue(),
         "lm_response_queue": Queue(),
         "lm_processed_queue": Queue(),  # NEW: LLM -> LM processor -> TTS
@@ -271,6 +272,7 @@ def build_pipeline(
     recv_audio_chunks_queue = queues_and_events["recv_audio_chunks_queue"]
     send_audio_chunks_queue = queues_and_events["send_audio_chunks_queue"]
     spoken_prompt_queue = queues_and_events["spoken_prompt_queue"]
+    stt_output_queue = queues_and_events["stt_output_queue"]
     text_prompt_queue = queues_and_events["text_prompt_queue"]
     lm_response_queue = queues_and_events["lm_response_queue"]
     lm_processed_queue = queues_and_events["lm_processed_queue"]
@@ -297,18 +299,48 @@ def build_pipeline(
         )
         comms_handlers = [websocket_streamer]
     elif module_kwargs.mode == "realtime":
-        from api.openai_realtime.connection import RealtimeConnection
+        from api.openai_realtime.server import RealtimeServer
+        from api.openai_realtime.runtime_config import RuntimeConfig
+        from api.openai_realtime.transcription_notifier import TranscriptionNotifier
 
-        realtime_conn = RealtimeConnection(
+        # Single shared instance: RealtimeService writes to it on
+        # session.update, pipeline handlers read from it at processing time.
+        # TODO: For multiple concurrent sessions, we need to make a RuntimeConfigManager class
+        #       that manages a dict of RuntimeConfig instances. Encapsulating each session's state.
+        runtime_config = RuntimeConfig()
+
+        for kw in (
+            vad_handler_kwargs,
+            open_api_language_model_handler_kwargs,
+            language_model_handler_kwargs,
+            mlx_language_model_handler_kwargs,
+            parler_tts_handler_kwargs,
+            kokoro_tts_handler_kwargs,
+        ):
+            vars(kw)["runtime_config"] = runtime_config
+
+        # Add text_output_queue to vad_handler_kwargs needed for realtime mode
+        vars(vad_handler_kwargs)["text_output_queue"] = text_output_queue
+
+        transcription_notifier = TranscriptionNotifier(
+            stop_event,
+            queue_in=stt_output_queue,
+            queue_out=text_prompt_queue,
+            setup_kwargs={"text_output_queue": text_output_queue},
+        )
+
+        realtime_conn = RealtimeServer(
             stop_event,
             input_queue=recv_audio_chunks_queue,
             output_queue=send_audio_chunks_queue,
             should_listen=should_listen,
             text_output_queue=text_output_queue,
+            text_prompt_queue=text_prompt_queue,
+            runtime_config=runtime_config,
             host=websocket_streamer_kwargs.ws_host,
             port=websocket_streamer_kwargs.ws_port,
         )
-        comms_handlers = [realtime_conn]
+        comms_handlers = [realtime_conn, transcription_notifier]
     else:
         from connections.socket_receiver import SocketReceiver
         from connections.socket_sender import SocketSender
@@ -335,19 +367,21 @@ def build_pipeline(
         vad_handler_kwargs.enable_realtime_transcription = True
         vad_handler_kwargs.realtime_processing_pause = module_kwargs.live_transcription_update_interval
 
-    # Add text_output_queue to VAD setup for speech_started/stopped events
-    vad_setup_kwargs = vars(vad_handler_kwargs)
-    vad_setup_kwargs["text_output_queue"] = text_output_queue
-
     vad = VADHandler(
         stop_event,
         queue_in=recv_audio_chunks_queue,
         queue_out=spoken_prompt_queue,
         setup_args=(should_listen,),
-        setup_kwargs=vad_setup_kwargs,
+        setup_kwargs=vad_handler_kwargs,
     )
 
-    stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs)
+    # In realtime mode, STT outputs to an intermediate queue so the
+    # TranscriptionNotifier can tap the transcription before forwarding
+    # to the LLM.  In other modes STT feeds text_prompt_queue directly.
+    stt_dest = stt_output_queue if module_kwargs.mode == "realtime" else text_prompt_queue
+
+    stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, stt_dest, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs)
+
     lm = get_llm_handler(module_kwargs, stop_event, text_prompt_queue, lm_response_queue, language_model_handler_kwargs, open_api_language_model_handler_kwargs, mlx_language_model_handler_kwargs)
 
     # Add LM output processor to extract tools and forward clean text to TTS
@@ -361,7 +395,10 @@ def build_pipeline(
 
     tts = get_tts_handler(module_kwargs, stop_event, lm_processed_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs)
 
-    return ThreadManager([*comms_handlers, vad, stt, lm, lm_processor, tts])
+    # Build the handler chain
+    pipeline_handlers = [*comms_handlers, vad, stt, lm, lm_processor, tts]
+
+    return ThreadManager(pipeline_handlers)
 
 
 def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs):

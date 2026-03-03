@@ -83,7 +83,8 @@ class KokoroTTSHandler(BaseHandler):
         lang_code="b",
         speed=1.0,
         blocksize=512,
-        gen_kwargs=None,  # Unused, but passed by the pipeline
+        gen_kwargs=None,
+        runtime_config=None,
     ):
         """
         Initialize the Kokoro TTS model.
@@ -104,6 +105,7 @@ class KokoroTTSHandler(BaseHandler):
         self.lang_code = lang_code
         self.speed = speed
         self.blocksize = blocksize
+        self.runtime_config = runtime_config
 
         # Determine device
         if device == "auto":
@@ -216,6 +218,9 @@ class KokoroTTSHandler(BaseHandler):
         Yields:
             Audio chunks as numpy int16 arrays
         """
+        if self.runtime_config and self.runtime_config.voice:
+            self.voice = self.runtime_config.voice
+
         if self.backend == "mlx":
             yield from self._process_mlx(llm_sentence)
         else:

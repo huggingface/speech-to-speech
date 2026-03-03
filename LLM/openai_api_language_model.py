@@ -59,13 +59,14 @@ class OpenApiModelHandler(BaseHandler):
         model_name="deepseek-chat",
         device="cuda",
         gen_kwargs={},
-        base_url =None,
+        base_url=None,
         api_key=None,
         stream=False,
         user_role="user",
         chat_size=1,
         init_chat_role="system",
         init_chat_prompt="You are a helpful AI assistant.",
+        runtime_config=None,
     ):
         self.model_name = model_name
         self.stream = stream
@@ -77,6 +78,8 @@ class OpenApiModelHandler(BaseHandler):
                 )
             self.chat.init_chat({"role": init_chat_role, "content": init_chat_prompt})
         self.user_role = user_role
+        self.runtime_config = runtime_config
+        self._last_instructions = init_chat_prompt
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.warmup()
 
@@ -95,7 +98,17 @@ class OpenApiModelHandler(BaseHandler):
         logger.info(
             f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s"
         )
+    def _apply_runtime_instructions(self):
+        if not self.runtime_config or not self.runtime_config.instructions:
+            return
+        new_instructions = self.runtime_config.instructions
+        if new_instructions != self._last_instructions:
+            self._last_instructions = new_instructions
+            self.chat.init_chat({"role": "system", "content": new_instructions})
+            logger.info(f"LLM instructions updated ({len(new_instructions)} chars)")
+
     def process(self, prompt):
+            self._apply_runtime_instructions()
             logger.debug("call api language model...")
             self.chat.append({"role": self.user_role, "content": prompt})
 

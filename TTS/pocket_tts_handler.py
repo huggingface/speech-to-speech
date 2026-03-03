@@ -23,6 +23,7 @@ class PocketTTSHandler(BaseHandler):
         blocksize=512,
         max_tokens=50,
         gen_kwargs=None,  # For compatibility with pipeline, not used
+        runtime_config=None,  # accepted but unused; implement voice-switch logic in process() to support dynamic voice change
     ):
         """
         Initialize Pocket TTS handler.

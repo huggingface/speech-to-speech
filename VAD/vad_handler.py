@@ -40,6 +40,7 @@ class VADHandler(BaseHandler):
         enable_realtime_transcription=False,
         realtime_processing_pause=0.25,
         text_output_queue=None,
+        runtime_config=None,
     ):
         self.should_listen = should_listen
         self.sample_rate = sample_rate
@@ -49,6 +50,8 @@ class VADHandler(BaseHandler):
         self.enable_realtime_transcription = enable_realtime_transcription
         self.realtime_processing_pause = realtime_processing_pause
         self.text_output_queue = text_output_queue
+        self.runtime_config = runtime_config
+        self._last_turn_detection = None
         self.model, _ = torch.hub.load("snakers4/silero-vad", "silero_vad")
         self.iterator = VADIterator(
             self.model,
@@ -69,7 +72,25 @@ class VADHandler(BaseHandler):
         self.accumulated_audio = []
         self.last_process_time = 0
 
+    def _apply_runtime_turn_detection(self):
+        """Check RuntimeConfig for turn_detection changes and apply them."""
+        if not self.runtime_config or not self.runtime_config.turn_detection:
+            return
+        td = self.runtime_config.turn_detection
+        if td is self._last_turn_detection:
+            return
+        self._last_turn_detection = td
+        if "threshold" in td:
+            self.iterator.threshold = td["threshold"]
+            logger.info(f"VAD threshold updated to {td['threshold']}")
+        if "silence_duration_ms" in td:
+            self.iterator.min_silence_samples = (
+                self.sample_rate * td["silence_duration_ms"] / 1000
+            )
+            logger.info(f"VAD silence duration updated to {td['silence_duration_ms']}ms")
+
     def process(self, audio_chunk):
+        self._apply_runtime_turn_detection()
         logger.debug(f"VAD received {len(audio_chunk)} bytes")
         audio_int16 = np.frombuffer(audio_chunk, dtype=np.int16)
         logger.debug(f"VAD processing {len(audio_int16)} samples")

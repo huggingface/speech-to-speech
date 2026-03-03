@@ -1,3 +1,4 @@
-from api.openai_realtime.connection import RealtimeConnection
+from api.openai_realtime.server import RealtimeServer
+from api.openai_realtime.runtime_config import RuntimeConfig
 
-__all__ = ["RealtimeConnection"]
+__all__ = ["RealtimeServer", "RuntimeConfig"]
