@@ -1,3 +1,4 @@
+import time
 import torchaudio
 from VAD.vad_iterator import VADIterator
 from baseHandler import BaseHandler
@@ -69,34 +70,41 @@ class VADHandler(BaseHandler):
         self.accumulated_audio = []
         self.last_process_time = 0
 
+        # Throttled logging state (summary once per second)
+        self._last_log_time = 0.0
+        self._log_chunks = 0
+        self._log_speech_starts = 0
+        self._log_speech_ends = 0
+
     def process(self, audio_chunk):
-        logger.debug(f"VAD received {len(audio_chunk)} bytes")
+        self._log_chunks += 1
         audio_int16 = np.frombuffer(audio_chunk, dtype=np.int16)
-        logger.debug(f"VAD processing {len(audio_int16)} samples")
         audio_float32 = int2float(audio_int16)
 
         # Check speech state BEFORE processing
         was_triggered_before = self.iterator.triggered
 
         vad_output = self.iterator(torch.from_numpy(audio_float32))
-        if vad_output is None or len(vad_output) == 0:
-            logger.debug("VAD output: None")
-        else:
-            try:
-                total_samples = sum(len(t) for t in vad_output)
-                logger.debug(
-                    f"VAD output: {len(vad_output)} chunks, {total_samples} samples"
-                )
-            except Exception:
-                logger.debug(f"VAD output: {type(vad_output)}")
 
         # Check if speech state changed AFTER processing
         is_triggered_now = self.iterator.triggered
         if is_triggered_now and not was_triggered_before:
-            # Speech started
+            self._log_speech_starts += 1
             if self.text_output_queue:
                 self.text_output_queue.put({"type": "speech_started"})
-                logger.debug("Speech started - sent event")
+
+        # Log a summary once per second instead of every chunk
+        now = time.time()
+        if now - self._last_log_time >= 1.0:
+            state = "SPEAKING" if is_triggered_now else "silent"
+            logger.debug(
+                f"VAD: {self._log_chunks} chunks/s | {state} | "
+                f"speech starts={self._log_speech_starts} ends={self._log_speech_ends}"
+            )
+            self._log_chunks = 0
+            self._log_speech_starts = 0
+            self._log_speech_ends = 0
+            self._last_log_time = now
 
         if self.enable_realtime_transcription:
             # Progressive mode: yield audio chunks while speaking
@@ -107,8 +115,6 @@ class VADHandler(BaseHandler):
 
     def _process_realtime(self, vad_output):
         """Process with real-time progressive audio release."""
-        import time
-
         # Check if we're currently in a speech segment
         if hasattr(self.iterator, "buffer") and len(self.iterator.buffer) > 0:
             current_time = time.time()
@@ -119,28 +125,24 @@ class VADHandler(BaseHandler):
                 duration_ms = len(array) / self.sample_rate * 1000
 
                 if duration_ms >= self.min_speech_ms:
-                    logger.debug(f"VAD: yielding progressive audio ({duration_ms:.0f}ms)")
                     # Yield with special flag to indicate this is progressive (not final)
                     yield ("progressive", array)
                     self.last_process_time = current_time
 
         # Handle end of speech
         if vad_output is not None and len(vad_output) != 0:
-            logger.debug("VAD: end of speech detected")
             array = torch.cat(vad_output).cpu().numpy()
             duration_ms = len(array) / self.sample_rate * 1000
 
             if duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
                 logger.debug(
-                    f"audio input of duration: {len(array) / self.sample_rate}s, skipping"
+                    f"VAD: skipping {duration_ms:.0f}ms segment (out of bounds)"
                 )
             else:
+                self._log_speech_ends += 1
                 self.should_listen.clear()
-                logger.debug("Stop listening")
-                # Send speech_stopped event
                 if self.text_output_queue:
                     self.text_output_queue.put({"type": "speech_stopped"})
-                    logger.debug("Speech stopped - sent event")
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
                 # Yield with final flag
@@ -150,20 +152,17 @@ class VADHandler(BaseHandler):
     def _process_normal(self, vad_output):
         """Original processing: yield only when speech ends."""
         if vad_output is not None and len(vad_output) != 0:
-            logger.debug("VAD: end of speech detected")
             array = torch.cat(vad_output).cpu().numpy()
             duration_ms = len(array) / self.sample_rate * 1000
             if duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
                 logger.debug(
-                    f"audio input of duration: {len(array) / self.sample_rate}s, skipping"
+                    f"VAD: skipping {duration_ms:.0f}ms segment (out of bounds)"
                 )
             else:
+                self._log_speech_ends += 1
                 self.should_listen.clear()
-                logger.debug("Stop listening")
-                # Send speech_stopped event
                 if self.text_output_queue:
                     self.text_output_queue.put({"type": "speech_stopped"})
-                    logger.debug("Speech stopped - sent event")
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
                 yield array
