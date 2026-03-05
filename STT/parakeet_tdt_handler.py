@@ -191,11 +191,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
             mode, audio_input = spoken_prompt
             is_progressive = (mode == "progressive")
         else:
-            mode = "normal"
             audio_input = spoken_prompt
-
-        duration_s = len(audio_input) / 16000 if hasattr(audio_input, '__len__') else 0
-        logger.info(f"STT received {mode} audio ({duration_s:.1f}s, {type(audio_input).__name__})")
 
         # Ensure audio is float32 numpy array
         if not isinstance(audio_input, np.ndarray):

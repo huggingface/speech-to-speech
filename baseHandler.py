@@ -85,9 +85,6 @@ class BaseHandler:
                             change_ratio = abs(total_time - self._last_timing_value) / self._last_timing_value
                             if change_ratio >= self.timing_log_change_ratio:
                                 should_log = True
-                # Always log when handler produces output (important state transition)
-                if output_count > 0:
-                    should_log = True
                 if should_log:
                     logger.info(
                         f"{self.__class__.__name__}: processed {output_count} output(s) "
