@@ -30,7 +30,11 @@ class LocalAudioStreamer:
 
             if self.output_queue.empty():
                 self.input_queue.put(indata.copy())
-                outdata[:] = 0 * outdata
+                # Use minimal dither instead of pure zeros so the audio sink
+                # stays active (prevents PulseAudio/PipeWire from suspending
+                # the output device during the STT/LLM silence window, which
+                # causes the first ~200ms of TTS audio to be dropped on turn 1).
+                outdata[:] = np.random.randint(-1, 2, size=outdata.shape, dtype=np.int16)
             else:
                 try:
                     audio_chunk = self.output_queue.get_nowait()

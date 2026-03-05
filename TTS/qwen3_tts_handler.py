@@ -45,6 +45,7 @@ class Qwen3TTSHandler(BaseHandler):
         instruct=None,
         streaming_chunk_size=8,
         max_new_tokens=360,
+        blocksize=512,
         gen_kwargs=None,
     ):
         self.should_listen = should_listen
@@ -57,6 +58,7 @@ class Qwen3TTSHandler(BaseHandler):
         self.instruct = instruct
         self.streaming_chunk_size = streaming_chunk_size
         self.max_new_tokens = max_new_tokens
+        self.blocksize = blocksize
 
         try:
             import torch
@@ -134,6 +136,8 @@ class Qwen3TTSHandler(BaseHandler):
         start = perf_counter()
         total_samples = 0
         first_chunk = True
+        found_speech = False
+        leftover = np.array([], dtype=np.int16)
 
         for audio_chunk, sr, _timing in gen:
             if first_chunk:
@@ -141,8 +145,33 @@ class Qwen3TTSHandler(BaseHandler):
                 first_chunk = False
             audio_chunk = self._resample_to_pipeline_sr(audio_chunk, sr)
             audio_chunk = self._to_int16(audio_chunk)
-            total_samples += len(audio_chunk)
-            yield audio_chunk
+
+            # Trim leading silence from the very start (model often generates
+            # a silent ramp-up on the first turn, causing a perceived "missing word").
+            if not found_speech:
+                threshold = int(32768 * 0.01)
+                above = np.abs(audio_chunk) > threshold
+                if not np.any(above):
+                    continue  # entire chunk is silence — skip it
+                start_idx = max(0, int(np.argmax(above)) - int(PIPELINE_SR * 0.005))
+                audio_chunk = audio_chunk[start_idx:]
+                found_speech = True
+
+            # Concatenate with any leftover samples from the previous chunk
+            audio_chunk = np.concatenate([leftover, audio_chunk])
+
+            # Yield exactly blocksize-sized chunks (required by LocalAudioStreamer)
+            n = (len(audio_chunk) // self.blocksize) * self.blocksize
+            for i in range(0, n, self.blocksize):
+                yield audio_chunk[i : i + self.blocksize]
+                total_samples += self.blocksize
+            leftover = audio_chunk[n:]
+
+        # Flush any remaining samples with zero-padding
+        if len(leftover) > 0:
+            chunk = np.pad(leftover, (0, self.blocksize - len(leftover)))
+            yield chunk
+            total_samples += len(leftover)
 
         generation_time = perf_counter() - start
         audio_duration = total_samples / PIPELINE_SR
