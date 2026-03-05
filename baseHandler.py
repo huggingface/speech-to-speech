@@ -76,7 +76,7 @@ class BaseHandler:
                 if first_output_time is None:
                     first_output_time = total_time
                 now = perf_counter()
-                should_log = total_time >= self.timing_log_min_s
+                should_log = output_count > 0 and total_time >= self.timing_log_min_s
                 if should_log:
                     if now - self._last_timing_log_time < self.timing_log_interval_s:
                         should_log = False
