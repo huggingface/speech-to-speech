@@ -1,10 +1,16 @@
 import socket
+import time
 from rich.console import Console
 import logging
 
 logger = logging.getLogger(__name__)
 
 console = Console()
+
+# If should_listen stays cleared for longer than this, something in the
+# pipeline probably failed (LLM exception, TTS crash, etc.).  Re-enable
+# listening so the user isn't permanently locked out.
+SHOULD_LISTEN_TIMEOUT_S = 30.0
 
 
 class SocketReceiver:
@@ -48,6 +54,7 @@ class SocketReceiver:
         logger.info("receiver connected")
 
         self.should_listen.set()
+        listen_cleared_at = None
         while not self.stop_event.is_set():
             audio_chunk = self.receive_full_chunk(self.conn, self.chunk_size)
             if audio_chunk is None:
@@ -56,5 +63,18 @@ class SocketReceiver:
                 break
             if self.should_listen.is_set():
                 self.queue_out.put(audio_chunk)
+                listen_cleared_at = None
+            else:
+                # Track how long should_listen has been cleared
+                if listen_cleared_at is None:
+                    listen_cleared_at = time.monotonic()
+                elif time.monotonic() - listen_cleared_at > SHOULD_LISTEN_TIMEOUT_S:
+                    logger.warning(
+                        "should_listen has been cleared for %.0fs — "
+                        "pipeline may be stuck, re-enabling listening",
+                        SHOULD_LISTEN_TIMEOUT_S,
+                    )
+                    self.should_listen.set()
+                    listen_cleared_at = None
         self.conn.close()
         logger.info("Receiver closed")
