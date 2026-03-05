@@ -22,6 +22,12 @@ class LocalAudioStreamer:
         self.output_queue = output_queue
 
     def run(self):
+        # Pre-generate a static dither buffer (±1 LSB, -96 dB) to keep the
+        # audio sink active without calling numpy inside the real-time callback.
+        dither = np.random.randint(
+            -1, 2, size=(self.list_play_chunk_size, 1), dtype=np.int16
+        )
+
         def callback(indata, outdata, frames, time, status):
             # During shutdown, just output silence
             if self.stop_event.is_set():
@@ -30,11 +36,7 @@ class LocalAudioStreamer:
 
             if self.output_queue.empty():
                 self.input_queue.put(indata.copy())
-                # Use minimal dither instead of pure zeros so the audio sink
-                # stays active (prevents PulseAudio/PipeWire from suspending
-                # the output device during the STT/LLM silence window, which
-                # causes the first ~200ms of TTS audio to be dropped on turn 1).
-                outdata[:] = np.random.randint(-1, 2, size=outdata.shape, dtype=np.int16)
+                outdata[:] = dither
             else:
                 try:
                     audio_chunk = self.output_queue.get_nowait()
