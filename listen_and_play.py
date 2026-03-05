@@ -2,6 +2,7 @@ import socket
 import threading
 from queue import Queue
 from dataclasses import dataclass, field
+import numpy as np
 import sounddevice as sd
 from transformers import HfArgumentParser
 
@@ -56,7 +57,12 @@ def listen_and_play(
             outdata[: len(data)] = data
             outdata[len(data) :] = b"\x00" * (len(outdata) - len(data))
         else:
-            outdata[:] = b"\x00" * len(outdata)
+            # Minimal dither (±1 LSB, -96 dB) instead of pure zeros to prevent
+            # PulseAudio/PipeWire from suspending the output sink during silence,
+            # which causes the first ~200ms of TTS audio to be dropped on turn 1.
+            outdata[:] = np.random.randint(
+                -1, 2, size=len(outdata) // 2, dtype=np.int16
+            ).tobytes()
 
     def callback_send(indata, frames, time, status):
         if recv_queue.empty():

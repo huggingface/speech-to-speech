@@ -69,3 +69,9 @@ class Qwen3TTSHandlerArguments:
             "help": "Maximum codec tokens to generate (~12 tokens per second of audio, ~30s max). Default is 360."
         },
     )
+    qwen3_tts_blocksize: int = field(
+        default=512,
+        metadata={
+            "help": "Audio chunk size in samples for streaming output. Must match LocalAudioStreamer blocksize. Default is 512."
+        },
+    )
