@@ -61,8 +61,9 @@ class BaseHandler:
             start_time = input_start
             first_output_time = None
             output_count = 0
+            gen = self.process(input)
             try:
-                for output in self.process(input):
+                for output in gen:
                     if first_output_time is None:
                         first_output_time = perf_counter() - start_time
                     self._times.append(perf_counter() - start_time)
@@ -93,6 +94,8 @@ class BaseHandler:
                     self._last_timing_value = total_time
             except Exception as e:
                 logger.error(f"{self.__class__.__name__}: Error in process(): {type(e).__name__}: {e}", exc_info=True)
+            finally:
+                gen.close()
 
         self.cleanup()
         self.queue_out.put(b"END")
