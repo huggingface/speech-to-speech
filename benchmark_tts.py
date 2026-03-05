@@ -6,7 +6,7 @@ Measures: warmup time, inference time, time-to-first-chunk, audio duration, and 
 
 Usage:
     python benchmark_tts.py --text "Hello world" --iterations 3
-    python benchmark_tts.py --handlers kokoro parler
+    python benchmark_tts.py --handlers kokoro qwen3 pocket_tts
 """
 
 import argparse
@@ -110,16 +110,6 @@ def benchmark_handler(handler_name: str, text: str, iterations: int, handler_kwa
                 setup_args=(should_listen,),
                 setup_kwargs=setup_kwargs,
             )
-        elif handler_name == "parler":
-            from TTS.parler_handler import ParlerTTSHandler
-            setup_kwargs = {"device": "cuda", "torch_dtype": "float16", **setup_kwargs}
-            handler = ParlerTTSHandler(
-                stop_event,
-                queue_in=queue_in,
-                queue_out=queue_out,
-                setup_args=(should_listen,),
-                setup_kwargs=setup_kwargs,
-            )
         elif handler_name == "pocket_tts":
             from TTS.pocket_tts_handler import PocketTTSHandler
             setup_kwargs = {"device": "cpu", **setup_kwargs}
@@ -130,24 +120,35 @@ def benchmark_handler(handler_name: str, text: str, iterations: int, handler_kwa
                 setup_args=(should_listen,),
                 setup_kwargs=setup_kwargs,
             )
-        elif handler_name == "melo":
-            from TTS.melo_handler import MeloTTSHandler
-            setup_kwargs = {"device": "cuda", "language": "en", "speaker_to_id": "en", **setup_kwargs}
-            handler = MeloTTSHandler(
+        elif handler_name == "qwen3":
+            from TTS.qwen3_tts_handler import Qwen3TTSHandler
+            setup_kwargs = {
+                "device": "cuda",
+                "model_name": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+                "ref_audio": "TTS/ref_audio.wav",
+                **setup_kwargs,
+            }
+            handler = Qwen3TTSHandler(
                 stop_event,
                 queue_in=queue_in,
                 queue_out=queue_out,
                 setup_args=(should_listen,),
                 setup_kwargs=setup_kwargs,
             )
-        elif handler_name == "qwen3-tts":
-            from TTS.qwen3_tts_handler import Qwen3TTSHandler
-            setup_kwargs = {
-                "device": "cuda",
-                "model_name": "Qwen3-TTS-12Hz-0.6B-Base",
-                **setup_kwargs,
-            }
-            handler = Qwen3TTSHandler(
+        elif handler_name == "chatTTS":
+            from TTS.chatTTS_handler import ChatTTSHandler
+            setup_kwargs = {"device": "cuda", **setup_kwargs}
+            handler = ChatTTSHandler(
+                stop_event,
+                queue_in=queue_in,
+                queue_out=queue_out,
+                setup_args=(should_listen,),
+                setup_kwargs=setup_kwargs,
+            )
+        elif handler_name == "facebookMMS":
+            from TTS.facebookmms_handler import FacebookMMSTTSHandler
+            setup_kwargs = {"device": "cuda", "language": "en", **setup_kwargs}
+            handler = FacebookMMSTTSHandler(
                 stop_event,
                 queue_in=queue_in,
                 queue_out=queue_out,
@@ -276,8 +277,8 @@ def main():
     parser.add_argument(
         "--handlers",
         nargs="+",
-        default=["kokoro", "parler"],
-        help="List of handlers to benchmark (default: kokoro parler)",
+        default=["kokoro", "qwen3", "pocket_tts"],
+        help="List of handlers to benchmark (kokoro, qwen3, pocket_tts, chatTTS, facebookMMS)",
     )
     parser.add_argument(
         "--iterations",
