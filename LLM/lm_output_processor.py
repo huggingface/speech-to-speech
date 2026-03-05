@@ -21,7 +21,7 @@ class LMOutputProcessor(BaseHandler):
     Side effect: Sends {"type": "assistant_text", "text": ..., "tools": ...} to text_output_queue
     """
 
-    def setup(self, text_output_queue):
+    def setup(self, text_output_queue=None):
         """
         Initialize the processor.
 
@@ -44,21 +44,22 @@ class LMOutputProcessor(BaseHandler):
         logger.debug(f"LM processor: text='{text_chunk}', tools={tools}")
 
         # Send text + tools to WebSocket clients
-        if tools:
-            message = {
-                "type": "assistant_text",
-                "text": text_chunk,
-                "tools": tools
-            }
-            logger.info(f"Sending to clients: text='{text_chunk}', tools={[t['name'] for t in tools]}")
-            self.text_output_queue.put(message)
-        else:
-            message = {
-                "type": "assistant_text",
-                "text": text_chunk
-            }
-            logger.debug(f"Sending to clients: text='{text_chunk}' (no tools)")
-            self.text_output_queue.put(message)
+        if self.text_output_queue is not None:
+            if tools:
+                message = {
+                    "type": "assistant_text",
+                    "text": text_chunk,
+                    "tools": tools
+                }
+                logger.info(f"Sending to clients: text='{text_chunk}', tools={[t['name'] for t in tools]}")
+                self.text_output_queue.put(message)
+            else:
+                message = {
+                    "type": "assistant_text",
+                    "text": text_chunk
+                }
+                logger.debug(f"Sending to clients: text='{text_chunk}' (no tools)")
+                self.text_output_queue.put(message)
 
         # Forward clean text to TTS (yield to maintain streaming)
         logger.debug(f"Forwarding to TTS: '{text_chunk}'")

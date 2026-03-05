@@ -280,7 +280,7 @@ def build_pipeline(
     text_prompt_queue = queues_and_events["text_prompt_queue"]
     lm_response_queue = queues_and_events["lm_response_queue"]
     lm_processed_queue = queues_and_events["lm_processed_queue"]
-    text_output_queue = queues_and_events["text_output_queue"]
+    text_output_queue = None
     if module_kwargs.mode == "local":
         from connections.local_audio_streamer import LocalAudioStreamer
 
@@ -292,6 +292,7 @@ def build_pipeline(
     elif module_kwargs.mode == "websocket":
         from connections.websocket_streamer import WebSocketStreamer
 
+        text_output_queue = queues_and_events["text_output_queue"]
         websocket_streamer = WebSocketStreamer(
             stop_event,
             input_queue=recv_audio_chunks_queue,

@@ -51,6 +51,18 @@ class Qwen3TTSHandlerArguments:
             "help": "Instruction text for VoiceDesign models (optional, required for voice design)."
         },
     )
+    qwen3_tts_xvec_only: bool = field(
+        default=False,
+        metadata={
+            "help": "Use x-vector only voice cloning mode (recommended for cleaner starts and language switching). Default is False."
+        },
+    )
+    qwen3_tts_parity_mode: bool = field(
+        default=False,
+        metadata={
+            "help": "Disable CUDA-graph streaming path and use parity mode for stability. Default is False."
+        },
+    )
     qwen3_tts_language: str = field(
         default="English",
         metadata={
