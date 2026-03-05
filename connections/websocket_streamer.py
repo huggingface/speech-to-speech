@@ -92,6 +92,7 @@ class WebSocketStreamer:
         client_id = id(websocket)
         logger.info(f"Client {client_id} connected")
         self.clients.add(websocket)
+        recv_buffer = bytearray()
 
         # Enable listening when first client connects
         if len(self.clients) == 1:
@@ -104,17 +105,17 @@ class WebSocketStreamer:
                 if isinstance(message, bytes):
                     logger.debug(f"Client {client_id}: Received {len(message)} bytes of audio")
                     if self.should_listen.is_set():
-                        # Split into 512-sample (1024 bytes) chunks for VAD
+                        # Split into 512-sample (1024 bytes) chunks for VAD.
+                        # Keep a per-client remainder buffer so no samples are dropped
+                        # when WebSocket frame boundaries are not aligned.
                         chunk_size_bytes = 512 * 2  # 512 samples * 2 bytes per int16
+                        recv_buffer.extend(message)
                         num_chunks = 0
-                        for i in range(0, len(message), chunk_size_bytes):
-                            chunk = message[i:i + chunk_size_bytes]
-                            # Only queue complete 512-sample chunks
-                            if len(chunk) == chunk_size_bytes:
-                                self.input_queue.put(chunk)
-                                num_chunks += 1
-                            else:
-                                logger.debug(f"Client {client_id}: Skipping incomplete chunk ({len(chunk)} bytes)")
+                        while len(recv_buffer) >= chunk_size_bytes:
+                            chunk = bytes(recv_buffer[:chunk_size_bytes])
+                            del recv_buffer[:chunk_size_bytes]
+                            self.input_queue.put(chunk)
+                            num_chunks += 1
                         logger.debug(f"Client {client_id}: Queued {num_chunks} chunks for processing")
                     else:
                         logger.debug(f"Client {client_id}: Skipping audio (should_listen not set)")

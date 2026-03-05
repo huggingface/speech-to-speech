@@ -43,6 +43,8 @@ class Qwen3TTSHandler(BaseHandler):
         language="English",
         speaker=None,
         instruct=None,
+        xvec_only=False,
+        parity_mode=False,
         streaming_chunk_size=8,
         max_new_tokens=360,
         blocksize=512,
@@ -56,6 +58,8 @@ class Qwen3TTSHandler(BaseHandler):
         self.language = language
         self.speaker = speaker
         self.instruct = instruct
+        self.xvec_only = xvec_only
+        self.parity_mode = parity_mode
         self.streaming_chunk_size = streaming_chunk_size
         self.max_new_tokens = max_new_tokens
         self.blocksize = blocksize
@@ -93,10 +97,13 @@ class Qwen3TTSHandler(BaseHandler):
 
     def warmup(self):
         logger.info(f"Warming up {self.__class__.__name__}")
-        try:
-            self.model._warmup(prefill_len=100)
-        except Exception as e:
-            logger.warning(f"CUDA graph capture failed: {e}")
+        if self.parity_mode:
+            logger.info("Qwen3-TTS parity mode enabled: skipping CUDA graph capture warmup")
+        else:
+            try:
+                self.model._warmup(prefill_len=100)
+            except Exception as e:
+                logger.warning(f"CUDA graph capture failed: {e}")
         try:
             for _ in self.process("Hello, this is a warmup."):
                 pass
@@ -205,7 +212,6 @@ class Qwen3TTSHandler(BaseHandler):
                     )
             except Exception as e:
                 logger.error(f"Error during Qwen3-TTS generation: {e}", exc_info=True)
-                yield np.zeros(160, dtype=np.int16)
         finally:
             self.should_listen.set()
 
@@ -216,11 +222,12 @@ class Qwen3TTSHandler(BaseHandler):
                 language=self.language,
                 ref_audio=self.ref_audio,
                 ref_text=self.ref_text,
-                xvec_only=False,
+                xvec_only=self.xvec_only,
                 chunk_size=self.streaming_chunk_size,
                 max_new_tokens=self.max_new_tokens,
+                parity_mode=self.parity_mode,
             ),
-            label="voice_clone",
+            label="voice_clone_parity" if self.parity_mode else "voice_clone",
         )
 
     def _process_custom_voice(self, text):
