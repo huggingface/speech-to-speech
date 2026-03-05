@@ -91,7 +91,7 @@ class VADHandler(BaseHandler):
         is_triggered_now = self.iterator.triggered
         if is_triggered_now and not was_triggered_before:
             self._log_speech_starts += 1
-            logger.debug("Speech started")
+            logger.info("Speech started")
             if self.text_output_queue:
                 self.text_output_queue.put({"type": "speech_started"})
 
@@ -147,10 +147,9 @@ class VADHandler(BaseHandler):
             else:
                 self._log_speech_ends += 1
                 self.should_listen.clear()
-                logger.debug("Stop listening")
+                logger.info(f"Speech ended ({duration_ms:.0f}ms), stop listening")
                 if self.text_output_queue:
                     self.text_output_queue.put({"type": "speech_stopped"})
-                    logger.debug("Speech stopped - sent event")
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
                 # Yield with final flag
@@ -170,10 +169,9 @@ class VADHandler(BaseHandler):
             else:
                 self._log_speech_ends += 1
                 self.should_listen.clear()
-                logger.debug("Stop listening")
+                logger.info(f"Speech ended ({duration_ms:.0f}ms), stop listening")
                 if self.text_output_queue:
                     self.text_output_queue.put({"type": "speech_stopped"})
-                    logger.debug("Speech stopped - sent event")
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
                 yield array

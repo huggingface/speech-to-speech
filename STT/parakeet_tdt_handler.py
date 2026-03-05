@@ -185,15 +185,17 @@ class ParakeetTDTSTTHandler(BaseHandler):
         Yields:
             Tuple of (transcription_text, language_code)
         """
-        logger.debug("Inferring Parakeet TDT...")
-
         # Check if this is progressive audio from VAD
         is_progressive = False
         if isinstance(spoken_prompt, tuple) and len(spoken_prompt) == 2:
             mode, audio_input = spoken_prompt
             is_progressive = (mode == "progressive")
         else:
+            mode = "normal"
             audio_input = spoken_prompt
+
+        duration_s = len(audio_input) / 16000 if hasattr(audio_input, '__len__') else 0
+        logger.info(f"STT received {mode} audio ({duration_s:.1f}s, {type(audio_input).__name__})")
 
         # Ensure audio is float32 numpy array
         if not isinstance(audio_input, np.ndarray):

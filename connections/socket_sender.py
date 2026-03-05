@@ -1,4 +1,5 @@
 import socket
+from queue import Empty
 from rich.console import Console
 import logging
 
@@ -28,7 +29,10 @@ class SocketSender:
         logger.info("sender connected")
 
         while not self.stop_event.is_set():
-            audio_chunk = self.queue_in.get()
+            try:
+                audio_chunk = self.queue_in.get(timeout=0.5)
+            except Empty:
+                continue
             self.conn.sendall(audio_chunk)
             if isinstance(audio_chunk, bytes) and audio_chunk == b"END":
                 break
