@@ -33,8 +33,8 @@ class ConversationItemInputAudioTranscriptionPartial(BaseModel):
 
 # event that doesn't exist in the OpenAI Realtime API, but we need for Reachy mini:
 # - response.completed
-# - response.audio.delta
+# - response.audio.delta -> response.output_audio.delta
 # - conversation.item.input_audio_transcription.partial -> used conversation.item.input_audio_transcription.delta
-# - response.audio.done
+# - response.audio.done -> response.output_audio.done
 # - response.audio.completed
-# - response.audio_transcript.done
+# - response.audio_transcript.done -> response.output_audio_transcript.done
