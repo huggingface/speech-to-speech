@@ -35,7 +35,7 @@ SUPPORTED_LANGUAGES = [
 
 if LINGUA_AVAILABLE:
     _lingua_detector = LanguageDetectorBuilder.from_iso_codes_639_1(
-        *[IsoCode639_1[code.upper()] for code in SUPPORTED_LANGUAGES]
+        *[getattr(IsoCode639_1, code.upper()) for code in SUPPORTED_LANGUAGES]
     ).build()
 
 
