@@ -194,6 +194,9 @@ class Qwen3TTSHandler(BaseHandler):
         if not llm_sentence:
             llm_sentence = "Hello."
 
+        if getattr(self, 'runtime_config', None) and self.runtime_config.voice:
+            self.ref_audio = self.runtime_config.voice
+
         console.print(f"[green]ASSISTANT: {llm_sentence}")
 
         try:
