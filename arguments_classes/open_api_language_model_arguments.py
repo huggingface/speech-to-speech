@@ -31,7 +31,7 @@ class OpenApiLanguageModelHandlerArguments:
     )
 
     open_api_chat_size: int = field(
-        default=2,
+        default=5,
         metadata={
             "help": "Number of interactions assitant-user to keep for the chat. None for no limitations."
         },
