@@ -18,10 +18,10 @@ from rich.console import Console
 from utils.mlx_lock import MLXLockContext
 
 try:
-    from langdetect import detect, LangDetectException
-    LANGDETECT_AVAILABLE = True
+    from lingua import Language, LanguageDetectorBuilder
+    LINGUA_AVAILABLE = True
 except ImportError:
-    LANGDETECT_AVAILABLE = False
+    LINGUA_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -32,6 +32,22 @@ SUPPORTED_LANGUAGES = [
     "cs", "sk", "hu", "ro", "bg", "hr", "sl", "sr", "da", "no",
     "sv", "fi", "et", "lv", "lt"
 ]
+
+# Lingua uses "nb" (Bokmål) for Norwegian instead of "no"
+_LINGUA_CODE_MAP = {"no": "nb"}
+
+if LINGUA_AVAILABLE:
+    _lingua_iso_to_code = {
+        lang.iso_code_639_1.name.lower(): lang
+        for lang in Language.all()
+        if lang.iso_code_639_1 is not None
+    }
+    _lingua_languages = [
+        _lingua_iso_to_code[_LINGUA_CODE_MAP.get(code, code)]
+        for code in SUPPORTED_LANGUAGES
+        if _LINGUA_CODE_MAP.get(code, code) in _lingua_iso_to_code
+    ]
+    _lingua_detector = LanguageDetectorBuilder.from_languages(*_lingua_languages).build()
 
 
 class ParakeetTDTSTTHandler(BaseHandler):
@@ -259,7 +275,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
 
     def _detect_language_from_text(self, text):
         """
-        Detect language from transcribed text using langdetect.
+        Detect language from transcribed text using lingua-py.
 
         Args:
             text: Transcribed text string
@@ -267,26 +283,21 @@ class ParakeetTDTSTTHandler(BaseHandler):
         Returns:
             Detected language code or None if detection fails
         """
-        if not LANGDETECT_AVAILABLE:
-            logger.warning("langdetect not available, cannot detect language from text")
+        if not LINGUA_AVAILABLE:
+            logger.warning("lingua-py not available, cannot detect language from text")
             return None
 
-        # Need at least some text for reliable detection
-        if not text or len(text.strip()) < 10:
+        # Need sufficient text for reliable detection - short sentences are too ambiguous
+        if not text or len(text.strip()) < 100:
             return None
 
-        try:
-            detected = detect(text)
-            # Map langdetect codes to our supported languages if needed
-            # langdetect uses ISO 639-1 codes which match SUPPORTED_LANGUAGES
-            if detected in SUPPORTED_LANGUAGES:
-                return detected
-            else:
-                logger.debug(f"Detected language '{detected}' not in supported languages")
-                return None
-        except LangDetectException as e:
-            logger.debug(f"Language detection failed: {e}")
+        detected = _lingua_detector.detect_language_of(text)
+        if detected is None:
             return None
+
+        code = detected.iso_code_639_1.name.lower()
+        # Map back lingua-specific codes to our supported codes
+        return {v: k for k, v in _LINGUA_CODE_MAP.items()}.get(code, code)
 
     @contextmanager
     def _compute_lock_context(self, handler_name: str, timeout: float):
