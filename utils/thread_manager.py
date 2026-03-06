@@ -28,6 +28,6 @@ class ThreadManager:
         # Wait for all threads to finish with timeout
         for i, thread in enumerate(self.threads):
             if thread.is_alive():
-                thread.join(timeout=2.0)
+                thread.join(timeout=5.0)
                 if thread.is_alive():
                     logger.warning(f"Thread {i} ({thread.name}) did not terminate within timeout")

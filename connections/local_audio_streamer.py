@@ -22,6 +22,12 @@ class LocalAudioStreamer:
         self.output_queue = output_queue
 
     def run(self):
+        # Pre-generate a static dither buffer (±1 LSB, -96 dB) to keep the
+        # audio sink active without calling numpy inside the real-time callback.
+        dither = np.random.randint(
+            -1, 2, size=(self.list_play_chunk_size, 1), dtype=np.int16
+        )
+
         def callback(indata, outdata, frames, time, status):
             # During shutdown, just output silence
             if self.stop_event.is_set():
@@ -30,7 +36,7 @@ class LocalAudioStreamer:
 
             if self.output_queue.empty():
                 self.input_queue.put(indata.copy())
-                outdata[:] = 0 * outdata
+                outdata[:] = dither
             else:
                 try:
                     audio_chunk = self.output_queue.get_nowait()
