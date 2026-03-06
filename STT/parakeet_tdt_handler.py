@@ -18,7 +18,7 @@ from rich.console import Console
 from utils.mlx_lock import MLXLockContext
 
 try:
-    from lingua import IsoCode639_1, LanguageDetectorBuilder
+    from lingua import Language, LanguageDetectorBuilder
     LINGUA_AVAILABLE = True
 except ImportError:
     LINGUA_AVAILABLE = False
@@ -33,10 +33,21 @@ SUPPORTED_LANGUAGES = [
     "sv", "fi", "et", "lv", "lt"
 ]
 
+# Lingua uses "nb" (Bokmål) for Norwegian instead of "no"
+_LINGUA_CODE_MAP = {"no": "nb"}
+
 if LINGUA_AVAILABLE:
-    _lingua_detector = LanguageDetectorBuilder.from_iso_codes_639_1(
-        *[getattr(IsoCode639_1, code.upper()) for code in SUPPORTED_LANGUAGES]
-    ).build()
+    _lingua_iso_to_code = {
+        lang.iso_code_639_1.name.lower(): lang
+        for lang in Language.all()
+        if lang.iso_code_639_1 is not None
+    }
+    _lingua_languages = [
+        _lingua_iso_to_code[_LINGUA_CODE_MAP.get(code, code)]
+        for code in SUPPORTED_LANGUAGES
+        if _LINGUA_CODE_MAP.get(code, code) in _lingua_iso_to_code
+    ]
+    _lingua_detector = LanguageDetectorBuilder.from_languages(*_lingua_languages).build()
 
 
 class ParakeetTDTSTTHandler(BaseHandler):
@@ -284,7 +295,9 @@ class ParakeetTDTSTTHandler(BaseHandler):
         if detected is None:
             return None
 
-        return detected.iso_code_639_1.name.lower()
+        code = detected.iso_code_639_1.name.lower()
+        # Map back lingua-specific codes to our supported codes
+        return {v: k for k, v in _LINGUA_CODE_MAP.items()}.get(code, code)
 
     @contextmanager
     def _compute_lock_context(self, handler_name: str, timeout: float):
