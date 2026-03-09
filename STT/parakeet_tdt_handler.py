@@ -185,8 +185,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
         Yields:
             Tuple of (transcription_text, language_code)
         """
-        logger.debug("Inferring Parakeet TDT...")
-
         # Check if this is progressive audio from VAD
         is_progressive = False
         if isinstance(spoken_prompt, tuple) and len(spoken_prompt) == 2:

@@ -2,6 +2,7 @@ import socket
 import threading
 from queue import Queue
 from dataclasses import dataclass, field
+import numpy as np
 import sounddevice as sd
 from transformers import HfArgumentParser
 
@@ -50,13 +51,19 @@ def listen_and_play(
     recv_queue = Queue()
     send_queue = Queue()
 
+    # Pre-generate a static dither buffer (±1 LSB, -96 dB) to keep the audio
+    # sink active without calling numpy inside the real-time audio callback.
+    dither_bytes = np.random.randint(
+        -1, 2, size=list_play_chunk_size, dtype=np.int16
+    ).tobytes()
+
     def callback_recv(outdata, frames, time, status):
         if not recv_queue.empty():
             data = recv_queue.get()
             outdata[: len(data)] = data
             outdata[len(data) :] = b"\x00" * (len(outdata) - len(data))
         else:
-            outdata[:] = b"\x00" * len(outdata)
+            outdata[:] = dither_bytes
 
     def callback_send(indata, frames, time, status):
         if recv_queue.empty():
