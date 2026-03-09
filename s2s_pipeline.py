@@ -172,7 +172,8 @@ def overwrite_device_argument(common_device: Optional[str], *handler_kwargs):
                 kwargs.paraformer_stt_device = common_device
             if hasattr(kwargs, "facebook_mms_device"):
                 kwargs.facebook_mms_device = common_device
-
+            if hasattr(kwargs, "qwen3_tts_device"):
+                kwargs.qwen3_tts_device = common_device
 
 def prepare_module_args(module_kwargs, *handler_kwargs):
     optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs)
