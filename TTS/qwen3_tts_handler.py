@@ -127,9 +127,7 @@ class Qwen3TTSHandler(BaseHandler):
         return None
 
     def _to_int16(self, audio):
-        if audio.dtype != np.int16:
-            return (audio * 32768).astype(np.int16)
-        return audio
+        return np.clip(audio * 32768, -32768, 32767).astype(np.int16)
 
     def _resample_to_pipeline_sr(self, audio, sr):
         if sr == PIPELINE_SR:
