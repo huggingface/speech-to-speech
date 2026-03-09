@@ -45,21 +45,16 @@ class LMOutputProcessor(BaseHandler):
 
         # Send text + tools to WebSocket clients
         if self.text_output_queue is not None:
+            message = {
+                "type": "assistant_text",
+                "text": text_chunk
+            }
             if tools:
-                message = {
-                    "type": "assistant_text",
-                    "text": text_chunk,
-                    "tools": tools
-                }
+                message["tools"] = tools
                 logger.info(f"Sending to clients: text='{text_chunk}', tools={[t['name'] for t in tools]}")
-                self.text_output_queue.put(message)
             else:
-                message = {
-                    "type": "assistant_text",
-                    "text": text_chunk
-                }
                 logger.debug(f"Sending to clients: text='{text_chunk}' (no tools)")
-                self.text_output_queue.put(message)
+            self.text_output_queue.put(message)
 
         # Forward clean text to TTS (yield to maintain streaming)
         logger.debug(f"Forwarding to TTS: '{text_chunk}'")
