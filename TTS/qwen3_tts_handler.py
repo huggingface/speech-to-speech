@@ -105,7 +105,7 @@ class Qwen3TTSHandler(BaseHandler):
             except Exception as e:
                 logger.warning(f"CUDA graph capture failed: {e}")
         try:
-            for _ in self.process("Hello, this is a warmup."):
+            for _ in self._warmup_process("Hello, this is a warmup."):
                 pass
             logger.info(f"{self.__class__.__name__} warmed up")
         except Exception as e:
@@ -128,6 +128,20 @@ class Qwen3TTSHandler(BaseHandler):
 
     def _to_int16(self, audio):
         return np.clip(audio * 32768, -32768, 32767).astype(np.int16)
+
+    def _warmup_process(self, llm_sentence):
+        model_type = self._model_type()
+        if self.ref_audio:
+            yield from self._process_voice_clone(llm_sentence)
+        elif model_type == "custom_voice":
+            yield from self._process_custom_voice(llm_sentence)
+        elif model_type == "voice_design":
+            yield from self._process_voice_design(llm_sentence)
+        else:
+            raise ValueError(
+                "Qwen3-TTS Base model requires ref_audio for voice cloning. "
+                "Provide qwen3_tts_ref_audio or use a CustomVoice/VoiceDesign model."
+            )
 
     def _resample_to_pipeline_sr(self, audio, sr):
         if sr == PIPELINE_SR:
