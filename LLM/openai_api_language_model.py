@@ -110,7 +110,6 @@ class OpenApiModelHandler(BaseHandler):
     def process(self, prompt):
             self._apply_runtime_instructions()
             logger.debug("call api language model...")
-            self.chat.append({"role": self.user_role, "content": prompt})
 
             language_code = None
             if isinstance(prompt, tuple):
@@ -118,12 +117,12 @@ class OpenApiModelHandler(BaseHandler):
                 if language_code[-5:] == "-auto":
                     language_code = language_code[:-5]
                     prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
-            
+
+            self.chat.append({"role": self.user_role, "content": prompt})
+
             response = self.client.chat.completions.create(
                 model=self.model_name,
-                messages=[
-                    {"role": self.user_role, "content": prompt},
-                ],
+                messages=self.chat.to_list(),
                 stream=self.stream
             )
             if self.stream:

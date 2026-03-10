@@ -9,7 +9,7 @@ Provides frequent partial transcriptions (every 250ms) with:
 """
 
 import numpy as np
-import mlx.core as mx
+from types import SimpleNamespace
 from typing import Generator, Tuple, List
 from dataclasses import dataclass
 
@@ -61,6 +61,26 @@ class SmartProgressiveStreamingHandler:
         self.fixed_end_time = 0.0
         self.last_transcribed_length = 0
 
+    def _decode_window(self, audio_window: np.ndarray):
+        """
+        Decode an audio window and return an object with:
+          - text: full transcript for the window
+          - sentences: list of objects with .text and .end (seconds)
+        """
+        if hasattr(self.model, "decode_chunk"):
+            import mlx.core as mx
+            audio_mx = mx.array(audio_window, dtype=mx.float32)
+            return self.model.decode_chunk(audio_mx, verbose=False)
+
+        # nano-parakeet: use timestamps from transcribe
+        result = self.model.transcribe(audio_window, timestamps=True)
+        segments = result.timestamp.get("segment", []) if hasattr(result, "timestamp") else []
+        sentences = [
+            SimpleNamespace(text=seg.get("segment", "").strip(), end=seg.get("end", 0.0))
+            for seg in segments
+        ]
+        return SimpleNamespace(text=getattr(result, "text", ""), sentences=sentences)
+
     def transcribe_incremental(self, audio: np.ndarray) -> PartialTranscription:
         """
         Transcribe audio incrementally (for live streaming).
@@ -94,8 +114,7 @@ class SmartProgressiveStreamingHandler:
         audio_window = audio[window_start_samples:]
 
         # Transcribe current window
-        audio_mx = mx.array(audio_window, dtype=mx.float32)
-        result = self.model.decode_chunk(audio_mx, verbose=False)
+        result = self._decode_window(audio_window)
 
         # Check if window exceeds max_window_size
         window_duration = len(audio_window) / self.sample_rate
@@ -125,8 +144,7 @@ class SmartProgressiveStreamingHandler:
                 # Re-transcribe from new fixed point
                 window_start_samples = int(self.fixed_end_time * self.sample_rate)
                 audio_window = audio[window_start_samples:]
-                audio_mx = mx.array(audio_window, dtype=mx.float32)
-                result = self.model.decode_chunk(audio_mx, verbose=False)
+                result = self._decode_window(audio_window)
 
         # Build output
         fixed_text = " ".join(self.fixed_sentences)
@@ -175,8 +193,7 @@ class SmartProgressiveStreamingHandler:
             audio_window = audio[window_start_samples:window_end]
 
             # Transcribe current window
-            audio_mx = mx.array(audio_window, dtype=mx.float32)
-            result = self.model.decode_chunk(audio_mx, verbose=False)
+            result = self._decode_window(audio_window)
 
             # Check if window exceeds max_window_size
             window_duration = (window_end - window_start_samples) / self.sample_rate
@@ -208,8 +225,7 @@ class SmartProgressiveStreamingHandler:
                     # Re-transcribe from new fixed_end_time
                     window_start_samples = int(fixed_end_time * self.sample_rate)
                     audio_window = audio[window_start_samples:window_end]
-                    audio_mx = mx.array(audio_window, dtype=mx.float32)
-                    result = self.model.decode_chunk(audio_mx, verbose=False)
+                    result = self._decode_window(audio_window)
 
             # Build output
             fixed_text = " ".join(fixed_sentences)

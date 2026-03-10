@@ -36,6 +36,7 @@ from arguments_classes.open_api_language_model_arguments import OpenApiLanguageM
 from arguments_classes.facebookmms_tts_arguments import FacebookMMSTTSHandlerArguments
 from arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
 from arguments_classes.kokoro_tts_arguments import KokoroTTSHandlerArguments
+from arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
 import torch
 import nltk
 from rich.console import Console
@@ -103,6 +104,7 @@ def parse_arguments():
             FacebookMMSTTSHandlerArguments,
             PocketTTSHandlerArguments,
             KokoroTTSHandlerArguments,
+            Qwen3TTSHandlerArguments,
         )
     )
 
@@ -170,7 +172,8 @@ def overwrite_device_argument(common_device: Optional[str], *handler_kwargs):
                 kwargs.paraformer_stt_device = common_device
             if hasattr(kwargs, "facebook_mms_device"):
                 kwargs.facebook_mms_device = common_device
-
+            if hasattr(kwargs, "qwen3_tts_device"):
+                kwargs.qwen3_tts_device = common_device
 
 def prepare_module_args(module_kwargs, *handler_kwargs):
     optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs)
@@ -195,6 +198,7 @@ def prepare_all_args(
     facebook_mms_tts_handler_kwargs,
     pocket_tts_handler_kwargs,
     kokoro_tts_handler_kwargs,
+    qwen3_tts_handler_kwargs,
 ):
     prepare_module_args(
         module_kwargs,
@@ -212,6 +216,7 @@ def prepare_all_args(
         facebook_mms_tts_handler_kwargs,
         pocket_tts_handler_kwargs,
         kokoro_tts_handler_kwargs,
+        qwen3_tts_handler_kwargs,
     )
 
     rename_args(whisper_stt_handler_kwargs, "stt")
@@ -228,6 +233,7 @@ def prepare_all_args(
     rename_args(facebook_mms_tts_handler_kwargs, "facebook_mms")
     rename_args(pocket_tts_handler_kwargs, "pocket_tts")
     rename_args(kokoro_tts_handler_kwargs, "kokoro")
+    rename_args(qwen3_tts_handler_kwargs, "qwen3_tts")
 
 
 def initialize_queues_and_events():
@@ -265,6 +271,7 @@ def build_pipeline(
     facebook_mms_tts_handler_kwargs,
     pocket_tts_handler_kwargs,
     kokoro_tts_handler_kwargs,
+    qwen3_tts_handler_kwargs,
     queues_and_events,
 ):
     stop_event = queues_and_events["stop_event"]
@@ -276,7 +283,7 @@ def build_pipeline(
     text_prompt_queue = queues_and_events["text_prompt_queue"]
     lm_response_queue = queues_and_events["lm_response_queue"]
     lm_processed_queue = queues_and_events["lm_processed_queue"]
-    text_output_queue = queues_and_events["text_output_queue"]
+    text_output_queue = None
     if module_kwargs.mode == "local":
         from connections.local_audio_streamer import LocalAudioStreamer
 
@@ -288,6 +295,7 @@ def build_pipeline(
     elif module_kwargs.mode == "websocket":
         from connections.websocket_streamer import WebSocketStreamer
 
+        text_output_queue = queues_and_events["text_output_queue"]
         websocket_streamer = WebSocketStreamer(
             stop_event,
             input_queue=recv_audio_chunks_queue,
@@ -393,7 +401,7 @@ def build_pipeline(
         setup_kwargs={"text_output_queue": text_output_queue},
     )
 
-    tts = get_tts_handler(module_kwargs, stop_event, lm_processed_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs)
+    tts = get_tts_handler(module_kwargs, stop_event, lm_processed_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs, qwen3_tts_handler_kwargs)
 
     # Build the handler chain
     pipeline_handlers = [*comms_handlers, vad, stt, lm, lm_processor, tts]
@@ -511,7 +519,7 @@ def get_llm_handler(
         raise ValueError("The LLM should be either transformers or mlx-lm")
 
 
-def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs):
+def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs, qwen3_tts_handler_kwargs):
     if module_kwargs.tts == "parler":
         from TTS.parler_handler import ParlerTTSHandler
         return ParlerTTSHandler(
@@ -576,8 +584,17 @@ def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chu
             setup_args=(should_listen,),
             setup_kwargs=vars(kokoro_tts_handler_kwargs),
         )
+    elif module_kwargs.tts == "qwen3":
+        from TTS.qwen3_tts_handler import Qwen3TTSHandler
+        return Qwen3TTSHandler(
+            stop_event,
+            queue_in=lm_response_queue,
+            queue_out=send_audio_chunks_queue,
+            setup_args=(should_listen,),
+            setup_kwargs=vars(qwen3_tts_handler_kwargs),
+        )
     else:
-        raise ValueError("The TTS should be either parler, melo, chatTTS, facebookMMS, pocket, or kokoro")
+        raise ValueError("The TTS should be either parler, melo, chatTTS, facebookMMS, pocket, kokoro, or qwen3")
 
 
 def main():
@@ -601,6 +618,7 @@ def main():
         facebook_mms_tts_handler_kwargs,
         pocket_tts_handler_kwargs,
         kokoro_tts_handler_kwargs,
+        qwen3_tts_handler_kwargs,
     ) = parse_arguments()
 
     setup_logger(module_kwargs.log_level)
@@ -621,6 +639,7 @@ def main():
         facebook_mms_tts_handler_kwargs,
         pocket_tts_handler_kwargs,
         kokoro_tts_handler_kwargs,
+        qwen3_tts_handler_kwargs,
     )
 
     queues_and_events = initialize_queues_and_events()
@@ -645,6 +664,7 @@ def main():
         facebook_mms_tts_handler_kwargs,
         pocket_tts_handler_kwargs,
         kokoro_tts_handler_kwargs,
+        qwen3_tts_handler_kwargs,
         queues_and_events,
     )
 

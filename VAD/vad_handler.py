@@ -1,3 +1,4 @@
+import time
 import torchaudio
 from VAD.vad_iterator import VADIterator
 from baseHandler import BaseHandler
@@ -72,6 +73,13 @@ class VADHandler(BaseHandler):
         self.accumulated_audio = []
         self.last_process_time = 0
 
+        # Throttled logging state (summary once per second)
+        self._last_log_time = 0.0
+        self._log_chunks = 0
+        self._log_speech_starts = 0
+        self._log_speech_ends = 0
+        self._log_progressive_yields = 0
+
     def _apply_runtime_turn_detection(self):
         """Check RuntimeConfig for turn_detection changes and apply them."""
         if not self.runtime_config or not self.runtime_config.turn_detection:
@@ -92,23 +100,37 @@ class VADHandler(BaseHandler):
     def process(self, audio_chunk):
         self._apply_runtime_turn_detection()
         logger.debug(f"VAD received {len(audio_chunk)} bytes")
+
+        self._log_chunks += 1
         audio_int16 = np.frombuffer(audio_chunk, dtype=np.int16)
-        logger.debug(f"VAD processing {len(audio_int16)} samples")
         audio_float32 = int2float(audio_int16)
 
         # Check speech state BEFORE processing
         was_triggered_before = self.iterator.triggered
 
         vad_output = self.iterator(torch.from_numpy(audio_float32))
-        logger.debug(f"VAD output: {vad_output}")
 
         # Check if speech state changed AFTER processing
         is_triggered_now = self.iterator.triggered
         if is_triggered_now and not was_triggered_before:
-            # Speech started
+            self._log_speech_starts += 1
+            logger.info("Speech started")
             if self.text_output_queue:
                 self.text_output_queue.put({"type": "speech_started"})
-                logger.debug("Speech started - sent event")
+
+        # Log a summary once per second instead of every chunk
+        now = time.time()
+        if now - self._last_log_time >= 1.0:
+            state = "SPEAKING" if is_triggered_now else "silent"
+            logger.debug(
+                f"VAD: {self._log_chunks} chunks/s | {state} | "
+                f"starts={self._log_speech_starts} ends={self._log_speech_ends} progressive={self._log_progressive_yields}"
+            )
+            self._log_chunks = 0
+            self._log_speech_starts = 0
+            self._log_speech_ends = 0
+            self._log_progressive_yields = 0
+            self._last_log_time = now
 
         if self.enable_realtime_transcription:
             # Progressive mode: yield audio chunks while speaking
@@ -119,8 +141,6 @@ class VADHandler(BaseHandler):
 
     def _process_realtime(self, vad_output):
         """Process with real-time progressive audio release."""
-        import time
-
         # Check if we're currently in a speech segment
         if hasattr(self.iterator, "buffer") and len(self.iterator.buffer) > 0:
             current_time = time.time()
@@ -131,6 +151,7 @@ class VADHandler(BaseHandler):
                 duration_ms = len(array) / self.sample_rate * 1000
 
                 if duration_ms >= self.min_speech_ms:
+                    self._log_progressive_yields += 1
                     logger.debug(f"VAD: yielding progressive audio ({duration_ms:.0f}ms)")
                     # Yield with special flag to indicate this is progressive (not final)
                     yield ("progressive", array)
@@ -144,17 +165,17 @@ class VADHandler(BaseHandler):
 
             if duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
                 logger.debug(
-                    f"audio input of duration: {len(array) / self.sample_rate}s, skipping"
+                    f"VAD: skipping {duration_ms:.0f}ms segment (out of bounds)"
                 )
             else:
+                self._log_speech_ends += 1
                 self.should_listen.clear()
-                logger.debug("Stop listening")
+                logger.info(f"Speech ended ({duration_ms:.0f}ms), stop listening")
                 if self.text_output_queue:
                     self.text_output_queue.put({
                         "type": "speech_stopped",
                         "duration_s": duration_ms / 1000.0,
                     })
-                    logger.debug("Speech stopped - sent event")
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
                 yield ("final", array)
@@ -168,17 +189,17 @@ class VADHandler(BaseHandler):
             duration_ms = len(array) / self.sample_rate * 1000
             if duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
                 logger.debug(
-                    f"audio input of duration: {len(array) / self.sample_rate}s, skipping"
+                    f"VAD: skipping {duration_ms:.0f}ms segment (out of bounds)"
                 )
             else:
+                self._log_speech_ends += 1
                 self.should_listen.clear()
-                logger.debug("Stop listening")
+                logger.info(f"Speech ended ({duration_ms:.0f}ms), stop listening")
                 if self.text_output_queue:
                     self.text_output_queue.put({
                         "type": "speech_stopped",
                         "duration_s": duration_ms / 1000.0,
                     })
-                    logger.debug("Speech stopped - sent event")
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
                 yield array
