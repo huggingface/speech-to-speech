@@ -16,3 +16,7 @@ class RuntimeConfig:
         self.tools: list | None = None
         self.tool_choice: Literal["auto", "required", "none"] | None = None
         self.input_audio_transcription: dict | None = None
+
+        # Per-response overrides (consumed once per response, then cleared)
+        self.response_instructions: str | None = None
+        self.response_tool_choice: str | None = None

@@ -149,13 +149,14 @@ class VADHandler(BaseHandler):
             else:
                 self.should_listen.clear()
                 logger.debug("Stop listening")
-                # Send speech_stopped event
                 if self.text_output_queue:
-                    self.text_output_queue.put({"type": "speech_stopped"})
+                    self.text_output_queue.put({
+                        "type": "speech_stopped",
+                        "duration_s": duration_ms / 1000.0,
+                    })
                     logger.debug("Speech stopped - sent event")
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
-                # Yield with final flag
                 yield ("final", array)
                 self.last_process_time = 0
 
@@ -172,9 +173,11 @@ class VADHandler(BaseHandler):
             else:
                 self.should_listen.clear()
                 logger.debug("Stop listening")
-                # Send speech_stopped event
                 if self.text_output_queue:
-                    self.text_output_queue.put({"type": "speech_stopped"})
+                    self.text_output_queue.put({
+                        "type": "speech_stopped",
+                        "duration_s": duration_ms / 1000.0,
+                    })
                     logger.debug("Speech stopped - sent event")
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)

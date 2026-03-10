@@ -16,8 +16,6 @@ from openai.types.realtime import (
     ConversationItemCreateEvent,
     ResponseCreateEvent,
     ResponseCancelEvent,
-    SessionCreatedEvent,
-    RealtimeSessionCreateRequest
 )
 
 logger = logging.getLogger(__name__)
@@ -73,21 +71,21 @@ def create_app(
                 service.make_error(
                     "Only one concurrent session is supported. "
                     "Disconnect the existing client first.",
-                    code="session_limit_reached",
+                    _type="session_limit_reached",
                 ),
             )
             await ws.close(code=1008, reason="Only one concurrent session is supported")
             return
 
         conn_id = str(id(ws))
-        service.register(conn_id)
+        session_id = service.register(conn_id)
         app.state.websockets[conn_id] = ws
-        logger.info(f"Client {conn_id} connected")
+        logger.info(f"Client {conn_id} connected (session {session_id})")
 
         should_listen.set()
 
         try:
-            await _send_event(ws, SessionCreatedEvent(event_id=conn_id, session=RealtimeSessionCreateRequest(type="realtime")))
+            await _send_event(ws, service.build_session_created(conn_id))
 
             while not stop_event.is_set():
                 try:
@@ -98,7 +96,7 @@ def create_app(
                 event = service.parse_client_event(raw)
                 if event is None:
                     await _send_event(
-                        ws, service.make_error(f"Unknown or invalid event: {raw.get('type')}", "unknown_or_invalid_event", conn_id)
+                        ws, service.make_error(f"Unknown or invalid event: {raw.get('type')}", "unknown_or_invalid_event")
                     )
                     continue
 
