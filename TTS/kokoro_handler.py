@@ -177,7 +177,7 @@ class KokoroTTSHandler(BaseHandler):
         """Preload voices for common languages to avoid download delays during inference."""
         # Only preload a few commonly used language voices to avoid excessive startup time
         # Users speaking other languages will experience a one-time download delay
-        preload_langs = ["e", "f", "i", "p"]  # Spanish, French, Italian, Portuguese
+        preload_langs = ["a", "b", "e", "f", "h", "i", "j", "p", "z"] # English, Spanish, French, Hindi, Italian, Japanese, Portuguese 
 
         for lang_code in preload_langs:
             voice = KOKORO_LANG_DEFAULT_VOICES.get(lang_code)

@@ -283,7 +283,7 @@ def build_pipeline(
     text_prompt_queue = queues_and_events["text_prompt_queue"]
     lm_response_queue = queues_and_events["lm_response_queue"]
     lm_processed_queue = queues_and_events["lm_processed_queue"]
-    text_output_queue = None
+    text_output_queue = queues_and_events["text_output_queue"]
     if module_kwargs.mode == "local":
         from connections.local_audio_streamer import LocalAudioStreamer
 
@@ -295,7 +295,6 @@ def build_pipeline(
     elif module_kwargs.mode == "websocket":
         from connections.websocket_streamer import WebSocketStreamer
 
-        text_output_queue = queues_and_events["text_output_queue"]
         websocket_streamer = WebSocketStreamer(
             stop_event,
             input_queue=recv_audio_chunks_queue,
@@ -319,8 +318,8 @@ def build_pipeline(
 
         for kw in (
             vad_handler_kwargs,
-            open_api_language_model_handler_kwargs,
             language_model_handler_kwargs,
+            open_api_language_model_handler_kwargs,
             mlx_language_model_handler_kwargs,
             parler_tts_handler_kwargs,
             kokoro_tts_handler_kwargs,
@@ -380,7 +379,7 @@ def build_pipeline(
         queue_in=recv_audio_chunks_queue,
         queue_out=spoken_prompt_queue,
         setup_args=(should_listen,),
-        setup_kwargs=vad_handler_kwargs,
+        setup_kwargs=vars(vad_handler_kwargs),
     )
 
     # In realtime mode, STT outputs to an intermediate queue so the
