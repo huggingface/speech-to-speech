@@ -77,6 +77,7 @@ class LanguageModelHandler(BaseHandler):
         chat_size=1,
         init_chat_role=None,
         init_chat_prompt="You are a helpful AI assistant.",
+        runtime_config=None,
     ):
         self.device = device
         self.torch_dtype = getattr(torch, torch_dtype)
@@ -107,6 +108,8 @@ class LanguageModelHandler(BaseHandler):
                 )
             self.chat.init_chat({"role": init_chat_role, "content": init_chat_prompt})
         self.user_role = user_role
+        self.runtime_config = runtime_config
+        self._last_instructions = init_chat_prompt
 
         self.warmup()
 
@@ -145,7 +148,17 @@ class LanguageModelHandler(BaseHandler):
                 f"{self.__class__.__name__}:  warmed up! time: {start_event.elapsed_time(end_event) * 1e-3:.3f} s"
             )
 
+    def _apply_runtime_instructions(self):
+        if not self.runtime_config or not self.runtime_config.instructions:
+            return
+        new_instructions = self.runtime_config.instructions
+        if new_instructions != self._last_instructions:
+            self._last_instructions = new_instructions
+            self.chat.init_chat({"role": "system", "content": new_instructions})
+            logger.info(f"LLM instructions updated ({len(new_instructions)} chars)")
+
     def process(self, prompt):
+        self._apply_runtime_instructions()
         logger.debug("infering language model...")
         language_code = None
         if isinstance(prompt, tuple):

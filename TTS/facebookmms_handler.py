@@ -65,6 +65,7 @@ class FacebookMMSTTSHandler(BaseHandler):
         language="en",
         stream=True,
         chunk_size=512,
+        runtime_config=None,  # accepted but unused; implement voice-switch logic in process() to support dynamic voice change
         **kwargs
     ):
         self.should_listen = should_listen

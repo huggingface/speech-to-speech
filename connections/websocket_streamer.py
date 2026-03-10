@@ -141,6 +141,13 @@ class WebSocketStreamer:
                 try:
                     audio_chunk = self.output_queue.get_nowait()
                     if isinstance(audio_chunk, bytes) and audio_chunk == b"END":
+                        if audio_buffer and self.clients:
+                            data = bytes(audio_buffer)
+                            audio_buffer.clear()
+                            await asyncio.gather(
+                                *[client.send(data) for client in self.clients],
+                                return_exceptions=True,
+                            )
                         break
 
                     if self.clients:

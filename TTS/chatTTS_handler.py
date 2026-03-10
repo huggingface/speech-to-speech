@@ -22,6 +22,7 @@ class ChatTTSHandler(BaseHandler):
         gen_kwargs={},  # Unused
         stream=True,
         chunk_size=512,
+        runtime_config=None,  # accepted but unused; implement voice-switch logic in process() to support dynamic voice change
     ):
         self.should_listen = should_listen
         self.device = device

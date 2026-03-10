@@ -59,8 +59,10 @@ class ParlerTTSHandler(BaseHandler):
         play_steps_s=1,
         blocksize=512,
         use_default_speakers_list=True,
+        runtime_config=None,
     ):
         self.should_listen = should_listen
+        self.runtime_config = runtime_config
         self.device = device
         self.torch_dtype = getattr(torch, torch_dtype)
         self.gen_kwargs = gen_kwargs
@@ -170,9 +172,13 @@ class ParlerTTSHandler(BaseHandler):
             )
 
     def process(self, llm_sentence):
+        if self.runtime_config and self.runtime_config.voice:
+            self.speaker = self.runtime_config.voice
+
         if isinstance(llm_sentence, tuple):
             llm_sentence, language_code = llm_sentence
-            self.speaker = WHISPER_LANGUAGE_TO_PARLER_SPEAKER.get(language_code, "Jason")
+            if not (self.runtime_config and self.runtime_config.voice):
+                self.speaker = WHISPER_LANGUAGE_TO_PARLER_SPEAKER.get(language_code, "Jason")
             
         console.print(f"[green]ASSISTANT: {llm_sentence}")
         nb_tokens = len(self.prompt_tokenizer(llm_sentence).input_ids)
