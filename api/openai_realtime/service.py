@@ -2,8 +2,10 @@ import base64
 import json
 import logging
 import uuid
+import numpy as np
 from pydantic import BaseModel, Field
 from queue import Queue
+from scipy.signal import resample_poly
 from threading import Event as ThreadingEvent
 from typing import Optional, Union
 
@@ -51,9 +53,20 @@ from api.openai_realtime.runtime_config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 
+PIPELINE_SAMPLE_RATE = 16000
 CHUNK_SAMPLES = 512
 BYTES_PER_SAMPLE = 2
 CHUNK_SIZE_BYTES = CHUNK_SAMPLES * BYTES_PER_SAMPLE
+
+
+def _resample(audio_int16: bytes, from_rate: int, to_rate: int) -> bytes:
+    """Resample int16 PCM audio between sample rates using polyphase filtering."""
+    if from_rate == to_rate:
+        return audio_int16
+    samples = np.frombuffer(audio_int16, dtype=np.int16).astype(np.float32) / 32768.0
+    gcd = np.gcd(to_rate, from_rate)
+    resampled = resample_poly(samples, up=to_rate // gcd, down=from_rate // gcd)
+    return np.clip(resampled * 32768, -32768, 32767).astype(np.int16).tobytes()
 
 _EVENT_TYPE_TO_MODEL: dict[str, type] = {
     "input_audio_buffer.append": InputAudioBufferAppendEvent,
@@ -253,12 +266,14 @@ class RealtimeService:
     # ── Client event handlers ────────────────────
 
     def handle_audio_append(self, conn_id: str, event: InputAudioBufferAppendEvent) -> list[bytes]:
-        """Decode base64 audio and split into 512-sample PCM16 chunks for the VAD."""
+        """Decode base64 audio, resample to pipeline rate, and split into 512-sample PCM16 chunks for the VAD."""
         try:
             pcm_bytes = base64.b64decode(event.audio)
         except Exception as e:
             logger.error(f"Base64 decode error: {e}")
             return []
+
+        pcm_bytes = _resample(pcm_bytes, self.runtime_config.client_audio_rate, PIPELINE_SAMPLE_RATE)
 
         chunks = []
         for i in range(0, len(pcm_bytes), CHUNK_SIZE_BYTES):
@@ -290,11 +305,14 @@ class RealtimeService:
         audio_in = getattr(audio, "input", None) if audio else None
         audio_out = getattr(audio, "output", None) if audio else None
 
+        audio_in_format = getattr(audio_in, "format", None) if audio_in else None
+
         model = getattr(s, "model", None)
         instructions = getattr(s, "instructions", None)
         voice = getattr(audio_out, "voice", None) if audio_out else None
         turn_detection = getattr(audio_in, "turn_detection", None) if audio_in else None
         transcription = getattr(audio_in, "transcription", None) if audio_in else None
+        client_rate = getattr(audio_in_format, "rate", None) if audio_in_format else None
         tools = getattr(s, "tools", None)
         tool_choice = getattr(s, "tool_choice", None)
 
@@ -312,6 +330,9 @@ class RealtimeService:
         if transcription is not None:
             cfg.input_audio_transcription = transcription
             logger.info("Input audio transcription config updated")
+        if client_rate is not None:
+            cfg.client_audio_rate = int(client_rate)
+            logger.info(f"Client audio rate updated to: {client_rate} Hz")
         if tools is not None:
             cfg.tools = tools
             logger.info(f"Tools updated ({len(tools)} tools)")
@@ -440,6 +461,7 @@ class RealtimeService:
                 event_id=self._next_event_id(),
                 response=self._build_response(conn_id, "in_progress"),
             ))
+        audio = _resample(audio, PIPELINE_SAMPLE_RATE, self.runtime_config.client_audio_rate)
         b64 = base64.b64encode(audio).decode("ascii")
         events.append(ResponseAudioDeltaEvent(
             type="response.output_audio.delta",

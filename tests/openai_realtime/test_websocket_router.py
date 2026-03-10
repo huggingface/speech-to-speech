@@ -28,6 +28,7 @@ from api.openai_realtime.websocket_router import create_app
 def setup():
     """Return (app, service, input_queue, output_queue, text_output_queue, should_listen, stop_event)."""
     runtime_config = RuntimeConfig()
+    runtime_config.client_audio_rate = 16000
     text_prompt_queue = Queue()
     should_listen = ThreadingEvent()
     should_listen.set()

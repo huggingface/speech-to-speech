@@ -52,6 +52,7 @@ class _ServerEnv:
 
     def __init__(self):
         self.runtime_config = RuntimeConfig()
+        self.runtime_config.client_audio_rate = 16000
         self.text_prompt_queue: Queue = Queue()
         self.should_listen = ThreadingEvent()
         self.should_listen.set()

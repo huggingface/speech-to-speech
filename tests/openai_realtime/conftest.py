@@ -8,7 +8,9 @@ from api.openai_realtime.runtime_config import RuntimeConfig
 
 @pytest.fixture
 def runtime_config():
-    return RuntimeConfig()
+    cfg = RuntimeConfig()
+    cfg.client_audio_rate = 16000
+    return cfg
 
 
 @pytest.fixture
