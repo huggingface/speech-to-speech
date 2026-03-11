@@ -3,8 +3,7 @@
   <img src="logo.png" width="600"/> 
 </div>
 
-# Speech To Speech: an effort for an open-sourced and modular GPT4-o
-
+# Speech To Speech: Build local voice agents with open-source models
 
 ## 📖 Quick Index
 * [Approach](#approach)
