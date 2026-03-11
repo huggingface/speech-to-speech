@@ -2,7 +2,7 @@ pip>=24.0
 lingua-language-detector>=2.0.2
 nltk==3.9.1
 # parler_tts @ git+https://github.com/huggingface/parler-tts.git unmaintained
-melotts @ git+https://github.com/andimarafioti/MeloTTS.git@bdec1c9#egg=MeloTTS  # includes MPS-safe BERT loading and librosa compatibility for modern torch
+melotts @ git+https://github.com/andimarafioti/MeloTTS.git#egg=MeloTTS
 torch==2.10.0
 torchaudio==2.10.0
 sounddevice>=0.5.0
