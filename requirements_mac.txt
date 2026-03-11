@@ -8,7 +8,7 @@ torchaudio==2.10.0
 sounddevice>=0.5.0
 lightning-whisper-mlx>=0.0.10
 mlx-lm>=0.14.0
-mlx-audio @ git+https://github.com/Blaizzy/mlx-audio.git@refs/pull/481/head  # PR for Parakeet v3 language detection
+mlx-audio==0.4.0
 ChatTTS>=0.1.1
 funasr>=1.1.6
 faster-whisper>=1.0.3
