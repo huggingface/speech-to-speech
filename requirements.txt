@@ -1,5 +1,5 @@
 pip>=24.0
-langdetect>=1.0.9
+lingua-language-detector>=2.0.2
 nltk==3.9.1
 parler_tts @ git+https://github.com/huggingface/parler-tts.git
 melotts @ git+https://github.com/andimarafioti/MeloTTS.git#egg=MeloTTS  # made a copy of MeloTTS to have compatible versions of transformers
