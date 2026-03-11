@@ -2,13 +2,13 @@ pip>=24.0
 lingua-language-detector>=2.0.2
 nltk==3.9.1
 # parler_tts @ git+https://github.com/huggingface/parler-tts.git unmaintained
-melotts @ git+https://github.com/andimarafioti/MeloTTS.git@6c643c2#egg=MeloTTS  # includes MPS-safe BERT loading for modern torch
+melotts @ git+https://github.com/andimarafioti/MeloTTS.git#egg=MeloTTS
 torch==2.10.0
 torchaudio==2.10.0
 sounddevice>=0.5.0
 lightning-whisper-mlx>=0.0.10
 mlx-lm>=0.14.0
-mlx-audio @ git+https://github.com/Blaizzy/mlx-audio.git@refs/pull/481/head  # PR for Parakeet v3 language detection
+mlx-audio==0.4.0
 ChatTTS>=0.1.1
 funasr>=1.1.6
 faster-whisper>=1.0.3
