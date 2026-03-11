@@ -48,6 +48,10 @@ python s2s_pipeline.py \
 
 Language switching can occur automatically when STT emits `(text, language_code)` tuples.
 
+Apple Silicon MPS note:
+- If MeloTTS fails with `Output channels > 65536 not supported at the MPS device`, update macOS first.
+- We reproduced this on an older macOS release and verified that the same MeloTTS code worked after updating to macOS `26.3.1`, without rebuilding the environment.
+
 ### 3) ChatTTS (`--tts chatTTS`)
 
 Primary args prefix: `--chat_tts_*`

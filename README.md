@@ -83,6 +83,10 @@ If you want to use Melo TTS, you also need to run:
 python -m unidic download
 ```
 
+Apple Silicon MeloTTS note:
+- If MeloTTS fails on MPS with `Output channels > 65536 not supported at the MPS device`, update macOS first.
+- We reproduced this on an older macOS release and verified that the same environment worked after updating to macOS `26.3.1`.
+
 **Note on DeepFilterNet:** DeepFilterNet (used for optional audio enhancement in VAD) is currently incompatible with Pocket TTS due to numpy version constraints. DeepFilterNet requires numpy<2, while Pocket TTS requires numpy>=2. If you need audio enhancement, you can install DeepFilterNet separately by commenting out pocket-tts in requirements and uncommenting deepfilternet.
 
 
