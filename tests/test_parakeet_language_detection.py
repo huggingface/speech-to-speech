@@ -19,8 +19,25 @@ def test_detect_language_from_short_text_returns_none_without_querying_detector(
     monkeypatch.setattr(parakeet_tdt_handler, "LINGUA_AVAILABLE", True)
     monkeypatch.setattr(parakeet_tdt_handler, "_lingua_detector", ExplodingDetector())
 
-    # langdetect commonly misclassifies this short English sentence as Tagalog ("tl")
     assert handler._detect_language_from_text("Okay.") is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Okay, open the door.",
+        "Okay, try that again.",
+        "Open the door, please.",
+    ],
+)
+def test_detect_language_from_short_english_text_uses_lingua_successfully(text):
+    if not parakeet_tdt_handler.LINGUA_AVAILABLE:
+        pytest.skip("lingua-language-detector is not installed")
+
+    handler = object.__new__(ParakeetTDTSTTHandler)
+
+    assert len(text) >= 20
+    assert handler._detect_language_from_text(text) == "en"
 
 
 def test_detect_language_from_long_norwegian_text_maps_nb_to_no():

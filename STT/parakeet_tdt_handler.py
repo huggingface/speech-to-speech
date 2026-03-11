@@ -285,8 +285,8 @@ class ParakeetTDTSTTHandler(BaseHandler):
             logger.warning("lingua-py not available, cannot detect language from text")
             return None
 
-        # Need sufficient text for reliable detection - short sentences are too ambiguous
-        if not text or len(text.strip()) < 100:
+        # Skip very short utterances where language ID is still too noisy.
+        if not text or len(text.strip()) < 20:
             return None
 
         detected = _lingua_detector.detect_language_of(text)
