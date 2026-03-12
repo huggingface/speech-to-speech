@@ -78,6 +78,16 @@ Apple Silicon MeloTTS note:
 
 **Note on DeepFilterNet:** DeepFilterNet (used for optional audio enhancement in VAD) is currently incompatible with Pocket TTS due to numpy version constraints. DeepFilterNet requires `numpy<2`, while Pocket TTS requires `numpy>=2`.
 
+If you want a DeepFilterNet-focused setup with `pyproject.toml`:
+1. Edit [`pyproject.toml`](./pyproject.toml): remove the `pocket-tts` dependency line.
+2. Add `deepfilternet>=0.5.6` and `numpy<2` to `project.dependencies`.
+3. Re-sync the environment:
+   ```bash
+   uv sync --refresh
+   ```
+
+To switch back to Pocket TTS, revert those `pyproject.toml` changes and run `uv sync --refresh` again.
+
 
 ## Usage
 
