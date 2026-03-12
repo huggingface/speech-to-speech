@@ -75,6 +75,11 @@ uv run python -m unidic download
 Apple Silicon MeloTTS note:
 - If MeloTTS fails on MPS with `Output channels > 65536 not supported at the MPS device`, update macOS first.
 - We reproduced this on an older macOS release and verified that the same environment worked after updating to macOS `26.3.1`.
+- If dependency installation fails while building `fugashi`, install MeCab and retry:
+  ```bash
+  brew install mecab mecab-ipadic
+  uv sync
+  ```
 
 **Note on DeepFilterNet:** DeepFilterNet (used for optional audio enhancement in VAD) is currently incompatible with Pocket TTS due to numpy version constraints. DeepFilterNet requires `numpy<2`, while Pocket TTS requires `numpy>=2`.
 
