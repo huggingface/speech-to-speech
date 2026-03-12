@@ -47,7 +47,6 @@ The pipeline provides a fully open and modular approach, with a focus on leverag
 - [OpenAI API](https://platform.openai.com/docs/quickstart)
 
 **TTS**
-- [Parler-TTS](https://github.com/huggingface/parler-tts) 🤗
 - [MeloTTS](https://github.com/myshell-ai/MeloTTS)
 - [ChatTTS](https://github.com/2noise/ChatTTS?tab=readme-ov-file)
 - [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) - Streaming TTS with voice cloning from Kyutai Labs
@@ -61,32 +60,33 @@ git clone https://github.com/huggingface/speech-to-speech.git
 cd speech-to-speech
 ```
 
-Create a new python virtual environment using [uv](https://github.com/astral-sh/uv) and install pip:
+Install dependencies with [uv](https://github.com/astral-sh/uv):
 ```bash
-uv init
-uv add pip
+uv sync
 ```
 
-Install the required dependencies using [uv](https://github.com/astral-sh/uv):
-```bash
-uv pip install -r requirements.txt
-```
+The project now uses a single `pyproject.toml` with platform markers, so macOS and non-macOS dependencies are resolved automatically from one file.
 
-For Mac users, use the `requirements_mac.txt` file instead:
+If you use Melo TTS (default on macOS), run this once after install:
 ```bash
-uv pip install -r requirements_mac.txt
-```
-
-If you want to use Melo TTS, you also need to run:
-```bash
-python -m unidic download
+uv run python -m unidic download
 ```
 
 Apple Silicon MeloTTS note:
 - If MeloTTS fails on MPS with `Output channels > 65536 not supported at the MPS device`, update macOS first.
 - We reproduced this on an older macOS release and verified that the same environment worked after updating to macOS `26.3.1`.
 
-**Note on DeepFilterNet:** DeepFilterNet (used for optional audio enhancement in VAD) is currently incompatible with Pocket TTS due to numpy version constraints. DeepFilterNet requires numpy<2, while Pocket TTS requires numpy>=2. If you need audio enhancement, you can install DeepFilterNet separately by commenting out pocket-tts in requirements and uncommenting deepfilternet.
+**Note on DeepFilterNet:** DeepFilterNet (used for optional audio enhancement in VAD) is currently incompatible with Pocket TTS due to numpy version constraints. DeepFilterNet requires `numpy<2`, while Pocket TTS requires `numpy>=2`.
+
+If you want a DeepFilterNet-focused setup with `pyproject.toml`:
+1. Edit [`pyproject.toml`](./pyproject.toml): remove the `pocket-tts` dependency line.
+2. Add `deepfilternet>=0.5.6` and `numpy<2` to `project.dependencies`.
+3. Re-sync the environment:
+   ```bash
+   uv sync --refresh
+   ```
+
+To switch back to Pocket TTS, revert those `pyproject.toml` changes and run `uv sync --refresh` again.
 
 
 ## Usage
@@ -133,6 +133,11 @@ This setting:
      - Sets LightningWhisperMLX for STT
      - Sets MLX LM for language model
      - Sets MeloTTS for TTS
+   - Requires one-time UniDic setup for MeloTTS:
+     ```bash
+     uv run python -m unidic download
+     ```
+   - `--tts pocket` is also a valid option on macOS.
 
 ### Docker Server
 

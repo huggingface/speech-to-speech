@@ -139,7 +139,7 @@ def optimal_mac_settings(mac_optimal_settings: Optional[str], *handler_kwargs):
             if hasattr(kwargs, "llm"):
                 kwargs.llm = "mlx-lm"
             if hasattr(kwargs, "tts"):
-                kwargs.tts = "kokoro"
+                kwargs.tts = "melo"
 
 def check_mac_settings(module_kwargs):
     if platform == "darwin":
@@ -151,9 +151,9 @@ def check_mac_settings(module_kwargs):
             logger.warning(
                 "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm mlx-lm."
             )
-        if module_kwargs.tts not in ("melo", "kokoro"):
+        if module_kwargs.tts not in ("melo", "pocket"):
             logger.warning(
-                "For macOS users, it is recommended to use kokoro or melo for TTS."
+                "For macOS users, it is recommended to use melo for TTS (pocket is also a valid option)."
             )
 
 
@@ -176,7 +176,7 @@ def overwrite_device_argument(common_device: Optional[str], *handler_kwargs):
 def prepare_module_args(module_kwargs, *handler_kwargs):
     optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs)
     if module_kwargs.tts is None:
-        module_kwargs.tts = "kokoro" if platform == "darwin" else "qwen3"
+        module_kwargs.tts = "melo" if platform == "darwin" else "qwen3"
     if platform == "darwin":
         check_mac_settings(module_kwargs)
     overwrite_device_argument(module_kwargs.device, *handler_kwargs)
@@ -462,9 +462,9 @@ def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chu
     if module_kwargs.tts == "melo":
         try:
             from TTS.melo_handler import MeloTTSHandler
-        except RuntimeError as e:
+        except Exception as e:
             logger.error(
-                "Error importing MeloTTSHandler. You might need to run: python -m unidic download"
+                "Error importing MeloTTSHandler. For uv environments, run `uv run python -m unidic download`. On macOS, `--tts pocket` is also a valid option."
             )
             raise e
         return MeloTTSHandler(
