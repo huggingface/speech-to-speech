@@ -67,7 +67,7 @@ uv sync
 
 The project now uses a single `pyproject.toml` with platform markers, so macOS and non-macOS dependencies are resolved automatically from one file.
 
-If you want to use Melo TTS, you also need to run:
+If you use Melo TTS (default on macOS), run this once after install:
 ```bash
 uv run python -m unidic download
 ```
@@ -128,6 +128,11 @@ This setting:
      - Sets LightningWhisperMLX for STT
      - Sets MLX LM for language model
      - Sets MeloTTS for TTS
+   - Requires one-time UniDic setup for MeloTTS:
+     ```bash
+     uv run python -m unidic download
+     ```
+   - `--tts pocket` is also a valid option on macOS.
 
 ### Docker Server
 

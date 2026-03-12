@@ -462,9 +462,9 @@ def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chu
     if module_kwargs.tts == "melo":
         try:
             from TTS.melo_handler import MeloTTSHandler
-        except RuntimeError as e:
+        except Exception as e:
             logger.error(
-                "Error importing MeloTTSHandler. You might need to run: python -m unidic download"
+                "Error importing MeloTTSHandler. For uv environments, run `uv run python -m unidic download`. On macOS, `--tts pocket` is also a valid option."
             )
             raise e
         return MeloTTSHandler(

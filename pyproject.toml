@@ -31,4 +31,5 @@ package = false
 prerelease = "allow"
 override-dependencies = [
     "fugashi>=1.3.2; platform_system == 'Darwin'",
+    "pykakasi>=2.3.0",
 ]
