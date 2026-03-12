@@ -16,6 +16,7 @@ dependencies = [
     "funasr>=1.1.6",
     "faster-whisper>=1.0.3",
     "modelscope>=1.17.1",
+    "onnxruntime<1.24; python_version < '3.11'",
     "openai>=1.40.1",
     "pocket-tts>=0.1.0",
     "lightning-whisper-mlx>=0.0.10; platform_system == 'Darwin'",
