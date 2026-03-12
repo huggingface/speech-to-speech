@@ -16,7 +16,6 @@ from arguments_classes.mlx_language_model_arguments import (
 )
 from arguments_classes.module_arguments import ModuleArguments
 from arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
-from arguments_classes.parler_tts_arguments import ParlerTTSHandlerArguments
 from arguments_classes.socket_receiver_arguments import SocketReceiverArguments
 from arguments_classes.socket_sender_arguments import SocketSenderArguments
 from arguments_classes.websocket_streamer_arguments import WebSocketStreamerArguments
@@ -98,7 +97,6 @@ def parse_arguments():
             LanguageModelHandlerArguments,
             OpenApiLanguageModelHandlerArguments,
             MLXLanguageModelHandlerArguments,
-            ParlerTTSHandlerArguments,
             MeloTTSHandlerArguments,
             ChatTTSHandlerArguments,
             FacebookMMSTTSHandlerArguments,
@@ -192,7 +190,6 @@ def prepare_all_args(
     language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
     mlx_language_model_handler_kwargs,
-    parler_tts_handler_kwargs,
     melo_tts_handler_kwargs,
     chat_tts_handler_kwargs,
     facebook_mms_tts_handler_kwargs,
@@ -210,7 +207,6 @@ def prepare_all_args(
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
-        parler_tts_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,
@@ -227,7 +223,6 @@ def prepare_all_args(
     rename_args(language_model_handler_kwargs, "lm")
     rename_args(mlx_language_model_handler_kwargs, "mlx_lm")
     rename_args(open_api_language_model_handler_kwargs, "open_api")
-    rename_args(parler_tts_handler_kwargs, "tts")
     rename_args(melo_tts_handler_kwargs, "melo")
     rename_args(chat_tts_handler_kwargs, "chat_tts")
     rename_args(facebook_mms_tts_handler_kwargs, "facebook_mms")
@@ -264,7 +259,6 @@ def build_pipeline(
     language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
     mlx_language_model_handler_kwargs,
-    parler_tts_handler_kwargs,
     melo_tts_handler_kwargs,
     chat_tts_handler_kwargs,
     facebook_mms_tts_handler_kwargs,
@@ -354,19 +348,12 @@ def build_pipeline(
         setup_kwargs={"text_output_queue": text_output_queue},
     )
 
-    tts = get_tts_handler(module_kwargs, stop_event, lm_processed_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs, qwen3_tts_handler_kwargs)
+    tts = get_tts_handler(module_kwargs, stop_event, lm_processed_queue, send_audio_chunks_queue, should_listen, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs, qwen3_tts_handler_kwargs)
 
     return ThreadManager([*comms_handlers, vad, stt, lm, lm_processor, tts])
 
 
 def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs):
-    if module_kwargs.stt == "moonshine":
-        from STT.moonshine_handler import MoonshineSTTHandler
-        return MoonshineSTTHandler(
-            stop_event,
-            queue_in=spoken_prompt_queue,
-            queue_out=text_prompt_queue,
-        )
     if module_kwargs.stt == "whisper":
         from STT.whisper_stt_handler import WhisperSTTHandler
         return WhisperSTTHandler(
@@ -427,7 +414,7 @@ def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_
             setup_kwargs=setup_kwargs,
         )
     else:
-        raise ValueError("The STT should be either whisper, whisper-mlx, mlx-audio-whisper, faster-whisper, parakeet-tdt, moonshine, or paraformer.")
+        raise ValueError("The STT should be either whisper, whisper-mlx, mlx-audio-whisper, faster-whisper, parakeet-tdt, or paraformer.")
 
 
 def get_llm_handler(
@@ -469,17 +456,8 @@ def get_llm_handler(
         raise ValueError("The LLM should be either transformers or mlx-lm")
 
 
-def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs, qwen3_tts_handler_kwargs):
-    if module_kwargs.tts == "parler":
-        from TTS.parler_handler import ParlerTTSHandler
-        return ParlerTTSHandler(
-            stop_event,
-            queue_in=lm_response_queue,
-            queue_out=send_audio_chunks_queue,
-            setup_args=(should_listen,),
-            setup_kwargs=vars(parler_tts_handler_kwargs),
-        )
-    elif module_kwargs.tts == "melo":
+def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs, qwen3_tts_handler_kwargs):
+    if module_kwargs.tts == "melo":
         try:
             from TTS.melo_handler import MeloTTSHandler
         except RuntimeError as e:
@@ -544,7 +522,7 @@ def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chu
             setup_kwargs=vars(qwen3_tts_handler_kwargs),
         )
     else:
-        raise ValueError("The TTS should be either parler, melo, chatTTS, facebookMMS, pocket, kokoro, or qwen3")
+        raise ValueError("The TTS should be either melo, chatTTS, facebookMMS, pocket, kokoro, or qwen3")
 
 
 def main():
@@ -562,7 +540,6 @@ def main():
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
-        parler_tts_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,
@@ -583,7 +560,6 @@ def main():
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
-        parler_tts_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,
@@ -608,7 +584,6 @@ def main():
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
-        parler_tts_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,

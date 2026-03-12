@@ -4,37 +4,16 @@
 
 Runtime-supported values in `s2s_pipeline.py`:
 
-- `parler` → `parler_handler.py`
 - `melo` → `melo_handler.py`
 - `chatTTS` → `chatTTS_handler.py`
 - `facebookMMS` → `facebookmms_handler.py`
 - `pocket` → `pocket_tts_handler.py`
 - `kokoro` → `kokoro_handler.py`
+- `qwen3` → `qwen3_tts_handler.py`
 
 ## Usage
 
-### 1) Parler-TTS (`--tts parler`)
-
-Recommended usage with Cuda
-
-Primary args prefix: `--tts_*`
-
-```bash
-python s2s_pipeline.py \
-  --tts parler \
-  --tts_model_name parler-tts/parler-mini-v1-jenny \
-  --tts_device cuda \
-  --tts_torch_dtype float16
-```
-
-Useful options:
-- `--description`
-- `--tts_compile_mode`
-- `--tts_gen_min_new_tokens`
-- `--tts_gen_max_new_tokens`
-- `--play_steps_s`
-
-### 2) MeloTTS (`--tts melo`)
+### 1) MeloTTS (`--tts melo`)
 
 Primary args prefix: `--melo_*`
 
@@ -52,7 +31,7 @@ Apple Silicon MPS note:
 - If MeloTTS fails with `Output channels > 65536 not supported at the MPS device`, update macOS first.
 - We reproduced this on an older macOS release and verified that the same MeloTTS code worked after updating to macOS `26.3.1`, without rebuilding the environment.
 
-### 3) ChatTTS (`--tts chatTTS`)
+### 2) ChatTTS (`--tts chatTTS`)
 
 Primary args prefix: `--chat_tts_*`
 
@@ -64,7 +43,7 @@ python s2s_pipeline.py \
   --chat_tts_chunk_size 512
 ```
 
-### 4) Facebook MMS (`--tts facebookMMS`)
+### 3) Facebook MMS (`--tts facebookMMS`)
 
 Primary args prefix: `--facebook_mms_*` plus `--tts_language`
 
@@ -77,7 +56,7 @@ python s2s_pipeline.py \
 
 This handler maps STT language codes (e.g. `en`, `fr`, `es`) to MMS model suffixes (e.g. `eng`, `fra`, `spa`) and reloads the model on language changes.
 
-### 5) Pocket TTS (`--tts pocket`)
+### 4) Pocket TTS (`--tts pocket`)
 
 Primary args prefix: `--pocket_tts_*`
 
@@ -92,7 +71,7 @@ python s2s_pipeline.py \
 Available preset voices include:
 `alba`, `marius`, `javert`, `jean`, `fantine`, `cosette`, `eponine`, `azelma`.
 
-### 6) Kokoro (`--tts kokoro`)
+### 5) Kokoro (`--tts kokoro`)
 
 Primary args prefix: `--kokoro_*`
 
@@ -109,6 +88,18 @@ Behavior:
 - Uses native kokoro pipeline otherwise (`hexgrad/Kokoro-82M`)
 - Can auto-switch voice/language based on STT language code mapping
 
+### 6) Qwen3-TTS (`--tts qwen3`)
+
+Primary args prefix: `--qwen3_tts_*`
+
+```bash
+python s2s_pipeline.py \
+  --tts qwen3 \
+  --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-0.6B-Base \
+  --qwen3_tts_device cuda \
+  --qwen3_tts_ref_audio TTS/ref_audio.wav
+```
+
 ## Setup
 
 ### Low-latency GPU setup
@@ -116,8 +107,7 @@ Behavior:
 ```bash
 python s2s_pipeline.py \
   --stt whisper \
-  --tts parler \
-  --tts_compile_mode default
+  --tts pocket
 ```
 
 ### Apple Silicon setup

@@ -9,7 +9,6 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - `mlx-audio-whisper` → `STT/mlx_audio_whisper_handler.py`
 - `faster-whisper` → `STT/faster_whisper_handler.py`
 - `parakeet-tdt` → `STT/parakeet_tdt_handler.py`
-- `moonshine` → `STT/moonshine_handler.py`
 - `paraformer` → `STT/paraformer_handler.py`
 
 ## Language Support by Handler
@@ -66,14 +65,7 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
   - On macOS/MPS: MLX (`mlx-community/parakeet-tdt-0.6b-v3`)
   - On CUDA/CPU: nano-parakeet (`nvidia/parakeet-tdt-0.6b-v3`)
 
-### 6) Moonshine (`--stt moonshine`)
-
-- Handler: `MoonshineSTTHandler`
-- No language CLI argument exposed
-- Output language is hardcoded to `en`
-- Practical support: English-focused in current integration
-
-### 7) Paraformer (`--stt paraformer`)
+### 6) Paraformer (`--stt paraformer`)
 
 - Handler: `ParaformerSTTHandler`
 - Model flag: `--paraformer_stt_model_name`
@@ -162,12 +154,6 @@ With live transcription (MLX or CUDA/nano-parakeet backend):
 python s2s_pipeline.py --stt parakeet-tdt \
   --enable_live_transcription \
   --live_transcription_update_interval 0.25
-```
-
-### Moonshine
-
-```bash
-python s2s_pipeline.py --stt moonshine
 ```
 
 ### Paraformer
