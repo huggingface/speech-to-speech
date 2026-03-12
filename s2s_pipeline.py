@@ -175,6 +175,8 @@ def overwrite_device_argument(common_device: Optional[str], *handler_kwargs):
 
 def prepare_module_args(module_kwargs, *handler_kwargs):
     optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs)
+    if module_kwargs.tts is None:
+        module_kwargs.tts = "pocket" if platform == "darwin" else "qwen3"
     if platform == "darwin":
         check_mac_settings(module_kwargs)
     overwrite_device_argument(module_kwargs.device, *handler_kwargs)

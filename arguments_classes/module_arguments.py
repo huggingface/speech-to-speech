@@ -33,9 +33,9 @@ class ModuleArguments:
         },
     )
     tts: Optional[str] = field(
-        default="pocket",
+        default=None,
         metadata={
-            "help": "The TTS to use. Either 'melo', 'chatTTS', 'facebookMMS', 'pocket', 'kokoro', or 'qwen3'. Default is 'pocket'"
+            "help": "The TTS to use. Either 'melo', 'chatTTS', 'facebookMMS', 'pocket', 'kokoro', or 'qwen3'. Default is platform-dependent: 'qwen3' on non-macOS and 'pocket' on macOS."
         },
     )
     log_level: str = field(
