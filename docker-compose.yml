@@ -20,8 +20,6 @@ services:
       - "You are a helpful assistant"
       - --stt_compile_mode 
       - reduce-overhead 
-      - --tts_compile_mode 
-      - default
     expose:
       - 12345/tcp
       - 12346/tcp

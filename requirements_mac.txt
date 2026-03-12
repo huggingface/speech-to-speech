@@ -1,7 +1,6 @@
 pip>=24.0
 lingua-language-detector>=2.0.2
 nltk==3.9.1
-# parler_tts @ git+https://github.com/huggingface/parler-tts.git unmaintained
 melotts @ git+https://github.com/andimarafioti/MeloTTS.git#egg=MeloTTS
 torch==2.10.0
 torchaudio==2.10.0
@@ -15,6 +14,5 @@ faster-whisper>=1.0.3
 modelscope>=1.17.1
 # deepfilternet>=0.5.6  # Optional: for audio enhancement. Incompatible with pocket-tts due to numpy<2 constraint
 openai>=1.40.1
-# useful-moonshine @ git+https://github.com/andimarafioti/moonshine.git
 websockets>=12.0
 pocket-tts>=0.1.0  # For Pocket TTS from Kyutai Labs

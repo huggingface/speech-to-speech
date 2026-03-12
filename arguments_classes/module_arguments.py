@@ -23,7 +23,7 @@ class ModuleArguments:
     stt: Optional[str] = field(
         default="whisper",
         metadata={
-            "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', 'parakeet-tdt', 'moonshine', or 'paraformer'. Default is 'whisper'."
+            "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', 'parakeet-tdt', or 'paraformer'. Default is 'whisper'."
         },
     )
     llm: Optional[str] = field(
@@ -33,9 +33,9 @@ class ModuleArguments:
         },
     )
     tts: Optional[str] = field(
-        default="parler",
+        default=None,
         metadata={
-            "help": "The TTS to use. Either 'parler', 'melo', 'chatTTS', 'facebookMMS', 'pocket', 'kokoro', 'kokoro-mlx', or 'qwen3'. Default is 'parler'"
+            "help": "The TTS to use. Either 'melo', 'chatTTS', 'facebookMMS', 'pocket', 'kokoro', or 'qwen3'. Default is platform-dependent: 'qwen3' on non-macOS and 'kokoro' on macOS."
         },
     )
     log_level: str = field(

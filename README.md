@@ -147,18 +147,16 @@ https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install
 
 ### Recommended usage with Cuda
 
-Leverage Torch Compile for Whisper and Parler-TTS. **The usage of Parler-TTS allows for audio output streaming, further reducing the overall latency** 🚀:
+Leverage Torch Compile for Whisper with Pocket TTS for a simple low-latency setup:
 
 ```bash
 python s2s_pipeline.py \
 	--lm_model_name microsoft/Phi-3-mini-4k-instruct \
 	--stt_compile_mode reduce-overhead \
-	--tts_compile_mode default \
+  --tts pocket \
   --recv_host 0.0.0.0 \
 	--send_host 0.0.0.0 
 ```
-
-For the moment, modes capturing CUDA Graphs are not compatible with streaming Parler-TTS (`reduce-overhead`, `max-autotune`).
 
 ### Multi-language Support
 
@@ -168,7 +166,7 @@ Two use cases are considered:
 - **Single-language conversation**: Enforce the language setting using the `--language` flag, specifying the target language code (default is 'en').
 - **Language switching**: Set `--language` to 'auto'. In this case, Whisper detects the language for each spoken prompt, and the LLM is prompted with "`Please reply to my message in ...`" to ensure the response is in the detected language.
 
-Please note that you must use STT and LLM checkpoints compatible with the target language(s). For the STT part, Parler-TTS is not yet multilingual (though that feature is coming soon! 🤗). In the meantime, you should use Melo (which supports English, French, Spanish, Chinese, Japanese, and Korean) or Chat-TTS.
+Please note that you must use STT and LLM checkpoints compatible with the target language(s). For multilingual TTS, use Melo (English, French, Spanish, Chinese, Japanese, and Korean) or Chat-TTS.
 
 #### With the server version:
 

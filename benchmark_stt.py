@@ -176,7 +176,7 @@ def benchmark_handler(
             )
 
         elif handler_name == "moonshine":
-            from STT.moonshine_handler import MoonshineSTTHandler
+            from archive.STT.moonshine_handler import MoonshineSTTHandler
             handler = MoonshineSTTHandler(
                 stop_event,
                 queue_in=queue_in,
