@@ -55,3 +55,21 @@ class OpenApiLanguageModelHandlerArguments:
                     " than in a single, complete response, often used for handling large or real-time data.Default is False"
         },
     )
+    open_api_image_paths: str = field(
+        default=None,
+        metadata={
+            "help": "Comma-separated local image paths to attach to each user turn for multimodal OpenAI-compatible models."
+        },
+    )
+    open_api_image_urls: str = field(
+        default=None,
+        metadata={
+            "help": "Comma-separated remote URLs or data URLs to attach to each user turn for multimodal OpenAI-compatible models."
+        },
+    )
+    open_api_image_detail: str = field(
+        default="auto",
+        metadata={
+            "help": "Image detail level for multimodal OpenAI-compatible models. Typically 'low', 'high', or 'auto'."
+        },
+    )
