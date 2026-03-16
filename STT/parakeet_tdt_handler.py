@@ -118,6 +118,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
             self._setup_nano_parakeet(model_name)
 
         # Setup streaming handler if live transcription is enabled
+        self.streaming_handler = None
         if self.enable_live_transcription:
             from STT.smart_progressive_streaming import (
                 SmartProgressiveStreamingHandler,
@@ -342,7 +343,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
     def _process_mlx_final(self, audio_input):
         """Process final audio using MLX backend with streaming handler."""
         # If we have fixed sentences from progressive updates, only transcribe the new part
-        if hasattr(self.streaming_handler, 'fixed_sentences') and self.streaming_handler.fixed_sentences:
+        if self.streaming_handler is not None and hasattr(self.streaming_handler, 'fixed_sentences') and self.streaming_handler.fixed_sentences:
             # Clear the live transcription line
             console.print(" " * 100, end="\r")
 
