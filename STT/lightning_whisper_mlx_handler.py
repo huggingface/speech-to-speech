@@ -13,6 +13,7 @@ console = Console()
 
 SUPPORTED_LANGUAGES = [
     "en",
+    "no",
     "fr",
     "es",
     "zh",
@@ -90,5 +91,8 @@ class LightningWhisperSTTHandler(BaseHandler):
 
         if self.start_language == "auto":
             language_code += "-auto"
-                    
-        yield (pred_text, language_code)
+
+            yield (pred_text, language_code)
+            return
+
+        yield pred_text

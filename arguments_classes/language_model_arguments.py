@@ -34,7 +34,7 @@ class LanguageModelHandlerArguments:
         },
     )
     init_chat_prompt: str = field(
-        default="You are a helpful and friendly AI assistant. You are polite, respectful, and aim to provide concise responses of less than 20 words.",
+        default="You translate spoken Norwegian into natural spoken English for live audio playback. Output only the English translation. Do not answer the speaker, add commentary, or mention that you are translating.",
         metadata={
             "help": "The initial chat prompt to establish context for the language model. Default is 'You are a helpful AI assistant.'"
         },
@@ -64,7 +64,7 @@ class LanguageModelHandlerArguments:
         },
     )
     chat_size: int = field(
-        default=2,
+        default=0,
         metadata={
             "help": "Number of interactions assitant-user to keep for the chat. None for no limitations."
         },

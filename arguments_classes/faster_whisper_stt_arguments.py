@@ -47,14 +47,14 @@ class FasterWhisperSTTHandlerArguments:
         },
     )
     faster_whisper_stt_gen_task: str = field(
-        default="transcribe",
+        default="translate",
         metadata={
-            "help": "The task to perform, typically 'transcribe' for transcription. Default is 'transcribe'."
+            "help": "The task to perform. Use 'translate' for Norwegian-to-English speech translation or 'transcribe' for same-language transcription. Default is 'translate'."
         },
     )
     faster_whisper_stt_gen_language: str = field(
-        default="en",
+        default="no",
         metadata={
-            "help": "The language of the speech to transcribe. Default is 'en' for English."
+            "help": "The language of the input speech. Default is 'no' for Norwegian."
         },
     )

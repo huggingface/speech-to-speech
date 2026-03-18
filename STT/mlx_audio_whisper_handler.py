@@ -11,6 +11,7 @@ console = Console()
 
 SUPPORTED_LANGUAGES = [
     "en",
+    "no",
     "fr",
     "es",
     "zh",
@@ -110,6 +111,8 @@ class MLXAudioWhisperSTTHandler(BaseHandler):
         # Prepare generation kwargs - only pass valid parameters
         gen_kwargs = {}
 
+        fixed_language = self.start_language and self.start_language != "auto"
+
         # Add language if specified
         if self.start_language and self.start_language != 'auto':
             gen_kwargs['language'] = self.start_language
@@ -126,7 +129,9 @@ class MLXAudioWhisperSTTHandler(BaseHandler):
             pred_text = result.text.strip() if hasattr(result, 'text') else str(result).strip()
 
             # Try to detect language from result if available
-            if hasattr(result, 'language'):
+            if fixed_language:
+                language_code = self.start_language
+            elif hasattr(result, 'language'):
                 language_code = result.language
             elif self.start_language and self.start_language != 'auto':
                 language_code = self.start_language
@@ -156,4 +161,7 @@ class MLXAudioWhisperSTTHandler(BaseHandler):
         if self.start_language == "auto":
             language_code += "-auto"
 
-        yield (pred_text, language_code)
+            yield (pred_text, language_code)
+            return
+
+        yield pred_text

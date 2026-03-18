@@ -24,6 +24,7 @@ TOOL_PATTERN = re.compile(r'\[TOOL:(\w+)(?:\|([^\]]+))?\]')
 
 WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
     "en": "english",
+    "no": "norwegian",
     "fr": "french",
     "es": "spanish",
     "zh": "chinese",

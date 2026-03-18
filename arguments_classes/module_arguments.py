@@ -9,9 +9,9 @@ class ModuleArguments:
         metadata={"help": "If specified, overrides the device for all handlers."},
     )
     mode: Optional[str] = field(
-        default="socket",
+        default="local",
         metadata={
-            "help": "The mode to run the pipeline in. Either 'local', 'socket', or 'websocket'. Default is 'socket'."
+            "help": "The mode to run the pipeline in. Either 'local', 'socket', or 'websocket'. Default is 'local'."
         },
     )
     local_mac_optimal_settings: bool = field(
@@ -35,7 +35,7 @@ class ModuleArguments:
     tts: Optional[str] = field(
         default=None,
         metadata={
-            "help": "The TTS to use. Either 'melo', 'chatTTS', 'facebookMMS', 'pocket', 'kokoro', or 'qwen3'. Default is platform-dependent: 'qwen3' on non-macOS and 'melo' on macOS (with 'pocket' also valid on macOS)."
+            "help": "The TTS to use. Either 'melo', 'chatTTS', 'facebookMMS', 'pocket', 'kokoro', or 'qwen3'. Default is platform-dependent: 'pocket' on non-macOS and 'melo' on macOS."
         },
     )
     log_level: str = field(

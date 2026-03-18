@@ -33,9 +33,8 @@ class ParakeetTDTSTTHandlerArguments:
         },
     )
     parakeet_tdt_language: Optional[str] = field(
-        default=None,
+        default="no",
         metadata={
-            "help": "Target language code for transcription. If not specified, the model will "
-            "auto-detect the language. Supports 25 European languages."
+            "help": "Target language code for transcription. Default is 'no' for Norwegian in the MVP."
         },
     )

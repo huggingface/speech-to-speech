@@ -47,18 +47,15 @@ class WhisperSTTHandlerArguments:
         },
     )
     stt_gen_task: str = field(
-        default="transcribe",
+        default="translate",
         metadata={
-            "help": "The task to perform, typically 'transcribe' for transcription. Default is 'transcribe'."
+            "help": "The task to perform. Use 'translate' for Norwegian-to-English speech translation or 'transcribe' for same-language transcription. Default is 'translate'."
         },
     )
     language: Optional[str] = field(
-        default='en',
+        default='no',
         metadata={
-            "help": """The language for the conversation. 
-            Choose between 'en' (english), 'fr' (french), 'es' (spanish), 
-            'zh' (chinese), 'ko' (korean), 'ja' (japanese), 'hi' (hindi) or 'None'.
-            If using 'auto', the language is automatically detected and can
-            change during the conversation. Default is 'en'."""
+            "help": """Input speech language. The MVP is tuned for Norwegian input, so the default is 'no'.
+            Use 'auto' only if you explicitly want per-utterance language detection."""
         },
     )

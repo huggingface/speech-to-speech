@@ -14,6 +14,7 @@ console = Console()
 
 SUPPORTED_LANGUAGES = [
     "en",
+    "no",
     "fr",
     "es",
     "zh",
@@ -122,21 +123,23 @@ class WhisperSTTHandler(BaseHandler):
 
         input_features = self.prepare_model_inputs(spoken_prompt)
         pred_ids = self.model.generate(input_features, **self.gen_kwargs)
-        language_code = self.processor.tokenizer.decode(pred_ids[0, 1])[2:-2]  # remove "<|" and "|>"
+        if self.start_language in (None, "auto"):
+            language_code = self.processor.tokenizer.decode(pred_ids[0, 1])[2:-2]  # remove "<|" and "|>"
 
-        if language_code not in SUPPORTED_LANGUAGES:  # reprocess with the last language
-            logger.warning("Whisper detected unsupported language:", language_code)
-            gen_kwargs = copy(self.gen_kwargs)
-            gen_kwargs['language'] = self.last_language
-            language_code = self.last_language
-            pred_ids = self.model.generate(input_features, **gen_kwargs)
+            if language_code not in SUPPORTED_LANGUAGES:  # reprocess with the last language
+                logger.warning(f"Whisper detected unsupported language: {language_code}")
+                gen_kwargs = copy(self.gen_kwargs)
+                gen_kwargs["language"] = self.last_language
+                language_code = self.last_language
+                pred_ids = self.model.generate(input_features, **gen_kwargs)
+            else:
+                self.last_language = language_code
         else:
-            self.last_language = language_code
+            language_code = self.start_language
         
         pred_text = self.processor.batch_decode(
             pred_ids, skip_special_tokens=True, decode_with_timestamps=False
         )[0]
-        language_code = self.processor.tokenizer.decode(pred_ids[0, 1])[2:-2] # remove "<|" and "|>"
 
         logger.debug("finished whisper inference")
         console.print(f"[yellow]USER: {pred_text}")
@@ -144,5 +147,8 @@ class WhisperSTTHandler(BaseHandler):
 
         if self.start_language == "auto":
             language_code += "-auto"
-            
-        yield (pred_text, language_code)
+
+            yield (pred_text, language_code)
+            return
+
+        yield pred_text

@@ -266,7 +266,10 @@ class ParakeetTDTSTTHandler(BaseHandler):
         console.print(f"[yellow]USER: {pred_text}")
         console.print(f"[dim]Language: {language_code}[/dim]")
 
-        yield (pred_text, language_code)
+        if self.start_language == "auto":
+            yield (pred_text, language_code)
+        else:
+            yield pred_text
 
         # Reset processing_final flag for next utterance
         if self.enable_live_transcription:
