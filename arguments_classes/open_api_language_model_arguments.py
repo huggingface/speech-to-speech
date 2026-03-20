@@ -56,7 +56,7 @@ class OpenApiLanguageModelHandlerArguments:
         },
     )
     open_api_disable_thinking: bool = field(
-        default=False,
+        default=True,
         metadata={
             "help": "Disable provider-side thinking/reasoning when supported by the OpenAI-compatible backend. "
                     "For Together Qwen3.5 models this sends chat_template_kwargs.enable_thinking=false."

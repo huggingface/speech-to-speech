@@ -111,3 +111,17 @@ def test_build_request_kwargs_merges_disable_thinking_with_existing_extra_body()
             "enable_thinking": False,
         },
     }
+
+
+def test_build_request_kwargs_disables_thinking_by_default():
+    handler = object.__new__(OpenApiModelHandler)
+    handler.model_name = "test-model"
+    handler.stream = False
+    handler.disable_thinking = True
+    handler.gen_kwargs = {}
+
+    request_kwargs = handler._build_request_kwargs([{"role": "user", "content": "Hi"}])
+
+    assert request_kwargs["extra_body"] == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }

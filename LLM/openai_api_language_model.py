@@ -81,7 +81,7 @@ class OpenApiModelHandler(BaseHandler):
         chat_size=1,
         init_chat_role="system",
         init_chat_prompt="You are a helpful AI assistant.",
-        disable_thinking=False,
+        disable_thinking=True,
     ):
         self.model_name = model_name
         self.stream = stream
