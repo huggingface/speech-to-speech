@@ -50,16 +50,31 @@ def parse_tool_calls(text):
     return clean_text, tools
 
 
+def extract_stream_chunk_text(chunk):
+    """Return streamed text content or an empty string for non-content chunks."""
+    choices = getattr(chunk, "choices", None) or []
+    if not choices:
+        return ""
+
+    delta = getattr(choices[0], "delta", None)
+    if delta is None:
+        return ""
+
+    content = getattr(delta, "content", None)
+    return content if isinstance(content, str) else ""
+
+
 class OpenApiModelHandler(BaseHandler):
     """
     Handles the language model part.
     """
+
     def setup(
         self,
         model_name="deepseek-chat",
         device="cuda",
         gen_kwargs={},
-        base_url =None,
+        base_url=None,
         api_key=None,
         stream=False,
         user_role="user",
@@ -95,43 +110,47 @@ class OpenApiModelHandler(BaseHandler):
         logger.info(
             f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s"
         )
+
     def process(self, prompt):
-            logger.debug("call api language model...")
+        logger.debug("call api language model...")
 
-            language_code = None
-            if isinstance(prompt, tuple):
-                prompt, language_code = prompt
-                if language_code[-5:] == "-auto":
-                    language_code = language_code[:-5]
-                    prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
+        language_code = None
+        if isinstance(prompt, tuple):
+            prompt, language_code = prompt
+            if language_code[-5:] == "-auto":
+                language_code = language_code[:-5]
+                prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
 
-            self.chat.append({"role": self.user_role, "content": prompt})
+        self.chat.append({"role": self.user_role, "content": prompt})
 
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=self.chat.to_list(),
-                stream=self.stream
-            )
-            if self.stream:
-                generated_text, printable_text = "", ""
-                for chunk in response:
-                    new_text = chunk.choices[0].delta.content or ""
-                    generated_text += new_text
-                    printable_text += new_text
-                    sentences = sent_tokenize(printable_text)
-                    if len(sentences) > 1:
-                        clean_text, tools = parse_tool_calls(sentences[0])
-                        yield clean_text, language_code, tools
-                        printable_text = new_text
-                self.chat.append({"role": "assistant", "content": generated_text})
-                # don't forget last sentence
-                clean_text, tools = parse_tool_calls(printable_text)
-                yield clean_text, language_code, tools
-            else:
-                generated_text = response.choices[0].message.content
-                self.chat.append({"role": "assistant", "content": generated_text})
-                clean_text, tools = parse_tool_calls(generated_text)
-                yield clean_text, language_code, tools
+        response = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=self.chat.to_list(),
+            stream=self.stream
+        )
+        if self.stream:
+            generated_text, printable_text = "", ""
+            for chunk in response:
+                new_text = extract_stream_chunk_text(chunk)
+                if not new_text:
+                    continue
+
+                generated_text += new_text
+                printable_text += new_text
+                sentences = sent_tokenize(printable_text)
+                if len(sentences) > 1:
+                    clean_text, tools = parse_tool_calls(sentences[0])
+                    yield clean_text, language_code, tools
+                    printable_text = new_text
+            self.chat.append({"role": "assistant", "content": generated_text})
+            # don't forget last sentence
+            clean_text, tools = parse_tool_calls(printable_text)
+            yield clean_text, language_code, tools
+        else:
+            generated_text = response.choices[0].message.content
+            self.chat.append({"role": "assistant", "content": generated_text})
+            clean_text, tools = parse_tool_calls(generated_text)
+            yield clean_text, language_code, tools
 
     def on_session_end(self):
         self.chat.reset()
