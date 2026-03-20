@@ -49,6 +49,8 @@ def test_process_skips_empty_stream_chunks_without_breaking_sentence_chunking(mo
     handler = object.__new__(OpenApiModelHandler)
     handler.model_name = "test-model"
     handler.stream = True
+    handler.gen_kwargs = {}
+    handler.disable_thinking = False
     handler.user_role = "user"
     handler.chat = Chat(1)
     handler.client = SimpleNamespace(
@@ -68,4 +70,58 @@ def test_process_skips_empty_stream_chunks_without_breaking_sentence_chunking(mo
     assert handler.chat.buffer[-1] == {
         "role": "assistant",
         "content": "Hello. How are you?",
+    }
+
+
+def test_build_request_kwargs_adds_disable_thinking_extra_body():
+    handler = object.__new__(OpenApiModelHandler)
+    handler.model_name = "Qwen/Qwen3.5-9B:together"
+    handler.stream = True
+    handler.disable_thinking = True
+    handler.gen_kwargs = {"temperature": 0.2}
+
+    request_kwargs = handler._build_request_kwargs([{"role": "user", "content": "Hi"}])
+
+    assert request_kwargs["model"] == "Qwen/Qwen3.5-9B:together"
+    assert request_kwargs["stream"] is True
+    assert request_kwargs["temperature"] == 0.2
+    assert request_kwargs["extra_body"] == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
+
+
+def test_build_request_kwargs_merges_disable_thinking_with_existing_extra_body():
+    handler = object.__new__(OpenApiModelHandler)
+    handler.model_name = "test-model"
+    handler.stream = False
+    handler.disable_thinking = True
+    handler.gen_kwargs = {
+        "extra_body": {
+            "foo": "bar",
+            "chat_template_kwargs": {"existing": 1},
+        }
+    }
+
+    request_kwargs = handler._build_request_kwargs([{"role": "user", "content": "Hi"}])
+
+    assert request_kwargs["extra_body"] == {
+        "foo": "bar",
+        "chat_template_kwargs": {
+            "existing": 1,
+            "enable_thinking": False,
+        },
+    }
+
+
+def test_build_request_kwargs_disables_thinking_by_default():
+    handler = object.__new__(OpenApiModelHandler)
+    handler.model_name = "test-model"
+    handler.stream = False
+    handler.disable_thinking = True
+    handler.gen_kwargs = {}
+
+    request_kwargs = handler._build_request_kwargs([{"role": "user", "content": "Hi"}])
+
+    assert request_kwargs["extra_body"] == {
+        "chat_template_kwargs": {"enable_thinking": False}
     }
