@@ -8,6 +8,24 @@ from pipeline_control import SESSION_END, is_control_message
 logger = logging.getLogger(__name__)
 
 
+class _WebSocketHandshakeNoiseFilter(logging.Filter):
+    """Suppress expected EOF handshake noise from TCP probes."""
+
+    def filter(self, record):
+        if record.msg != "opening handshake failed" or not record.exc_info:
+            return True
+
+        exc = record.exc_info[1]
+        if exc is None or str(exc) != "did not receive a valid HTTP request":
+            return True
+
+        cause = getattr(exc, "__cause__", None)
+        return not (
+            isinstance(cause, EOFError)
+            and str(cause) == "connection closed while reading HTTP request line"
+        )
+
+
 class WebSocketStreamer:
     """
     Handles bidirectional audio streaming over WebSocket.
@@ -37,6 +55,12 @@ class WebSocketStreamer:
         self.clients = set()
         self.loop = None
         self.server = None
+        self.server_logger = logging.getLogger("websockets.server")
+        if not any(
+            isinstance(existing_filter, _WebSocketHandshakeNoiseFilter)
+            for existing_filter in self.server_logger.filters
+        ):
+            self.server_logger.addFilter(_WebSocketHandshakeNoiseFilter())
 
     def run(self):
         """Run the WebSocket server (called from a thread)."""
@@ -60,6 +84,7 @@ class WebSocketStreamer:
             self._handle_client,
             self.host,
             self.port,
+            logger=self.server_logger,
         )
 
         logger.info("WebSocket server ready, waiting for connections...")
