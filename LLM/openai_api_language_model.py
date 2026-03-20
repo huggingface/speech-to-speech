@@ -133,3 +133,6 @@ class OpenApiModelHandler(BaseHandler):
                 clean_text, tools = parse_tool_calls(generated_text)
                 yield clean_text, language_code, tools
 
+    def on_session_end(self):
+        self.chat.reset()
+        logger.debug("OpenAI API language model chat state reset")

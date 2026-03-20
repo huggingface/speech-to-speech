@@ -200,6 +200,14 @@ class VADHandler(BaseHandler):
             )
         return enhanced.numpy().squeeze()
 
+    def on_session_end(self):
+        self.iterator.reset_states()
+        self.iterator.buffer = []
+        self.accumulated_audio = []
+        self.last_process_time = 0
+        self.should_listen.set()
+        logger.debug("VAD session state reset")
+
     @property
     def min_time_to_debug(self):
         return 0.00001

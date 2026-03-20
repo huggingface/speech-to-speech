@@ -445,3 +445,10 @@ class ParakeetTDTSTTHandler(BaseHandler):
         logger.info(f"Cleaning up {self.__class__.__name__}")
         if hasattr(self, "model"):
             del self.model
+
+    def on_session_end(self):
+        if self.enable_live_transcription:
+            self.processing_final = False
+            if self.streaming_handler is not None:
+                self.streaming_handler.reset()
+        logger.debug("Parakeet TDT session state reset")

@@ -23,3 +23,6 @@ class Chat:
             return [self.init_chat_message] + self.buffer
         else:
             return self.buffer
+
+    def reset(self):
+        self.buffer = []
