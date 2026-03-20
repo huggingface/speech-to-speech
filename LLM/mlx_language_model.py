@@ -198,3 +198,7 @@ class MLXLanguageModelHandler(BaseHandler):
         torch.mps.empty_cache()
 
         self.chat.append({"role": "assistant", "content": generated_text})
+
+    def on_session_end(self):
+        self.chat.reset()
+        logger.debug("MLX language model chat state reset")

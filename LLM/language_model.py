@@ -181,3 +181,7 @@ class LanguageModelHandler(BaseHandler):
         # don't forget last sentence
         clean_text, tools = parse_tool_calls(printable_text)
         yield (clean_text, language_code, tools)
+
+    def on_session_end(self):
+        self.chat.reset()
+        logger.debug("Language model chat state reset")
