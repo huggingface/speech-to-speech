@@ -55,3 +55,10 @@ class OpenApiLanguageModelHandlerArguments:
                     " than in a single, complete response, often used for handling large or real-time data.Default is False"
         },
     )
+    open_api_disable_thinking: bool = field(
+        default=False,
+        metadata={
+            "help": "Disable provider-side thinking/reasoning when supported by the OpenAI-compatible backend. "
+                    "For Together Qwen3.5 models this sends chat_template_kwargs.enable_thinking=false."
+        },
+    )

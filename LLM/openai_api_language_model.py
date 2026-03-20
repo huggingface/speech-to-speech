@@ -81,9 +81,12 @@ class OpenApiModelHandler(BaseHandler):
         chat_size=1,
         init_chat_role="system",
         init_chat_prompt="You are a helpful AI assistant.",
+        disable_thinking=False,
     ):
         self.model_name = model_name
         self.stream = stream
+        self.gen_kwargs = dict(gen_kwargs)
+        self.disable_thinking = disable_thinking
         self.chat = Chat(chat_size)
         if init_chat_role:
             if not init_chat_prompt:
@@ -95,16 +98,31 @@ class OpenApiModelHandler(BaseHandler):
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.warmup()
 
+    def _build_request_kwargs(self, messages):
+        request_kwargs = {
+            "model": self.model_name,
+            "messages": messages,
+            "stream": self.stream,
+            **self.gen_kwargs,
+        }
+
+        if self.disable_thinking:
+            extra_body = dict(request_kwargs.get("extra_body") or {})
+            chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+            chat_template_kwargs["enable_thinking"] = False
+            extra_body["chat_template_kwargs"] = chat_template_kwargs
+            request_kwargs["extra_body"] = extra_body
+
+        return request_kwargs
+
     def warmup(self):
         logger.info(f"Warming up {self.__class__.__name__}")
         start = time.time()
         response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[
+            **self._build_request_kwargs([
                 {"role": "system", "content": "You are a helpful assistant"},
                 {"role": "user", "content": "Hello"},
-            ],
-            stream=self.stream
+            ])
         )
         end = time.time()
         logger.info(
@@ -124,9 +142,7 @@ class OpenApiModelHandler(BaseHandler):
         self.chat.append({"role": self.user_role, "content": prompt})
 
         response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=self.chat.to_list(),
-            stream=self.stream
+            **self._build_request_kwargs(self.chat.to_list())
         )
         if self.stream:
             generated_text, printable_text = "", ""
