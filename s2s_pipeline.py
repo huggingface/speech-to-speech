@@ -32,6 +32,7 @@ from arguments_classes.parakeet_tdt_arguments import (
 )
 from arguments_classes.melo_tts_arguments import MeloTTSHandlerArguments
 from arguments_classes.open_api_language_model_arguments import OpenApiLanguageModelHandlerArguments
+from arguments_classes.minimax_language_model_arguments import MiniMaxLanguageModelHandlerArguments
 from arguments_classes.facebookmms_tts_arguments import FacebookMMSTTSHandlerArguments
 from arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
 from arguments_classes.kokoro_tts_arguments import KokoroTTSHandlerArguments
@@ -96,6 +97,7 @@ def parse_arguments():
             ParakeetTDTSTTHandlerArguments,
             LanguageModelHandlerArguments,
             OpenApiLanguageModelHandlerArguments,
+            MiniMaxLanguageModelHandlerArguments,
             MLXLanguageModelHandlerArguments,
             MeloTTSHandlerArguments,
             ChatTTSHandlerArguments,
@@ -191,6 +193,7 @@ def prepare_all_args(
     parakeet_tdt_stt_handler_kwargs,
     language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
+    minimax_language_model_handler_kwargs,
     mlx_language_model_handler_kwargs,
     melo_tts_handler_kwargs,
     chat_tts_handler_kwargs,
@@ -208,6 +211,7 @@ def prepare_all_args(
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
+        minimax_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
@@ -225,6 +229,7 @@ def prepare_all_args(
     rename_args(language_model_handler_kwargs, "lm")
     rename_args(mlx_language_model_handler_kwargs, "mlx_lm")
     rename_args(open_api_language_model_handler_kwargs, "open_api")
+    rename_args(minimax_language_model_handler_kwargs, "minimax")
     rename_args(melo_tts_handler_kwargs, "melo")
     rename_args(chat_tts_handler_kwargs, "chat_tts")
     rename_args(facebook_mms_tts_handler_kwargs, "facebook_mms")
@@ -260,6 +265,7 @@ def build_pipeline(
     parakeet_tdt_stt_handler_kwargs,
     language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
+    minimax_language_model_handler_kwargs,
     mlx_language_model_handler_kwargs,
     melo_tts_handler_kwargs,
     chat_tts_handler_kwargs,
@@ -339,7 +345,7 @@ def build_pipeline(
     )
 
     stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs)
-    lm = get_llm_handler(module_kwargs, stop_event, text_prompt_queue, lm_response_queue, language_model_handler_kwargs, open_api_language_model_handler_kwargs, mlx_language_model_handler_kwargs)
+    lm = get_llm_handler(module_kwargs, stop_event, text_prompt_queue, lm_response_queue, language_model_handler_kwargs, open_api_language_model_handler_kwargs, minimax_language_model_handler_kwargs, mlx_language_model_handler_kwargs)
 
     # Add LM output processor to extract tools and forward clean text to TTS
     from LLM.lm_output_processor import LMOutputProcessor
@@ -420,12 +426,13 @@ def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_
 
 
 def get_llm_handler(
-    module_kwargs, 
-    stop_event, 
-    text_prompt_queue, 
-    lm_response_queue, 
+    module_kwargs,
+    stop_event,
+    text_prompt_queue,
+    lm_response_queue,
     language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
+    minimax_language_model_handler_kwargs,
     mlx_language_model_handler_kwargs
 ):
     if module_kwargs.llm == "transformers":
@@ -444,7 +451,14 @@ def get_llm_handler(
             queue_out=lm_response_queue,
             setup_kwargs=vars(open_api_language_model_handler_kwargs),
         )
-
+    elif module_kwargs.llm == "minimax":
+        from LLM.minimax_language_model import MiniMaxModelHandler
+        return MiniMaxModelHandler(
+            stop_event,
+            queue_in=text_prompt_queue,
+            queue_out=lm_response_queue,
+            setup_kwargs=vars(minimax_language_model_handler_kwargs),
+        )
     elif module_kwargs.llm == "mlx-lm":
         from LLM.mlx_language_model import MLXLanguageModelHandler
         return MLXLanguageModelHandler(
@@ -455,7 +469,7 @@ def get_llm_handler(
         )
 
     else:
-        raise ValueError("The LLM should be either transformers or mlx-lm")
+        raise ValueError("The LLM should be either transformers, open_api, minimax, or mlx-lm")
 
 
 def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs, qwen3_tts_handler_kwargs):
@@ -541,6 +555,7 @@ def main():
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
+        minimax_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
@@ -561,6 +576,7 @@ def main():
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
+        minimax_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
@@ -585,6 +601,7 @@ def main():
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
+        minimax_language_model_handler_kwargs,
         mlx_language_model_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,

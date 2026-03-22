@@ -45,6 +45,7 @@ The pipeline provides a fully open and modular approach, with a focus on leverag
 - Any instruction-following model on the [Hugging Face Hub](https://huggingface.co/models?pipeline_tag=text-generation&sort=trending) via Transformers 🤗
 - [mlx-lm](https://github.com/ml-explore/mlx-examples/blob/main/llms/README.md)
 - [OpenAI API](https://platform.openai.com/docs/quickstart)
+- [MiniMax API](https://platform.minimaxi.com/) — MiniMax-M2.7, MiniMax-M2.5, MiniMax-M2.5-highspeed
 
 **TTS**
 - [MeloTTS](https://github.com/myshell-ai/MeloTTS)
@@ -229,6 +230,24 @@ python s2s_pipeline.py \
 ```
 
 Available voice presets: `alba`, `marius`, `javert`, `jean`, `fantine`, `cosette`, `eponine`, `azelma`. You can also use custom voice files or HuggingFace paths.
+
+### Using MiniMax LLM
+
+You can use [MiniMax](https://platform.minimaxi.com/) cloud models as the language model backend. Set your API key and select the `minimax` LLM:
+
+```bash
+export MINIMAX_API_KEY="your-api-key"
+
+python s2s_pipeline.py \
+    --llm minimax \
+    --minimax_model_name MiniMax-M2.7 \
+    --minimax_stream \
+    --tts pocket \
+    --recv_host 0.0.0.0 \
+    --send_host 0.0.0.0
+```
+
+Available models: `MiniMax-M2.7` (default), `MiniMax-M2.5`, `MiniMax-M2.5-highspeed` (204K context).
 
 ## Command-line Usage
 
