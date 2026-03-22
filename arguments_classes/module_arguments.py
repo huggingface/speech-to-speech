@@ -29,7 +29,7 @@ class ModuleArguments:
     llm: Optional[str] = field(
         default="transformers",
         metadata={
-            "help": "The LLM to use. Either 'transformers' or 'mlx-lm'. Default is 'transformers'"
+            "help": "The LLM to use. Either 'transformers', 'open_api', 'minimax', or 'mlx-lm'. Default is 'transformers'"
         },
     )
     tts: Optional[str] = field(
