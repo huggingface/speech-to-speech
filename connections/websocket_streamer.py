@@ -126,9 +126,6 @@ class WebSocketStreamer:
             self.clients.discard(websocket)
             logger.info(f"Client {client_id} disconnected (finally block)")
 
-            if len(self.clients) == 0:
-                self.input_queue.put(b"END")
-
     async def _send_loop(self):
         """Send audio and text from queues to all connected clients."""
         # Buffer audio until we have at least 100ms worth (3200 bytes = 1600 samples at 16kHz int16)
