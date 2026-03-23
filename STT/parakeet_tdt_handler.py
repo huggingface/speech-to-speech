@@ -265,8 +265,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
             language_code = self.last_language
 
         logger.debug("Finished Parakeet TDT inference")
-        console.print(f"[yellow]USER: {pred_text}")
-        console.print(f"[dim]Language: {language_code}[/dim]")
         self._emit_user_transcript(pred_text, is_final=True, language_code=language_code)
 
         yield (pred_text, language_code)
@@ -322,14 +320,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
         try:
             # Use streaming handler for progressive transcription
             result = self.streaming_handler.transcribe_incremental(audio_input)
-            self._emit_user_transcript(
-                self._build_progressive_text(result),
-                is_final=False,
-            )
-
-            # Display live transcription with colors (overwrite previous line)
-            # Yellow = fixed user text (matches final USER output)
-            # Cyan = active/in-progress text (indicates processing)
             text = Text()
             if result.fixed_text:
                 text.append("Live: ", style="dim")
@@ -342,8 +332,12 @@ class ParakeetTDTSTTHandler(BaseHandler):
                     text.append("Live: ", style="dim")
                 text.append(result.active_text, style="cyan dim")
 
-            if text:
-                console.print(text, end="\r")
+            self._emit_user_transcript(
+                self._build_progressive_text(result),
+                is_final=False,
+                console_text=text if text else None,
+                console_end="\r",
+            )
         except Exception as e:
             logger.debug(f"Progressive transcription failed: {e}")
 
@@ -355,12 +349,21 @@ class ParakeetTDTSTTHandler(BaseHandler):
             parts.append(result.active_text.strip())
         return " ".join(part for part in parts if part).strip()
 
-    def _emit_user_transcript(self, text, is_final, language_code=None):
-        if self.text_output_queue is None:
-            return
-
+    def _emit_user_transcript(self, text, is_final, language_code=None, console_text=None, console_end=None):
         clean_text = text.strip()
         if not clean_text:
+            return
+
+        if console_text is not None:
+            console.print(console_text, end=console_end)
+        elif is_final:
+            console.print(f"[yellow]USER: {clean_text}")
+            if language_code:
+                console.print(f"[dim]Language: {language_code}[/dim]")
+        else:
+            console.print(f"[dim]Live: [/dim]{clean_text}", end=console_end or "\r")
+
+        if self.text_output_queue is None:
             return
 
         message = {
