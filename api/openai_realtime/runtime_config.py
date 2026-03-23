@@ -30,8 +30,8 @@ class RuntimeConfig(BaseModel):
     processing.  Python's GIL makes simple attribute reads/writes atomic,
     so no explicit locking is needed for primitive values.
 
-    The canonical state lives in ``session`` (a full
-    ``RealtimeSessionCreateRequest``).
+    The canonical state lives in 'session' (a full
+    'RealtimeSessionCreateRequest').
     """
 
     model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True)
@@ -44,7 +44,7 @@ class RuntimeConfig(BaseModel):
     @field_validator("session", mode="after")
     @classmethod
     def _ensure_audio_structure(cls, v: RealtimeSessionCreateRequest) -> RealtimeSessionCreateRequest:
-        """Guarantee ``audio.input`` and ``audio.output`` are never None."""
+        """Guarantee 'audio.input' and 'audio.output' are never None."""
         if v.audio is None:
             v.audio = RealtimeAudioConfig()
         if v.audio.input is None:
@@ -54,6 +54,6 @@ class RuntimeConfig(BaseModel):
         return v
 
     def apply_session_update(self, update: RealtimeSessionCreateRequest) -> None:
-        """Merge non-None, explicitly-set fields from *update* into the
-        current ``session``, preserving any fields not present in the update."""
+        """Merge non-None, explicitly-set fields from 'update' into the
+        current 'session', preserving any fields not present in the update."""
         _apply_update(self.session, update)
