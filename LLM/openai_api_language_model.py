@@ -132,9 +132,8 @@ class OpenApiModelHandler(BaseHandler):
                 tool_choice=self.tools_choice
             )
             tools: list[dict[str, str]] = []
-            clean_text: str = ""
+            clean_text = ""
             if self.stream:
-                printable_text = ""
                 cancelled = False
                 for event in response:
                     if self.cancel_response and self.cancel_response.is_set():
@@ -142,8 +141,7 @@ class OpenApiModelHandler(BaseHandler):
                         cancelled = True
                         break
                     if event.type == "response.output_text.delta":
-                        printable_text = remove_emojis(printable_text)
-                        printable_text += event.delta
+                        clean_text += remove_emojis(event.delta)
                         # TODO: Rethink stream generation to use special yield tags that signal
                         # the engine whether the model is sending a partial or complete
                         # LLM response. Enable TTS response only on complete LLM response (and send partial events for realtime engine).
@@ -158,10 +156,10 @@ class OpenApiModelHandler(BaseHandler):
                         elif event.item.type == "message":
                             self.chat.append({"role": event.item.role, "content": event.item.content})
                 if not cancelled:
-                    if printable_text.strip() or tools:
-                        logger.info(f"Clean text: {printable_text}")
+                    if clean_text.strip() or tools:
+                        logger.info(f"Clean text: {clean_text}")
                         logger.info(f"Tools: {tools}")
-                        yield printable_text, language_code, tools
+                        yield clean_text, language_code, tools
             else:
                 if self.cancel_response and self.cancel_response.is_set():
                     logger.info("LLM generation cancelled (interruption)")
@@ -173,8 +171,7 @@ class OpenApiModelHandler(BaseHandler):
                             self.chat.append({"role": message.role, "content": message.content})
                             for chunk in message.content:
                                 if chunk.type == "output_text":
-                                    clean_text = remove_emojis(clean_text)
-                                    clean_text += chunk.text
+                                    clean_text += remove_emojis(chunk.text)
                         else:
                             logger.warning(f"Not supported message type: {message.type}")
                     logger.info(f"Clean text: {clean_text}")
