@@ -338,7 +338,7 @@ def build_pipeline(
         setup_kwargs=vad_setup_kwargs,
     )
 
-    stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs)
+    stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, text_output_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs)
     lm = get_llm_handler(module_kwargs, stop_event, text_prompt_queue, lm_response_queue, language_model_handler_kwargs, open_api_language_model_handler_kwargs, mlx_language_model_handler_kwargs)
 
     # Add LM output processor to extract tools and forward clean text to TTS
@@ -355,7 +355,7 @@ def build_pipeline(
     return ThreadManager([*comms_handlers, vad, stt, lm, lm_processor, tts])
 
 
-def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs):
+def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, text_output_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs):
     if module_kwargs.stt == "whisper":
         from STT.whisper_stt_handler import WhisperSTTHandler
         return WhisperSTTHandler(
@@ -407,6 +407,7 @@ def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_
             **vars(parakeet_tdt_stt_handler_kwargs),
             "enable_live_transcription": module_kwargs.enable_live_transcription,
             "live_transcription_update_interval": module_kwargs.live_transcription_update_interval,
+            "text_output_queue": text_output_queue,
         }
 
         return ParakeetTDTSTTHandler(
