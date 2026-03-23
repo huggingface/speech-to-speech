@@ -1,4 +1,4 @@
-from threading import Thread
+from threading import Event, Thread
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -6,21 +6,20 @@ from transformers import (
     TextIteratorStreamer,
 )
 import torch
-import re
+import logging
 
 from LLM.chat import Chat
+from LLM.tool_call.function_call import extract_function_calls_from_text
+from LLM.tool_call.function_tool import FunctionTool
+from LLM.tool_call.tool_prompt import build_tool_system_prompt, build_block_regex
 from baseHandler import BaseHandler
 from rich.console import Console
-import logging
 from nltk import sent_tokenize
+from api.openai_realtime.runtime_config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 
 console = Console()
-
-# Tool call pattern for extraction
-TOOL_PATTERN = re.compile(r'\[TOOL:(\w+)(?:\|([^\]]+))?\]')
-
 
 WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
     "en": "english",
@@ -38,30 +37,6 @@ WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
 }
 
 
-def parse_tool_calls(text):
-    """Extract tool calls from text and return cleaned text + tool calls."""
-    tools = []
-
-    for match in TOOL_PATTERN.finditer(text):
-        tool_name = match.group(1)
-        params_str = match.group(2) or ""
-
-        # Parse params: key1:val1|key2:val2
-        params = {}
-        if params_str:
-            for param in params_str.split('|'):
-                if ':' in param:
-                    key, val = param.split(':', 1)
-                    params[key] = val
-
-        tools.append({"name": tool_name, "parameters": params})
-
-    # Remove tool markers from text
-    clean_text = TOOL_PATTERN.sub('', text).strip()
-
-    return clean_text, tools
-
-
 class LanguageModelHandler(BaseHandler):
     """
     Handles the language model part.
@@ -77,8 +52,10 @@ class LanguageModelHandler(BaseHandler):
         chat_size=1,
         init_chat_role=None,
         init_chat_prompt="You are a helpful AI assistant.",
-        runtime_config=None,
+        runtime_config: RuntimeConfig | None = None,
+        cancel_response: Event | None = None,
     ):
+        self.cancel_response = cancel_response
         self.device = device
         self.torch_dtype = getattr(torch, torch_dtype)
 
@@ -99,6 +76,7 @@ class LanguageModelHandler(BaseHandler):
             "return_full_text": False,
             **gen_kwargs,
         }
+        print(self.gen_kwargs)
 
         self.chat = Chat(chat_size)
         if init_chat_role:
@@ -110,6 +88,10 @@ class LanguageModelHandler(BaseHandler):
         self.user_role = user_role
         self.runtime_config = runtime_config
         self._last_instructions = init_chat_prompt
+        self.tools = None
+        self.tool_choice = None
+        self._function_tools: list[FunctionTool] = []
+        self._block_regex: str | None = None
 
         self.warmup()
 
@@ -149,48 +131,128 @@ class LanguageModelHandler(BaseHandler):
             )
 
     def _apply_runtime_instructions(self):
-        if not self.runtime_config or not self.runtime_config.instructions:
+        if not self.runtime_config:
             return
-        new_instructions = self.runtime_config.instructions
-        if new_instructions != self._last_instructions:
-            self._last_instructions = new_instructions
-            self.chat.init_chat({"role": "system", "content": new_instructions})
-            logger.info(f"LLM instructions updated ({len(new_instructions)} chars)")
+        new_instructions = self.runtime_config.session.instructions
+        if not new_instructions:
+            return
+
+        raw_tools = self.runtime_config.session.tools or []
+        self.tool_choice = self.runtime_config.session.tool_choice
+
+        function_tools = [
+            FunctionTool(**t.model_dump())
+            for t in raw_tools
+            if t.type == "function"
+        ]
+        tool_names = tuple(t.name for t in function_tools)
+        old_tool_names = tuple(t.name for t in self._function_tools)
+
+        instructions_changed = new_instructions != self._last_instructions
+        tools_changed = tool_names != old_tool_names
+
+        if not instructions_changed and not tools_changed:
+            return
+
+        self._last_instructions = new_instructions
+        self._function_tools = function_tools
+        self.tools = raw_tools
+
+        if function_tools and self.tool_choice != "none":
+            tool_section = build_tool_system_prompt(function_tools)
+            full_instructions = f"{new_instructions}\n\n{tool_section}"
+            self._block_regex = build_block_regex()
+        else:
+            full_instructions = new_instructions
+            self._block_regex = None
+
+        self.chat.init_chat({"role": "system", "content": full_instructions})
+        logger.info(f"LLM instructions updated ({len(full_instructions)} chars, {len(function_tools)} tools)")
+
+    def _extract_tools(self, text: str) -> tuple[str, list[dict]]:
+        """Strip code blocks from *text* and return (clean_text, tool_dicts).
+
+        When no tools are configured (``_block_regex is None``), returns
+        the text unchanged with an empty tool list.
+        """
+        if not self._block_regex:
+            return text, []
+        clean_text, func_calls = extract_function_calls_from_text(
+            text, self._block_regex,
+        )
+        tools = []
+        for fc in func_calls:
+            try:
+                tools.append(
+                    fc.to_realtime_function_tool_call(self._function_tools).model_dump()
+                )
+            except ValueError as e:
+                logger.warning("Skipping invalid tool call: %s", e)
+        return clean_text, tools
 
     def process(self, prompt):
-        self._apply_runtime_instructions()
-        logger.debug("infering language model...")
-        language_code = None
-        if isinstance(prompt, tuple):
-            prompt, language_code = prompt
-            if language_code[-5:] == "-auto":
-                language_code = language_code[:-5]
-                prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
+        if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == "__ADD_TO_CONTEXT__":
+            _, role, text = prompt
+            self.chat.append({"role": role, "content": text})
+            return
 
-        self.chat.append({"role": self.user_role, "content": prompt})
+        if isinstance(prompt, tuple) and len(prompt) == 2 and prompt[0] == "__FUNCTION_RESULT__":
+            _, result_text = prompt
+            self.chat.append({"role": self.user_role, "content": result_text})
+            return
+
+        language_code = None
+
+        if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == "__GENERATE_RESPONSE__":
+            _, override_instructions, _ = prompt
+            self._apply_runtime_instructions()
+            if override_instructions:
+                self.chat.append({"role": self.user_role, "content": override_instructions})
+        else:
+            self._apply_runtime_instructions()
+            logger.debug("infering language model...")
+            if isinstance(prompt, tuple):
+                prompt, language_code = prompt
+                if language_code[-5:] == "-auto":
+                    language_code = language_code[:-5]
+                    prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
+            self.chat.append({"role": self.user_role, "content": prompt})
+
         thread = Thread(
             target=self.pipe, args=(self.chat.to_list(),), kwargs=self.gen_kwargs
         )
         thread.start()
+        cancelled = False
         if self.device == "mps":
             generated_text = ""
             for new_text in self.streamer:
+                if self.cancel_response and self.cancel_response.is_set():
+                    logger.info("LLM generation cancelled (interruption)")
+                    cancelled = True
+                    break
                 generated_text += new_text
             printable_text = generated_text
             torch.mps.empty_cache()
         else:
             generated_text, printable_text = "", ""
             for new_text in self.streamer:
+                if self.cancel_response and self.cancel_response.is_set():
+                    logger.info("LLM generation cancelled (interruption)")
+                    cancelled = True
+                    break
                 generated_text += new_text
                 printable_text += new_text
                 sentences = sent_tokenize(printable_text)
                 if len(sentences) > 1:
-                    clean_text, tools = parse_tool_calls(sentences[0])
+                    clean_text, tools = self._extract_tools(sentences[0])
                     yield (clean_text, language_code, tools)
                     printable_text = new_text
 
         self.chat.append({"role": "assistant", "content": generated_text})
 
-        # don't forget last sentence
-        clean_text, tools = parse_tool_calls(printable_text)
-        yield (clean_text, language_code, tools)
+        logger.debug("generated_text: %s", generated_text)
+
+        if not cancelled and printable_text.strip():
+            clean_text, tools = self._extract_tools(printable_text)
+            yield (clean_text, language_code, tools)
+        yield ("__END_OF_RESPONSE__", None, None)

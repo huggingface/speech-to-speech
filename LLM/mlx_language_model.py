@@ -1,5 +1,6 @@
 import logging
 import re
+from threading import Event
 from LLM.chat import Chat
 from baseHandler import BaseHandler
 from mlx_lm import load, stream_generate, generate
@@ -7,6 +8,8 @@ from rich.console import Console
 from utils.mlx_lock import MLXLockContext
 import mlx.core as mx
 import torch
+
+from api.openai_realtime.runtime_config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +85,10 @@ class MLXLanguageModelHandler(BaseHandler):
         chat_size=1,
         init_chat_role=None,
         init_chat_prompt="You are a helpful AI assistant.",
-        runtime_config=None,
+        runtime_config: RuntimeConfig | None = None,
+        cancel_response: Event | None = None,
     ):
+        self.cancel_response = cancel_response
         self.model_name = model_name
         self.model, self.tokenizer = load(self.model_name)
         self.gen_kwargs = gen_kwargs
@@ -120,7 +125,7 @@ class MLXLanguageModelHandler(BaseHandler):
         n_steps = 2
 
         for _ in range(n_steps):
-            prompt = self.tokenizer.apply_chat_template(dummy_chat, tokenize=False)
+            prompt = self.tokenizer.apply_chat_template(messages=dummy_chat, tokenize=False)
             generate(
                 self.model,
                 self.tokenizer,
@@ -130,26 +135,43 @@ class MLXLanguageModelHandler(BaseHandler):
             )
 
     def _apply_runtime_instructions(self):
-        if not self.runtime_config or not self.runtime_config.instructions:
+        if not self.runtime_config:
             return
-        new_instructions = self.runtime_config.instructions
+        new_instructions = self.runtime_config.session.instructions
+        if not new_instructions:
+            return
         if new_instructions != self._last_instructions:
             self._last_instructions = new_instructions
             self.chat.init_chat({"role": "system", "content": new_instructions})
             logger.info(f"LLM instructions updated ({len(new_instructions)} chars)")
 
     def process(self, prompt):
-        self._apply_runtime_instructions()
-        logger.debug("infering language model...")
+        if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == "__ADD_TO_CONTEXT__":
+            _, role, text = prompt
+            self.chat.append({"role": role, "content": text})
+            return
+
+        if isinstance(prompt, tuple) and len(prompt) == 2 and prompt[0] == "__FUNCTION_RESULT__":
+            _, result_text = prompt
+            self.chat.append({"role": self.user_role, "content": result_text})
+            return
+
         language_code = None
 
-        if isinstance(prompt, tuple):
-            prompt, language_code = prompt
-            if language_code[-5:] == "-auto":
-                language_code = language_code[:-5]
-                prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
-
-        self.chat.append({"role": self.user_role, "content": prompt})
+        if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == "__GENERATE_RESPONSE__":
+            _, override_instructions, _ = prompt
+            self._apply_runtime_instructions()
+            if override_instructions:
+                self.chat.append({"role": self.user_role, "content": override_instructions})
+        else:
+            self._apply_runtime_instructions()
+            logger.debug("infering language model...")
+            if isinstance(prompt, tuple):
+                prompt, language_code = prompt
+                if language_code[-5:] == "-auto":
+                    language_code = language_code[:-5]
+                    prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
+            self.chat.append({"role": self.user_role, "content": prompt})
 
         # Remove system messages if using a Gemma model
         if "gemma" in self.model_name.lower():
@@ -167,6 +189,7 @@ class MLXLanguageModelHandler(BaseHandler):
         end_of_turn = False
 
         # Acquire global MLX lock to prevent concurrent access with STT/TTS
+        cancelled = False
         with MLXLockContext(handler_name="MLX-LLM", timeout=10.0):
             for t in stream_generate(
                 self.model,
@@ -174,6 +197,11 @@ class MLXLanguageModelHandler(BaseHandler):
                 prompt,
                 max_tokens=self.gen_kwargs["max_new_tokens"],
             ):
+                if self.cancel_response and self.cancel_response.is_set():
+                    logger.info("LLM generation cancelled (interruption)")
+                    cancelled = True
+                    break
+
                 output += t.text
                 curr_output += t.text
 
@@ -195,8 +223,8 @@ class MLXLanguageModelHandler(BaseHandler):
                         yield (clean_text, language_code, tools)
                     curr_output = ""
 
-            # Yield any remaining content if we didn't hit end of turn
-            if not end_of_turn and len(curr_output.strip()) > 0:
+            if not cancelled and not end_of_turn and len(curr_output.strip()) > 0:
+                # Yield any remaining content if we didn't hit end of turn
                 clean_text, tools = parse_tool_calls(curr_output.strip())
                 yield (clean_text, language_code, tools)
 
@@ -211,3 +239,4 @@ class MLXLanguageModelHandler(BaseHandler):
         torch.mps.empty_cache()
 
         self.chat.append({"role": "assistant", "content": generated_text})
+        yield ("__END_OF_RESPONSE__", None, None)

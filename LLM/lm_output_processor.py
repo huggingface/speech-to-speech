@@ -41,6 +41,11 @@ class LMOutputProcessor(BaseHandler):
             Tuple of (text, language_code) for TTS
         """
         text_chunk, language_code, tools = lm_output
+
+        if text_chunk == "__END_OF_RESPONSE__":
+            yield ("__END_OF_RESPONSE__", None)
+            return
+
         logger.debug(f"LM processor: text='{text_chunk}', tools={tools}")
 
         # Send text + tools to WebSocket clients
