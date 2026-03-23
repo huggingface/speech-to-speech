@@ -4,12 +4,20 @@ from openai.types.realtime import RealtimeFunctionTool
 
 class FunctionTool(RealtimeFunctionTool):
 
-    def to_code_prompt(self) -> str:
+    def to_code_prompt(self, include_args_doc: bool = False) -> str:
+        """Generate a code-style prompt string for this function tool.
+
+        Args:
+            include_args_doc: If True, include argument descriptions in the docstring.
+                ⚠️ This lets the model see each argument's purpose but significantly increases
+                token usage (e.g. 906 tokens without vs 3434 with for the default Reachy Mini
+                tool profile). Enable depending on the model's capabilities and context limit.
+        """
         signature = signature_from_schema(self.parameters)
 
         tool_doc = self.description or ""
 
-        if isinstance(self.parameters, dict):
+        if isinstance(self.parameters, dict) and include_args_doc:
             props = self.parameters.get("properties", {})
             if props:
                 arg_lines = []
@@ -20,4 +28,5 @@ class FunctionTool(RealtimeFunctionTool):
                 tool_doc += f"\n\n{args_doc}"
 
         tool_doc = f'"""{tool_doc}\n"""'
+
         return f"def {self.name}{signature}:\n{textwrap.indent(tool_doc, '    ')}"

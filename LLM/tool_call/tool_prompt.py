@@ -32,8 +32,8 @@ When you need to use a tool, output the function call between \
 {{ enter_code }} and {{ end_code }} tags in your response:
 
 {{ enter_code }}
-function_name(arg1=value1, arg2='string_value')
-another_function(arg1='hello')
+function_name(arg_name_1=value1, arg_name_2='string_value')
+another_function(arg_name_1='hello')
 {{ end_code }}
 
 RULES:

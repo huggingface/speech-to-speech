@@ -6,11 +6,11 @@ import librosa
 import numpy as np
 from rich.console import Console
 import torch
+from api.openai_realtime.runtime_config import RuntimeConfig
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-from api.openai_realtime.runtime_config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 

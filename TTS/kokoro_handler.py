@@ -147,7 +147,7 @@ class KokoroTTSHandler(BaseHandler):
 
             self.backend = "mlx"
             self.model = load_model(model_name)
-            logger.info(f"MLX Audio Kokoro model loaded successfully")
+            logger.info("MLX Audio Kokoro model loaded successfully")
 
             # Get or create the pipeline for our language and preload the voice
             # This avoids the voice being reloaded on every generate() call
@@ -170,7 +170,7 @@ class KokoroTTSHandler(BaseHandler):
 
             self.backend = "kokoro"
             self.pipeline = KPipeline(lang_code=self.lang_code)
-            logger.info(f"Native Kokoro pipeline loaded successfully")
+            logger.info("Native Kokoro pipeline loaded successfully")
         except ImportError as e:
             raise ImportError(
                 "kokoro is required for Kokoro TTS on CUDA/CPU. "

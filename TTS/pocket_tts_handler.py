@@ -60,7 +60,7 @@ class PocketTTSHandler(BaseHandler):
         # Import and load model
         from pocket_tts import TTSModel
 
-        logger.info(f"Loading Pocket TTS model")
+        logger.info("Loading Pocket TTS model")
         self.model = TTSModel.load_model()
 
         # Move model to specified device

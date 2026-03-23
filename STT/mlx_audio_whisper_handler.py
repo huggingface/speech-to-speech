@@ -89,7 +89,7 @@ class MLXAudioWhisperSTTHandler(BaseHandler):
                 dummy_audio,
                 verbose=False
             )
-            logger.info(f"Model warmed up and ready")
+            logger.info("Model warmed up and ready")
         except Exception as e:
             logger.warning(f"Warmup failed: {e}")
 

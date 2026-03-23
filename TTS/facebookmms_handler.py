@@ -6,12 +6,12 @@ import librosa
 from rich.console import Console
 from baseHandler import BaseHandler
 import logging
+from api.openai_realtime.runtime_config import RuntimeConfig
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.DEBUG
 )
-from api.openai_realtime.runtime_config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +24,12 @@ WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE = {
     "ko": "kor", # Korean
     "hi": "hin", # Hindi
     "ar": "ara", # Arabic
-    "ar": "hyw", # Armenian
+    "hy": "hyw", # Armenian
     "az": "azb", # Azerbaijani
     "bu": "bul", # Bulgarian
     "ca": "cat", # Catalan
     "nl": "nld", # Dutch
     "fi": "fin", # Finnish
-    "fr": "fra", # French
     "de": "deu", # German
     "el": "ell", # Greek
     "he": "heb", # Hebrew
@@ -97,7 +96,7 @@ class FacebookMMSTTSHandler(BaseHandler):
 
     def warmup(self):
         logger.info(f"Warming up {self.__class__.__name__}")
-        output = self.generate_audio("Hello, this is a test")
+        self.generate_audio("Hello, this is a test")
 
     def generate_audio(self, text):
         if not text:

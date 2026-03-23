@@ -19,7 +19,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 ```bash
 python s2s_pipeline.py \
   --llm transformers \
-  --lm_model_name microsoft/Phi-3-mini-4k-instruct \
+  --lm_model_name Qwen/Qwen3-4B-Instruct-2507 \
   --lm_device cuda \
   --lm_torch_dtype float16 \
   --lm_gen_max_new_tokens 128
@@ -34,23 +34,23 @@ Common options:
 
 ### 2) MLX-LM (`--llm mlx-lm`)
 
-- Handler: `MLXLanguageModelHandler`
+- Handler: `LanguageModelHandler`
 - Typical use: Apple Silicon local inference
-- Primary args prefix: `--mlx_lm_*`
+- Primary args prefix: same as Transformers (`--lm_*`)
 
 ```bash
 python s2s_pipeline.py \
   --llm mlx-lm \
-  --mlx_lm_model_name mlx-community/SmolLM3-3B-4bit \
-  --mlx_lm_device mps \
-  --mlx_lm_gen_max_new_tokens 128
+  --lm_model_name mlx-community/Qwen3-4B-Instruct-2507-bf16 \
+  --lm_device mps \
+  --lm_gen_max_new_tokens 128
 ```
 
 Common options:
-- `--mlx_lm_gen_temperature`
-- `--mlx_lm_gen_do_sample`
-- `--mlx_lm_chat_size`
-- `--mlx_lm_init_chat_prompt`
+- `--lm_gen_temperature`
+- `--lm_gen_do_sample`
+- `--lm_chat_size`
+- `--lm_init_chat_prompt`
 
 ### 3) OpenAI-compatible API (`--llm open_api`)
 

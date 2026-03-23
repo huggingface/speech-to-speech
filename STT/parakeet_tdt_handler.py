@@ -124,7 +124,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
 
             self.backend = "mlx"
             self.model = load_model(model_name)
-            logger.info(f"MLX Audio Parakeet model loaded successfully")
+            logger.info("MLX Audio Parakeet model loaded successfully")
         except ImportError as e:
             raise ImportError(
                 "mlx-audio is required for Parakeet TDT on Apple Silicon. "

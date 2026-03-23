@@ -17,7 +17,6 @@ from typing import List, Dict, Any
 import json
 from queue import Queue
 from threading import Event
-import sys
 
 logging.basicConfig(
     level=logging.INFO,

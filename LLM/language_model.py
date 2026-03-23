@@ -12,10 +12,19 @@ from LLM.chat import Chat
 from LLM.tool_call.function_call import extract_function_calls_from_text
 from LLM.tool_call.function_tool import FunctionTool
 from LLM.tool_call.tool_prompt import build_tool_system_prompt, build_block_regex
+from typing import Literal
 from baseHandler import BaseHandler
 from rich.console import Console
-from nltk import sent_tokenize
+from LLM.utils import remove_emojis
 from api.openai_realtime.runtime_config import RuntimeConfig
+
+try:
+    from mlx_lm import load as mlx_load, stream_generate as mlx_stream_generate, generate as mlx_generate
+    from utils.mlx_lock import MLXLockContext
+    import mlx.core as mx
+    HAS_MLX = True
+except ImportError:
+    HAS_MLX = False
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +53,7 @@ class LanguageModelHandler(BaseHandler):
 
     def setup(
         self,
-        model_name="microsoft/Phi-3-mini-4k-instruct",
+        model_name="Qwen/Qwen3-4B-Instruct-2507",
         device="cuda",
         torch_dtype="float16",
         gen_kwargs={},
@@ -54,29 +63,42 @@ class LanguageModelHandler(BaseHandler):
         init_chat_prompt="You are a helpful AI assistant.",
         runtime_config: RuntimeConfig | None = None,
         cancel_response: Event | None = None,
+        backend: Literal["transformers", "mlx"] = "transformers",
     ):
+        self.backend = backend
         self.cancel_response = cancel_response
         self.device = device
-        self.torch_dtype = getattr(torch, torch_dtype)
+        self.model_name = model_name
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=torch_dtype, trust_remote_code=True
-        ).to(device)
-        self.pipe = pipeline(
-            "text-generation", model=self.model, tokenizer=self.tokenizer, device=device
-        )
-        self.streamer = TextIteratorStreamer(
-            self.tokenizer,
-            skip_prompt=True,
-            skip_special_tokens=True,
-        )
-        self.gen_kwargs = {
-            "streamer": self.streamer,
-            "return_full_text": False,
-            **gen_kwargs,
-        }
-        print(self.gen_kwargs)
+        logger.info(f"LLM Backend: {self.backend}")
+
+        if self.backend == "mlx":
+            if not HAS_MLX:
+                raise ImportError(
+                    "mlx_lm is required for the 'mlx' backend. "
+                    "Install with: pip install mlx-lm"
+                )
+            self.model, self.tokenizer = mlx_load(model_name)  # type: ignore[misc]
+            self.gen_kwargs = gen_kwargs
+        else:
+            self.torch_dtype = getattr(torch, torch_dtype)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name, torch_dtype=torch_dtype, trust_remote_code=True
+            ).to(device)
+            self.pipe = pipeline(
+                "text-generation", model=self.model, tokenizer=self.tokenizer, device=device
+            )
+            self.streamer = TextIteratorStreamer(
+                self.tokenizer,  # type: ignore[arg-type]
+                skip_prompt=True,
+                skip_special_tokens=True,
+            )
+            self.gen_kwargs = {
+                "streamer": self.streamer,
+                "return_full_text": False,
+                **gen_kwargs,
+            }
 
         self.chat = Chat(chat_size)
         if init_chat_role:
@@ -100,35 +122,47 @@ class LanguageModelHandler(BaseHandler):
 
         dummy_input_text = "Repeat the word 'home'."
         dummy_chat = [{"role": self.user_role, "content": dummy_input_text}]
-        warmup_gen_kwargs = {
-            "min_new_tokens": self.gen_kwargs["min_new_tokens"],
-            "max_new_tokens": self.gen_kwargs["max_new_tokens"],
-            **self.gen_kwargs,
-        }
-
         n_steps = 2
 
-        if self.device == "cuda":
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-            torch.cuda.synchronize()
-            start_event.record()
+        if self.backend == "mlx":
+            for _ in range(n_steps):
+                prompt = self.tokenizer.apply_chat_template(
+                    dummy_chat, tokenize=False
+                )
+                mlx_generate(
+                    self.model,
+                    self.tokenizer,
+                    prompt=prompt,
+                    max_tokens=self.gen_kwargs["max_new_tokens"],
+                    verbose=False,
+                )
+        else:
+            warmup_gen_kwargs = {
+                "min_new_tokens": self.gen_kwargs["min_new_tokens"],
+                "max_new_tokens": self.gen_kwargs["max_new_tokens"],
+                **self.gen_kwargs,
+            }
 
-        for _ in range(n_steps):
-            thread = Thread(
-                target=self.pipe, args=(dummy_chat,), kwargs=warmup_gen_kwargs
-            )
-            thread.start()
-            for _ in self.streamer:
-                pass
+            if self.device == "cuda":
+                start_event = torch.cuda.Event(enable_timing=True)
+                end_event = torch.cuda.Event(enable_timing=True)
+                torch.cuda.synchronize()
+                start_event.record()
 
-        if self.device == "cuda":
-            end_event.record()
-            torch.cuda.synchronize()
+            for _ in range(n_steps):
+                thread = Thread(
+                    target=self.pipe, args=(dummy_chat,), kwargs=warmup_gen_kwargs
+                )
+                thread.start()
+                for _ in self.streamer:
+                    pass
 
-            logger.info(
-                f"{self.__class__.__name__}:  warmed up! time: {start_event.elapsed_time(end_event) * 1e-3:.3f} s"
-            )
+            if self.device == "cuda":
+                end_event.record()
+                torch.cuda.synchronize()
+                logger.info(
+                    f"{self.__class__.__name__}:  warmed up! time: {start_event.elapsed_time(end_event) * 1e-3:.3f} s"
+                )
 
     def _apply_runtime_instructions(self):
         if not self.runtime_config:
@@ -218,12 +252,44 @@ class LanguageModelHandler(BaseHandler):
                     prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
             self.chat.append({"role": self.user_role, "content": prompt})
 
-        thread = Thread(
-            target=self.pipe, args=(self.chat.to_list(),), kwargs=self.gen_kwargs
+        if logger.isEnabledFor(logging.DEBUG):
+            chat_input = self.tokenizer.apply_chat_template(self.chat.to_list(), tokenize=True)
+            num_tokens = len(chat_input["input_ids"])
+            logger.info("Prompt token count: %d", num_tokens)
+
+        chat_prompt = self.tokenizer.apply_chat_template(
+            self.chat.to_list(), tokenize=False, add_generation_prompt=True, enable_thinking=False
         )
-        thread.start()
+
         cancelled = False
-        if self.device == "mps":
+
+        # TODO: Rethink stream generation to use special yield tags that signal
+        # the engine whether the model is sending a partial or complete
+        # LLM response. Enable TTS response only on complete LLM response (and send partial events for realtime engine).
+        if self.backend == "mlx":
+            generated_text = ""
+            with MLXLockContext(handler_name="MLX-LLM", timeout=10.0):
+                for t in mlx_stream_generate(
+                    self.model,
+                    self.tokenizer,
+                    chat_prompt,
+                    max_tokens=self.gen_kwargs["max_new_tokens"],
+                ):
+                    if self.cancel_response and self.cancel_response.is_set():
+                        logger.info("LLM generation cancelled (interruption)")
+                        cancelled = True
+                        break
+                    generated_text += t.text
+            try:
+                mx.clear_cache()
+            except Exception:
+                pass
+            torch.mps.empty_cache()
+        else:
+            thread = Thread(
+                target=self.pipe, args=(chat_prompt,), kwargs=self.gen_kwargs
+            )
+            thread.start()
             generated_text = ""
             for new_text in self.streamer:
                 if self.cancel_response and self.cancel_response.is_set():
@@ -231,28 +297,16 @@ class LanguageModelHandler(BaseHandler):
                     cancelled = True
                     break
                 generated_text += new_text
-            printable_text = generated_text
-            torch.mps.empty_cache()
-        else:
-            generated_text, printable_text = "", ""
-            for new_text in self.streamer:
-                if self.cancel_response and self.cancel_response.is_set():
-                    logger.info("LLM generation cancelled (interruption)")
-                    cancelled = True
-                    break
-                generated_text += new_text
-                printable_text += new_text
-                sentences = sent_tokenize(printable_text)
-                if len(sentences) > 1:
-                    clean_text, tools = self._extract_tools(sentences[0])
-                    yield (clean_text, language_code, tools)
-                    printable_text = new_text
+            if self.device == "mps":
+                torch.mps.empty_cache()
+
+        generated_text = remove_emojis(generated_text)
 
         self.chat.append({"role": "assistant", "content": generated_text})
-
+        logger.debug("chat: %s", self.chat.to_list())
         logger.debug("generated_text: %s", generated_text)
 
-        if not cancelled and printable_text.strip():
-            clean_text, tools = self._extract_tools(printable_text)
-            yield (clean_text, language_code, tools)
+        if not cancelled and generated_text.strip():
+            clean_text, tools = self._extract_tools(generated_text)
+            yield (clean_text.strip(), language_code, tools)
         yield ("__END_OF_RESPONSE__", None, None)

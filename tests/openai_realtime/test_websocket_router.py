@@ -6,11 +6,10 @@ app, service, and set of queues so there is no cross-test state.
 """
 
 import base64
-import json
 import time
 
 import pytest
-from queue import Queue, Empty
+from queue import Queue
 from threading import Event as ThreadingEvent
 
 from starlette.testclient import TestClient

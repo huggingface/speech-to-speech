@@ -97,7 +97,7 @@ class WebSocketStreamer:
         # Enable listening when first client connects
         if len(self.clients) == 1:
             self.should_listen.set()
-            logger.debug(f"Listening enabled (should_listen.set())")
+            logger.debug("Listening enabled (should_listen.set())")
 
         try:
             logger.debug(f"Client {client_id}: Starting message receive loop")

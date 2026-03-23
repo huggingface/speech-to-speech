@@ -1,16 +1,14 @@
 import logging
 import time
-import re
 from threading import Event
 
-from nltk import sent_tokenize
 from rich.console import Console
 from openai import OpenAI, Stream
 from openai.types.responses import Response, ResponseStreamEvent 
 
 from baseHandler import BaseHandler
 from LLM.chat import Chat
-
+from LLM.utils import remove_emojis
 from api.openai_realtime.runtime_config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
@@ -144,11 +142,16 @@ class OpenApiModelHandler(BaseHandler):
                         cancelled = True
                         break
                     if event.type == "response.output_text.delta":
+                        printable_text = remove_emojis(printable_text)
                         printable_text += event.delta
-                        sentences = sent_tokenize(printable_text)
-                        if len(sentences) > 1:
-                            yield sentences[0], language_code, []
-                            printable_text = sentences[-1]
+                        # TODO: Rethink stream generation to use special yield tags that signal
+                        # the engine whether the model is sending a partial or complete
+                        # LLM response. Enable TTS response only on complete LLM response (and send partial events for realtime engine).
+                        # from nltk import sent_tokenize
+                        # sentences = sent_tokenize(printable_text)
+                        # if len(sentences) > 1:
+                        #     yield sentences[0], language_code, []
+                        #     printable_text = sentences[-1]
                     elif event.type == "response.output_item.done":
                         if event.item.type == "function_call":
                             tools.append(event.item.model_dump())
@@ -170,6 +173,7 @@ class OpenApiModelHandler(BaseHandler):
                             self.chat.append({"role": message.role, "content": message.content})
                             for chunk in message.content:
                                 if chunk.type == "output_text":
+                                    clean_text = remove_emojis(clean_text)
                                     clean_text += chunk.text
                         else:
                             logger.warning(f"Not supported message type: {message.type}")

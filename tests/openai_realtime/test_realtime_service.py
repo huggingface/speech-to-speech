@@ -18,7 +18,6 @@ from openai.types.realtime import (
     InputAudioBufferSpeechStartedEvent,
     InputAudioBufferSpeechStoppedEvent,
     RealtimeErrorEvent,
-    RealtimeResponse,
     ResponseAudioDeltaEvent,
     ResponseAudioDoneEvent,
     ResponseAudioTranscriptDoneEvent,
@@ -33,8 +32,6 @@ from openai.types.realtime import (
 
 from api.openai_realtime.service import (
     CHUNK_SIZE_BYTES,
-    ConnState,
-    RealtimeService,
 )
 
 

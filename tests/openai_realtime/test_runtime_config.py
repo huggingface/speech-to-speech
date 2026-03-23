@@ -6,9 +6,6 @@ explicit None clears a previously-set value.
 """
 
 from openai.types.realtime import RealtimeSessionCreateRequest
-from openai.types.realtime.realtime_audio_config import RealtimeAudioConfig
-from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfigInput
-from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
 from openai.types.realtime.session_update_event import SessionUpdateEvent
 
 from api.openai_realtime.runtime_config import RuntimeConfig

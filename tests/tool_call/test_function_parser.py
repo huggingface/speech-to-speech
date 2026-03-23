@@ -1,7 +1,6 @@
 import pytest
 
 from LLM.tool_call.function_call import (
-    FunctionToolCall,
     extract_function_calls_from_text,
     parse_function_call,
 )

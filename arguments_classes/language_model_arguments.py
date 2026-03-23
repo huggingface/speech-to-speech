@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 @dataclass
 class LanguageModelHandlerArguments:
     lm_model_name: str = field(
-        default="HuggingFaceTB/SmolLM-360M-Instruct",
+        default="Qwen/Qwen3-4B-Instruct-2507",
         metadata={
             "help": "The pretrained language model to use. Default is 'HuggingFaceTB/SmolLM-360M-Instruct'."
         },
@@ -40,7 +40,7 @@ class LanguageModelHandlerArguments:
         },
     )
     lm_gen_max_new_tokens: int = field(
-        default=128,
+        default=1024,
         metadata={
             "help": "Maximum number of new tokens to generate in a single completion. Default is 128."
         },
@@ -64,7 +64,7 @@ class LanguageModelHandlerArguments:
         },
     )
     chat_size: int = field(
-        default=2,
+        default=10,
         metadata={
             "help": "Number of interactions assitant-user to keep for the chat. None for no limitations."
         },

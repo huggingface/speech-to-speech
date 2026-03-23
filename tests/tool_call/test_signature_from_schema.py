@@ -1,4 +1,3 @@
-import pytest
 from typing import Any, Literal, Optional, Union
 from LLM.tool_call.signature_from_schema import _annotation_from_spec, signature_from_schema
 
