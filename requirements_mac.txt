@@ -26,3 +26,4 @@ openai==2.24.0
 # useful-moonshine @ git+https://github.com/andimarafioti/moonshine.git
 websockets>=12.0
 pocket-tts>=0.1.0  # For Pocket TTS from Kyutai Labs
+transformers==5.3.0

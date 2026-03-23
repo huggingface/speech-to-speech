@@ -15,9 +15,26 @@ from threading import Event as ThreadingEvent
 
 from starlette.testclient import TestClient
 
+from openai.types.realtime import RealtimeSessionCreateRequest
+from openai.types.realtime.realtime_audio_config import RealtimeAudioConfig
+from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfigInput
+from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
+from openai.types.realtime.realtime_audio_formats import AudioPCM
+
 from api.openai_realtime.runtime_config import RuntimeConfig
 from api.openai_realtime.service import RealtimeService, CHUNK_SIZE_BYTES
 from api.openai_realtime.websocket_router import create_app
+
+
+def _session_16k() -> RealtimeSessionCreateRequest:
+    fmt = AudioPCM.model_construct(rate=16000, type="audio/pcm")
+    return RealtimeSessionCreateRequest.model_construct(
+        type="realtime",
+        audio=RealtimeAudioConfig.model_construct(
+            input=RealtimeAudioConfigInput.model_construct(format=fmt),
+            output=RealtimeAudioConfigOutput.model_construct(format=fmt),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +45,7 @@ from api.openai_realtime.websocket_router import create_app
 def setup():
     """Return (app, service, input_queue, output_queue, text_output_queue, should_listen, stop_event)."""
     runtime_config = RuntimeConfig()
-    runtime_config.client_audio_rate = 16000
+    runtime_config.session = _session_16k()
     text_prompt_queue = Queue()
     should_listen = ThreadingEvent()
     should_listen.set()
@@ -41,7 +58,9 @@ def setup():
     output_queue = Queue()
     text_output_queue = Queue()
     stop_event = ThreadingEvent()
-    app = create_app(service, input_queue, output_queue, text_output_queue, should_listen, stop_event)
+    response_playing = ThreadingEvent()
+    cancel_response = ThreadingEvent()
+    app = create_app(service, input_queue, output_queue, text_output_queue, should_listen, response_playing, cancel_response, stop_event)
     return app, service, input_queue, output_queue, text_output_queue, should_listen, stop_event
 
 
@@ -106,7 +125,7 @@ class TestClientEventDispatch:
                     },
                 })
                 time.sleep(0.1)
-                assert service.runtime_config.voice == "coral"
+                assert service.runtime_config.session.audio.output.voice == "coral"
 
     def test_conversation_item_create_returns_events(self, setup):
         app, *_ = setup

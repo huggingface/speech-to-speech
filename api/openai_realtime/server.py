@@ -1,4 +1,6 @@
 import logging
+from queue import Queue
+from threading import Event
 
 import uvicorn
 
@@ -19,15 +21,17 @@ class RealtimeServer:
 
     def __init__(
         self,
-        stop_event,
-        input_queue,
-        output_queue,
-        should_listen,
-        text_output_queue=None,
-        text_prompt_queue=None,
-        runtime_config=None,
-        host="0.0.0.0",
-        port=8765,
+        stop_event: Event,
+        input_queue: Queue,
+        output_queue: Queue,
+        should_listen: Event,
+        response_playing: Event | None = None,
+        cancel_response: Event | None = None,
+        text_output_queue: Queue | None = None,
+        text_prompt_queue: Queue | None = None,
+        runtime_config: RuntimeConfig | None = None,
+        host: str = "0.0.0.0",
+        port: int = 8765,
     ):
         self.stop_event = stop_event
         self.input_queue = input_queue
@@ -35,6 +39,8 @@ class RealtimeServer:
         self.text_output_queue = text_output_queue
         self.text_prompt_queue = text_prompt_queue
         self.should_listen = should_listen
+        self.response_playing = response_playing
+        self.cancel_response = cancel_response
         self.runtime_config = runtime_config or RuntimeConfig()
         self.host = host
         self.port = port
@@ -52,6 +58,8 @@ class RealtimeServer:
             output_queue=self.output_queue,
             text_output_queue=self.text_output_queue,
             should_listen=self.should_listen,
+            response_playing=self.response_playing,
+            cancel_response=self.cancel_response,
             stop_event=self.stop_event,
         )
 

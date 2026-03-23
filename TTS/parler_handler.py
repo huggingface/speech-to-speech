@@ -1,4 +1,4 @@
-from threading import Thread
+from threading import Event, Thread
 from time import perf_counter
 from baseHandler import BaseHandler
 import numpy as np
@@ -14,6 +14,8 @@ from utils.utils import next_power_of_2
 from transformers.utils.import_utils import (
     is_flash_attn_2_available,
 )
+
+from api.openai_realtime.runtime_config import RuntimeConfig
 
 torch._inductor.config.fx_graph_cache = True
 # mind about this parameter ! should be >= 2 * number of padded prompt sizes for TTS
@@ -59,10 +61,12 @@ class ParlerTTSHandler(BaseHandler):
         play_steps_s=1,
         blocksize=512,
         use_default_speakers_list=True,
-        runtime_config=None,
+        runtime_config: RuntimeConfig | None = None,
+        cancel_response: Event | None = None,
     ):
         self.should_listen = should_listen
         self.runtime_config = runtime_config
+        self.cancel_response = cancel_response
         self.device = device
         self.torch_dtype = getattr(torch, torch_dtype)
         self.gen_kwargs = gen_kwargs
@@ -172,12 +176,16 @@ class ParlerTTSHandler(BaseHandler):
             )
 
     def process(self, llm_sentence):
-        if self.runtime_config and self.runtime_config.voice:
-            self.speaker = self.runtime_config.voice
+        if isinstance(llm_sentence, tuple) and llm_sentence[0] == "__END_OF_RESPONSE__":
+            yield b"__RESPONSE_DONE__"
+            return
+
+        if self.runtime_config and self.runtime_config.session.audio.output.voice:
+            self.speaker = self.runtime_config.session.audio.output.voice
 
         if isinstance(llm_sentence, tuple):
             llm_sentence, language_code = llm_sentence
-            if not (self.runtime_config and self.runtime_config.voice):
+            if not (self.runtime_config and self.runtime_config.session.audio.output.voice):
                 self.speaker = WHISPER_LANGUAGE_TO_PARLER_SPEAKER.get(language_code, "Jason")
             
         console.print(f"[green]ASSISTANT: {llm_sentence}")
@@ -205,6 +213,9 @@ class ParlerTTSHandler(BaseHandler):
         thread.start()
 
         for i, audio_chunk in enumerate(streamer):
+            if self.cancel_response and self.cancel_response.is_set():
+                logger.info("TTS generation cancelled (interruption)")
+                return
             global pipeline_start
             if i == 0 and "pipeline_start" in globals():
                 logger.info(
@@ -218,4 +229,5 @@ class ParlerTTSHandler(BaseHandler):
                     (0, self.blocksize - len(audio_chunk[i : i + self.blocksize])),
                 )
 
-        self.should_listen.set()
+        if not getattr(self, 'runtime_config', None):
+            self.should_listen.set()

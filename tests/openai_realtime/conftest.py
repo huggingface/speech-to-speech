@@ -2,14 +2,32 @@ import pytest
 from queue import Queue
 from threading import Event as ThreadingEvent
 
+from openai.types.realtime import RealtimeSessionCreateRequest
+from openai.types.realtime.realtime_audio_config import RealtimeAudioConfig
+from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfigInput
+from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
+from openai.types.realtime.realtime_audio_formats import AudioPCM
+
 from api.openai_realtime.service import RealtimeService
 from api.openai_realtime.runtime_config import RuntimeConfig
+
+
+def _session_16k() -> RealtimeSessionCreateRequest:
+    """Build a test session with 16 kHz audio rates (matches PIPELINE_SAMPLE_RATE)."""
+    fmt = AudioPCM.model_construct(rate=16000, type="audio/pcm")
+    return RealtimeSessionCreateRequest.model_construct(
+        type="realtime",
+        audio=RealtimeAudioConfig.model_construct(
+            input=RealtimeAudioConfigInput.model_construct(format=fmt),
+            output=RealtimeAudioConfigOutput.model_construct(format=fmt),
+        ),
+    )
 
 
 @pytest.fixture
 def runtime_config():
     cfg = RuntimeConfig()
-    cfg.client_audio_rate = 16000
+    cfg.session = _session_16k()
     return cfg
 
 
@@ -36,7 +54,6 @@ def service(runtime_config, text_prompt_queue, should_listen):
 
 @pytest.fixture
 def conn_id(service):
-    cid = "test-conn-1"
-    service.register(cid)
+    cid = service.register()
     yield cid
     service.unregister(cid)

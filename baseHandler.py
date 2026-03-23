@@ -21,7 +21,7 @@ class BaseHandler:
         self.setup(*setup_args, **setup_kwargs)
         self._times = []
 
-    def setup(self):
+    def setup(self, *arg, **kwargs):
         pass
 
     def process(self):

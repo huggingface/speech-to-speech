@@ -1,3 +1,4 @@
+from threading import Event
 from transformers import VitsModel, AutoTokenizer
 import torch
 import numpy as np
@@ -10,6 +11,8 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.DEBUG
 )
+from api.openai_realtime.runtime_config import RuntimeConfig
+
 logger = logging.getLogger(__name__)
 
 console = Console()
@@ -65,10 +68,13 @@ class FacebookMMSTTSHandler(BaseHandler):
         language="en",
         stream=True,
         chunk_size=512,
-        runtime_config=None,  # accepted but unused; implement voice-switch logic in process() to support dynamic voice change
+        runtime_config: RuntimeConfig | None = None, # accepted but unused; implement voice-switch logic in process() to support dynamic voice change
+        cancel_response: Event | None = None,
         **kwargs
     ):
         self.should_listen = should_listen
+        self.runtime_config = runtime_config
+        self.cancel_response = cancel_response
         self.device = device
         self.torch_dtype = getattr(torch, torch_dtype)
         self.stream = stream
@@ -125,6 +131,10 @@ class FacebookMMSTTSHandler(BaseHandler):
             return None
 
     def process(self, llm_sentence):
+        if isinstance(llm_sentence, tuple) and llm_sentence[0] == "__END_OF_RESPONSE__":
+            yield b"__RESPONSE_DONE__"
+            return
+
         language_code = None
 
         if isinstance(llm_sentence, tuple):
@@ -146,7 +156,8 @@ class FacebookMMSTTSHandler(BaseHandler):
         
         if audio_output is None or audio_output.numel() == 0:
             logger.warning("No audio output generated")
-            self.should_listen.set()
+            if not getattr(self, 'runtime_config', None):
+                self.should_listen.set()
             return
 
         audio_numpy = audio_output.cpu().numpy().squeeze()
@@ -160,13 +171,20 @@ class FacebookMMSTTSHandler(BaseHandler):
 
         if self.stream:
             for i in range(0, len(audio_int16), self.chunk_size):
+                if self.cancel_response and self.cancel_response.is_set():
+                    logger.info("TTS generation cancelled (interruption)")
+                    return
                 chunk = audio_int16[i:i + self.chunk_size]
                 yield np.pad(chunk, (0, self.chunk_size - len(chunk)))
         else:
             for i in range(0, len(audio_int16), self.chunk_size):
+                if self.cancel_response and self.cancel_response.is_set():
+                    logger.info("TTS generation cancelled (interruption)")
+                    return
                 yield np.pad(
                     audio_int16[i : i + self.chunk_size],
                     (0, self.chunk_size - len(audio_int16[i : i + self.chunk_size])),
                 )
 
-        self.should_listen.set()
+        if not getattr(self, 'runtime_config', None):
+            self.should_listen.set()

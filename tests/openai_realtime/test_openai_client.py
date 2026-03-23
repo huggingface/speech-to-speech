@@ -28,9 +28,26 @@ from threading import Event as ThreadingEvent
 
 from openai import AsyncOpenAI
 
+from openai.types.realtime import RealtimeSessionCreateRequest
+from openai.types.realtime.realtime_audio_config import RealtimeAudioConfig
+from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfigInput
+from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
+from openai.types.realtime.realtime_audio_formats import AudioPCM
+
 from api.openai_realtime.runtime_config import RuntimeConfig
 from api.openai_realtime.service import RealtimeService
 from api.openai_realtime.websocket_router import create_app
+
+
+def _session_16k() -> RealtimeSessionCreateRequest:
+    fmt = AudioPCM.model_construct(rate=16000, type="audio/pcm")
+    return RealtimeSessionCreateRequest.model_construct(
+        type="realtime",
+        audio=RealtimeAudioConfig.model_construct(
+            input=RealtimeAudioConfigInput.model_construct(format=fmt),
+            output=RealtimeAudioConfigOutput.model_construct(format=fmt),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +69,7 @@ class _ServerEnv:
 
     def __init__(self):
         self.runtime_config = RuntimeConfig()
-        self.runtime_config.client_audio_rate = 16000
+        self.runtime_config.session = _session_16k()
         self.text_prompt_queue: Queue = Queue()
         self.should_listen = ThreadingEvent()
         self.should_listen.set()
@@ -65,12 +82,16 @@ class _ServerEnv:
         self.output_queue: Queue = Queue()
         self.text_output_queue: Queue = Queue()
         self.stop_event = ThreadingEvent()
+        self.response_playing = ThreadingEvent()
+        self.cancel_response = ThreadingEvent()
         self.app = create_app(
             self.service,
             self.input_queue,
             self.output_queue,
             self.text_output_queue,
             self.should_listen,
+            self.response_playing,
+            self.cancel_response,
             self.stop_event,
         )
         self.port = _free_port()
@@ -192,12 +213,12 @@ class TestSDKSessionUpdate:
             })
             await asyncio.sleep(0.2)
 
-            cfg = server_env.runtime_config
-            assert cfg.voice == "alloy"
-            assert cfg.instructions == "You are a helpful robot"
-            assert cfg.turn_detection.type == "server_vad"
-            assert cfg.tools is not None
-            assert cfg.tool_choice == "auto"
+            s = server_env.runtime_config.session
+            assert s.audio.output.voice == "alloy"
+            assert s.instructions == "You are a helpful robot"
+            assert s.audio.input.turn_detection.type == "server_vad"
+            assert s.tools is not None
+            assert s.tool_choice == "auto"
 
 
 # ===================================================================
@@ -270,7 +291,7 @@ class TestSDKVoiceTurn:
 
 
 # ===================================================================
-# 4. Barge-in
+# 4. Interruption (barge-in)
 # ===================================================================
 
 class TestSDKBargeIn:
@@ -300,6 +321,111 @@ class TestSDKBargeIn:
             done = next(e for e in events if e.type == RESPONSE_DONE)
             assert done.response.status == "cancelled"
             assert done.response.status_details.reason == "turn_detected"
+
+    @pytest.mark.asyncio
+    async def test_stale_assistant_text_flushed_on_interruption(self, server_env):
+        """Stale assistant_text queued during interruption is flushed, not reopened as a new response."""
+        client = server_env.make_client()
+        async with client.realtime.connect(model="test") as conn:
+            await _recv(conn)  # session.created
+
+            server_env.output_queue.put(_pcm_bytes(256))
+            event = await _recv(conn)
+            assert event.type == RESPONSE_CREATED
+            await _recv(conn)  # audio delta
+
+            server_env.text_output_queue.put({"type": "speech_started", "audio_start_ms": 500})
+            server_env.text_output_queue.put({"type": "assistant_text", "text": "stale response text"})
+
+            events = []
+            for _ in range(3):
+                events.append(await _recv(conn))
+
+            types = [e.type for e in events]
+            assert AUDIO_DONE in types
+            assert RESPONSE_DONE in types
+            assert SPEECH_STARTED in types
+
+            done = next(e for e in events if e.type == RESPONSE_DONE)
+            assert done.response.status == "cancelled"
+
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(conn.recv(), timeout=0.5)
+
+
+# ===================================================================
+# 4b. Phantom speech & interruption state
+# ===================================================================
+
+class TestSDKPhantomSpeech:
+    @pytest.mark.asyncio
+    async def test_phantom_speech_does_not_block_pipeline(self, server_env):
+        """speech_started + speech_stopped(duration=0) doesn't hang; a normal turn follows."""
+        client = server_env.make_client()
+        async with client.realtime.connect(model="test") as conn:
+            await _recv(conn)  # session.created
+
+            server_env.text_output_queue.put({"type": "speech_started", "audio_start_ms": 0})
+            event = await _recv(conn)
+            assert event.type == SPEECH_STARTED
+
+            server_env.text_output_queue.put({"type": "speech_stopped", "duration_s": 0})
+            event = await _recv(conn)
+            assert event.type == SPEECH_STOPPED
+
+            server_env.text_output_queue.put({"type": "speech_started", "audio_start_ms": 1000})
+            event = await _recv(conn)
+            assert event.type == SPEECH_STARTED
+
+            server_env.text_output_queue.put(
+                {"type": "speech_stopped", "duration_s": 2.0, "audio_end_ms": 3000},
+            )
+            event = await _recv(conn)
+            assert event.type == SPEECH_STOPPED
+
+            server_env.output_queue.put(_pcm_bytes(256))
+            event = await _recv(conn)
+            assert event.type == RESPONSE_CREATED
+            await _recv(conn)  # audio delta
+
+            server_env.output_queue.put(b"__RESPONSE_DONE__")
+            event = await _recv(conn)
+            assert event.type == AUDIO_DONE
+            event = await _recv(conn)
+            assert event.type == RESPONSE_DONE
+            assert event.response.status == "completed"
+
+
+class TestSDKInterruptionState:
+    @pytest.mark.asyncio
+    async def test_interruption_resets_pipeline_state(self, server_env):
+        """After interruption, response_playing and cancel_response are cleared."""
+        client = server_env.make_client()
+        async with client.realtime.connect(model="test") as conn:
+            await _recv(conn)  # session.created
+
+            assert not server_env.response_playing.is_set()
+            assert not server_env.cancel_response.is_set()
+
+            server_env.output_queue.put(_pcm_bytes(256))
+            await _recv(conn)  # response.created
+            await _recv(conn)  # audio delta
+            assert server_env.response_playing.is_set()
+
+            server_env.text_output_queue.put(
+                {"type": "speech_started", "audio_start_ms": 500},
+            )
+            events = []
+            for _ in range(3):
+                events.append(await _recv(conn))
+
+            types = [e.type for e in events]
+            assert SPEECH_STARTED in types
+            assert RESPONSE_DONE in types
+
+            await asyncio.sleep(0.1)
+            assert not server_env.response_playing.is_set()
+            assert not server_env.cancel_response.is_set()
 
 
 # ===================================================================

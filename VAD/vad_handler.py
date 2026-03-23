@@ -9,6 +9,8 @@ from rich.console import Console
 from utils.utils import int2float
 import logging
 
+from api.openai_realtime.runtime_config import RuntimeConfig
+
 logger = logging.getLogger(__name__)
 
 # Optional import for audio enhancement
@@ -31,7 +33,7 @@ class VADHandler(BaseHandler):
     def setup(
         self,
         should_listen,
-        thresh=0.3,
+        thresh=0.5,
         sample_rate=16000,
         min_silence_ms=1000,
         min_speech_ms=500,
@@ -41,7 +43,7 @@ class VADHandler(BaseHandler):
         enable_realtime_transcription=False,
         realtime_processing_pause=0.25,
         text_output_queue=None,
-        runtime_config=None,
+        runtime_config: RuntimeConfig | None = None,
     ):
         self.should_listen = should_listen
         self.sample_rate = sample_rate
@@ -70,7 +72,6 @@ class VADHandler(BaseHandler):
                 self.enhanced_model, self.df_state, _ = init_df()
 
         # State for progressive audio release
-        self.accumulated_audio = []
         self.last_process_time = 0
 
         # Throttled logging state (summary once per second)
@@ -82,12 +83,23 @@ class VADHandler(BaseHandler):
 
     def _apply_runtime_turn_detection(self):
         """Check RuntimeConfig for turn_detection changes and apply them."""
-        if not self.runtime_config or not self.runtime_config.turn_detection:
+        if not self.runtime_config or not self.runtime_config.session.audio.input.turn_detection:
             return
-        td = self.runtime_config.turn_detection
-        if td is self._last_turn_detection:
+        td_raw = self.runtime_config.session.audio.input.turn_detection
+        if td_raw is self._last_turn_detection:
             return
-        self._last_turn_detection = td
+        self._last_turn_detection = td_raw
+
+        # Convert Pydantic models (e.g. OpenAI SDK ServerVad) to dict;
+        # plain dicts pass through unchanged.
+        if hasattr(td_raw, "model_dump"):
+            td = td_raw.model_dump(exclude_none=True)
+        elif isinstance(td_raw, dict):
+            td = td_raw
+        else:
+            logger.warning(f"Unexpected turn_detection type: {type(td_raw)}")
+            return
+
         if "threshold" in td:
             self.iterator.threshold = td["threshold"]
             logger.info(f"VAD threshold updated to {td['threshold']}")
@@ -101,6 +113,10 @@ class VADHandler(BaseHandler):
         self._apply_runtime_turn_detection()
         logger.debug(f"VAD received {len(audio_chunk)} bytes")
 
+        if not self.should_listen.is_set():
+            return
+
+        # Normal listening mode
         self._log_chunks += 1
         audio_int16 = np.frombuffer(audio_chunk, dtype=np.int16)
         audio_float32 = int2float(audio_int16)
@@ -158,15 +174,23 @@ class VADHandler(BaseHandler):
                     self.last_process_time = current_time
 
         # Handle end of speech
-        if vad_output is not None and len(vad_output) != 0:
-            logger.debug("VAD: end of speech detected")
+        if vad_output is not None:
+            if len(vad_output) == 0:
+                logger.info("VAD: phantom trigger (empty buffer), closing speech pair")
+                if self.text_output_queue:
+                    self.text_output_queue.put({"type": "speech_stopped", "duration_s": 0})
+                return
+
             array = torch.cat(vad_output).cpu().numpy()
             duration_ms = len(array) / self.sample_rate * 1000
 
             if duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
-                logger.debug(
-                    f"VAD: skipping {duration_ms:.0f}ms segment (out of bounds)"
+                logger.info(
+                    f"VAD: discarding {duration_ms:.0f}ms segment "
+                    f"(bounds: {self.min_speech_ms}-{self.max_speech_ms}ms)"
                 )
+                if self.text_output_queue:
+                    self.text_output_queue.put({"type": "speech_stopped", "duration_s": 0})
             else:
                 self._log_speech_ends += 1
                 self.should_listen.clear()
@@ -183,14 +207,22 @@ class VADHandler(BaseHandler):
 
     def _process_normal(self, vad_output):
         """Original processing: yield only when speech ends."""
-        if vad_output is not None and len(vad_output) != 0:
-            logger.debug("VAD: end of speech detected")
+        if vad_output is not None:
+            if len(vad_output) == 0:
+                logger.info("VAD: phantom trigger (empty buffer), closing speech pair")
+                if self.text_output_queue:
+                    self.text_output_queue.put({"type": "speech_stopped", "duration_s": 0})
+                return
+
             array = torch.cat(vad_output).cpu().numpy()
             duration_ms = len(array) / self.sample_rate * 1000
             if duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
-                logger.debug(
-                    f"VAD: skipping {duration_ms:.0f}ms segment (out of bounds)"
+                logger.info(
+                    f"VAD: discarding {duration_ms:.0f}ms segment "
+                    f"(bounds: {self.min_speech_ms}-{self.max_speech_ms}ms)"
                 )
+                if self.text_output_queue:
+                    self.text_output_queue.put({"type": "speech_stopped", "duration_s": 0})
             else:
                 self._log_speech_ends += 1
                 self.should_listen.clear()

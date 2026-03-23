@@ -1,8 +1,11 @@
 from time import perf_counter
+from threading import Event
 from baseHandler import BaseHandler
 import numpy as np
 import logging
 from rich.console import Console
+
+from api.openai_realtime.runtime_config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -23,7 +26,8 @@ class PocketTTSHandler(BaseHandler):
         blocksize=512,
         max_tokens=50,
         gen_kwargs=None,  # For compatibility with pipeline, not used
-        runtime_config=None,  # accepted but unused; implement voice-switch logic in process() to support dynamic voice change
+        runtime_config: RuntimeConfig | None = None,
+        cancel_response: Event | None = None,
     ):
         """
         Initialize Pocket TTS handler.
@@ -40,6 +44,8 @@ class PocketTTSHandler(BaseHandler):
             max_tokens: Maximum tokens to generate
         """
         self.should_listen = should_listen
+        self.cancel_response = cancel_response
+        self.runtime_config = runtime_config
         self.device = device
         self.voice = voice
         self.sample_rate = sample_rate
@@ -89,6 +95,10 @@ class PocketTTSHandler(BaseHandler):
         Args:
             llm_sentence: Text to convert to speech, or tuple of (text, language_code)
         """
+        if isinstance(llm_sentence, tuple) and llm_sentence[0] == "__END_OF_RESPONSE__":
+            yield b"__RESPONSE_DONE__"
+            return
+
         # Handle tuple input (text, language_code)
         if isinstance(llm_sentence, tuple):
             llm_sentence, language_code = llm_sentence
@@ -129,6 +139,9 @@ class PocketTTSHandler(BaseHandler):
             max_tokens=self.max_tokens,
             copy_state=True,  # Don't modify the original voice state
         ):
+            if self.cancel_response and self.cancel_response.is_set():
+                logger.info("TTS generation cancelled (interruption)")
+                return
             if first_chunk and "pipeline_start" in globals():
                 logger.debug(
                     f"Time to first audio: {perf_counter() - pipeline_start:.3f}s"
@@ -197,4 +210,5 @@ class PocketTTSHandler(BaseHandler):
                     chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
                 yield chunk
 
-        self.should_listen.set()
+        if not getattr(self, 'runtime_config', None):
+            self.should_listen.set()

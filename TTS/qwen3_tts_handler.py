@@ -7,9 +7,12 @@ Requires faster-qwen3-tts for real-time performance on NVIDIA GPUs:
 
 import logging
 from time import perf_counter
+from threading import Event
 import numpy as np
 from baseHandler import BaseHandler
 from rich.console import Console
+
+from api.openai_realtime.runtime_config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -49,7 +52,11 @@ class Qwen3TTSHandler(BaseHandler):
         max_new_tokens=360,
         blocksize=512,
         gen_kwargs=None,
+        runtime_config: RuntimeConfig | None = None,
+        cancel_response: Event | None = None,
     ):
+        self.runtime_config = runtime_config
+        self.cancel_response = cancel_response
         self.should_listen = should_listen
         self.model_name = model_name
         self.device = device
@@ -159,6 +166,9 @@ class Qwen3TTSHandler(BaseHandler):
         leftover = np.array([], dtype=np.int16)
 
         for audio_chunk, sr, _timing in gen:
+            if self.cancel_response and self.cancel_response.is_set():
+                logger.info("TTS generation cancelled (interruption)")
+                return
             if first_chunk:
                 logger.info(f"Qwen3-TTS TTFA: {perf_counter() - start:.2f}s ({label})")
                 first_chunk = False
@@ -201,13 +211,17 @@ class Qwen3TTSHandler(BaseHandler):
         )
 
     def process(self, llm_sentence):
+        if isinstance(llm_sentence, tuple) and llm_sentence[0] == "__END_OF_RESPONSE__":
+            yield b"__RESPONSE_DONE__"
+            return
+
         if isinstance(llm_sentence, tuple):
             llm_sentence, _ = llm_sentence
         if not llm_sentence:
             llm_sentence = "Hello."
 
-        if getattr(self, 'runtime_config', None) and self.runtime_config.voice:
-            self.ref_audio = self.runtime_config.voice
+        if getattr(self, 'runtime_config', None) and self.runtime_config.session.audio.output.voice:
+            self.ref_audio = self.runtime_config.session.audio.output.voice
 
         console.print(f"[green]ASSISTANT: {llm_sentence}")
 
@@ -227,7 +241,8 @@ class Qwen3TTSHandler(BaseHandler):
         except Exception as e:
             logger.error(f"Error during Qwen3-TTS generation: {e}", exc_info=True)
         finally:
-            self.should_listen.set()
+            if not getattr(self, 'runtime_config', None):
+                self.should_listen.set()
 
     def _process_voice_clone(self, text):
         yield from self._stream(

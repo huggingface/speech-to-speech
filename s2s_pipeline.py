@@ -240,6 +240,8 @@ def initialize_queues_and_events():
     return {
         "stop_event": Event(),
         "should_listen": Event(),
+        "response_playing": Event(),
+        "cancel_response": Event(),
         "recv_audio_chunks_queue": Queue(),
         "send_audio_chunks_queue": Queue(),
         "spoken_prompt_queue": Queue(),
@@ -276,6 +278,8 @@ def build_pipeline(
 ):
     stop_event = queues_and_events["stop_event"]
     should_listen = queues_and_events["should_listen"]
+    response_playing = queues_and_events["response_playing"]
+    cancel_response = queues_and_events["cancel_response"]
     recv_audio_chunks_queue = queues_and_events["recv_audio_chunks_queue"]
     send_audio_chunks_queue = queues_and_events["send_audio_chunks_queue"]
     spoken_prompt_queue = queues_and_events["spoken_prompt_queue"]
@@ -323,6 +327,11 @@ def build_pipeline(
             mlx_language_model_handler_kwargs,
             parler_tts_handler_kwargs,
             kokoro_tts_handler_kwargs,
+            qwen3_tts_handler_kwargs,
+            pocket_tts_handler_kwargs,
+            melo_tts_handler_kwargs,
+            chat_tts_handler_kwargs,
+            facebook_mms_tts_handler_kwargs,
         ):
             vars(kw)["runtime_config"] = runtime_config
 
@@ -336,11 +345,27 @@ def build_pipeline(
             setup_kwargs={"text_output_queue": text_output_queue},
         )
 
+        for kw in (
+            language_model_handler_kwargs,
+            open_api_language_model_handler_kwargs,
+            mlx_language_model_handler_kwargs,
+            parler_tts_handler_kwargs,
+            kokoro_tts_handler_kwargs,
+            qwen3_tts_handler_kwargs,
+            pocket_tts_handler_kwargs,
+            melo_tts_handler_kwargs,
+            chat_tts_handler_kwargs,
+            facebook_mms_tts_handler_kwargs,
+        ):
+            vars(kw)["cancel_response"] = cancel_response
+
         realtime_conn = RealtimeServer(
             stop_event,
             input_queue=recv_audio_chunks_queue,
             output_queue=send_audio_chunks_queue,
             should_listen=should_listen,
+            response_playing=response_playing,
+            cancel_response=cancel_response,
             text_output_queue=text_output_queue,
             text_prompt_queue=text_prompt_queue,
             runtime_config=runtime_config,

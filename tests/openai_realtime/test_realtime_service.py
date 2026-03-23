@@ -61,27 +61,34 @@ def _make_audio_append(audio_b64: str) -> InputAudioBufferAppendEvent:
 
 class TestConnectionLifecycle:
     def test_register_creates_session_id(self, service):
-        sid = service.register("c1")
+        sid = service.register()
         assert sid.startswith("session_")
-        st = service._state("c1")
+        st = service._state(sid)
         assert st.conversation_id.startswith("conv_")
         assert st.in_response is False
         assert st.last_item_id is None
-        service.unregister("c1")
+        service.unregister(sid)
 
     def test_unregister_removes_state(self, service):
-        service.register("c2")
-        service.unregister("c2")
+        sid = service.register()
+        service.unregister(sid)
         with pytest.raises(KeyError):
-            service._state("c2")
+            service._state(sid)
 
     def test_build_session_created(self, service, conn_id, runtime_config):
-        runtime_config.voice = "echo"
-        runtime_config.instructions = "Be helpful"
-        runtime_config.tools = [{"type": "function", "name": "get_weather"}]
-        runtime_config.tool_choice = "auto"
-        runtime_config.turn_detection = {"type": "server_vad"}
-        runtime_config.input_audio_transcription = {"model": "whisper-1"}
+        service.handle_session_update(SessionUpdateEvent(
+            type="session.update",
+            session={
+                "type": "realtime",
+                "instructions": "Be helpful",
+                "tools": [{"type": "function", "name": "get_weather"}],
+                "tool_choice": "auto",
+                "audio": {
+                    "input": {"turn_detection": {"type": "server_vad"}},
+                    "output": {"voice": "echo"},
+                },
+            },
+        ))
 
         evt = service.build_session_created(conn_id)
         assert isinstance(evt, SessionCreatedEvent)
@@ -92,7 +99,6 @@ class TestConnectionLifecycle:
         assert evt.session.tool_choice == "auto"
         assert evt.session.audio.output.voice == "echo"
         assert evt.session.audio.input.turn_detection.type == "server_vad"
-        assert evt.session.audio.input.transcription.model == "whisper-1"
 
 
 # ===================================================================
@@ -180,17 +186,27 @@ class TestHandleSessionUpdate:
             audio={"output": {"voice": "shimmer"}},
         )
         service.handle_session_update(evt)
-        assert runtime_config.voice == "shimmer"
+        assert runtime_config.session.audio.output.voice == "shimmer"
 
     def test_session_update_instructions(self, service, runtime_config):
         service.handle_session_update(self._make_update(instructions="Be concise"))
-        assert runtime_config.instructions == "Be concise"
+        assert runtime_config.session.instructions == "Be concise"
 
     def test_session_update_tools_and_tool_choice(self, service, runtime_config):
         tools = [{"type": "function", "name": "f1"}]
         service.handle_session_update(self._make_update(tools=tools, tool_choice="required"))
-        assert runtime_config.tools is not None
-        assert runtime_config.tool_choice == "required"
+        assert runtime_config.session.tools is not None
+        assert runtime_config.session.tool_choice == "required"
+
+    def test_session_update_rejects_transcription_session(self, service, runtime_config):
+        raw = {
+            "type": "session.update",
+            "session": {"type": "transcription"},
+        }
+        evt = SessionUpdateEvent.model_validate(raw)
+        err = service.handle_session_update(evt)
+        assert isinstance(err, RealtimeErrorEvent)
+        assert err.error.type == "invalid_session_type"
 
     def test_session_update_nested_audio_format(self, service, runtime_config):
         raw = {
@@ -205,8 +221,21 @@ class TestHandleSessionUpdate:
         }
         evt = SessionUpdateEvent.model_validate(raw)
         service.handle_session_update(evt)
-        assert runtime_config.voice == "nova"
-        assert runtime_config.turn_detection.type == "server_vad"
+        assert runtime_config.session.audio.output.voice == "nova"
+        assert runtime_config.session.audio.input.turn_detection.type == "server_vad"
+
+    def test_session_update_merges_partial_updates(self, service, runtime_config):
+        """Partial updates preserve previously-set fields."""
+        service.handle_session_update(self._make_update(
+            audio={"output": {"voice": "echo"}},
+            instructions="Be helpful",
+        ))
+        assert runtime_config.session.audio.output.voice == "echo"
+        assert runtime_config.session.instructions == "Be helpful"
+
+        service.handle_session_update(self._make_update(instructions="Be concise"))
+        assert runtime_config.session.instructions == "Be concise"
+        assert runtime_config.session.audio.output.voice == "echo"  # preserved from first update
 
 
 # ===================================================================
@@ -239,7 +268,8 @@ class TestHandleConversationItemCreate:
         assert evt.item.content[0].type == "input_text"
         assert evt.item.content[0].text == "hi"
         assert not text_prompt_queue.empty()
-        assert text_prompt_queue.get() == "hi"
+        msg = text_prompt_queue.get()
+        assert msg == ("__ADD_TO_CONTEXT__", "user", "hi")
         assert not should_listen.is_set()
 
     def test_text_input_previous_item_id_chain(self, service, conn_id):
@@ -255,7 +285,8 @@ class TestHandleConversationItemCreate:
         )
         events = service.handle_conversation_item_create(conn_id, evt)
         assert events == []
-        assert text_prompt_queue.get() == '{"result": 42}'
+        msg = text_prompt_queue.get()
+        assert msg == ("__FUNCTION_RESULT__", '{"result": 42}')
 
     def test_input_image_ignored(self, service, conn_id):
         evt = ConversationItemCreateEvent(
@@ -304,17 +335,40 @@ class TestHandleResponseCreate:
         assert isinstance(err, RealtimeErrorEvent)
         assert err.error.type == "conversation_already_has_active_response"
 
-    def test_response_create_stores_overrides(self, service, conn_id, runtime_config):
+    def test_response_create_stores_overrides(self, service, conn_id, runtime_config, text_prompt_queue):
         evt = ResponseCreateEvent(
             type="response.create",
             response={
                 "instructions": "override instructions",
-                "tool_choice": {"type": "function", "name": "my_func"},
+                "tool_choice": "auto",
             },
         )
         service.handle_response_create(conn_id, evt)
-        assert runtime_config.response_instructions == "override instructions"
-        assert runtime_config.response_tool_choice is not None
+        sentinel = text_prompt_queue.get()
+        assert sentinel == ("__GENERATE_RESPONSE__", "override instructions", "auto")
+
+    def test_response_create_rejects_complex_tool_choice(self, service, conn_id, runtime_config):
+        evt = ResponseCreateEvent(
+            type="response.create",
+            response={
+                "tool_choice": {"type": "function", "name": "my_func"},
+            },
+        )
+        err = service.handle_response_create(conn_id, evt)
+        assert isinstance(err, RealtimeErrorEvent)
+        assert err.error.type == "tool_choice_not_supported"
+
+    def test_response_create_accepts_valid_str_tool_choices(self, service, conn_id, text_prompt_queue):
+        for choice in ("auto", "required", "none"):
+            evt = ResponseCreateEvent(
+                type="response.create",
+                response={"tool_choice": choice},
+            )
+            result = service.handle_response_create(conn_id, evt)
+            assert result is None, f"Expected no error for tool_choice={choice!r}"
+            sentinel = text_prompt_queue.get()
+            assert sentinel[0] == "__GENERATE_RESPONSE__"
+            assert sentinel[2] == choice
 
 
 # ===================================================================
@@ -399,7 +453,7 @@ class TestFinishAudioResponse:
         st = service._state(conn_id)
         assert st.in_response is False
         assert st.current_response_id is None
-        assert st.current_output_item_id is None
+        assert st.current_item_id is None
         assert st.response_metadata is None
 
 
@@ -434,6 +488,28 @@ class TestTranslatePipelineText:
         speech = [e for e in events if isinstance(e, InputAudioBufferSpeechStartedEvent)]
         assert len(speech) == 1
 
+    def test_speech_started_no_response_emits_only_started(self, service, conn_id):
+        """speech_started without active response emits only the started event."""
+        events = service.translate_pipeline_text(
+            conn_id, {"type": "speech_started"},
+        )
+        assert len(events) == 1
+        assert isinstance(events[0], InputAudioBufferSpeechStartedEvent)
+
+    def test_consecutive_speech_cycles_get_distinct_item_ids(self, service, conn_id):
+        """Each speech_started/stopped cycle generates a new unique item_id."""
+        started_1 = service.translate_pipeline_text(conn_id, {"type": "speech_started"})
+        stopped_1 = service.translate_pipeline_text(conn_id, {"type": "speech_stopped"})
+
+        started_2 = service.translate_pipeline_text(conn_id, {"type": "speech_started"})
+        stopped_2 = service.translate_pipeline_text(conn_id, {"type": "speech_stopped"})
+
+        id_1 = started_1[0].item_id
+        id_2 = started_2[0].item_id
+        assert id_1 != id_2
+        assert stopped_1[0].item_id == id_1
+        assert stopped_2[0].item_id == id_2
+
     # -- speech_stopped --
 
     def test_speech_stopped_emits_event(self, service, conn_id):
@@ -461,6 +537,16 @@ class TestTranslatePipelineText:
             conn_id, {"type": "speech_stopped", "duration_s": 2.5},
         )
         assert service._state(conn_id).input_audio_duration_s == 2.5
+
+    def test_speech_stopped_zero_duration_not_stored(self, service, conn_id):
+        """Phantom trigger (duration_s=0) emits stopped event but doesn't overwrite duration."""
+        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
+        events = service.translate_pipeline_text(
+            conn_id, {"type": "speech_stopped", "duration_s": 0},
+        )
+        assert len(events) == 1
+        assert isinstance(events[0], InputAudioBufferSpeechStoppedEvent)
+        assert service._state(conn_id).input_audio_duration_s == 0.0
 
     # -- assistant_text --
 
@@ -574,12 +660,14 @@ class TestIdAndStateManagement:
         st = service._state(conn_id)
         assert st.last_item_id is None
 
-        # 1) _start_input_item updates last_item_id
-        input_id = service._start_input_item(conn_id)
+        # 1) speech_started sets last_item_id via translate_pipeline_text
+        events = service.translate_pipeline_text(conn_id, {"type": "speech_started"})
+        input_id = events[0].item_id
         assert st.last_item_id == input_id
 
-        # 2) _ensure_response updates last_item_id
-        _, output_id = service._ensure_response(conn_id)
+        # 2) assistant_text sets last_item_id via translate_pipeline_text
+        events = service.translate_pipeline_text(conn_id, {"type": "assistant_text", "text": "hi"})
+        output_id = st.current_item_id
         assert st.last_item_id == output_id
 
         # 3) handle_conversation_item_create updates last_item_id
@@ -598,17 +686,17 @@ class TestIdAndStateManagement:
         assert events[0].previous_item_id == output_id
 
     def test_content_index_resets_on_new_item(self, service, conn_id):
-        service._start_input_item(conn_id)
-        assert service._next_input_content_index(conn_id) == 0
-        assert service._next_input_content_index(conn_id) == 1
+        service._start_item(conn_id)
+        assert service._next_content_index(conn_id) == 0
+        assert service._next_content_index(conn_id) == 1
 
-        service._start_input_item(conn_id)
-        assert service._next_input_content_index(conn_id) == 0
+        service._start_item(conn_id)
+        assert service._next_content_index(conn_id) == 0
 
         service._ensure_response(conn_id)
-        assert service._next_output_content_index(conn_id) == 0
-        assert service._next_output_content_index(conn_id) == 1
+        assert service._next_content_index(conn_id) == 0
+        assert service._next_content_index(conn_id) == 1
 
         service._end_response(conn_id)
         service._ensure_response(conn_id)
-        assert service._next_output_content_index(conn_id) == 0
+        assert service._next_content_index(conn_id) == 0

@@ -1,27 +1,59 @@
-from typing import Literal
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-class RuntimeConfig:
+from openai.types.realtime import RealtimeSessionCreateRequest
+from openai.types.realtime.realtime_audio_config import RealtimeAudioConfig
+from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfigInput
+from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
+
+
+def _apply_update(current: BaseModel, update: BaseModel) -> None:
+    """Apply explicitly-set fields from *update* onto *current* in-place,
+    recursing into nested BaseModel children so partial nested updates
+    don't overwrite unset fields.
+
+    Only fields present in update.model_fields_set (i.e. actually
+    sent by the client) are considered.
+    """
+    for field_name in update.model_fields_set:
+        new_val = getattr(update, field_name)
+        old_val = getattr(current, field_name, None)
+        if isinstance(new_val, BaseModel) and isinstance(old_val, BaseModel):
+            _apply_update(old_val, new_val)
+        else:
+            setattr(current, field_name, new_val)
+
+
+class RuntimeConfig(BaseModel):
     """
     Shared mutable configuration written by the RealtimeService on
     session.update and read by pipeline handlers (VAD, LLM, TTS) during
     processing.  Python's GIL makes simple attribute reads/writes atomic,
     so no explicit locking is needed for primitive values.
+
+    The canonical state lives in ``session`` (a full
+    ``RealtimeSessionCreateRequest``).
     """
 
-    def __init__(self):
-        # Session-level config (persistent until next session.update)
-        self.voice: str | None = None
-        self.instructions: str | None = None
-        self.turn_detection: dict | None = None
-        self.tools: list | None = None
-        self.tool_choice: Literal["auto", "required", "none"] | None = None
-        self.input_audio_transcription: dict | None = None
+    model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True)
 
-        # Client audio sample rate: OpenAI Realtime API standard is 24kHz,
-        # but the internal pipeline operates at 16kHz.  The service layer
-        # resamples between these rates transparently.
-        self.client_audio_rate: int = 24000
+    session: RealtimeSessionCreateRequest = Field(
+        default_factory=lambda: RealtimeSessionCreateRequest(type="realtime"),
+        validate_default=True,
+    )
 
-        # Per-response overrides (consumed once per response, then cleared)
-        self.response_instructions: str | None = None
-        self.response_tool_choice: str | None = None
+    @field_validator("session", mode="after")
+    @classmethod
+    def _ensure_audio_structure(cls, v: RealtimeSessionCreateRequest) -> RealtimeSessionCreateRequest:
+        """Guarantee ``audio.input`` and ``audio.output`` are never None."""
+        if v.audio is None:
+            v.audio = RealtimeAudioConfig()
+        if v.audio.input is None:
+            v.audio.input = RealtimeAudioConfigInput()
+        if v.audio.output is None:
+            v.audio.output = RealtimeAudioConfigOutput()
+        return v
+
+    def apply_session_update(self, update: RealtimeSessionCreateRequest) -> None:
+        """Merge non-None, explicitly-set fields from *update* into the
+        current ``session``, preserving any fields not present in the update."""
+        _apply_update(self.session, update)

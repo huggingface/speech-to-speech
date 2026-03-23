@@ -11,9 +11,12 @@ Model supports 8 languages with multiple voices per language.
 import logging
 import numpy as np
 from sys import platform
+from threading import Event
 from baseHandler import BaseHandler
 from rich.console import Console
 from utils.mlx_lock import MLXLockContext
+
+from api.openai_realtime.runtime_config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -84,7 +87,8 @@ class KokoroTTSHandler(BaseHandler):
         speed=1.0,
         blocksize=512,
         gen_kwargs=None,
-        runtime_config=None,
+        runtime_config: RuntimeConfig | None = None,
+        cancel_response: Event | None = None,
     ):
         """
         Initialize the Kokoro TTS model.
@@ -106,6 +110,7 @@ class KokoroTTSHandler(BaseHandler):
         self.speed = speed
         self.blocksize = blocksize
         self.runtime_config = runtime_config
+        self.cancel_response = cancel_response
 
         # Determine device
         if device == "auto":
@@ -177,7 +182,8 @@ class KokoroTTSHandler(BaseHandler):
         """Preload voices for common languages to avoid download delays during inference."""
         # Only preload a few commonly used language voices to avoid excessive startup time
         # Users speaking other languages will experience a one-time download delay
-        preload_langs = ["a", "b", "e", "f", "h", "i", "j", "p", "z"] # English, Spanish, French, Hindi, Italian, Japanese, Portuguese 
+        # preload_langs = ["a", "b", "e", "f", "h", "i", "j", "p", "z"] # English, Spanish, French, Hindi, Italian, Japanese, Portuguese 
+        preload_langs = ["a"] # English
 
         for lang_code in preload_langs:
             voice = KOKORO_LANG_DEFAULT_VOICES.get(lang_code)
@@ -218,15 +224,20 @@ class KokoroTTSHandler(BaseHandler):
         Yields:
             Audio chunks as numpy int16 arrays
         """
-        if self.runtime_config and self.runtime_config.voice:
-            self.voice = self.runtime_config.voice
+        if isinstance(llm_sentence, tuple) and llm_sentence[0] == "__END_OF_RESPONSE__":
+            yield b"__RESPONSE_DONE__"
+            return
+
+        if self.runtime_config and self.runtime_config.session.audio.output.voice:
+            self.voice = self.runtime_config.session.audio.output.voice
 
         if self.backend == "mlx":
             yield from self._process_mlx(llm_sentence)
         else:
             yield from self._process_kokoro(llm_sentence)
 
-        self.should_listen.set()
+        if not getattr(self, 'runtime_config', None):
+            self.should_listen.set()
 
     def _process_mlx(self, llm_sentence):
         """Process using MLX backend with Apple Silicon optimizations."""
@@ -297,6 +308,9 @@ class KokoroTTSHandler(BaseHandler):
 
                 # Yield audio in fixed-size chunks
                 for i in range(0, len(audio), self.blocksize):
+                    if self.cancel_response and self.cancel_response.is_set():
+                        logger.info("TTS generation cancelled (interruption)")
+                        return
                     chunk = audio[i : i + self.blocksize]
                     # Pad the last chunk if necessary
                     if len(chunk) < self.blocksize:
@@ -351,6 +365,9 @@ class KokoroTTSHandler(BaseHandler):
 
             # Yield audio in fixed-size chunks
             for i in range(0, len(audio), self.blocksize):
+                if self.cancel_response and self.cancel_response.is_set():
+                    logger.info("TTS generation cancelled (interruption)")
+                    return
                 chunk = audio[i : i + self.blocksize]
                 # Pad the last chunk if necessary
                 if len(chunk) < self.blocksize:
