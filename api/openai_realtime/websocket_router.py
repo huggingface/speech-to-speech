@@ -8,6 +8,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 
 from api.openai_realtime.service import RealtimeService, ServerEvent
+from pipeline_control import SESSION_END
 
 from openai.types.realtime import (
     InputAudioBufferAppendEvent,
@@ -138,6 +139,9 @@ def create_app(
         finally:
             service.unregister(session_id)
             app.state.websockets.pop(session_id, None)
+            if not service._conns:
+                input_queue.put(SESSION_END)
+                logger.info("Last client disconnected, sent SESSION_END")
             logger.info(f"Client {session_id} removed")
 
     async def _send_loop():

@@ -106,49 +106,49 @@ class TestExtractFromText:
 
     CODE_BLOCK_REGEX = r"<code>.*?</code>"
 
-    def test_block_regex_no_match_returns_original(self):
+    def test_no_code_block_returns_original_text_no_calls(self):
         text = "Hello world, no code blocks here"
         outside, calls = extract_function_calls_from_text(text, block_regex=self.CODE_BLOCK_REGEX)
         assert outside == text
         assert calls == []
 
-    def test_block_regex_extracts_calls_outside_code_blocks(self):
-        text = "mobile.click(x=0.5)\n<code>ignored.call(a=1)</code>\nmobile.home()"
+    def test_extracts_calls_inside_code_block(self):
+        text = "Sure, I'll do that.\n<code>mobile.click(x=0.5)</code>\nDone."
+        outside, calls = extract_function_calls_from_text(text, block_regex=self.CODE_BLOCK_REGEX)
+        assert len(calls) == 1
+        assert calls[0].function_name == "mobile.click"
+        assert "mobile.click" not in outside
+
+    def test_ignores_calls_outside_code_block(self):
+        text = "mobile.click(x=0.5)\n<code>real.call(a=1)</code>\nmobile.home()"
         outside, calls = extract_function_calls_from_text(text, block_regex=self.CODE_BLOCK_REGEX)
         names = [c.function_name for c in calls]
-        assert "mobile.click" in names
-        assert "mobile.home" in names
-        assert "ignored.call" not in names
+        assert names == ["real.call"]
 
-    def test_block_regex_ignores_calls_inside_code_block(self):
-        text = "<code>secret.func(x=1)</code>"
-        outside, calls = extract_function_calls_from_text(text, block_regex=self.CODE_BLOCK_REGEX)
-        assert calls == []
-
-    def test_block_regex_multiline_code_block(self):
-        text = "mobile.click(x=0.5)\n<code>\nignored.a()\nignored.b()\n</code>\nmobile.home()"
+    def test_multiline_code_block(self):
+        text = "Here:\n<code>\ndo.a()\ndo.b()\n</code>\nDone."
         outside, calls = extract_function_calls_from_text(text, block_regex=self.CODE_BLOCK_REGEX)
         names = [c.function_name for c in calls]
-        assert "mobile.click" in names
-        assert "mobile.home" in names
+        assert "do.a" in names
+        assert "do.b" in names
         assert len(calls) == 2
 
-    def test_block_regex_multiple_code_blocks(self):
-        text = "a.first()\n<code>skip()</code>\nb.second()\n<code>skip2()</code>\nc.third()"
+    def test_multiple_code_blocks(self):
+        text = "Step 1\n<code>a.first()</code>\nStep 2\n<code>b.second()</code>\nDone"
         outside, calls = extract_function_calls_from_text(text, block_regex=self.CODE_BLOCK_REGEX)
         names = [c.function_name for c in calls]
-        assert names == ["a.first", "b.second", "c.third"]
+        assert names == ["a.first", "b.second"]
 
     def test_outside_text_excludes_code_blocks(self):
-        text = "Hello\n<code>hidden</code>\nWorld"
+        text = "Hello\n<code>hidden()</code>\nWorld"
         outside, _ = extract_function_calls_from_text(text, block_regex=self.CODE_BLOCK_REGEX)
         assert "<code>" not in outside
         assert "hidden" not in outside
         assert "Hello" in outside
         assert "World" in outside
 
-    def test_only_code_block_returns_empty_calls(self):
-        text = "<code>mobile.click(x=0.5)</code>"
+    def test_no_calls_when_code_block_has_no_functions(self):
+        text = "<code>just plain text</code>"
         outside, calls = extract_function_calls_from_text(text, block_regex=self.CODE_BLOCK_REGEX)
         assert calls == []
 

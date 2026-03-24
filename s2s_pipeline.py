@@ -13,7 +13,6 @@ from arguments_classes.chat_tts_arguments import ChatTTSHandlerArguments
 from arguments_classes.language_model_arguments import LanguageModelHandlerArguments
 from arguments_classes.module_arguments import ModuleArguments
 from arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
-from arguments_classes.parler_tts_arguments import ParlerTTSHandlerArguments
 from arguments_classes.socket_receiver_arguments import SocketReceiverArguments
 from arguments_classes.socket_sender_arguments import SocketSenderArguments
 from arguments_classes.websocket_streamer_arguments import WebSocketStreamerArguments
@@ -94,7 +93,6 @@ def parse_arguments():
             ParakeetTDTSTTHandlerArguments,
             LanguageModelHandlerArguments,
             OpenApiLanguageModelHandlerArguments,
-            ParlerTTSHandlerArguments,
             MeloTTSHandlerArguments,
             ChatTTSHandlerArguments,
             FacebookMMSTTSHandlerArguments,
@@ -137,7 +135,7 @@ def optimal_mac_settings(mac_optimal_settings: Optional[str], *handler_kwargs):
             if hasattr(kwargs, "llm"):
                 kwargs.llm = "mlx-lm"
             if hasattr(kwargs, "tts"):
-                kwargs.tts = "kokoro"
+                kwargs.tts = "melo"
 
 def check_mac_settings(module_kwargs):
     if platform == "darwin":
@@ -149,9 +147,9 @@ def check_mac_settings(module_kwargs):
             logger.warning(
                 "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm mlx-lm."
             )
-        if module_kwargs.tts != "melo":
+        if module_kwargs.tts not in ("melo", "pocket"):
             logger.warning(
-                "If you experiences issues generating the voice, considering setting the tts to melo."
+                "For macOS users, it is recommended to use melo for TTS (pocket is also a valid option)."
             )
 
 
@@ -173,6 +171,8 @@ def overwrite_device_argument(common_device: Optional[str], *handler_kwargs):
 
 def prepare_module_args(module_kwargs, *handler_kwargs):
     optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs)
+    if module_kwargs.tts is None:
+        module_kwargs.tts = "melo" if platform == "darwin" else "qwen3"
     if platform == "darwin":
         check_mac_settings(module_kwargs)
     overwrite_device_argument(module_kwargs.device, *handler_kwargs)
@@ -187,7 +187,6 @@ def prepare_all_args(
     parakeet_tdt_stt_handler_kwargs,
     language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
-    parler_tts_handler_kwargs,
     melo_tts_handler_kwargs,
     chat_tts_handler_kwargs,
     facebook_mms_tts_handler_kwargs,
@@ -204,7 +203,6 @@ def prepare_all_args(
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
-        parler_tts_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,
@@ -220,7 +218,6 @@ def prepare_all_args(
     rename_args(parakeet_tdt_stt_handler_kwargs, "parakeet_tdt")
     rename_args(language_model_handler_kwargs, "lm")
     rename_args(open_api_language_model_handler_kwargs, "open_api")
-    rename_args(parler_tts_handler_kwargs, "tts")
     rename_args(melo_tts_handler_kwargs, "melo")
     rename_args(chat_tts_handler_kwargs, "chat_tts")
     rename_args(facebook_mms_tts_handler_kwargs, "facebook_mms")
@@ -259,7 +256,6 @@ def build_pipeline(
     parakeet_tdt_stt_handler_kwargs,
     language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
-    parler_tts_handler_kwargs,
     melo_tts_handler_kwargs,
     chat_tts_handler_kwargs,
     facebook_mms_tts_handler_kwargs,
@@ -279,7 +275,7 @@ def build_pipeline(
     text_prompt_queue = queues_and_events["text_prompt_queue"]
     lm_response_queue = queues_and_events["lm_response_queue"]
     lm_processed_queue = queues_and_events["lm_processed_queue"]
-    text_output_queue = queues_and_events["text_output_queue"]
+    text_output_queue = None  # Only set for websocket/realtime modes; kept None otherwise to avoid unbounded queue growth
     if module_kwargs.mode == "local":
         from connections.local_audio_streamer import LocalAudioStreamer
 
@@ -290,7 +286,9 @@ def build_pipeline(
         should_listen.set()
     elif module_kwargs.mode == "websocket":
         from connections.websocket_streamer import WebSocketStreamer
+        from STT.transcription_notifier import TranscriptionNotifier
 
+        text_output_queue = queues_and_events["text_output_queue"]
         websocket_streamer = WebSocketStreamer(
             stop_event,
             input_queue=recv_audio_chunks_queue,
@@ -300,11 +298,19 @@ def build_pipeline(
             host=websocket_streamer_kwargs.ws_host,
             port=websocket_streamer_kwargs.ws_port,
         )
-        comms_handlers = [websocket_streamer]
+        transcription_notifier = TranscriptionNotifier(
+            stop_event,
+            queue_in=stt_output_queue,
+            queue_out=text_prompt_queue,
+            setup_kwargs={"text_output_queue": text_output_queue},
+        )
+        comms_handlers = [websocket_streamer, transcription_notifier]
     elif module_kwargs.mode == "realtime":
         from api.openai_realtime.server import RealtimeServer
         from api.openai_realtime.runtime_config import RuntimeConfig
-        from api.openai_realtime.transcription_notifier import TranscriptionNotifier
+        from STT.transcription_notifier import TranscriptionNotifier
+
+        text_output_queue = queues_and_events["text_output_queue"]
 
         # Single shared instance: RealtimeService writes to it on
         # session.update, pipeline handlers read from it at processing time.
@@ -316,7 +322,6 @@ def build_pipeline(
             vad_handler_kwargs,
             language_model_handler_kwargs,
             open_api_language_model_handler_kwargs,
-            parler_tts_handler_kwargs,
             kokoro_tts_handler_kwargs,
             qwen3_tts_handler_kwargs,
             pocket_tts_handler_kwargs,
@@ -339,7 +344,6 @@ def build_pipeline(
         for kw in (
             language_model_handler_kwargs,
             open_api_language_model_handler_kwargs,
-            parler_tts_handler_kwargs,
             kokoro_tts_handler_kwargs,
             qwen3_tts_handler_kwargs,
             pocket_tts_handler_kwargs,
@@ -397,10 +401,13 @@ def build_pipeline(
         setup_kwargs=vars(vad_handler_kwargs),
     )
 
-    # In realtime mode, STT outputs to an intermediate queue so the
-    # TranscriptionNotifier can tap the transcription before forwarding
-    # to the LLM.  In other modes STT feeds text_prompt_queue directly.
-    stt_dest = stt_output_queue if module_kwargs.mode == "realtime" else text_prompt_queue
+    if module_kwargs.mode in ("websocket", "realtime"):
+        # STT outputs to an intermediate queue so TranscriptionNotifier can
+        # intercept partials and emit transcription events before forwarding
+        # finals to the LLM.
+        stt_dest = stt_output_queue
+    else:
+        stt_dest = text_prompt_queue
 
     stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, stt_dest, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs)
 
@@ -415,7 +422,7 @@ def build_pipeline(
         setup_kwargs={"text_output_queue": text_output_queue},
     )
 
-    tts = get_tts_handler(module_kwargs, stop_event, lm_processed_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs, qwen3_tts_handler_kwargs)
+    tts = get_tts_handler(module_kwargs, stop_event, lm_processed_queue, send_audio_chunks_queue, should_listen, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs, qwen3_tts_handler_kwargs)
 
     # Build the handler chain
     pipeline_handlers = [*comms_handlers, vad, stt, lm, lm_processor, tts]
@@ -424,13 +431,6 @@ def build_pipeline(
 
 
 def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs):
-    if module_kwargs.stt == "moonshine":
-        from STT.moonshine_handler import MoonshineSTTHandler
-        return MoonshineSTTHandler(
-            stop_event,
-            queue_in=spoken_prompt_queue,
-            queue_out=text_prompt_queue,
-        )
     if module_kwargs.stt == "whisper":
         from STT.whisper_stt_handler import WhisperSTTHandler
         return WhisperSTTHandler(
@@ -491,7 +491,7 @@ def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_
             setup_kwargs=setup_kwargs,
         )
     else:
-        raise ValueError("The STT should be either whisper, whisper-mlx, mlx-audio-whisper, faster-whisper, parakeet-tdt, moonshine, or paraformer.")
+        raise ValueError("The STT should be either whisper, whisper-mlx, mlx-audio-whisper, faster-whisper, parakeet-tdt, or paraformer.")
 
 
 def get_llm_handler(
@@ -532,22 +532,13 @@ def get_llm_handler(
         raise ValueError("The LLM should be either transformers, mlx-lm or open_api")
 
 
-def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, parler_tts_handler_kwargs, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs, qwen3_tts_handler_kwargs):
-    if module_kwargs.tts == "parler":
-        from TTS.parler_handler import ParlerTTSHandler
-        return ParlerTTSHandler(
-            stop_event,
-            queue_in=lm_response_queue,
-            queue_out=send_audio_chunks_queue,
-            setup_args=(should_listen,),
-            setup_kwargs=vars(parler_tts_handler_kwargs),
-        )
-    elif module_kwargs.tts == "melo":
+def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs, qwen3_tts_handler_kwargs):
+    if module_kwargs.tts == "melo":
         try:
             from TTS.melo_handler import MeloTTSHandler
-        except RuntimeError as e:
+        except Exception as e:
             logger.error(
-                "Error importing MeloTTSHandler. You might need to run: python -m unidic download"
+                "Error importing MeloTTSHandler. For uv environments, run `uv run python -m unidic download`. On macOS, `--tts pocket` is also a valid option."
             )
             raise e
         return MeloTTSHandler(
@@ -607,7 +598,7 @@ def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chu
             setup_kwargs=vars(qwen3_tts_handler_kwargs),
         )
     else:
-        raise ValueError("The TTS should be either parler, melo, chatTTS, facebookMMS, pocket, kokoro, or qwen3")
+        raise ValueError("The TTS should be either melo, chatTTS, facebookMMS, pocket, kokoro, or qwen3")
 
 
 def main():
@@ -624,7 +615,6 @@ def main():
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
-        parler_tts_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,
@@ -644,7 +634,6 @@ def main():
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
-        parler_tts_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,
@@ -668,7 +657,6 @@ def main():
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
-        parler_tts_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,

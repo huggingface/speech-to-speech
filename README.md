@@ -3,8 +3,7 @@
   <img src="logo.png" width="600"/> 
 </div>
 
-# Speech To Speech: an effort for an open-sourced and modular GPT4-o
-
+# Speech To Speech: Build local voice agents with open-source models
 
 ## 📖 Quick Index
 * [Approach](#approach)
@@ -48,7 +47,6 @@ The pipeline provides a fully open and modular approach, with a focus on leverag
 - [OpenAI API](https://platform.openai.com/docs/quickstart)
 
 **TTS**
-- [Parler-TTS](https://github.com/huggingface/parler-tts) 🤗
 - [MeloTTS](https://github.com/myshell-ai/MeloTTS)
 - [ChatTTS](https://github.com/2noise/ChatTTS?tab=readme-ov-file)
 - [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) - Streaming TTS with voice cloning from Kyutai Labs
@@ -62,28 +60,33 @@ git clone https://github.com/huggingface/speech-to-speech.git
 cd speech-to-speech
 ```
 
-Create a new python virtual environment using [uv](https://github.com/astral-sh/uv) and install pip:
+Install dependencies with [uv](https://github.com/astral-sh/uv):
 ```bash
-uv init
-uv add pip
+uv sync
 ```
 
-Install the required dependencies using [uv](https://github.com/astral-sh/uv):
+The project now uses a single `pyproject.toml` with platform markers, so macOS and non-macOS dependencies are resolved automatically from one file.
+
+If you use Melo TTS (default on macOS), run this once after install:
 ```bash
-uv pip install -r requirements.txt
+uv run python -m unidic download
 ```
 
-For Mac users, use the `requirements_mac.txt` file instead:
-```bash
-uv pip install -r requirements_mac.txt
-```
+Apple Silicon MeloTTS note:
+- If MeloTTS fails on MPS with `Output channels > 65536 not supported at the MPS device`, update macOS first.
+- We reproduced this on an older macOS release and verified that the same environment worked after updating to macOS `26.3.1`.
 
-If you want to use Melo TTS, you also need to run:
-```bash
-python -m unidic download
-```
+**Note on DeepFilterNet:** DeepFilterNet (used for optional audio enhancement in VAD) is currently incompatible with Pocket TTS due to numpy version constraints. DeepFilterNet requires `numpy<2`, while Pocket TTS requires `numpy>=2`.
 
-**Note on DeepFilterNet:** DeepFilterNet (used for optional audio enhancement in VAD) is currently incompatible with Pocket TTS due to numpy version constraints. DeepFilterNet requires numpy<2, while Pocket TTS requires numpy>=2. If you need audio enhancement, you can install DeepFilterNet separately by commenting out pocket-tts in requirements and uncommenting deepfilternet.
+If you want a DeepFilterNet-focused setup with `pyproject.toml`:
+1. Edit [`pyproject.toml`](./pyproject.toml): remove the `pocket-tts` dependency line.
+2. Add `deepfilternet>=0.5.6` and `numpy<2` to `project.dependencies`.
+3. Re-sync the environment:
+   ```bash
+   uv sync --refresh
+   ```
+
+To switch back to Pocket TTS, revert those `pyproject.toml` changes and run `uv sync --refresh` again.
 
 
 ## Usage
@@ -130,6 +133,11 @@ This setting:
      - Sets LightningWhisperMLX for STT
      - Sets MLX LM for language model
      - Sets MeloTTS for TTS
+   - Requires one-time UniDic setup for MeloTTS:
+     ```bash
+     uv run python -m unidic download
+     ```
+   - `--tts pocket` is also a valid option on macOS.
 
 ### Docker Server
 
@@ -144,18 +152,16 @@ https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install
 
 ### Recommended usage with Cuda
 
-Leverage Torch Compile for Whisper and Parler-TTS. **The usage of Parler-TTS allows for audio output streaming, further reducing the overall latency** 🚀:
+Leverage Torch Compile for Whisper with Pocket TTS for a simple low-latency setup:
 
 ```bash
 python s2s_pipeline.py \
 	--lm_model_name microsoft/Phi-3-mini-4k-instruct \
 	--stt_compile_mode reduce-overhead \
-	--tts_compile_mode default \
+  --tts pocket \
   --recv_host 0.0.0.0 \
 	--send_host 0.0.0.0 
 ```
-
-For the moment, modes capturing CUDA Graphs are not compatible with streaming Parler-TTS (`reduce-overhead`, `max-autotune`).
 
 ### Multi-language Support
 
@@ -165,7 +171,7 @@ Two use cases are considered:
 - **Single-language conversation**: Enforce the language setting using the `--language` flag, specifying the target language code (default is 'en').
 - **Language switching**: Set `--language` to 'auto'. In this case, Whisper detects the language for each spoken prompt, and the LLM is prompted with "`Please reply to my message in ...`" to ensure the response is in the detected language.
 
-Please note that you must use STT and LLM checkpoints compatible with the target language(s). For the STT part, Parler-TTS is not yet multilingual (though that feature is coming soon! 🤗). In the meantime, you should use Melo (which supports English, French, Spanish, Chinese, Japanese, and Korean) or Chat-TTS.
+Please note that you must use STT and LLM checkpoints compatible with the target language(s). For multilingual TTS, use Melo (English, French, Spanish, Chinese, Japanese, and Korean) or Chat-TTS.
 
 #### With the server version:
 

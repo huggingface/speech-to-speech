@@ -23,6 +23,7 @@ from openai.types.realtime.realtime_audio_formats import AudioPCM
 from api.openai_realtime.runtime_config import RuntimeConfig
 from api.openai_realtime.service import RealtimeService, CHUNK_SIZE_BYTES
 from api.openai_realtime.websocket_router import create_app
+from pipeline_control import SESSION_END, is_control_message
 
 
 def _session_16k() -> RealtimeSessionCreateRequest:
@@ -240,4 +241,4 @@ class TestCleanup:
             time.sleep(0.2)
             assert len(service._conns) == 0
             end = input_queue.get(timeout=1)
-            assert end == b"END"
+            assert is_control_message(end, SESSION_END.kind)

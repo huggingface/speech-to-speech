@@ -424,25 +424,29 @@ def extract_function_calls_from_text(text: str, block_regex: str = ".*") -> Tupl
     """
     Extract function calls from delimited code blocks inside *text*.
 
+    The LLM is prompted to wrap tool calls inside code-block delimiters
+    (e.g. ``<code>func(x=1)</code>``).  This function finds those blocks,
+    parses the function calls within them, and returns the remaining text
+    (with blocks stripped) alongside the parsed calls.
+
     Args:
         text: Full model output potentially containing code blocks.
         block_regex: Regex matching the code-block delimiters **and** their
-            content (e.g. ``r"<code>.*?</code>"``).  Only text inside
+            content (e.g. ``r"<code>.*?</code>"``).  Only text **inside**
             matched blocks is scanned for function calls.
 
     Returns:
         ``(outside_text, function_calls)`` – the text with blocks stripped
         and the parsed function calls found inside the blocks.
     """
-    original_text = text
     func_pattern = r"[a-zA-Z_][a-zA-Z0-9_.]*\([^)]*\)"
 
     if block_regex:
-        if not re.search(block_regex, original_text, flags=re.DOTALL):
-            return original_text, []
+        if not re.search(block_regex, text, flags=re.DOTALL):
+            return text, []
 
-        outside = "".join(re.split(block_regex, original_text, flags=re.DOTALL))
-        blocks = re.findall(block_regex, original_text, flags=re.DOTALL)
+        outside = "".join(re.split(block_regex, text, flags=re.DOTALL))
+        blocks = re.findall(block_regex, text, flags=re.DOTALL)
         inside = " ".join(blocks)
 
         if not inside.strip():
@@ -451,4 +455,4 @@ def extract_function_calls_from_text(text: str, block_regex: str = ".*") -> Tupl
         matches = re.findall(func_pattern, inside)
         return outside, parse_multiple_functions(matches)
 
-    return original_text, []
+    return text, []

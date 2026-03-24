@@ -18,10 +18,10 @@ from rich.console import Console
 from utils.mlx_lock import MLXLockContext
 
 try:
-    from langdetect import detect, LangDetectException
-    LANGDETECT_AVAILABLE = True
+    from lingua import Language, LanguageDetectorBuilder
+    LINGUA_AVAILABLE = True
 except ImportError:
-    LANGDETECT_AVAILABLE = False
+    LINGUA_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -32,6 +32,22 @@ SUPPORTED_LANGUAGES = [
     "cs", "sk", "hu", "ro", "bg", "hr", "sl", "sr", "da", "no",
     "sv", "fi", "et", "lv", "lt"
 ]
+
+# Lingua uses "nb" (Bokmål) for Norwegian instead of "no"
+_LINGUA_CODE_MAP = {"no": "nb"}
+
+if LINGUA_AVAILABLE:
+    _lingua_iso_to_code = {
+        lang.iso_code_639_1.name.lower(): lang
+        for lang in Language.all()
+        if lang.iso_code_639_1 is not None
+    }
+    _lingua_languages = [
+        _lingua_iso_to_code[_LINGUA_CODE_MAP.get(code, code)]
+        for code in SUPPORTED_LANGUAGES
+        if _LINGUA_CODE_MAP.get(code, code) in _lingua_iso_to_code
+    ]
+    _lingua_detector = LanguageDetectorBuilder.from_languages(*_lingua_languages).build()
 
 
 class ParakeetTDTSTTHandler(BaseHandler):
@@ -102,6 +118,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
             self._setup_nano_parakeet(model_name)
 
         # Setup streaming handler if live transcription is enabled
+        self.streaming_handler = None
         if self.enable_live_transcription:
             from STT.smart_progressive_streaming import (
                 SmartProgressiveStreamingHandler,
@@ -199,7 +216,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
         else:
             audio_input = audio_input.astype(np.float32)
 
-        # Handle progressive updates (live transcription display only)
+        # Handle progressive updates: yield tagged partial for TranscriptionNotifier
         if self.enable_live_transcription and is_progressive:
             # Ignore progressive updates if we're already processing final audio
             if self.processing_final:
@@ -210,12 +227,15 @@ class ParakeetTDTSTTHandler(BaseHandler):
             with self._compute_lock_context(handler_name="ParakeetSTT-Progressive", timeout=0.01) as acquired:
                 if acquired:
                     try:
-                        self._show_progressive_transcription(audio_input)
+                        progressive_text = self._show_progressive_transcription(audio_input)
+                        if progressive_text:
+                            yield ("__PARTIAL__", progressive_text)
+                            return
                     except Exception as e:
                         logger.debug(f"Progressive transcription failed: {e}")
                 else:
                     logger.debug("Skipping progressive update (compute busy)")
-            return  # Don't yield to queue
+            return
 
         # Handle final transcription (send to LLM)
         try:
@@ -246,8 +266,10 @@ class ParakeetTDTSTTHandler(BaseHandler):
             language_code = self.last_language
 
         logger.debug("Finished Parakeet TDT inference")
-        console.print(f"[yellow]USER: {pred_text}")
-        console.print(f"[dim]Language: {language_code}[/dim]")
+        if pred_text.strip():
+            console.print(f"[yellow]USER: {pred_text.strip()}")
+            if language_code:
+                console.print(f"[dim]Language: {language_code}[/dim]")
 
         yield (pred_text, language_code)
 
@@ -257,7 +279,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
 
     def _detect_language_from_text(self, text):
         """
-        Detect language from transcribed text using langdetect.
+        Detect language from transcribed text using lingua-py.
 
         Args:
             text: Transcribed text string
@@ -265,26 +287,21 @@ class ParakeetTDTSTTHandler(BaseHandler):
         Returns:
             Detected language code or None if detection fails
         """
-        if not LANGDETECT_AVAILABLE:
-            logger.warning("langdetect not available, cannot detect language from text")
+        if not LINGUA_AVAILABLE:
+            logger.warning("lingua-py not available, cannot detect language from text")
             return None
 
-        # Need at least some text for reliable detection
-        if not text or len(text.strip()) < 10:
+        # Skip very short utterances where language ID is still too noisy.
+        if not text or len(text.strip()) < 20:
             return None
 
-        try:
-            detected = detect(text)
-            # Map langdetect codes to our supported languages if needed
-            # langdetect uses ISO 639-1 codes which match SUPPORTED_LANGUAGES
-            if detected in SUPPORTED_LANGUAGES:
-                return detected
-            else:
-                logger.debug(f"Detected language '{detected}' not in supported languages")
-                return None
-        except LangDetectException as e:
-            logger.debug(f"Language detection failed: {e}")
+        detected = _lingua_detector.detect_language_of(text)
+        if detected is None:
             return None
+
+        code = detected.iso_code_639_1.name.lower()
+        # Map back lingua-specific codes to our supported codes
+        return {v: k for k, v in _LINGUA_CODE_MAP.items()}.get(code, code)
 
     @contextmanager
     def _compute_lock_context(self, handler_name: str, timeout: float):
@@ -301,37 +318,44 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 self.compute_lock.release()
 
     def _show_progressive_transcription(self, audio_input):
-        """Show progressive transcription without yielding result."""
+        """Run progressive transcription, print to console, and return the text."""
         from rich.text import Text
 
-        try:
-            # Use streaming handler for progressive transcription
-            result = self.streaming_handler.transcribe_incremental(audio_input)
-
-            # Display live transcription with colors (overwrite previous line)
-            # Yellow = fixed user text (matches final USER output)
-            # Cyan = active/in-progress text (indicates processing)
-            text = Text()
-            if result.fixed_text:
-                text.append("Live: ", style="dim")
-                text.append(result.fixed_text, style="yellow")
-                if result.active_text:
-                    text.append(" ", style="dim")
-
+        result = self.streaming_handler.transcribe_incremental(audio_input)
+        rich_text = Text()
+        if result.fixed_text:
+            rich_text.append("Live: ", style="dim")
+            rich_text.append(result.fixed_text, style="yellow")
             if result.active_text:
-                if not result.fixed_text:
-                    text.append("Live: ", style="dim")
-                text.append(result.active_text, style="cyan dim")
+                rich_text.append(" ", style="dim")
 
-            if text:
-                console.print(text, end="\r")
-        except Exception as e:
-            logger.debug(f"Progressive transcription failed: {e}")
+        if result.active_text:
+            if not result.fixed_text:
+                rich_text.append("Live: ", style="dim")
+            rich_text.append(result.active_text, style="cyan dim")
+
+        progressive_text = self._build_progressive_text(result)
+        if progressive_text:
+            if rich_text:
+                console.print(rich_text, end="\r")
+            else:
+                console.print(f"[dim]Live: [/dim]{progressive_text}", end="\r")
+
+        return progressive_text
+
+    def _build_progressive_text(self, result):
+        parts = []
+        if result.fixed_text:
+            parts.append(result.fixed_text.strip())
+        if result.active_text:
+            parts.append(result.active_text.strip())
+        return " ".join(part for part in parts if part).strip()
+
 
     def _process_mlx_final(self, audio_input):
         """Process final audio using MLX backend with streaming handler."""
         # If we have fixed sentences from progressive updates, only transcribe the new part
-        if hasattr(self.streaming_handler, 'fixed_sentences') and self.streaming_handler.fixed_sentences:
+        if self.streaming_handler is not None and hasattr(self.streaming_handler, 'fixed_sentences') and self.streaming_handler.fixed_sentences:
             # Clear the live transcription line
             console.print(" " * 100, end="\r")
 
@@ -433,3 +457,10 @@ class ParakeetTDTSTTHandler(BaseHandler):
         logger.info(f"Cleaning up {self.__class__.__name__}")
         if hasattr(self, "model"):
             del self.model
+
+    def on_session_end(self):
+        if self.enable_live_transcription:
+            self.processing_final = False
+            if self.streaming_handler is not None:
+                self.streaming_handler.reset()
+        logger.debug("Parakeet TDT session state reset")

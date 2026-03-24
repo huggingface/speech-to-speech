@@ -2,6 +2,8 @@ from time import perf_counter
 from queue import Empty
 import logging
 
+from pipeline_control import SESSION_END, is_control_message
+
 logger = logging.getLogger(__name__)
 
 
@@ -11,6 +13,7 @@ class BaseHandler:
     The `setup` method along with `setup_args` and `setup_kwargs` can be used to address the specific requirements of the implemented pipeline part.
     To stop a handler properly, set the stop_event and, to avoid queue deadlocks, place b"END" in the input queue.
     Objects placed in the input queue will be processed by the `process` method, and the yielded results will be placed in the output queue.
+    `SESSION_END` is a soft control message used to reset per-session state without stopping the handler thread.
     The cleanup method handles stopping the handler, and b"END" is placed in the output queue.
     """
 
@@ -34,6 +37,18 @@ class BaseHandler:
                 # Use timeout to check stop_event periodically
                 input = self.queue_in.get(timeout=0.1)
             except Empty:
+                continue
+
+            if is_control_message(input, SESSION_END.kind):
+                logger.debug(f"{self.__class__.__name__}: session end received")
+                try:
+                    self.on_session_end()
+                except Exception as e:
+                    logger.error(
+                        f"{self.__class__.__name__}: Error in on_session_end(): {type(e).__name__}: {e}",
+                        exc_info=True,
+                    )
+                self.queue_out.put(input)
                 continue
 
             if isinstance(input, bytes) and input == b"END":
@@ -63,4 +78,7 @@ class BaseHandler:
         return 0.001
 
     def cleanup(self):
+        pass
+
+    def on_session_end(self):
         pass

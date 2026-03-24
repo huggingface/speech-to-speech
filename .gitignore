@@ -2,3 +2,4 @@ __pycache__
 tmp
 cache
 .DS_Store
+uv.lock

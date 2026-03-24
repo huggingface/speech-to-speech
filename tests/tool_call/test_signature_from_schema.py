@@ -199,7 +199,7 @@ class TestToolToCodePrompt:
             },
             "required": ["name"],
         })
-        result = tool.to_code_prompt()
+        result = tool.to_code_prompt(include_args_doc=True)
         assert "def greet(name: str):" in result
         assert "Greet the user." in result
         assert "name: User name." in result

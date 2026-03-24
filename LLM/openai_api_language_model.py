@@ -29,6 +29,7 @@ class OpenApiModelHandler(BaseHandler):
     """
     Handles the language model part.
     """
+
     def setup(
         self,
         model_name="deepseek-chat",
@@ -43,10 +44,12 @@ class OpenApiModelHandler(BaseHandler):
         init_chat_prompt="You are a helpful AI assistant.",
         runtime_config: RuntimeConfig | None = None,
         cancel_response: Event | None = None,
+        disable_thinking=True,
     ):
         self.cancel_response = cancel_response
         self.model_name = model_name
         self.stream = stream
+        self.gen_kwargs = dict(gen_kwargs)
         self.chat = Chat(chat_size)
         if init_chat_role:
             if not init_chat_prompt:
@@ -60,6 +63,11 @@ class OpenApiModelHandler(BaseHandler):
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.tools = None
         self.tools_choice = None
+        self._extra_body = (
+            {"chat_template_kwargs": {"enable_thinking": False}}
+            if disable_thinking
+            else None
+        )
         self.warmup()
 
     def warmup(self):
@@ -70,8 +78,7 @@ class OpenApiModelHandler(BaseHandler):
             input=[
                 {"role": "system", "content": "You are a helpful assistant"},
                 {"role": "user", "content": "Hello"},
-            ],
-            stream=self.stream
+            ]
         )
         end = time.time()
         logger.info(
@@ -91,92 +98,96 @@ class OpenApiModelHandler(BaseHandler):
         self.tools_choice = override_tool_choice or self.runtime_config.session.tool_choice
 
     def process(self, prompt):
-            # Context-only: add user/input text to chat without generating.
-            # Generation is deferred until __GENERATE_RESPONSE__ (from response.create).
-            if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == "__ADD_TO_CONTEXT__":
-                _, role, text = prompt
-                self.chat.append({"role": role, "content": text})
-                logger.debug("Added to LLM context (role=%s, %d chars)", role, len(text))
-                return
+        # Context-only: add user/input text to chat without generating.
+        # Generation is deferred until __GENERATE_RESPONSE__ (from response.create).
+        if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == "__ADD_TO_CONTEXT__":
+            _, role, text = prompt
+            self.chat.append({"role": role, "content": text})
+            logger.debug("Added to LLM context (role=%s, %d chars)", role, len(text))
+            return
 
-            # Context-only: add function-call result to chat without generating.
-            if isinstance(prompt, tuple) and len(prompt) == 2 and prompt[0] == "__FUNCTION_RESULT__":
-                _, result_text = prompt
-                self.chat.append({"role": self.user_role, "content": result_text})
-                logger.debug("Added function result to LLM context (%d chars)", len(result_text))
-                return
+        # Context-only: add function-call result to chat without generating.
+        if isinstance(prompt, tuple) and len(prompt) == 2 and prompt[0] == "__FUNCTION_RESULT__":
+            _, result_text = prompt
+            self.chat.append({"role": self.user_role, "content": result_text})
+            logger.debug("Added function result to LLM context (%d chars)", len(result_text))
+            return
 
-            language_code = None
+        language_code = None
 
-            if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == "__GENERATE_RESPONSE__":
-                _, override_instructions, override_tool_choice = prompt
-                self._apply_runtime_config(override_tool_choice)
-                if override_instructions:
-                    self.chat.append({"role": self.user_role, "content": override_instructions})
-            else:
-                self._apply_runtime_config()
-                # Regular text from STT pipeline
-                logger.debug("call api language model...")
-                if isinstance(prompt, tuple):
-                    prompt, language_code = prompt
-                    if language_code[-5:] == "-auto":
-                        language_code = language_code[:-5]
-                        prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
-                self.chat.append({"role": self.user_role, "content": prompt})
+        if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == "__GENERATE_RESPONSE__":
+            _, override_instructions, override_tool_choice = prompt
+            self._apply_runtime_config(override_tool_choice)
+            if override_instructions:
+                self.chat.append({"role": self.user_role, "content": override_instructions})
+        else:
+            self._apply_runtime_config()
+            # Regular text from STT pipeline
+            logger.debug("call api language model...")
+            if isinstance(prompt, tuple):
+                prompt, language_code = prompt
+                if language_code[-5:] == "-auto":
+                    language_code = language_code[:-5]
+                    prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
+            self.chat.append({"role": self.user_role, "content": prompt})
 
-            response: Response | Stream[ResponseStreamEvent] = self.client.responses.create(
-                model=self.model_name,
-                input=self.chat.to_list(),
-                stream=self.stream,
-                tools=self.tools,
-                tool_choice=self.tools_choice
-            )
-            tools: list[dict[str, str]] = []
-            clean_text = ""
-            if self.stream:
-                cancelled = False
-                for event in response:
-                    if self.cancel_response and self.cancel_response.is_set():
-                        logger.info("LLM generation cancelled (interruption)")
-                        cancelled = True
-                        break
-                    if event.type == "response.output_text.delta":
-                        clean_text += remove_emojis(event.delta)
-                        # TODO: Rethink stream generation to use special yield tags that signal
-                        # the engine whether the model is sending a partial or complete
-                        # LLM response. Enable TTS response only on complete LLM response (and send partial events for realtime engine).
-                        # from nltk import sent_tokenize
-                        # sentences = sent_tokenize(printable_text)
-                        # if len(sentences) > 1:
-                        #     yield sentences[0], language_code, []
-                        #     printable_text = sentences[-1]
-                    elif event.type == "response.output_item.done":
-                        if event.item.type == "function_call":
-                            tools.append(event.item.model_dump())
-                        elif event.item.type == "message":
-                            self.chat.append({"role": event.item.role, "content": event.item.content})
-                if not cancelled:
-                    if clean_text.strip() or tools:
-                        logger.info(f"Clean text: {clean_text}")
-                        logger.info(f"Tools: {tools}")
-                        yield clean_text, language_code, tools
-            else:
+        response: Response | Stream[ResponseStreamEvent] = self.client.responses.create(
+            model=self.model_name,
+            input=self.chat.to_list(),
+            stream=self.stream,
+            tools=self.tools,
+            tool_choice=self.tools_choice,
+            extra_body=self._extra_body,
+        )
+        tools: list[dict[str, str]] = []
+        clean_text = ""
+        if self.stream:
+            cancelled = False
+            for event in response:
                 if self.cancel_response and self.cancel_response.is_set():
                     logger.info("LLM generation cancelled (interruption)")
-                else:
-                    for message in response.output:
-                        if message.type == "function_call":
-                            tools.append(message.model_dump())
-                        elif message.type == "message":
-                            self.chat.append({"role": message.role, "content": message.content})
-                            for chunk in message.content:
-                                if chunk.type == "output_text":
-                                    clean_text += remove_emojis(chunk.text)
-                        else:
-                            logger.warning(f"Not supported message type: {message.type}")
+                    cancelled = True
+                    break
+                if event.type == "response.output_text.delta":
+                    clean_text += remove_emojis(event.delta)
+                    # TODO: Rethink stream generation to use special yield tags that signal
+                    # the engine whether the model is sending a partial or complete
+                    # LLM response. Enable TTS response only on complete LLM response (and send partial events for realtime engine).
+                    # from nltk import sent_tokenize
+                    # sentences = sent_tokenize(printable_text)
+                    # if len(sentences) > 1:
+                    #     yield sentences[0], language_code, []
+                    #     printable_text = sentences[-1]
+                elif event.type == "response.output_item.done":
+                    if event.item.type == "function_call":
+                        tools.append(event.item.model_dump())
+                    elif event.item.type == "message":
+                        self.chat.append({"role": event.item.role, "content": event.item.content})
+            if not cancelled:
+                if clean_text.strip() or tools:
                     logger.info(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
                     yield clean_text, language_code, tools
+        else:
+            if self.cancel_response and self.cancel_response.is_set():
+                logger.info("LLM generation cancelled (interruption)")
+            else:
+                for message in response.output:
+                    if message.type == "function_call":
+                        tools.append(message.model_dump())
+                    elif message.type == "message":
+                        self.chat.append({"role": message.role, "content": message.content})
+                        for chunk in message.content:
+                            if chunk.type == "output_text":
+                                clean_text += remove_emojis(chunk.text)
+                    else:
+                        logger.warning(f"Not supported message type: {message.type}")
+                logger.info(f"Clean text: {clean_text}")
+                logger.info(f"Tools: {tools}")
+                yield clean_text, language_code, tools
 
-            yield ("__END_OF_RESPONSE__", None, None)
+        yield ("__END_OF_RESPONSE__", None, None)
 
+    def on_session_end(self):
+        self.chat.reset()
+        logger.debug("OpenAI API language model chat state reset")

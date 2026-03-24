@@ -3,6 +3,8 @@ import logging
 import json
 from queue import Empty
 
+from pipeline_control import SESSION_END, is_control_message
+
 logger = logging.getLogger(__name__)
 
 
@@ -126,6 +128,10 @@ class WebSocketStreamer:
             self.clients.discard(websocket)
             logger.info(f"Client {client_id} disconnected (finally block)")
 
+            if len(self.clients) == 0:
+                logger.debug("Last WebSocket client disconnected, ending session")
+                self.input_queue.put(SESSION_END)
+
     async def _send_loop(self):
         """Send audio and text from queues to all connected clients."""
         # Buffer audio until we have at least 100ms worth (3200 bytes = 1600 samples at 16kHz int16)
@@ -146,6 +152,9 @@ class WebSocketStreamer:
                                 return_exceptions=True,
                             )
                         break
+                    if is_control_message(audio_chunk, SESSION_END.kind):
+                        audio_buffer.clear()
+                        continue
 
                     if self.clients:
                         if hasattr(audio_chunk, 'tobytes'):

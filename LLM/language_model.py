@@ -310,3 +310,7 @@ class LanguageModelHandler(BaseHandler):
             clean_text, tools = self._extract_tools(generated_text)
             yield (clean_text.strip(), language_code, tools)
         yield ("__END_OF_RESPONSE__", None, None)
+
+    def on_session_end(self):
+        self.chat.reset()
+        logger.debug("Language model chat state reset")
