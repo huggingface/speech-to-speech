@@ -33,7 +33,7 @@ class VADHandler(BaseHandler):
     def setup(
         self,
         should_listen,
-        thresh=0.5,
+        thresh=0.3,
         sample_rate=16000,
         min_silence_ms=1000,
         min_speech_ms=500,
