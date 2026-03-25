@@ -41,8 +41,8 @@ class LanguageModelHandlerArguments:
     )
     lm_gen_max_new_tokens: int = field(
         default=1024,
-        metadata={
-            "help": "Maximum number of new tokens to generate in a single completion. Default is 128."
+metadata={
+"help": "Maximum number of new tokens to generate in a single completion. Default is 1024."
         },
     )
     lm_gen_min_new_tokens: int = field(
