@@ -123,6 +123,10 @@ def setup_logger(log_level):
         torch._logging.set_logs(graph_breaks=True, recompiles=True, cudagraphs=True)
 
 
+MLX_DEFAULT_LM_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-bf16"
+TRANSFORMERS_DEFAULT_LM_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
+
+
 def optimal_mac_settings(mac_optimal_settings: Optional[str], *handler_kwargs):
     if mac_optimal_settings:
         for kwargs in handler_kwargs:
@@ -136,6 +140,9 @@ def optimal_mac_settings(mac_optimal_settings: Optional[str], *handler_kwargs):
                 kwargs.llm = "mlx-lm"
             if hasattr(kwargs, "tts"):
                 kwargs.tts = "melo"
+            if hasattr(kwargs, "lm_model_name"):
+                if kwargs.lm_model_name == TRANSFORMERS_DEFAULT_LM_MODEL:
+                    kwargs.lm_model_name = MLX_DEFAULT_LM_MODEL
 
 def check_mac_settings(module_kwargs):
     if platform == "darwin":
@@ -147,9 +154,9 @@ def check_mac_settings(module_kwargs):
             logger.warning(
                 "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm mlx-lm."
             )
-        if module_kwargs.tts not in ("melo", "pocket"):
+        if module_kwargs.tts not in ("melo", "pocket", "kokoro"):
             logger.warning(
-                "For macOS users, it is recommended to use melo for TTS (pocket is also a valid option)."
+                "For macOS users, it is recommended to use melo for TTS (pocket and kokoro are also valid options)."
             )
 
 
@@ -170,7 +177,7 @@ def overwrite_device_argument(common_device: Optional[str], *handler_kwargs):
                 kwargs.qwen3_tts_device = common_device
 
 def prepare_module_args(module_kwargs, *handler_kwargs):
-    optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs)
+    optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs, *handler_kwargs)
     if module_kwargs.tts is None:
         module_kwargs.tts = "melo" if platform == "darwin" else "qwen3"
     if platform == "darwin":

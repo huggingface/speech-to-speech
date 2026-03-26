@@ -17,7 +17,7 @@ class ModuleArguments:
     local_mac_optimal_settings: bool = field(
         default=False,
         metadata={
-            "help": "If specified, sets the optimal settings for Mac OS. Hence whisper-mlx, MLX LM and MeloTTS will be used."
+            "help": "If specified, sets the optimal settings for Mac OS. Sets Parakeet TDT for STT, MLX LM for language model, and MeloTTS for TTS, with MPS device and local mode."
         },
     )
     stt: Optional[str] = field(

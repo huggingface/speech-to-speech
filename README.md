@@ -128,16 +128,23 @@ The pipeline can be run in three ways:
    python s2s_pipeline.py --local_mac_optimal_settings
    ```
 
+   You can also specify a particular LLM model:
+   ```bash
+   python s2s_pipeline.py \
+       --local_mac_optimal_settings \
+       --lm_model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+   ```
+
 This setting:
    - Adds `--device mps` to use MPS for all models.
-     - Sets LightningWhisperMLX for STT
-     - Sets MLX LM for language model
-     - Sets MeloTTS for TTS
+   - Sets [Parakeet TDT](https://huggingface.co/nvidia/parakeet-tdt-1.1b) for STT (fast streaming ASR on Apple Silicon)
+   - Sets MLX LM for the language model (uses `--lm_model_name` to specify the model)
+   - Sets MeloTTS for TTS
    - Requires one-time UniDic setup for MeloTTS:
      ```bash
      uv run python -m unidic download
      ```
-   - `--tts pocket` is also a valid option on macOS.
+   - `--tts pocket` and `--tts kokoro` are also valid TTS options on macOS.
 
 ### Docker Server
 
@@ -179,31 +186,35 @@ For automatic language detection:
 
 ```bash
 python s2s_pipeline.py \
+    --stt whisper-mlx \
     --stt_model_name large-v3 \
     --language auto \
-    --mlx_lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct \
+    --llm mlx-lm \
+    --lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct
 ```
 
 Or for one language in particular, chinese in this example
 
 ```bash
 python s2s_pipeline.py \
+    --stt whisper-mlx \
     --stt_model_name large-v3 \
     --language zh \
-    --mlx_lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct \
+    --llm mlx-lm \
+    --lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct
 ```
 
 #### Local Mac Setup
 
-For automatic language detection:
+For automatic language detection (note: `--stt whisper-mlx` overrides the default parakeet-tdt from optimal settings, since Whisper `large-v3` has broader language coverage):
 
 ```bash
 python s2s_pipeline.py \
     --local_mac_optimal_settings \
-    --device mps \
+    --stt whisper-mlx \
     --stt_model_name large-v3 \
     --language auto \
-    --mlx_lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct-4bit \
+    --lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 ```
 
 Or for one language in particular, chinese in this example
@@ -211,10 +222,10 @@ Or for one language in particular, chinese in this example
 ```bash
 python s2s_pipeline.py \
     --local_mac_optimal_settings \
-    --device mps \
+    --stt whisper-mlx \
     --stt_model_name large-v3 \
     --language zh \
-    --mlx_lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct-4bit \
+    --lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 ```
 
 ### Using Pocket TTS

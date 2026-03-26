@@ -6,7 +6,7 @@ class LanguageModelHandlerArguments:
     lm_model_name: str = field(
         default="Qwen/Qwen3-4B-Instruct-2507",
         metadata={
-            "help": "The pretrained language model to use. Default is 'HuggingFaceTB/SmolLM-360M-Instruct'."
+            "help": "The pretrained language model to use. Default is 'Qwen/Qwen3-4B-Instruct-2507'. For MLX LM on Mac, use an mlx-community model (e.g. 'mlx-community/Qwen3-4B-Instruct-2507-bf16')."
         },
     )
     lm_device: str = field(
