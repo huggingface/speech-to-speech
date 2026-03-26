@@ -368,8 +368,8 @@ class LanguageModelHandler(BaseHandler):
                 torch.mps.empty_cache()
 
         self.chat.append({"role": "assistant", "content": generated_text})
-        logger.debug("chat: %s", self.chat.to_list())
-        logger.debug("generated_text: %s", generated_text)
+        logger.debug("Clean text: %s", generated_text)
+        logger.info(f"Tools: {tools}")
 
         if not cancelled and (printable_text.strip() or tools):
             yield (printable_text.strip(), language_code, tools)
@@ -377,4 +377,11 @@ class LanguageModelHandler(BaseHandler):
 
     def on_session_end(self):
         self.chat.reset()
-        logger.debug("Language model chat state reset")
+        self._last_instructions = None
+        self.tools = None
+        self.tool_choice = None
+        self._function_tools = []
+        self._block_regex = None
+        self._enter_code = None
+        self._end_code = None
+        logger.debug("Language model session state reset (chat + tool cache)")

@@ -76,3 +76,8 @@ class RuntimeConfig(BaseModel):
         """Merge non-None, explicitly-set fields from 'update' into the
         current 'session', preserving any fields not present in the update."""
         _apply_update(self.session, update)
+
+    def reset(self) -> None:
+        """Reset session to defaults, discarding all accumulated state from
+        previous connections (instructions, tools, voice, turn_detection, etc.)."""
+        self.session = RealtimeSessionCreateRequest(type="realtime")

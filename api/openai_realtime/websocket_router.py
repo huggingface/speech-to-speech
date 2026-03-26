@@ -84,6 +84,19 @@ def create_app(
         app.state.websockets[session_id] = ws
         logger.info(f"Client connected (session {session_id})")
 
+        # Defensive: drain edge queues and reset events so stale data from a
+        # previous session that survived SESSION_END propagation doesn't leak.
+        for q in (output_queue, text_output_queue):
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except Empty:
+                    break
+        if response_playing:
+            response_playing.clear()
+        if cancel_response:
+            cancel_response.clear()
+
         should_listen.set()
 
         try:
@@ -154,10 +167,11 @@ def create_app(
             logger.error(f"Client {session_id} error: {type(e).__name__}: {e}", exc_info=True)
         finally:
             service.unregister(session_id)
-            app.state.websockets.pop(session_id, None)
             if not service._conns:
+                service.runtime_config.reset()
                 input_queue.put(SESSION_END)
-                logger.info("Last client disconnected, sent SESSION_END")
+                logger.info("Last client disconnected, reset RuntimeConfig and sent SESSION_END")
+            app.state.websockets.pop(session_id, None)
             logger.info(f"Client {session_id} removed")
 
     async def _send_loop():

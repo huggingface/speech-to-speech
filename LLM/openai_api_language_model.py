@@ -171,7 +171,7 @@ class OpenApiModelHandler(BaseHandler):
                         self.chat.append({"role": event.item.role, "content": event.item.content})
             if not cancelled:
                 if printable_text.strip() or tools:
-                    logger.info(f"Clean text: {clean_text}")
+                    logger.debug(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
                     yield printable_text.strip(), language_code, tools
         else:
@@ -188,7 +188,7 @@ class OpenApiModelHandler(BaseHandler):
                                 clean_text += remove_emojis(chunk.text)
                     else:
                         logger.warning(f"Not supported message type: {message.type}")
-                logger.info(f"Clean text: {clean_text}")
+                logger.debug(f"Clean text: {clean_text}")
                 logger.info(f"Tools: {tools}")
                 yield clean_text, language_code, tools
 
@@ -196,4 +196,7 @@ class OpenApiModelHandler(BaseHandler):
 
     def on_session_end(self):
         self.chat.reset()
-        logger.debug("OpenAI API language model chat state reset")
+        self._last_instructions = None
+        self.tools = None
+        self.tools_choice = None
+        logger.debug("OpenAI API language model session state reset (chat + tool cache)")
