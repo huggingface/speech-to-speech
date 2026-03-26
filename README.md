@@ -190,7 +190,7 @@ python s2s_pipeline.py \
     --stt_model_name large-v3 \
     --language auto \
     --llm mlx-lm \
-    --lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct
+    --lm_model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
 ```
 
 Or for one language in particular, chinese in this example
@@ -201,7 +201,7 @@ python s2s_pipeline.py \
     --stt_model_name large-v3 \
     --language zh \
     --llm mlx-lm \
-    --lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct
+    --lm_model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
 ```
 
 #### Local Mac Setup
@@ -214,7 +214,7 @@ python s2s_pipeline.py \
     --stt whisper-mlx \
     --stt_model_name large-v3 \
     --language auto \
-    --lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+    --lm_model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
 ```
 
 Or for one language in particular, chinese in this example
@@ -225,7 +225,7 @@ python s2s_pipeline.py \
     --stt whisper-mlx \
     --stt_model_name large-v3 \
     --language zh \
-    --lm_model_name mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+    --lm_model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
 ```
 
 ### Using Pocket TTS
