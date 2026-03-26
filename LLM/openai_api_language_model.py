@@ -2,6 +2,7 @@ import logging
 import time
 from threading import Event
 
+from nltk import sent_tokenize
 from rich.console import Console
 from openai import OpenAI, Stream
 from openai.types.responses import Response, ResponseStreamEvent 
@@ -148,31 +149,31 @@ class OpenApiModelHandler(BaseHandler):
         clean_text = ""
         if self.stream:
             cancelled = False
+            printable_text = ""
             for event in response:
                 if self.cancel_response and self.cancel_response.is_set():
                     logger.info("LLM generation cancelled (interruption)")
                     cancelled = True
                     break
                 if event.type == "response.output_text.delta":
-                    clean_text += remove_emojis(event.delta)
-                    # TODO: Rethink stream generation to use special yield tags that signal
-                    # the engine whether the model is sending a partial or complete
-                    # LLM response. Enable TTS response only on complete LLM response (and send partial events for realtime engine).
-                    # from nltk import sent_tokenize
-                    # sentences = sent_tokenize(printable_text)
-                    # if len(sentences) > 1:
-                    #     yield sentences[0], language_code, []
-                    #     printable_text = sentences[-1]
+                    new_text = remove_emojis(event.delta)
+                    clean_text += new_text
+                    printable_text += new_text
+                    sentences = sent_tokenize(printable_text)
+                    if len(sentences) > 1:
+                        for s in sentences[:-1]:
+                            yield s, language_code, []
+                        printable_text = sentences[-1]
                 elif event.type == "response.output_item.done":
                     if event.item.type == "function_call":
                         tools.append(event.item.model_dump())
                     elif event.item.type == "message":
                         self.chat.append({"role": event.item.role, "content": event.item.content})
             if not cancelled:
-                if clean_text.strip() or tools:
+                if printable_text.strip() or tools:
                     logger.info(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
-                    yield clean_text, language_code, tools
+                    yield printable_text.strip(), language_code, tools
         else:
             if self.cancel_response and self.cancel_response.is_set():
                 logger.info("LLM generation cancelled (interruption)")

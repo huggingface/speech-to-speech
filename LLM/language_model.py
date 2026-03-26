@@ -7,11 +7,12 @@ from transformers import (
 )
 import torch
 import logging
+from nltk import sent_tokenize
 
 from LLM.chat import Chat
 from LLM.tool_call.function_call import extract_function_calls_from_text
 from LLM.tool_call.function_tool import FunctionTool
-from LLM.tool_call.tool_prompt import build_tool_system_prompt, build_block_regex
+from LLM.tool_call.tool_prompt import build_tool_system_prompt, build_block_regex, ENTER_CODE, END_CODE
 from typing import Literal
 from baseHandler import BaseHandler
 from rich.console import Console
@@ -114,6 +115,8 @@ class LanguageModelHandler(BaseHandler):
         self.tool_choice = None
         self._function_tools: list[FunctionTool] = []
         self._block_regex: str | None = None
+        self._enter_code: str | None = None
+        self._end_code: str | None = None
 
         self.warmup()
 
@@ -196,9 +199,13 @@ class LanguageModelHandler(BaseHandler):
             tool_section = build_tool_system_prompt(function_tools)
             full_instructions = f"{new_instructions}\n\n{tool_section}"
             self._block_regex = build_block_regex()
+            self._enter_code = ENTER_CODE
+            self._end_code = END_CODE
         else:
             full_instructions = new_instructions
             self._block_regex = None
+            self._enter_code = None
+            self._end_code = None
 
         self.chat.init_chat({"role": "system", "content": full_instructions})
         logger.info(f"LLM instructions updated ({len(full_instructions)} chars, {len(function_tools)} tools)")
@@ -223,6 +230,48 @@ class LanguageModelHandler(BaseHandler):
             except ValueError as e:
                 logger.warning("Skipping invalid tool call: %s", e)
         return clean_text, tools
+
+    def _process_printable_text(
+        self, printable_text: str, language_code, tools: list[dict],
+    ) -> tuple[list[tuple], list[dict], str]:
+        """Extract complete code blocks and return complete sentences to yield.
+
+        Returns ``(chunks_to_yield, updated_tools, remaining_printable_text)``.
+        Each element in *chunks_to_yield* is a ``(text, language_code, [])`` tuple
+        ready to be yielded to the downstream pipeline.
+        """
+        chunks: list[tuple] = []
+
+        if self._block_regex and self._end_code and self._end_code in printable_text:
+            stripped, func_calls = extract_function_calls_from_text(
+                printable_text, self._block_regex,
+            )
+            for fc in func_calls:
+                try:
+                    tools.append(
+                        fc.to_realtime_function_tool_call(self._function_tools).model_dump()
+                    )
+                except ValueError as e:
+                    logger.warning("Skipping invalid tool call: %s", e)
+            printable_text = stripped
+
+        if self._enter_code and self._enter_code in printable_text:
+            idx = printable_text.index(self._enter_code)
+            before = printable_text[:idx]
+            if before.strip():
+                for s in sent_tokenize(before):
+                    chunks.append((s, language_code, []))
+            printable_text = printable_text[idx:]
+            return chunks, tools, printable_text
+
+        if printable_text:
+            sentences = sent_tokenize(printable_text)
+            if len(sentences) > 1:
+                for s in sentences[:-1]:
+                    chunks.append((s, language_code, []))
+                printable_text = sentences[-1]
+
+        return chunks, tools, printable_text
 
     def process(self, prompt):
         if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == "__ADD_TO_CONTEXT__":
@@ -268,6 +317,8 @@ class LanguageModelHandler(BaseHandler):
         # LLM response. Enable TTS response only on complete LLM response (and send partial events for realtime engine).
         if self.backend == "mlx":
             generated_text = ""
+            printable_text = ""
+            tools: list[dict] = []
             with MLXLockContext(handler_name="MLX-LLM", timeout=10.0):
                 for t in mlx_stream_generate(
                     self.model,
@@ -279,7 +330,14 @@ class LanguageModelHandler(BaseHandler):
                         logger.info("LLM generation cancelled (interruption)")
                         cancelled = True
                         break
-                    generated_text += t.text
+                    new_text = remove_emojis(t.text)
+                    generated_text += new_text
+                    printable_text += new_text
+                    chunks, tools, printable_text = self._process_printable_text(
+                        printable_text, language_code, tools,
+                    )
+                    for chunk in chunks:
+                        yield chunk
             try:
                 mx.clear_cache()
             except Exception:
@@ -291,24 +349,30 @@ class LanguageModelHandler(BaseHandler):
             )
             thread.start()
             generated_text = ""
+            printable_text = ""
+            tools: list[dict] = []
             for new_text in self.streamer:
                 if self.cancel_response and self.cancel_response.is_set():
                     logger.info("LLM generation cancelled (interruption)")
                     cancelled = True
                     break
+                new_text = remove_emojis(new_text)
                 generated_text += new_text
+                printable_text += new_text
+                chunks, tools, printable_text = self._process_printable_text(
+                    printable_text, language_code, tools,
+                )
+                for chunk in chunks:
+                    yield chunk
             if self.device == "mps":
                 torch.mps.empty_cache()
-
-        generated_text = remove_emojis(generated_text)
 
         self.chat.append({"role": "assistant", "content": generated_text})
         logger.debug("chat: %s", self.chat.to_list())
         logger.debug("generated_text: %s", generated_text)
 
-        if not cancelled and generated_text.strip():
-            clean_text, tools = self._extract_tools(generated_text)
-            yield (clean_text.strip(), language_code, tools)
+        if not cancelled and (printable_text.strip() or tools):
+            yield (printable_text.strip(), language_code, tools)
         yield ("__END_OF_RESPONSE__", None, None)
 
     def on_session_end(self):

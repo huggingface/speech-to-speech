@@ -13,6 +13,12 @@ from LLM.tool_call.function_tool import FunctionTool
 
 
 # ---------------------------------------------------------------------------
+# Default delimiters
+# ---------------------------------------------------------------------------
+ENTER_CODE = "<code>"
+END_CODE = "</code>"
+
+# ---------------------------------------------------------------------------
 # Jinja2 template
 # ---------------------------------------------------------------------------
 # ``enter_code`` / ``end_code`` are the block delimiters the model must wrap
@@ -56,8 +62,8 @@ in your response without any surrounding explanation.
 
 def build_tool_system_prompt(
     tools: list[FunctionTool],
-    enter_code: str = "<code>",
-    end_code: str = "</code>",
+    enter_code: str = ENTER_CODE,
+    end_code: str = END_CODE,
 ) -> str:
     """Render the tool-calling system-prompt section.
 
@@ -75,8 +81,8 @@ def build_tool_system_prompt(
 
 
 def build_block_regex(
-    enter_code: str = "<code>",
-    end_code: str = "</code>",
+    enter_code: str = ENTER_CODE,
+    end_code: str = END_CODE,
 ) -> str:
     """Build a regex that matches a single code block (non-greedy).
 
