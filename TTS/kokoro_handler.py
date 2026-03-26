@@ -11,8 +11,8 @@ Model supports 8 languages with multiple voices per language.
 import logging
 import numpy as np
 from sys import platform
-from threading import Event
 from baseHandler import BaseHandler
+from cancel_scope import CancelScope
 from rich.console import Console
 from utils.mlx_lock import MLXLockContext
 
@@ -88,7 +88,7 @@ class KokoroTTSHandler(BaseHandler):
         blocksize=512,
         gen_kwargs=None,
         runtime_config: RuntimeConfig | None = None,
-        cancel_response: Event | None = None,
+        cancel_scope: CancelScope | None = None,
     ):
         """
         Initialize the Kokoro TTS model.
@@ -110,7 +110,7 @@ class KokoroTTSHandler(BaseHandler):
         self.speed = speed
         self.blocksize = blocksize
         self.runtime_config = runtime_config
-        self.cancel_response = cancel_response
+        self.cancel_scope = cancel_scope
 
         # Determine device
         if device == "auto":
@@ -243,6 +243,7 @@ class KokoroTTSHandler(BaseHandler):
         """Process using MLX backend with Apple Silicon optimizations."""
         from scipy.signal import resample_poly
 
+        gen = self.cancel_scope.generation if self.cancel_scope else None
         # Acquire global MLX lock to prevent concurrent access with STT
         with MLXLockContext(handler_name="KokoroTTS", timeout=10.0):
             language_code = None
@@ -308,7 +309,7 @@ class KokoroTTSHandler(BaseHandler):
 
                 # Yield audio in fixed-size chunks
                 for i in range(0, len(audio), self.blocksize):
-                    if self.cancel_response and self.cancel_response.is_set():
+                    if gen is not None and self.cancel_scope.is_stale(gen):
                         logger.info("TTS generation cancelled (interruption)")
                         return
                     chunk = audio[i : i + self.blocksize]
@@ -322,6 +323,7 @@ class KokoroTTSHandler(BaseHandler):
         """Process using native kokoro library."""
         from scipy.signal import resample_poly
 
+        gen = self.cancel_scope.generation if self.cancel_scope else None
         language_code = None
         if isinstance(llm_sentence, tuple):
             llm_sentence, language_code = llm_sentence
@@ -365,7 +367,7 @@ class KokoroTTSHandler(BaseHandler):
 
             # Yield audio in fixed-size chunks
             for i in range(0, len(audio), self.blocksize):
-                if self.cancel_response and self.cancel_response.is_set():
+                if gen is not None and self.cancel_scope.is_stale(gen):
                     logger.info("TTS generation cancelled (interruption)")
                     return
                 chunk = audio[i : i + self.blocksize]

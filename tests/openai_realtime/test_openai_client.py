@@ -34,6 +34,7 @@ from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfi
 from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
 from openai.types.realtime.realtime_audio_formats import AudioPCM
 
+from cancel_scope import CancelScope
 from api.openai_realtime.runtime_config import RuntimeConfig
 from api.openai_realtime.service import RealtimeService
 from api.openai_realtime.websocket_router import create_app
@@ -83,7 +84,7 @@ class _ServerEnv:
         self.text_output_queue: Queue = Queue()
         self.stop_event = ThreadingEvent()
         self.response_playing = ThreadingEvent()
-        self.cancel_response = ThreadingEvent()
+        self.cancel_scope = CancelScope()
         self.app = create_app(
             self.service,
             self.input_queue,
@@ -91,7 +92,7 @@ class _ServerEnv:
             self.text_output_queue,
             self.should_listen,
             self.response_playing,
-            self.cancel_response,
+            self.cancel_scope,
             self.stop_event,
         )
         self.port = _free_port()
@@ -399,13 +400,14 @@ class TestSDKPhantomSpeech:
 class TestSDKInterruptionState:
     @pytest.mark.asyncio
     async def test_interruption_resets_pipeline_state(self, server_env):
-        """After interruption, response_playing and cancel_response are cleared."""
+        """After interruption, response_playing is cleared and cancel_scope
+        enters discarding mode until __RESPONSE_DONE__ arrives."""
         client = server_env.make_client()
         async with client.realtime.connect(model="test") as conn:
             await _recv(conn)  # session.created
 
             assert not server_env.response_playing.is_set()
-            assert not server_env.cancel_response.is_set()
+            assert not server_env.cancel_scope.discarding
 
             server_env.output_queue.put(_pcm_bytes(256))
             await _recv(conn)  # response.created
@@ -425,7 +427,7 @@ class TestSDKInterruptionState:
 
             await asyncio.sleep(0.1)
             assert not server_env.response_playing.is_set()
-            assert not server_env.cancel_response.is_set()
+            assert server_env.cancel_scope.discarding
 
 
 # ===================================================================
@@ -639,6 +641,10 @@ class TestSDKMultiTurn:
                 events.append(await _recv(conn))
 
             t1_done = next(e for e in events if e.type == RESPONSE_DONE)
+
+            # Simulate pipeline acknowledging cancellation so discard guard clears
+            server_env.output_queue.put(b"__RESPONSE_DONE__")
+            await asyncio.sleep(0.15)
 
             # Turn 2
             server_env.text_output_queue.put({"type": "speech_stopped", "audio_end_ms": 3000})

@@ -1,6 +1,5 @@
 import logging
 import time
-from threading import Event
 
 from nltk import sent_tokenize
 from rich.console import Console
@@ -8,6 +7,7 @@ from openai import OpenAI, Stream
 from openai.types.responses import Response, ResponseStreamEvent 
 
 from baseHandler import BaseHandler
+from cancel_scope import CancelScope
 from LLM.chat import Chat
 from LLM.utils import remove_emojis
 from api.openai_realtime.runtime_config import RuntimeConfig
@@ -44,10 +44,10 @@ class OpenApiModelHandler(BaseHandler):
         init_chat_role="system",
         init_chat_prompt="You are a helpful AI assistant.",
         runtime_config: RuntimeConfig | None = None,
-        cancel_response: Event | None = None,
+        cancel_scope: CancelScope | None = None,
         disable_thinking=True,
     ):
-        self.cancel_response = cancel_response
+        self.cancel_scope = cancel_scope
         self.model_name = model_name
         self.stream = stream
         self.gen_kwargs = dict(gen_kwargs)
@@ -138,6 +138,7 @@ class OpenApiModelHandler(BaseHandler):
         if self.tools_choice is not None:
             optional_kwargs["tool_choice"] = self.tools_choice
 
+        gen = self.cancel_scope.generation if self.cancel_scope else None
         response: Response | Stream[ResponseStreamEvent] = self.client.responses.create(
             model=self.model_name,
             input=self.chat.to_list(),
@@ -151,7 +152,7 @@ class OpenApiModelHandler(BaseHandler):
             cancelled = False
             printable_text = ""
             for event in response:
-                if self.cancel_response and self.cancel_response.is_set():
+                if gen is not None and self.cancel_scope.is_stale(gen):
                     logger.info("LLM generation cancelled (interruption)")
                     cancelled = True
                     break
@@ -175,7 +176,7 @@ class OpenApiModelHandler(BaseHandler):
                     logger.info(f"Tools: {tools}")
                     yield printable_text.strip(), language_code, tools
         else:
-            if self.cancel_response and self.cancel_response.is_set():
+            if gen is not None and self.cancel_scope.is_stale(gen):
                 logger.info("LLM generation cancelled (interruption)")
             else:
                 for message in response.output:

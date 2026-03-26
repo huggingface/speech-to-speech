@@ -6,8 +6,8 @@ from threading import Event as ThreadingEvent
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-
 from api.openai_realtime.service import RealtimeService, ServerEvent
+from cancel_scope import CancelScope
 from pipeline_control import SESSION_END
 
 from openai.types.realtime import (
@@ -41,9 +41,25 @@ def create_app(
     text_output_queue: Queue,
     should_listen: ThreadingEvent,
     response_playing: ThreadingEvent | None,
-    cancel_response: ThreadingEvent | None,
+    cancel_scope: CancelScope | None,
     stop_event: ThreadingEvent,
 ) -> FastAPI:
+
+    def _flush_queue(q: Queue, *, preserve_sentinel: bool = False) -> None:
+        """Drain a queue.  When *preserve_sentinel* is True, any
+        ``__RESPONSE_DONE__`` found during the drain is re-enqueued so
+        ``_send_loop`` can still emit ``finish_audio_response`` events
+        and call ``cancel_scope.response_done()``."""
+        found_done = False
+        while not q.empty():
+            try:
+                item = q.get_nowait()
+                if preserve_sentinel and isinstance(item, bytes) and item == b"__RESPONSE_DONE__":
+                    found_done = True
+            except Empty:
+                break
+        if found_done:
+            q.put(b"__RESPONSE_DONE__")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -94,8 +110,8 @@ def create_app(
                     break
         if response_playing:
             response_playing.clear()
-        if cancel_response:
-            cancel_response.clear()
+        if cancel_scope:
+            cancel_scope.reset()
 
         should_listen.set()
 
@@ -136,30 +152,23 @@ def create_app(
                         await _send_events(ws, events)
 
                 elif isinstance(event, ResponseCreateEvent):
+                    if cancel_scope:
+                        cancel_scope.new_response()
                     err = service.handle_response_create(session_id, event)
                     if err:
                         await _send_event(ws, err)
 
                 elif isinstance(event, ResponseCancelEvent):
-                    if cancel_response:
-                        cancel_response.set()
-                    while not output_queue.empty():
-                        try:
-                            output_queue.get_nowait()
-                        except Empty:
-                            break
-                    while not text_output_queue.empty():
-                        try:
-                            text_output_queue.get_nowait()
-                        except Empty:
-                            break
+                    was_active = service._state(session_id).in_response
+                    if was_active and cancel_scope:
+                        cancel_scope.cancel()
+                    _flush_queue(output_queue, preserve_sentinel=True)
+                    _flush_queue(text_output_queue)
                     events = service.handle_response_cancel(session_id)
                     if events:
                         await _send_events(ws, events)
                     if response_playing:
                         response_playing.clear()
-                    if cancel_response:
-                        cancel_response.clear()
 
         except WebSocketDisconnect:
             logger.info(f"Client {session_id} disconnected")
@@ -183,29 +192,24 @@ def create_app(
                     try:
                         text_msg = text_output_queue.get_nowait()
                         is_speech_start = text_msg.get("type") == "speech_started"
-                        for cid in service.connection_ids:
-                            ws = app.state.websockets.get(cid)
-                            if ws:
-                                events = service.translate_pipeline_text(cid, text_msg)
-                                if events:
-                                    await _send_events(ws, events)
+
+                        if cancel_scope and cancel_scope.discarding and text_msg.get("type") == "assistant_text":
+                            pass
+                        else:
+                            for cid in service.connection_ids:
+                                ws = app.state.websockets.get(cid)
+                                if ws:
+                                    events = service.translate_pipeline_text(cid, text_msg)
+                                    if events:
+                                        await _send_events(ws, events)
+
                         if is_speech_start and response_playing and response_playing.is_set():
                             if service.runtime_config.interrupt_response_enabled:
-                                if cancel_response:
-                                    cancel_response.set()
-                                while not output_queue.empty():
-                                    try:
-                                        output_queue.get_nowait()
-                                    except Empty:
-                                        break
-                                while not text_output_queue.empty():
-                                    try:
-                                        text_output_queue.get_nowait()
-                                    except Empty:
-                                        break
+                                if cancel_scope:
+                                    cancel_scope.cancel()
+                                _flush_queue(output_queue, preserve_sentinel=True)
+                                _flush_queue(text_output_queue)
                                 response_playing.clear()
-                                if cancel_response:
-                                    cancel_response.clear()
                                 logger.info("Speech during response: cancelled, queue flushed")
                             else:
                                 logger.info("Speech during response: interrupt_response disabled, ignoring")
@@ -229,8 +233,13 @@ def create_app(
                                 await _send_events(ws, service.finish_audio_response(cid))
                         if response_playing:
                             response_playing.clear()
+                        if cancel_scope:
+                            cancel_scope.response_done()
                         should_listen.set()
                         logger.info("Response complete, listening re-enabled")
+                        continue
+
+                    if cancel_scope and cancel_scope.discarding:
                         continue
 
                     if hasattr(audio_chunk, "tobytes"):

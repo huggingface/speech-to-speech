@@ -7,9 +7,9 @@ Requires faster-qwen3-tts for real-time performance on NVIDIA GPUs:
 
 import logging
 from time import perf_counter
-from threading import Event
 import numpy as np
 from baseHandler import BaseHandler
+from cancel_scope import CancelScope
 from rich.console import Console
 
 from api.openai_realtime.runtime_config import RuntimeConfig
@@ -53,10 +53,10 @@ class Qwen3TTSHandler(BaseHandler):
         blocksize=512,
         gen_kwargs=None,
         runtime_config: RuntimeConfig | None = None,
-        cancel_response: Event | None = None,
+        cancel_scope: CancelScope | None = None,
     ):
         self.runtime_config = runtime_config
-        self.cancel_response = cancel_response
+        self.cancel_scope = cancel_scope
         self.should_listen = should_listen
         self.model_name = model_name
         self.device = device
@@ -159,6 +159,7 @@ class Qwen3TTSHandler(BaseHandler):
 
     def _stream(self, gen, label):
         """Common streaming loop: log TTFA and RTF, yield int16 chunks."""
+        cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
         start = perf_counter()
         total_samples = 0
         first_chunk = True
@@ -166,7 +167,7 @@ class Qwen3TTSHandler(BaseHandler):
         leftover = np.array([], dtype=np.int16)
 
         for audio_chunk, sr, _timing in gen:
-            if self.cancel_response and self.cancel_response.is_set():
+            if cancel_gen is not None and self.cancel_scope.is_stale(cancel_gen):
                 logger.info("TTS generation cancelled (interruption)")
                 return
             if first_chunk:

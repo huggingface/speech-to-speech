@@ -1,7 +1,7 @@
 import ChatTTS
 import logging
-from threading import Event
 from baseHandler import BaseHandler
+from cancel_scope import CancelScope
 import librosa
 import numpy as np
 from rich.console import Console
@@ -26,11 +26,11 @@ class ChatTTSHandler(BaseHandler):
         stream=True,
         chunk_size=512,
         runtime_config: RuntimeConfig | None = None,   # accepted but unused; implement voice-switch logic in process() to support dynamic voice change
-        cancel_response: Event | None = None,
+        cancel_scope: CancelScope | None = None,
     ):
         self.should_listen = should_listen
         self.runtime_config = runtime_config
-        self.cancel_response = cancel_response
+        self.cancel_scope = cancel_scope
         self.device = device
         self.model = ChatTTS.Chat()
         self.model.load(compile=False)  # Doesn't work for me with True
@@ -51,6 +51,7 @@ class ChatTTSHandler(BaseHandler):
             yield b"__RESPONSE_DONE__"
             return
 
+        _cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
         console.print(f"[green]ASSISTANT: {llm_sentence}")
         if self.device == "mps":
             import time
@@ -69,7 +70,7 @@ class ChatTTSHandler(BaseHandler):
         if self.stream:
             wavs = [np.array([])]
             for gen in wavs_gen:
-                if self.cancel_response and self.cancel_response.is_set():
+                if _cancel_gen is not None and self.cancel_scope.is_stale(_cancel_gen):
                     logger.info("TTS generation cancelled (interruption)")
                     return
                 if gen[0] is None or len(gen[0]) == 0:

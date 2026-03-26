@@ -1,10 +1,10 @@
 from pathlib import Path
 from types import SimpleNamespace
-from threading import Event
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from cancel_scope import CancelScope
 from LLM.chat import Chat
 from LLM.openai_api_language_model import OpenApiModelHandler
 
@@ -32,7 +32,7 @@ def _make_output_item_done_event(role="assistant", content="Hello.", item_type="
     )
 
 
-def _make_handler(*, disable_thinking=False, stream=True, cancel_response=None):
+def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler = object.__new__(OpenApiModelHandler)
     handler.model_name = "test-model"
     handler.stream = stream
@@ -46,7 +46,7 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_response=None):
     handler.user_role = "user"
     handler.chat = Chat(1)
     handler.runtime_config = None
-    handler.cancel_response = cancel_response
+    handler.cancel_scope = cancel_scope
     handler.tools = None
     handler.tools_choice = None
     return handler
@@ -70,21 +70,22 @@ def test_process_streams_text_from_response_events():
     outputs = list(handler.process("Hi"))
 
     assert outputs == [
-        ("Hello. How are you?", None, []),
+        ("Hello.", None, []),
+        ("How are you?", None, []),
         ("__END_OF_RESPONSE__", None, None),
     ]
 
 
 def test_process_handles_cancellation():
-    cancel = Event()
-    cancel.set()
+    scope = CancelScope()
+    handler = _make_handler(cancel_scope=scope)
 
-    handler = _make_handler(cancel_response=cancel)
+    def fake_create(**kwargs):
+        scope.cancel()
+        return iter([_make_text_delta_event("Hello")])
 
     handler.client = SimpleNamespace(
-        responses=SimpleNamespace(
-            create=lambda **kwargs: iter([_make_text_delta_event("Hello")]),
-        )
+        responses=SimpleNamespace(create=fake_create)
     )
 
     outputs = list(handler.process("Hi"))

@@ -1,7 +1,7 @@
-from threading import Event
 from melo.api import TTS
 import logging
 from baseHandler import BaseHandler
+from cancel_scope import CancelScope
 import librosa
 import numpy as np
 from rich.console import Console
@@ -42,11 +42,11 @@ class MeloTTSHandler(BaseHandler):
         gen_kwargs={},  # Unused
         blocksize=512,
         runtime_config: RuntimeConfig | None = None, # accepted but unused; implement voice-switch logic in process() to support dynamic voice change
-        cancel_response: Event | None = None,
+        cancel_scope: CancelScope | None = None,
     ):
         self.should_listen = should_listen
         self.runtime_config = runtime_config
-        self.cancel_response = cancel_response
+        self.cancel_scope = cancel_scope
         self.device = device
         self.language = language
         self.model = TTS(
@@ -67,6 +67,7 @@ class MeloTTSHandler(BaseHandler):
             yield b"__RESPONSE_DONE__"
             return
 
+        gen = self.cancel_scope.generation if self.cancel_scope else None
         language_code = None
 
         if isinstance(llm_sentence, tuple):
@@ -113,7 +114,7 @@ class MeloTTSHandler(BaseHandler):
         audio_chunk = librosa.resample(audio_chunk, orig_sr=44100, target_sr=16000)
         audio_chunk = (audio_chunk * 32768).astype(np.int16)
         for i in range(0, len(audio_chunk), self.blocksize):
-            if self.cancel_response and self.cancel_response.is_set():
+            if gen is not None and self.cancel_scope.is_stale(gen):
                 logger.info("TTS generation cancelled (interruption)")
                 return
             yield np.pad(

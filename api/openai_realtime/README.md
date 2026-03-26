@@ -122,7 +122,14 @@ Both handlers yield `(text, language_code, tools)` tuples. `LMOutputProcessor` f
 
 ## Interruption Handling
 
-Barge-in (user speaks while the assistant is playing audio) is handled cooperatively between the VAD, the `_send_loop`, and the LLM:
+Barge-in (user speaks while the assistant is playing audio) is handled cooperatively between the VAD, the `_send_loop`, and the LLM/TTS handlers via a shared `CancelScope` object (`cancel_scope.py`).
+
+### CancelScope design
+
+`CancelScope` replaces the old two-signal pattern (`cancel_response` Event + `discard_stale_output` boolean) with a single object that manages:
+
+- **Generation counter** (`cancel_scope.generation`): pipeline threads (LLM, TTS) capture the current generation at the start of each response and check `cancel_scope.is_stale(gen)` on every streaming token. When `cancel()` is called, the generation increments and all prior generations become stale -- no timing games required.
+- **Discard flag** (`cancel_scope.discarding`): the async `_send_loop` checks this to drop stale audio/text that arrives between `cancel()` and `response_done()`.
 
 ```mermaid
 sequenceDiagram
@@ -138,10 +145,13 @@ sequenceDiagram
     VAD->>SendLoop: speech_started on text_output_queue
     SendLoop->>Client: input_audio_buffer.speech_started
     SendLoop->>Client: response.done (status=cancelled, reason=turn_detected)
-    SendLoop->>LLM: cancel_response.set()
+    SendLoop->>SendLoop: cancel_scope.cancel() (gen++ & discarding=True)
     SendLoop->>SendLoop: flush output_queue + text_output_queue
-    SendLoop->>SendLoop: response_playing.clear(), cancel_response.clear()
-    LLM->>LLM: detects cancel_response, aborts generation
+    SendLoop->>SendLoop: response_playing.clear()
+    LLM->>LLM: is_stale(gen) → True, aborts generation
+    TTS->>TTS: is_stale(gen) → True, aborts generation
+    TTS->>SendLoop: __RESPONSE_DONE__
+    SendLoop->>SendLoop: cancel_scope.response_done() (discarding=False)
     Note over VAD,Client: Pipeline is now processing the new user utterance
 ```
 
@@ -149,9 +159,11 @@ sequenceDiagram
 
 1. **VAD detects speech**: puts `{"type": "speech_started"}` on `text_output_queue`.
 2. **`_send_loop` processes text events first** (priority over audio): translates `speech_started` into protocol events. If an active response was in progress, `RealtimeService.translate_pipeline_text` emits `response.output_audio.done` + `response.done` with `status="cancelled"` and `reason="turn_detected"`.
-3. **Queue flush**: if `response_playing` is set, the send loop sets `cancel_response`, drains both `output_queue` (pending TTS audio) and `text_output_queue` (pending text events), then clears `response_playing` and `cancel_response`.
-4. **LLM cancellation**: both `LanguageModelHandler` and `OpenApiModelHandler` check `cancel_response.is_set()` on every streaming token and abort generation early if set.
-5. **Client-initiated cancel**: `response.cancel` triggers `finish_audio_response(status="cancelled", reason="client_cancelled")` and re-enables `should_listen`.
+3. **Cancel + queue flush**: if `response_playing` is set, the send loop calls `cancel_scope.cancel()` (increments generation, enables discard), drains both `output_queue` (preserving `__RESPONSE_DONE__` sentinels) and `text_output_queue`, then clears `response_playing`.
+4. **LLM/TTS cancellation**: handlers capture `gen = cancel_scope.generation` at the start of each response and check `cancel_scope.is_stale(gen)` on every streaming token, aborting early when stale.
+5. **Discard guard**: while `cancel_scope.discarding` is True, the send loop silently drops stale audio chunks and assistant text. The guard clears when `__RESPONSE_DONE__` arrives (via `cancel_scope.response_done()`).
+6. **Client-initiated cancel**: `response.cancel` calls `cancel_scope.cancel()` (only if a response was active), triggers `finish_audio_response(status="cancelled", reason="client_cancelled")`, and re-enables `should_listen`.
+7. **Spurious cancel safety**: if no response is active, `cancel_scope.cancel()` is not called, preventing the discard guard from being set without a `__RESPONSE_DONE__` to clear it.
 
 ---
 

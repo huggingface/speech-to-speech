@@ -1,10 +1,10 @@
-from threading import Event
 from transformers import VitsModel, AutoTokenizer
 import torch
 import numpy as np
 import librosa
 from rich.console import Console
 from baseHandler import BaseHandler
+from cancel_scope import CancelScope
 import logging
 from api.openai_realtime.runtime_config import RuntimeConfig
 
@@ -68,12 +68,12 @@ class FacebookMMSTTSHandler(BaseHandler):
         stream=True,
         chunk_size=512,
         runtime_config: RuntimeConfig | None = None, # accepted but unused; implement voice-switch logic in process() to support dynamic voice change
-        cancel_response: Event | None = None,
+        cancel_scope: CancelScope | None = None,
         **kwargs
     ):
         self.should_listen = should_listen
         self.runtime_config = runtime_config
-        self.cancel_response = cancel_response
+        self.cancel_scope = cancel_scope
         self.device = device
         self.torch_dtype = getattr(torch, torch_dtype)
         self.stream = stream
@@ -134,6 +134,7 @@ class FacebookMMSTTSHandler(BaseHandler):
             yield b"__RESPONSE_DONE__"
             return
 
+        gen = self.cancel_scope.generation if self.cancel_scope else None
         language_code = None
 
         if isinstance(llm_sentence, tuple):
@@ -170,14 +171,14 @@ class FacebookMMSTTSHandler(BaseHandler):
 
         if self.stream:
             for i in range(0, len(audio_int16), self.chunk_size):
-                if self.cancel_response and self.cancel_response.is_set():
+                if gen is not None and self.cancel_scope.is_stale(gen):
                     logger.info("TTS generation cancelled (interruption)")
                     return
                 chunk = audio_int16[i:i + self.chunk_size]
                 yield np.pad(chunk, (0, self.chunk_size - len(chunk)))
         else:
             for i in range(0, len(audio_int16), self.chunk_size):
-                if self.cancel_response and self.cancel_response.is_set():
+                if gen is not None and self.cancel_scope.is_stale(gen):
                     logger.info("TTS generation cancelled (interruption)")
                     return
                 yield np.pad(

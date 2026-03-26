@@ -7,6 +7,8 @@ from pathlib import Path
 from queue import Queue
 from threading import Event
 from typing import Optional
+
+from cancel_scope import CancelScope
 from sys import platform
 from VAD.vad_handler import VADHandler
 from arguments_classes.chat_tts_arguments import ChatTTSHandlerArguments
@@ -238,7 +240,7 @@ def initialize_queues_and_events():
         "stop_event": Event(),
         "should_listen": Event(),
         "response_playing": Event(),
-        "cancel_response": Event(),
+        "cancel_scope": CancelScope(),
         "recv_audio_chunks_queue": Queue(),
         "send_audio_chunks_queue": Queue(),
         "spoken_prompt_queue": Queue(),
@@ -274,7 +276,7 @@ def build_pipeline(
     stop_event = queues_and_events["stop_event"]
     should_listen = queues_and_events["should_listen"]
     response_playing = queues_and_events["response_playing"]
-    cancel_response = queues_and_events["cancel_response"]
+    cancel_scope = queues_and_events["cancel_scope"]
     recv_audio_chunks_queue = queues_and_events["recv_audio_chunks_queue"]
     send_audio_chunks_queue = queues_and_events["send_audio_chunks_queue"]
     spoken_prompt_queue = queues_and_events["spoken_prompt_queue"]
@@ -358,7 +360,7 @@ def build_pipeline(
             chat_tts_handler_kwargs,
             facebook_mms_tts_handler_kwargs,
         ):
-            vars(kw)["cancel_response"] = cancel_response
+            vars(kw)["cancel_scope"] = cancel_scope
 
         realtime_conn = RealtimeServer(
             stop_event,
@@ -366,7 +368,7 @@ def build_pipeline(
             output_queue=send_audio_chunks_queue,
             should_listen=should_listen,
             response_playing=response_playing,
-            cancel_response=cancel_response,
+            cancel_scope=cancel_scope,
             text_output_queue=text_output_queue,
             text_prompt_queue=text_prompt_queue,
             runtime_config=runtime_config,

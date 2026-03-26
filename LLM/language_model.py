@@ -1,4 +1,4 @@
-from threading import Event, Thread
+from threading import Thread
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -15,6 +15,7 @@ from LLM.tool_call.function_tool import FunctionTool
 from LLM.tool_call.tool_prompt import build_tool_system_prompt, build_block_regex, ENTER_CODE, END_CODE
 from typing import Literal
 from baseHandler import BaseHandler
+from cancel_scope import CancelScope
 from rich.console import Console
 from LLM.utils import remove_emojis
 from api.openai_realtime.runtime_config import RuntimeConfig
@@ -63,11 +64,11 @@ class LanguageModelHandler(BaseHandler):
         init_chat_role=None,
         init_chat_prompt="You are a helpful AI assistant.",
         runtime_config: RuntimeConfig | None = None,
-        cancel_response: Event | None = None,
+        cancel_scope: CancelScope | None = None,
         backend: Literal["transformers", "mlx"] = "transformers",
     ):
         self.backend = backend
-        self.cancel_response = cancel_response
+        self.cancel_scope = cancel_scope
         self.device = device
         self.model_name = model_name
 
@@ -311,6 +312,7 @@ class LanguageModelHandler(BaseHandler):
         )
 
         cancelled = False
+        gen = self.cancel_scope.generation if self.cancel_scope else None
 
         # TODO: Rethink stream generation to use special yield tags that signal
         # the engine whether the model is sending a partial or complete
@@ -326,7 +328,7 @@ class LanguageModelHandler(BaseHandler):
                     chat_prompt,
                     max_tokens=self.gen_kwargs["max_new_tokens"],
                 ):
-                    if self.cancel_response and self.cancel_response.is_set():
+                    if gen is not None and self.cancel_scope.is_stale(gen):
                         logger.info("LLM generation cancelled (interruption)")
                         cancelled = True
                         break
@@ -352,7 +354,7 @@ class LanguageModelHandler(BaseHandler):
             printable_text = ""
             tools: list[dict] = []
             for new_text in self.streamer:
-                if self.cancel_response and self.cancel_response.is_set():
+                if gen is not None and self.cancel_scope.is_stale(gen):
                     logger.info("LLM generation cancelled (interruption)")
                     cancelled = True
                     break

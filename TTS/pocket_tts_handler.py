@@ -1,6 +1,6 @@
 from time import perf_counter
-from threading import Event
 from baseHandler import BaseHandler
+from cancel_scope import CancelScope
 import numpy as np
 import logging
 from rich.console import Console
@@ -27,7 +27,7 @@ class PocketTTSHandler(BaseHandler):
         max_tokens=50,
         gen_kwargs=None,  # For compatibility with pipeline, not used
         runtime_config: RuntimeConfig | None = None,
-        cancel_response: Event | None = None,
+        cancel_scope: CancelScope | None = None,
     ):
         """
         Initialize Pocket TTS handler.
@@ -44,7 +44,7 @@ class PocketTTSHandler(BaseHandler):
             max_tokens: Maximum tokens to generate
         """
         self.should_listen = should_listen
-        self.cancel_response = cancel_response
+        self.cancel_scope = cancel_scope
         self.runtime_config = runtime_config
         self.device = device
         self.voice = voice
@@ -99,6 +99,7 @@ class PocketTTSHandler(BaseHandler):
             yield b"__RESPONSE_DONE__"
             return
 
+        gen = self.cancel_scope.generation if self.cancel_scope else None
         # Handle tuple input (text, language_code)
         if isinstance(llm_sentence, tuple):
             llm_sentence, language_code = llm_sentence
@@ -139,7 +140,7 @@ class PocketTTSHandler(BaseHandler):
             max_tokens=self.max_tokens,
             copy_state=True,  # Don't modify the original voice state
         ):
-            if self.cancel_response and self.cancel_response.is_set():
+            if gen is not None and self.cancel_scope.is_stale(gen):
                 logger.info("TTS generation cancelled (interruption)")
                 return
             if first_chunk and "pipeline_start" in globals():

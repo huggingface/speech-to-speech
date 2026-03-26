@@ -8,6 +8,7 @@ import uvicorn
 from api.openai_realtime.runtime_config import RuntimeConfig
 from api.openai_realtime.service import RealtimeService
 from api.openai_realtime.websocket_router import create_app
+from cancel_scope import CancelScope
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ class RealtimeServer:
         output_queue: Queue,
         should_listen: Event,
         response_playing: Event | None = None,
-        cancel_response: Event | None = None,
+        cancel_scope: CancelScope | None = None,
         text_output_queue: Queue | None = None,
         text_prompt_queue: Queue | None = None,
         runtime_config: RuntimeConfig | None = None,
@@ -41,7 +42,7 @@ class RealtimeServer:
         self.text_prompt_queue = text_prompt_queue
         self.should_listen = should_listen
         self.response_playing = response_playing
-        self.cancel_response = cancel_response
+        self.cancel_scope = cancel_scope
         self.runtime_config = runtime_config or RuntimeConfig()
         self.host = host
         self.port = port
@@ -60,7 +61,7 @@ class RealtimeServer:
             text_output_queue=self.text_output_queue,
             should_listen=self.should_listen,
             response_playing=self.response_playing,
-            cancel_response=self.cancel_response,
+            cancel_scope=self.cancel_scope,
             stop_event=self.stop_event,
         )
 

@@ -14,6 +14,7 @@ from threading import Event as ThreadingEvent
 
 from starlette.testclient import TestClient
 
+from cancel_scope import CancelScope
 from openai.types.realtime import RealtimeSessionCreateRequest
 from openai.types.realtime.realtime_audio_config import RealtimeAudioConfig
 from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfigInput
@@ -43,7 +44,7 @@ def _session_16k() -> RealtimeSessionCreateRequest:
 
 @pytest.fixture
 def setup():
-    """Return (app, service, input_queue, output_queue, text_output_queue, should_listen, stop_event, response_playing, cancel_response)."""
+    """Return (app, service, input_queue, output_queue, text_output_queue, should_listen, stop_event, response_playing, cancel_scope)."""
     runtime_config = RuntimeConfig()
     runtime_config.session = _session_16k()
     text_prompt_queue = Queue()
@@ -59,9 +60,9 @@ def setup():
     text_output_queue = Queue()
     stop_event = ThreadingEvent()
     response_playing = ThreadingEvent()
-    cancel_response = ThreadingEvent()
-    app = create_app(service, input_queue, output_queue, text_output_queue, should_listen, response_playing, cancel_response, stop_event)
-    return app, service, input_queue, output_queue, text_output_queue, should_listen, stop_event, response_playing, cancel_response
+    cancel_scope = CancelScope()
+    app = create_app(service, input_queue, output_queue, text_output_queue, should_listen, response_playing, cancel_scope, stop_event)
+    return app, service, input_queue, output_queue, text_output_queue, should_listen, stop_event, response_playing, cancel_scope
 
 
 def _pcm_bytes(n_samples: int) -> bytes:
@@ -171,7 +172,7 @@ class TestClientEventDispatch:
                 assert "response.done" in types
 
     def test_response_cancel_flushes_queues(self, setup):
-        app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_response = setup
+        app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
@@ -188,7 +189,41 @@ class TestClientEventDispatch:
                 assert output_queue.empty()
                 assert text_output_queue.empty()
                 assert not response_playing.is_set()
-                assert not cancel_response.is_set()
+                assert cancel_scope.discarding
+
+    def test_response_cancel_spurious_does_not_set_discarding(self, setup):
+        """response.cancel when no response is active must NOT enable discarding,
+        otherwise it would stick True forever (no __RESPONSE_DONE__ to clear it)."""
+        app, service, _, _, _, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                assert not service._state(list(service._conns.keys())[0]).in_response
+                ws.send_json({"type": "response.cancel"})
+                time.sleep(0.1)
+                assert not cancel_scope.discarding
+
+    def test_response_cancel_late_audio_is_discarded(self, setup):
+        """Audio arriving after response.cancel is silently dropped (discard guard)."""
+        app, service, _, output_queue, _, _, _, response_playing, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                service._ensure_response(conn_id)
+                response_playing.set()
+                ws.send_json({"type": "response.cancel"})
+                ws.receive_json()  # response.output_audio.done
+                ws.receive_json()  # response.done
+                time.sleep(0.1)
+                assert cancel_scope.discarding
+                output_queue.put(_pcm_bytes(256))
+                time.sleep(0.15)
+                # No response.created or audio delta should appear; only
+                # __RESPONSE_DONE__ will eventually clear the guard.
+                output_queue.put(b"__RESPONSE_DONE__")
+                time.sleep(0.15)
+                assert not cancel_scope.discarding
 
     def test_unknown_event_returns_error(self, setup):
         app, *_ = setup
@@ -246,10 +281,31 @@ class TestSendLoop:
                 assert msg["type"] == "input_audio_buffer.speech_started"
                 assert msg["audio_start_ms"] == 100
 
+    def test_barge_in_discard_clears_after_response_done(self, setup):
+        """After barge-in sets discarding=True, __RESPONSE_DONE__ must clear it back to False."""
+        app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                service._ensure_response(conn_id)
+                response_playing.set()
+                # Trigger barge-in
+                text_output_queue.put({"type": "speech_started", "audio_start_ms": 0})
+                ws.receive_json()  # input_audio_buffer.speech_started
+                ws.receive_json()  # response.output_audio.done
+                ws.receive_json()  # response.done
+                time.sleep(0.1)
+                assert cancel_scope.discarding
+                # Pipeline sends __RESPONSE_DONE__ to acknowledge completion
+                output_queue.put(b"__RESPONSE_DONE__")
+                time.sleep(0.15)
+                assert not cancel_scope.discarding
+
     def test_speech_started_does_not_cancel_when_interrupt_disabled(self, setup):
         """With interrupt_response=False, speech during playback should NOT cancel or flush."""
         from openai.types.realtime.realtime_audio_input_turn_detection import ServerVad
-        app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_response = setup
+        app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
         service.runtime_config.session.audio.input.turn_detection = ServerVad(
             type="server_vad", interrupt_response=False,
         )
@@ -264,7 +320,7 @@ class TestSendLoop:
                 assert msg["type"] == "input_audio_buffer.speech_started"
                 time.sleep(0.15)
                 assert response_playing.is_set(), "response_playing should remain set"
-                assert not cancel_response.is_set(), "cancel_response should not have been set"
+                assert not cancel_scope.discarding, "cancel_scope should not be discarding"
                 assert service._state(conn_id).in_response, "response should still be active"
 
 
