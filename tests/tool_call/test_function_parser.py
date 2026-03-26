@@ -1,9 +1,13 @@
+import json
+
 import pytest
 
 from LLM.tool_call.function_call import (
+    FunctionToolCall,
     extract_function_calls_from_text,
     parse_function_call,
 )
+from LLM.tool_call.function_tool import FunctionTool
 
 
 # ---------------------------------------------------------------------------
@@ -18,10 +22,10 @@ class TestParseFunctionCall:
         ("mobile.open_app(app_name='drupe')", "mobile.open_app", {"app_name": "drupe"}),
         ("mobile.long_press(x=0.799, y=0.911)", "mobile.long_press", {"x": 0.799, "y": 0.911}),
         ("mobile.terminate(status='success')", "mobile.terminate", {"status": "success"}),
-        ("answer('text')", "answer", {"arg_0": "text"}),
+        ("answer('text')", "answer", {"__arg_0__": "text"}),
         ("pyautogui.hscroll(page=-0.1)", "pyautogui.hscroll", {"page": -0.1}),
         ("pyautogui.scroll(page=-0.1)", "pyautogui.scroll", {"page": -0.1}),
-        ("pyautogui.scroll(0.13)", "pyautogui.scroll", {"arg_0": 0.13}),
+        ("pyautogui.scroll(0.13)", "pyautogui.scroll", {"__arg_0__": 0.13}),
         ("pyautogui.click(x=0.8102, y=0.9463)", "pyautogui.click", {"x": 0.8102, "y": 0.9463}),
         ("pyautogui.hotkey(keys=['ctrl', 'c'])", "pyautogui.hotkey", {"keys": ["ctrl", "c"]}),
         ("pyautogui.press(keys='enter')", "pyautogui.press", {"keys": "enter"}),
@@ -60,8 +64,8 @@ class TestPositionalArguments:
     def test_mixed_positional_and_named(self):
         results = parse_function_call("function('hello', 123, x=0.5)")
         r = results[0]
-        assert r.parameters["arg_0"] == "hello"
-        assert r.parameters["arg_1"] == 123
+        assert r.parameters["__arg_0__"] == "hello"
+        assert r.parameters["__arg_1__"] == 123
         assert r.parameters["x"] == 0.5
 
     def test_positional_with_named_trailing(self):
@@ -72,16 +76,44 @@ class TestPositionalArguments:
         results = parse_function_call("function(1, 2, 3, 4, 5)")
         r = results[0]
         for i in range(5):
-            assert r.parameters[f"arg_{i}"] == i + 1
+            assert r.parameters[f"__arg_{i}__"] == i + 1
 
     def test_strings_with_kwargs(self):
         results = parse_function_call("function('a', 'b', 'c', x=1, y=2)")
         r = results[0]
-        assert r.parameters["arg_0"] == "a"
-        assert r.parameters["arg_1"] == "b"
-        assert r.parameters["arg_2"] == "c"
+        assert r.parameters["__arg_0__"] == "a"
+        assert r.parameters["__arg_1__"] == "b"
+        assert r.parameters["__arg_2__"] == "c"
         assert r.parameters["x"] == 1
         assert r.parameters["y"] == 2
+
+
+# ---------------------------------------------------------------------------
+# parse_function_call – nested parens / special characters (Bug 1 fixes)
+# ---------------------------------------------------------------------------
+
+class TestNestedParens:
+
+    def test_closing_paren_inside_string(self):
+        results = parse_function_call("tool(msg='hello ) world')")
+        assert len(results) == 1
+        assert results[0].function_name == "tool"
+        assert results[0].parameters == {"msg": "hello ) world"}
+
+    def test_tuple_argument(self):
+        results = parse_function_call("tool(x=(1, 2))")
+        assert len(results) == 1
+        assert results[0].parameters == {"x": [1, 2]}
+
+    def test_dict_with_paren_in_value(self):
+        results = parse_function_call("tool(a={'nested': ')'})")
+        assert len(results) == 1
+        assert results[0].parameters == {"a": {"nested": ")"}}
+
+    def test_mixed_nested_structures(self):
+        results = parse_function_call("tool(items=[1, (2, 3), 4])")
+        assert len(results) == 1
+        assert results[0].parameters == {"items": [1, [2, 3], 4]}
 
 
 # ---------------------------------------------------------------------------
@@ -152,4 +184,83 @@ class TestExtractFromText:
         outside, calls = extract_function_calls_from_text(text, block_regex=self.CODE_BLOCK_REGEX)
         assert calls == []
 
+    def test_nested_parens_inside_code_block(self):
+        text = "<code>tool(msg='hello ) world')</code>"
+        _, calls = extract_function_calls_from_text(text, block_regex=self.CODE_BLOCK_REGEX)
+        assert len(calls) == 1
+        assert calls[0].parameters == {"msg": "hello ) world"}
 
+
+# ---------------------------------------------------------------------------
+# to_realtime_function_tool_call – arg stripping & validation (Bug 2 fixes)
+# ---------------------------------------------------------------------------
+
+def _make_tool(name: str, properties: dict, required: list[str] | None = None) -> FunctionTool:
+    schema = {"type": "object", "properties": properties}
+    if required is not None:
+        schema["required"] = required
+    return FunctionTool(type="function", name=name, parameters=schema)
+
+
+class TestToRealtimeToolCall:
+
+    def test_positional_args_stripped_when_required_present(self):
+        fc = FunctionToolCall(
+            function_name="greet",
+            parameters={"__arg_0__": 1, "msg": "hi"},
+            original_string="greet(1, msg='hi')",
+        )
+        tool = _make_tool("greet", {"msg": {"type": "string"}}, required=["msg"])
+        result = fc.to_realtime_function_tool_call([tool])
+        args = json.loads(result.arguments)
+        assert "__arg_0__" not in args
+        assert args == {"msg": "hi"}
+
+    def test_undeclared_args_stripped_when_required_present(self):
+        fc = FunctionToolCall(
+            function_name="greet",
+            parameters={"msg": "hi", "bogus": 42},
+            original_string="greet(msg='hi', bogus=42)",
+        )
+        tool = _make_tool("greet", {"msg": {"type": "string"}}, required=["msg"])
+        result = fc.to_realtime_function_tool_call([tool])
+        args = json.loads(result.arguments)
+        assert "bogus" not in args
+        assert args == {"msg": "hi"}
+
+    def test_raises_when_required_missing_after_strip(self):
+        fc = FunctionToolCall(
+            function_name="greet",
+            parameters={"__arg_0__": 1, "bogus": 2},
+            original_string="greet(1, bogus=2)",
+        )
+        tool = _make_tool("greet", {"msg": {"type": "string"}}, required=["msg"])
+        with pytest.raises(ValueError, match="Missing required"):
+            fc.to_realtime_function_tool_call([tool])
+
+    def test_succeeds_with_no_required_after_full_strip(self):
+        fc = FunctionToolCall(
+            function_name="noop",
+            parameters={"__arg_0__": 1, "yy": 2},
+            original_string="noop(1, yy=2)",
+        )
+        tool = _make_tool("noop", {"x": {"type": "integer"}})
+        result = fc.to_realtime_function_tool_call([tool])
+        args = json.loads(result.arguments)
+        assert args == {}
+
+    def test_no_collision_with_real_arg_prefix(self):
+        """A real parameter named 'arg_0' should NOT be stripped."""
+        fc = FunctionToolCall(
+            function_name="calc",
+            parameters={"arg_0": 10, "x": 5},
+            original_string="calc(arg_0=10, x=5)",
+        )
+        tool = _make_tool(
+            "calc",
+            {"arg_0": {"type": "integer"}, "x": {"type": "integer"}},
+            required=["arg_0"],
+        )
+        result = fc.to_realtime_function_tool_call([tool])
+        args = json.loads(result.arguments)
+        assert args == {"arg_0": 10, "x": 5}

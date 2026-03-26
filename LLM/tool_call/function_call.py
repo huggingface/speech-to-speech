@@ -1,18 +1,153 @@
 #!/usr/bin/env python3
 """
 Function parser for extracting function names, parameter names, and values from string function calls.
-Supports both mobile and pyautogui function patterns.
+
+Uses Python's ``tokenize`` and ``ast`` modules so that nested parentheses,
+strings containing ')' characters, tuples, dicts, etc. are handled correctly.
 """
 
-import re
-from collections import OrderedDict
+import ast
+import io
 import json
+import logging
+import re
+import tokenize
+from collections import OrderedDict
 from typing import Any, Dict, List, Tuple
-
-from pydantic import BaseModel
-from openai.types.responses import ResponseFunctionToolCall
-from LLM.tool_call.function_tool import FunctionTool
 from uuid import uuid4
+
+from openai.types.responses import ResponseFunctionToolCall
+from pydantic import BaseModel
+
+from LLM.tool_call.function_tool import FunctionTool
+
+logger = logging.getLogger(__name__)
+
+_POSITIONAL_RE = re.compile(r"^__arg_\d+__$")
+
+
+# ── AST / tokenize helpers ───────────────────────────────────────────
+
+
+def _split_top_level_calls(source: str) -> List[str]:
+    """Split *source* into individual ``name(...)`` expression strings.
+
+    Uses the tokenizer to walk tokens and track parenthesis depth so that
+    nested parens, strings with ')' chars, etc. are handled correctly.
+    """
+    tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    calls: List[str] = []
+    i = 0
+
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.type != tokenize.NAME:
+            i += 1
+            continue
+
+        start = i
+        j = i + 1
+
+        # Walk past dotted attribute access (e.g. ``mobile.click``)
+        while (
+            j + 1 < len(tokens)
+            and tokens[j].string == "."
+            and tokens[j + 1].type == tokenize.NAME
+        ):
+            j += 2
+
+        if j >= len(tokens) or tokens[j].string != "(":
+            i += 1
+            continue
+
+        # Track balanced parens
+        depth = 0
+        end = None
+        k = j
+        while k < len(tokens):
+            t = tokens[k]
+            if t.type == tokenize.OP and t.string == "(":
+                depth += 1
+            elif t.type == tokenize.OP and t.string == ")":
+                depth -= 1
+                if depth == 0:
+                    end = k
+                    break
+            k += 1
+
+        if end is None:
+            i += 1
+            continue
+
+        calls.append(tokenize.untokenize(tokens[start : end + 1]).strip())
+        i = end + 1
+
+    return calls
+
+
+def _extract_function_name(node: ast.expr) -> str:
+    """Return the dotted function name from a Call node's ``func`` attribute."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _extract_function_name(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    raise ValueError(f"Unsupported function target: {ast.dump(node)}")
+
+
+def _literal_from_ast(node: ast.AST) -> Any:
+    """Convert an AST node to a Python literal value."""
+    if isinstance(node, ast.Constant):
+        return node.value
+
+    if isinstance(node, ast.Name):
+        return node.id
+
+    if isinstance(node, ast.List):
+        return [_literal_from_ast(elt) for elt in node.elts]
+
+    if isinstance(node, ast.Tuple):
+        return [_literal_from_ast(elt) for elt in node.elts]
+
+    if isinstance(node, ast.Dict):
+        return {
+            _literal_from_ast(key): _literal_from_ast(value)
+            for key, value in zip(node.keys, node.values)
+        }
+
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        value = _literal_from_ast(node.operand)
+        if not isinstance(value, (int, float)):
+            raise ValueError(f"Unsupported unary literal: {ast.dump(node)}")
+        return -value if isinstance(node.op, ast.USub) else value
+
+    raise ValueError(f"Unsupported literal: {ast.dump(node)}")
+
+
+def _parse_call_expr(expr: str) -> "FunctionToolCall":
+    """Parse a single ``name(args...)`` expression string into a FunctionToolCall."""
+    parsed = ast.parse(expr, mode="eval").body
+    if not isinstance(parsed, ast.Call):
+        raise ValueError(f"Expression is not a function call: {expr!r}")
+
+    parameters: "OrderedDict[str, Any]" = OrderedDict()
+
+    for idx, arg in enumerate(parsed.args):
+        parameters[f"__arg_{idx}__"] = _literal_from_ast(arg)
+
+    for kw in parsed.keywords:
+        if kw.arg is None:
+            raise ValueError("**kwargs are not supported")
+        parameters[kw.arg] = _literal_from_ast(kw.value)
+
+    return FunctionToolCall(
+        function_name=_extract_function_name(parsed.func),
+        parameters=parameters,
+        original_string=expr,
+    )
+
+
+# ── Data model ───────────────────────────────────────────────────────
 
 
 class FunctionToolCall(BaseModel):
@@ -27,9 +162,15 @@ class FunctionToolCall(BaseModel):
         self,
         function_tools: list[FunctionTool] | None = None,
     ) -> ResponseFunctionToolCall:
+        positional = {k for k in self.parameters if _POSITIONAL_RE.match(k)}
+        if positional:
+            logger.warning(
+                "Dropping positional arguments for '%s': %s",
+                self.function_name,
+                positional,
+            )
         arguments = {
-            name: value for name, value in self.parameters.items()
-            if not name.startswith("arg_")
+            k: v for k, v in self.parameters.items() if not _POSITIONAL_RE.match(k)
         }
 
         if function_tools is not None:
@@ -47,8 +188,14 @@ class FunctionToolCall(BaseModel):
             properties = schema.get("properties", {})
             required = set(schema.get("required", []))
 
-            # Drop arguments not declared in the tool schema
-            arguments = {k: v for k, v in arguments.items() if k in properties}
+            undeclared = {k for k in arguments if k not in properties}
+            if undeclared:
+                logger.warning(
+                    "Dropping undeclared parameters for '%s': %s",
+                    self.function_name,
+                    undeclared,
+                )
+                arguments = {k: v for k, v in arguments.items() if k in properties}
 
             missing = required - set(arguments.keys())
             if missing:
@@ -64,365 +211,59 @@ class FunctionToolCall(BaseModel):
         )
 
 
+# ── Public API ───────────────────────────────────────────────────────
+
+
 def parse_function_call(
     function_string: str, pattern_to_match: list[str] = []
 ) -> List[FunctionToolCall]:
-    """
-    Parse a function call string and extract all function calls found.
+    """Parse a function call string and extract all function calls found.
 
     Args:
-        function_string: String representation of function calls
+        function_string: String representation of function calls.
+        pattern_to_match: If non-empty, only calls whose function name
+            contains at least one of these substrings are returned.
 
     Returns:
-        List of FunctionToolCall objects with parsed information
-
-    Examples:
-        >>> parse_function_call("mobile.wait(seconds=3)")
-        [FunctionToolCall(function_name='wait', parameters={'seconds': 3}, ...)]
-
-        >>> parse_function_call("mobile. wait(seconds=3)")
-        [FunctionToolCall(function_name='wait', parameters={'seconds': 3}, ...)]
-
-        >>> parse_function_call("mobile.wait(seconds=3) mobile.home()")
-        [FunctionToolCall(function_name='wait', parameters={'seconds': 3}, ...), FunctionToolCall(function_name='home', parameters={}, ...)]
+        List of FunctionToolCall objects with parsed information.
     """
-    # Remove any leading/trailing whitespace
     function_string = function_string.strip()
-
-    # Pattern to match function calls with parameters
-    # Matches: function_name(param1=value1, param2=value2, ...)
-    # Can have any characters before the function call, extracts just the function name
-    pattern = r".*?([a-zA-Z_][a-zA-Z0-9_.]*)\(([^)]*)\)"
-
-    matches = re.findall(pattern, function_string)
-    if not matches:
-        # No valid function calls found in: {function_string}
+    if not function_string:
         return []
 
-    results = []
-    for match in matches:
-        function_name = match[0]
-        params_string = match[1]
-
+    results: List[FunctionToolCall] = []
+    for expr in _split_top_level_calls(function_string):
+        call = _parse_call_expr(expr)
         if pattern_to_match and all(
-            pattern not in function_name for pattern in pattern_to_match
+            pattern not in call.function_name for pattern in pattern_to_match
         ):
             continue
-
-        # Parse parameters
-        parameters = parse_parameters(params_string)
-
-        # Create the original string for this specific function call
-        original_string = f"{function_name}({params_string})"
-
-        results.append(
-            FunctionToolCall(
-                function_name=function_name,
-                parameters=parameters,
-                original_string=original_string,
-            )
-        )
-
+        results.append(call)
     return results
-
-
-def parse_parameters(params_string: str) -> Dict[str, Any]:
-    """
-    Parse parameter string and extract parameter names and values.
-
-    Args:
-        params_string: String containing parameters (e.g., "x=0.5, y=0.6, text='hello'")
-
-    Returns:
-        Dictionary mapping parameter names to their values
-
-    Examples:
-        >>> parse_parameters("x=0.5, y=0.6")
-        {'x': 0.5, 'y': 0.6}
-
-        >>> parse_parameters("app_name='drupe'")
-        {'app_name': 'drupe'}
-
-        >>> parse_parameters("'text'")
-        {'arg_0': 'text'}
-
-        >>> parse_parameters("1, 3, 4")
-        {'arg_0': 1, 'arg_1': 3, 'arg_2': 4}
-
-        >>> parse_parameters("arg1, arg2, x=0.5")
-        {'arg_0': 'arg1', 'arg_1': 'arg2', 'x': 0.5}
-    """
-    if not params_string.strip():
-        return {}
-
-    parameters = OrderedDict()
-
-    # Split by commas, but be careful with commas inside quotes or brackets
-    param_parts = split_parameters(params_string)
-
-    positional_index = 0
-
-    for part in param_parts:
-        part = part.strip()
-        if not part:
-            continue
-
-        # Parse individual parameter
-        name, value = parse_single_parameter(part)
-
-        # For positional arguments, use index-based naming
-        if name.startswith("arg_"):
-            name = f"arg_{positional_index}"
-            positional_index += 1
-
-        parameters[name] = value
-
-    return parameters
-
-
-def split_parameters(params_string: str) -> List[str]:
-    """
-    Split parameter string by commas, respecting quotes and brackets.
-
-    Args:
-        params_string: String containing parameters
-
-    Returns:
-        List of individual parameter strings
-    """
-    parts = []
-    current_part = ""
-    paren_count = 0
-    bracket_count = 0
-    brace_count = 0
-    in_quotes = False
-    quote_char = None
-
-    for char in params_string:
-        if char in ['"', "'"] and (not in_quotes or char == quote_char):
-            if not in_quotes:
-                in_quotes = True
-                quote_char = char
-            else:
-                in_quotes = False
-                quote_char = None
-        elif not in_quotes:
-            if char == "(":
-                paren_count += 1
-            elif char == ")":
-                paren_count -= 1
-            elif char == "[":
-                bracket_count += 1
-            elif char == "]":
-                bracket_count -= 1
-            elif char == "{":
-                brace_count += 1
-            elif char == "}":
-                brace_count -= 1
-            elif (
-                char == ","
-                and paren_count == 0
-                and bracket_count == 0
-                and brace_count == 0
-            ):
-                parts.append(current_part.strip())
-                current_part = ""
-                continue
-
-        current_part += char
-
-    if current_part.strip():
-        parts.append(current_part.strip())
-
-    return parts
-
-
-def parse_single_parameter(param_string: str) -> Tuple[str, Any]:
-    """
-    Parse a single parameter string into name and value.
-
-    Args:
-        param_string: String like "x=0.5" or "app_name='drupe'" or just "value"
-
-    Returns:
-        Tuple of (parameter_name, parameter_value)
-
-    Examples:
-        >>> parse_single_parameter("x=0.5")
-        ('x', 0.5)
-
-        >>> parse_single_parameter("app_name='drupe'")
-        ('app_name', 'drupe')
-
-        >>> parse_single_parameter("'text'")
-        ('arg_0', 'text')
-
-        >>> parse_single_parameter("123")
-        ('arg_0', 123)
-
-        >>> parse_single_parameter("3")
-        ('arg_0', 3)
-    """
-    # Pattern to match parameter name and value
-    pattern = r"^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+)$"
-
-    match = re.match(pattern, param_string)
-    if match:
-        # Named parameter
-        param_name = match.group(1)
-        param_value_str = match.group(2).strip()
-        param_value = parse_value(param_value_str)
-        return param_name, param_value
-    else:
-        # Positional parameter - treat as unnamed argument
-        param_value = parse_value(param_string)
-        return "arg_0", param_value
-
-
-def parse_value(value_string: str) -> Any:
-    """
-    Parse a value string into appropriate Python type.
-
-    Args:
-        value_string: String representation of a value
-
-    Returns:
-        Parsed value (int, float, str, list, etc.)
-
-    Examples:
-        >>> parse_value("3")
-        3
-
-        >>> parse_value("3.14")
-        3.14
-
-        >>> parse_value("'hello'")
-        'hello'
-
-        >>> parse_value("[0.581, 0.898]")
-        [0.581, 0.898]
-    """
-    value_string = value_string.strip()
-
-    # String values (quoted)
-    if (value_string.startswith("'") and value_string.endswith("'")) or (
-        value_string.startswith('"') and value_string.endswith('"')
-    ):
-        return value_string[1:-1]
-
-    # List values
-    if value_string.startswith("[") and value_string.endswith("]"):
-        return parse_list(value_string)
-
-    # Dictionary values
-    if value_string.startswith("{") and value_string.endswith("}"):
-        return parse_dict(value_string)
-
-    # Boolean values
-    if value_string.lower() in ["true", "false"]:
-        return value_string.lower() == "true"
-
-    # None value
-    if value_string.lower() == "none":
-        return None
-
-    # Numeric values
-    try:
-        # Try integer first
-        if "." not in value_string:
-            return int(value_string)
-        else:
-            return float(value_string)
-    except ValueError:
-        # If it's not a number, return as string (remove quotes if present)
-        if value_string.startswith("'") and value_string.endswith("'"):
-            return value_string[1:-1]
-        elif value_string.startswith('"') and value_string.endswith('"'):
-            return value_string[1:-1]
-        else:
-            return value_string
-
-
-def parse_list(list_string: str) -> List[Any]:
-    """
-    Parse a list string into a Python list.
-
-    Args:
-        list_string: String like "[0.581, 0.898]"
-
-    Returns:
-        List of parsed values
-
-    Examples:
-        >>> parse_list("[0.581, 0.898]")
-        [0.581, 0.898]
-    """
-    # Remove outer brackets
-    content = list_string[1:-1].strip()
-    if not content:
-        return []
-
-    # Split by commas, respecting nested structures
-    parts = split_parameters(content)
-
-    return [parse_value(part.strip()) for part in parts]
-
-
-def parse_dict(dict_string: str) -> Dict[str, Any]:
-    """
-    Parse a dictionary string into a Python dict.
-
-    Args:
-        dict_string: String like "{'key': 'value'}"
-
-    Returns:
-        Dictionary of parsed key-value pairs
-    """
-    # Remove outer braces
-    content = dict_string[1:-1].strip()
-    if not content:
-        return {}
-
-    # Split by commas, respecting nested structures
-    parts = split_parameters(content)
-
-    result = {}
-    for part in parts:
-        part = part.strip()
-        if ":" in part:
-            key_str, value_str = part.split(":", 1)
-            key = parse_value(key_str.strip())
-            value = parse_value(value_str.strip())
-            result[key] = value
-
-    return result
 
 
 def parse_multiple_functions(function_strings: List[str]) -> List[FunctionToolCall]:
-    """
-    Parse multiple function call strings.
+    """Parse multiple function call strings.
 
     Args:
-        function_strings: List of function call strings
+        function_strings: List of function call strings.
 
     Returns:
-        List of FunctionCall objects
+        List of FunctionToolCall objects.
     """
-    results = []
+    results: List[FunctionToolCall] = []
     for func_str in function_strings:
         try:
-            result_list = parse_function_call(func_str)
-            results.extend(result_list)
-        except Exception as e:
-            print(f"Warning: Could not parse function call '{func_str}': {e}")
+            results.extend(parse_function_call(func_str))
+        except Exception:
             continue
-
     return results
 
 
-def extract_function_calls_from_text(text: str, block_regex: str = ".*") -> Tuple[str, List[FunctionToolCall]]:
-    """
-    Extract function calls from delimited code blocks inside *text*.
+def extract_function_calls_from_text(
+    text: str, block_regex: str = ".*"
+) -> Tuple[str, List[FunctionToolCall]]:
+    """Extract function calls from delimited code blocks inside *text*.
 
     The LLM is prompted to wrap tool calls inside code-block delimiters
     (e.g. ``<code>func(x=1)</code>``).  This function finds those blocks,
@@ -436,23 +277,22 @@ def extract_function_calls_from_text(text: str, block_regex: str = ".*") -> Tupl
             matched blocks is scanned for function calls.
 
     Returns:
-        ``(outside_text, function_calls)`` – the text with blocks stripped
+        ``(outside_text, function_calls)`` -- the text with blocks stripped
         and the parsed function calls found inside the blocks.
     """
-    func_pattern = r"[a-zA-Z_][a-zA-Z0-9_.]*\([^)]*\)"
+    if not block_regex:
+        return text, []
 
-    if block_regex:
-        if not re.search(block_regex, text, flags=re.DOTALL):
-            return text, []
+    matches = list(re.finditer(block_regex, text, flags=re.DOTALL))
+    if not matches:
+        return text, []
 
-        outside = "".join(re.split(block_regex, text, flags=re.DOTALL))
-        blocks = re.findall(block_regex, text, flags=re.DOTALL)
-        inside = " ".join(blocks)
+    outside = re.sub(block_regex, "", text, flags=re.DOTALL)
+    inside = " ".join(match.group(0) for match in matches).strip()
+    if not inside:
+        return outside, []
 
-        if not inside.strip():
-            return outside, []
-
-        matches = re.findall(func_pattern, inside)
-        return outside, parse_multiple_functions(matches)
-
-    return text, []
+    try:
+        return outside, parse_function_call(inside)
+    except Exception:
+        return outside, []

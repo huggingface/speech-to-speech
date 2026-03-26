@@ -1,4 +1,5 @@
 import logging
+import threading
 from queue import Queue
 from threading import Event
 
@@ -76,5 +77,12 @@ class RealtimeServer:
         server = uvicorn.Server(config)
 
         server.install_signal_handlers = lambda: None
+
+        def _watch_stop():
+            self.stop_event.wait()
+            server.should_exit = True
+
+        watcher = threading.Thread(target=_watch_stop, daemon=True)
+        watcher.start()
 
         server.run()

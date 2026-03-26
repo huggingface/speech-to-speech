@@ -128,9 +128,25 @@ def create_app(
                         await _send_event(ws, err)
 
                 elif isinstance(event, ResponseCancelEvent):
+                    if cancel_response:
+                        cancel_response.set()
+                    while not output_queue.empty():
+                        try:
+                            output_queue.get_nowait()
+                        except Empty:
+                            break
+                    while not text_output_queue.empty():
+                        try:
+                            text_output_queue.get_nowait()
+                        except Empty:
+                            break
                     events = service.handle_response_cancel(session_id)
                     if events:
                         await _send_events(ws, events)
+                    if response_playing:
+                        response_playing.clear()
+                    if cancel_response:
+                        cancel_response.clear()
 
         except WebSocketDisconnect:
             logger.info(f"Client {session_id} disconnected")
@@ -160,22 +176,25 @@ def create_app(
                                 if events:
                                     await _send_events(ws, events)
                         if is_speech_start and response_playing and response_playing.is_set():
-                            if cancel_response:
-                                cancel_response.set()
-                            while not output_queue.empty():
-                                try:
-                                    output_queue.get_nowait()
-                                except Empty:
-                                    break
-                            while not text_output_queue.empty():
-                                try:
-                                    text_output_queue.get_nowait()
-                                except Empty:
-                                    break
-                            response_playing.clear()
-                            if cancel_response:
-                                cancel_response.clear()
-                            logger.info("Speech during response: cancelled, queue flushed")
+                            if service.runtime_config.interrupt_response_enabled:
+                                if cancel_response:
+                                    cancel_response.set()
+                                while not output_queue.empty():
+                                    try:
+                                        output_queue.get_nowait()
+                                    except Empty:
+                                        break
+                                while not text_output_queue.empty():
+                                    try:
+                                        text_output_queue.get_nowait()
+                                    except Empty:
+                                        break
+                                response_playing.clear()
+                                if cancel_response:
+                                    cancel_response.clear()
+                                logger.info("Speech during response: cancelled, queue flushed")
+                            else:
+                                logger.info("Speech during response: interrupt_response disabled, ignoring")
                     except Empty:
                         pass
 

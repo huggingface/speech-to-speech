@@ -493,6 +493,20 @@ class TestTranslatePipelineText:
         assert len(events) == 1
         assert isinstance(events[0], InputAudioBufferSpeechStartedEvent)
 
+    def test_speech_started_does_not_cancel_when_interrupt_disabled(self, service, conn_id):
+        """With interrupt_response=False, speech_started emits the started event but does NOT cancel the active response."""
+        from openai.types.realtime.realtime_audio_input_turn_detection import ServerVad
+        service.runtime_config.session.audio.input.turn_detection = ServerVad(
+            type="server_vad", interrupt_response=False,
+        )
+        service._ensure_response(conn_id)
+        events = service.translate_pipeline_text(
+            conn_id, {"type": "speech_started", "audio_start_ms": 0},
+        )
+        assert len(events) == 1
+        assert isinstance(events[0], InputAudioBufferSpeechStartedEvent)
+        assert service._state(conn_id).in_response is True
+
     def test_consecutive_speech_cycles_get_distinct_item_ids(self, service, conn_id):
         """Each speech_started/stopped cycle generates a new unique item_id."""
         started_1 = service.translate_pipeline_text(conn_id, {"type": "speech_started"})
@@ -697,3 +711,46 @@ class TestIdAndStateManagement:
         service._end_response(conn_id)
         service._ensure_response(conn_id)
         assert service._next_content_index(conn_id) == 0
+
+
+# ===================================================================
+# interrupt_response_enabled property
+# ===================================================================
+
+class TestInterruptResponseEnabled:
+    def test_default_true_when_no_turn_detection(self, runtime_config):
+        runtime_config.session.audio.input.turn_detection = None
+        assert runtime_config.interrupt_response_enabled is True
+
+    def test_true_when_server_vad_interrupt_true(self, runtime_config):
+        from openai.types.realtime.realtime_audio_input_turn_detection import ServerVad
+        runtime_config.session.audio.input.turn_detection = ServerVad(
+            type="server_vad", interrupt_response=True,
+        )
+        assert runtime_config.interrupt_response_enabled is True
+
+    def test_false_when_server_vad_interrupt_false(self, runtime_config):
+        from openai.types.realtime.realtime_audio_input_turn_detection import ServerVad
+        runtime_config.session.audio.input.turn_detection = ServerVad(
+            type="server_vad", interrupt_response=False,
+        )
+        assert runtime_config.interrupt_response_enabled is False
+
+    def test_default_true_when_server_vad_interrupt_none(self, runtime_config):
+        from openai.types.realtime.realtime_audio_input_turn_detection import ServerVad
+        runtime_config.session.audio.input.turn_detection = ServerVad(
+            type="server_vad", interrupt_response=None,
+        )
+        assert runtime_config.interrupt_response_enabled is True
+
+    def test_reads_dict_turn_detection(self, runtime_config):
+        runtime_config.session.audio.input.turn_detection = {
+            "type": "server_vad", "interrupt_response": False,
+        }
+        assert runtime_config.interrupt_response_enabled is False
+
+    def test_dict_defaults_to_true(self, runtime_config):
+        runtime_config.session.audio.input.turn_detection = {
+            "type": "server_vad",
+        }
+        assert runtime_config.interrupt_response_enabled is True

@@ -43,7 +43,7 @@ def _session_16k() -> RealtimeSessionCreateRequest:
 
 @pytest.fixture
 def setup():
-    """Return (app, service, input_queue, output_queue, text_output_queue, should_listen, stop_event)."""
+    """Return (app, service, input_queue, output_queue, text_output_queue, should_listen, stop_event, response_playing, cancel_response)."""
     runtime_config = RuntimeConfig()
     runtime_config.session = _session_16k()
     text_prompt_queue = Queue()
@@ -61,7 +61,7 @@ def setup():
     response_playing = ThreadingEvent()
     cancel_response = ThreadingEvent()
     app = create_app(service, input_queue, output_queue, text_output_queue, should_listen, response_playing, cancel_response, stop_event)
-    return app, service, input_queue, output_queue, text_output_queue, should_listen, stop_event
+    return app, service, input_queue, output_queue, text_output_queue, should_listen, stop_event, response_playing, cancel_response
 
 
 def _pcm_bytes(n_samples: int) -> bytes:
@@ -170,6 +170,26 @@ class TestClientEventDispatch:
                 assert "response.output_audio.done" in types
                 assert "response.done" in types
 
+    def test_response_cancel_flushes_queues(self, setup):
+        app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_response = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                conn_id = list(service._conns.keys())[0]
+                service._ensure_response(conn_id)
+                response_playing.set()
+                output_queue.put(_pcm_bytes(256))
+                output_queue.put(_pcm_bytes(256))
+                text_output_queue.put({"type": "assistant_text", "text": "stale"})
+                ws.send_json({"type": "response.cancel"})
+                ws.receive_json()  # response.output_audio.done
+                ws.receive_json()  # response.done
+                time.sleep(0.1)
+                assert output_queue.empty()
+                assert text_output_queue.empty()
+                assert not response_playing.is_set()
+                assert not cancel_response.is_set()
+
     def test_unknown_event_returns_error(self, setup):
         app, *_ = setup
         with TestClient(app) as client:
@@ -225,6 +245,27 @@ class TestSendLoop:
                 msg = ws.receive_json()
                 assert msg["type"] == "input_audio_buffer.speech_started"
                 assert msg["audio_start_ms"] == 100
+
+    def test_speech_started_does_not_cancel_when_interrupt_disabled(self, setup):
+        """With interrupt_response=False, speech during playback should NOT cancel or flush."""
+        from openai.types.realtime.realtime_audio_input_turn_detection import ServerVad
+        app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_response = setup
+        service.runtime_config.session.audio.input.turn_detection = ServerVad(
+            type="server_vad", interrupt_response=False,
+        )
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                service._ensure_response(conn_id)
+                response_playing.set()
+                text_output_queue.put({"type": "speech_started", "audio_start_ms": 0})
+                msg = ws.receive_json()
+                assert msg["type"] == "input_audio_buffer.speech_started"
+                time.sleep(0.15)
+                assert response_playing.is_set(), "response_playing should remain set"
+                assert not cancel_response.is_set(), "cancel_response should not have been set"
+                assert service._state(conn_id).in_response, "response should still be active"
 
 
 # ===================================================================

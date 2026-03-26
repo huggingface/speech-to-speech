@@ -53,6 +53,25 @@ class RuntimeConfig(BaseModel):
             v.audio.output = RealtimeAudioConfigOutput()
         return v
 
+    @property
+    def interrupt_response_enabled(self) -> bool:
+        """Whether barge-in should cancel an active response.
+
+        Reads 'turn_detection.interrupt_response' from the session config,
+        handling both Pydantic models ('ServerVad') and plain dicts.
+        Defaults to 'True' (OpenAI API default).
+        """
+        td = self.session.audio.input.turn_detection
+        if td is None:
+            return True
+        if hasattr(td, "interrupt_response"):
+            val = td.interrupt_response
+        elif isinstance(td, dict):
+            val = td.get("interrupt_response", True)
+        else:
+            return True
+        return val if val is not None else True
+
     def apply_session_update(self, update: RealtimeSessionCreateRequest) -> None:
         """Merge non-None, explicitly-set fields from 'update' into the
         current 'session', preserving any fields not present in the update."""

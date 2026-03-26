@@ -500,7 +500,7 @@ class RealtimeService:
         msg_type = msg.get("type")
 
         if msg_type == "speech_started":
-            if self._state(conn_id).in_response:
+            if self._state(conn_id).in_response and self.runtime_config.interrupt_response_enabled:
                 events.extend(self.finish_audio_response(conn_id, status="cancelled", reason="turn_detected"))
             input_item_id = self._start_item(conn_id)
             self._state(conn_id).last_item_id = input_item_id

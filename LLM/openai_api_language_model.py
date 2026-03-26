@@ -131,13 +131,18 @@ class OpenApiModelHandler(BaseHandler):
                     prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
             self.chat.append({"role": self.user_role, "content": prompt})
 
+        optional_kwargs = {}
+        if self.tools is not None:
+            optional_kwargs["tools"] = self.tools
+        if self.tools_choice is not None:
+            optional_kwargs["tool_choice"] = self.tools_choice
+
         response: Response | Stream[ResponseStreamEvent] = self.client.responses.create(
             model=self.model_name,
             input=self.chat.to_list(),
             stream=self.stream,
-            tools=self.tools,
-            tool_choice=self.tools_choice,
             extra_body=self._extra_body,
+            **optional_kwargs,
         )
         tools: list[dict[str, str]] = []
         clean_text = ""

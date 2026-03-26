@@ -42,6 +42,7 @@ Do NOT write "Here is the call", "I will use", "Let me call", \
 "The function is", or any similar phrasing.
 - The {{ enter_code }}…{{ end_code }} block must appear directly \
 in your response without any surrounding explanation.
+- Arguments MUST always be named: func(x=1, y=2). Positional arguments like func(1, 2) are NOT allowed.
 - String arguments must be quoted: func(name='hello').
 - Multiple tool calls can live in the same {{ enter_code }}…{{ end_code }} block.\
 """,
