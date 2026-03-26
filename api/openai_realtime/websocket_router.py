@@ -183,6 +183,10 @@ def create_app(
             app.state.websockets.pop(session_id, None)
             logger.info(f"Client {session_id} removed")
 
+    @app.get("/v1/usage")
+    async def usage_endpoint():
+        return service.get_usage()
+
     async def _send_loop():
         """Poll pipeline output queues and send to each connected client."""
         while not stop_event.is_set():
