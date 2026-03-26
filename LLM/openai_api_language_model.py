@@ -148,6 +148,8 @@ class OpenApiModelHandler(BaseHandler):
         )
         tools: list[dict[str, str]] = []
         clean_text = ""
+        input_tokens = 0
+        output_tokens = 0
         if self.stream:
             cancelled = False
             printable_text = ""
@@ -170,6 +172,11 @@ class OpenApiModelHandler(BaseHandler):
                         tools.append(event.item.model_dump())
                     elif event.item.type == "message":
                         self.chat.append({"role": event.item.role, "content": event.item.content})
+                elif event.type == "response.completed":
+                    usage = getattr(event.response, "usage", None)
+                    if usage:
+                        input_tokens = usage.input_tokens or 0
+                        output_tokens = usage.output_tokens or 0
             if not cancelled:
                 if printable_text.strip() or tools:
                     logger.debug(f"Clean text: {clean_text}")
@@ -179,6 +186,10 @@ class OpenApiModelHandler(BaseHandler):
             if gen is not None and self.cancel_scope.is_stale(gen):
                 logger.info("LLM generation cancelled (interruption)")
             else:
+                usage = getattr(response, "usage", None)
+                if usage:
+                    input_tokens = usage.input_tokens or 0
+                    output_tokens = usage.output_tokens or 0
                 for message in response.output:
                     if message.type == "function_call":
                         tools.append(message.model_dump())
@@ -193,6 +204,8 @@ class OpenApiModelHandler(BaseHandler):
                 logger.info(f"Tools: {tools}")
                 yield clean_text, language_code, tools
 
+        if input_tokens or output_tokens:
+            yield ("__TOKEN_USAGE__", input_tokens, output_tokens)
         yield ("__END_OF_RESPONSE__", None, None)
 
     def on_session_end(self):

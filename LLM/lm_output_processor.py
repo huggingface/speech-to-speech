@@ -40,6 +40,18 @@ class LMOutputProcessor(BaseHandler):
         Yields:
             Tuple of (text, language_code) for TTS
         """
+        sentinel, *_ = lm_output
+
+        if sentinel == "__TOKEN_USAGE__":
+            _, input_tokens, output_tokens = lm_output
+            if self.text_output_queue is not None:
+                self.text_output_queue.put({
+                    "type": "token_usage",
+                    "input_tokens": input_tokens or 0,
+                    "output_tokens": output_tokens or 0,
+                })
+            return
+
         text_chunk, language_code, tools = lm_output
 
         if text_chunk == "__END_OF_RESPONSE__":

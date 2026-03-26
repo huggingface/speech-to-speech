@@ -302,10 +302,9 @@ class LanguageModelHandler(BaseHandler):
                     prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
             self.chat.append({"role": self.user_role, "content": prompt})
 
-        if logger.isEnabledFor(logging.DEBUG):
-            chat_input = self.tokenizer.apply_chat_template(self.chat.to_list(), tokenize=True)
-            num_tokens = len(chat_input["input_ids"])
-            logger.info("Prompt token count: %d", num_tokens)
+        chat_input = self.tokenizer.apply_chat_template(self.chat.to_list(), tokenize=True)
+        input_tokens = len(chat_input["input_ids"])
+        logger.debug("Prompt token count: %d", input_tokens)
 
         chat_prompt = self.tokenizer.apply_chat_template(
             self.chat.to_list(), tokenize=False, add_generation_prompt=True, enable_thinking=False
@@ -313,14 +312,15 @@ class LanguageModelHandler(BaseHandler):
 
         cancelled = False
         gen = self.cancel_scope.generation if self.cancel_scope else None
+        generated_text = ""
+        raw_generated_text = ""
+        printable_text = ""
+        tools: list[dict] = []
 
         # TODO: Rethink stream generation to use special yield tags that signal
         # the engine whether the model is sending a partial or complete
         # LLM response. Enable TTS response only on complete LLM response (and send partial events for realtime engine).
         if self.backend == "mlx":
-            generated_text = ""
-            printable_text = ""
-            tools: list[dict] = []
             with MLXLockContext(handler_name="MLX-LLM", timeout=10.0):
                 for t in mlx_stream_generate(
                     self.model,
@@ -332,6 +332,7 @@ class LanguageModelHandler(BaseHandler):
                         logger.info("LLM generation cancelled (interruption)")
                         cancelled = True
                         break
+                    raw_generated_text += t.text
                     new_text = remove_emojis(t.text)
                     generated_text += new_text
                     printable_text += new_text
@@ -350,14 +351,12 @@ class LanguageModelHandler(BaseHandler):
                 target=self.pipe, args=(chat_prompt,), kwargs=self.gen_kwargs
             )
             thread.start()
-            generated_text = ""
-            printable_text = ""
-            tools: list[dict] = []
             for new_text in self.streamer:
                 if gen is not None and self.cancel_scope.is_stale(gen):
                     logger.info("LLM generation cancelled (interruption)")
                     cancelled = True
                     break
+                raw_generated_text += new_text
                 new_text = remove_emojis(new_text)
                 generated_text += new_text
                 printable_text += new_text
@@ -375,6 +374,10 @@ class LanguageModelHandler(BaseHandler):
 
         if not cancelled and (printable_text.strip() or tools):
             yield (printable_text.strip(), language_code, tools)
+
+        output_tokens = len(self.tokenizer.encode(raw_generated_text)) if raw_generated_text else 0
+        if input_tokens or output_tokens:
+            yield ("__TOKEN_USAGE__", input_tokens, output_tokens)
         yield ("__END_OF_RESPONSE__", None, None)
 
     def on_session_end(self):

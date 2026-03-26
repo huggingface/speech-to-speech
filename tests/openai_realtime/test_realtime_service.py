@@ -754,3 +754,273 @@ class TestInterruptResponseEnabled:
             "type": "server_vad",
         }
         assert runtime_config.interrupt_response_enabled is True
+
+
+# ===================================================================
+# Usage metrics tracking (tokens + audio duration)
+# ===================================================================
+
+class TestUsageMetricsTracking:
+
+    # -- token accumulation --
+
+    def test_token_usage_accumulates_in_conn_state(self, service, conn_id):
+        service._ensure_response(conn_id)
+        service.translate_pipeline_text(
+            conn_id, {"type": "token_usage", "input_tokens": 10, "output_tokens": 20},
+        )
+        usage = service._state(conn_id).response_usage
+        assert usage.input_tokens == 10
+        assert usage.output_tokens == 20
+
+    def test_token_usage_accumulates_multiple(self, service, conn_id):
+        service._ensure_response(conn_id)
+        service.translate_pipeline_text(
+            conn_id, {"type": "token_usage", "input_tokens": 5, "output_tokens": 10},
+        )
+        service.translate_pipeline_text(
+            conn_id, {"type": "token_usage", "input_tokens": 3, "output_tokens": 7},
+        )
+        usage = service._state(conn_id).response_usage
+        assert usage.input_tokens == 8
+        assert usage.output_tokens == 17
+
+    def test_token_usage_emits_no_events(self, service, conn_id):
+        events = service.translate_pipeline_text(
+            conn_id, {"type": "token_usage", "input_tokens": 10, "output_tokens": 20},
+        )
+        assert events == []
+
+    def test_response_done_reflects_token_usage(self, service, conn_id):
+        service._ensure_response(conn_id)
+        service.translate_pipeline_text(
+            conn_id, {"type": "token_usage", "input_tokens": 100, "output_tokens": 50},
+        )
+        events = service.finish_audio_response(conn_id)
+        done_evt = events[1]
+        assert isinstance(done_evt, ResponseDoneEvent)
+        assert done_evt.response.usage.input_tokens == 100
+        assert done_evt.response.usage.output_tokens == 50
+        assert done_evt.response.usage.total_tokens == 150
+
+    def test_response_created_has_zero_tokens(self, service, conn_id):
+        """ResponseCreatedEvent is emitted before any tokens are produced."""
+        events = service.encode_audio_chunk(conn_id, _pcm_bytes(256))
+        created_evt = events[0]
+        assert isinstance(created_evt, ResponseCreatedEvent)
+        assert created_evt.response.usage.input_tokens == 0
+        assert created_evt.response.usage.output_tokens == 0
+        assert created_evt.response.usage.total_tokens == 0
+
+    def test_end_response_rolls_into_global(self, service, conn_id):
+        service._ensure_response(conn_id)
+        service.translate_pipeline_text(
+            conn_id, {"type": "token_usage", "input_tokens": 10, "output_tokens": 20},
+        )
+        service._end_response(conn_id)
+        assert service.total_usage.input_tokens == 10
+        assert service.total_usage.output_tokens == 20
+        usage = service._state(conn_id).response_usage
+        assert usage.input_tokens == 0
+        assert usage.output_tokens == 0
+
+    def test_multiple_responses_accumulate_global(self, service, conn_id):
+        service._ensure_response(conn_id)
+        service.translate_pipeline_text(
+            conn_id, {"type": "token_usage", "input_tokens": 10, "output_tokens": 20},
+        )
+        service._end_response(conn_id)
+
+        service._ensure_response(conn_id)
+        service.translate_pipeline_text(
+            conn_id, {"type": "token_usage", "input_tokens": 5, "output_tokens": 15},
+        )
+        service._end_response(conn_id)
+
+        assert service.total_usage.input_tokens == 15
+        assert service.total_usage.output_tokens == 35
+
+    def test_unregister_rolls_partial_tokens_into_global(self, service):
+        cid = service.register()
+        service._ensure_response(cid)
+        service.translate_pipeline_text(
+            cid, {"type": "token_usage", "input_tokens": 7, "output_tokens": 3},
+        )
+        service.unregister(cid)
+        assert service.total_usage.input_tokens == 7
+        assert service.total_usage.output_tokens == 3
+
+    def test_unregister_without_active_response_no_leak(self, service):
+        cid = service.register()
+        service.unregister(cid)
+        assert service.total_usage.input_tokens == 0
+        assert service.total_usage.output_tokens == 0
+
+    def test_finish_audio_response_resets_per_response_tokens(self, service, conn_id):
+        """After finish_audio_response, per-response counters are zero."""
+        service._ensure_response(conn_id)
+        service.translate_pipeline_text(
+            conn_id, {"type": "token_usage", "input_tokens": 50, "output_tokens": 25},
+        )
+        service.finish_audio_response(conn_id)
+        usage = service._state(conn_id).response_usage
+        assert usage.input_tokens == 0
+        assert usage.output_tokens == 0
+        assert service.total_usage.input_tokens == 50
+        assert service.total_usage.output_tokens == 25
+
+    # -- audio duration accumulation --
+
+    def test_transcription_completed_accumulates_duration(self, service, conn_id):
+        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
+        service.translate_pipeline_text(conn_id, {"type": "speech_stopped", "duration_s": 2.5})
+        service.translate_pipeline_text(conn_id, {"type": "transcription_completed", "transcript": "hi"})
+        assert service._state(conn_id).response_usage.audio_duration_s == 2.5
+
+    def test_multiple_transcriptions_accumulate_duration(self, service, conn_id):
+        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
+        service.translate_pipeline_text(conn_id, {"type": "speech_stopped", "duration_s": 1.0})
+        service.translate_pipeline_text(conn_id, {"type": "transcription_completed", "transcript": "a"})
+
+        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
+        service.translate_pipeline_text(conn_id, {"type": "speech_stopped", "duration_s": 2.0})
+        service.translate_pipeline_text(conn_id, {"type": "transcription_completed", "transcript": "b"})
+
+        assert service._state(conn_id).response_usage.audio_duration_s == 3.0
+
+    def test_end_response_rolls_duration_into_global(self, service, conn_id):
+        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
+        service.translate_pipeline_text(conn_id, {"type": "speech_stopped", "duration_s": 4.0})
+        service.translate_pipeline_text(conn_id, {"type": "transcription_completed", "transcript": "x"})
+        service._ensure_response(conn_id)
+        service._end_response(conn_id)
+        assert service.total_usage.audio_duration_s == 4.0
+        assert service._state(conn_id).response_usage.audio_duration_s == 0.0
+
+    def test_unregister_rolls_duration_into_global(self, service):
+        cid = service.register()
+        service.translate_pipeline_text(cid, {"type": "speech_started"})
+        service.translate_pipeline_text(cid, {"type": "speech_stopped", "duration_s": 1.5})
+        service.translate_pipeline_text(cid, {"type": "transcription_completed", "transcript": "y"})
+        service.unregister(cid)
+        assert service.total_usage.audio_duration_s == 1.5
+
+    # -- responses_completed / responses_cancelled --
+
+    def test_responses_completed_increments(self, service, conn_id):
+        service._ensure_response(conn_id)
+        service.finish_audio_response(conn_id)
+        assert service.total_usage.responses_completed == 1
+        assert service.total_usage.responses_cancelled == 0
+
+    def test_responses_cancelled_increments(self, service, conn_id):
+        service._ensure_response(conn_id)
+        service.finish_audio_response(conn_id, status="cancelled", reason="turn_detected")
+        assert service.total_usage.responses_cancelled == 1
+        assert service.total_usage.responses_completed == 0
+
+    def test_multiple_responses_accumulate_status_counters(self, service, conn_id):
+        service._ensure_response(conn_id)
+        service.finish_audio_response(conn_id)
+        service._ensure_response(conn_id)
+        service.finish_audio_response(conn_id, status="cancelled", reason="client_cancelled")
+        service._ensure_response(conn_id)
+        service.finish_audio_response(conn_id)
+        assert service.total_usage.responses_completed == 2
+        assert service.total_usage.responses_cancelled == 1
+
+    # -- tool_calls --
+
+    def test_tool_calls_increments(self, service, conn_id):
+        service.translate_pipeline_text(conn_id, {
+            "type": "assistant_text",
+            "text": "",
+            "tools": [
+                {"call_id": "c1", "name": "f1", "arguments": {}},
+                {"call_id": "c2", "name": "f2", "arguments": {}},
+            ],
+        })
+        assert service._state(conn_id).response_usage.tool_calls == 2
+
+    def test_tool_calls_rolls_into_global(self, service, conn_id):
+        service._ensure_response(conn_id)
+        service.translate_pipeline_text(conn_id, {
+            "type": "assistant_text",
+            "text": "",
+            "tools": [{"call_id": "c1", "name": "f1", "arguments": {}}],
+        })
+        service.finish_audio_response(conn_id)
+        assert service.total_usage.tool_calls == 1
+        assert service._state(conn_id).response_usage.tool_calls == 0
+
+    # -- connections --
+
+    def test_connections_increments(self, service):
+        assert service.total_usage.connections == 0
+        cid1 = service.register()
+        assert service.total_usage.connections == 1
+        cid2 = service.register()
+        assert service.total_usage.connections == 2
+        service.unregister(cid1)
+        service.unregister(cid2)
+
+    # -- turns --
+
+    def test_turns_increments(self, service, conn_id):
+        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
+        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
+        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
+        assert service._state(conn_id).response_usage.turns == 3
+
+    def test_turns_rolls_into_global(self, service, conn_id):
+        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
+        service._ensure_response(conn_id)
+        service._end_response(conn_id)
+        assert service.total_usage.turns == 1
+        assert service._state(conn_id).response_usage.turns == 0
+
+    # -- errors_by_type --
+
+    def test_errors_by_type_increments(self, service):
+        service.make_error("msg", "type_a")
+        service.make_error("msg", "type_a")
+        service.make_error("msg", "type_b")
+        assert service.total_usage.errors_by_type == {"type_a": 2, "type_b": 1}
+
+    def test_total_errors_in_get_usage(self, service):
+        service.make_error("msg", "type_a")
+        service.make_error("msg", "type_b")
+        usage = service.get_usage()
+        assert usage["total_errors"] == 2
+        assert usage["errors_by_type"] == {"type_a": 1, "type_b": 1}
+
+    # -- get_usage --
+
+    def test_get_usage(self, service, conn_id):
+        # Speech cycle before response so speech_started doesn't cancel anything
+        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
+        service.translate_pipeline_text(conn_id, {"type": "speech_stopped", "duration_s": 3.0})
+        service.translate_pipeline_text(conn_id, {"type": "transcription_completed", "transcript": "z"})
+
+        service._ensure_response(conn_id)
+        service.translate_pipeline_text(
+            conn_id, {"type": "token_usage", "input_tokens": 10, "output_tokens": 20},
+        )
+        service.translate_pipeline_text(conn_id, {
+            "type": "assistant_text", "text": "hi",
+            "tools": [{"call_id": "c1", "name": "f1", "arguments": {}}],
+        })
+        service.finish_audio_response(conn_id)
+        service.make_error("oops", "some_error")
+        usage = service.get_usage()
+        assert usage["input_tokens"] == 10
+        assert usage["output_tokens"] == 20
+        assert usage["total_tokens"] == 30
+        assert usage["audio_duration_s"] == 3.0
+        assert usage["responses_completed"] == 1
+        assert usage["responses_cancelled"] == 0
+        assert usage["tool_calls"] == 1
+        assert usage["turns"] == 1
+        assert usage["connections"] >= 1
+        assert usage["total_errors"] == 1
+        assert usage["errors_by_type"] == {"some_error": 1}

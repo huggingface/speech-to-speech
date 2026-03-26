@@ -110,6 +110,44 @@ def _generate_id(prefix: str) -> str:
 
 
 
+class UsageMetrics(BaseModel):
+    """Per-response usage counters.
+
+    Supports ``+=`` for rolling per-response metrics into a global total
+    and ``reset()`` for clearing per-response state after rollup.
+    """
+    input_tokens: int = 0
+    output_tokens: int = 0
+    audio_duration_s: float = 0.0
+    responses_completed: int = 0
+    responses_cancelled: int = 0
+    tool_calls: int = 0
+    turns: int = 0
+
+    def __iadd__(self, other: "UsageMetrics") -> "UsageMetrics":
+        for field in UsageMetrics.model_fields:
+            setattr(self, field, getattr(self, field) + getattr(other, field))
+        return self
+
+    def reset(self) -> None:
+        for field, info in UsageMetrics.model_fields.items():
+            setattr(self, field, info.default)
+
+
+class GlobalUsageMetrics(UsageMetrics):
+    """Server-wide metrics that extend per-response counters with
+    connection and error tracking."""
+    connections: int = 0
+    errors_by_type: dict[str, int] = Field(default_factory=dict)
+
+    def record_error(self, error_type: str) -> None:
+        self.errors_by_type[error_type] = self.errors_by_type.get(error_type, 0) + 1
+
+    @property
+    def total_errors(self) -> int:
+        return sum(self.errors_by_type.values())
+
+
 class ConnState(BaseModel):
     """Per-connection mutable state, including all protocol-level IDs."""
     session_id: str = Field(default_factory=lambda: _generate_id("session"))
@@ -123,6 +161,7 @@ class ConnState(BaseModel):
     input_audio_duration_s: float = 0.0
     last_item_id: str | None = None
     response_metadata: dict[str, str] | None = None
+    response_usage: UsageMetrics = Field(default_factory=UsageMetrics)
 
 
 class RealtimeService:
@@ -143,6 +182,7 @@ class RealtimeService:
         self.text_prompt_queue = text_prompt_queue
         self.should_listen = should_listen
         self._conns: dict[str, ConnState] = {}
+        self.total_usage = GlobalUsageMetrics()
 
     # ── Connection lifecycle ─────────────────────
 
@@ -150,10 +190,18 @@ class RealtimeService:
         """Register a new connection and return its session_id."""
         state = ConnState()
         self._conns[state.session_id] = state
+        self.total_usage.connections += 1
         return state.session_id
 
     def unregister(self, conn_id: str) -> None:
-        self._conns.pop(conn_id, None)
+        st = self._conns.pop(conn_id, None)
+        if st is not None:
+            self.total_usage += st.response_usage
+            logger.info(
+                "Session %s unregistered — cumulative: input_tokens=%d, output_tokens=%d, audio=%.2fs",
+                conn_id, self.total_usage.input_tokens, self.total_usage.output_tokens,
+                self.total_usage.audio_duration_s,
+            )
 
     def _state(self, conn_id: str) -> ConnState:
         return self._conns[conn_id]
@@ -186,8 +234,23 @@ class RealtimeService:
             st.in_response = True
         return st.current_response_id, self._current_item_id(conn_id)
 
-    def _end_response(self, conn_id: str) -> None:
+    def _end_response(self, conn_id: str, status: _ResponseStatus = "completed") -> None:
         st = self._state(conn_id)
+        if status == "cancelled":
+            st.response_usage.responses_cancelled += 1
+        else:
+            st.response_usage.responses_completed += 1
+        self.total_usage += st.response_usage
+        logger.info(
+            "Response done (status=%s) — this response: input_tokens=%d, output_tokens=%d, audio=%.2fs"
+            " | cumulative: input_tokens=%d, output_tokens=%d, audio=%.2fs",
+            status,
+            st.response_usage.input_tokens, st.response_usage.output_tokens,
+            st.response_usage.audio_duration_s,
+            self.total_usage.input_tokens, self.total_usage.output_tokens,
+            self.total_usage.audio_duration_s,
+        )
+        st.response_usage.reset()
         st.current_response_id = None
         st.current_item_id = None
         st.content_index = 0
@@ -231,7 +294,9 @@ class RealtimeService:
             conversation_id=st.conversation_id,
             metadata=st.response_metadata,
             usage=RealtimeResponseUsage(
-                input_tokens=0, output_tokens=0, total_tokens=0,
+                input_tokens=st.response_usage.input_tokens,
+                output_tokens=st.response_usage.output_tokens,
+                total_tokens=st.response_usage.input_tokens + st.response_usage.output_tokens,
             ),
         )
 
@@ -489,7 +554,7 @@ class RealtimeService:
                 event_id=self._next_event_id(),
                 response=self._build_response(conn_id, status, reason),
             ))
-            self._end_response(conn_id)
+            self._end_response(conn_id, status)
         return events
 
     # ── Pipeline text -> protocol events ─────────
@@ -503,7 +568,9 @@ class RealtimeService:
             if self._state(conn_id).in_response and self.runtime_config.interrupt_response_enabled:
                 events.extend(self.finish_audio_response(conn_id, status="cancelled", reason="turn_detected"))
             input_item_id = self._start_item(conn_id)
-            self._state(conn_id).last_item_id = input_item_id
+            st = self._state(conn_id)
+            st.last_item_id = input_item_id
+            st.response_usage.turns += 1
             events.append(InputAudioBufferSpeechStartedEvent(
                 type="input_audio_buffer.speech_started",
                 event_id=self._next_event_id(),
@@ -540,6 +607,7 @@ class RealtimeService:
                 output_idx += 1
             tools = msg.get("tools")
             if tools:
+                self._state(conn_id).response_usage.tool_calls += len(tools)
                 for tool in tools:
                     logger.info(f"Tool: {tool}")
                     events.append(
@@ -569,6 +637,7 @@ class RealtimeService:
 
         elif msg_type == "transcription_completed":
             st = self._state(conn_id)
+            st.response_usage.audio_duration_s += st.input_audio_duration_s
             events.append(
                 ConversationItemInputAudioTranscriptionCompletedEvent(
                     type="conversation.item.input_audio_transcription.completed",
@@ -582,17 +651,35 @@ class RealtimeService:
                 )
             )
 
+        elif msg_type == "token_usage":
+            st = self._state(conn_id)
+            st.response_usage.input_tokens += msg.get("input_tokens", 0)
+            st.response_usage.output_tokens += msg.get("output_tokens", 0)
+            logger.info(
+                "Token usage (response): input=%d, output=%d",
+                st.response_usage.input_tokens, st.response_usage.output_tokens,
+            )
+
         else:
             logger.debug(f"Unhandled pipeline text message type: {msg_type}")
 
         return events
 
+    # ── Metrics ────────────────────────────────────
+
+    def get_usage(self) -> dict:
+        """Return cumulative usage metrics across all completed responses."""
+        data = self.total_usage.model_dump()
+        data["total_tokens"] = data["input_tokens"] + data["output_tokens"]
+        data["total_errors"] = self.total_usage.total_errors
+        return data
+
     # ── Helpers ───────────────────────────────────
 
-    @staticmethod
-    def make_error(message: str, _type: str) -> RealtimeErrorEvent:
+    def make_error(self, message: str, _type: str) -> RealtimeErrorEvent:
+        self.total_usage.record_error(_type)
         return RealtimeErrorEvent(
             type="error",
             error=RealtimeError(message=message, type=_type),
-            event_id=RealtimeService._next_event_id(),
+            event_id=self._next_event_id(),
         )
