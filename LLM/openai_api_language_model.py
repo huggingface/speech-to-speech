@@ -76,10 +76,10 @@ class OpenApiModelHandler(BaseHandler):
         start = time.time()
         self.client.responses.create(
             model=self.model_name,
-            input=[
+            input=self._serialize_responses_input([
                 {"role": "system", "content": "You are a helpful assistant"},
                 {"role": "user", "content": "Hello"},
-            ]
+            ]),
         )
         end = time.time()
         logger.info(
@@ -97,6 +97,48 @@ class OpenApiModelHandler(BaseHandler):
 
         self.tools = self.runtime_config.session.tools
         self.tools_choice = override_tool_choice or self.runtime_config.session.tool_choice
+
+    def _normalize_chat_message(self, role, content):
+        text = self._extract_text_content(content)
+        if text is None:
+            text = ""
+        return {"role": role, "content": text}
+
+    def _extract_text_content(self, content):
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    item_type = item.get("type")
+                    if item_type in {"output_text", "input_text"}:
+                        parts.append(str(item.get("text") or ""))
+                else:
+                    item_type = getattr(item, "type", None)
+                    if item_type in {"output_text", "input_text"}:
+                        parts.append(str(getattr(item, "text", "") or ""))
+            return "".join(parts)
+        return str(content)
+
+    def _serialize_responses_input(self, messages):
+        serialized = []
+        for message in messages:
+            role = str(message.get("role") or "").strip()
+            if not role:
+                continue
+            text = self._extract_text_content(message.get("content"))
+            content_type = "output_text" if role == "assistant" else "input_text"
+            serialized.append(
+                {
+                    "type": "message",
+                    "role": role,
+                    "content": [{"type": content_type, "text": text}],
+                }
+            )
+        return serialized
 
     def process(self, prompt):
         # Context-only: add user/input text to chat without generating.
@@ -141,7 +183,7 @@ class OpenApiModelHandler(BaseHandler):
         gen = self.cancel_scope.generation if self.cancel_scope else None
         response: Response | Stream[ResponseStreamEvent] = self.client.responses.create(
             model=self.model_name,
-            input=self.chat.to_list(),
+            input=self._serialize_responses_input(self.chat.to_list()),
             stream=self.stream,
             extra_body=self._extra_body,
             **optional_kwargs,
@@ -170,14 +212,14 @@ class OpenApiModelHandler(BaseHandler):
                 elif event.type == "response.output_item.done":
                     if event.item.type == "function_call":
                         tools.append(event.item.model_dump())
-                    elif event.item.type == "message":
-                        self.chat.append({"role": event.item.role, "content": event.item.content})
                 elif event.type == "response.completed":
                     usage = getattr(event.response, "usage", None)
                     if usage:
                         input_tokens = usage.input_tokens or 0
                         output_tokens = usage.output_tokens or 0
             if not cancelled:
+                if clean_text.strip():
+                    self.chat.append(self._normalize_chat_message("assistant", clean_text))
                 if printable_text.strip() or tools:
                     logger.debug(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
@@ -194,12 +236,13 @@ class OpenApiModelHandler(BaseHandler):
                     if message.type == "function_call":
                         tools.append(message.model_dump())
                     elif message.type == "message":
-                        self.chat.append({"role": message.role, "content": message.content})
                         for chunk in message.content:
                             if chunk.type == "output_text":
                                 clean_text += remove_emojis(chunk.text)
                     else:
                         logger.warning(f"Not supported message type: {message.type}")
+                if clean_text.strip():
+                    self.chat.append(self._normalize_chat_message("assistant", clean_text))
                 logger.debug(f"Clean text: {clean_text}")
                 logger.info(f"Tools: {tools}")
                 yield clean_text, language_code, tools

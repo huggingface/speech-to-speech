@@ -133,3 +133,79 @@ def test_no_disable_thinking_omits_extra_body():
     list(handler.process("Hi"))
 
     assert captured.get("extra_body") is None
+
+
+def test_serialize_responses_input_uses_typed_content_blocks():
+    handler = _make_handler()
+
+    serialized = handler._serialize_responses_input(
+        [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hola."},
+        ]
+    )
+
+    assert serialized == [
+        {
+            "type": "message",
+            "role": "system",
+            "content": [{"type": "input_text", "text": "You are helpful."}],
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Hello"}],
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Hola."}],
+        },
+    ]
+
+
+def test_process_second_turn_uses_typed_responses_history(monkeypatch):
+    monkeypatch.setattr(
+        sys.modules["LLM.openai_api_language_model"],
+        "sent_tokenize",
+        lambda text: [text] if text else [],
+    )
+
+    handler = _make_handler()
+    captured_inputs = []
+
+    def fake_create(**kwargs):
+        captured_inputs.append(kwargs["input"])
+        if len(captured_inputs) == 1:
+            return iter([
+                _make_text_delta_event("Hola."),
+                _make_output_item_done_event(content=[SimpleNamespace(type="output_text", text="Hola.")]),
+            ])
+        return iter([
+            _make_text_delta_event("Adiós."),
+            _make_output_item_done_event(content=[SimpleNamespace(type="output_text", text="Adiós.")]),
+        ])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+
+    list(handler.process("Say hello in Spanish."))
+    list(handler.process("Now say goodbye in Spanish."))
+
+    assert captured_inputs[1] == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Say hello in Spanish."}],
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Hola."}],
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Now say goodbye in Spanish."}],
+        },
+    ]
