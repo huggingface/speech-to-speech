@@ -4,7 +4,7 @@ from openai.types.realtime import RealtimeFunctionTool
 
 class FunctionTool(RealtimeFunctionTool):
 
-    def to_code_prompt(self, include_args_doc: bool = False) -> str:
+    def to_code_prompt(self, include_args_doc: bool = True) -> str:
         """Generate a code-style prompt string for this function tool.
 
         Args:

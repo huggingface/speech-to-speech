@@ -621,7 +621,7 @@ class RealtimeService:
                             event_id=self._next_event_id(),
                             call_id=tool.get("call_id", ""),
                             name=tool.get("name", ""),
-                            arguments=json.dumps(tool.get("arguments", {})),
+                            arguments=tool.get("arguments", {}),
                             item_id=item_id,
                             output_index=output_idx,
                             response_id=resp_id,

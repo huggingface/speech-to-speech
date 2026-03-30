@@ -206,7 +206,7 @@ class FunctionToolCall(BaseModel):
         return ResponseFunctionToolCall(
             name=self.function_name,
             arguments=json.dumps(arguments),
-            call_id=f"call_{uuid4().hex[:12]}",
+            call_id=f"call_{uuid4()}",
             type="function_call",
         )
 

@@ -469,8 +469,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
 
     def _generate(self, language_code: str | None, gen: int | None, ctx: StreamContext) -> Iterator[tuple[str, str | None, list]]:
         chat_input = self.tokenizer.apply_chat_template(self.chat.to_list(), tokenize=True)
-        assert isinstance(chat_input, dict) or isinstance(chat_input, list)
-        ctx.input_tokens = len(chat_input["input_ids"] if isinstance(chat_input, dict) else chat_input)
+        ctx.input_tokens = len(chat_input if isinstance(chat_input, list) else chat_input["input_ids"])
         logger.debug("Prompt token count: %d", ctx.input_tokens)
 
         chat_prompt = self.tokenizer.apply_chat_template(
