@@ -30,7 +30,7 @@ dependencies = [
     "phonemizer-fork>=3.3.2; platform_system == 'Darwin'",
     "nano-parakeet>=0.2.0; platform_system != 'Darwin'",
     "kokoro>=0.9.2; platform_system != 'Darwin'",
-    "faster-qwen3-tts>=0.2.4; platform_system != 'Darwin'",
+    "faster-qwen3-tts>=0.2.5; platform_system != 'Darwin'",
 ]
 
 [dependency-groups]
