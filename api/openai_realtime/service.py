@@ -615,13 +615,17 @@ class RealtimeService:
                 self._state(conn_id).response_usage.tool_calls += len(tools)
                 for tool in tools:
                     logger.info(f"Tool: {tool}")
+                    if isinstance(tool.get("arguments"), str):
+                        arguments = tool.get("arguments")
+                    else:
+                        arguments = json.dumps(tool.get("arguments", {}))
                     events.append(
                         ResponseFunctionCallArgumentsDoneEvent(
                             type="response.function_call_arguments.done",
                             event_id=self._next_event_id(),
                             call_id=tool.get("call_id", ""),
                             name=tool.get("name", ""),
-                            arguments=tool.get("arguments", {}),
+                            arguments=arguments,
                             item_id=item_id,
                             output_index=output_idx,
                             response_id=resp_id,

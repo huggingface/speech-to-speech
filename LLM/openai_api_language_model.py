@@ -4,7 +4,7 @@ import time
 from nltk import sent_tokenize
 from rich.console import Console
 from openai import OpenAI, Stream
-from openai.types.responses import Response, ResponseStreamEvent, ResponseOutputMessage
+from openai.types.responses import Response, ResponseStreamEvent
 
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
