@@ -158,6 +158,13 @@ class KokoroTTSHandler(BaseHandler):
             # Preload voices for common languages to avoid download delays during inference
             self._preload_multilingual_voices()
         except ImportError as e:
+            message = str(e)
+            if "misaki" in message or "espeakng_loader" in message:
+                raise ImportError(
+                    "Kokoro TTS on Apple Silicon requires additional mlx-audio TTS dependencies. "
+                    f"Missing dependency: {message}. "
+                    "Install with: pip install misaki espeakng-loader"
+                ) from e
             raise ImportError(
                 "mlx-audio is required for Kokoro TTS on Apple Silicon. "
                 "Install with: pip install mlx-audio"

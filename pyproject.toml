@@ -6,7 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "lingua-language-detector>=2.0.2",
     "nltk==3.9.1",
-    "melotts @ git+https://github.com/andimarafioti/MeloTTS.git; platform_system != 'Darwin'",
+    "melotts @ git+https://github.com/andimarafioti/MeloTTS.git",
     "torch==2.11.0; platform_system == 'Darwin'",
     "torchaudio==2.11.0; platform_system == 'Darwin'",
     "torch>=2.4.0; platform_system != 'Darwin'",
@@ -23,7 +23,12 @@ dependencies = [
     "lightning-whisper-mlx>=0.0.10; platform_system == 'Darwin'",
     "mlx-lm>=0.14.0; platform_system == 'Darwin'",
     "mlx-vlm==0.4.1; platform_system == 'Darwin'",
-    "mlx-audio[tts] @ git+https://github.com/Blaizzy/mlx-audio.git@v0.4.1; platform_system == 'Darwin'", # mlx-audio[tts]==0.4.1 install from source due to issue with dependencies
+    # "mlx-audio[tts] @ git+https://github.com/Blaizzy/mlx-audio.git@v0.4.1; platform_system == 'Darwin'", # mlx-audio[tts]==0.4.1 install from source due to issue with dependencies
+    "mlx-audio==0.4.1; platform_system == 'Darwin'",
+    "misaki>=0.9.4; platform_system == 'Darwin'",
+    "espeakng-loader>=0.2.4; platform_system == 'Darwin'",
+    "spacy>=3.8.4; platform_system == 'Darwin'",
+    "phonemizer-fork>=3.3.2; platform_system == 'Darwin'",
     "nano-parakeet>=0.2.0; platform_system != 'Darwin'",
     "kokoro>=0.9.2; platform_system != 'Darwin'",
     "faster-qwen3-tts>=0.2.4; platform_system != 'Darwin'",
