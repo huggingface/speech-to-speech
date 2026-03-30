@@ -2,10 +2,8 @@ import base64
 import json
 import logging
 import uuid
-import numpy as np
 from pydantic import BaseModel, Field
 from queue import Queue
-from scipy.signal import resample_poly
 from threading import Event as ThreadingEvent
 from typing import Literal, Optional, Union
 

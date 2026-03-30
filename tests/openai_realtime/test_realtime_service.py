@@ -1104,7 +1104,7 @@ class TestChatImageLifecycle:
         chat.append({"role": "assistant", "content": "It's a cat."})
         chat.strip_images()
         user_msg = chat.buffer[0]
-        assert user_msg["content"] == "What is this?"
+        assert user_msg["content"] == [{"type": "input_text", "text": "What is this?"}]
 
     def test_strip_images_noop_on_text_only(self):
         chat = self._make_chat()
@@ -1125,7 +1125,7 @@ class TestChatImageLifecycle:
         })
         chat.append({"role": "assistant", "content": "I see it."})
         chat.strip_images()
-        assert chat.buffer[0]["content"] == "look"
+        assert chat.buffer[0]["content"] == [{"type": "input_text", "text": "look"}]
 
         chat.append({
             "role": "user",

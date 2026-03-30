@@ -30,9 +30,8 @@ class Chat:
     def strip_images(self):
         """Remove all input_image content parts from every message in the buffer.
 
-        Multi-part messages that contained both text and image are collapsed
-        back to a plain string when only one text part remains.  Called after
-        appending the assistant response so images don't persist across turns.
+        Called after appending the assistant response so images don't persist
+        across turns.
         """
         for msg in self.buffer:
             content = msg.get("content")
