@@ -124,7 +124,6 @@ class BaseHandler:
 
                 next_text, next_language_code, is_end = _decode(next_item)
                 if is_end:
-                    self.queue_in.queue.popleft()
                     saw_end_of_response = True
                     break
                 if next_text is None:

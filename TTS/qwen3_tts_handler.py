@@ -254,8 +254,6 @@ class Qwen3TTSHandler(BaseHandler):
             if not getattr(self, 'runtime_config', None):
                 self.should_listen.set()
 
-        if saw_end_of_response:
-            yield b"__RESPONSE_DONE__"
 
     def _process_voice_clone(self, text):
         yield from self._stream(

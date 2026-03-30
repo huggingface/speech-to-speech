@@ -28,7 +28,7 @@ def test_coalesce_pending_tts_input_merges_ready_sentences_and_absorbs_response_
 
     assert combined == ("First sentence. Second sentence. Third sentence.", "en")
     assert saw_end is True
-    assert handler.queue_in.empty()
+    assert handler.queue_in.get_nowait() == ("__END_OF_RESPONSE__", None)
 
 
 def test_coalesce_pending_tts_input_stops_before_control_messages():
