@@ -4,7 +4,7 @@ import time
 from nltk import sent_tokenize
 from rich.console import Console
 from openai import OpenAI, Stream
-from openai.types.responses import Response, ResponseStreamEvent 
+from openai.types.responses import Response, ResponseStreamEvent, ResponseOutputMessage
 
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
@@ -76,10 +76,10 @@ class OpenApiModelHandler(BaseHandler):
         start = time.time()
         self.client.responses.create(
             model=self.model_name,
-            input=self._serialize_responses_input_to_chat_completions([
-                {"role": "system", "content": "You are a helpful assistant"},
-                {"role": "user", "content": "Hello"},
-            ])
+            input=[
+                {"type": "message", "role": "system", "content": [{"type": "input_text", "text": "You are a helpful assistant"}]},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]},
+            ]
         )
         end = time.time()
         logger.info(
@@ -92,69 +92,29 @@ class OpenApiModelHandler(BaseHandler):
         new_instructions = self.runtime_config.session.instructions
         if new_instructions and new_instructions != self._last_instructions:
             self._last_instructions = new_instructions
-            self.chat.init_chat({"role": "system", "content": new_instructions})
+            self.chat.init_chat({"type": "message", "role": "system", "content": [{"type": "input_text", "text": new_instructions}]})
             logger.info(f"LLM instructions updated ({len(new_instructions)} chars)")
 
         self.tools = self.runtime_config.session.tools
         self.tools_choice = override_tool_choice or self.runtime_config.session.tool_choice
-
-    def _extract_content_parts(self, content: str | list[dict] | None) -> list[dict]:
-        """Walk *content* in order and return a list of normalised parts.
-
-        Preserves the original interleaving so ``[text, image, text]`` stays
-        in that order.  Accepts both the Realtime-style types
-        (``input_text`` / ``input_image``) and the Chat Completions-style
-        types (``text`` / ``image_url``).
-        """
-        if content is None:
-            return []
-        if isinstance(content, str):
-            return [{"type": "text", "text": content}] if content else []
-        if isinstance(content, list):
-            parts: list[dict] = []
-            for item in content:
-                if isinstance(item, dict):
-                    item_type = item.get("type")
-                else:
-                    item_type = getattr(item, "type", None)
-
-                if item_type in {"output_text", "input_text", "text"}:
-                    text = (item.get("text") if isinstance(item, dict)
-                            else getattr(item, "text", "")) or ""
-                    parts.append({"type": "text", "text": str(text)})
-                elif item_type == "input_image":
-                    url = (item.get("image_url") if isinstance(item, dict)
-                           else getattr(item, "image_url", "")) or ""
-                    parts.append({"type": "image_url", "image_url": {"url": url}})
-                else:
-                    logger.warning(f"Unsupported content type: {item_type}")
-            return parts
-
-    def _serialize_responses_input_to_chat_completions(self, messages: list[dict]) -> list[dict]:
-        serialized = []
-        for message in messages:
-            role = str(message.get("role") or "").strip()
-            if not role:
-                continue
-            parts = self._extract_content_parts(message.get("content"))
-            if not parts:
-                parts = [{"type": "text", "text": ""}]
-            serialized.append({"role": role, "content": parts})
-        return serialized
 
     def process(self, prompt):
         # Context-only: add user/input text to chat without generating.
         # Generation is deferred until __GENERATE_RESPONSE__ (from response.create).
         if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == "__ADD_TO_CONTEXT__":
             _, role, content = prompt
-            self.chat.append({"role": role, "content": content})
+            self.chat.append({"type": "message", "role": role, "content": content})
             logger.debug("Added to LLM context (role=%s)", role)
             return
 
         # Context-only: add function-call result to chat without generating.
         if isinstance(prompt, tuple) and len(prompt) == 2 and prompt[0] == "__FUNCTION_RESULT__":
             _, result_text = prompt
-            self.chat.append({"role": self.user_role, "content": result_text})
+            self.chat.append({
+                "type": "message",
+                "role": self.user_role,
+                "content": [{"type": "input_text", "text": result_text}],
+            })
             logger.debug("Added function result to LLM context (%d chars)", len(result_text))
             return
 
@@ -164,7 +124,11 @@ class OpenApiModelHandler(BaseHandler):
             _, override_instructions, override_tool_choice = prompt
             self._apply_runtime_config(override_tool_choice)
             if override_instructions:
-                self.chat.append({"role": self.user_role, "content": override_instructions})
+                self.chat.append({
+                    "type": "message",
+                    "role": self.user_role,
+                    "content": [{"type": "input_text", "text": override_instructions}],
+                })
         else:
             self._apply_runtime_config()
             # Regular text from STT pipeline
@@ -174,7 +138,11 @@ class OpenApiModelHandler(BaseHandler):
                 if language_code[-5:] == "-auto":
                     language_code = language_code[:-5]
                     prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
-            self.chat.append({"role": self.user_role, "content": prompt})
+            self.chat.append({
+                "type": "message",
+                "role": self.user_role,
+                "content": [{"type": "input_text", "text": prompt}],
+            })
 
         optional_kwargs = {}
         if self.tools is not None:
@@ -183,9 +151,10 @@ class OpenApiModelHandler(BaseHandler):
             optional_kwargs["tool_choice"] = self.tools_choice
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
+        print(self.chat.to_list())
         response: Response | Stream[ResponseStreamEvent] = self.client.responses.create(
             model=self.model_name,
-            input=self._serialize_responses_input_to_chat_completions(self.chat.to_list()),
+            input=self.chat.to_list(),
             stream=self.stream,
             extra_body=self._extra_body,
             **optional_kwargs,
@@ -194,7 +163,6 @@ class OpenApiModelHandler(BaseHandler):
         clean_text = ""
         input_tokens = 0
         output_tokens = 0
-        assistant_content: list[dict] = []
         if self.stream:
             cancelled = False
             printable_text = ""
@@ -216,7 +184,11 @@ class OpenApiModelHandler(BaseHandler):
                     if event.item.type == "function_call":
                         tools.append(event.item.model_dump())
                     elif event.item.type == "message":
-                        assistant_content.append({"role": event.item.role, "content": event.item.content})
+                        self.chat.append({
+                            "type": "message",
+                            "role": event.item.role,
+                            "content": event.item.content,
+                        })
                 elif event.type == "response.completed":
                     usage = getattr(event.response, "usage", None)
                     if usage:
@@ -239,7 +211,11 @@ class OpenApiModelHandler(BaseHandler):
                     if message.type == "function_call":
                         tools.append(message.model_dump())
                     elif message.type == "message":
-                        assistant_content.append({"role": message.role, "content": message.content})
+                        self.chat.append({
+                            "type": "message",
+                            "role": message.role,
+                            "content": message.content,
+                        })
                         for chunk in message.content:
                             if chunk.type == "output_text":
                                 clean_text += remove_emojis(chunk.text)
@@ -250,7 +226,6 @@ class OpenApiModelHandler(BaseHandler):
                 yield clean_text.strip(), language_code, tools
 
         self.chat.strip_images()
-        self.chat.append(self._serialize_responses_input(assistant_content))
         if input_tokens or output_tokens:
             yield ("__TOKEN_USAGE__", input_tokens, output_tokens)
         yield ("__END_OF_RESPONSE__", None, None)

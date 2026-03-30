@@ -491,7 +491,7 @@ class RealtimeService:
             return False
 
         if getattr(item, "type", None) == "function_call_output" and getattr(item, "output", None):
-            result_text = f"(call_id: {item.call_id}) {item.output}"
+            result_text = f"(call_id: {item.call_id})\noutput: {item.output}"
             self.text_prompt_queue.put(("__FUNCTION_RESULT__", result_text))
             logger.debug("Enqueued function_call_output (call_id=%s)", item.call_id)
             return True
