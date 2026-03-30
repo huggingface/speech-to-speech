@@ -216,6 +216,8 @@ class Qwen3TTSHandler(BaseHandler):
             yield b"__RESPONSE_DONE__"
             return
 
+        llm_sentence, saw_end_of_response = self._coalesce_pending_tts_input(llm_sentence)
+
         if isinstance(llm_sentence, tuple):
             llm_sentence, _ = llm_sentence
         if not llm_sentence:
@@ -251,6 +253,9 @@ class Qwen3TTSHandler(BaseHandler):
         finally:
             if not getattr(self, 'runtime_config', None):
                 self.should_listen.set()
+
+        if saw_end_of_response:
+            yield b"__RESPONSE_DONE__"
 
     def _process_voice_clone(self, text):
         yield from self._stream(

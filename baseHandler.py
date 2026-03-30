@@ -82,3 +82,67 @@ class BaseHandler:
 
     def on_session_end(self):
         pass
+
+    def _coalesce_pending_tts_input(self, current_input):
+        """Combine already-queued text chunks before the next TTS synthesis call.
+
+        This does not wait for more text. It only drains items that are already
+        sitting in the input queue when the TTS handler becomes ready again.
+
+        Returns:
+            Tuple of (coalesced_input, saw_end_of_response)
+        """
+        if not hasattr(self.queue_in, "mutex") or not hasattr(self.queue_in, "queue"):
+            return current_input, False
+
+        def _decode(item):
+            if isinstance(item, tuple):
+                if item and item[0] == "__END_OF_RESPONSE__":
+                    return None, None, True
+                if len(item) == 2 and isinstance(item[0], str):
+                    return item[0], item[1], False
+            elif isinstance(item, str):
+                return item, None, False
+            return None, None, False
+
+        text, language_code, _ = _decode(current_input)
+        if text is None:
+            return current_input, False
+
+        parts = [text.strip()] if text and text.strip() else []
+        saw_end_of_response = False
+
+        # Queue.Queue has no public peek API. We inspect the protected deque
+        # under its mutex so we can stop before consuming control messages.
+        with self.queue_in.mutex:
+            while self.queue_in.queue:
+                next_item = self.queue_in.queue[0]
+                if is_control_message(next_item, SESSION_END.kind):
+                    break
+                if isinstance(next_item, bytes) and next_item == b"END":
+                    break
+
+                next_text, next_language_code, is_end = _decode(next_item)
+                if is_end:
+                    self.queue_in.queue.popleft()
+                    saw_end_of_response = True
+                    break
+                if next_text is None:
+                    break
+                if (
+                    language_code is not None
+                    and next_language_code is not None
+                    and next_language_code != language_code
+                ):
+                    break
+
+                self.queue_in.queue.popleft()
+                if next_text.strip():
+                    parts.append(next_text.strip())
+                if language_code is None:
+                    language_code = next_language_code
+
+        combined_text = " ".join(parts).strip()
+        if isinstance(current_input, tuple):
+            return (combined_text, language_code), saw_end_of_response
+        return combined_text, saw_end_of_response
