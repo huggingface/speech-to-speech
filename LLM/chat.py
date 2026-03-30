@@ -28,18 +28,20 @@ class Chat:
         self.buffer = []
 
     def strip_images(self):
-        """Remove all input_image content parts from every message in the buffer.
+        """Remove all image content parts from every message in the buffer.
 
         Called after appending the assistant response so images don't persist
-        across turns.
+        across turns.  Handles both Realtime-style ``input_image`` and
+        Chat Completions-style ``image_url`` types.
         """
+        _IMAGE_TYPES = {"input_image", "image_url"}
         for msg in self.buffer:
             content = msg.get("content")
             if not isinstance(content, list):
                 continue
             text_parts = [
                 p for p in content
-                if (p.get("type") if isinstance(p, dict) else getattr(p, "type", None)) != "input_image"
+                if (p.get("type") if isinstance(p, dict) else getattr(p, "type", None)) not in _IMAGE_TYPES
             ]
             msg["content"] = text_parts
 

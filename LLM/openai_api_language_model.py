@@ -66,7 +66,7 @@ class OpenApiModelHandler(BaseHandler):
         self.tools_choice = None
         self._extra_body = (
             {"chat_template_kwargs": {"enable_thinking": False}}
-            if disable_thinking
+            if disable_thinking and base_url is not None # Only for other than OpenAI
             else None
         )
         self.warmup()
@@ -76,10 +76,10 @@ class OpenApiModelHandler(BaseHandler):
         start = time.time()
         self.client.responses.create(
             model=self.model_name,
-            input=[
+            input=self._serialize_responses_input_to_chat_completions([
                 {"role": "system", "content": "You are a helpful assistant"},
                 {"role": "user", "content": "Hello"},
-            ]
+            ])
         )
         end = time.time()
         logger.info(
@@ -97,6 +97,50 @@ class OpenApiModelHandler(BaseHandler):
 
         self.tools = self.runtime_config.session.tools
         self.tools_choice = override_tool_choice or self.runtime_config.session.tool_choice
+
+    def _extract_content_parts(self, content: str | list[dict] | None) -> list[dict]:
+        """Walk *content* in order and return a list of normalised parts.
+
+        Preserves the original interleaving so ``[text, image, text]`` stays
+        in that order.  Accepts both the Realtime-style types
+        (``input_text`` / ``input_image``) and the Chat Completions-style
+        types (``text`` / ``image_url``).
+        """
+        if content is None:
+            return []
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}] if content else []
+        if isinstance(content, list):
+            parts: list[dict] = []
+            for item in content:
+                if isinstance(item, dict):
+                    item_type = item.get("type")
+                else:
+                    item_type = getattr(item, "type", None)
+
+                if item_type in {"output_text", "input_text", "text"}:
+                    text = (item.get("text") if isinstance(item, dict)
+                            else getattr(item, "text", "")) or ""
+                    parts.append({"type": "text", "text": str(text)})
+                elif item_type == "input_image":
+                    url = (item.get("image_url") if isinstance(item, dict)
+                           else getattr(item, "image_url", "")) or ""
+                    parts.append({"type": "image_url", "image_url": {"url": url}})
+                else:
+                    logger.warning(f"Unsupported content type: {item_type}")
+            return parts
+
+    def _serialize_responses_input_to_chat_completions(self, messages: list[dict]) -> list[dict]:
+        serialized = []
+        for message in messages:
+            role = str(message.get("role") or "").strip()
+            if not role:
+                continue
+            parts = self._extract_content_parts(message.get("content"))
+            if not parts:
+                parts = [{"type": "text", "text": ""}]
+            serialized.append({"role": role, "content": parts})
+        return serialized
 
     def process(self, prompt):
         # Context-only: add user/input text to chat without generating.
@@ -141,7 +185,7 @@ class OpenApiModelHandler(BaseHandler):
         gen = self.cancel_scope.generation if self.cancel_scope else None
         response: Response | Stream[ResponseStreamEvent] = self.client.responses.create(
             model=self.model_name,
-            input=self.chat.to_list(),
+            input=self._serialize_responses_input_to_chat_completions(self.chat.to_list()),
             stream=self.stream,
             extra_body=self._extra_body,
             **optional_kwargs,
@@ -150,6 +194,7 @@ class OpenApiModelHandler(BaseHandler):
         clean_text = ""
         input_tokens = 0
         output_tokens = 0
+        assistant_content: list[dict] = []
         if self.stream:
             cancelled = False
             printable_text = ""
@@ -171,7 +216,7 @@ class OpenApiModelHandler(BaseHandler):
                     if event.item.type == "function_call":
                         tools.append(event.item.model_dump())
                     elif event.item.type == "message":
-                        self.chat.append({"role": event.item.role, "content": event.item.content})
+                        assistant_content.append({"role": event.item.role, "content": event.item.content})
                 elif event.type == "response.completed":
                     usage = getattr(event.response, "usage", None)
                     if usage:
@@ -194,7 +239,7 @@ class OpenApiModelHandler(BaseHandler):
                     if message.type == "function_call":
                         tools.append(message.model_dump())
                     elif message.type == "message":
-                        self.chat.append({"role": message.role, "content": message.content})
+                        assistant_content.append({"role": message.role, "content": message.content})
                         for chunk in message.content:
                             if chunk.type == "output_text":
                                 clean_text += remove_emojis(chunk.text)
@@ -202,9 +247,10 @@ class OpenApiModelHandler(BaseHandler):
                         logger.warning(f"Not supported message type: {message.type}")
                 logger.debug(f"Clean text: {clean_text}")
                 logger.info(f"Tools: {tools}")
-                yield clean_text, language_code, tools
+                yield clean_text.strip(), language_code, tools
 
         self.chat.strip_images()
+        self.chat.append(self._serialize_responses_input(assistant_content))
         if input_tokens or output_tokens:
             yield ("__TOKEN_USAGE__", input_tokens, output_tokens)
         yield ("__END_OF_RESPONSE__", None, None)
