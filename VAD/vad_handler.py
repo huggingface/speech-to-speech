@@ -55,7 +55,12 @@ class VADHandler(BaseHandler):
         self.text_output_queue = text_output_queue
         self.runtime_config = runtime_config
         self._last_turn_detection = None
-        self.model, _ = torch.hub.load("snakers4/silero-vad", "silero_vad")
+        self.model, _ = torch.hub.load(
+            "snakers4/silero-vad",
+            "silero_vad",
+            trust_repo=True,
+            skip_validation=True,
+        )
         self.iterator = VADIterator(
             self.model,
             threshold=thresh,
