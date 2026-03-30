@@ -511,15 +511,7 @@ def get_llm_handler(
     language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
 ):
-    if module_kwargs.llm == "transformers":
-        from LLM.language_model import LanguageModelHandler
-        return LanguageModelHandler(
-            stop_event,
-            queue_in=text_prompt_queue,
-            queue_out=lm_response_queue,
-            setup_kwargs=vars(language_model_handler_kwargs),
-        )
-    elif module_kwargs.llm == "open_api":
+    if module_kwargs.llm == "open_api":
         from LLM.openai_api_language_model import OpenApiModelHandler
         return OpenApiModelHandler(
             stop_event,
@@ -527,18 +519,26 @@ def get_llm_handler(
             queue_out=lm_response_queue,
             setup_kwargs=vars(open_api_language_model_handler_kwargs),
         )
-    elif module_kwargs.llm == "mlx-lm":
-        from LLM.language_model import LanguageModelHandler
+
+    if module_kwargs.llm in ("transformers", "mlx-lm"):
         lm_kwargs = vars(language_model_handler_kwargs)
-        lm_kwargs["backend"] = "mlx"
-        return LanguageModelHandler(
+        is_vlm = lm_kwargs.pop("is_vlm", False)
+        if module_kwargs.llm == "mlx-lm":
+            lm_kwargs["backend"] = "mlx"
+
+        if is_vlm:
+            from LLM.language_model import VisionLanguageModelHandler as HandlerClass
+        else:
+            from LLM.language_model import LanguageModelHandler as HandlerClass
+
+        return HandlerClass(
             stop_event,
             queue_in=text_prompt_queue,
             queue_out=lm_response_queue,
             setup_kwargs=lm_kwargs,
         )
-    else:
-        raise ValueError("The LLM should be either transformers, mlx-lm or open_api")
+
+    raise ValueError("The LLM should be either transformers, mlx-lm or open_api")
 
 
 def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs, qwen3_tts_handler_kwargs):

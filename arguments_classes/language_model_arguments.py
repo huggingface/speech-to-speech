@@ -69,3 +69,11 @@ metadata={
             "help": "Number of interactions assitant-user to keep for the chat. None for no limitations."
         },
     )
+    lm_is_vlm: bool = field(
+        default=False,
+        metadata={
+            "help": "Set to True when using a Vision Language Model (VLM) that accepts image inputs. "
+                    "Loads AutoProcessor + AutoModelForImageTextToText instead of the default text-only model. "
+                    "Default is False."
+        },
+    )

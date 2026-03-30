@@ -252,22 +252,19 @@ class TestHandleConversationItemCreate:
         )
 
     def test_text_input_emits_conversation_item_created(
-        self, service, conn_id, text_prompt_queue, should_listen,
+        self, service, conn_id, text_prompt_queue,
     ):
-        should_listen.set()
         events = service.handle_conversation_item_create(conn_id, self._text_event("hi"))
         assert len(events) == 1
         evt = events[0]
         assert isinstance(evt, ConversationItemCreatedEvent)
         assert evt.previous_item_id is None  # first item
         assert evt.item.role == "user"
-        assert evt.item.status == "completed"
         assert evt.item.content[0].type == "input_text"
         assert evt.item.content[0].text == "hi"
         assert not text_prompt_queue.empty()
         msg = text_prompt_queue.get()
-        assert msg == ("__ADD_TO_CONTEXT__", "user", "hi")
-        assert not should_listen.is_set()
+        assert msg == ("__ADD_TO_CONTEXT__", "user", [{"type": "input_text", "text": "hi"}])
 
     def test_text_input_previous_item_id_chain(self, service, conn_id):
         e1 = service.handle_conversation_item_create(conn_id, self._text_event("a", "item_1"))
@@ -281,21 +278,52 @@ class TestHandleConversationItemCreate:
             item={"type": "function_call_output", "output": '{"result": 42}', "call_id": "call_1"},
         )
         events = service.handle_conversation_item_create(conn_id, evt)
-        assert events == []
+        assert len(events) == 1
+        assert isinstance(events[0], ConversationItemCreatedEvent)
         msg = text_prompt_queue.get()
-        assert msg == ("__FUNCTION_RESULT__", '{"result": 42}')
+        assert msg == ("__FUNCTION_RESULT__", '(call_id: call_1) {"result": 42}')
 
-    def test_input_image_ignored(self, service, conn_id):
+    def test_input_image_forwarded(self, service, conn_id, text_prompt_queue):
         evt = ConversationItemCreateEvent(
             type="conversation.item.create",
             item={
                 "type": "message",
                 "role": "user",
-                "content": [{"type": "input_image", "url": "https://example.com/img.png"}],
+                "content": [{"type": "input_image", "image_url": "https://example.com/img.png"}],
             },
         )
         events = service.handle_conversation_item_create(conn_id, evt)
-        assert events == []
+        assert len(events) == 1
+        assert isinstance(events[0], ConversationItemCreatedEvent)
+        msg = text_prompt_queue.get()
+        assert msg[0] == "__ADD_TO_CONTEXT__"
+        assert msg[1] == "user"
+        assert isinstance(msg[2], list)
+        assert msg[2][0]["type"] == "input_image"
+        assert msg[2][0]["image_url"] == "https://example.com/img.png"
+
+    def test_mixed_text_and_image_forwarded(self, service, conn_id, text_prompt_queue):
+        evt = ConversationItemCreateEvent(
+            type="conversation.item.create",
+            item={
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "What is this?"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,abc123"},
+                ],
+            },
+        )
+        events = service.handle_conversation_item_create(conn_id, evt)
+        assert len(events) == 1
+        msg = text_prompt_queue.get()
+        assert msg[0] == "__ADD_TO_CONTEXT__"
+        assert msg[1] == "user"
+        assert isinstance(msg[2], list)
+        assert len(msg[2]) == 2
+        assert msg[2][0] == {"type": "input_text", "text": "What is this?"}
+        assert msg[2][1]["type"] == "input_image"
+        assert msg[2][1]["image_url"] == "data:image/png;base64,abc123"
 
 
 # ===================================================================
@@ -366,6 +394,33 @@ class TestHandleResponseCreate:
             sentinel = text_prompt_queue.get()
             assert sentinel[0] == "__GENERATE_RESPONSE__"
             assert sentinel[2] == choice
+
+    def test_response_create_with_image_input_items(self, service, conn_id, text_prompt_queue):
+        evt = ResponseCreateEvent(
+            type="response.create",
+            response={
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "Describe this image"},
+                            {"type": "input_image", "image_url": "https://example.com/photo.jpg"},
+                        ],
+                    }
+                ],
+            },
+        )
+        err = service.handle_response_create(conn_id, evt)
+        assert err is None
+        context_msg = text_prompt_queue.get()
+        assert context_msg[0] == "__ADD_TO_CONTEXT__"
+        assert context_msg[1] == "user"
+        assert isinstance(context_msg[2], list)
+        assert any(p["type"] == "input_image" for p in context_msg[2])
+        assert any(p["type"] == "input_text" for p in context_msg[2])
+        gen_msg = text_prompt_queue.get()
+        assert gen_msg[0] == "__GENERATE_RESPONSE__"
 
 
 # ===================================================================
@@ -1024,3 +1079,61 @@ class TestUsageMetricsTracking:
         assert usage["connections"] >= 1
         assert usage["total_errors"] == 1
         assert usage["errors_by_type"] == {"some_error": 1}
+
+
+# ===================================================================
+# Chat image lifecycle
+# ===================================================================
+
+class TestChatImageLifecycle:
+    """Tests for Chat.strip_images()."""
+
+    def _make_chat(self):
+        from LLM.chat import Chat
+        return Chat(size=10)
+
+    def test_strip_images_removes_image_parts(self):
+        chat = self._make_chat()
+        chat.append({
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "What is this?"},
+                {"type": "input_image", "image_url": "data:image/png;base64,abc"},
+            ],
+        })
+        chat.append({"role": "assistant", "content": "It's a cat."})
+        chat.strip_images()
+        user_msg = chat.buffer[0]
+        assert user_msg["content"] == "What is this?"
+
+    def test_strip_images_noop_on_text_only(self):
+        chat = self._make_chat()
+        chat.append({"role": "user", "content": "hello"})
+        chat.append({"role": "assistant", "content": "hi"})
+        chat.strip_images()
+        assert chat.buffer[0]["content"] == "hello"
+        assert chat.buffer[1]["content"] == "hi"
+
+    def test_strip_then_new_image_cycle(self):
+        chat = self._make_chat()
+        chat.append({
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "look"},
+                {"type": "input_image", "image_url": "old_url"},
+            ],
+        })
+        chat.append({"role": "assistant", "content": "I see it."})
+        chat.strip_images()
+        assert chat.buffer[0]["content"] == "look"
+
+        chat.append({
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "now this"},
+                {"type": "input_image", "image_url": "new_url"},
+            ],
+        })
+        last_user = chat.buffer[-1]
+        assert isinstance(last_user["content"], list)
+        assert any(p.get("image_url") == "new_url" for p in last_user["content"])

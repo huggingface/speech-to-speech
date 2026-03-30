@@ -102,9 +102,9 @@ class OpenApiModelHandler(BaseHandler):
         # Context-only: add user/input text to chat without generating.
         # Generation is deferred until __GENERATE_RESPONSE__ (from response.create).
         if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == "__ADD_TO_CONTEXT__":
-            _, role, text = prompt
-            self.chat.append({"role": role, "content": text})
-            logger.debug("Added to LLM context (role=%s, %d chars)", role, len(text))
+            _, role, content = prompt
+            self.chat.append({"role": role, "content": content})
+            logger.debug("Added to LLM context (role=%s)", role)
             return
 
         # Context-only: add function-call result to chat without generating.
@@ -204,6 +204,7 @@ class OpenApiModelHandler(BaseHandler):
                 logger.info(f"Tools: {tools}")
                 yield clean_text, language_code, tools
 
+        self.chat.strip_images()
         if input_tokens or output_tokens:
             yield ("__TOKEN_USAGE__", input_tokens, output_tokens)
         yield ("__END_OF_RESPONSE__", None, None)

@@ -12,10 +12,6 @@ from typing import Literal, Optional, Union
 from pydantic import ValidationError
 
 from openai.types.realtime.realtime_response import Audio, AudioOutput
-from openai.types.realtime.realtime_conversation_item_user_message import (
-    RealtimeConversationItemUserMessage,
-    Content as UserMessageContent,
-)
 from openai.types.realtime.realtime_response_status import RealtimeResponseStatus
 from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
 from openai.types.realtime.conversation_item_input_audio_transcription_completed_event import (
@@ -46,10 +42,12 @@ from openai.types.realtime import (
     ResponseAudioDeltaEvent,
     ResponseAudioDoneEvent,
     ResponseAudioTranscriptDoneEvent,
-    ResponseFunctionCallArgumentsDoneEvent
+    ResponseFunctionCallArgumentsDoneEvent,
+    ConversationItem
 )
 
 from api.openai_realtime.runtime_config import RuntimeConfig
+from api.openai_realtime.utils import resample
 
 logger = logging.getLogger(__name__)
 
@@ -60,16 +58,6 @@ CHUNK_SIZE_BYTES = CHUNK_SAMPLES * BYTES_PER_SAMPLE
 
 _ResponseStatus = Literal["completed", "cancelled", "failed", "incomplete", "in_progress"]
 _StatusReason = Literal["turn_detected", "client_cancelled", "max_output_tokens", "content_filter"]
-
-
-def _resample(audio_int16: bytes, from_rate: int, to_rate: int) -> bytes:
-    """Resample int16 PCM audio between sample rates using polyphase filtering."""
-    if from_rate == to_rate:
-        return audio_int16
-    samples = np.frombuffer(audio_int16, dtype=np.int16).astype(np.float32) / 32768.0
-    gcd = np.gcd(to_rate, from_rate)
-    resampled = resample_poly(samples, up=to_rate // gcd, down=from_rate // gcd)
-    return np.clip(resampled * 32768, -32768, 32767).astype(np.int16).tobytes()
 
 _EVENT_TYPE_TO_MODEL: dict[str, type[BaseModel]] = {
     "input_audio_buffer.append": InputAudioBufferAppendEvent,
@@ -138,6 +126,8 @@ class GlobalUsageMetrics(UsageMetrics):
     """Server-wide metrics that extend per-response counters with
     connection and error tracking."""
     connections: int = 0
+    # connection duration in seconds.
+    # latency tts, llm, vad, stt (mean, max, p90)
     errors_by_type: dict[str, int] = Field(default_factory=dict)
 
     def record_error(self, error_type: str) -> None:
@@ -332,7 +322,7 @@ class RealtimeService:
             client_in_rate = getattr(audio_cfg.input.format, "rate", None) or PIPELINE_SAMPLE_RATE
         else:
             client_in_rate = PIPELINE_SAMPLE_RATE
-        pcm_bytes = _resample(pcm_bytes, client_in_rate, PIPELINE_SAMPLE_RATE)
+        pcm_bytes = resample(pcm_bytes, client_in_rate, PIPELINE_SAMPLE_RATE)
 
         st = self._state(conn_id)
         pcm_bytes = st.audio_remainder + pcm_bytes
@@ -391,51 +381,28 @@ class RealtimeService:
 
         Supported content part types:
         - ``input_text``: added to LLM context (generation deferred to response.create).
-        - ``input_image``: acknowledged but not processed (image support is
-          not implemented in the local pipeline). A log entry is emitted so
-          callers can observe the event.
+        - ``input_image``: forwarded to LLM context as a multi-part content list
+          alongside any ``input_text`` in the same message.
         - ``function_call_output``: added to LLM context without triggering generation.
         """
         events: list[ServerEvent] = []
         item = event.item
 
-        if item.type == "message" and item.content:
-            for part in item.content:
-                if part.type == "input_text" and part.text:
-                    if self.text_prompt_queue:
-                        self.text_prompt_queue.put(("__ADD_TO_CONTEXT__", "user", part.text))
-                        logger.info(f"Injected text to LLM: {part.text!r:.80}")
-                    if self.should_listen:
-                        self.should_listen.clear()
-                    st = self._state(conn_id)
-                    events.append(
-                        ConversationItemCreatedEvent(
-                            type="conversation.item.created",
-                            event_id=self._next_event_id(),
-                            previous_item_id=st.last_item_id,
-                            item=RealtimeConversationItemUserMessage(
-                                id=item.id,
-                                type="message",
-                                role="user",
-                                object="realtime.item",
-                                status="completed",
-                                content=[UserMessageContent(type="input_text", text=part.text)],
-                            ),
-                        )
-                    )
-                    st.last_item_id = item.id
-                elif part.type == "input_image":
-                    # Image content is received but not forwarded to the
-                    # local pipeline — vision is not supported server-side.
-                    logger.info(
-                        "Received input_image content part; "
-                        "ignoring — image processing not yet supported in local pipeline",
-                    )
+        if not self._enqueue_item(item):
+            return []
 
-        elif item.type == "function_call_output" and item.output:
-            if self.text_prompt_queue:
-                self.text_prompt_queue.put(("__FUNCTION_RESULT__", item.output))
-                logger.info("Injected function_call_output to LLM context")
+        if item:
+            st = self._state(conn_id)
+            events.append(
+                ConversationItemCreatedEvent(
+                    type="conversation.item.created",
+                    event_id=self._next_event_id(),
+                    previous_item_id=st.last_item_id,
+                    item=item,
+                )
+            )
+            st.last_item_id = item.id
+
 
         return events
 
@@ -457,6 +424,9 @@ class RealtimeService:
         Per-response overrides (instructions, tool_choice) travel inside the
         ``__GENERATE_RESPONSE__`` sentinel tuple so they are atomically paired
         with the correct LLM generation — no shared mutable state to race on.
+
+        If ``event.response.input`` is present, its items are forwarded to the
+        LLM context before triggering generation (supports text + image items).
         """
         if self._state(conn_id).in_response:
             return self.make_error(
@@ -487,12 +457,49 @@ class RealtimeService:
             if hasattr(event.response, "metadata") and event.response.metadata:
                 self._state(conn_id).response_metadata = event.response.metadata
                 logger.info("Per-response metadata stored (%d keys)", len(event.response.metadata))
+            if event.response.input:
+                for input_item in event.response.input:
+                    self._enqueue_item(input_item)
         if self.text_prompt_queue:
             self.text_prompt_queue.put(
                 ("__GENERATE_RESPONSE__", override_instructions, override_tool_choice)
             )
         logger.debug("response.create received, LLM generation triggered")
         return None
+
+    def _enqueue_item(self, item: ConversationItem) -> bool:
+        """Enqueue a single conversation item into the LLM context.
+
+        Returns ``True`` if the item was handled, ``False`` otherwise.
+        """
+        if not self.text_prompt_queue:
+            return False
+
+        if getattr(item, "type", None) == "message" and getattr(item, "content", None):
+            role = getattr(item, "role", None)
+            if not role or role not in ("user", "assistant"):
+                logger.warning("Unsupported message role: %s", role)
+                return False
+            content_parts: list[dict] = []
+            for part in item.content:
+                if (part.type == "input_text" and part.text) or (part.type == "input_image" and part.image_url):
+                    content_parts.append(part.model_dump(exclude_none=True))
+                else:
+                    logger.warning("Unsupported content part type: %s", part.type)
+            if content_parts:
+                self.text_prompt_queue.put(("__ADD_TO_CONTEXT__", role, content_parts))
+                logger.debug("Enqueued message item (role=%s, %d parts)", role, len(content_parts))
+                return True
+            return False
+
+        if getattr(item, "type", None) == "function_call_output" and getattr(item, "output", None):
+            result_text = f"(call_id: {item.call_id}) {item.output}"
+            self.text_prompt_queue.put(("__FUNCTION_RESULT__", result_text))
+            logger.debug("Enqueued function_call_output (call_id=%s)", item.call_id)
+            return True
+
+        logger.warning("Unsupported item type: %s", getattr(item, "type", None))
+        return False
 
     def handle_response_cancel(self, conn_id: str) -> list[ServerEvent]:
         """Cancel the in-progress response and re-enable listening."""
@@ -520,7 +527,7 @@ class RealtimeService:
             client_out_rate = getattr(audio_cfg.output.format, "rate", None) or PIPELINE_SAMPLE_RATE
         else:
             client_out_rate = PIPELINE_SAMPLE_RATE
-        audio = _resample(audio, PIPELINE_SAMPLE_RATE, client_out_rate)
+        audio = resample(audio, PIPELINE_SAMPLE_RATE, client_out_rate)
         b64 = base64.b64encode(audio).decode("ascii")
         events.append(ResponseAudioDeltaEvent(
             type="response.output_audio.delta",
