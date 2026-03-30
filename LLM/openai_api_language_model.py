@@ -66,7 +66,7 @@ class OpenApiModelHandler(BaseHandler):
         self.tools_choice = None
         self._extra_body = (
             {"chat_template_kwargs": {"enable_thinking": False}}
-            if disable_thinking
+            if disable_thinking and base_url is not None # Only for other than OpenAI Official Server
             else None
         )
         self.warmup()
