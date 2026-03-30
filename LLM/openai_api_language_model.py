@@ -151,7 +151,6 @@ class OpenApiModelHandler(BaseHandler):
             optional_kwargs["tool_choice"] = self.tools_choice
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
-        print(self.chat.to_list())
         response: Response | Stream[ResponseStreamEvent] = self.client.responses.create(
             model=self.model_name,
             input=self.chat.to_list(),
