@@ -4,7 +4,7 @@ import time
 from nltk import sent_tokenize
 from rich.console import Console
 from openai import OpenAI, Stream
-from openai.types.responses import Response, ResponseStreamEvent 
+from openai.types.responses import Response, ResponseStreamEvent
 
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
@@ -77,8 +77,8 @@ class OpenApiModelHandler(BaseHandler):
         self.client.responses.create(
             model=self.model_name,
             input=[
-                {"role": "system", "content": "You are a helpful assistant"},
-                {"role": "user", "content": "Hello"},
+                {"type": "message", "role": "system", "content": [{"type": "input_text", "text": "You are a helpful assistant"}]},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]},
             ]
         )
         end = time.time()
@@ -92,7 +92,7 @@ class OpenApiModelHandler(BaseHandler):
         new_instructions = self.runtime_config.session.instructions
         if new_instructions and new_instructions != self._last_instructions:
             self._last_instructions = new_instructions
-            self.chat.init_chat({"role": "system", "content": new_instructions})
+            self.chat.init_chat({"type": "message", "role": "system", "content": [{"type": "input_text", "text": new_instructions}]})
             logger.info(f"LLM instructions updated ({len(new_instructions)} chars)")
 
         self.tools = self.runtime_config.session.tools
@@ -103,14 +103,18 @@ class OpenApiModelHandler(BaseHandler):
         # Generation is deferred until __GENERATE_RESPONSE__ (from response.create).
         if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == "__ADD_TO_CONTEXT__":
             _, role, content = prompt
-            self.chat.append({"role": role, "content": content})
+            self.chat.append({"type": "message", "role": role, "content": content})
             logger.debug("Added to LLM context (role=%s)", role)
             return
 
         # Context-only: add function-call result to chat without generating.
         if isinstance(prompt, tuple) and len(prompt) == 2 and prompt[0] == "__FUNCTION_RESULT__":
             _, result_text = prompt
-            self.chat.append({"role": self.user_role, "content": result_text})
+            self.chat.append({
+                "type": "message",
+                "role": self.user_role,
+                "content": [{"type": "input_text", "text": result_text}],
+            })
             logger.debug("Added function result to LLM context (%d chars)", len(result_text))
             return
 
@@ -120,7 +124,11 @@ class OpenApiModelHandler(BaseHandler):
             _, override_instructions, override_tool_choice = prompt
             self._apply_runtime_config(override_tool_choice)
             if override_instructions:
-                self.chat.append({"role": self.user_role, "content": override_instructions})
+                self.chat.append({
+                    "type": "message",
+                    "role": self.user_role,
+                    "content": [{"type": "input_text", "text": override_instructions}],
+                })
         else:
             self._apply_runtime_config()
             # Regular text from STT pipeline
@@ -130,7 +138,11 @@ class OpenApiModelHandler(BaseHandler):
                 if language_code[-5:] == "-auto":
                     language_code = language_code[:-5]
                     prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
-            self.chat.append({"role": self.user_role, "content": prompt})
+            self.chat.append({
+                "type": "message",
+                "role": self.user_role,
+                "content": [{"type": "input_text", "text": prompt}],
+            })
 
         optional_kwargs = {}
         if self.tools is not None:
@@ -171,7 +183,11 @@ class OpenApiModelHandler(BaseHandler):
                     if event.item.type == "function_call":
                         tools.append(event.item.model_dump())
                     elif event.item.type == "message":
-                        self.chat.append({"role": event.item.role, "content": event.item.content})
+                        self.chat.append({
+                            "type": "message",
+                            "role": event.item.role,
+                            "content": event.item.content,
+                        })
                 elif event.type == "response.completed":
                     usage = getattr(event.response, "usage", None)
                     if usage:
@@ -194,7 +210,11 @@ class OpenApiModelHandler(BaseHandler):
                     if message.type == "function_call":
                         tools.append(message.model_dump())
                     elif message.type == "message":
-                        self.chat.append({"role": message.role, "content": message.content})
+                        self.chat.append({
+                            "type": "message",
+                            "role": message.role,
+                            "content": message.content,
+                        })
                         for chunk in message.content:
                             if chunk.type == "output_text":
                                 clean_text += remove_emojis(chunk.text)

@@ -281,7 +281,7 @@ class TestHandleConversationItemCreate:
         assert len(events) == 1
         assert isinstance(events[0], ConversationItemCreatedEvent)
         msg = text_prompt_queue.get()
-        assert msg == ("__FUNCTION_RESULT__", '(call_id: call_1) {"result": 42}')
+        assert msg == ("__FUNCTION_RESULT__", 'Call ID: call_1\nOutput: {"result": 42}')
 
     def test_input_image_forwarded(self, service, conn_id, text_prompt_queue):
         evt = ConversationItemCreateEvent(
@@ -634,8 +634,8 @@ class TestTranslatePipelineText:
                 "type": "assistant_text",
                 "text": "Let me check",
                 "tools": [
-                    {"call_id": "c1", "name": "get_weather", "arguments": {"city": "Paris"}},
-                    {"call_id": "c2", "name": "get_time", "arguments": {}},
+                    {"call_id": "c1", "name": "get_weather", "arguments": '{"city": "Paris"}'},
+                    {"call_id": "c2", "name": "get_time", "arguments": "{}"},
                 ],
             },
         )
@@ -656,7 +656,7 @@ class TestTranslatePipelineText:
             {
                 "type": "assistant_text",
                 "text": "",
-                "tools": [{"call_id": "c1", "name": "f1", "arguments": {}}],
+                "tools": [{"call_id": "c1", "name": "f1", "arguments": "{}"}],
             },
         )
         assert len(events) == 1
@@ -991,8 +991,8 @@ class TestUsageMetricsTracking:
             "type": "assistant_text",
             "text": "",
             "tools": [
-                {"call_id": "c1", "name": "f1", "arguments": {}},
-                {"call_id": "c2", "name": "f2", "arguments": {}},
+                {"call_id": "c1", "name": "f1", "arguments": "{}"},
+                {"call_id": "c2", "name": "f2", "arguments": "{}"},
             ],
         })
         assert service._state(conn_id).response_usage.tool_calls == 2
@@ -1002,7 +1002,7 @@ class TestUsageMetricsTracking:
         service.translate_pipeline_text(conn_id, {
             "type": "assistant_text",
             "text": "",
-            "tools": [{"call_id": "c1", "name": "f1", "arguments": {}}],
+            "tools": [{"call_id": "c1", "name": "f1", "arguments": "{}"}],
         })
         service.finish_audio_response(conn_id)
         assert service.total_usage.tool_calls == 1
@@ -1063,7 +1063,7 @@ class TestUsageMetricsTracking:
         )
         service.translate_pipeline_text(conn_id, {
             "type": "assistant_text", "text": "hi",
-            "tools": [{"call_id": "c1", "name": "f1", "arguments": {}}],
+            "tools": [{"call_id": "c1", "name": "f1", "arguments": "{}"}],
         })
         service.finish_audio_response(conn_id)
         service.make_error("oops", "some_error")

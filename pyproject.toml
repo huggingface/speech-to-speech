@@ -23,7 +23,6 @@ dependencies = [
     "lightning-whisper-mlx>=0.0.10; platform_system == 'Darwin'",
     "mlx-lm>=0.14.0; platform_system == 'Darwin'",
     "mlx-vlm==0.4.1; platform_system == 'Darwin'",
-    # "mlx-audio[tts] @ git+https://github.com/Blaizzy/mlx-audio.git@v0.4.1; platform_system == 'Darwin'", # mlx-audio[tts]==0.4.1 install from source due to issue with dependencies
     "mlx-audio==0.4.1; platform_system == 'Darwin'",
     "misaki>=0.9.4; platform_system == 'Darwin'",
     "espeakng-loader>=0.2.4; platform_system == 'Darwin'",
@@ -33,6 +32,17 @@ dependencies = [
     "kokoro>=0.9.2; platform_system != 'Darwin'",
     "faster-qwen3-tts>=0.2.4; platform_system != 'Darwin'",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff",
+    "mypy",
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
 
 [tool.uv]
 package = false
