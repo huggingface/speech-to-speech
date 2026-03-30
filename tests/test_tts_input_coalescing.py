@@ -5,20 +5,20 @@ from threading import Event
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from baseHandler import BaseHandler
 from pipeline_control import SESSION_END
+from TTS.qwen3_tts_handler import Qwen3TTSHandler
 
 
-class ProbeHandler(BaseHandler):
-    def setup(self):
-        pass
-
-    def process(self, _item):
-        yield _item
+def _make_handler():
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.queue_in = Queue()
+    handler.queue_out = Queue()
+    handler.stop_event = Event()
+    return handler
 
 
 def test_coalesce_pending_tts_input_merges_ready_sentences_and_absorbs_response_end():
-    handler = ProbeHandler(Event(), queue_in=Queue(), queue_out=Queue())
+    handler = _make_handler()
 
     handler.queue_in.put(("Second sentence.", "en"))
     handler.queue_in.put(("Third sentence.", "en"))
@@ -32,7 +32,7 @@ def test_coalesce_pending_tts_input_merges_ready_sentences_and_absorbs_response_
 
 
 def test_coalesce_pending_tts_input_stops_before_control_messages():
-    handler = ProbeHandler(Event(), queue_in=Queue(), queue_out=Queue())
+    handler = _make_handler()
 
     handler.queue_in.put(SESSION_END)
     combined, saw_end = handler._coalesce_pending_tts_input(("Hello.", "en"))
