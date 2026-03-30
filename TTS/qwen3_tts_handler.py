@@ -221,13 +221,20 @@ class Qwen3TTSHandler(BaseHandler):
         if not llm_sentence:
             llm_sentence = "Hello."
 
-        if getattr(self, 'runtime_config', None) and self.runtime_config.session.audio.output.voice:
-            self.ref_audio = self.runtime_config.session.audio.output.voice
+        model_type = self._model_type()
+        session_voice = None
+        if getattr(self, "runtime_config", None):
+            session_voice = self.runtime_config.session.audio.output.voice
+        if session_voice:
+            if model_type == "custom_voice":
+                self.speaker = session_voice
+                self.ref_audio = None
+            else:
+                self.ref_audio = session_voice
 
         console.print(f"[green]ASSISTANT: {llm_sentence}")
 
         try:
-            model_type = self._model_type()
             if self.ref_audio:
                 yield from self._process_voice_clone(llm_sentence)
             elif model_type == "custom_voice":
