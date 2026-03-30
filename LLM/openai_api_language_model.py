@@ -202,7 +202,7 @@ class OpenApiModelHandler(BaseHandler):
                         logger.warning(f"Not supported message type: {message.type}")
                 logger.debug(f"Clean text: {clean_text}")
                 logger.info(f"Tools: {tools}")
-                yield clean_text, language_code, tools
+                yield clean_text.strip(), language_code, tools
 
         self.chat.strip_images()
         if input_tokens or output_tokens:
