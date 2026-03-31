@@ -133,3 +133,44 @@ def test_no_disable_thinking_omits_extra_body():
     list(handler.process("Hi"))
 
     assert captured.get("extra_body") is None
+
+
+def test_second_turn_flattens_assistant_history_for_responses():
+    handler = _make_handler(stream=False)
+    captured = {}
+
+    first_response = SimpleNamespace(
+        usage=None,
+        output=[
+            SimpleNamespace(
+                type="message",
+                role="assistant",
+                content=[SimpleNamespace(type="output_text", text="Hello.")],
+            )
+        ],
+    )
+    second_response = SimpleNamespace(usage=None, output=[])
+    call_count = 0
+
+    def fake_create(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return first_response
+        captured.update(kwargs)
+        return second_response
+
+    handler.client = SimpleNamespace(
+        responses=SimpleNamespace(create=fake_create)
+    )
+
+    list(handler.process("Hi"))
+    list(handler.process("Again"))
+
+    assistant_items = [
+        item for item in captured["input"]
+        if item.get("role") == "assistant"
+    ]
+    assert assistant_items == [
+        {"type": "message", "role": "assistant", "content": "Hello."}
+    ]
