@@ -5,21 +5,17 @@ import re
 import requests
 from PIL import Image
 
-EMOJI_PATTERN = re.compile(
-    "["
-    "\U0001F600-\U0001F64F"  # emoticons
-    "\U0001F300-\U0001F5FF"  # symbols & pictographs
-    "\U0001F680-\U0001F6FF"  # transport & map symbols
-    "\U0001F1E0-\U0001F1FF"  # flags (iOS)
-    "\U00002700-\U000027BF"  # dingbats
-    "\U000024C2-\U0001F251"
-    "]+", flags=re.UNICODE
+SPEECHABLE_PATTERN = re.compile(
+    r"[^\w\s.,!?;:'\"\-()\/\\@#%&*+=$€£¥₹₽¢\[\]{}<>~`^|…—–\n\r\t]",
+    flags=re.UNICODE,
 )
 
 
-def remove_emojis(text: str) -> str:
-    """Remove emoji characters from text."""
-    return EMOJI_PATTERN.sub('', text)
+def remove_unspeechable(text: str) -> str:
+    """Keep only speechable characters: letters, digits, punctuation, whitespace.
+    support unicode characters (english, arabic, chinese, japanese, korean, etc.)
+    """
+    return SPEECHABLE_PATTERN.sub('', text)
 
 
 def image_url_to_pil(image_url: str) -> Image.Image:

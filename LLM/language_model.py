@@ -25,7 +25,7 @@ from typing import Any, Literal
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
 from rich.console import Console
-from LLM.utils import remove_emojis, image_url_to_pil
+from LLM.utils import remove_unspeechable, image_url_to_pil
 from api.openai_realtime.runtime_config import RuntimeConfig
 
 try:
@@ -329,7 +329,7 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
 
             raw_text: str = token.text if hasattr(token, "text") else token
             ctx.raw_generated_text += raw_text
-            clean = remove_emojis(raw_text)
+            clean = remove_unspeechable(raw_text)
             ctx.generated_text += clean
             ctx.printable_text += clean
             chunks, ctx.tools, ctx.printable_text = self._process_printable_text(

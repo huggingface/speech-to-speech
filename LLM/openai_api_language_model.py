@@ -9,7 +9,7 @@ from openai.types.responses import Response, ResponseStreamEvent
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
 from LLM.chat import Chat
-from LLM.utils import remove_emojis
+from LLM.utils import remove_unspeechable
 from api.openai_realtime.runtime_config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
@@ -171,7 +171,7 @@ class OpenApiModelHandler(BaseHandler):
                     cancelled = True
                     break
                 if event.type == "response.output_text.delta":
-                    new_text = remove_emojis(event.delta)
+                    new_text = remove_unspeechable(event.delta)
                     clean_text += new_text
                     printable_text += new_text
                     sentences = sent_tokenize(printable_text)
@@ -217,12 +217,13 @@ class OpenApiModelHandler(BaseHandler):
                         })
                         for chunk in message.content:
                             if chunk.type == "output_text":
-                                clean_text += remove_emojis(chunk.text)
+                                clean_text += remove_unspeechable(chunk.text)
                     else:
                         logger.warning(f"Not supported message type: {message.type}")
                 logger.debug(f"Clean text: {clean_text}")
                 logger.info(f"Tools: {tools}")
-                yield clean_text.strip(), language_code, tools
+                if clean_text.strip() or tools:
+                    yield clean_text.strip(), language_code, tools
 
         self.chat.strip_images()
         if input_tokens or output_tokens:

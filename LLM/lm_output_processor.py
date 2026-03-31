@@ -74,5 +74,6 @@ class LMOutputProcessor(BaseHandler):
             self.text_output_queue.put(message)
 
         # Forward clean text to TTS (yield to maintain streaming)
-        logger.debug(f"Forwarding to TTS: '{text_chunk}'")
-        yield (text_chunk, language_code)
+        if text_chunk:
+            logger.debug(f"Forwarding to TTS: '{text_chunk}'")
+            yield (text_chunk, language_code)
