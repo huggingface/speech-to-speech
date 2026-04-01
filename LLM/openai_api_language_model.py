@@ -11,6 +11,8 @@ from cancel_scope import CancelScope
 from LLM.chat import Chat
 from LLM.utils import remove_unspeechable
 from api.openai_realtime.runtime_config import RuntimeConfig
+from LLM.tool_call.qwen3coder_tool_parser import Qwen3CoderToolParser
+from openai.types.responses import ResponseFunctionToolCall
 
 logger = logging.getLogger(__name__)
 
@@ -145,8 +147,10 @@ class OpenApiModelHandler(BaseHandler):
             })
 
         optional_kwargs = {}
+        parser = None
         if self.tools is not None:
             optional_kwargs["tools"] = self.tools
+            parser = Qwen3CoderToolParser(tools=self.tools)
         if self.tools_choice is not None:
             optional_kwargs["tool_choice"] = self.tools_choice
 
@@ -183,6 +187,10 @@ class OpenApiModelHandler(BaseHandler):
                     if event.item.type == "function_call":
                         tools.append(event.item.model_dump())
                 elif event.type == "response.completed":
+                    if parser is not None:
+                        for message in event.response.output:
+                            for chunk in message.content:
+                                tools.extend([t.model_dump() for t in parser.parse(chunk.text)])
                     usage = getattr(event.response, "usage", None)
                     if usage:
                         input_tokens = usage.input_tokens or 0
