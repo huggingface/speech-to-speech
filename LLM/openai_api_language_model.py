@@ -240,6 +240,8 @@ class OpenApiModelHandler(BaseHandler):
         yield ("__END_OF_RESPONSE__", None, None)
 
     def on_session_end(self):
+        # reset() also clears init_chat_message, so a previous session's
+        # instructions cannot persist into the next one.
         self.chat.reset()
         self._last_instructions = None
         self.tools = None
