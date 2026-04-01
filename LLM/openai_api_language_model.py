@@ -184,15 +184,8 @@ class OpenApiModelHandler(BaseHandler):
                             yield s, language_code, []
                         printable_text = sentences[-1]
                 elif event.type == "response.output_item.done":
-                    
                     if event.item.type == "function_call":
                         tools.append(event.item.model_dump())
-                    elif event.item.type == "message":
-                        self.chat.append({
-                            "type": "message",
-                            "role": event.item.role,
-                            "content": event.item.content,
-                        })
                 elif event.type == "response.completed":
                     if parser is not None:
                         for message in event.response.output:
@@ -203,6 +196,12 @@ class OpenApiModelHandler(BaseHandler):
                         input_tokens = usage.input_tokens or 0
                         output_tokens = usage.output_tokens or 0
             if not cancelled:
+                if clean_text.strip():
+                    self.chat.append({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": clean_text.strip(),
+                    })
                 if printable_text.strip() or tools:
                     logger.debug(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
@@ -219,11 +218,6 @@ class OpenApiModelHandler(BaseHandler):
                     if message.type == "function_call":
                         tools.append(message.model_dump())
                     elif message.type == "message":
-                        self.chat.append({
-                            "type": "message",
-                            "role": message.role,
-                            "content": message.content,
-                        })
                         for chunk in message.content:
                             if chunk.type == "output_text":
                                 clean_text += remove_unspeechable(chunk.text)
@@ -231,6 +225,12 @@ class OpenApiModelHandler(BaseHandler):
                         logger.warning(f"Not supported message type: {message.type}")
                 logger.debug(f"Clean text: {clean_text}")
                 logger.info(f"Tools: {tools}")
+                if clean_text.strip():
+                    self.chat.append({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": clean_text.strip(),
+                    })
                 if clean_text.strip() or tools:
                     yield clean_text.strip(), language_code, tools
 
