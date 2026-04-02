@@ -416,8 +416,15 @@ class RealtimeService:
         logger.debug("Audio buffer committed")
         return None
 
-    def handle_response_create(self, conn_id: str, event: ResponseCreateEvent) -> RealtimeErrorEvent | None:
-        """Trigger a response. Returns an error if a response is already in progress.
+    def handle_response_create(self, conn_id: str, event: ResponseCreateEvent) -> ServerEvent | None:
+        """Trigger a response.
+
+        Returns a ``ResponseCreatedEvent`` on success, a ``RealtimeErrorEvent``
+        on failure, or ``None`` if there is no text_prompt_queue.
+
+        The response is marked *in-progress* immediately so that a second
+        ``response.create`` arriving before the first audio chunk is correctly
+        rejected, and so that barge-in can cancel a pending response.
 
         Per-response overrides (instructions, tool_choice) travel inside the
         ``__GENERATE_RESPONSE__`` sentinel tuple so they are atomically paired
@@ -431,9 +438,18 @@ class RealtimeService:
                 message="Cannot create response while another response is in progress.",
                 _type="conversation_already_has_active_response",
             )
+
         override_instructions: str | None = None
         override_tool_choice: str | None = None
         if event.response:
+            if event.response.tool_choice:
+                if not isinstance(event.response.tool_choice, str):
+                    return self.make_error(
+                        message="Only string tool_choice values are supported for now (auto, required, none).",
+                        _type="tool_choice_not_supported",
+                    )
+                override_tool_choice = event.response.tool_choice
+                logger.info("Per-response tool_choice: %s", override_tool_choice)
             cfg = self.runtime_config
             if cfg.session is None:
                 cfg.session = RealtimeSessionCreateRequest(type="realtime")
@@ -444,26 +460,28 @@ class RealtimeService:
                     len(override_instructions),
                     override_instructions[:60],
                 )
-            if event.response.tool_choice:
-                if not isinstance(event.response.tool_choice, str):
-                    return self.make_error(
-                        message="Only string tool_choice values are supported for now (auto, required, none).",
-                        _type="tool_choice_not_supported",
-                    )
-                override_tool_choice = event.response.tool_choice
-                logger.info("Per-response tool_choice: %s", override_tool_choice)
             if hasattr(event.response, "metadata") and event.response.metadata:
                 self._state(conn_id).response_metadata = event.response.metadata
                 logger.info("Per-response metadata stored (%d keys)", len(event.response.metadata))
             if event.response.input:
                 for input_item in event.response.input:
                     self._enqueue_item(input_item)
+
+        st = self._state(conn_id)
+        st.in_response = True
+        st.current_response_id = _generate_id("resp")
+        self._start_item(conn_id)
+
         if self.text_prompt_queue:
             self.text_prompt_queue.put(
                 ("__GENERATE_RESPONSE__", override_instructions, override_tool_choice)
             )
         logger.debug("response.create received, LLM generation triggered")
-        return None
+        return ResponseCreatedEvent(
+            type="response.created",
+            event_id=self._next_event_id(),
+            response=self._build_response(conn_id, "in_progress"),
+        )
 
     def _enqueue_item(self, item: ConversationItem) -> bool:
         """Enqueue a single conversation item into the LLM context.
@@ -510,11 +528,18 @@ class RealtimeService:
     # ── Outbound audio encoding ──────────────────
 
     def encode_audio_chunk(self, conn_id: str, audio: bytes) -> list[ServerEvent]:
-        """Encode a raw PCM audio chunk, emitting ResponseCreated on the first chunk."""
+        """Encode a raw PCM audio chunk, emitting ResponseCreated on the first chunk.
+
+        When ``handle_response_create`` already allocated the response,
+        ``current_response_id`` is set and no duplicate event is emitted.
+        For the implicit-response path (VAD -> STT -> LLM -> TTS, no
+        ``response.create``), ``current_response_id`` is still ``None``
+        and the event is emitted here on the first audio chunk.
+        """
         events: list[ServerEvent] = []
-        was_new = not self._state(conn_id).in_response
+        need_created = self._state(conn_id).current_response_id is None
         resp_id, item_id = self._ensure_response(conn_id)
-        if was_new:
+        if need_created:
             events.append(ResponseCreatedEvent(
                 type="response.created",
                 event_id=self._next_event_id(),

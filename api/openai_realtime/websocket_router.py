@@ -3,6 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 from queue import Empty, Queue
 from threading import Event as ThreadingEvent
+from typing import Callable
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
@@ -34,6 +35,16 @@ async def _send_events(ws: WebSocket, events: list[ServerEvent]) -> None:
         await _send_event(ws, event)
 
 
+def _keep_audio_sentinel(item) -> bool:
+    return isinstance(item, bytes) and item == b"__RESPONSE_DONE__"
+
+
+def _keep_user_text_event(item) -> bool:
+    if not isinstance(item, dict):
+        return False
+    return item.get("type") in ("speech_stopped", "token_usage")
+
+
 def create_app(
     service: RealtimeService,
     input_queue: Queue,
@@ -45,25 +56,31 @@ def create_app(
     stop_event: ThreadingEvent,
 ) -> FastAPI:
 
-    def _flush_queue(q: Queue, *, preserve_sentinel: bool = False) -> None:
-        """Drain a queue.  When *preserve_sentinel* is True, any
-        ``__RESPONSE_DONE__`` found during the drain is re-enqueued so
-        ``_send_loop`` can still emit ``finish_audio_response`` events
-        and call ``cancel_scope.response_done()``."""
-        found_done = False
-        while not q.empty():
+    def _flush_queue(q: Queue, *, preserve: Callable | None = None) -> None:
+        """Drain a queue, optionally preserving items matching *preserve*.
+
+        Preserved items are re-inserted at the **front** of the queue
+        (atomically under the queue's mutex) so they are processed before
+        anything a pipeline thread may have enqueued during the drain.
+        """
+        preserved: list = []
+        while True:
             try:
                 item = q.get_nowait()
-                if preserve_sentinel and isinstance(item, bytes) and item == b"__RESPONSE_DONE__":
-                    found_done = True
+                if preserve and preserve(item):
+                    preserved.append(item)
             except Empty:
                 break
-        if found_done:
-            q.put(b"__RESPONSE_DONE__")
+        if preserved:
+            with q.mutex:
+                for item in reversed(preserved):
+                    q.queue.appendleft(item)
+                q.not_empty.notify(len(preserved))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.websockets = {}
+        app.state.active_session: str | None = None
         app.state.send_task = asyncio.create_task(_send_loop())
         yield
         app.state.send_task.cancel()
@@ -98,12 +115,13 @@ def create_app(
 
         session_id = service.register()
         app.state.websockets[session_id] = ws
+        app.state.active_session = session_id
         logger.info(f"Client connected (session {session_id})")
 
         # Defensive: drain edge queues and reset events so stale data from a
         # previous session that survived SESSION_END propagation doesn't leak.
         for q in (output_queue, text_output_queue):
-            while not q.empty():
+            while True:
                 try:
                     q.get_nowait()
                 except Empty:
@@ -152,18 +170,18 @@ def create_app(
                         await _send_events(ws, events)
 
                 elif isinstance(event, ResponseCreateEvent):
-                    if cancel_scope:
-                        cancel_scope.new_response()
-                    err = service.handle_response_create(session_id, event)
-                    if err:
-                        await _send_event(ws, err)
+                    result = service.handle_response_create(session_id, event)
+                    if result:
+                        if result.type != "error" and cancel_scope:
+                            cancel_scope.new_response()
+                        await _send_event(ws, result)
 
                 elif isinstance(event, ResponseCancelEvent):
                     was_active = service._state(session_id).in_response
                     if was_active and cancel_scope:
                         cancel_scope.cancel()
-                    _flush_queue(output_queue, preserve_sentinel=True)
-                    _flush_queue(text_output_queue)
+                    _flush_queue(output_queue, preserve=_keep_audio_sentinel)
+                    _flush_queue(text_output_queue, preserve=_keep_user_text_event)
                     events = service.handle_response_cancel(session_id)
                     if events:
                         await _send_events(ws, events)
@@ -181,6 +199,7 @@ def create_app(
                 input_queue.put(SESSION_END)
                 logger.info("Last client disconnected, reset RuntimeConfig and sent SESSION_END")
             app.state.websockets.pop(session_id, None)
+            app.state.active_session = None
             logger.info(f"Client {session_id} removed")
 
     @app.get("/v1/usage")
@@ -197,6 +216,11 @@ def create_app(
                         text_msg = text_output_queue.get_nowait()
                         is_speech_start = text_msg.get("type") == "speech_started"
 
+                        # Capture response state before translate modifies it. To change when multiple sessions are supported.
+                        was_in_response = False
+                        if is_speech_start and app.state.active_session:
+                            was_in_response = service._state(app.state.active_session).in_response
+
                         if cancel_scope and cancel_scope.discarding and text_msg.get("type") == "assistant_text":
                             pass
                         else:
@@ -207,13 +231,14 @@ def create_app(
                                     if events:
                                         await _send_events(ws, events)
 
-                        if is_speech_start and response_playing and response_playing.is_set():
+                        if is_speech_start and was_in_response:
                             if service.runtime_config.interrupt_response_enabled:
                                 if cancel_scope:
                                     cancel_scope.cancel()
-                                _flush_queue(output_queue, preserve_sentinel=True)
-                                _flush_queue(text_output_queue)
-                                response_playing.clear()
+                                _flush_queue(output_queue, preserve=_keep_audio_sentinel)
+                                _flush_queue(text_output_queue, preserve=_keep_user_text_event)
+                                if response_playing and response_playing.is_set():
+                                    response_playing.clear()
                                 logger.info("Speech during response: cancelled, queue flushed")
                             else:
                                 logger.info("Speech during response: interrupt_response disabled, ignoring")
