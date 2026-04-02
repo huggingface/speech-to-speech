@@ -350,8 +350,13 @@ class TestHandleAudioCommit:
 class TestHandleResponseCreate:
     def test_response_create_ok(self, service, conn_id):
         evt = ResponseCreateEvent(type="response.create")
-        err = service.handle_response_create(conn_id, evt)
-        assert err is None
+        result = service.handle_response_create(conn_id, evt)
+        assert isinstance(result, ResponseCreatedEvent)
+        assert result.response.status == "in_progress"
+        st = service._state(conn_id)
+        assert st.in_response is True
+        assert st.current_response_id is not None
+        assert st.current_item_id is not None
 
     def test_response_create_while_active(self, service, conn_id):
         service._state(conn_id).in_response = True
@@ -368,7 +373,8 @@ class TestHandleResponseCreate:
                 "tool_choice": "auto",
             },
         )
-        service.handle_response_create(conn_id, evt)
+        result = service.handle_response_create(conn_id, evt)
+        assert isinstance(result, ResponseCreatedEvent)
         sentinel = text_prompt_queue.get()
         assert sentinel == ("__GENERATE_RESPONSE__", "override instructions", "auto")
 
@@ -382,6 +388,7 @@ class TestHandleResponseCreate:
         err = service.handle_response_create(conn_id, evt)
         assert isinstance(err, RealtimeErrorEvent)
         assert err.error.type == "tool_choice_not_supported"
+        assert service._state(conn_id).in_response is False
 
     def test_response_create_accepts_valid_str_tool_choices(self, service, conn_id, text_prompt_queue):
         for choice in ("auto", "required", "none"):
@@ -390,10 +397,11 @@ class TestHandleResponseCreate:
                 response={"tool_choice": choice},
             )
             result = service.handle_response_create(conn_id, evt)
-            assert result is None, f"Expected no error for tool_choice={choice!r}"
+            assert isinstance(result, ResponseCreatedEvent), f"Expected ResponseCreatedEvent for tool_choice={choice!r}"
             sentinel = text_prompt_queue.get()
             assert sentinel[0] == "__GENERATE_RESPONSE__"
             assert sentinel[2] == choice
+            service._end_response(conn_id)
 
     def test_response_create_with_image_input_items(self, service, conn_id, text_prompt_queue):
         evt = ResponseCreateEvent(
@@ -411,8 +419,8 @@ class TestHandleResponseCreate:
                 ],
             },
         )
-        err = service.handle_response_create(conn_id, evt)
-        assert err is None
+        result = service.handle_response_create(conn_id, evt)
+        assert isinstance(result, ResponseCreatedEvent)
         context_msg = text_prompt_queue.get()
         assert context_msg[0] == "__ADD_TO_CONTEXT__"
         assert context_msg[1] == "user"
@@ -421,6 +429,15 @@ class TestHandleResponseCreate:
         assert any(p["type"] == "input_text" for p in context_msg[2])
         gen_msg = text_prompt_queue.get()
         assert gen_msg[0] == "__GENERATE_RESPONSE__"
+
+    def test_double_response_create_rejected(self, service, conn_id, text_prompt_queue):
+        """Second response.create is rejected because in_response is set immediately."""
+        evt = ResponseCreateEvent(type="response.create")
+        result1 = service.handle_response_create(conn_id, evt)
+        assert isinstance(result1, ResponseCreatedEvent)
+        result2 = service.handle_response_create(conn_id, evt)
+        assert isinstance(result2, RealtimeErrorEvent)
+        assert result2.error.type == "conversation_already_has_active_response"
 
 
 # ===================================================================
