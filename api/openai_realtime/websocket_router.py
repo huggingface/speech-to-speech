@@ -21,6 +21,7 @@ from openai.types.realtime import (
 )
 
 logger = logging.getLogger(__name__)
+MAX_AUDIO_BATCH_BYTES = 6400
 
 
 async def _send_event(ws: WebSocket, event: ServerEvent) -> None:
@@ -76,6 +77,11 @@ def create_app(
                 for item in reversed(preserved):
                     q.queue.appendleft(item)
                 q.not_empty.notify(len(preserved))
+
+    def _to_audio_bytes(audio_chunk) -> bytes:
+        if hasattr(audio_chunk, "tobytes"):
+            return audio_chunk.tobytes()
+        return audio_chunk
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -208,6 +214,7 @@ def create_app(
 
     async def _send_loop():
         """Poll pipeline output queues and send to each connected client."""
+        pending_output_item = None
         while not stop_event.is_set():
             try:
                 # Process text events first (speech_started cancels active response)
@@ -246,7 +253,11 @@ def create_app(
                         pass
 
                 try:
-                    audio_chunk = output_queue.get_nowait()
+                    if pending_output_item is not None:
+                        audio_chunk = pending_output_item
+                        pending_output_item = None
+                    else:
+                        audio_chunk = output_queue.get_nowait()
 
                     if isinstance(audio_chunk, bytes) and audio_chunk == b"END":
                         for cid in service.connection_ids:
@@ -271,8 +282,24 @@ def create_app(
                     if cancel_scope and cancel_scope.discarding:
                         continue
 
-                    if hasattr(audio_chunk, "tobytes"):
-                        audio_chunk = audio_chunk.tobytes()
+                    audio_chunk = _to_audio_bytes(audio_chunk)
+
+                    audio_batch = bytearray(audio_chunk)
+                    while len(audio_batch) < MAX_AUDIO_BATCH_BYTES:
+                        try:
+                            next_chunk = output_queue.get_nowait()
+                        except Empty:
+                            break
+
+                        if isinstance(next_chunk, bytes) and next_chunk in {b"END", b"__RESPONSE_DONE__"}:
+                            pending_output_item = next_chunk
+                            break
+
+                        next_audio = _to_audio_bytes(next_chunk)
+                        if len(audio_batch) + len(next_audio) > MAX_AUDIO_BATCH_BYTES:
+                            pending_output_item = next_chunk
+                            break
+                        audio_batch.extend(next_audio)
 
                     if response_playing and not response_playing.is_set():
                         response_playing.set()
@@ -281,7 +308,7 @@ def create_app(
                     for cid in service.connection_ids:
                         ws = app.state.websockets.get(cid)
                         if ws:
-                            await _send_events(ws, service.encode_audio_chunk(cid, audio_chunk))
+                            await _send_events(ws, service.encode_audio_chunk(cid, bytes(audio_batch)))
                 except Empty:
                     pass
 

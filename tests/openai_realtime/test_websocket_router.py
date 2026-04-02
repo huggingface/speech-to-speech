@@ -253,6 +253,29 @@ class TestSendLoop:
                 assert msg2["type"] == "response.output_audio.delta"
                 assert "delta" in msg2
 
+    def test_audio_output_batches_immediately_available_chunks(self, setup):
+        app, _, _, output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                output_queue.put(_pcm_bytes(256))
+                output_queue.put(_pcm_bytes(256))
+                output_queue.put(b"END")
+
+                msg1 = ws.receive_json()
+                assert msg1["type"] == "response.created"
+
+                msg2 = ws.receive_json()
+                assert msg2["type"] == "response.output_audio.delta"
+                decoded = base64.b64decode(msg2["delta"])
+                assert len(decoded) == len(_pcm_bytes(512))
+
+                msg3 = ws.receive_json()
+                msg4 = ws.receive_json()
+                types = {msg3["type"], msg4["type"]}
+                assert "response.output_audio.done" in types
+                assert "response.done" in types
+
     def test_end_marker_sends_finish_events(self, setup):
         app, _, _, output_queue, *_ = setup
         with TestClient(app) as client:
