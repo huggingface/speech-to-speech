@@ -154,11 +154,12 @@ class OpenApiModelHandler(BaseHandler):
         if self.tools_choice is not None:
             optional_kwargs["tool_choice"] = self.tools_choice
 
+        request_stream = self.stream and self.tools_choice != "required"
         gen = self.cancel_scope.generation if self.cancel_scope else None
         response: Response | Stream[ResponseStreamEvent] = self.client.responses.create(
             model=self.model_name,
             input=self.chat.to_list(),
-            stream=self.stream,
+            stream=request_stream,
             extra_body=self._extra_body,
             **optional_kwargs,
         )
@@ -166,7 +167,7 @@ class OpenApiModelHandler(BaseHandler):
         clean_text = ""
         input_tokens = 0
         output_tokens = 0
-        if self.stream:
+        if request_stream:
             cancelled = False
             printable_text = ""
             for event in response:
