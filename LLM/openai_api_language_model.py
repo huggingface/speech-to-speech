@@ -156,8 +156,6 @@ class OpenApiModelHandler(BaseHandler):
         if self.tools_choice is not None:
             optional_kwargs["tool_choice"] = self.tools_choice
 
-        print(self.chat.to_list())
-
         request_stream = self.stream and self.tools_choice != "required"
         gen = self.cancel_scope.generation if self.cancel_scope else None
         response: Response | Stream[ResponseStreamEvent] = self.client.responses.create(
