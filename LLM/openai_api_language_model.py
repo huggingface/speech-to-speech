@@ -12,6 +12,7 @@ from LLM.chat import Chat
 from LLM.utils import remove_unspeechable
 from api.openai_realtime.runtime_config import RuntimeConfig
 from LLM.voice_prompt import VOICE_SYSTEM_PROMPT
+from LLM.voice_prompt import build_voice_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ class OpenApiModelHandler(BaseHandler):
                 raise ValueError(
                     "An initial promt needs to be specified when setting init_chat_role."
                 )
-            full_prompt = f"{VOICE_SYSTEM_PROMPT}\n\n{init_chat_prompt}"
+            full_prompt = build_voice_system_prompt(init_chat_prompt)
             self.chat.init_chat({"role": init_chat_role, "content": full_prompt})
         self.user_role = user_role
         self.runtime_config = runtime_config
@@ -94,7 +95,7 @@ class OpenApiModelHandler(BaseHandler):
         new_instructions = self.runtime_config.session.instructions
         if new_instructions and new_instructions != self._last_instructions:
             self._last_instructions = new_instructions
-            full_instructions = f"{VOICE_SYSTEM_PROMPT}\n\n{new_instructions}"
+            full_instructions = build_voice_system_prompt(new_instructions)
             self.chat.init_chat({"type": "message", "role": "system", "content": [{"type": "input_text", "text": full_instructions}]})
             logger.info(f"LLM instructions updated ({len(new_instructions)} chars)")
 
