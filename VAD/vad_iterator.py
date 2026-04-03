@@ -79,6 +79,7 @@ class VADIterator:
 
         if (speech_prob >= self.threshold) and not self.triggered:
             self.triggered = True
+            self.buffer.append(x)
             return None
 
         if (speech_prob < self.threshold - 0.15) and self.triggered:

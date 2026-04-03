@@ -11,13 +11,13 @@ class ModuleArguments:
     mode: Optional[str] = field(
         default="socket",
         metadata={
-            "help": "The mode to run the pipeline in. Either 'local', 'socket', or 'websocket'. Default is 'socket'."
+            "help": "The mode to run the pipeline in. Either 'local', 'socket', 'websocket', or 'realtime'. Default is 'socket'."
         },
     )
     local_mac_optimal_settings: bool = field(
         default=False,
         metadata={
-            "help": "If specified, sets the optimal settings for Mac OS. Hence whisper-mlx, MLX LM and MeloTTS will be used."
+            "help": "If specified, sets the optimal settings for Mac OS. Sets Parakeet TDT for STT, MLX LM for language model, and MeloTTS for TTS, with MPS device and local mode."
         },
     )
     stt: Optional[str] = field(

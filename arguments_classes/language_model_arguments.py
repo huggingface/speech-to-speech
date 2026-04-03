@@ -4,9 +4,9 @@ from dataclasses import dataclass, field
 @dataclass
 class LanguageModelHandlerArguments:
     lm_model_name: str = field(
-        default="HuggingFaceTB/SmolLM-360M-Instruct",
+        default="Qwen/Qwen3-4B-Instruct-2507",
         metadata={
-            "help": "The pretrained language model to use. Default is 'HuggingFaceTB/SmolLM-360M-Instruct'."
+            "help": "The pretrained language model to use. Default is 'Qwen/Qwen3-4B-Instruct-2507'. For MLX LM on Mac, use an mlx-community model (e.g. 'mlx-community/Qwen3-4B-Instruct-2507-bf16')."
         },
     )
     lm_device: str = field(
@@ -40,9 +40,9 @@ class LanguageModelHandlerArguments:
         },
     )
     lm_gen_max_new_tokens: int = field(
-        default=128,
-        metadata={
-            "help": "Maximum number of new tokens to generate in a single completion. Default is 128."
+        default=1024,
+metadata={
+"help": "Maximum number of new tokens to generate in a single completion. Default is 1024."
         },
     )
     lm_gen_min_new_tokens: int = field(
@@ -64,8 +64,16 @@ class LanguageModelHandlerArguments:
         },
     )
     chat_size: int = field(
-        default=2,
+        default=10,
         metadata={
             "help": "Number of interactions assitant-user to keep for the chat. None for no limitations."
+        },
+    )
+    lm_is_vlm: bool = field(
+        default=False,
+        metadata={
+            "help": "Set to True when using a Vision Language Model (VLM) that accepts image inputs. "
+                    "Loads AutoProcessor + AutoModelForImageTextToText instead of the default text-only model. "
+                    "Default is False."
         },
     )

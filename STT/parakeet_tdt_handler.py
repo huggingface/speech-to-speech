@@ -70,7 +70,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
         gen_kwargs={},
         enable_live_transcription=False,
         live_transcription_update_interval=0.25,
-        text_output_queue=None,
     ):
         """
         Initialize the Parakeet TDT model.
@@ -89,7 +88,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
         self.last_language = language if language else "en"
         self.enable_live_transcription = enable_live_transcription
         self.live_transcription_update_interval = live_transcription_update_interval
-        self.text_output_queue = text_output_queue
         self.compute_lock = Lock()
 
         # Determine device
@@ -143,7 +141,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
 
             self.backend = "mlx"
             self.model = load_model(model_name)
-            logger.info(f"MLX Audio Parakeet model loaded successfully")
+            logger.info("MLX Audio Parakeet model loaded successfully")
         except ImportError as e:
             raise ImportError(
                 "mlx-audio is required for Parakeet TDT on Apple Silicon. "
@@ -218,7 +216,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
         else:
             audio_input = audio_input.astype(np.float32)
 
-        # Handle progressive updates (live transcription display only)
+        # Handle progressive updates: yield tagged partial for TranscriptionNotifier
         if self.enable_live_transcription and is_progressive:
             # Ignore progressive updates if we're already processing final audio
             if self.processing_final:
@@ -229,12 +227,15 @@ class ParakeetTDTSTTHandler(BaseHandler):
             with self._compute_lock_context(handler_name="ParakeetSTT-Progressive", timeout=0.01) as acquired:
                 if acquired:
                     try:
-                        self._show_progressive_transcription(audio_input)
+                        progressive_text = self._show_progressive_transcription(audio_input)
+                        if progressive_text:
+                            yield ("__PARTIAL__", progressive_text)
+                            return
                     except Exception as e:
                         logger.debug(f"Progressive transcription failed: {e}")
                 else:
                     logger.debug("Skipping progressive update (compute busy)")
-            return  # Don't yield to queue
+            return
 
         # Handle final transcription (send to LLM)
         try:
@@ -265,7 +266,10 @@ class ParakeetTDTSTTHandler(BaseHandler):
             language_code = self.last_language
 
         logger.debug("Finished Parakeet TDT inference")
-        self._emit_user_transcript(pred_text, is_final=True, language_code=language_code)
+        if pred_text.strip():
+            console.print(f"[yellow]USER: {pred_text.strip()}")
+            if language_code:
+                console.print(f"[dim]Language: {language_code}[/dim]")
 
         yield (pred_text, language_code)
 
@@ -314,32 +318,30 @@ class ParakeetTDTSTTHandler(BaseHandler):
                 self.compute_lock.release()
 
     def _show_progressive_transcription(self, audio_input):
-        """Show progressive transcription without yielding result."""
+        """Run progressive transcription, print to console, and return the text."""
         from rich.text import Text
 
-        try:
-            # Use streaming handler for progressive transcription
-            result = self.streaming_handler.transcribe_incremental(audio_input)
-            text = Text()
-            if result.fixed_text:
-                text.append("Live: ", style="dim")
-                text.append(result.fixed_text, style="yellow")
-                if result.active_text:
-                    text.append(" ", style="dim")
-
+        result = self.streaming_handler.transcribe_incremental(audio_input)
+        rich_text = Text()
+        if result.fixed_text:
+            rich_text.append("Live: ", style="dim")
+            rich_text.append(result.fixed_text, style="yellow")
             if result.active_text:
-                if not result.fixed_text:
-                    text.append("Live: ", style="dim")
-                text.append(result.active_text, style="cyan dim")
+                rich_text.append(" ", style="dim")
 
-            self._emit_user_transcript(
-                self._build_progressive_text(result),
-                is_final=False,
-                console_text=text if text else None,
-                console_end="\r",
-            )
-        except Exception as e:
-            logger.debug(f"Progressive transcription failed: {e}")
+        if result.active_text:
+            if not result.fixed_text:
+                rich_text.append("Live: ", style="dim")
+            rich_text.append(result.active_text, style="cyan dim")
+
+        progressive_text = self._build_progressive_text(result)
+        if progressive_text:
+            if rich_text:
+                console.print(rich_text, end="\r")
+            else:
+                console.print(f"[dim]Live: [/dim]{progressive_text}", end="\r")
+
+        return progressive_text
 
     def _build_progressive_text(self, result):
         parts = []
@@ -349,32 +351,6 @@ class ParakeetTDTSTTHandler(BaseHandler):
             parts.append(result.active_text.strip())
         return " ".join(part for part in parts if part).strip()
 
-    def _emit_user_transcript(self, text, is_final, language_code=None, console_text=None, console_end=None):
-        clean_text = text.strip()
-        if not clean_text:
-            return
-
-        if console_text is not None:
-            console.print(console_text, end=console_end)
-        elif is_final:
-            console.print(f"[yellow]USER: {clean_text}")
-            if language_code:
-                console.print(f"[dim]Language: {language_code}[/dim]")
-        else:
-            console.print(f"[dim]Live: [/dim]{clean_text}", end=console_end or "\r")
-
-        if self.text_output_queue is None:
-            return
-
-        message = {
-            "type": "user_text",
-            "text": clean_text,
-            "is_final": is_final,
-        }
-        if language_code:
-            message["language"] = language_code
-
-        self.text_output_queue.put(message)
 
     def _process_mlx_final(self, audio_input):
         """Process final audio using MLX backend with streaming handler."""

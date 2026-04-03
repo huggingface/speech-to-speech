@@ -36,13 +36,13 @@ class OpenApiLanguageModelHandlerArguments:
             "help": "Number of interactions assitant-user to keep for the chat. None for no limitations."
         },
     )
-    open_api_api_key: str = field(
+    open_api_api_key: str | None = field(
         default=None,
         metadata={
             "help": "Is a unique code used to authenticate and authorize access to an API.Default is None"
         },
     )
-    open_api_base_url: str = field(
+    open_api_base_url: str | None = field(
         default=None,
         metadata={
             "help": "Is the root URL for all endpoints of an API, serving as the starting point for constructing API request.Default is Non"

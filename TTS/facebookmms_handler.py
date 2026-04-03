@@ -4,12 +4,15 @@ import numpy as np
 import librosa
 from rich.console import Console
 from baseHandler import BaseHandler
+from cancel_scope import CancelScope
 import logging
+from api.openai_realtime.runtime_config import RuntimeConfig
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.DEBUG
 )
+
 logger = logging.getLogger(__name__)
 
 console = Console()
@@ -21,13 +24,12 @@ WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE = {
     "ko": "kor", # Korean
     "hi": "hin", # Hindi
     "ar": "ara", # Arabic
-    "ar": "hyw", # Armenian
+    "hy": "hyw", # Armenian
     "az": "azb", # Azerbaijani
     "bu": "bul", # Bulgarian
     "ca": "cat", # Catalan
     "nl": "nld", # Dutch
     "fi": "fin", # Finnish
-    "fr": "fra", # French
     "de": "deu", # German
     "el": "ell", # Greek
     "he": "heb", # Hebrew
@@ -65,9 +67,13 @@ class FacebookMMSTTSHandler(BaseHandler):
         language="en",
         stream=True,
         chunk_size=512,
+        runtime_config: RuntimeConfig | None = None, # accepted but unused; implement voice-switch logic in process() to support dynamic voice change
+        cancel_scope: CancelScope | None = None,
         **kwargs
     ):
         self.should_listen = should_listen
+        self.runtime_config = runtime_config
+        self.cancel_scope = cancel_scope
         self.device = device
         self.torch_dtype = getattr(torch, torch_dtype)
         self.stream = stream
@@ -90,7 +96,7 @@ class FacebookMMSTTSHandler(BaseHandler):
 
     def warmup(self):
         logger.info(f"Warming up {self.__class__.__name__}")
-        output = self.generate_audio("Hello, this is a test")
+        self.generate_audio("Hello, this is a test")
 
     def generate_audio(self, text):
         if not text:
@@ -124,6 +130,11 @@ class FacebookMMSTTSHandler(BaseHandler):
             return None
 
     def process(self, llm_sentence):
+        if isinstance(llm_sentence, tuple) and llm_sentence[0] == "__END_OF_RESPONSE__":
+            yield b"__RESPONSE_DONE__"
+            return
+
+        gen = self.cancel_scope.generation if self.cancel_scope else None
         language_code = None
 
         if isinstance(llm_sentence, tuple):
@@ -145,7 +156,8 @@ class FacebookMMSTTSHandler(BaseHandler):
         
         if audio_output is None or audio_output.numel() == 0:
             logger.warning("No audio output generated")
-            self.should_listen.set()
+            if not getattr(self, 'runtime_config', None):
+                self.should_listen.set()
             return
 
         audio_numpy = audio_output.cpu().numpy().squeeze()
@@ -159,13 +171,20 @@ class FacebookMMSTTSHandler(BaseHandler):
 
         if self.stream:
             for i in range(0, len(audio_int16), self.chunk_size):
+                if gen is not None and self.cancel_scope.is_stale(gen):
+                    logger.info("TTS generation cancelled (interruption)")
+                    return
                 chunk = audio_int16[i:i + self.chunk_size]
                 yield np.pad(chunk, (0, self.chunk_size - len(chunk)))
         else:
             for i in range(0, len(audio_int16), self.chunk_size):
+                if gen is not None and self.cancel_scope.is_stale(gen):
+                    logger.info("TTS generation cancelled (interruption)")
+                    return
                 yield np.pad(
                     audio_int16[i : i + self.chunk_size],
                     (0, self.chunk_size - len(audio_int16[i : i + self.chunk_size])),
                 )
 
-        self.should_listen.set()
+        if not getattr(self, 'runtime_config', None):
+            self.should_listen.set()

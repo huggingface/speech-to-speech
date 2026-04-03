@@ -12,8 +12,11 @@ import logging
 import numpy as np
 from sys import platform
 from baseHandler import BaseHandler
+from cancel_scope import CancelScope
 from rich.console import Console
 from utils.mlx_lock import MLXLockContext
+
+from api.openai_realtime.runtime_config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -83,7 +86,9 @@ class KokoroTTSHandler(BaseHandler):
         lang_code="b",
         speed=1.0,
         blocksize=512,
-        gen_kwargs=None,  # Unused, but passed by the pipeline
+        gen_kwargs=None,
+        runtime_config: RuntimeConfig | None = None,
+        cancel_scope: CancelScope | None = None,
     ):
         """
         Initialize the Kokoro TTS model.
@@ -104,6 +109,8 @@ class KokoroTTSHandler(BaseHandler):
         self.lang_code = lang_code
         self.speed = speed
         self.blocksize = blocksize
+        self.runtime_config = runtime_config
+        self.cancel_scope = cancel_scope
 
         # Determine device
         if device == "auto":
@@ -140,7 +147,7 @@ class KokoroTTSHandler(BaseHandler):
 
             self.backend = "mlx"
             self.model = load_model(model_name)
-            logger.info(f"MLX Audio Kokoro model loaded successfully")
+            logger.info("MLX Audio Kokoro model loaded successfully")
 
             # Get or create the pipeline for our language and preload the voice
             # This avoids the voice being reloaded on every generate() call
@@ -170,7 +177,7 @@ class KokoroTTSHandler(BaseHandler):
 
             self.backend = "kokoro"
             self.pipeline = KPipeline(lang_code=self.lang_code)
-            logger.info(f"Native Kokoro pipeline loaded successfully")
+            logger.info("Native Kokoro pipeline loaded successfully")
         except ImportError as e:
             raise ImportError(
                 "kokoro is required for Kokoro TTS on CUDA/CPU. "
@@ -182,7 +189,8 @@ class KokoroTTSHandler(BaseHandler):
         """Preload voices for common languages to avoid download delays during inference."""
         # Only preload a few commonly used language voices to avoid excessive startup time
         # Users speaking other languages will experience a one-time download delay
-        preload_langs = ["e", "f", "i", "p"]  # Spanish, French, Italian, Portuguese
+        # preload_langs = ["a", "b", "e", "f", "h", "i", "j", "p", "z"] # English, Spanish, French, Hindi, Italian, Japanese, Portuguese 
+        preload_langs = ["a", "e", "f"] # English, Spanish, French
 
         for lang_code in preload_langs:
             voice = KOKORO_LANG_DEFAULT_VOICES.get(lang_code)
@@ -223,17 +231,26 @@ class KokoroTTSHandler(BaseHandler):
         Yields:
             Audio chunks as numpy int16 arrays
         """
+        if isinstance(llm_sentence, tuple) and llm_sentence[0] == "__END_OF_RESPONSE__":
+            yield b"__RESPONSE_DONE__"
+            return
+
+        if self.runtime_config and self.runtime_config.session.audio.output.voice:
+            self.voice = self.runtime_config.session.audio.output.voice
+
         if self.backend == "mlx":
             yield from self._process_mlx(llm_sentence)
         else:
             yield from self._process_kokoro(llm_sentence)
 
-        self.should_listen.set()
+        if not getattr(self, 'runtime_config', None):
+            self.should_listen.set()
 
     def _process_mlx(self, llm_sentence):
         """Process using MLX backend with Apple Silicon optimizations."""
         from scipy.signal import resample_poly
 
+        gen = self.cancel_scope.generation if self.cancel_scope else None
         # Acquire global MLX lock to prevent concurrent access with STT
         with MLXLockContext(handler_name="KokoroTTS", timeout=10.0):
             language_code = None
@@ -299,6 +316,9 @@ class KokoroTTSHandler(BaseHandler):
 
                 # Yield audio in fixed-size chunks
                 for i in range(0, len(audio), self.blocksize):
+                    if gen is not None and self.cancel_scope.is_stale(gen):
+                        logger.info("TTS generation cancelled (interruption)")
+                        return
                     chunk = audio[i : i + self.blocksize]
                     # Pad the last chunk if necessary
                     if len(chunk) < self.blocksize:
@@ -310,6 +330,7 @@ class KokoroTTSHandler(BaseHandler):
         """Process using native kokoro library."""
         from scipy.signal import resample_poly
 
+        gen = self.cancel_scope.generation if self.cancel_scope else None
         language_code = None
         if isinstance(llm_sentence, tuple):
             llm_sentence, language_code = llm_sentence
@@ -353,6 +374,9 @@ class KokoroTTSHandler(BaseHandler):
 
             # Yield audio in fixed-size chunks
             for i in range(0, len(audio), self.blocksize):
+                if gen is not None and self.cancel_scope.is_stale(gen):
+                    logger.info("TTS generation cancelled (interruption)")
+                    return
                 chunk = audio[i : i + self.blocksize]
                 # Pad the last chunk if necessary
                 if len(chunk) < self.blocksize:
