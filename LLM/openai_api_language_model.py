@@ -13,7 +13,6 @@ from LLM.utils import remove_unspeechable
 from api.openai_realtime.runtime_config import RuntimeConfig
 from LLM.tool_call.qwen3coder_tool_parser import Qwen3CoderToolParser
 from LLM.voice_prompt import VOICE_SYSTEM_PROMPT
-from openai.types.responses import ResponseFunctionToolCall
 
 logger = logging.getLogger(__name__)
 
