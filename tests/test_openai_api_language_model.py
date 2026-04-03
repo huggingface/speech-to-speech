@@ -174,3 +174,39 @@ def test_second_turn_flattens_assistant_history_for_responses():
     assert assistant_items == [
         {"type": "message", "role": "assistant", "content": "Hello."}
     ]
+
+
+def test_required_tool_choice_disables_streaming():
+    handler = _make_handler(stream=True)
+    handler.tools_choice = "required"
+    captured = {}
+
+    response = SimpleNamespace(
+        usage=None,
+        output=[
+            SimpleNamespace(
+                type="function_call",
+                model_dump=lambda: {
+                    "type": "function_call",
+                    "name": "play_emotion",
+                    "arguments": '{"emotion": "Bored"}',
+                },
+            )
+        ],
+    )
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return response
+
+    handler.client = SimpleNamespace(
+        responses=SimpleNamespace(create=fake_create)
+    )
+
+    outputs = list(handler.process("Hi"))
+
+    assert captured["stream"] is False
+    assert outputs == [
+        ("", None, [{"type": "function_call", "name": "play_emotion", "arguments": '{"emotion": "Bored"}'}]),
+        ("__END_OF_RESPONSE__", None, None),
+    ]
