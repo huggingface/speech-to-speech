@@ -26,7 +26,7 @@ from baseHandler import BaseHandler
 from cancel_scope import CancelScope
 from rich.console import Console
 from LLM.utils import remove_unspeechable, image_url_to_pil
-from LLM.voice_prompt import VOICE_SYSTEM_PROMPT
+from LLM.voice_prompt import build_voice_system_prompt
 from api.openai_realtime.runtime_config import RuntimeConfig
 
 try:
@@ -133,7 +133,7 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
                 raise ValueError(
                     "An initial promt needs to be specified when setting init_chat_role."
                 )
-            full_prompt = f"{VOICE_SYSTEM_PROMPT}\n\n{init_chat_prompt}"
+            full_prompt = build_voice_system_prompt(init_chat_prompt)
             self.chat.init_chat({"role": init_chat_role, "content": full_prompt})
         self.user_role = user_role
         self.runtime_config = runtime_config
@@ -220,12 +220,12 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
 
         if function_tools and self.tool_choice != "none":
             tool_section = build_tool_system_prompt(function_tools)
-            full_instructions = f"{VOICE_SYSTEM_PROMPT}\n\n{new_instructions}\n\n{tool_section}"
+            full_instructions = build_voice_system_prompt(new_instructions, tool_section=tool_section)
             self._block_regex = build_block_regex()
             self._enter_code = ENTER_CODE
             self._end_code = END_CODE
         else:
-            full_instructions = f"{VOICE_SYSTEM_PROMPT}\n\n{new_instructions}"
+            full_instructions = build_voice_system_prompt(new_instructions)
             self._block_regex = None
             self._enter_code = None
             self._end_code = None
