@@ -11,7 +11,6 @@ from cancel_scope import CancelScope
 from LLM.chat import Chat
 from LLM.utils import remove_unspeechable
 from api.openai_realtime.runtime_config import RuntimeConfig
-from LLM.voice_prompt import VOICE_SYSTEM_PROMPT
 from LLM.voice_prompt import build_voice_system_prompt
 
 logger = logging.getLogger(__name__)
