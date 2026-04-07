@@ -60,6 +60,40 @@ def strip_qwen_tool_markup_for_chat(text: str) -> str:
     return " ".join(segments)
 
 
+def _strip_leading_orphan_closes(text: str) -> str:
+    """Remove ``</tool_call>`` that appear before any ``<tool_call>`` (malformed / streaming glitches)."""
+    while True:
+        first_open = text.find(TOOL_CALL_OPEN)
+        first_close = text.find(TOOL_CALL_CLOSE)
+        if first_close != -1 and (first_open == -1 or first_close < first_open):
+            text = (
+                text[:first_close]
+                + text[first_close + len(TOOL_CALL_CLOSE) :]
+            )
+            continue
+        break
+    return text
+
+
+def _flush_complete_sentences(text: str, *, flush_single: bool) -> tuple[list[str], str]:
+    """Split *text* on sentence boundaries for streaming TTS.
+
+    When *flush_single* is True (speech before an unclosed ``<tool_call>``), a lone sentence
+    is yielded and the remainder is empty. When False (normal tail), a lone sentence stays
+    in the remainder buffer unchanged.
+    """
+    if not text.strip():
+        return ([], "") if flush_single else ([], text)
+    sentences = sent_tokenize(text)
+    if len(sentences) > 1:
+        return sentences[:-1], sentences[-1]
+    if len(sentences) == 1:
+        if flush_single:
+            return [sentences[0]], ""
+        return [], text
+    return ([], "") if flush_single else ([], text)
+
+
 def process_printable_text_qwen_xml(
     printable_text: str,
     tools: list[dict],
@@ -73,18 +107,7 @@ def process_printable_text_qwen_xml(
     """
     chunks: list[str] = []
 
-    # Drop stray </tool_call> that appear before any <tool_call> (streaming glitches / malformed XML)
-    # so they do not reach TTS or confuse the closed-span parser below.
-    while True:
-        first_open = printable_text.find(TOOL_CALL_OPEN)
-        first_close = printable_text.find(TOOL_CALL_CLOSE)
-        if first_close != -1 and (first_open == -1 or first_close < first_open):
-            printable_text = (
-                printable_text[:first_close]
-                + printable_text[first_close + len(TOOL_CALL_CLOSE) :]
-            )
-            continue
-        break
+    printable_text = _strip_leading_orphan_closes(printable_text)
 
     while True:
         start = printable_text.find(TOOL_CALL_OPEN)
@@ -99,31 +122,28 @@ def process_printable_text_qwen_xml(
             tools.append(tc.model_dump())
         printable_text = printable_text[:start] + printable_text[end_close:]
 
+    printable_text = _strip_leading_orphan_closes(printable_text)
+
     if TOOL_CALL_OPEN in printable_text:
         idx = printable_text.index(TOOL_CALL_OPEN)
         before = printable_text[:idx]
         tail_from_tag = printable_text[idx:]
         if before.strip():
-            sentences = sent_tokenize(before)
-            if len(sentences) > 1:
-                for s in sentences[:-1]:
-                    chunks.append(s)
-                printable_text = sentences[-1] + tail_from_tag
-            elif len(sentences) == 1:
-                chunks.append(sentences[0])
-                printable_text = tail_from_tag
-            else:
-                printable_text = tail_from_tag
+            flushed, remainder = _flush_complete_sentences(before, flush_single=True)
+            chunks.extend(flushed)
+            printable_text = (
+                (remainder + tail_from_tag) if remainder else tail_from_tag
+            )
         else:
             printable_text = tail_from_tag
         return chunks, tools, printable_text
 
     if printable_text:
-        sentences = sent_tokenize(printable_text)
-        if len(sentences) > 1:
-            for s in sentences[:-1]:
-                chunks.append(s)
-            printable_text = sentences[-1]
+        flushed, remainder = _flush_complete_sentences(
+            printable_text, flush_single=False,
+        )
+        chunks.extend(flushed)
+        printable_text = remainder
 
     return chunks, tools, printable_text
 

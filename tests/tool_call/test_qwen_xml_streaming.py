@@ -93,6 +93,15 @@ class TestProcessPrintableTextQwenXml:
         assert len(tools) == 1
         assert "Hello" in buf or "Done" in buf
 
+    def test_orphan_close_tag_after_block_dropped(self):
+        """Stray ``</tool_call>`` after a removed complete block must not reach TTS."""
+        parser = Qwen3CoderToolParser(tools=[_fn_tool()])
+        text = _tool_block("a") + "</tool_call> Hello."
+        chunks, tools, buf = _feed([text], parser)
+        assert len(tools) == 1
+        joined = " ".join(chunks) + " " + buf
+        assert "</tool_call>" not in joined
+
 
 class TestStripHelpers:
     def test_strip_qwen_tool_markup_for_chat(self):
