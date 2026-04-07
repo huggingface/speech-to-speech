@@ -4,7 +4,6 @@ from baseHandler import BaseHandler
 from lightning_whisper_mlx import LightningWhisperMLX
 import numpy as np
 from rich.console import Console
-from copy import copy
 import torch
 
 logger = logging.getLogger(__name__)

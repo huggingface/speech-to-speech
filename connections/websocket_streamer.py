@@ -98,8 +98,17 @@ class WebSocketStreamer:
 
         # Enable listening when first client connects
         if len(self.clients) == 1:
+            # Drain edge queues so stale data from a previous session doesn't
+            # leak into the new one (SESSION_END may not have flushed everything).
+            for q in (self.output_queue, self.text_output_queue):
+                if q is not None:
+                    while not q.empty():
+                        try:
+                            q.get_nowait()
+                        except Empty:
+                            break
             self.should_listen.set()
-            logger.debug(f"Listening enabled (should_listen.set())")
+            logger.debug("Listening enabled, edge queues drained (should_listen.set())")
 
         try:
             logger.debug(f"Client {client_id}: Starting message receive loop")
@@ -144,6 +153,13 @@ class WebSocketStreamer:
                 try:
                     audio_chunk = self.output_queue.get_nowait()
                     if isinstance(audio_chunk, bytes) and audio_chunk == b"END":
+                        if audio_buffer and self.clients:
+                            data = bytes(audio_buffer)
+                            audio_buffer.clear()
+                            await asyncio.gather(
+                                *[client.send(data) for client in self.clients],
+                                return_exceptions=True,
+                            )
                         break
                     if is_control_message(audio_chunk, SESSION_END.kind):
                         audio_buffer.clear()

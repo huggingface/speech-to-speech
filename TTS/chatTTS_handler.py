@@ -1,14 +1,17 @@
 import ChatTTS
 import logging
 from baseHandler import BaseHandler
+from cancel_scope import CancelScope
 import librosa
 import numpy as np
 from rich.console import Console
 import torch
+from api.openai_realtime.runtime_config import RuntimeConfig
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+
 logger = logging.getLogger(__name__)
 
 console = Console()
@@ -22,8 +25,12 @@ class ChatTTSHandler(BaseHandler):
         gen_kwargs={},  # Unused
         stream=True,
         chunk_size=512,
+        runtime_config: RuntimeConfig | None = None,   # accepted but unused; implement voice-switch logic in process() to support dynamic voice change
+        cancel_scope: CancelScope | None = None,
     ):
         self.should_listen = should_listen
+        self.runtime_config = runtime_config
+        self.cancel_scope = cancel_scope
         self.device = device
         self.model = ChatTTS.Chat()
         self.model.load(compile=False)  # Doesn't work for me with True
@@ -40,6 +47,11 @@ class ChatTTSHandler(BaseHandler):
         _ = self.model.infer("text")
 
     def process(self, llm_sentence):
+        if isinstance(llm_sentence, tuple) and llm_sentence[0] == "__END_OF_RESPONSE__":
+            yield b"__RESPONSE_DONE__"
+            return
+
+        _cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
         console.print(f"[green]ASSISTANT: {llm_sentence}")
         if self.device == "mps":
             import time
@@ -58,8 +70,12 @@ class ChatTTSHandler(BaseHandler):
         if self.stream:
             wavs = [np.array([])]
             for gen in wavs_gen:
+                if _cancel_gen is not None and self.cancel_scope.is_stale(_cancel_gen):
+                    logger.info("TTS generation cancelled (interruption)")
+                    return
                 if gen[0] is None or len(gen[0]) == 0:
-                    self.should_listen.set()
+                    if not getattr(self, 'runtime_config', None):
+                        self.should_listen.set()
                     return
                 audio_chunk = librosa.resample(gen[0], orig_sr=24000, target_sr=16000)
                 audio_chunk = (audio_chunk * 32768).astype(np.int16)[0]
@@ -70,7 +86,8 @@ class ChatTTSHandler(BaseHandler):
         else:
             wavs = wavs_gen
             if len(wavs[0]) == 0:
-                self.should_listen.set()
+                if not getattr(self, 'runtime_config', None):
+                    self.should_listen.set()
                 return
             audio_chunk = librosa.resample(wavs[0], orig_sr=24000, target_sr=16000)
             audio_chunk = (audio_chunk * 32768).astype(np.int16)
@@ -79,4 +96,5 @@ class ChatTTSHandler(BaseHandler):
                     audio_chunk[i : i + self.chunk_size],
                     (0, self.chunk_size - len(audio_chunk[i : i + self.chunk_size])),
                 )
-        self.should_listen.set()
+        if not getattr(self, 'runtime_config', None):
+            self.should_listen.set()

@@ -40,7 +40,24 @@ class LMOutputProcessor(BaseHandler):
         Yields:
             Tuple of (text, language_code) for TTS
         """
+        sentinel, *_ = lm_output
+
+        if sentinel == "__TOKEN_USAGE__":
+            _, input_tokens, output_tokens = lm_output
+            if self.text_output_queue is not None:
+                self.text_output_queue.put({
+                    "type": "token_usage",
+                    "input_tokens": input_tokens or 0,
+                    "output_tokens": output_tokens or 0,
+                })
+            return
+
         text_chunk, language_code, tools = lm_output
+
+        if text_chunk == "__END_OF_RESPONSE__":
+            yield ("__END_OF_RESPONSE__", None)
+            return
+
         logger.debug(f"LM processor: text='{text_chunk}', tools={tools}")
 
         # Send text + tools to WebSocket clients
@@ -57,5 +74,6 @@ class LMOutputProcessor(BaseHandler):
             self.text_output_queue.put(message)
 
         # Forward clean text to TTS (yield to maintain streaming)
-        logger.debug(f"Forwarding to TTS: '{text_chunk}'")
-        yield (text_chunk, language_code)
+        if text_chunk:
+            logger.debug(f"Forwarding to TTS: '{text_chunk}'")
+            yield (text_chunk, language_code)

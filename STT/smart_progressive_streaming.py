@@ -10,7 +10,7 @@ Provides frequent partial transcriptions (every 250ms) with:
 
 import numpy as np
 from types import SimpleNamespace
-from typing import Generator, Tuple, List
+from typing import Generator
 from dataclasses import dataclass
 
 @dataclass
@@ -168,7 +168,6 @@ class SmartProgressiveStreamingHandler:
         - timestamp: Current position
         - is_final: True for last update
         """
-        total_duration = len(audio) / self.sample_rate
         position = 0  # Start of current window (in samples)
         fixed_sentences = []  # List of completed sentence texts
         fixed_end_time = 0.0  # End time of last fixed sentence

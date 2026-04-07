@@ -7,13 +7,12 @@ from pathlib import Path
 from queue import Queue
 from threading import Event
 from typing import Optional
+
+from cancel_scope import CancelScope
 from sys import platform
 from VAD.vad_handler import VADHandler
 from arguments_classes.chat_tts_arguments import ChatTTSHandlerArguments
 from arguments_classes.language_model_arguments import LanguageModelHandlerArguments
-from arguments_classes.mlx_language_model_arguments import (
-    MLXLanguageModelHandlerArguments,
-)
 from arguments_classes.module_arguments import ModuleArguments
 from arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
 from arguments_classes.socket_receiver_arguments import SocketReceiverArguments
@@ -96,7 +95,6 @@ def parse_arguments():
             ParakeetTDTSTTHandlerArguments,
             LanguageModelHandlerArguments,
             OpenApiLanguageModelHandlerArguments,
-            MLXLanguageModelHandlerArguments,
             MeloTTSHandlerArguments,
             ChatTTSHandlerArguments,
             FacebookMMSTTSHandlerArguments,
@@ -127,6 +125,10 @@ def setup_logger(log_level):
         torch._logging.set_logs(graph_breaks=True, recompiles=True, cudagraphs=True)
 
 
+MLX_DEFAULT_LM_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-bf16"
+TRANSFORMERS_DEFAULT_LM_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
+
+
 def optimal_mac_settings(mac_optimal_settings: Optional[str], *handler_kwargs):
     if mac_optimal_settings:
         for kwargs in handler_kwargs:
@@ -140,6 +142,9 @@ def optimal_mac_settings(mac_optimal_settings: Optional[str], *handler_kwargs):
                 kwargs.llm = "mlx-lm"
             if hasattr(kwargs, "tts"):
                 kwargs.tts = "melo"
+            if hasattr(kwargs, "lm_model_name"):
+                if kwargs.lm_model_name == TRANSFORMERS_DEFAULT_LM_MODEL:
+                    kwargs.lm_model_name = MLX_DEFAULT_LM_MODEL
 
 def check_mac_settings(module_kwargs):
     if platform == "darwin":
@@ -151,9 +156,9 @@ def check_mac_settings(module_kwargs):
             logger.warning(
                 "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm mlx-lm."
             )
-        if module_kwargs.tts not in ("melo", "pocket"):
+        if module_kwargs.tts not in ("melo", "pocket", "kokoro"):
             logger.warning(
-                "For macOS users, it is recommended to use melo for TTS (pocket is also a valid option)."
+                "For macOS users, it is recommended to use melo for TTS (pocket and kokoro are also valid options)."
             )
 
 
@@ -174,7 +179,7 @@ def overwrite_device_argument(common_device: Optional[str], *handler_kwargs):
                 kwargs.qwen3_tts_device = common_device
 
 def prepare_module_args(module_kwargs, *handler_kwargs):
-    optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs)
+    optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs, *handler_kwargs)
     if module_kwargs.tts is None:
         module_kwargs.tts = "melo" if platform == "darwin" else "qwen3"
     if platform == "darwin":
@@ -191,7 +196,6 @@ def prepare_all_args(
     parakeet_tdt_stt_handler_kwargs,
     language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
-    mlx_language_model_handler_kwargs,
     melo_tts_handler_kwargs,
     chat_tts_handler_kwargs,
     facebook_mms_tts_handler_kwargs,
@@ -208,7 +212,6 @@ def prepare_all_args(
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
-        mlx_language_model_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,
@@ -223,7 +226,6 @@ def prepare_all_args(
     rename_args(mlx_audio_whisper_stt_handler_kwargs, "mlx_audio_whisper")
     rename_args(parakeet_tdt_stt_handler_kwargs, "parakeet_tdt")
     rename_args(language_model_handler_kwargs, "lm")
-    rename_args(mlx_language_model_handler_kwargs, "mlx_lm")
     rename_args(open_api_language_model_handler_kwargs, "open_api")
     rename_args(melo_tts_handler_kwargs, "melo")
     rename_args(chat_tts_handler_kwargs, "chat_tts")
@@ -237,9 +239,12 @@ def initialize_queues_and_events():
     return {
         "stop_event": Event(),
         "should_listen": Event(),
+        "response_playing": Event(),
+        "cancel_scope": CancelScope(),
         "recv_audio_chunks_queue": Queue(),
         "send_audio_chunks_queue": Queue(),
         "spoken_prompt_queue": Queue(),
+        "stt_output_queue": Queue(),
         "text_prompt_queue": Queue(),
         "lm_response_queue": Queue(),
         "lm_processed_queue": Queue(),  # NEW: LLM -> LM processor -> TTS
@@ -260,7 +265,6 @@ def build_pipeline(
     parakeet_tdt_stt_handler_kwargs,
     language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
-    mlx_language_model_handler_kwargs,
     melo_tts_handler_kwargs,
     chat_tts_handler_kwargs,
     facebook_mms_tts_handler_kwargs,
@@ -271,13 +275,16 @@ def build_pipeline(
 ):
     stop_event = queues_and_events["stop_event"]
     should_listen = queues_and_events["should_listen"]
+    response_playing = queues_and_events["response_playing"]
+    cancel_scope = queues_and_events["cancel_scope"]
     recv_audio_chunks_queue = queues_and_events["recv_audio_chunks_queue"]
     send_audio_chunks_queue = queues_and_events["send_audio_chunks_queue"]
     spoken_prompt_queue = queues_and_events["spoken_prompt_queue"]
+    stt_output_queue = queues_and_events["stt_output_queue"]
     text_prompt_queue = queues_and_events["text_prompt_queue"]
     lm_response_queue = queues_and_events["lm_response_queue"]
     lm_processed_queue = queues_and_events["lm_processed_queue"]
-    text_output_queue = None
+    text_output_queue = None  # Only set for websocket/realtime modes; kept None otherwise to avoid unbounded queue growth
     if module_kwargs.mode == "local":
         from connections.local_audio_streamer import LocalAudioStreamer
 
@@ -288,6 +295,7 @@ def build_pipeline(
         should_listen.set()
     elif module_kwargs.mode == "websocket":
         from connections.websocket_streamer import WebSocketStreamer
+        from STT.transcription_notifier import TranscriptionNotifier
 
         text_output_queue = queues_and_events["text_output_queue"]
         websocket_streamer = WebSocketStreamer(
@@ -299,7 +307,75 @@ def build_pipeline(
             host=websocket_streamer_kwargs.ws_host,
             port=websocket_streamer_kwargs.ws_port,
         )
-        comms_handlers = [websocket_streamer]
+        transcription_notifier = TranscriptionNotifier(
+            stop_event,
+            queue_in=stt_output_queue,
+            queue_out=text_prompt_queue,
+            setup_kwargs={"text_output_queue": text_output_queue},
+        )
+        comms_handlers = [websocket_streamer, transcription_notifier]
+    elif module_kwargs.mode == "realtime":
+        from api.openai_realtime.server import RealtimeServer
+        from api.openai_realtime.runtime_config import RuntimeConfig
+        from STT.transcription_notifier import TranscriptionNotifier
+
+        text_output_queue = queues_and_events["text_output_queue"]
+
+        # Single shared instance: RealtimeService writes to it on
+        # session.update, pipeline handlers read from it at processing time.
+        # TODO: For multiple concurrent sessions, we need to make a RuntimeConfigManager class
+        #       that manages a dict of RuntimeConfig instances. Encapsulating each session's state.
+        runtime_config = RuntimeConfig()
+
+        for kw in (
+            vad_handler_kwargs,
+            language_model_handler_kwargs,
+            open_api_language_model_handler_kwargs,
+            kokoro_tts_handler_kwargs,
+            qwen3_tts_handler_kwargs,
+            pocket_tts_handler_kwargs,
+            melo_tts_handler_kwargs,
+            chat_tts_handler_kwargs,
+            facebook_mms_tts_handler_kwargs,
+        ):
+            vars(kw)["runtime_config"] = runtime_config
+
+        # Add text_output_queue to vad_handler_kwargs needed for realtime mode
+        vars(vad_handler_kwargs)["text_output_queue"] = text_output_queue
+
+        transcription_notifier = TranscriptionNotifier(
+            stop_event,
+            queue_in=stt_output_queue,
+            queue_out=text_prompt_queue,
+            setup_kwargs={"text_output_queue": text_output_queue},
+        )
+
+        for kw in (
+            language_model_handler_kwargs,
+            open_api_language_model_handler_kwargs,
+            kokoro_tts_handler_kwargs,
+            qwen3_tts_handler_kwargs,
+            pocket_tts_handler_kwargs,
+            melo_tts_handler_kwargs,
+            chat_tts_handler_kwargs,
+            facebook_mms_tts_handler_kwargs,
+        ):
+            vars(kw)["cancel_scope"] = cancel_scope
+
+        realtime_conn = RealtimeServer(
+            stop_event,
+            input_queue=recv_audio_chunks_queue,
+            output_queue=send_audio_chunks_queue,
+            should_listen=should_listen,
+            response_playing=response_playing,
+            cancel_scope=cancel_scope,
+            text_output_queue=text_output_queue,
+            text_prompt_queue=text_prompt_queue,
+            runtime_config=runtime_config,
+            host=websocket_streamer_kwargs.ws_host,
+            port=websocket_streamer_kwargs.ws_port,
+        )
+        comms_handlers = [realtime_conn, transcription_notifier]
     else:
         from connections.socket_receiver import SocketReceiver
         from connections.socket_sender import SocketSender
@@ -326,20 +402,25 @@ def build_pipeline(
         vad_handler_kwargs.enable_realtime_transcription = True
         vad_handler_kwargs.realtime_processing_pause = module_kwargs.live_transcription_update_interval
 
-    # Add text_output_queue to VAD setup for speech_started/stopped events
-    vad_setup_kwargs = vars(vad_handler_kwargs)
-    vad_setup_kwargs["text_output_queue"] = text_output_queue
-
     vad = VADHandler(
         stop_event,
         queue_in=recv_audio_chunks_queue,
         queue_out=spoken_prompt_queue,
         setup_args=(should_listen,),
-        setup_kwargs=vad_setup_kwargs,
+        setup_kwargs=vars(vad_handler_kwargs),
     )
 
-    stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, text_output_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs)
-    lm = get_llm_handler(module_kwargs, stop_event, text_prompt_queue, lm_response_queue, language_model_handler_kwargs, open_api_language_model_handler_kwargs, mlx_language_model_handler_kwargs)
+    if module_kwargs.mode in ("websocket", "realtime"):
+        # STT outputs to an intermediate queue so TranscriptionNotifier can
+        # intercept partials and emit transcription events before forwarding
+        # finals to the LLM.
+        stt_dest = stt_output_queue
+    else:
+        stt_dest = text_prompt_queue
+
+    stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, stt_dest, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs)
+
+    lm = get_llm_handler(module_kwargs, stop_event, text_prompt_queue, lm_response_queue, language_model_handler_kwargs, open_api_language_model_handler_kwargs)
 
     # Add LM output processor to extract tools and forward clean text to TTS
     from LLM.lm_output_processor import LMOutputProcessor
@@ -352,10 +433,13 @@ def build_pipeline(
 
     tts = get_tts_handler(module_kwargs, stop_event, lm_processed_queue, send_audio_chunks_queue, should_listen, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs, qwen3_tts_handler_kwargs)
 
-    return ThreadManager([*comms_handlers, vad, stt, lm, lm_processor, tts])
+    # Build the handler chain
+    pipeline_handlers = [*comms_handlers, vad, stt, lm, lm_processor, tts]
+
+    return ThreadManager(pipeline_handlers)
 
 
-def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, text_output_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs):
+def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_queue, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs):
     if module_kwargs.stt == "whisper":
         from STT.whisper_stt_handler import WhisperSTTHandler
         return WhisperSTTHandler(
@@ -407,7 +491,6 @@ def get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, text_prompt_
             **vars(parakeet_tdt_stt_handler_kwargs),
             "enable_live_transcription": module_kwargs.enable_live_transcription,
             "live_transcription_update_interval": module_kwargs.live_transcription_update_interval,
-            "text_output_queue": text_output_queue,
         }
 
         return ParakeetTDTSTTHandler(
@@ -427,17 +510,8 @@ def get_llm_handler(
     lm_response_queue, 
     language_model_handler_kwargs,
     open_api_language_model_handler_kwargs,
-    mlx_language_model_handler_kwargs
 ):
-    if module_kwargs.llm == "transformers":
-        from LLM.language_model import LanguageModelHandler
-        return LanguageModelHandler(
-            stop_event,
-            queue_in=text_prompt_queue,
-            queue_out=lm_response_queue,
-            setup_kwargs=vars(language_model_handler_kwargs),
-        )
-    elif module_kwargs.llm == "open_api":
+    if module_kwargs.llm == "open_api":
         from LLM.openai_api_language_model import OpenApiModelHandler
         return OpenApiModelHandler(
             stop_event,
@@ -446,17 +520,25 @@ def get_llm_handler(
             setup_kwargs=vars(open_api_language_model_handler_kwargs),
         )
 
-    elif module_kwargs.llm == "mlx-lm":
-        from LLM.mlx_language_model import MLXLanguageModelHandler
-        return MLXLanguageModelHandler(
+    if module_kwargs.llm in ("transformers", "mlx-lm"):
+        lm_kwargs = vars(language_model_handler_kwargs)
+        is_vlm = lm_kwargs.pop("is_vlm", False)
+        if module_kwargs.llm == "mlx-lm":
+            lm_kwargs["backend"] = "mlx"
+
+        if is_vlm:
+            from LLM.language_model import VisionLanguageModelHandler as HandlerClass
+        else:
+            from LLM.language_model import LanguageModelHandler as HandlerClass
+
+        return HandlerClass(
             stop_event,
             queue_in=text_prompt_queue,
             queue_out=lm_response_queue,
-            setup_kwargs=vars(mlx_language_model_handler_kwargs),
+            setup_kwargs=lm_kwargs,
         )
 
-    else:
-        raise ValueError("The LLM should be either transformers or mlx-lm")
+    raise ValueError("The LLM should be either transformers, mlx-lm or open_api")
 
 
 def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chunks_queue, should_listen, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs, qwen3_tts_handler_kwargs):
@@ -542,7 +624,6 @@ def main():
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
-        mlx_language_model_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,
@@ -562,7 +643,6 @@ def main():
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
-        mlx_language_model_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,
@@ -586,7 +666,6 @@ def main():
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
-        mlx_language_model_handler_kwargs,
         melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,

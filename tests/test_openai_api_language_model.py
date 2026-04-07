@@ -4,60 +4,66 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from cancel_scope import CancelScope
 from LLM.chat import Chat
-from LLM import openai_api_language_model
-from LLM.openai_api_language_model import OpenApiModelHandler, extract_stream_chunk_text
+from LLM.openai_api_language_model import OpenApiModelHandler
 
 
-def _chunk(*, content=None, delta=True, choices=True, finish_reason=None):
-    if not choices:
-        return SimpleNamespace(choices=[])
-
-    if not delta:
-        choice = SimpleNamespace(finish_reason=finish_reason)
-        return SimpleNamespace(choices=[choice])
-
-    choice = SimpleNamespace(
-        delta=SimpleNamespace(content=content),
-        finish_reason=finish_reason,
-    )
-    return SimpleNamespace(choices=[choice])
+def _make_text_delta_event(text):
+    return SimpleNamespace(type="response.output_text.delta", delta=text)
 
 
-def test_extract_stream_chunk_text_handles_empty_non_content_chunks():
-    assert extract_stream_chunk_text(_chunk(choices=False)) == ""
-    assert extract_stream_chunk_text(_chunk(delta=False, finish_reason="stop")) == ""
-    assert extract_stream_chunk_text(_chunk(content=None)) == ""
-    assert extract_stream_chunk_text(_chunk(content="hello")) == "hello"
-
-
-def test_process_skips_empty_stream_chunks_without_breaking_sentence_chunking(monkeypatch):
-    monkeypatch.setattr(
-        openai_api_language_model,
-        "sent_tokenize",
-        lambda text: [part for part in ("Hello.", "How are you?") if part in text],
+def _make_output_item_done_event(role="assistant", content="Hello.", item_type="message"):
+    if item_type == "function_call":
+        return SimpleNamespace(
+            type="response.output_item.done",
+            item=SimpleNamespace(
+                type="function_call",
+                model_dump=lambda: {"type": "function_call", "name": "test_fn"},
+            ),
+        )
+    return SimpleNamespace(
+        type="response.output_item.done",
+        item=SimpleNamespace(
+            type="message",
+            role=role,
+            content=content,
+        ),
     )
 
-    streamed_chunks = [
-        _chunk(choices=False),
-        _chunk(content="Hello. "),
-        _chunk(delta=False, finish_reason="stop"),
-        _chunk(content=None),
-        _chunk(content="How are you?"),
-    ]
 
+def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler = object.__new__(OpenApiModelHandler)
     handler.model_name = "test-model"
-    handler.stream = True
+    handler.stream = stream
     handler.gen_kwargs = {}
-    handler.disable_thinking = False
+    handler.disable_thinking = disable_thinking
+    handler._extra_body = (
+        {"chat_template_kwargs": {"enable_thinking": False}}
+        if disable_thinking
+        else None
+    )
     handler.user_role = "user"
     handler.chat = Chat(1)
+    handler.runtime_config = None
+    handler.cancel_scope = cancel_scope
+    handler.tools = None
+    handler.tools_choice = None
+    return handler
+
+
+def test_process_streams_text_from_response_events():
+    handler = _make_handler()
+
+    streamed_events = [
+        _make_text_delta_event("Hello. "),
+        _make_text_delta_event("How are you?"),
+        _make_output_item_done_event(content="Hello. How are you?"),
+    ]
+
     handler.client = SimpleNamespace(
-        chat=SimpleNamespace(
-            completions=SimpleNamespace(
-                create=lambda **kwargs: iter(streamed_chunks),
-            )
+        responses=SimpleNamespace(
+            create=lambda **kwargs: iter(streamed_events),
         )
     )
 
@@ -66,62 +72,105 @@ def test_process_skips_empty_stream_chunks_without_breaking_sentence_chunking(mo
     assert outputs == [
         ("Hello.", None, []),
         ("How are you?", None, []),
+        ("__END_OF_RESPONSE__", None, None),
     ]
-    assert handler.chat.buffer[-1] == {
-        "role": "assistant",
-        "content": "Hello. How are you?",
-    }
 
 
-def test_build_request_kwargs_adds_disable_thinking_extra_body():
-    handler = object.__new__(OpenApiModelHandler)
-    handler.model_name = "Qwen/Qwen3.5-9B:together"
-    handler.stream = True
-    handler.disable_thinking = True
-    handler.gen_kwargs = {"temperature": 0.2}
+def test_process_handles_cancellation():
+    scope = CancelScope()
+    handler = _make_handler(cancel_scope=scope)
 
-    request_kwargs = handler._build_request_kwargs([{"role": "user", "content": "Hi"}])
+    def fake_create(**kwargs):
+        scope.cancel()
+        return iter([_make_text_delta_event("Hello")])
 
-    assert request_kwargs["model"] == "Qwen/Qwen3.5-9B:together"
-    assert request_kwargs["stream"] is True
-    assert request_kwargs["temperature"] == 0.2
-    assert request_kwargs["extra_body"] == {
+    handler.client = SimpleNamespace(
+        responses=SimpleNamespace(create=fake_create)
+    )
+
+    outputs = list(handler.process("Hi"))
+
+    assert outputs == [("__END_OF_RESPONSE__", None, None)]
+
+
+def test_disable_thinking_passes_extra_body():
+    handler = _make_handler(disable_thinking=True)
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return iter([
+            _make_text_delta_event("Ok"),
+            _make_output_item_done_event(content="Ok"),
+        ])
+
+    handler.client = SimpleNamespace(
+        responses=SimpleNamespace(create=fake_create)
+    )
+
+    list(handler.process("Hi"))
+
+    assert captured["extra_body"] == {
         "chat_template_kwargs": {"enable_thinking": False}
     }
 
 
-def test_build_request_kwargs_merges_disable_thinking_with_existing_extra_body():
-    handler = object.__new__(OpenApiModelHandler)
-    handler.model_name = "test-model"
-    handler.stream = False
-    handler.disable_thinking = True
-    handler.gen_kwargs = {
-        "extra_body": {
-            "foo": "bar",
-            "chat_template_kwargs": {"existing": 1},
-        }
-    }
+def test_no_disable_thinking_omits_extra_body():
+    handler = _make_handler(disable_thinking=False)
+    captured = {}
 
-    request_kwargs = handler._build_request_kwargs([{"role": "user", "content": "Hi"}])
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return iter([
+            _make_text_delta_event("Ok"),
+            _make_output_item_done_event(content="Ok"),
+        ])
 
-    assert request_kwargs["extra_body"] == {
-        "foo": "bar",
-        "chat_template_kwargs": {
-            "existing": 1,
-            "enable_thinking": False,
-        },
-    }
+    handler.client = SimpleNamespace(
+        responses=SimpleNamespace(create=fake_create)
+    )
+
+    list(handler.process("Hi"))
+
+    assert captured.get("extra_body") is None
 
 
-def test_build_request_kwargs_disables_thinking_by_default():
-    handler = object.__new__(OpenApiModelHandler)
-    handler.model_name = "test-model"
-    handler.stream = False
-    handler.disable_thinking = True
-    handler.gen_kwargs = {}
+def test_second_turn_flattens_assistant_history_for_responses():
+    handler = _make_handler(stream=False)
+    captured = {}
 
-    request_kwargs = handler._build_request_kwargs([{"role": "user", "content": "Hi"}])
+    first_response = SimpleNamespace(
+        usage=None,
+        output=[
+            SimpleNamespace(
+                type="message",
+                role="assistant",
+                content=[SimpleNamespace(type="output_text", text="Hello.")],
+            )
+        ],
+    )
+    second_response = SimpleNamespace(usage=None, output=[])
+    call_count = 0
 
-    assert request_kwargs["extra_body"] == {
-        "chat_template_kwargs": {"enable_thinking": False}
-    }
+    def fake_create(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return first_response
+        captured.update(kwargs)
+        return second_response
+
+    handler.client = SimpleNamespace(
+        responses=SimpleNamespace(create=fake_create)
+    )
+
+    list(handler.process("Hi"))
+    list(handler.process("Again"))
+
+    assistant_items = [
+        item for item in captured["input"]
+        if item.get("role") == "assistant"
+    ]
+    assert assistant_items == [
+        {"type": "message", "role": "assistant", "content": "Hello."}
+    ]

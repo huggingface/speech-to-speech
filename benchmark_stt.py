@@ -272,7 +272,7 @@ def print_results(results: List[BenchmarkResult]):
         print("-" * 80)
 
         if stats.get("status") == "failed":
-            print(f"  Status: FAILED")
+            print("  Status: FAILED")
             print(f"  Errors: {stats['errors']}")
             continue
 
@@ -284,7 +284,7 @@ def print_results(results: List[BenchmarkResult]):
 
         # Print time to first token stats if available
         if 'avg_time_to_first_token' in stats:
-            print(f"\n  Time to First Token:")
+            print("\n  Time to First Token:")
             print(f"    Avg TTFT:           {stats['avg_time_to_first_token']:.4f}s")
             print(f"    Min TTFT:           {stats['min_time_to_first_token']:.4f}s")
             print(f"    Max TTFT:           {stats['max_time_to_first_token']:.4f}s")
