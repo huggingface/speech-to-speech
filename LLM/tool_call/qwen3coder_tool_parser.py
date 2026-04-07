@@ -12,6 +12,8 @@ No vLLM dependency -- only the ``openai`` SDK (already in the project) and the
 standard library.
 """
 
+from __future__ import annotations
+
 import ast
 import json
 import logging
@@ -19,6 +21,7 @@ import re
 import uuid
 from typing import Any
 
+from nltk import sent_tokenize
 from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.function_tool import FunctionTool
 
@@ -35,6 +38,92 @@ _PARAMETER_REGEX = re.compile(
     re.DOTALL,
 )
 _FUNCTION_PREFIX = "<function="
+
+TOOL_CALL_OPEN = "<tool_call>"
+TOOL_CALL_CLOSE = "</tool_call>"
+
+# Speech-only segments for chat history: split on complete blocks or unclosed ``<tool_call>…`` tail.
+_TOOL_CALL_SPEECH_SPLIT = re.compile(
+    r"<tool_call>.*?</tool_call>|<tool_call>.*$", re.DOTALL,
+)
+
+
+def strip_qwen_tool_markup_for_chat(text: str) -> str:
+    """Remove tool XML and return speech-only text (assistant history and final TTS buffer).
+
+    Splits on each ``<tool_call>…</tool_call>`` span and on an unclosed ``<tool_call>…``
+    tail, then joins the non-empty segments (text before, between, and after blocks)
+    with a single space.
+    """
+    parts = _TOOL_CALL_SPEECH_SPLIT.split(text)
+    segments = [p.strip() for p in parts if p.strip()]
+    return " ".join(segments)
+
+
+def process_printable_text_qwen_xml(
+    printable_text: str,
+    tools: list[dict],
+    parser: Qwen3CoderToolParser,
+) -> tuple[list[str], list[dict], str]:
+    """Extract closed tool blocks and speech sentence strings for streaming TTS.
+
+    Returns ``(chunks_to_yield, updated_tools, remaining_printable_text)``.
+    Each chunk is a single sentence string (no tool XML). Call ``parse()`` only on complete
+    ``<tool_call>…</tool_call>`` spans. The caller attaches ``language_code`` and tool metadata.
+    """
+    chunks: list[str] = []
+
+    while True:
+        first_open = printable_text.find(TOOL_CALL_OPEN)
+        first_close = printable_text.find(TOOL_CALL_CLOSE)
+        if first_close != -1 and (first_open == -1 or first_close < first_open):
+            printable_text = (
+                printable_text[:first_close]
+                + printable_text[first_close + len(TOOL_CALL_CLOSE) :]
+            )
+            continue
+        break
+
+    while True:
+        start = printable_text.find(TOOL_CALL_OPEN)
+        if start == -1:
+            break
+        end = printable_text.find(TOOL_CALL_CLOSE, start)
+        if end == -1:
+            break
+        end_close = end + len(TOOL_CALL_CLOSE)
+        span = printable_text[start:end_close]
+        for tc in parser.parse(span):
+            tools.append(tc.model_dump())
+        printable_text = printable_text[:start] + printable_text[end_close:]
+
+    if TOOL_CALL_OPEN in printable_text:
+        idx = printable_text.index(TOOL_CALL_OPEN)
+        before = printable_text[:idx]
+        tail_from_tag = printable_text[idx:]
+        if before.strip():
+            sentences = sent_tokenize(before)
+            if len(sentences) > 1:
+                for s in sentences[:-1]:
+                    chunks.append(s)
+                printable_text = sentences[-1] + tail_from_tag
+            elif len(sentences) == 1:
+                chunks.append(sentences[0])
+                printable_text = tail_from_tag
+            else:
+                printable_text = tail_from_tag
+        else:
+            printable_text = tail_from_tag
+        return chunks, tools, printable_text
+
+    if printable_text:
+        sentences = sent_tokenize(printable_text)
+        if len(sentences) > 1:
+            for s in sentences[:-1]:
+                chunks.append(s)
+            printable_text = sentences[-1]
+
+    return chunks, tools, printable_text
 
 
 class Qwen3CoderToolParser:
