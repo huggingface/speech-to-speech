@@ -26,6 +26,7 @@ class Chat:
 
     def reset(self):
         self.buffer = []
+        self.init_chat_message = None
 
     def strip_images(self):
         """Remove all image content parts from every message in the buffer.
