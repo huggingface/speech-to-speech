@@ -60,6 +60,16 @@ class ListenAndPlayRealtimeArguments:
         default=None,
         metadata={"help": "Optional session instructions to apply on connect."},
     )
+    voice: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "TTS voice sent as session.audio.output.voice. "
+                "Local Kokoro: e.g. bm_fable, af_heart, am_adam. "
+                "OpenAI Realtime: e.g. marin, cedar, alloy."
+            ),
+        },
+    )
     print_json: bool = field(
         default=False,
         metadata={"help": "Print raw event payloads in addition to friendly logs."},
@@ -106,6 +116,8 @@ def _build_session_update(args: ListenAndPlayRealtimeArguments) -> dict:
         input_cfg["format"] = input_format
     if output_format is not None:
         output_cfg["format"] = output_format
+    if args.voice:
+        output_cfg["voice"] = args.voice
 
     session = {
         "type": "realtime",
@@ -332,6 +344,13 @@ def main() -> None:
     parser.add_argument("--input-device", type=int, default=defaults.input_device)
     parser.add_argument("--output-device", type=int, default=defaults.output_device)
     parser.add_argument("--instructions", default=defaults.instructions)
+    parser.add_argument(
+        "--voice",
+        default=defaults.voice,
+        help=(
+            "session.audio.output.voice (Kokoro id like bm_fable, or OpenAI name like marin)."
+        ),
+    )
     parser.add_argument("--print-json", action="store_true", default=defaults.print_json)
     parser.add_argument(
         "--block-mic-during-playback",
@@ -352,6 +371,7 @@ def main() -> None:
         input_device=namespace.input_device,
         output_device=namespace.output_device,
         instructions=namespace.instructions,
+        voice=namespace.voice,
         print_json=namespace.print_json,
         block_mic_during_playback=namespace.block_mic_during_playback,
     )
