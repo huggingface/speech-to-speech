@@ -73,6 +73,8 @@ def process_printable_text_qwen_xml(
     """
     chunks: list[str] = []
 
+    # Drop stray </tool_call> that appear before any <tool_call> (streaming glitches / malformed XML)
+    # so they do not reach TTS or confuse the closed-span parser below.
     while True:
         first_open = printable_text.find(TOOL_CALL_OPEN)
         first_close = printable_text.find(TOOL_CALL_CLOSE)
