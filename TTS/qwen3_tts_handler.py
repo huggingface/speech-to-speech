@@ -164,7 +164,6 @@ class Qwen3TTSHandler(BaseHandler):
         start = perf_counter()
         total_samples = 0
         first_chunk = True
-        found_speech = False
         leftover = np.array([], dtype=np.int16)
 
         for audio_chunk, sr, _timing in gen:
@@ -176,17 +175,6 @@ class Qwen3TTSHandler(BaseHandler):
                 first_chunk = False
             audio_chunk = self._resample_to_pipeline_sr(audio_chunk, sr)
             audio_chunk = self._to_int16(audio_chunk)
-
-            # Trim leading silence from the very start (model often generates
-            # a silent ramp-up on the first turn, causing a perceived "missing word").
-            if not found_speech:
-                threshold = int(32768 * 0.01)
-                above = np.abs(audio_chunk) > threshold
-                if not np.any(above):
-                    continue  # entire chunk is silence — skip it
-                start_idx = max(0, int(np.argmax(above)) - int(PIPELINE_SR * 0.005))
-                audio_chunk = audio_chunk[start_idx:]
-                found_speech = True
 
             # Concatenate with any leftover samples from the previous chunk
             audio_chunk = np.concatenate([leftover, audio_chunk])
