@@ -236,18 +236,21 @@ class OpenApiModelHandler(BaseHandler):
                     elif message.type == "message":
                         for chunk in message.content:
                             if chunk.type == "output_text":
-                                if parser is not None:
-                                    clean_text += chunk.text
-                                else:
-                                    clean_text += remove_unspeechable(chunk.text)
+                                clean_text += chunk.text
                     else:
                         logger.warning(f"Not supported message type: {message.type}")
                 if parser is not None:
                     chunks, tools, printable_text = process_printable_text_qwen_xml(
                         clean_text, tools, parser,
                     )
-                    for s in chunks:
-                        yield remove_unspeechable(s), language_code, []
+                    chunk_parts = [remove_unspeechable(s).strip() for s in chunks]
+                    chunk_joined = " ".join(p for p in chunk_parts if p)
+                    printable_text = remove_unspeechable(
+                        strip_qwen_tool_markup_for_chat(printable_text).strip(),
+                    )
+                    combined = " ".join(
+                        p for p in (chunk_joined, printable_text) if p
+                    ).strip()
                     assistant_speech = remove_unspeechable(
                         strip_qwen_tool_markup_for_chat(clean_text),
                     )
@@ -257,16 +260,14 @@ class OpenApiModelHandler(BaseHandler):
                             "role": "assistant",
                             "content": assistant_speech,
                         })
-                    printable_text = remove_unspeechable(
-                        strip_qwen_tool_markup_for_chat(printable_text).strip(),
-                    )
                     logger.debug(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
-                    if printable_text or tools:
-                        yield printable_text, language_code, tools
+                    if combined or tools:
+                        yield combined, language_code, tools
                 else:
                     logger.debug(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
+                    clean_text = remove_unspeechable(clean_text)
                     if clean_text.strip():
                         self.chat.append({
                             "type": "message",
