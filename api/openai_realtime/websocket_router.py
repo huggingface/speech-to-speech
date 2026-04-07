@@ -9,7 +9,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from api.openai_realtime.service import RealtimeService, ServerEvent
 from cancel_scope import CancelScope
-from pipeline_control import SESSION_END
+from pipeline_control import SESSION_END, is_control_message
 
 from openai.types.realtime import (
     InputAudioBufferAppendEvent,
@@ -134,8 +134,6 @@ def create_app(
                     break
         if response_playing:
             response_playing.clear()
-        if cancel_scope:
-            cancel_scope.reset()
 
         should_listen.set()
 
@@ -201,9 +199,18 @@ def create_app(
         finally:
             service.unregister(session_id)
             if not service._conns:
+                if cancel_scope:
+                    cancel_scope.cancel()
+                _flush_queue(output_queue)
+                _flush_queue(text_output_queue)
+                if response_playing:
+                    response_playing.clear()
                 service.runtime_config.reset()
                 input_queue.put(SESSION_END)
-                logger.info("Last client disconnected, reset RuntimeConfig and sent SESSION_END")
+                logger.info(
+                    "Last client disconnected, cancelled active response, flushed queues, "
+                    "reset RuntimeConfig and sent SESSION_END",
+                )
             app.state.websockets.pop(session_id, None)
             app.state.active_session = None
             logger.info(f"Client {session_id} removed")
@@ -279,6 +286,9 @@ def create_app(
                         logger.info("Response complete, listening re-enabled")
                         continue
 
+                    if is_control_message(audio_chunk, SESSION_END.kind):
+                        continue
+
                     if cancel_scope and cancel_scope.discarding:
                         continue
 
@@ -291,7 +301,10 @@ def create_app(
                         except Empty:
                             break
 
-                        if isinstance(next_chunk, bytes) and next_chunk in {b"END", b"__RESPONSE_DONE__"}:
+                        if (
+                            isinstance(next_chunk, bytes)
+                            and next_chunk in {b"END", b"__RESPONSE_DONE__"}
+                        ) or is_control_message(next_chunk, SESSION_END.kind):
                             pending_output_item = next_chunk
                             break
 

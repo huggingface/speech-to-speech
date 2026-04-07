@@ -240,6 +240,19 @@ class TestClientEventDispatch:
 # ===================================================================
 
 class TestSendLoop:
+    def test_audio_output_ignores_session_end_control_message(self, setup):
+        app, _, _, output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                output_queue.put(SESSION_END)
+                output_queue.put(_pcm_bytes(256))
+
+                msg1 = ws.receive_json()
+                assert msg1["type"] == "response.created"
+                msg2 = ws.receive_json()
+                assert msg2["type"] == "response.output_audio.delta"
+
     def test_audio_output_sends_response_created_and_delta(self, setup):
         app, _, _, output_queue, *_ = setup
         with TestClient(app) as client:
@@ -352,6 +365,14 @@ class TestSendLoop:
 # ===================================================================
 
 class TestCleanup:
+    def test_new_connection_preserves_existing_discard_guard(self, setup):
+        app, _, *_rest, cancel_scope = setup
+        cancel_scope.cancel()
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                assert cancel_scope.discarding
+
     def test_disconnect_unregisters(self, setup):
         app, service, input_queue, *_ = setup
         with TestClient(app) as client:
@@ -362,3 +383,22 @@ class TestCleanup:
             assert len(service._conns) == 0
             end = input_queue.get(timeout=1)
             assert is_control_message(end, SESSION_END.kind)
+
+    def test_last_disconnect_cancels_and_clears_response_state(self, setup):
+        app, service, input_queue, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                conn_id = list(service._conns.keys())[0]
+                service._ensure_response(conn_id)
+                response_playing.set()
+                output_queue.put(_pcm_bytes(256))
+                text_output_queue.put({"type": "assistant_text", "text": "stale"})
+            time.sleep(0.2)
+
+        assert cancel_scope.discarding
+        assert not response_playing.is_set()
+        assert output_queue.empty()
+        assert text_output_queue.empty()
+        end = input_queue.get(timeout=1)
+        assert is_control_message(end, SESSION_END.kind)
