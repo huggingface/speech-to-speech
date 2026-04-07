@@ -11,6 +11,11 @@ from cancel_scope import CancelScope
 from LLM.chat import Chat
 from LLM.utils import remove_unspeechable
 from api.openai_realtime.runtime_config import RuntimeConfig
+from LLM.tool_call.qwen3coder_tool_parser import (
+    Qwen3CoderToolParser,
+    process_printable_text_qwen_xml,
+    strip_qwen_tool_markup_for_chat,
+)
 from LLM.voice_prompt import build_voice_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -148,16 +153,19 @@ class OpenApiModelHandler(BaseHandler):
             })
 
         optional_kwargs = {}
+        parser = None
         if self.tools is not None:
             optional_kwargs["tools"] = self.tools
+            parser = Qwen3CoderToolParser(tools=self.tools)
         if self.tools_choice is not None:
             optional_kwargs["tool_choice"] = self.tools_choice
 
+        request_stream = self.stream and self.tools_choice != "required"
         gen = self.cancel_scope.generation if self.cancel_scope else None
         response: Response | Stream[ResponseStreamEvent] = self.client.responses.create(
             model=self.model_name,
             input=self.chat.to_list(),
-            stream=self.stream,
+            stream=request_stream,
             extra_body=self._extra_body,
             **optional_kwargs,
         )
@@ -165,7 +173,7 @@ class OpenApiModelHandler(BaseHandler):
         clean_text = ""
         input_tokens = 0
         output_tokens = 0
-        if self.stream:
+        if request_stream:
             cancelled = False
             printable_text = ""
             for event in response:
@@ -174,34 +182,46 @@ class OpenApiModelHandler(BaseHandler):
                     cancelled = True
                     break
                 if event.type == "response.output_text.delta":
-                    new_text = remove_unspeechable(event.delta)
+                    new_text = event.delta
                     clean_text += new_text
                     printable_text += new_text
-                    sentences = sent_tokenize(printable_text)
-                    if len(sentences) > 1:
-                        for s in sentences[:-1]:
-                            yield s, language_code, []
-                        printable_text = sentences[-1]
+                    if parser is not None:
+                        chunks, tools, printable_text = process_printable_text_qwen_xml(
+                            printable_text, tools, parser,
+                        )
+                        for s in chunks:
+                            yield remove_unspeechable(s), language_code, []
+                    else:
+                        sentences = sent_tokenize(printable_text)
+                        if len(sentences) > 1:
+                            for s in sentences[:-1]:
+                                yield remove_unspeechable(s), language_code, []
+                            printable_text = sentences[-1]
                 elif event.type == "response.output_item.done":
-                    
                     if event.item.type == "function_call":
                         tools.append(event.item.model_dump())
-                    elif event.item.type == "message":
-                        self.chat.append({
-                            "type": "message",
-                            "role": event.item.role,
-                            "content": event.item.content,
-                        })
                 elif event.type == "response.completed":
                     usage = getattr(event.response, "usage", None)
                     if usage:
                         input_tokens = usage.input_tokens or 0
                         output_tokens = usage.output_tokens or 0
             if not cancelled:
-                if printable_text.strip() or tools:
+                assistant_speech = remove_unspeechable(
+                    strip_qwen_tool_markup_for_chat(clean_text),
+                )
+                if assistant_speech:
+                    self.chat.append({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": assistant_speech,
+                    })
+                printable_text = remove_unspeechable(
+                    strip_qwen_tool_markup_for_chat(printable_text).strip(),
+                )
+                if printable_text or tools:
                     logger.debug(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
-                    yield printable_text.strip(), language_code, tools
+                    yield printable_text, language_code, tools
         else:
             if gen is not None and self.cancel_scope.is_stale(gen):
                 logger.info("LLM generation cancelled (interruption)")
@@ -214,11 +234,6 @@ class OpenApiModelHandler(BaseHandler):
                     if message.type == "function_call":
                         tools.append(message.model_dump())
                     elif message.type == "message":
-                        self.chat.append({
-                            "type": "message",
-                            "role": message.role,
-                            "content": message.content,
-                        })
                         for chunk in message.content:
                             if chunk.type == "output_text":
                                 clean_text += remove_unspeechable(chunk.text)
@@ -226,6 +241,12 @@ class OpenApiModelHandler(BaseHandler):
                         logger.warning(f"Not supported message type: {message.type}")
                 logger.debug(f"Clean text: {clean_text}")
                 logger.info(f"Tools: {tools}")
+                if clean_text.strip():
+                    self.chat.append({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": clean_text.strip(),
+                    })
                 if clean_text.strip() or tools:
                     yield clean_text.strip(), language_code, tools
 
@@ -235,6 +256,8 @@ class OpenApiModelHandler(BaseHandler):
         yield ("__END_OF_RESPONSE__", None, None)
 
     def on_session_end(self):
+        # reset() also clears init_chat_message, so a previous session's
+        # instructions cannot persist into the next one.
         self.chat.reset()
         self._last_instructions = None
         self.tools = None

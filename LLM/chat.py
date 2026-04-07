@@ -45,4 +45,3 @@ class Chat:
                 if (p.get("type") if isinstance(p, dict) else getattr(p, "type", None)) not in _IMAGE_TYPES
             ]
             msg["content"] = text_parts
-
