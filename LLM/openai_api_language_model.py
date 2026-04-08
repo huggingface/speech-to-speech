@@ -1,6 +1,7 @@
 import logging
 import time
 
+import httpx
 from nltk import sent_tokenize
 from rich.console import Console
 from openai import OpenAI, Stream
@@ -52,11 +53,17 @@ class OpenApiModelHandler(BaseHandler):
         runtime_config: RuntimeConfig | None = None,
         cancel_scope: CancelScope | None = None,
         disable_thinking=True,
+        request_timeout_s=20.0,
     ):
         self.cancel_scope = cancel_scope
         self.model_name = model_name
         self.stream = stream
         self.gen_kwargs = dict(gen_kwargs)
+        self.request_timeout_s = float(request_timeout_s)
+        self.request_timeout = httpx.Timeout(
+            self.request_timeout_s,
+            connect=min(10.0, self.request_timeout_s),
+        )
         self.chat = Chat(chat_size)
         if init_chat_role:
             if not init_chat_prompt:
@@ -86,7 +93,8 @@ class OpenApiModelHandler(BaseHandler):
             input=[
                 {"type": "message", "role": "system", "content": [{"type": "input_text", "text": "You are a helpful assistant"}]},
                 {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]},
-            ]
+            ],
+            timeout=self.request_timeout,
         )
         end = time.time()
         logger.info(
@@ -162,21 +170,61 @@ class OpenApiModelHandler(BaseHandler):
 
         request_stream = self.stream and self.tools_choice != "required"
         gen = self.cancel_scope.generation if self.cancel_scope else None
-        response: Response | Stream[ResponseStreamEvent] = self.client.responses.create(
-            model=self.model_name,
-            input=self.chat.to_list(),
-            stream=request_stream,
-            extra_body=self._extra_body,
-            **optional_kwargs,
-        )
+        response: Response | Stream[ResponseStreamEvent] | None = None
         tools: list[dict[str, str]] = []
         clean_text = ""
         input_tokens = 0
         output_tokens = 0
-        if request_stream:
-            cancelled = False
-            printable_text = ""
-            for event in response:
+        try:
+            response = self.client.responses.create(
+                model=self.model_name,
+                input=self.chat.to_list(),
+                stream=request_stream,
+                extra_body=self._extra_body,
+                timeout=self.request_timeout,
+                **optional_kwargs,
+            )
+            if request_stream:
+                cancelled = False
+                printable_text = ""
+                for event in response:
+                    if gen is not None and self.cancel_scope.is_stale(gen):
+                        logger.info("LLM generation cancelled (interruption)")
+                        cancelled = True
+                        break
+                    if event.type == "response.output_text.delta":
+                        new_text = remove_unspeechable(event.delta)
+                        clean_text += new_text
+                        printable_text += new_text
+                        sentences = sent_tokenize(printable_text)
+                        if len(sentences) > 1:
+                            for s in sentences[:-1]:
+                                yield s, language_code, []
+                            printable_text = sentences[-1]
+                    elif event.type == "response.output_item.done":
+                        if event.item.type == "function_call":
+                            tools.append(event.item.model_dump())
+                    elif event.type == "response.completed":
+                        if parser is not None:
+                            for message in event.response.output:
+                                for chunk in message.content:
+                                    tools.extend([t.model_dump() for t in parser.parse(chunk.text)])
+                        usage = getattr(event.response, "usage", None)
+                        if usage:
+                            input_tokens = usage.input_tokens or 0
+                            output_tokens = usage.output_tokens or 0
+                if not cancelled:
+                    if clean_text.strip():
+                        self.chat.append({
+                            "type": "message",
+                            "role": "assistant",
+                            "content": clean_text.strip(),
+                        })
+                    if printable_text.strip() or tools:
+                        logger.debug(f"Clean text: {clean_text}")
+                        logger.info(f"Tools: {tools}")
+                        yield printable_text.strip(), language_code, tools
+            else:
                 if gen is not None and self.cancel_scope.is_stale(gen):
                     logger.info("LLM generation cancelled (interruption)")
                     cancelled = True
@@ -222,60 +270,72 @@ class OpenApiModelHandler(BaseHandler):
                     logger.debug(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
                     yield printable_text, language_code, tools
-        else:
-            if gen is not None and self.cancel_scope.is_stale(gen):
-                logger.info("LLM generation cancelled (interruption)")
             else:
-                usage = getattr(response, "usage", None)
-                if usage:
-                    input_tokens = usage.input_tokens or 0
-                    output_tokens = usage.output_tokens or 0
-                for message in response.output:
-                    if message.type == "function_call":
-                        tools.append(message.model_dump())
-                    elif message.type == "message":
-                        for chunk in message.content:
-                            if chunk.type == "output_text":
-                                clean_text += chunk.text
-                    else:
-                        logger.warning(f"Not supported message type: {message.type}")
-                if parser is not None:
-                    chunks, tools, printable_text = process_printable_text_qwen_xml(
-                        clean_text, tools, parser,
-                    )
-                    chunk_parts = [remove_unspeechable(s).strip() for s in chunks]
-                    chunk_joined = " ".join(p for p in chunk_parts if p)
-                    printable_text = remove_unspeechable(
-                        strip_qwen_tool_markup_for_chat(printable_text).strip(),
-                    )
-                    combined = " ".join(
-                        p for p in (chunk_joined, printable_text) if p
-                    ).strip()
-                    assistant_speech = remove_unspeechable(
-                        strip_qwen_tool_markup_for_chat(clean_text),
-                    )
-                    if assistant_speech:
-                        self.chat.append({
-                            "type": "message",
-                            "role": "assistant",
-                            "content": assistant_speech,
-                        })
-                    logger.debug(f"Clean text: {clean_text}")
-                    logger.info(f"Tools: {tools}")
-                    if combined or tools:
-                        yield combined, language_code, tools
+                if gen is not None and self.cancel_scope.is_stale(gen):
+                    logger.info("LLM generation cancelled (interruption)")
                 else:
-                    logger.debug(f"Clean text: {clean_text}")
-                    logger.info(f"Tools: {tools}")
-                    clean_text = remove_unspeechable(clean_text)
-                    if clean_text.strip():
-                        self.chat.append({
-                            "type": "message",
-                            "role": "assistant",
-                            "content": clean_text.strip(),
-                        })
-                    if clean_text.strip() or tools:
-                        yield clean_text.strip(), language_code, tools
+                    usage = getattr(response, "usage", None)
+                    if usage:
+                        input_tokens = usage.input_tokens or 0
+                        output_tokens = usage.output_tokens or 0
+                    for message in response.output:
+                        if message.type == "function_call":
+                            tools.append(message.model_dump())
+                        elif message.type == "message":
+                            for chunk in message.content:
+                                if chunk.type == "output_text":
+                                    clean_text += chunk.text
+                        else:
+                            logger.warning(f"Not supported message type: {message.type}")
+                    if parser is not None:
+                        chunks, tools, printable_text = process_printable_text_qwen_xml(
+                            clean_text, tools, parser,
+                        )
+                        chunk_parts = [remove_unspeechable(s).strip() for s in chunks]
+                        chunk_joined = " ".join(p for p in chunk_parts if p)
+                        printable_text = remove_unspeechable(
+                            strip_qwen_tool_markup_for_chat(printable_text).strip(),
+                        )
+                        combined = " ".join(
+                            p for p in (chunk_joined, printable_text) if p
+                        ).strip()
+                        assistant_speech = remove_unspeechable(
+                            strip_qwen_tool_markup_for_chat(clean_text),
+                        )
+                        if assistant_speech:
+                            self.chat.append({
+                                "type": "message",
+                                "role": "assistant",
+                                "content": assistant_speech,
+                            })
+                        logger.debug(f"Clean text: {clean_text}")
+                        logger.info(f"Tools: {tools}")
+                        if combined or tools:
+                            yield combined, language_code, tools
+                    else:
+                        logger.debug(f"Clean text: {clean_text}")
+                        logger.info(f"Tools: {tools}")
+                        clean_text = remove_unspeechable(clean_text)
+                        if clean_text.strip():
+                            self.chat.append({
+                                "type": "message",
+                                "role": "assistant",
+                                "content": clean_text.strip(),
+                            })
+                        if clean_text.strip() or tools:
+                            yield clean_text.strip(), language_code, tools
+        except httpx.ReadTimeout:
+            logger.warning(
+                "OpenAI API read timed out after %.1fs; ending the current response",
+                self.request_timeout_s,
+            )
+            yield ("Wow I'm a bit slow today, could you repeat that?", None, None)
+        finally:
+            if response is not None and hasattr(response, "close"):
+                try:
+                    response.close()
+                except Exception:
+                    pass
 
         self.chat.strip_images()
         if input_tokens or output_tokens:

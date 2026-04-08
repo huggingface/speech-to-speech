@@ -9,7 +9,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from api.openai_realtime.service import RealtimeService, ServerEvent
 from cancel_scope import CancelScope
-from pipeline_control import SESSION_END
+from pipeline_control import SESSION_END, is_control_message
 
 from openai.types.realtime import (
     InputAudioBufferAppendEvent,
@@ -77,6 +77,20 @@ def create_app(
                 for item in reversed(preserved):
                     q.queue.appendleft(item)
                 q.not_empty.notify(len(preserved))
+        
+    def clean_session(preserve: Callable | None = None):
+        # Invalidate in-flight LLM/TTS work (cooperative cancel via is_stale), then
+        # flush queues. reset() clears discarding only; generation stays bumped.
+        # Blocking HTTP reads are not interrupted here; see OpenApiModelHandler.process.
+        if cancel_scope:
+            cancel_scope.cancel()
+        _flush_queue(output_queue, preserve=preserve)
+        _flush_queue(text_output_queue, preserve=preserve)
+        if response_playing:
+            response_playing.clear()
+        if cancel_scope:
+            cancel_scope.reset()
+        should_listen.set()
 
     def _to_audio_bytes(audio_chunk) -> bytes:
         if hasattr(audio_chunk, "tobytes"):
@@ -126,18 +140,7 @@ def create_app(
 
         # Defensive: drain edge queues and reset events so stale data from a
         # previous session that survived SESSION_END propagation doesn't leak.
-        for q in (output_queue, text_output_queue):
-            while True:
-                try:
-                    q.get_nowait()
-                except Empty:
-                    break
-        if response_playing:
-            response_playing.clear()
-        if cancel_scope:
-            cancel_scope.reset()
-
-        should_listen.set()
+        clean_session()
 
         try:
             await _send_event(ws, service.build_session_created(session_id))
@@ -199,6 +202,7 @@ def create_app(
         except Exception as e:
             logger.error(f"Client {session_id} error: {type(e).__name__}: {e}", exc_info=True)
         finally:
+            clean_session()
             service.unregister(session_id)
             if not service._conns:
                 service.runtime_config.reset()
@@ -279,6 +283,9 @@ def create_app(
                         logger.info("Response complete, listening re-enabled")
                         continue
 
+                    if is_control_message(audio_chunk, SESSION_END.kind):
+                        continue
+
                     if cancel_scope and cancel_scope.discarding:
                         continue
 
@@ -291,7 +298,10 @@ def create_app(
                         except Empty:
                             break
 
-                        if isinstance(next_chunk, bytes) and next_chunk in {b"END", b"__RESPONSE_DONE__"}:
+                        if (
+                            isinstance(next_chunk, bytes)
+                            and next_chunk in {b"END", b"__RESPONSE_DONE__"}
+                        ) or is_control_message(next_chunk, SESSION_END.kind):
                             pending_output_item = next_chunk
                             break
 

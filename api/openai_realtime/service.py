@@ -639,7 +639,6 @@ class RealtimeService:
             if tools:
                 self._state(conn_id).response_usage.tool_calls += len(tools)
                 for tool in tools:
-                    logger.info(f"Tool: {tool}")
                     if isinstance(tool.get("arguments"), str):
                         arguments = tool.get("arguments")
                     else:
