@@ -2,6 +2,8 @@ from pathlib import Path
 from types import SimpleNamespace
 import sys
 
+import httpx
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cancel_scope import CancelScope
@@ -37,6 +39,8 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler.model_name = "test-model"
     handler.stream = stream
     handler.gen_kwargs = {}
+    handler.request_timeout_s = 20.0
+    handler.request_timeout = 20.0
     handler.disable_thinking = disable_thinking
     handler._extra_body = (
         {"chat_template_kwargs": {"enable_thinking": False}}
@@ -91,6 +95,28 @@ def test_process_handles_cancellation():
     outputs = list(handler.process("Hi"))
 
     assert outputs == [("__END_OF_RESPONSE__", None, None)]
+
+
+def test_process_read_timeout_ends_response_cleanly():
+    handler = _make_handler()
+
+    class TimeoutStream:
+        def __iter__(self):
+            raise httpx.ReadTimeout("timed out")
+
+        def close(self):
+            return None
+
+    handler.client = SimpleNamespace(
+        responses=SimpleNamespace(create=lambda **kwargs: TimeoutStream())
+    )
+
+    outputs = list(handler.process("Hi"))
+
+    assert outputs == [
+        ("Wow I'm a bit slow today, could you repeat that?", None, None),
+        ("__END_OF_RESPONSE__", None, None),
+    ]
 
 
 def test_disable_thinking_passes_extra_body():
@@ -172,5 +198,9 @@ def test_second_turn_flattens_assistant_history_for_responses():
         if item.get("role") == "assistant"
     ]
     assert assistant_items == [
-        {"type": "message", "role": "assistant", "content": "Hello."}
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [SimpleNamespace(type="output_text", text="Hello.")],
+        }
     ]
