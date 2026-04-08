@@ -33,11 +33,8 @@ WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
 }
 
 def _vllm_normalize_list_part(part: dict) -> dict:
-    """Map one message content part to shapes vLLM OpenAI-compatible servers accept.
-
-    Realtime / Responses uses ``input_image`` with a string ``image_url``. vLLM
-    expects Chat Completions-style parts: ``type: image_url`` with
-    ``image_url: {\"url\": ...}`` (not a flat string, and not ``file_id``-only).
+    """
+    Normalize input_image part to detail="auto"
     """
     t = part.get("type")
     if t == "input_image":
@@ -46,7 +43,7 @@ def _vllm_normalize_list_part(part: dict) -> dict:
 
 
 def _vllm_normalize_content(content: list | str) -> list[dict]:
-    """Normalize chat rows for strict vLLM / OpenAI-compatible responses validators."""
+    """Normalize chat rows for strict vLLM Responses API responses validators."""
     if isinstance(content, list):
         return [
             _vllm_normalize_list_part(p) if isinstance(p, dict) else p
