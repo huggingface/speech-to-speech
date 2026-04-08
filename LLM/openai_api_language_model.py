@@ -32,6 +32,29 @@ WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
     "ko": "korean",
 }
 
+def _vllm_normalize_list_part(part: dict) -> dict:
+    """Map one message content part to shapes vLLM OpenAI-compatible servers accept.
+
+    Realtime / Responses uses ``input_image`` with a string ``image_url``. vLLM
+    expects Chat Completions-style parts: ``type: image_url`` with
+    ``image_url: {\"url\": ...}`` (not a flat string, and not ``file_id``-only).
+    """
+    t = part.get("type")
+    if t == "input_image":
+        part["detail"] = "auto"
+    return part
+
+
+def _vllm_normalize_content(content: list | str) -> list[dict]:
+    """Normalize chat rows for strict vLLM / OpenAI-compatible responses validators."""
+    if isinstance(content, list):
+        return [
+            _vllm_normalize_list_part(p) if isinstance(p, dict) else p
+            for p in content
+        ]
+    else:
+        return content
+
 
 class OpenApiModelHandler(BaseHandler):
     """
@@ -119,7 +142,7 @@ class OpenApiModelHandler(BaseHandler):
         # Generation is deferred until __GENERATE_RESPONSE__ (from response.create).
         if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == "__ADD_TO_CONTEXT__":
             _, role, content = prompt
-            self.chat.append({"type": "message", "role": role, "content": content})
+            self.chat.append({"type": "message", "role": role, "content": _vllm_normalize_content(content)})
             logger.debug("Added to LLM context (role=%s)", role)
             return
 
@@ -193,84 +216,48 @@ class OpenApiModelHandler(BaseHandler):
                         cancelled = True
                         break
                     if event.type == "response.output_text.delta":
-                        new_text = remove_unspeechable(event.delta)
+                        new_text = event.delta
                         clean_text += new_text
                         printable_text += new_text
-                        sentences = sent_tokenize(printable_text)
-                        if len(sentences) > 1:
-                            for s in sentences[:-1]:
-                                yield s, language_code, []
-                            printable_text = sentences[-1]
+                        if parser is not None:
+                            chunks, tools, printable_text = process_printable_text_qwen_xml(
+                                printable_text, tools, parser,
+                            )
+                            for s in chunks:
+                                yield remove_unspeechable(s), language_code, []
+                        else:
+                            sentences = sent_tokenize(printable_text)
+                            if len(sentences) > 1:
+                                for s in sentences[:-1]:
+                                    yield remove_unspeechable(s), language_code, []
+                                printable_text = sentences[-1]
                     elif event.type == "response.output_item.done":
                         if event.item.type == "function_call":
                             tools.append(event.item.model_dump())
                     elif event.type == "response.completed":
-                        if parser is not None:
-                            for message in event.response.output:
-                                for chunk in message.content:
-                                    tools.extend([t.model_dump() for t in parser.parse(chunk.text)])
                         usage = getattr(event.response, "usage", None)
                         if usage:
                             input_tokens = usage.input_tokens or 0
                             output_tokens = usage.output_tokens or 0
                 if not cancelled:
-                    if clean_text.strip():
+                    assistant_speech = remove_unspeechable(
+                        strip_qwen_tool_markup_for_chat(clean_text),
+                    )
+                    if assistant_speech:
                         self.chat.append({
                             "type": "message",
                             "role": "assistant",
-                            "content": clean_text.strip(),
+                            "content": assistant_speech,
                         })
-                    if printable_text.strip() or tools:
+                    printable_text = remove_unspeechable(
+                        strip_qwen_tool_markup_for_chat(printable_text).strip(),
+                    )
+                    if printable_text or tools:
                         logger.debug(f"Clean text: {clean_text}")
-                        logger.info(f"Tools: {tools}")
-                        yield printable_text.strip(), language_code, tools
+                        logger.debug(f"Tools: {tools}")
+                        yield printable_text, language_code, tools
             else:
-                if gen is not None and self.cancel_scope.is_stale(gen):
-                    logger.info("LLM generation cancelled (interruption)")
-                    cancelled = True
-                    break
-                if event.type == "response.output_text.delta":
-                    new_text = event.delta
-                    clean_text += new_text
-                    printable_text += new_text
-                    if parser is not None:
-                        chunks, tools, printable_text = process_printable_text_qwen_xml(
-                            printable_text, tools, parser,
-                        )
-                        for s in chunks:
-                            yield remove_unspeechable(s), language_code, []
-                    else:
-                        sentences = sent_tokenize(printable_text)
-                        if len(sentences) > 1:
-                            for s in sentences[:-1]:
-                                yield remove_unspeechable(s), language_code, []
-                            printable_text = sentences[-1]
-                elif event.type == "response.output_item.done":
-                    if event.item.type == "function_call":
-                        tools.append(event.item.model_dump())
-                elif event.type == "response.completed":
-                    usage = getattr(event.response, "usage", None)
-                    if usage:
-                        input_tokens = usage.input_tokens or 0
-                        output_tokens = usage.output_tokens or 0
-            if not cancelled:
-                assistant_speech = remove_unspeechable(
-                    strip_qwen_tool_markup_for_chat(clean_text),
-                )
-                if assistant_speech:
-                    self.chat.append({
-                        "type": "message",
-                        "role": "assistant",
-                        "content": assistant_speech,
-                    })
-                printable_text = remove_unspeechable(
-                    strip_qwen_tool_markup_for_chat(printable_text).strip(),
-                )
-                if printable_text or tools:
-                    logger.debug(f"Clean text: {clean_text}")
-                    logger.info(f"Tools: {tools}")
-                    yield printable_text, language_code, tools
-            else:
+                # Non-streaming Response (stream=False or tool_choice forces sync API).
                 if gen is not None and self.cancel_scope.is_stale(gen):
                     logger.info("LLM generation cancelled (interruption)")
                 else:
@@ -284,7 +271,7 @@ class OpenApiModelHandler(BaseHandler):
                         elif message.type == "message":
                             for chunk in message.content:
                                 if chunk.type == "output_text":
-                                    clean_text += chunk.text
+                                    clean_text += remove_unspeechable(chunk.text)
                         else:
                             logger.warning(f"Not supported message type: {message.type}")
                     if parser is not None:
