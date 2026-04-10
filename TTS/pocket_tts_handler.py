@@ -1,6 +1,7 @@
 from time import perf_counter
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
+from pipeline_messages import MessageTag, AUDIO_RESPONSE_DONE
 import numpy as np
 import logging
 from rich.console import Console
@@ -95,8 +96,8 @@ class PocketTTSHandler(BaseHandler):
         Args:
             llm_sentence: Text to convert to speech, or tuple of (text, language_code)
         """
-        if isinstance(llm_sentence, tuple) and llm_sentence[0] == "__END_OF_RESPONSE__":
-            yield b"__RESPONSE_DONE__"
+        if isinstance(llm_sentence, tuple) and llm_sentence[0] == MessageTag.END_OF_RESPONSE:
+            yield AUDIO_RESPONSE_DONE
             return
 
         gen = self.cancel_scope.generation if self.cancel_scope else None

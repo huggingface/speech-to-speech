@@ -16,6 +16,7 @@ from baseHandler import BaseHandler
 import numpy as np
 from rich.console import Console
 from utils.mlx_lock import MLXLockContext
+from pipeline_messages import MessageTag
 
 try:
     from lingua import Language, LanguageDetectorBuilder
@@ -229,7 +230,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
                     try:
                         progressive_text = self._show_progressive_transcription(audio_input)
                         if progressive_text:
-                            yield ("__PARTIAL__", progressive_text)
+                            yield (MessageTag.PARTIAL, progressive_text)
                             return
                     except Exception as e:
                         logger.debug(f"Progressive transcription failed: {e}")

@@ -46,6 +46,7 @@ from openai.types.realtime import (
 
 from api.openai_realtime.runtime_config import RuntimeConfig
 from api.openai_realtime.utils import resample
+from pipeline_messages import MessageTag
 
 logger = logging.getLogger(__name__)
 
@@ -427,7 +428,7 @@ class RealtimeService:
         rejected, and so that barge-in can cancel a pending response.
 
         Per-response overrides (instructions, tool_choice) travel inside the
-        ``__GENERATE_RESPONSE__`` sentinel tuple so they are atomically paired
+        ``GENERATE_RESPONSE`` sentinel tuple so they are atomically paired
         with the correct LLM generation — no shared mutable state to race on.
 
         If ``event.response.input`` is present, its items are forwarded to the
@@ -474,7 +475,7 @@ class RealtimeService:
 
         if self.text_prompt_queue:
             self.text_prompt_queue.put(
-                ("__GENERATE_RESPONSE__", override_instructions, override_tool_choice)
+                (MessageTag.GENERATE_RESPONSE, override_instructions, override_tool_choice)
             )
         logger.debug("response.create received, LLM generation triggered")
         return ResponseCreatedEvent(
@@ -503,14 +504,14 @@ class RealtimeService:
                 else:
                     logger.warning("Unsupported content part type: %s", part.type)
             if content_parts:
-                self.text_prompt_queue.put(("__ADD_TO_CONTEXT__", role, content_parts))
+                self.text_prompt_queue.put((MessageTag.ADD_TO_CONTEXT, role, content_parts))
                 logger.debug("Enqueued message item (role=%s, %d parts)", role, len(content_parts))
                 return True
             return False
 
         if getattr(item, "type", None) == "function_call_output" and getattr(item, "output", None):
             result_text = f"Call ID: {item.call_id}\nOutput: {item.output}"
-            self.text_prompt_queue.put(("__FUNCTION_RESULT__", result_text))
+            self.text_prompt_queue.put((MessageTag.FUNCTION_RESULT, result_text))
             logger.debug("Enqueued function_call_output (call_id=%s)", item.call_id)
             return True
 

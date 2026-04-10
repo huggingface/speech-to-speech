@@ -33,6 +33,7 @@ from openai.types.realtime import (
 from api.openai_realtime.service import (
     CHUNK_SIZE_BYTES,
 )
+from pipeline_messages import MessageTag
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +265,7 @@ class TestHandleConversationItemCreate:
         assert evt.item.content[0].text == "hi"
         assert not text_prompt_queue.empty()
         msg = text_prompt_queue.get()
-        assert msg == ("__ADD_TO_CONTEXT__", "user", [{"type": "input_text", "text": "hi"}])
+        assert msg == (MessageTag.ADD_TO_CONTEXT, "user", [{"type": "input_text", "text": "hi"}])
 
     def test_text_input_previous_item_id_chain(self, service, conn_id):
         e1 = service.handle_conversation_item_create(conn_id, self._text_event("a", "item_1"))
@@ -281,7 +282,7 @@ class TestHandleConversationItemCreate:
         assert len(events) == 1
         assert isinstance(events[0], ConversationItemCreatedEvent)
         msg = text_prompt_queue.get()
-        assert msg == ("__FUNCTION_RESULT__", 'Call ID: call_1\nOutput: {"result": 42}')
+        assert msg == (MessageTag.FUNCTION_RESULT, 'Call ID: call_1\nOutput: {"result": 42}')
 
     def test_input_image_forwarded(self, service, conn_id, text_prompt_queue):
         evt = ConversationItemCreateEvent(
@@ -296,7 +297,7 @@ class TestHandleConversationItemCreate:
         assert len(events) == 1
         assert isinstance(events[0], ConversationItemCreatedEvent)
         msg = text_prompt_queue.get()
-        assert msg[0] == "__ADD_TO_CONTEXT__"
+        assert msg[0] == MessageTag.ADD_TO_CONTEXT
         assert msg[1] == "user"
         assert isinstance(msg[2], list)
         assert msg[2][0]["type"] == "input_image"
@@ -317,7 +318,7 @@ class TestHandleConversationItemCreate:
         events = service.handle_conversation_item_create(conn_id, evt)
         assert len(events) == 1
         msg = text_prompt_queue.get()
-        assert msg[0] == "__ADD_TO_CONTEXT__"
+        assert msg[0] == MessageTag.ADD_TO_CONTEXT
         assert msg[1] == "user"
         assert isinstance(msg[2], list)
         assert len(msg[2]) == 2
@@ -376,7 +377,7 @@ class TestHandleResponseCreate:
         result = service.handle_response_create(conn_id, evt)
         assert isinstance(result, ResponseCreatedEvent)
         sentinel = text_prompt_queue.get()
-        assert sentinel == ("__GENERATE_RESPONSE__", "override instructions", "auto")
+        assert sentinel == (MessageTag.GENERATE_RESPONSE, "override instructions", "auto")
 
     def test_response_create_rejects_complex_tool_choice(self, service, conn_id, runtime_config):
         evt = ResponseCreateEvent(
@@ -399,7 +400,7 @@ class TestHandleResponseCreate:
             result = service.handle_response_create(conn_id, evt)
             assert isinstance(result, ResponseCreatedEvent), f"Expected ResponseCreatedEvent for tool_choice={choice!r}"
             sentinel = text_prompt_queue.get()
-            assert sentinel[0] == "__GENERATE_RESPONSE__"
+            assert sentinel[0] == MessageTag.GENERATE_RESPONSE
             assert sentinel[2] == choice
             service._end_response(conn_id)
 
@@ -422,13 +423,13 @@ class TestHandleResponseCreate:
         result = service.handle_response_create(conn_id, evt)
         assert isinstance(result, ResponseCreatedEvent)
         context_msg = text_prompt_queue.get()
-        assert context_msg[0] == "__ADD_TO_CONTEXT__"
+        assert context_msg[0] == MessageTag.ADD_TO_CONTEXT
         assert context_msg[1] == "user"
         assert isinstance(context_msg[2], list)
         assert any(p["type"] == "input_image" for p in context_msg[2])
         assert any(p["type"] == "input_text" for p in context_msg[2])
         gen_msg = text_prompt_queue.get()
-        assert gen_msg[0] == "__GENERATE_RESPONSE__"
+        assert gen_msg[0] == MessageTag.GENERATE_RESPONSE
 
     def test_double_response_create_rejected(self, service, conn_id, text_prompt_queue):
         """Second response.create is rejected because in_response is set immediately."""
