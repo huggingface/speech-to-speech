@@ -2,6 +2,7 @@ import ChatTTS
 import logging
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
+from pipeline_messages import MessageTag, AUDIO_RESPONSE_DONE
 import librosa
 import numpy as np
 from rich.console import Console
@@ -47,8 +48,8 @@ class ChatTTSHandler(BaseHandler):
         _ = self.model.infer("text")
 
     def process(self, llm_sentence):
-        if isinstance(llm_sentence, tuple) and llm_sentence[0] == "__END_OF_RESPONSE__":
-            yield b"__RESPONSE_DONE__"
+        if isinstance(llm_sentence, tuple) and llm_sentence[0] == MessageTag.END_OF_RESPONSE:
+            yield AUDIO_RESPONSE_DONE
             return
 
         _cancel_gen = self.cancel_scope.generation if self.cancel_scope else None

@@ -2,6 +2,7 @@ import socket
 from queue import Empty
 from rich.console import Console
 import logging
+from pipeline_messages import PIPELINE_END
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ class SocketSender:
             except Empty:
                 continue
             self.conn.sendall(audio_chunk)
-            if isinstance(audio_chunk, bytes) and audio_chunk == b"END":
+            if isinstance(audio_chunk, bytes) and audio_chunk == PIPELINE_END:
                 break
         self.conn.close()
         logger.info("Sender closed")

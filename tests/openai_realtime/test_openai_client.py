@@ -38,6 +38,7 @@ from cancel_scope import CancelScope
 from api.openai_realtime.runtime_config import RuntimeConfig
 from api.openai_realtime.service import RealtimeService
 from api.openai_realtime.websocket_router import create_app
+from pipeline_messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 
 
 def _session_16k() -> RealtimeSessionCreateRequest:
@@ -281,7 +282,7 @@ class TestSDKVoiceTurn:
             assert event.type == TRANSCRIPT_DONE
             assert event.transcript == "Hi there!"
 
-            server_env.output_queue.put(b"END")
+            server_env.output_queue.put(PIPELINE_END)
             event = await _recv(conn)
             assert event.type == AUDIO_DONE
 
@@ -389,7 +390,7 @@ class TestSDKPhantomSpeech:
             assert event.type == RESPONSE_CREATED
             await _recv(conn)  # audio delta
 
-            server_env.output_queue.put(b"__RESPONSE_DONE__")
+            server_env.output_queue.put(AUDIO_RESPONSE_DONE)
             event = await _recv(conn)
             assert event.type == AUDIO_DONE
             event = await _recv(conn)
@@ -643,7 +644,7 @@ class TestSDKMultiTurn:
             t1_done = next(e for e in events if e.type == RESPONSE_DONE)
 
             # Simulate pipeline acknowledging cancellation so discard guard clears
-            server_env.output_queue.put(b"__RESPONSE_DONE__")
+            server_env.output_queue.put(AUDIO_RESPONSE_DONE)
             await asyncio.sleep(0.15)
 
             # Turn 2
@@ -658,7 +659,7 @@ class TestSDKMultiTurn:
             assert t2_created.type == RESPONSE_CREATED
             await _recv(conn)  # audio delta
 
-            server_env.output_queue.put(b"END")
+            server_env.output_queue.put(PIPELINE_END)
             await _recv(conn)  # audio done
             t2_done = await _recv(conn)
             assert t2_done.type == RESPONSE_DONE

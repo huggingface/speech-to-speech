@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from baseHandler import BaseHandler
 from connections.websocket_streamer import WebSocketStreamer
 from pipeline_control import SESSION_END, is_control_message
+from pipeline_messages import PIPELINE_END
 
 
 class EchoHandler(BaseHandler):
@@ -49,7 +50,7 @@ def test_base_handler_session_end_resets_without_stopping():
 
     queue_in.put(SESSION_END)
     queue_in.put("hello")
-    queue_in.put(b"END")
+    queue_in.put(PIPELINE_END)
 
     thread.join(timeout=2)
     assert not thread.is_alive()
@@ -57,7 +58,7 @@ def test_base_handler_session_end_resets_without_stopping():
     outputs = [queue_out.get(timeout=1) for _ in range(3)]
     assert is_control_message(outputs[0], SESSION_END.kind)
     assert outputs[1] == "HELLO"
-    assert outputs[2] == b"END"
+    assert outputs[2] == PIPELINE_END
     assert handler.processed == ["hello"]
     assert handler.session_end_calls == 1
 

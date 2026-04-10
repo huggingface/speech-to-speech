@@ -1,6 +1,7 @@
 import logging
 
 from baseHandler import BaseHandler
+from pipeline_messages import MessageTag
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,7 @@ class TranscriptionNotifier(BaseHandler):
         self.text_output_queue = text_output_queue
 
     def process(self, transcription):
-        if isinstance(transcription, tuple) and len(transcription) == 2 and transcription[0] == "__PARTIAL__":
+        if isinstance(transcription, tuple) and len(transcription) == 2 and transcription[0] == MessageTag.PARTIAL:
             _, text = transcription
             if self.text_output_queue and text:
                 self.text_output_queue.put(

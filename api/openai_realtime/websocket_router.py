@@ -10,6 +10,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from api.openai_realtime.service import RealtimeService, ServerEvent
 from cancel_scope import CancelScope
 from pipeline_control import SESSION_END, is_control_message
+from pipeline_messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 
 from openai.types.realtime import (
     InputAudioBufferAppendEvent,
@@ -37,7 +38,7 @@ async def _send_events(ws: WebSocket, events: list[ServerEvent]) -> None:
 
 
 def _keep_audio_sentinel(item) -> bool:
-    return isinstance(item, bytes) and item == b"__RESPONSE_DONE__"
+    return isinstance(item, bytes) and item == AUDIO_RESPONSE_DONE
 
 
 def _keep_user_text_event(item) -> bool:
@@ -263,14 +264,14 @@ def create_app(
                     else:
                         audio_chunk = output_queue.get_nowait()
 
-                    if isinstance(audio_chunk, bytes) and audio_chunk == b"END":
+                    if isinstance(audio_chunk, bytes) and audio_chunk == PIPELINE_END:
                         for cid in service.connection_ids:
                             ws = app.state.websockets.get(cid)
                             if ws:
                                 await _send_events(ws, service.finish_audio_response(cid))
                         break
 
-                    if isinstance(audio_chunk, bytes) and audio_chunk == b"__RESPONSE_DONE__":
+                    if isinstance(audio_chunk, bytes) and audio_chunk == AUDIO_RESPONSE_DONE:
                         for cid in service.connection_ids:
                             ws = app.state.websockets.get(cid)
                             if ws:
@@ -300,7 +301,7 @@ def create_app(
 
                         if (
                             isinstance(next_chunk, bytes)
-                            and next_chunk in {b"END", b"__RESPONSE_DONE__"}
+                            and next_chunk in {PIPELINE_END, AUDIO_RESPONSE_DONE}
                         ) or is_control_message(next_chunk, SESSION_END.kind):
                             pending_output_item = next_chunk
                             break
