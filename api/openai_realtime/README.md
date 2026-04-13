@@ -158,7 +158,7 @@ sequenceDiagram
 **Step by step:**
 
 1. **VAD detects speech**: puts `{"type": "speech_started"}` on `text_output_queue`.
-2. **`_send_loop` processes text events first** (priority over audio): translates `speech_started` into protocol events. If an active response was in progress, `RealtimeService.translate_pipeline_text` emits `response.output_audio.done` + `response.done` with `status="cancelled"` and `reason="turn_detected"`.
+2. **`_send_loop` processes text events first** (priority over audio): translates `speech_started` into protocol events. If an active response was in progress, `RealtimeService.dispatch_pipeline_event` emits `response.output_audio.done` + `response.done` with `status="cancelled"` and `reason="turn_detected"`.
 3. **Cancel + queue flush**: if `response_playing` is set, the send loop calls `cancel_scope.cancel()` (increments generation, enables discard), drains both `output_queue` (preserving `__RESPONSE_DONE__` sentinels) and `text_output_queue`, then clears `response_playing`.
 4. **LLM/TTS cancellation**: handlers capture `gen = cancel_scope.generation` at the start of each response and check `cancel_scope.is_stale(gen)` on every streaming token, aborting early when stale.
 5. **Discard guard**: while `cancel_scope.discarding` is True, the send loop silently drops stale audio chunks and assistant text. The guard clears when `__RESPONSE_DONE__` arrives (via `cancel_scope.response_done()`).

@@ -152,7 +152,7 @@ class TestClientEventDispatch:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
                 conn_id = list(service._conns.keys())[0]
-                service._ensure_response(conn_id)
+                service.response._ensure_response(conn_id)
                 ws.send_json({"type": "response.create"})
                 msg = ws.receive_json()
                 assert msg["type"] == "error"
@@ -164,7 +164,7 @@ class TestClientEventDispatch:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
                 conn_id = list(service._conns.keys())[0]
-                service._ensure_response(conn_id)
+                service.response._ensure_response(conn_id)
                 ws.send_json({"type": "response.cancel"})
                 msg1 = ws.receive_json()
                 msg2 = ws.receive_json()
@@ -178,7 +178,7 @@ class TestClientEventDispatch:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
                 conn_id = list(service._conns.keys())[0]
-                service._ensure_response(conn_id)
+                service.response._ensure_response(conn_id)
                 response_playing.set()
                 output_queue.put(_pcm_bytes(256))
                 output_queue.put(_pcm_bytes(256))
@@ -211,7 +211,7 @@ class TestClientEventDispatch:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()  # session.created
                 conn_id = list(service._conns.keys())[0]
-                service._ensure_response(conn_id)
+                service.response._ensure_response(conn_id)
                 response_playing.set()
                 ws.send_json({"type": "response.cancel"})
                 ws.receive_json()  # response.output_audio.done
@@ -325,7 +325,7 @@ class TestSendLoop:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()  # session.created
                 conn_id = list(service._conns.keys())[0]
-                service._ensure_response(conn_id)
+                service.response._ensure_response(conn_id)
                 response_playing.set()
                 # Trigger barge-in
                 text_output_queue.put({"type": "speech_started", "audio_start_ms": 0})
@@ -349,7 +349,7 @@ class TestSendLoop:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()  # session.created
                 conn_id = list(service._conns.keys())[0]
-                service._ensure_response(conn_id)
+                service.response._ensure_response(conn_id)
                 response_playing.set()
                 text_output_queue.put({"type": "speech_started", "audio_start_ms": 0})
                 msg = ws.receive_json()
@@ -405,7 +405,7 @@ class TestCleanup:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
                 conn_id = list(service._conns.keys())[0]
-                service._ensure_response(conn_id)
+                service.response._ensure_response(conn_id)
                 response_playing.set()
                 output_queue.put(_pcm_bytes(256))
                 text_output_queue.put({"type": "assistant_text", "text": "stale"})
