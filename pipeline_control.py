@@ -1,12 +1,19 @@
 from dataclasses import dataclass
+from enum import Enum
+
+
+class ControlKind(str, Enum):
+    """Strongly-typed kinds for :class:`PipelineControlMessage`."""
+
+    SESSION_END = "session_end"
 
 
 @dataclass(frozen=True)
 class PipelineControlMessage:
-    kind: str
+    kind: ControlKind
 
 
-SESSION_END = PipelineControlMessage("session_end")
+SESSION_END = PipelineControlMessage(ControlKind.SESSION_END)
 
 
 def is_control_message(message, kind=None):

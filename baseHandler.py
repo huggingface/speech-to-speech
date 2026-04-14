@@ -3,6 +3,7 @@ from queue import Empty
 import logging
 
 from pipeline_control import SESSION_END, is_control_message
+from pipeline_messages import PIPELINE_END
 
 logger = logging.getLogger(__name__)
 
@@ -11,10 +12,10 @@ class BaseHandler:
     """
     Base class for pipeline parts. Each part of the pipeline has an input and an output queue.
     The `setup` method along with `setup_args` and `setup_kwargs` can be used to address the specific requirements of the implemented pipeline part.
-    To stop a handler properly, set the stop_event and, to avoid queue deadlocks, place b"END" in the input queue.
+    To stop a handler properly, set the stop_event and, to avoid queue deadlocks, place PIPELINE_END in the input queue.
     Objects placed in the input queue will be processed by the `process` method, and the yielded results will be placed in the output queue.
     `SESSION_END` is a soft control message used to reset per-session state without stopping the handler thread.
-    The cleanup method handles stopping the handler, and b"END" is placed in the output queue.
+    The cleanup method handles stopping the handler, and PIPELINE_END is placed in the output queue.
     """
 
     def __init__(self, stop_event, queue_in, queue_out, setup_args=(), setup_kwargs={}):
@@ -51,8 +52,7 @@ class BaseHandler:
                 self.queue_out.put(input)
                 continue
 
-            if isinstance(input, bytes) and input == b"END":
-                # sentinelle signal to avoid queue deadlock
+            if isinstance(input, bytes) and input == PIPELINE_END:
                 logger.debug("Stopping thread")
                 break
             start_time = perf_counter()
@@ -67,7 +67,7 @@ class BaseHandler:
                 logger.error(f"{self.__class__.__name__}: Error in process(): {type(e).__name__}: {e}", exc_info=True)
 
         self.cleanup()
-        self.queue_out.put(b"END")
+        self.queue_out.put(PIPELINE_END)
 
     @property
     def last_time(self):

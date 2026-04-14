@@ -4,6 +4,7 @@ import json
 from queue import Empty
 
 from pipeline_control import SESSION_END, is_control_message
+from pipeline_messages import PIPELINE_END
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +153,7 @@ class WebSocketStreamer:
                 # Check for audio
                 try:
                     audio_chunk = self.output_queue.get_nowait()
-                    if isinstance(audio_chunk, bytes) and audio_chunk == b"END":
+                    if isinstance(audio_chunk, bytes) and audio_chunk == PIPELINE_END:
                         if audio_buffer and self.clients:
                             data = bytes(audio_buffer)
                             audio_buffer.clear()

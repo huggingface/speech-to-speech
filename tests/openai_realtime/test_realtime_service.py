@@ -33,6 +33,7 @@ from openai.types.realtime import (
 from api.openai_realtime.service import (
     CHUNK_SIZE_BYTES,
 )
+from pipeline_messages import MessageTag
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +74,7 @@ class TestConnectionLifecycle:
             service._state(sid)
 
     def test_build_session_created(self, service, conn_id, runtime_config):
-        service.handle_session_update(SessionUpdateEvent(
+        service.handle_session_update(conn_id, SessionUpdateEvent(
             type="session.update",
             session={
                 "type": "realtime",
@@ -178,34 +179,34 @@ class TestHandleSessionUpdate:
         session_fields.setdefault("type", "realtime")
         return SessionUpdateEvent(type="session.update", session=session_fields)
 
-    def test_session_update_voice(self, service, runtime_config):
+    def test_session_update_voice(self, service, conn_id, runtime_config):
         evt = self._make_update(
             audio={"output": {"voice": "shimmer"}},
         )
-        service.handle_session_update(evt)
+        service.handle_session_update(conn_id, evt)
         assert runtime_config.session.audio.output.voice == "shimmer"
 
-    def test_session_update_instructions(self, service, runtime_config):
-        service.handle_session_update(self._make_update(instructions="Be concise"))
+    def test_session_update_instructions(self, service, conn_id, runtime_config):
+        service.handle_session_update(conn_id, self._make_update(instructions="Be concise"))
         assert runtime_config.session.instructions == "Be concise"
 
-    def test_session_update_tools_and_tool_choice(self, service, runtime_config):
+    def test_session_update_tools_and_tool_choice(self, service, conn_id, runtime_config):
         tools = [{"type": "function", "name": "f1"}]
-        service.handle_session_update(self._make_update(tools=tools, tool_choice="required"))
+        service.handle_session_update(conn_id, self._make_update(tools=tools, tool_choice="required"))
         assert runtime_config.session.tools is not None
         assert runtime_config.session.tool_choice == "required"
 
-    def test_session_update_rejects_transcription_session(self, service, runtime_config):
+    def test_session_update_rejects_transcription_session(self, service, conn_id, runtime_config):
         raw = {
             "type": "session.update",
             "session": {"type": "transcription"},
         }
         evt = SessionUpdateEvent.model_validate(raw)
-        err = service.handle_session_update(evt)
+        err = service.handle_session_update(conn_id, evt)
         assert isinstance(err, RealtimeErrorEvent)
         assert err.error.type == "invalid_session_type"
 
-    def test_session_update_nested_audio_format(self, service, runtime_config):
+    def test_session_update_nested_audio_format(self, service, conn_id, runtime_config):
         raw = {
             "type": "session.update",
             "session": {
@@ -217,20 +218,20 @@ class TestHandleSessionUpdate:
             },
         }
         evt = SessionUpdateEvent.model_validate(raw)
-        service.handle_session_update(evt)
+        service.handle_session_update(conn_id, evt)
         assert runtime_config.session.audio.output.voice == "nova"
         assert runtime_config.session.audio.input.turn_detection.type == "server_vad"
 
-    def test_session_update_merges_partial_updates(self, service, runtime_config):
+    def test_session_update_merges_partial_updates(self, service, conn_id, runtime_config):
         """Partial updates preserve previously-set fields."""
-        service.handle_session_update(self._make_update(
+        service.handle_session_update(conn_id, self._make_update(
             audio={"output": {"voice": "echo"}},
             instructions="Be helpful",
         ))
         assert runtime_config.session.audio.output.voice == "echo"
         assert runtime_config.session.instructions == "Be helpful"
 
-        service.handle_session_update(self._make_update(instructions="Be concise"))
+        service.handle_session_update(conn_id, self._make_update(instructions="Be concise"))
         assert runtime_config.session.instructions == "Be concise"
         assert runtime_config.session.audio.output.voice == "echo"  # preserved from first update
 
@@ -264,7 +265,7 @@ class TestHandleConversationItemCreate:
         assert evt.item.content[0].text == "hi"
         assert not text_prompt_queue.empty()
         msg = text_prompt_queue.get()
-        assert msg == ("__ADD_TO_CONTEXT__", "user", [{"type": "input_text", "text": "hi"}])
+        assert msg == (MessageTag.ADD_TO_CONTEXT, "user", [{"type": "input_text", "text": "hi"}])
 
     def test_text_input_previous_item_id_chain(self, service, conn_id):
         e1 = service.handle_conversation_item_create(conn_id, self._text_event("a", "item_1"))
@@ -281,7 +282,7 @@ class TestHandleConversationItemCreate:
         assert len(events) == 1
         assert isinstance(events[0], ConversationItemCreatedEvent)
         msg = text_prompt_queue.get()
-        assert msg == ("__FUNCTION_RESULT__", 'Call ID: call_1\nOutput: {"result": 42}')
+        assert msg == (MessageTag.FUNCTION_RESULT, 'Call ID: call_1\nOutput: {"result": 42}')
 
     def test_input_image_forwarded(self, service, conn_id, text_prompt_queue):
         evt = ConversationItemCreateEvent(
@@ -296,7 +297,7 @@ class TestHandleConversationItemCreate:
         assert len(events) == 1
         assert isinstance(events[0], ConversationItemCreatedEvent)
         msg = text_prompt_queue.get()
-        assert msg[0] == "__ADD_TO_CONTEXT__"
+        assert msg[0] == MessageTag.ADD_TO_CONTEXT
         assert msg[1] == "user"
         assert isinstance(msg[2], list)
         assert msg[2][0]["type"] == "input_image"
@@ -317,7 +318,7 @@ class TestHandleConversationItemCreate:
         events = service.handle_conversation_item_create(conn_id, evt)
         assert len(events) == 1
         msg = text_prompt_queue.get()
-        assert msg[0] == "__ADD_TO_CONTEXT__"
+        assert msg[0] == MessageTag.ADD_TO_CONTEXT
         assert msg[1] == "user"
         assert isinstance(msg[2], list)
         assert len(msg[2]) == 2
@@ -376,7 +377,7 @@ class TestHandleResponseCreate:
         result = service.handle_response_create(conn_id, evt)
         assert isinstance(result, ResponseCreatedEvent)
         sentinel = text_prompt_queue.get()
-        assert sentinel == ("__GENERATE_RESPONSE__", "override instructions", "auto")
+        assert sentinel == (MessageTag.GENERATE_RESPONSE, "override instructions", "auto")
 
     def test_response_create_rejects_complex_tool_choice(self, service, conn_id, runtime_config):
         evt = ResponseCreateEvent(
@@ -399,9 +400,9 @@ class TestHandleResponseCreate:
             result = service.handle_response_create(conn_id, evt)
             assert isinstance(result, ResponseCreatedEvent), f"Expected ResponseCreatedEvent for tool_choice={choice!r}"
             sentinel = text_prompt_queue.get()
-            assert sentinel[0] == "__GENERATE_RESPONSE__"
+            assert sentinel[0] == MessageTag.GENERATE_RESPONSE
             assert sentinel[2] == choice
-            service._end_response(conn_id)
+            service.response._end_response(conn_id)
 
     def test_response_create_with_image_input_items(self, service, conn_id, text_prompt_queue):
         evt = ResponseCreateEvent(
@@ -422,13 +423,13 @@ class TestHandleResponseCreate:
         result = service.handle_response_create(conn_id, evt)
         assert isinstance(result, ResponseCreatedEvent)
         context_msg = text_prompt_queue.get()
-        assert context_msg[0] == "__ADD_TO_CONTEXT__"
+        assert context_msg[0] == MessageTag.ADD_TO_CONTEXT
         assert context_msg[1] == "user"
         assert isinstance(context_msg[2], list)
         assert any(p["type"] == "input_image" for p in context_msg[2])
         assert any(p["type"] == "input_text" for p in context_msg[2])
         gen_msg = text_prompt_queue.get()
-        assert gen_msg[0] == "__GENERATE_RESPONSE__"
+        assert gen_msg[0] == MessageTag.GENERATE_RESPONSE
 
     def test_double_response_create_rejected(self, service, conn_id, text_prompt_queue):
         """Second response.create is rejected because in_response is set immediately."""
@@ -447,7 +448,7 @@ class TestHandleResponseCreate:
 class TestHandleResponseCancel:
     def test_cancel_active_response(self, service, conn_id, should_listen):
         should_listen.clear()
-        service._ensure_response(conn_id)
+        service.response._ensure_response(conn_id)
         events = service.handle_response_cancel(conn_id)
         assert len(events) == 2
         assert isinstance(events[0], ResponseAudioDoneEvent)
@@ -500,7 +501,7 @@ class TestEncodeAudioChunk:
 
 class TestFinishAudioResponse:
     def test_finish_emits_audio_done_and_response_done(self, service, conn_id):
-        service._ensure_response(conn_id)
+        service.response._ensure_response(conn_id)
         events = service.finish_audio_response(conn_id)
         assert len(events) == 2
         assert isinstance(events[0], ResponseAudioDoneEvent)
@@ -509,7 +510,7 @@ class TestFinishAudioResponse:
         assert events[1].response.status == "completed"
 
     def test_finish_with_cancel_status(self, service, conn_id):
-        service._ensure_response(conn_id)
+        service.response._ensure_response(conn_id)
         events = service.finish_audio_response(conn_id, status="cancelled", reason="turn_detected")
         done = events[1]
         assert done.response.status == "cancelled"
@@ -517,7 +518,7 @@ class TestFinishAudioResponse:
 
     def test_finish_resets_state(self, service, conn_id):
         service._state(conn_id).response_metadata = {"k": "v"}
-        service._ensure_response(conn_id)
+        service.response._ensure_response(conn_id)
         service.finish_audio_response(conn_id)
         st = service._state(conn_id)
         assert st.in_response is False
@@ -530,12 +531,12 @@ class TestFinishAudioResponse:
 # Pipeline text translation
 # ===================================================================
 
-class TestTranslatePipelineText:
+class TestDispatchPipelineEvent:
 
     # -- speech_started --
 
     def test_speech_started_emits_event(self, service, conn_id):
-        events = service.translate_pipeline_text(
+        events = service.dispatch_pipeline_event(
             conn_id, {"type": "speech_started", "audio_start_ms": 1000},
         )
         assert len(events) == 1
@@ -545,8 +546,8 @@ class TestTranslatePipelineText:
         assert evt.item_id.startswith("item_")
 
     def test_speech_started_cancels_active_response(self, service, conn_id):
-        service._ensure_response(conn_id)
-        events = service.translate_pipeline_text(
+        service.response._ensure_response(conn_id)
+        events = service.dispatch_pipeline_event(
             conn_id, {"type": "speech_started", "audio_start_ms": 0},
         )
         cancel_events = [e for e in events if isinstance(e, (ResponseAudioDoneEvent, ResponseDoneEvent))]
@@ -559,7 +560,7 @@ class TestTranslatePipelineText:
 
     def test_speech_started_no_response_emits_only_started(self, service, conn_id):
         """speech_started without active response emits only the started event."""
-        events = service.translate_pipeline_text(
+        events = service.dispatch_pipeline_event(
             conn_id, {"type": "speech_started"},
         )
         assert len(events) == 1
@@ -571,8 +572,8 @@ class TestTranslatePipelineText:
         service.runtime_config.session.audio.input.turn_detection = ServerVad(
             type="server_vad", interrupt_response=False,
         )
-        service._ensure_response(conn_id)
-        events = service.translate_pipeline_text(
+        service.response._ensure_response(conn_id)
+        events = service.dispatch_pipeline_event(
             conn_id, {"type": "speech_started", "audio_start_ms": 0},
         )
         assert len(events) == 1
@@ -581,11 +582,11 @@ class TestTranslatePipelineText:
 
     def test_consecutive_speech_cycles_get_distinct_item_ids(self, service, conn_id):
         """Each speech_started/stopped cycle generates a new unique item_id."""
-        started_1 = service.translate_pipeline_text(conn_id, {"type": "speech_started"})
-        stopped_1 = service.translate_pipeline_text(conn_id, {"type": "speech_stopped"})
+        started_1 = service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        stopped_1 = service.dispatch_pipeline_event(conn_id, {"type": "speech_stopped"})
 
-        started_2 = service.translate_pipeline_text(conn_id, {"type": "speech_started"})
-        stopped_2 = service.translate_pipeline_text(conn_id, {"type": "speech_stopped"})
+        started_2 = service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        stopped_2 = service.dispatch_pipeline_event(conn_id, {"type": "speech_stopped"})
 
         id_1 = started_1[0].item_id
         id_2 = started_2[0].item_id
@@ -596,8 +597,8 @@ class TestTranslatePipelineText:
     # -- speech_stopped --
 
     def test_speech_stopped_emits_event(self, service, conn_id):
-        service.translate_pipeline_text(conn_id, {"type": "speech_started", "audio_start_ms": 0})
-        events = service.translate_pipeline_text(
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_started", "audio_start_ms": 0})
+        events = service.dispatch_pipeline_event(
             conn_id, {"type": "speech_stopped", "audio_end_ms": 2000},
         )
         assert len(events) == 1
@@ -606,25 +607,25 @@ class TestTranslatePipelineText:
         assert evt.audio_end_ms == 2000
 
     def test_speech_stopped_same_item_id_as_started(self, service, conn_id):
-        started = service.translate_pipeline_text(
+        started = service.dispatch_pipeline_event(
             conn_id, {"type": "speech_started", "audio_start_ms": 0},
         )
-        stopped = service.translate_pipeline_text(
+        stopped = service.dispatch_pipeline_event(
             conn_id, {"type": "speech_stopped", "audio_end_ms": 500},
         )
         assert started[0].item_id == stopped[0].item_id
 
     def test_speech_stopped_stores_duration(self, service, conn_id):
-        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
-        service.translate_pipeline_text(
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        service.dispatch_pipeline_event(
             conn_id, {"type": "speech_stopped", "duration_s": 2.5},
         )
         assert service._state(conn_id).input_audio_duration_s == 2.5
 
     def test_speech_stopped_zero_duration_not_stored(self, service, conn_id):
         """Phantom trigger (duration_s=0) emits stopped event but doesn't overwrite duration."""
-        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
-        events = service.translate_pipeline_text(
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        events = service.dispatch_pipeline_event(
             conn_id, {"type": "speech_stopped", "duration_s": 0},
         )
         assert len(events) == 1
@@ -634,7 +635,7 @@ class TestTranslatePipelineText:
     # -- assistant_text --
 
     def test_assistant_text_emits_transcript_done(self, service, conn_id):
-        events = service.translate_pipeline_text(
+        events = service.dispatch_pipeline_event(
             conn_id, {"type": "assistant_text", "text": "Hello there"},
         )
         assert len(events) == 1
@@ -645,7 +646,7 @@ class TestTranslatePipelineText:
         assert evt.transcript == "Hello there"
 
     def test_assistant_text_with_tools(self, service, conn_id):
-        events = service.translate_pipeline_text(
+        events = service.dispatch_pipeline_event(
             conn_id,
             {
                 "type": "assistant_text",
@@ -668,7 +669,7 @@ class TestTranslatePipelineText:
         assert events[2].output_index == 2
 
     def test_assistant_text_tools_only(self, service, conn_id):
-        events = service.translate_pipeline_text(
+        events = service.dispatch_pipeline_event(
             conn_id,
             {
                 "type": "assistant_text",
@@ -683,11 +684,11 @@ class TestTranslatePipelineText:
     # -- partial_transcription --
 
     def test_partial_transcription_emits_delta(self, service, conn_id):
-        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
-        e1 = service.translate_pipeline_text(
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        e1 = service.dispatch_pipeline_event(
             conn_id, {"type": "partial_transcription", "delta": "hel"},
         )
-        e2 = service.translate_pipeline_text(
+        e2 = service.dispatch_pipeline_event(
             conn_id, {"type": "partial_transcription", "delta": "lo"},
         )
         assert isinstance(e1[0], ConversationItemInputAudioTranscriptionDeltaEvent)
@@ -699,11 +700,11 @@ class TestTranslatePipelineText:
     # -- transcription_completed --
 
     def test_transcription_completed_emits_event(self, service, conn_id):
-        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
-        service.translate_pipeline_text(
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        service.dispatch_pipeline_event(
             conn_id, {"type": "speech_stopped", "duration_s": 3.2},
         )
-        events = service.translate_pipeline_text(
+        events = service.dispatch_pipeline_event(
             conn_id, {"type": "transcription_completed", "transcript": "hello world"},
         )
         assert len(events) == 1
@@ -717,7 +718,7 @@ class TestTranslatePipelineText:
     # -- unknown --
 
     def test_unknown_type_returns_empty(self, service, conn_id):
-        events = service.translate_pipeline_text(conn_id, {"type": "something_else"})
+        events = service.dispatch_pipeline_event(conn_id, {"type": "something_else"})
         assert events == []
 
 
@@ -743,18 +744,18 @@ class TestIdAndStateManagement:
         st = service._state(conn_id)
         assert st.last_item_id is None
 
-        # 1) speech_started sets last_item_id via translate_pipeline_text
-        events = service.translate_pipeline_text(conn_id, {"type": "speech_started"})
+        # 1) speech_started sets last_item_id via dispatch_pipeline_event
+        events = service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
         input_id = events[0].item_id
         assert st.last_item_id == input_id
 
-        # 2) assistant_text sets last_item_id via translate_pipeline_text
-        events = service.translate_pipeline_text(conn_id, {"type": "assistant_text", "text": "hi"})
+        # 2) assistant_text sets last_item_id via dispatch_pipeline_event
+        events = service.dispatch_pipeline_event(conn_id, {"type": "assistant_text", "text": "hi"})
         output_id = st.current_item_id
         assert st.last_item_id == output_id
 
         # 3) handle_conversation_item_create updates last_item_id
-        service._end_response(conn_id)
+        service.response._end_response(conn_id)
         evt = ConversationItemCreateEvent(
             type="conversation.item.create",
             item={
@@ -769,20 +770,20 @@ class TestIdAndStateManagement:
         assert events[0].previous_item_id == output_id
 
     def test_content_index_resets_on_new_item(self, service, conn_id):
-        service._start_item(conn_id)
-        assert service._next_content_index(conn_id) == 0
-        assert service._next_content_index(conn_id) == 1
+        service.response._start_item(conn_id)
+        assert service.response._next_content_index(conn_id) == 0
+        assert service.response._next_content_index(conn_id) == 1
 
-        service._start_item(conn_id)
-        assert service._next_content_index(conn_id) == 0
+        service.response._start_item(conn_id)
+        assert service.response._next_content_index(conn_id) == 0
 
-        service._ensure_response(conn_id)
-        assert service._next_content_index(conn_id) == 0
-        assert service._next_content_index(conn_id) == 1
+        service.response._ensure_response(conn_id)
+        assert service.response._next_content_index(conn_id) == 0
+        assert service.response._next_content_index(conn_id) == 1
 
-        service._end_response(conn_id)
-        service._ensure_response(conn_id)
-        assert service._next_content_index(conn_id) == 0
+        service.response._end_response(conn_id)
+        service.response._ensure_response(conn_id)
+        assert service.response._next_content_index(conn_id) == 0
 
 
 # ===================================================================
@@ -837,8 +838,8 @@ class TestUsageMetricsTracking:
     # -- token accumulation --
 
     def test_token_usage_accumulates_in_conn_state(self, service, conn_id):
-        service._ensure_response(conn_id)
-        service.translate_pipeline_text(
+        service.response._ensure_response(conn_id)
+        service.dispatch_pipeline_event(
             conn_id, {"type": "token_usage", "input_tokens": 10, "output_tokens": 20},
         )
         usage = service._state(conn_id).response_usage
@@ -846,11 +847,11 @@ class TestUsageMetricsTracking:
         assert usage.output_tokens == 20
 
     def test_token_usage_accumulates_multiple(self, service, conn_id):
-        service._ensure_response(conn_id)
-        service.translate_pipeline_text(
+        service.response._ensure_response(conn_id)
+        service.dispatch_pipeline_event(
             conn_id, {"type": "token_usage", "input_tokens": 5, "output_tokens": 10},
         )
-        service.translate_pipeline_text(
+        service.dispatch_pipeline_event(
             conn_id, {"type": "token_usage", "input_tokens": 3, "output_tokens": 7},
         )
         usage = service._state(conn_id).response_usage
@@ -858,14 +859,14 @@ class TestUsageMetricsTracking:
         assert usage.output_tokens == 17
 
     def test_token_usage_emits_no_events(self, service, conn_id):
-        events = service.translate_pipeline_text(
+        events = service.dispatch_pipeline_event(
             conn_id, {"type": "token_usage", "input_tokens": 10, "output_tokens": 20},
         )
         assert events == []
 
     def test_response_done_reflects_token_usage(self, service, conn_id):
-        service._ensure_response(conn_id)
-        service.translate_pipeline_text(
+        service.response._ensure_response(conn_id)
+        service.dispatch_pipeline_event(
             conn_id, {"type": "token_usage", "input_tokens": 100, "output_tokens": 50},
         )
         events = service.finish_audio_response(conn_id)
@@ -885,11 +886,11 @@ class TestUsageMetricsTracking:
         assert created_evt.response.usage.total_tokens == 0
 
     def test_end_response_rolls_into_global(self, service, conn_id):
-        service._ensure_response(conn_id)
-        service.translate_pipeline_text(
+        service.response._ensure_response(conn_id)
+        service.dispatch_pipeline_event(
             conn_id, {"type": "token_usage", "input_tokens": 10, "output_tokens": 20},
         )
-        service._end_response(conn_id)
+        service.response._end_response(conn_id)
         assert service.total_usage.input_tokens == 10
         assert service.total_usage.output_tokens == 20
         usage = service._state(conn_id).response_usage
@@ -897,25 +898,25 @@ class TestUsageMetricsTracking:
         assert usage.output_tokens == 0
 
     def test_multiple_responses_accumulate_global(self, service, conn_id):
-        service._ensure_response(conn_id)
-        service.translate_pipeline_text(
+        service.response._ensure_response(conn_id)
+        service.dispatch_pipeline_event(
             conn_id, {"type": "token_usage", "input_tokens": 10, "output_tokens": 20},
         )
-        service._end_response(conn_id)
+        service.response._end_response(conn_id)
 
-        service._ensure_response(conn_id)
-        service.translate_pipeline_text(
+        service.response._ensure_response(conn_id)
+        service.dispatch_pipeline_event(
             conn_id, {"type": "token_usage", "input_tokens": 5, "output_tokens": 15},
         )
-        service._end_response(conn_id)
+        service.response._end_response(conn_id)
 
         assert service.total_usage.input_tokens == 15
         assert service.total_usage.output_tokens == 35
 
     def test_unregister_rolls_partial_tokens_into_global(self, service):
         cid = service.register()
-        service._ensure_response(cid)
-        service.translate_pipeline_text(
+        service.response._ensure_response(cid)
+        service.dispatch_pipeline_event(
             cid, {"type": "token_usage", "input_tokens": 7, "output_tokens": 3},
         )
         service.unregister(cid)
@@ -930,8 +931,8 @@ class TestUsageMetricsTracking:
 
     def test_finish_audio_response_resets_per_response_tokens(self, service, conn_id):
         """After finish_audio_response, per-response counters are zero."""
-        service._ensure_response(conn_id)
-        service.translate_pipeline_text(
+        service.response._ensure_response(conn_id)
+        service.dispatch_pipeline_event(
             conn_id, {"type": "token_usage", "input_tokens": 50, "output_tokens": 25},
         )
         service.finish_audio_response(conn_id)
@@ -944,59 +945,59 @@ class TestUsageMetricsTracking:
     # -- audio duration accumulation --
 
     def test_transcription_completed_accumulates_duration(self, service, conn_id):
-        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
-        service.translate_pipeline_text(conn_id, {"type": "speech_stopped", "duration_s": 2.5})
-        service.translate_pipeline_text(conn_id, {"type": "transcription_completed", "transcript": "hi"})
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_stopped", "duration_s": 2.5})
+        service.dispatch_pipeline_event(conn_id, {"type": "transcription_completed", "transcript": "hi"})
         assert service._state(conn_id).response_usage.audio_duration_s == 2.5
 
     def test_multiple_transcriptions_accumulate_duration(self, service, conn_id):
-        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
-        service.translate_pipeline_text(conn_id, {"type": "speech_stopped", "duration_s": 1.0})
-        service.translate_pipeline_text(conn_id, {"type": "transcription_completed", "transcript": "a"})
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_stopped", "duration_s": 1.0})
+        service.dispatch_pipeline_event(conn_id, {"type": "transcription_completed", "transcript": "a"})
 
-        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
-        service.translate_pipeline_text(conn_id, {"type": "speech_stopped", "duration_s": 2.0})
-        service.translate_pipeline_text(conn_id, {"type": "transcription_completed", "transcript": "b"})
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_stopped", "duration_s": 2.0})
+        service.dispatch_pipeline_event(conn_id, {"type": "transcription_completed", "transcript": "b"})
 
         assert service._state(conn_id).response_usage.audio_duration_s == 3.0
 
     def test_end_response_rolls_duration_into_global(self, service, conn_id):
-        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
-        service.translate_pipeline_text(conn_id, {"type": "speech_stopped", "duration_s": 4.0})
-        service.translate_pipeline_text(conn_id, {"type": "transcription_completed", "transcript": "x"})
-        service._ensure_response(conn_id)
-        service._end_response(conn_id)
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_stopped", "duration_s": 4.0})
+        service.dispatch_pipeline_event(conn_id, {"type": "transcription_completed", "transcript": "x"})
+        service.response._ensure_response(conn_id)
+        service.response._end_response(conn_id)
         assert service.total_usage.audio_duration_s == 4.0
         assert service._state(conn_id).response_usage.audio_duration_s == 0.0
 
     def test_unregister_rolls_duration_into_global(self, service):
         cid = service.register()
-        service.translate_pipeline_text(cid, {"type": "speech_started"})
-        service.translate_pipeline_text(cid, {"type": "speech_stopped", "duration_s": 1.5})
-        service.translate_pipeline_text(cid, {"type": "transcription_completed", "transcript": "y"})
+        service.dispatch_pipeline_event(cid, {"type": "speech_started"})
+        service.dispatch_pipeline_event(cid, {"type": "speech_stopped", "duration_s": 1.5})
+        service.dispatch_pipeline_event(cid, {"type": "transcription_completed", "transcript": "y"})
         service.unregister(cid)
         assert service.total_usage.audio_duration_s == 1.5
 
     # -- responses_completed / responses_cancelled --
 
     def test_responses_completed_increments(self, service, conn_id):
-        service._ensure_response(conn_id)
+        service.response._ensure_response(conn_id)
         service.finish_audio_response(conn_id)
         assert service.total_usage.responses_completed == 1
         assert service.total_usage.responses_cancelled == 0
 
     def test_responses_cancelled_increments(self, service, conn_id):
-        service._ensure_response(conn_id)
+        service.response._ensure_response(conn_id)
         service.finish_audio_response(conn_id, status="cancelled", reason="turn_detected")
         assert service.total_usage.responses_cancelled == 1
         assert service.total_usage.responses_completed == 0
 
     def test_multiple_responses_accumulate_status_counters(self, service, conn_id):
-        service._ensure_response(conn_id)
+        service.response._ensure_response(conn_id)
         service.finish_audio_response(conn_id)
-        service._ensure_response(conn_id)
+        service.response._ensure_response(conn_id)
         service.finish_audio_response(conn_id, status="cancelled", reason="client_cancelled")
-        service._ensure_response(conn_id)
+        service.response._ensure_response(conn_id)
         service.finish_audio_response(conn_id)
         assert service.total_usage.responses_completed == 2
         assert service.total_usage.responses_cancelled == 1
@@ -1004,7 +1005,7 @@ class TestUsageMetricsTracking:
     # -- tool_calls --
 
     def test_tool_calls_increments(self, service, conn_id):
-        service.translate_pipeline_text(conn_id, {
+        service.dispatch_pipeline_event(conn_id, {
             "type": "assistant_text",
             "text": "",
             "tools": [
@@ -1015,8 +1016,8 @@ class TestUsageMetricsTracking:
         assert service._state(conn_id).response_usage.tool_calls == 2
 
     def test_tool_calls_rolls_into_global(self, service, conn_id):
-        service._ensure_response(conn_id)
-        service.translate_pipeline_text(conn_id, {
+        service.response._ensure_response(conn_id)
+        service.dispatch_pipeline_event(conn_id, {
             "type": "assistant_text",
             "text": "",
             "tools": [{"call_id": "c1", "name": "f1", "arguments": "{}"}],
@@ -1039,15 +1040,15 @@ class TestUsageMetricsTracking:
     # -- turns --
 
     def test_turns_increments(self, service, conn_id):
-        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
-        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
-        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
         assert service._state(conn_id).response_usage.turns == 3
 
     def test_turns_rolls_into_global(self, service, conn_id):
-        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
-        service._ensure_response(conn_id)
-        service._end_response(conn_id)
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        service.response._ensure_response(conn_id)
+        service.response._end_response(conn_id)
         assert service.total_usage.turns == 1
         assert service._state(conn_id).response_usage.turns == 0
 
@@ -1070,15 +1071,15 @@ class TestUsageMetricsTracking:
 
     def test_get_usage(self, service, conn_id):
         # Speech cycle before response so speech_started doesn't cancel anything
-        service.translate_pipeline_text(conn_id, {"type": "speech_started"})
-        service.translate_pipeline_text(conn_id, {"type": "speech_stopped", "duration_s": 3.0})
-        service.translate_pipeline_text(conn_id, {"type": "transcription_completed", "transcript": "z"})
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        service.dispatch_pipeline_event(conn_id, {"type": "speech_stopped", "duration_s": 3.0})
+        service.dispatch_pipeline_event(conn_id, {"type": "transcription_completed", "transcript": "z"})
 
-        service._ensure_response(conn_id)
-        service.translate_pipeline_text(
+        service.response._ensure_response(conn_id)
+        service.dispatch_pipeline_event(
             conn_id, {"type": "token_usage", "input_tokens": 10, "output_tokens": 20},
         )
-        service.translate_pipeline_text(conn_id, {
+        service.dispatch_pipeline_event(conn_id, {
             "type": "assistant_text", "text": "hi",
             "tools": [{"call_id": "c1", "name": "f1", "arguments": "{}"}],
         })

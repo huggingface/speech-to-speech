@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cancel_scope import CancelScope
 from LLM.chat import Chat
 from LLM.openai_api_language_model import OpenApiModelHandler
+from pipeline_messages import MessageTag
 
 
 def _make_text_delta_event(text):
@@ -76,7 +77,7 @@ def test_process_streams_text_from_response_events():
     assert outputs == [
         ("Hello.", None, []),
         ("How are you?", None, []),
-        ("__END_OF_RESPONSE__", None, None),
+        (MessageTag.END_OF_RESPONSE, None, None),
     ]
 
 
@@ -94,7 +95,7 @@ def test_process_handles_cancellation():
 
     outputs = list(handler.process("Hi"))
 
-    assert outputs == [("__END_OF_RESPONSE__", None, None)]
+    assert outputs == [(MessageTag.END_OF_RESPONSE, None, None)]
 
 
 def test_process_read_timeout_ends_response_cleanly():
@@ -115,7 +116,7 @@ def test_process_read_timeout_ends_response_cleanly():
 
     assert outputs == [
         ("Wow I'm a bit slow today, could you repeat that?", None, None),
-        ("__END_OF_RESPONSE__", None, None),
+        (MessageTag.END_OF_RESPONSE, None, None),
     ]
 
 

@@ -8,6 +8,7 @@ Intercepts LLM output to:
 
 import logging
 from baseHandler import BaseHandler
+from pipeline_messages import MessageTag
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ class LMOutputProcessor(BaseHandler):
         """
         sentinel, *_ = lm_output
 
-        if sentinel == "__TOKEN_USAGE__":
+        if sentinel == MessageTag.TOKEN_USAGE:
             _, input_tokens, output_tokens = lm_output
             if self.text_output_queue is not None:
                 self.text_output_queue.put({
@@ -54,8 +55,8 @@ class LMOutputProcessor(BaseHandler):
 
         text_chunk, language_code, tools = lm_output
 
-        if text_chunk == "__END_OF_RESPONSE__":
-            yield ("__END_OF_RESPONSE__", None)
+        if text_chunk == MessageTag.END_OF_RESPONSE:
+            yield (MessageTag.END_OF_RESPONSE, None)
             return
 
         logger.debug(f"LM processor: text='{text_chunk}', tools={tools}")

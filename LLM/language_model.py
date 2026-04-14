@@ -28,6 +28,7 @@ from rich.console import Console
 from LLM.utils import remove_unspeechable, image_url_to_pil
 from LLM.voice_prompt import build_voice_system_prompt
 from api.openai_realtime.runtime_config import RuntimeConfig
+from pipeline_messages import MessageTag
 
 try:
     from mlx_lm import load as mlx_load, stream_generate as mlx_stream_generate, generate as mlx_generate
@@ -157,7 +158,7 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
 
     @abstractmethod
     def _add_to_context(self, role: str, content: str | list[dict]) -> None:
-        """Handle an ``__ADD_TO_CONTEXT__`` payload (may contain images)."""
+        """Handle an ``ADD_TO_CONTEXT`` payload (may contain images)."""
 
     @abstractmethod
     def _generate(
@@ -344,19 +345,19 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
     # ------------------------------------------------------------------
 
     def process(self, prompt: str | tuple) -> Iterator[tuple]:
-        if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == "__ADD_TO_CONTEXT__":
+        if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == MessageTag.ADD_TO_CONTEXT:
             _, role, content = prompt
             self._add_to_context(role, content)
             return
 
-        if isinstance(prompt, tuple) and len(prompt) == 2 and prompt[0] == "__FUNCTION_RESULT__":
+        if isinstance(prompt, tuple) and len(prompt) == 2 and prompt[0] == MessageTag.FUNCTION_RESULT:
             _, result_text = prompt
             self.chat.append({"role": self.user_role, "content": result_text})
             return
 
         language_code = None
 
-        if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == "__GENERATE_RESPONSE__":
+        if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == MessageTag.GENERATE_RESPONSE:
             _, override_instructions, _ = prompt
             self._apply_runtime_instructions()
             if override_instructions:
@@ -389,8 +390,8 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
 
         output_tokens = len(self.tokenizer.encode(ctx.raw_generated_text)) if ctx.raw_generated_text else 0
         if ctx.input_tokens or output_tokens:
-            yield ("__TOKEN_USAGE__", ctx.input_tokens, output_tokens)
-        yield ("__END_OF_RESPONSE__", None, None)
+            yield (MessageTag.TOKEN_USAGE, ctx.input_tokens, output_tokens)
+        yield (MessageTag.END_OF_RESPONSE, None, None)
 
     def on_session_end(self) -> None:
         # reset() also clears init_chat_message, so a previous session's
