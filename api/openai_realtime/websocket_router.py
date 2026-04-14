@@ -170,7 +170,7 @@ def create_app(
                         await _send_event(ws, err)
 
                 elif isinstance(event, SessionUpdateEvent):
-                    err = service.handle_session_update(event)
+                    err = service.handle_session_update(session_id, event)
                     if err:
                         await _send_event(ws, err)
 
@@ -239,7 +239,7 @@ def create_app(
                             for cid in service.connection_ids:
                                 ws = app.state.websockets.get(cid)
                                 if ws:
-                                    events = service.translate_pipeline_text(cid, text_msg)
+                                    events = service.dispatch_pipeline_event(cid, text_msg)
                                     if events:
                                         await _send_events(ws, events)
 
