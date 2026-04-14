@@ -2,6 +2,7 @@ import socket
 import time
 from rich.console import Console
 import logging
+from pipeline_messages import PIPELINE_END
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ class SocketReceiver:
             audio_chunk = self.receive_full_chunk(self.conn, self.chunk_size)
             if audio_chunk is None:
                 # connection closed
-                self.queue_out.put(b"END")
+                self.queue_out.put(PIPELINE_END)
                 break
             if self.should_listen.is_set():
                 self.queue_out.put(audio_chunk)

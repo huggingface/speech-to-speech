@@ -11,6 +11,7 @@ import numpy as np
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
 from pipeline_control import SESSION_END, is_control_message
+from pipeline_messages import MessageTag, AUDIO_RESPONSE_DONE, PIPELINE_END
 from rich.console import Console
 
 from api.openai_realtime.runtime_config import RuntimeConfig
@@ -219,7 +220,7 @@ class Qwen3TTSHandler(BaseHandler):
 
         def _decode(item):
             if isinstance(item, tuple):
-                if item and item[0] == "__END_OF_RESPONSE__":
+                if item and item[0] == MessageTag.END_OF_RESPONSE:
                     return None, None, True
                 if len(item) == 2 and isinstance(item[0], str):
                     return item[0], item[1], False
@@ -239,7 +240,7 @@ class Qwen3TTSHandler(BaseHandler):
                 next_item = self.queue_in.queue[0]
                 if is_control_message(next_item, SESSION_END.kind):
                     break
-                if isinstance(next_item, bytes) and next_item == b"END":
+                if isinstance(next_item, bytes) and next_item == PIPELINE_END:
                     break
 
                 next_text, next_language_code, is_end = _decode(next_item)
@@ -267,8 +268,8 @@ class Qwen3TTSHandler(BaseHandler):
         return combined_text, saw_end_of_response
 
     def process(self, llm_sentence):
-        if isinstance(llm_sentence, tuple) and llm_sentence[0] == "__END_OF_RESPONSE__":
-            yield b"__RESPONSE_DONE__"
+        if isinstance(llm_sentence, tuple) and llm_sentence[0] == MessageTag.END_OF_RESPONSE:
+            yield AUDIO_RESPONSE_DONE
             return
 
         llm_sentence, saw_end_of_response = self._coalesce_pending_tts_input(llm_sentence)

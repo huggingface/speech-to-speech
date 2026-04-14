@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from STT import parakeet_tdt_handler
 from STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
+from pipeline_messages import MessageTag
 
 
 def test_show_progressive_transcription_returns_combined_text(monkeypatch):
@@ -41,7 +42,7 @@ def test_process_yields_partial_tagged_tuple(monkeypatch):
 
     result = list(handler.process(("progressive", np.zeros(16000, dtype=np.float32))))
 
-    assert result == [("__PARTIAL__", "partial text")]
+    assert result == [(MessageTag.PARTIAL, "partial text")]
 
 
 def test_process_yields_final_transcript(monkeypatch):

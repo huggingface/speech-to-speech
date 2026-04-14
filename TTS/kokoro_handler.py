@@ -13,6 +13,7 @@ import numpy as np
 from sys import platform
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
+from pipeline_messages import MessageTag, AUDIO_RESPONSE_DONE
 from rich.console import Console
 from utils.mlx_lock import MLXLockContext
 
@@ -231,8 +232,8 @@ class KokoroTTSHandler(BaseHandler):
         Yields:
             Audio chunks as numpy int16 arrays
         """
-        if isinstance(llm_sentence, tuple) and llm_sentence[0] == "__END_OF_RESPONSE__":
-            yield b"__RESPONSE_DONE__"
+        if isinstance(llm_sentence, tuple) and llm_sentence[0] == MessageTag.END_OF_RESPONSE:
+            yield AUDIO_RESPONSE_DONE
             return
 
         if self.runtime_config and self.runtime_config.session.audio.output.voice:

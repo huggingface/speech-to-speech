@@ -13,6 +13,7 @@ from LLM.chat import Chat
 from LLM.utils import remove_unspeechable
 from api.openai_realtime.runtime_config import RuntimeConfig
 from LLM.voice_prompt import build_voice_system_prompt
+from pipeline_messages import MessageTag
 
 logger = logging.getLogger(__name__)
 
@@ -110,16 +111,13 @@ class OpenApiModelHandler(BaseHandler):
         self.tools_choice = override_tool_choice or self.runtime_config.session.tool_choice
 
     def process(self, prompt):
-        # Context-only: add user/input text to chat without generating.
-        # Generation is deferred until __GENERATE_RESPONSE__ (from response.create).
-        if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == "__ADD_TO_CONTEXT__":
+        if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == MessageTag.ADD_TO_CONTEXT:
             _, role, content = prompt
             self.chat.append({"type": "message", "role": role, "content": content})
             logger.debug("Added to LLM context (role=%s)", role)
             return
 
-        # Context-only: add function-call result to chat without generating.
-        if isinstance(prompt, tuple) and len(prompt) == 2 and prompt[0] == "__FUNCTION_RESULT__":
+        if isinstance(prompt, tuple) and len(prompt) == 2 and prompt[0] == MessageTag.FUNCTION_RESULT:
             _, result_text = prompt
             self.chat.append({
                 "type": "message",
@@ -131,7 +129,7 @@ class OpenApiModelHandler(BaseHandler):
 
         language_code = None
 
-        if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == "__GENERATE_RESPONSE__":
+        if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == MessageTag.GENERATE_RESPONSE:
             _, override_instructions, override_tool_choice = prompt
             self._apply_runtime_config(override_tool_choice)
             if override_instructions:
@@ -259,8 +257,8 @@ class OpenApiModelHandler(BaseHandler):
 
         self.chat.strip_images()
         if input_tokens or output_tokens:
-            yield ("__TOKEN_USAGE__", input_tokens, output_tokens)
-        yield ("__END_OF_RESPONSE__", None, None)
+            yield (MessageTag.TOKEN_USAGE, input_tokens, output_tokens)
+        yield (MessageTag.END_OF_RESPONSE, None, None)
 
     def on_session_end(self):
         self.chat.reset()

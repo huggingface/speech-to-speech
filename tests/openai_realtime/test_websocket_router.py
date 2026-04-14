@@ -25,6 +25,7 @@ from api.openai_realtime.runtime_config import RuntimeConfig
 from api.openai_realtime.service import RealtimeService, CHUNK_SIZE_BYTES
 from api.openai_realtime.websocket_router import create_app
 from pipeline_control import SESSION_END, is_control_message
+from pipeline_messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 
 
 def _session_16k() -> RealtimeSessionCreateRequest:
@@ -221,7 +222,7 @@ class TestClientEventDispatch:
                 time.sleep(0.15)
                 # No response.created or audio delta should appear; only
                 # __RESPONSE_DONE__ will eventually clear the guard.
-                output_queue.put(b"__RESPONSE_DONE__")
+                output_queue.put(AUDIO_RESPONSE_DONE)
                 time.sleep(0.15)
                 assert not cancel_scope.discarding
 
@@ -273,7 +274,7 @@ class TestSendLoop:
                 ws.receive_json()  # session.created
                 output_queue.put(_pcm_bytes(256))
                 output_queue.put(_pcm_bytes(256))
-                output_queue.put(b"END")
+                output_queue.put(PIPELINE_END)
 
                 msg1 = ws.receive_json()
                 assert msg1["type"] == "response.created"
@@ -297,7 +298,7 @@ class TestSendLoop:
                 output_queue.put(_pcm_bytes(256))
                 ws.receive_json()  # response.created
                 ws.receive_json()  # audio delta
-                output_queue.put(b"END")
+                output_queue.put(PIPELINE_END)
                 msg1 = ws.receive_json()
                 msg2 = ws.receive_json()
                 types = {msg1["type"], msg2["type"]}
@@ -333,8 +334,7 @@ class TestSendLoop:
                 ws.receive_json()  # response.done
                 time.sleep(0.1)
                 assert cancel_scope.discarding
-                # Pipeline sends __RESPONSE_DONE__ to acknowledge completion
-                output_queue.put(b"__RESPONSE_DONE__")
+                output_queue.put(AUDIO_RESPONSE_DONE)
                 time.sleep(0.15)
                 assert not cancel_scope.discarding
 
