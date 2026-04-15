@@ -142,8 +142,6 @@ class Qwen3TTSHandler(BaseHandler):
             if any(
                 dep in message
                 for dep in (
-                    "sentencepiece",
-                    "num2words",
                     "misaki",
                     "spacy",
                     "phonemizer",
@@ -153,7 +151,7 @@ class Qwen3TTSHandler(BaseHandler):
                 raise ImportError(
                     "Qwen3-TTS on Apple Silicon requires mlx-audio and its TTS dependencies. "
                     f"Missing dependency: {message}. "
-                    "Install with: pip install mlx-audio sentencepiece num2words misaki spacy phonemizer-fork espeakng-loader"
+                    "Install with: pip install mlx-audio misaki spacy phonemizer-fork espeakng-loader"
                 ) from e
             raise ImportError(
                 "mlx-audio is required for Qwen3 TTS on Apple Silicon. "
