@@ -6,13 +6,13 @@ class Qwen3TTSHandlerArguments:
     qwen3_tts_model_name: str = field(
         default="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
         metadata={
-            "help": "The Qwen3-TTS model to use (HuggingFace Hub ID or local path)."
+            "help": "The Qwen3-TTS model to use (HuggingFace Hub ID or local path). On Apple Silicon, Qwen/* model IDs are auto-mapped to the corresponding mlx-community/*-bf16 model when possible."
         },
     )
     qwen3_tts_device: str = field(
         default="cuda",
         metadata={
-            "help": "The device to run Qwen3-TTS on. Options: 'cuda', 'cpu'. Default is 'cuda'."
+            "help": "Preferred device for Qwen3-TTS. Options: 'cuda', 'cpu', 'mps', 'auto'. Default is 'cuda'. On Apple Silicon the mlx-audio backend is selected automatically."
         },
     )
     qwen3_tts_dtype: str = field(

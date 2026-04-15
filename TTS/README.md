@@ -100,6 +100,11 @@ python s2s_pipeline.py \
   --qwen3_tts_ref_audio TTS/ref_audio.wav
 ```
 
+Behavior:
+- Uses `faster-qwen3-tts` on non-macOS platforms.
+- Uses `mlx-audio` on Apple Silicon and auto-maps `Qwen/...` model IDs to `mlx-community/...-bf16` when possible.
+- Keeps the existing voice-clone/custom-voice/voice-design handler flow intact.
+
 ## Setup
 
 ### Low-latency GPU setup
@@ -118,4 +123,4 @@ python s2s_pipeline.py \
   --tts melo
 ```
 
-`--tts pocket` is also a valid option on macOS.
+`--tts pocket`, `--tts kokoro`, and `--tts qwen3` are also valid options on macOS.

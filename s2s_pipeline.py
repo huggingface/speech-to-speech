@@ -156,9 +156,9 @@ def check_mac_settings(module_kwargs):
             logger.warning(
                 "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm mlx-lm."
             )
-        if module_kwargs.tts not in ("melo", "pocket", "kokoro"):
+        if module_kwargs.tts not in ("melo", "pocket", "kokoro", "qwen3"):
             logger.warning(
-                "For macOS users, it is recommended to use melo for TTS (pocket and kokoro are also valid options)."
+                "For macOS users, it is recommended to use melo for TTS (pocket, kokoro, and qwen3 are also valid options)."
             )
 
 
@@ -537,7 +537,7 @@ def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chu
             from TTS.melo_handler import MeloTTSHandler
         except Exception as e:
             logger.error(
-                "Error importing MeloTTSHandler. For uv environments, run `uv run python -m unidic download`. On macOS, `--tts pocket` is also a valid option."
+                "Error importing MeloTTSHandler. For uv environments, run `uv run python -m unidic download`. On macOS, `--tts pocket`, `--tts kokoro`, and `--tts qwen3` are also valid options."
             )
             raise e
         return MeloTTSHandler(

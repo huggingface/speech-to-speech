@@ -144,7 +144,7 @@ This setting:
      ```bash
      uv run python -m unidic download
      ```
-   - `--tts pocket` and `--tts kokoro` are also valid TTS options on macOS.
+   - `--tts pocket`, `--tts kokoro`, and `--tts qwen3` are also valid TTS options on macOS.
 
 ### Docker Server
 

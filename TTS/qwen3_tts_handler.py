@@ -1,39 +1,46 @@
 """
 Qwen3 TTS Handler
 
-Requires faster-qwen3-tts for real-time performance on NVIDIA GPUs:
-  pip install faster-qwen3-tts
+- On Apple Silicon: Uses mlx-audio with MLX-converted Qwen3-TTS models.
+- On CUDA/CPU: Uses faster-qwen3-tts for low-latency streaming.
 """
 
 import logging
+from sys import platform
 from time import perf_counter
+
 import numpy as np
-from baseHandler import BaseHandler
-from cancel_scope import CancelScope
-from pipeline_control import SESSION_END, is_control_message
-from pipeline_messages import MessageTag, AUDIO_RESPONSE_DONE, PIPELINE_END
 from rich.console import Console
 
 from api.openai_realtime.runtime_config import RuntimeConfig
+from baseHandler import BaseHandler
+from cancel_scope import CancelScope
+from pipeline_control import SESSION_END, is_control_message
+from pipeline_messages import AUDIO_RESPONSE_DONE, PIPELINE_END, MessageTag
+from utils.mlx_lock import MLXLockContext
 
 logger = logging.getLogger(__name__)
 console = Console()
 
 DEFAULT_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+DEFAULT_MLX_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16"
 DEFAULT_REF_TEXT = "I'm confused why some people have super short timelines, yet at the same time are bullish on scaling up reinforcement learning atop LLMs. If we're actually close to a human-like learner, then this whole approach of training on verifiable outcomes."
+MLX_STREAMING_TOKENS_PER_SECOND = 12.5
 PIPELINE_SR = 16000
 
 
 class Qwen3TTSHandler(BaseHandler):
     """
-    Handles Text-to-Speech using Qwen3-TTS via the faster-qwen3-tts backend.
+    Handles Text-to-Speech using Qwen3-TTS.
+
+    Backend selection:
+      - Apple Silicon (Darwin): mlx-audio
+      - Other platforms: faster-qwen3-tts
 
     Supports three generation modes depending on the loaded model:
       - Voice cloning (ref_audio + ref_text)
       - Custom voice (preset speakers)
       - Voice design (instruct prompt)
-
-    All modes use streaming generation for low time-to-first-audio.
     """
 
     def setup(
@@ -60,8 +67,7 @@ class Qwen3TTSHandler(BaseHandler):
         self.runtime_config = runtime_config
         self.cancel_scope = cancel_scope
         self.should_listen = should_listen
-        self.model_name = model_name
-        self.device = device
+        self.requested_device = device
         self.ref_audio = ref_audio
         self.ref_text = ref_text
         self.language = language
@@ -72,7 +78,32 @@ class Qwen3TTSHandler(BaseHandler):
         self.streaming_chunk_size = streaming_chunk_size
         self.max_new_tokens = max_new_tokens
         self.blocksize = blocksize
+        self.gen_kwargs = gen_kwargs or {}
 
+        self.backend = "mlx" if platform == "darwin" else "faster_qwen3_tts"
+
+        if self.backend == "mlx":
+            self.device = "mps"
+            self.model_name = self._resolve_mlx_model_name(model_name)
+            logger.info(
+                f"Loading Qwen3-TTS model: {self.model_name} via mlx-audio on Apple Silicon"
+            )
+            self._setup_mlx(self.model_name)
+        else:
+            self.device = device
+            self.model_name = model_name
+            logger.info(
+                f"Loading Qwen3-TTS model: {self.model_name} via faster-qwen3-tts"
+            )
+            self._setup_faster(
+                model_name=self.model_name,
+                dtype=dtype,
+                attn_implementation=attn_implementation,
+            )
+
+        self.warmup()
+
+    def _setup_faster(self, model_name, dtype, attn_implementation):
         try:
             import torch
         except ImportError as e:
@@ -89,30 +120,80 @@ class Qwen3TTSHandler(BaseHandler):
             from faster_qwen3_tts import FasterQwen3TTS
         except ImportError as e:
             raise ImportError(
-                "faster-qwen3-tts is required for Qwen3 TTS. "
+                "faster-qwen3-tts is required for Qwen3 TTS on non-macOS platforms. "
                 "Install with: pip install faster-qwen3-tts"
             ) from e
 
-        logger.info(f"Loading Qwen3-TTS model: {self.model_name}")
         self.model = FasterQwen3TTS.from_pretrained(
-            self.model_name,
+            model_name,
             device=self.device,
             dtype=self.dtype,
             attn_implementation=attn_implementation,
         )
         logger.info("Qwen3-TTS model loaded")
 
-        self.warmup()
+    def _setup_mlx(self, model_name):
+        try:
+            from mlx_audio.tts.utils import load_model
+
+            self.model = load_model(model_name)
+        except ImportError as e:
+            message = str(e)
+            if any(
+                dep in message
+                for dep in (
+                    "sentencepiece",
+                    "num2words",
+                    "misaki",
+                    "spacy",
+                    "phonemizer",
+                    "espeakng_loader",
+                )
+            ):
+                raise ImportError(
+                    "Qwen3-TTS on Apple Silicon requires mlx-audio and its TTS dependencies. "
+                    f"Missing dependency: {message}. "
+                    "Install with: pip install mlx-audio sentencepiece num2words misaki spacy phonemizer-fork espeakng-loader"
+                ) from e
+            raise ImportError(
+                "mlx-audio is required for Qwen3 TTS on Apple Silicon. "
+                "Install with: pip install mlx-audio"
+            ) from e
+
+        logger.info("MLX Audio Qwen3-TTS model loaded")
+
+    def _resolve_mlx_model_name(self, model_name):
+        if not model_name:
+            return DEFAULT_MLX_MODEL
+        if model_name.startswith("mlx-community/"):
+            return model_name
+        if model_name.startswith("Qwen/"):
+            mapped = model_name.replace("Qwen/", "mlx-community/", 1)
+            if not mapped.endswith("-bf16"):
+                mapped = f"{mapped}-bf16"
+            return mapped
+        return model_name
+
+    def _infer_model_type_from_name(self):
+        name = (self.model_name or "").lower()
+        if "voicedesign" in name:
+            return "voice_design"
+        if "customvoice" in name:
+            return "custom_voice"
+        return "base"
 
     def warmup(self):
         logger.info(f"Warming up {self.__class__.__name__}")
-        if self.parity_mode:
-            logger.info("Qwen3-TTS parity mode enabled: skipping CUDA graph capture warmup")
-        else:
-            try:
-                self.model._warmup(prefill_len=100)
-            except Exception as e:
-                logger.warning(f"CUDA graph capture failed: {e}")
+
+        if self.backend == "faster_qwen3_tts":
+            if self.parity_mode:
+                logger.info("Qwen3-TTS parity mode enabled: skipping CUDA graph capture warmup")
+            else:
+                try:
+                    self.model._warmup(prefill_len=100)
+                except Exception as e:
+                    logger.warning(f"CUDA graph capture failed: {e}")
+
         try:
             for _ in self._warmup_process("Hello, this is a warmup."):
                 pass
@@ -121,18 +202,27 @@ class Qwen3TTSHandler(BaseHandler):
             logger.warning(f"Warmup generation failed: {e}")
 
     def _model_type(self):
+        if self.backend == "mlx":
+            config = getattr(self.model, "config", None)
+            return getattr(config, "tts_model_type", None) or self._infer_model_type_from_name()
+
         inner = getattr(getattr(self.model, "model", None), "model", None)
-        return getattr(inner, "tts_model_type", None)
+        return getattr(inner, "tts_model_type", None) or self._infer_model_type_from_name()
 
     def _resolve_speaker(self):
         if self.speaker:
             return self.speaker
-        inner = getattr(getattr(self.model, "model", None), "model", None)
-        get_speakers = getattr(inner, "get_supported_speakers", None)
-        if callable(get_speakers):
-            speakers = list(get_speakers() or [])
-            if speakers:
-                return speakers[0]
+
+        for candidate in (
+            self.model,
+            getattr(getattr(self.model, "model", None), "model", None),
+        ):
+            get_speakers = getattr(candidate, "get_supported_speakers", None)
+            if callable(get_speakers):
+                speakers = list(get_speakers() or [])
+                if speakers:
+                    return speakers[0]
+
         return None
 
     def _to_int16(self, audio):
@@ -156,8 +246,22 @@ class Qwen3TTSHandler(BaseHandler):
         if sr == PIPELINE_SR:
             return audio
         from scipy.signal import resample_poly
+
         gcd = np.gcd(PIPELINE_SR, sr)
         return resample_poly(audio, up=PIPELINE_SR // gcd, down=sr // gcd)
+
+    def _prepare_audio_chunk(self, item):
+        if isinstance(item, tuple):
+            audio_chunk, sr, _timing = item
+            return np.asarray(audio_chunk, dtype=np.float32), sr
+
+        audio = getattr(item, "audio", None)
+        if audio is None:
+            return None, None
+
+        audio_chunk = np.asarray(audio, dtype=np.float32).squeeze()
+        sr = getattr(item, "sample_rate", None) or PIPELINE_SR
+        return audio_chunk, sr
 
     def _stream(self, gen, label):
         """Common streaming loop: log TTFA and RTF, yield int16 chunks."""
@@ -168,13 +272,19 @@ class Qwen3TTSHandler(BaseHandler):
         found_speech = False
         leftover = np.array([], dtype=np.int16)
 
-        for audio_chunk, sr, _timing in gen:
+        for item in gen:
             if cancel_gen is not None and self.cancel_scope.is_stale(cancel_gen):
                 logger.info("TTS generation cancelled (interruption)")
                 return
+
+            audio_chunk, sr = self._prepare_audio_chunk(item)
+            if audio_chunk is None or sr is None or audio_chunk.size == 0:
+                continue
+
             if first_chunk:
                 logger.info(f"Qwen3-TTS TTFA: {perf_counter() - start:.2f}s ({label})")
                 first_chunk = False
+
             audio_chunk = self._resample_to_pipeline_sr(audio_chunk, sr)
             audio_chunk = self._to_int16(audio_chunk)
 
@@ -189,17 +299,14 @@ class Qwen3TTSHandler(BaseHandler):
                 audio_chunk = audio_chunk[start_idx:]
                 found_speech = True
 
-            # Concatenate with any leftover samples from the previous chunk
             audio_chunk = np.concatenate([leftover, audio_chunk])
 
-            # Yield exactly blocksize-sized chunks (required by LocalAudioStreamer)
             n = (len(audio_chunk) // self.blocksize) * self.blocksize
             for i in range(0, n, self.blocksize):
                 yield audio_chunk[i : i + self.blocksize]
                 total_samples += self.blocksize
             leftover = audio_chunk[n:]
 
-        # Flush any remaining samples with zero-padding
         if len(leftover) > 0:
             chunk = np.pad(leftover, (0, self.blocksize - len(leftover)))
             yield chunk
@@ -272,7 +379,7 @@ class Qwen3TTSHandler(BaseHandler):
             yield AUDIO_RESPONSE_DONE
             return
 
-        llm_sentence, saw_end_of_response = self._coalesce_pending_tts_input(llm_sentence)
+        llm_sentence, _saw_end_of_response = self._coalesce_pending_tts_input(llm_sentence)
 
         if isinstance(llm_sentence, tuple):
             llm_sentence, _ = llm_sentence
@@ -307,11 +414,38 @@ class Qwen3TTSHandler(BaseHandler):
         except Exception as e:
             logger.error(f"Error during Qwen3-TTS generation: {e}", exc_info=True)
         finally:
-            if not getattr(self, 'runtime_config', None):
+            if not getattr(self, "runtime_config", None):
                 self.should_listen.set()
 
+    def _mlx_streaming_interval(self):
+        return max(1, self.streaming_chunk_size) / MLX_STREAMING_TOKENS_PER_SECOND
 
     def _process_voice_clone(self, text):
+        if self.backend == "mlx":
+            if self.xvec_only:
+                logger.warning("mlx-audio Qwen3-TTS does not support xvec_only; ignoring it")
+            if self.parity_mode:
+                logger.info("Qwen3-TTS parity mode is CUDA-specific and is ignored on mlx-audio")
+
+            with MLXLockContext(handler_name="Qwen3TTS", timeout=10.0) as acquired:
+                if not acquired:
+                    raise TimeoutError("Timed out waiting for MLX lock")
+                yield from self._stream(
+                    self.model.generate(
+                        text=text,
+                        ref_audio=self.ref_audio,
+                        ref_text=self.ref_text,
+                        lang_code=self.language,
+                        max_tokens=self.max_new_tokens,
+                        verbose=False,
+                        stream=True,
+                        streaming_interval=self._mlx_streaming_interval(),
+                        **self.gen_kwargs,
+                    ),
+                    label="voice_clone_mlx",
+                )
+            return
+
         yield from self._stream(
             self.model.generate_voice_clone_streaming(
                 text=text,
@@ -333,6 +467,27 @@ class Qwen3TTSHandler(BaseHandler):
                 "CustomVoice generation requires a speaker. "
                 "Set qwen3_tts_speaker or use a voice-clone model with ref_audio."
             )
+
+        if self.backend == "mlx":
+            with MLXLockContext(handler_name="Qwen3TTS", timeout=10.0) as acquired:
+                if not acquired:
+                    raise TimeoutError("Timed out waiting for MLX lock")
+                yield from self._stream(
+                    self.model.generate_custom_voice(
+                        text=text,
+                        speaker=speaker,
+                        language=self.language,
+                        instruct=self.instruct,
+                        max_tokens=self.max_new_tokens,
+                        verbose=False,
+                        stream=True,
+                        streaming_interval=self._mlx_streaming_interval(),
+                        **self.gen_kwargs,
+                    ),
+                    label="custom_voice_mlx",
+                )
+            return
+
         yield from self._stream(
             self.model.generate_custom_voice_streaming(
                 text=text,
@@ -346,6 +501,25 @@ class Qwen3TTSHandler(BaseHandler):
         )
 
     def _process_voice_design(self, text):
+        if self.backend == "mlx":
+            with MLXLockContext(handler_name="Qwen3TTS", timeout=10.0) as acquired:
+                if not acquired:
+                    raise TimeoutError("Timed out waiting for MLX lock")
+                yield from self._stream(
+                    self.model.generate_voice_design(
+                        text=text,
+                        instruct=self.instruct,
+                        language=self.language,
+                        max_tokens=self.max_new_tokens,
+                        verbose=False,
+                        stream=True,
+                        streaming_interval=self._mlx_streaming_interval(),
+                        **self.gen_kwargs,
+                    ),
+                    label="voice_design_mlx",
+                )
+            return
+
         yield from self._stream(
             self.model.generate_voice_design_streaming(
                 text=text,
@@ -359,10 +533,19 @@ class Qwen3TTSHandler(BaseHandler):
 
     def cleanup(self):
         try:
-            import torch
             del self.model
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            if self.backend == "mlx":
+                try:
+                    import mlx.core as mx
+
+                    mx.clear_cache()
+                except Exception:
+                    pass
+            else:
+                import torch
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             logger.info("Qwen3-TTS handler cleaned up")
         except Exception as e:
             logger.warning(f"Cleanup error: {e}")
