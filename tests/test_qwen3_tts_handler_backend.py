@@ -95,36 +95,17 @@ def test_prepare_mlx_ref_audio_normalizes_file_and_caches_result(monkeypatch, tm
 
     save_calls = []
 
-    class FakeTensor:
-        ndim = 2
-        shape = (2, 3)
-
-        def unsqueeze(self, _dim):
-            return self
-
-        def mean(self, dim=0, keepdim=True):
-            assert dim == 0
-            assert keepdim is True
-            return self
-
-        def to(self, dtype=None):
-            return self
-
-        def cpu(self):
-            return self
-
-    fake_torchaudio = SimpleNamespace(
-        load=lambda path: (FakeTensor(), 44100),
-        functional=SimpleNamespace(resample=lambda waveform, src, dst: waveform),
-        save=lambda path, waveform, sample_rate, format=None: (
-            save_calls.append((path, sample_rate, format)),
+    fake_sf = SimpleNamespace(
+        read=lambda path, always_2d=False, dtype=None: (
+            [[0.1, 0.2], [0.3, 0.4]],
+            44100,
+        ),
+        write=lambda path, waveform, sample_rate, format=None, subtype=None: (
+            save_calls.append((path, sample_rate, format, subtype)),
             Path(path).write_bytes(b"RIFF"),
         ),
     )
-    fake_torch = SimpleNamespace(float32="float32")
-
-    monkeypatch.setitem(sys.modules, "torchaudio", fake_torchaudio)
-    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "soundfile", fake_sf)
 
     handler = object.__new__(Qwen3TTSHandler)
     handler.backend = "mlx"
@@ -137,7 +118,7 @@ def test_prepare_mlx_ref_audio_normalizes_file_and_caches_result(monkeypatch, tm
 
     assert normalized == normalized_again
     assert Path(normalized).exists()
-    assert save_calls == [(normalized, 24000, "wav")]
+    assert save_calls == [(normalized, 24000, "WAV", "PCM_16")]
 
 
 def test_apply_session_voice_override_ignores_non_file_for_base_model():

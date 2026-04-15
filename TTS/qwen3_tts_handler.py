@@ -229,23 +229,24 @@ class Qwen3TTSHandler(BaseHandler):
             return cached_path
 
         try:
-            import torch
-            import torchaudio
+            import soundfile as sf
+            from scipy.signal import resample_poly
 
-            waveform, sample_rate = torchaudio.load(str(resolved_path))
-            if waveform.ndim == 1:
-                waveform = waveform.unsqueeze(0)
-            if waveform.shape[0] > 1:
-                waveform = waveform.mean(dim=0, keepdim=True)
-
+            waveform, sample_rate = sf.read(
+                str(resolved_path), always_2d=False, dtype="float32"
+            )
+            waveform = np.asarray(waveform, dtype=np.float32)
+            if waveform.ndim > 1:
+                waveform = waveform.mean(axis=1)
             target_sample_rate = getattr(self.model, "sample_rate", 24000)
             if sample_rate != target_sample_rate:
-                waveform = torchaudio.functional.resample(
-                    waveform, sample_rate, target_sample_rate
+                gcd = np.gcd(int(sample_rate), int(target_sample_rate))
+                waveform = resample_poly(
+                    waveform,
+                    up=int(target_sample_rate) // gcd,
+                    down=int(sample_rate) // gcd,
                 )
                 sample_rate = target_sample_rate
-
-            waveform = waveform.to(dtype=torch.float32).cpu()
 
             with tempfile.NamedTemporaryFile(
                 prefix="qwen3_ref_",
@@ -254,11 +255,12 @@ class Qwen3TTSHandler(BaseHandler):
             ) as temp_file:
                 normalized_path = temp_file.name
 
-            torchaudio.save(
+            sf.write(
                 normalized_path,
                 waveform,
                 sample_rate,
-                format="wav",
+                format="WAV",
+                subtype="PCM_16",
             )
         except Exception as e:
             raise RuntimeError(
