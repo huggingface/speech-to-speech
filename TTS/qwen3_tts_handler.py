@@ -6,7 +6,9 @@ Qwen3 TTS Handler
 """
 
 import logging
+from pathlib import Path
 from sys import platform
+import tempfile
 from time import perf_counter
 
 import numpy as np
@@ -79,6 +81,8 @@ class Qwen3TTSHandler(BaseHandler):
         self.max_new_tokens = max_new_tokens
         self.blocksize = blocksize
         self.gen_kwargs = gen_kwargs or {}
+        self._mlx_ref_audio_cache = {}
+        self._mlx_temp_ref_audio_files = set()
 
         self.backend = "mlx" if platform == "darwin" else "faster_qwen3_tts"
 
@@ -179,6 +183,112 @@ class Qwen3TTSHandler(BaseHandler):
         if "customvoice" in name:
             return "custom_voice"
         return "base"
+
+    def _resolve_audio_path(self, audio):
+        if not isinstance(audio, (str, Path)) or not audio:
+            return None
+
+        candidate = Path(audio).expanduser()
+        repo_root = Path(__file__).resolve().parents[1]
+        search_paths = []
+
+        if candidate.is_absolute():
+            search_paths.append(candidate)
+        else:
+            search_paths.append(Path.cwd() / candidate)
+            search_paths.append(repo_root / candidate)
+
+        seen = set()
+        for path in search_paths:
+            normalized = str(path)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            if path.exists():
+                return path.resolve()
+
+        return None
+
+    def _prepare_mlx_ref_audio(self, ref_audio):
+        if self.backend != "mlx" or ref_audio is None:
+            return ref_audio
+
+        if not isinstance(ref_audio, (str, Path)):
+            return ref_audio
+
+        resolved_path = self._resolve_audio_path(ref_audio)
+        if resolved_path is None:
+            raise FileNotFoundError(
+                "Qwen3-TTS on Apple Silicon requires qwen3_tts_ref_audio to point to "
+                f"a readable audio file. Got: {ref_audio!r}"
+            )
+
+        cache_key = str(resolved_path)
+        cached_path = self._mlx_ref_audio_cache.get(cache_key)
+        if cached_path and Path(cached_path).exists():
+            return cached_path
+
+        try:
+            import torch
+            import torchaudio
+
+            waveform, sample_rate = torchaudio.load(str(resolved_path))
+            if waveform.ndim == 1:
+                waveform = waveform.unsqueeze(0)
+            if waveform.shape[0] > 1:
+                waveform = waveform.mean(dim=0, keepdim=True)
+
+            target_sample_rate = getattr(self.model, "sample_rate", 24000)
+            if sample_rate != target_sample_rate:
+                waveform = torchaudio.functional.resample(
+                    waveform, sample_rate, target_sample_rate
+                )
+                sample_rate = target_sample_rate
+
+            waveform = waveform.to(dtype=torch.float32).cpu()
+
+            with tempfile.NamedTemporaryFile(
+                prefix="qwen3_ref_",
+                suffix=".wav",
+                delete=False,
+            ) as temp_file:
+                normalized_path = temp_file.name
+
+            torchaudio.save(
+                normalized_path,
+                waveform,
+                sample_rate,
+                format="wav",
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to normalize Qwen3-TTS reference audio {resolved_path}: {e}"
+            ) from e
+
+        self._mlx_ref_audio_cache[cache_key] = normalized_path
+        self._mlx_temp_ref_audio_files.add(normalized_path)
+        return normalized_path
+
+    def _apply_session_voice_override(self, model_type):
+        session_voice = None
+        if getattr(self, "runtime_config", None):
+            session_voice = self.runtime_config.session.audio.output.voice
+        if not session_voice:
+            return
+
+        if model_type == "custom_voice":
+            self.speaker = session_voice
+            self.ref_audio = None
+            return
+
+        if self._resolve_audio_path(session_voice) is not None:
+            self.ref_audio = session_voice
+            return
+
+        logger.debug(
+            "Ignoring Qwen3-TTS session voice override because it is not an audio file path: %r",
+            session_voice,
+        )
 
     def warmup(self):
         logger.info(f"Warming up {self.__class__.__name__}")
@@ -385,15 +495,7 @@ class Qwen3TTSHandler(BaseHandler):
             llm_sentence = "Hello."
 
         model_type = self._model_type()
-        session_voice = None
-        if getattr(self, "runtime_config", None):
-            session_voice = self.runtime_config.session.audio.output.voice
-        if session_voice:
-            if model_type == "custom_voice":
-                self.speaker = session_voice
-                self.ref_audio = None
-            else:
-                self.ref_audio = session_voice
+        self._apply_session_voice_override(model_type)
 
         console.print(f"[green]ASSISTANT: {llm_sentence}")
 
@@ -431,7 +533,7 @@ class Qwen3TTSHandler(BaseHandler):
                 yield from self._stream(
                     self.model.generate(
                         text=text,
-                        ref_audio=self.ref_audio,
+                        ref_audio=self._prepare_mlx_ref_audio(self.ref_audio),
                         ref_text=self.ref_text,
                         lang_code=self.language,
                         max_tokens=self.max_new_tokens,
@@ -532,6 +634,11 @@ class Qwen3TTSHandler(BaseHandler):
     def cleanup(self):
         try:
             del self.model
+            for path in list(getattr(self, "_mlx_temp_ref_audio_files", set())):
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except Exception:
+                    pass
             if self.backend == "mlx":
                 try:
                     import mlx.core as mx
