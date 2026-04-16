@@ -27,6 +27,9 @@ console = Console()
 DEFAULT_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
 DEFAULT_MLX_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16"
 DEFAULT_REF_TEXT = "I'm confused why some people have super short timelines, yet at the same time are bullish on scaling up reinforcement learning atop LLMs. If we're actually close to a human-like learner, then this whole approach of training on verifiable outcomes."
+DEFAULT_FASTER_STREAMING_CHUNK_SIZE = 8
+DEFAULT_MLX_STREAMING_CHUNK_SIZE = 2
+VALID_MLX_QUANTIZATION_SUFFIXES = ("bf16", "6bit")
 MLX_STREAMING_TOKENS_PER_SECOND = 12.5
 PIPELINE_SR = 16000
 
@@ -59,7 +62,8 @@ class Qwen3TTSHandler(BaseHandler):
         instruct=None,
         xvec_only=False,
         parity_mode=False,
-        streaming_chunk_size=8,
+        mlx_quantization=None,
+        streaming_chunk_size=None,
         max_new_tokens=360,
         blocksize=512,
         gen_kwargs=None,
@@ -77,7 +81,7 @@ class Qwen3TTSHandler(BaseHandler):
         self.instruct = instruct
         self.xvec_only = xvec_only
         self.parity_mode = parity_mode
-        self.streaming_chunk_size = streaming_chunk_size
+        self.mlx_quantization = self._normalize_mlx_quantization(mlx_quantization)
         self.max_new_tokens = max_new_tokens
         self.blocksize = blocksize
         self.gen_kwargs = gen_kwargs or {}
@@ -85,6 +89,9 @@ class Qwen3TTSHandler(BaseHandler):
         self._mlx_temp_ref_audio_files = set()
 
         self.backend = "mlx" if platform == "darwin" else "faster_qwen3_tts"
+        self.streaming_chunk_size = self._resolve_streaming_chunk_size(
+            streaming_chunk_size
+        )
 
         if self.backend == "mlx":
             self.device = "mps"
@@ -92,6 +99,10 @@ class Qwen3TTSHandler(BaseHandler):
             logger.info(
                 f"Loading Qwen3-TTS model: {self.model_name} via mlx-audio on Apple Silicon"
             )
+            if self.mlx_quantization:
+                logger.info(
+                    "Using MLX quantized Qwen3-TTS variant: %s", self.mlx_quantization
+                )
             self._setup_mlx(self.model_name)
         else:
             self.device = device
@@ -104,6 +115,13 @@ class Qwen3TTSHandler(BaseHandler):
                 dtype=dtype,
                 attn_implementation=attn_implementation,
             )
+
+        logger.info(
+            "Using Qwen3-TTS streaming chunk size %d (~%.0fms audio per chunk) on %s",
+            self.streaming_chunk_size,
+            self.streaming_chunk_size / MLX_STREAMING_TOKENS_PER_SECOND * 1000,
+            self.backend,
+        )
 
         self.warmup()
 
@@ -164,17 +182,50 @@ class Qwen3TTSHandler(BaseHandler):
 
         logger.info("MLX Audio Qwen3-TTS model loaded")
 
+    def _normalize_mlx_quantization(self, mlx_quantization):
+        if mlx_quantization is None:
+            return None
+
+        value = str(mlx_quantization).strip().lower()
+        if value in ("", "none", "default"):
+            return None
+        if value not in VALID_MLX_QUANTIZATION_SUFFIXES:
+            raise ValueError(
+                "Unsupported qwen3_tts_mlx_quantization value "
+                f"{mlx_quantization!r}. Supported values: {', '.join(VALID_MLX_QUANTIZATION_SUFFIXES)}"
+            )
+        return value
+
+    def _apply_mlx_quantization_suffix(self, model_name):
+        if self.mlx_quantization is None:
+            return model_name
+
+        desired_suffix = f"-{self.mlx_quantization}"
+        for suffix in VALID_MLX_QUANTIZATION_SUFFIXES:
+            current_suffix = f"-{suffix}"
+            if model_name.endswith(current_suffix):
+                return model_name[: -len(current_suffix)] + desired_suffix
+
+        return f"{model_name}{desired_suffix}"
+
     def _resolve_mlx_model_name(self, model_name):
         if not model_name:
-            return DEFAULT_MLX_MODEL
+            return self._apply_mlx_quantization_suffix(DEFAULT_MLX_MODEL)
         if model_name.startswith("mlx-community/"):
-            return model_name
+            return self._apply_mlx_quantization_suffix(model_name)
         if model_name.startswith("Qwen/"):
             mapped = model_name.replace("Qwen/", "mlx-community/", 1)
-            if not mapped.endswith("-bf16"):
+            if not mapped.endswith(tuple(f"-{suffix}" for suffix in VALID_MLX_QUANTIZATION_SUFFIXES)):
                 mapped = f"{mapped}-bf16"
-            return mapped
+            return self._apply_mlx_quantization_suffix(mapped)
         return model_name
+
+    def _resolve_streaming_chunk_size(self, streaming_chunk_size):
+        if streaming_chunk_size is not None:
+            return max(1, int(streaming_chunk_size))
+        if self.backend == "mlx":
+            return DEFAULT_MLX_STREAMING_CHUNK_SIZE
+        return DEFAULT_FASTER_STREAMING_CHUNK_SIZE
 
     def _infer_model_type_from_name(self):
         name = (self.model_name or "").lower()

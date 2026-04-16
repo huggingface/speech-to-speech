@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -63,16 +64,22 @@ class Qwen3TTSHandlerArguments:
             "help": "Disable CUDA-graph streaming path and use parity mode for stability. Default is False."
         },
     )
+    qwen3_tts_mlx_quantization: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Optional MLX quantization override on Apple Silicon. Use '6bit' to auto-map MLX Qwen3-TTS models to their 6-bit variant for faster inference, or leave unset for the default bf16 models."
+        },
+    )
     qwen3_tts_language: str = field(
         default="English",
         metadata={
             "help": "Target language for synthesis. Default is 'English'."
         },
     )
-    qwen3_tts_streaming_chunk_size: int = field(
-        default=8,
+    qwen3_tts_streaming_chunk_size: Optional[int] = field(
+        default=None,
         metadata={
-            "help": "Codec steps per streaming chunk (8 = ~667ms of audio). Default is 8."
+            "help": "Codec steps per streaming chunk. If unset, the handler uses a backend-specific default: 8 on faster-qwen3-tts and 2 on mlx-audio to reduce audible pauses on macOS."
         },
     )
     qwen3_tts_max_new_tokens: int = field(

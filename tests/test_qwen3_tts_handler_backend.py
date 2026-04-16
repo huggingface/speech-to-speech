@@ -34,9 +34,35 @@ def test_setup_uses_mlx_backend_on_darwin_and_maps_qwen_repo_ids(monkeypatch):
 
     assert handler.backend == "mlx"
     assert handler.device == "mps"
+    assert handler.streaming_chunk_size == 2
     assert (
         recorded["model_name"]
         == "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16"
+    )
+
+
+def test_setup_supports_6bit_mlx_mapping_on_darwin(monkeypatch):
+    recorded = {}
+
+    def _setup_mlx(self, model_name):
+        recorded["model_name"] = model_name
+
+    monkeypatch.setattr(qwen3_tts_module, "platform", "darwin")
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
+    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.setup(
+        Event(),
+        model_name="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        mlx_quantization="6bit",
+    )
+
+    assert handler.backend == "mlx"
+    assert handler.mlx_quantization == "6bit"
+    assert (
+        recorded["model_name"]
+        == "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit"
     )
 
 
@@ -66,11 +92,49 @@ def test_setup_preserves_faster_backend_off_darwin(monkeypatch):
     )
 
     assert handler.backend == "faster_qwen3_tts"
+    assert handler.streaming_chunk_size == 8
     assert recorded == {
         "model_name": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
         "dtype": "float16",
         "attn_implementation": "sdpa",
     }
+
+
+def test_setup_preserves_explicit_chunk_size_on_darwin(monkeypatch):
+    def _setup_mlx(self, model_name):
+        return None
+
+    monkeypatch.setattr(qwen3_tts_module, "platform", "darwin")
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
+    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.setup(
+        Event(),
+        model_name="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        streaming_chunk_size=4,
+    )
+
+    assert handler.backend == "mlx"
+    assert handler.streaming_chunk_size == 4
+
+
+def test_setup_rejects_invalid_mlx_quantization(monkeypatch):
+    def _setup_mlx(self, model_name):
+        return None
+
+    monkeypatch.setattr(qwen3_tts_module, "platform", "darwin")
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
+    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(Qwen3TTSHandler)
+
+    with pytest.raises(ValueError, match="Unsupported qwen3_tts_mlx_quantization"):
+        handler.setup(
+            Event(),
+            model_name="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+            mlx_quantization="4bit",
+        )
 
 
 def test_mlx_helper_methods_use_model_config_and_streaming_conversion():
