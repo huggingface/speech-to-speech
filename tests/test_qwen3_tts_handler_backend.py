@@ -38,7 +38,6 @@ def test_setup_uses_mlx_backend_on_darwin_and_maps_qwen_repo_ids(monkeypatch):
     assert handler.backend == "mlx"
     assert handler.device == "mps"
     assert handler.dtype is None
-    assert handler.effective_mlx_quantization == "6bit"
     assert handler.streaming_chunk_size == 4
     assert (
         recorded["model_name"]
@@ -66,7 +65,6 @@ def test_setup_supports_quantized_mlx_mapping_on_darwin(monkeypatch, quantizatio
 
     assert handler.backend == "mlx"
     assert handler.mlx_quantization == quantization
-    assert handler.effective_mlx_quantization == quantization
     assert (
         recorded["model_name"]
         == f"mlx-community/Qwen3-TTS-12Hz-0.6B-Base-{quantization}"
@@ -91,7 +89,6 @@ def test_setup_preserves_explicit_mlx_model_suffix_when_quantization_unset(monke
 
     assert handler.backend == "mlx"
     assert handler.mlx_quantization is None
-    assert handler.effective_mlx_quantization is None
     assert recorded["model_name"] == "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16"
 
 

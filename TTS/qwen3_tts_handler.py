@@ -25,8 +25,7 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 DEFAULT_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
-DEFAULT_MLX_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16"
-DEFAULT_MLX_QUANTIZATION = "6bit"
+DEFAULT_MLX_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit"
 DEFAULT_REF_TEXT = "I'm confused why some people have super short timelines, yet at the same time are bullish on scaling up reinforcement learning atop LLMs. If we're actually close to a human-like learner, then this whole approach of training on verifiable outcomes."
 DEFAULT_FASTER_STREAMING_CHUNK_SIZE = 8
 DEFAULT_MLX_STREAMING_CHUNK_SIZE = 4
@@ -86,7 +85,6 @@ class Qwen3TTSHandler(BaseHandler):
         self.max_new_tokens = max_new_tokens
         self.blocksize = blocksize
         self.dtype = None
-        self.effective_mlx_quantization = None
         self.gen_kwargs = gen_kwargs or {}
         self._mlx_ref_audio_cache = {}
         self._mlx_temp_ref_audio_files = set()
@@ -98,17 +96,15 @@ class Qwen3TTSHandler(BaseHandler):
 
         if self.backend == "mlx":
             self.device = "mps"
-            self.effective_mlx_quantization = self._effective_mlx_quantization(
-                model_name
-            )
             self.model_name = self._resolve_mlx_model_name(model_name)
             logger.info(
                 f"Loading Qwen3-TTS model: {self.model_name} via mlx-audio on Apple Silicon"
             )
-            if self.effective_mlx_quantization and self.effective_mlx_quantization != "bf16":
+            model_quantization = self._model_name_quantization_suffix(self.model_name)
+            if model_quantization and model_quantization != "bf16":
                 logger.info(
                     "Using MLX quantized Qwen3-TTS variant: %s",
-                    self.effective_mlx_quantization,
+                    model_quantization,
                 )
             self._setup_mlx(self.model_name)
         else:
@@ -204,11 +200,10 @@ class Qwen3TTSHandler(BaseHandler):
         return value
 
     def _apply_mlx_quantization_suffix(self, model_name):
-        quantization = self.effective_mlx_quantization
-        if quantization is None:
+        if self.mlx_quantization is None:
             return model_name
 
-        desired_suffix = f"-{quantization}"
+        desired_suffix = f"-{self.mlx_quantization}"
         for suffix in VALID_MLX_QUANTIZATION_SUFFIXES:
             current_suffix = f"-{suffix}"
             if model_name.endswith(current_suffix):
@@ -226,23 +221,21 @@ class Qwen3TTSHandler(BaseHandler):
 
         return None
 
-    def _effective_mlx_quantization(self, model_name):
-        if self.mlx_quantization is not None:
-            return self.mlx_quantization
-
-        if self._model_name_quantization_suffix(model_name) is not None:
-            return None
-
-        return DEFAULT_MLX_QUANTIZATION
-
     def _resolve_mlx_model_name(self, model_name):
         if not model_name:
             return self._apply_mlx_quantization_suffix(DEFAULT_MLX_MODEL)
         if model_name.startswith("mlx-community/"):
+            if (
+                self.mlx_quantization is None
+                and self._model_name_quantization_suffix(model_name) is None
+            ):
+                return f"{model_name}-6bit"
             return self._apply_mlx_quantization_suffix(model_name)
         if model_name.startswith("Qwen/"):
             mapped = model_name.replace("Qwen/", "mlx-community/", 1)
-            if not mapped.endswith(tuple(f"-{suffix}" for suffix in VALID_MLX_QUANTIZATION_SUFFIXES)):
+            if self._model_name_quantization_suffix(mapped) is None:
+                if self.mlx_quantization is None:
+                    return f"{mapped}-6bit"
                 mapped = f"{mapped}-bf16"
             return self._apply_mlx_quantization_suffix(mapped)
         return model_name
