@@ -84,6 +84,7 @@ class Qwen3TTSHandler(BaseHandler):
         self.mlx_quantization = self._normalize_mlx_quantization(mlx_quantization)
         self.max_new_tokens = max_new_tokens
         self.blocksize = blocksize
+        self.dtype = None
         self.gen_kwargs = gen_kwargs or {}
         self._mlx_ref_audio_cache = {}
         self._mlx_temp_ref_audio_files = set()
@@ -338,7 +339,7 @@ class Qwen3TTSHandler(BaseHandler):
             self.ref_audio = session_voice
             return
 
-        logger.debug(
+        logger.warning(
             "Ignoring Qwen3-TTS session voice override because it is not an audio file path: %r",
             session_voice,
         )
@@ -567,10 +568,33 @@ class Qwen3TTSHandler(BaseHandler):
                     "Provide qwen3_tts_ref_audio or use a CustomVoice/VoiceDesign model."
                 )
         except Exception as e:
+            if not getattr(self, "runtime_config", None):
+                self.should_listen.set()
             logger.error(f"Error during Qwen3-TTS generation: {e}", exc_info=True)
 
     def _mlx_streaming_interval(self):
         return max(1, self.streaming_chunk_size) / MLX_STREAMING_TOKENS_PER_SECOND
+
+    def _mlx_stream_kwargs(self):
+        return {
+            "max_tokens": self.max_new_tokens,
+            "verbose": False,
+            "stream": True,
+            "streaming_interval": self._mlx_streaming_interval(),
+            **self.gen_kwargs,
+        }
+
+    def _stream_mlx_generation(self, generation_fn, label, **generation_kwargs):
+        with MLXLockContext(handler_name="Qwen3TTS", timeout=10.0) as acquired:
+            if not acquired:
+                raise TimeoutError("Timed out waiting for MLX lock")
+            yield from self._stream(
+                generation_fn(
+                    **self._mlx_stream_kwargs(),
+                    **generation_kwargs,
+                ),
+                label=label,
+            )
 
     def _process_voice_clone(self, text):
         if self.backend == "mlx":
@@ -579,23 +603,14 @@ class Qwen3TTSHandler(BaseHandler):
             if self.parity_mode:
                 logger.info("Qwen3-TTS parity mode is CUDA-specific and is ignored on mlx-audio")
 
-            with MLXLockContext(handler_name="Qwen3TTS", timeout=10.0) as acquired:
-                if not acquired:
-                    raise TimeoutError("Timed out waiting for MLX lock")
-                yield from self._stream(
-                    self.model.generate(
-                        text=text,
-                        ref_audio=self._prepare_mlx_ref_audio(self.ref_audio),
-                        ref_text=self.ref_text,
-                        lang_code=self.language,
-                        max_tokens=self.max_new_tokens,
-                        verbose=False,
-                        stream=True,
-                        streaming_interval=self._mlx_streaming_interval(),
-                        **self.gen_kwargs,
-                    ),
-                    label="voice_clone_mlx",
-                )
+            yield from self._stream_mlx_generation(
+                self.model.generate,
+                label="voice_clone_mlx",
+                text=text,
+                ref_audio=self._prepare_mlx_ref_audio(self.ref_audio),
+                ref_text=self.ref_text,
+                lang_code=self.language,
+            )
             return
 
         yield from self._stream(
@@ -621,23 +636,14 @@ class Qwen3TTSHandler(BaseHandler):
             )
 
         if self.backend == "mlx":
-            with MLXLockContext(handler_name="Qwen3TTS", timeout=10.0) as acquired:
-                if not acquired:
-                    raise TimeoutError("Timed out waiting for MLX lock")
-                yield from self._stream(
-                    self.model.generate_custom_voice(
-                        text=text,
-                        speaker=speaker,
-                        language=self.language,
-                        instruct=self.instruct,
-                        max_tokens=self.max_new_tokens,
-                        verbose=False,
-                        stream=True,
-                        streaming_interval=self._mlx_streaming_interval(),
-                        **self.gen_kwargs,
-                    ),
-                    label="custom_voice_mlx",
-                )
+            yield from self._stream_mlx_generation(
+                self.model.generate_custom_voice,
+                label="custom_voice_mlx",
+                text=text,
+                speaker=speaker,
+                language=self.language,
+                instruct=self.instruct,
+            )
             return
 
         yield from self._stream(
@@ -654,22 +660,13 @@ class Qwen3TTSHandler(BaseHandler):
 
     def _process_voice_design(self, text):
         if self.backend == "mlx":
-            with MLXLockContext(handler_name="Qwen3TTS", timeout=10.0) as acquired:
-                if not acquired:
-                    raise TimeoutError("Timed out waiting for MLX lock")
-                yield from self._stream(
-                    self.model.generate_voice_design(
-                        text=text,
-                        instruct=self.instruct,
-                        language=self.language,
-                        max_tokens=self.max_new_tokens,
-                        verbose=False,
-                        stream=True,
-                        streaming_interval=self._mlx_streaming_interval(),
-                        **self.gen_kwargs,
-                    ),
-                    label="voice_design_mlx",
-                )
+            yield from self._stream_mlx_generation(
+                self.model.generate_voice_design,
+                label="voice_design_mlx",
+                text=text,
+                instruct=self.instruct,
+                language=self.language,
+            )
             return
 
         yield from self._stream(

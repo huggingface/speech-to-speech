@@ -37,6 +37,7 @@ def test_setup_uses_mlx_backend_on_darwin_and_maps_qwen_repo_ids(monkeypatch):
 
     assert handler.backend == "mlx"
     assert handler.device == "mps"
+    assert handler.dtype is None
     assert handler.streaming_chunk_size == 4
     assert (
         recorded["model_name"]
@@ -189,7 +190,7 @@ def test_prepare_mlx_ref_audio_normalizes_file_and_caches_result(monkeypatch, tm
     assert save_calls == [(normalized, 24000, "WAV", "PCM_16")]
 
 
-def test_apply_session_voice_override_ignores_non_file_for_base_model():
+def test_apply_session_voice_override_warns_for_non_file_for_base_model(caplog):
     handler = object.__new__(Qwen3TTSHandler)
     handler.runtime_config = SimpleNamespace(
         session=SimpleNamespace(
@@ -201,10 +202,12 @@ def test_apply_session_voice_override_ignores_non_file_for_base_model():
     handler.ref_audio = "TTS/ref_audio.wav"
     handler.speaker = None
 
-    handler._apply_session_voice_override("base")
+    with caplog.at_level("WARNING"):
+        handler._apply_session_voice_override("base")
 
     assert handler.ref_audio == "TTS/ref_audio.wav"
     assert handler.speaker is None
+    assert "Ignoring Qwen3-TTS session voice override" in caplog.text
 
 
 def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
@@ -232,4 +235,32 @@ def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     end_outputs = list(handler.process((MessageTag.END_OF_RESPONSE, None)))
 
     assert end_outputs == [qwen3_tts_module.AUDIO_RESPONSE_DONE]
+    assert handler.should_listen.is_set() is True
+
+
+def test_process_reenables_listening_when_generation_fails_outside_realtime(monkeypatch):
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.should_listen = Event()
+    handler.runtime_config = None
+    handler.cancel_scope = None
+    handler.ref_audio = "TTS/ref_audio.wav"
+    handler.speaker = None
+    handler.instruct = None
+    handler.language = "English"
+    handler.backend = "mlx"
+    handler.queue_in = Queue()
+    handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
+    handler._apply_session_voice_override = lambda model_type: None
+
+    def _boom(text):
+        raise RuntimeError("boom")
+        yield  # pragma: no cover
+
+    handler._process_voice_clone = _boom
+
+    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+
+    outputs = list(handler.process("Hello there."))
+
+    assert outputs == []
     assert handler.should_listen.is_set() is True
