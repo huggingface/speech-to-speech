@@ -202,46 +202,6 @@ def test_second_turn_flattens_assistant_history_for_responses():
         {
             "type": "message",
             "role": "assistant",
-            "content": [{"type": "input_text", "text": "Hello."}],
-        }
-    ]
-
-
-def test_streaming_history_normalizes_output_text_for_next_turn():
-    handler = _make_handler(stream=True)
-    captured = {}
-    call_count = 0
-
-    first_stream = iter([
-        _make_text_delta_event("Hello."),
-        _make_output_item_done_event(
-            content=[SimpleNamespace(type="output_text", text="Hello.")]
-        ),
-    ])
-
-    def fake_create(**kwargs):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            return first_stream
-        captured.update(kwargs)
-        return iter([])
-
-    handler.client = SimpleNamespace(
-        responses=SimpleNamespace(create=fake_create)
-    )
-
-    list(handler.process("Hi"))
-    list(handler.process("Again"))
-
-    assistant_items = [
-        item for item in captured["input"]
-        if item.get("role") == "assistant"
-    ]
-    assert assistant_items == [
-        {
-            "type": "message",
-            "role": "assistant",
-            "content": [{"type": "input_text", "text": "Hello."}],
+            "content": [SimpleNamespace(type="output_text", text="Hello.")],
         }
     ]

@@ -151,8 +151,7 @@ python s2s_pipeline.py \
 
 ```bash
 python s2s_pipeline.py \
-  --local_mac_optimal_settings \
-  --tts melo
+  --local_mac_optimal_settings
 ```
 
-`--tts pocket`, `--tts kokoro`, and `--tts qwen3` are also valid options on macOS.
+`--tts melo`, `--tts pocket`, and `--tts kokoro` are also valid options on macOS.

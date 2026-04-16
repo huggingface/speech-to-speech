@@ -67,7 +67,7 @@ uv sync
 
 The project now uses a single `pyproject.toml` with platform markers, so macOS and non-macOS dependencies are resolved automatically from one file.
 
-If you use Melo TTS (default on macOS), run this once after install:
+If you use Melo TTS, run this once after install:
 ```bash
 uv run python -m unidic download
 ```
@@ -139,12 +139,8 @@ This setting:
    - Adds `--device mps` to use MPS for all models.
    - Sets [Parakeet TDT](https://huggingface.co/nvidia/parakeet-tdt-1.1b) for STT (fast streaming ASR on Apple Silicon)
    - Sets MLX LM for the language model (uses `--lm_model_name` to specify the model)
-   - Sets MeloTTS for TTS
-   - Requires one-time UniDic setup for MeloTTS:
-     ```bash
-     uv run python -m unidic download
-     ```
-   - `--tts pocket`, `--tts kokoro`, and `--tts qwen3` are also valid TTS options on macOS.
+   - Sets Qwen3-TTS for TTS
+   - `--tts melo`, `--tts pocket`, and `--tts kokoro` are also valid TTS options on macOS.
    - Qwen3 on Apple Silicon uses `mlx-audio` and supports `--qwen3_tts_mlx_quantization 4bit|6bit|8bit` for faster MLX variants.
    - To compare the MLX variants locally, run:
      ```bash

@@ -141,7 +141,7 @@ def optimal_mac_settings(mac_optimal_settings: Optional[str], *handler_kwargs):
             if hasattr(kwargs, "llm"):
                 kwargs.llm = "mlx-lm"
             if hasattr(kwargs, "tts"):
-                kwargs.tts = "melo"
+                kwargs.tts = "qwen3"
             if hasattr(kwargs, "lm_model_name"):
                 if kwargs.lm_model_name == TRANSFORMERS_DEFAULT_LM_MODEL:
                     kwargs.lm_model_name = MLX_DEFAULT_LM_MODEL
@@ -158,7 +158,7 @@ def check_mac_settings(module_kwargs):
             )
         if module_kwargs.tts not in ("melo", "pocket", "kokoro", "qwen3"):
             logger.warning(
-                "For macOS users, it is recommended to use melo for TTS (pocket, kokoro, and qwen3 are also valid options)."
+                "For macOS users, it is recommended to use qwen3 for TTS (melo, pocket, and kokoro are also valid options)."
             )
 
 
@@ -181,7 +181,7 @@ def overwrite_device_argument(common_device: Optional[str], *handler_kwargs):
 def prepare_module_args(module_kwargs, *handler_kwargs):
     optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs, *handler_kwargs)
     if module_kwargs.tts is None:
-        module_kwargs.tts = "melo" if platform == "darwin" else "qwen3"
+        module_kwargs.tts = "qwen3"
     if platform == "darwin":
         check_mac_settings(module_kwargs)
     overwrite_device_argument(module_kwargs.device, *handler_kwargs)

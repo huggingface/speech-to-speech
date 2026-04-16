@@ -96,49 +96,6 @@ class OpenApiModelHandler(BaseHandler):
         logger.info(
             f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s"
         )
-
-    def _normalize_responses_message_content(self, content):
-        """Convert Responses API output content back into request-safe input parts.
-
-        The Responses API returns assistant message parts like ``output_text``.
-        When we place those assistant turns back into ``input=...`` on the next
-        request, they need to be converted to ``input_text`` content items.
-        """
-        if content is None:
-            return []
-
-        if isinstance(content, str):
-            return [{"type": "input_text", "text": content}]
-
-        if not isinstance(content, list):
-            return [{"type": "input_text", "text": str(content)}]
-
-        normalized = []
-        for part in content:
-            if isinstance(part, dict):
-                part_type = part.get("type")
-                text = part.get("text")
-                image_url = part.get("image_url")
-            else:
-                part_type = getattr(part, "type", None)
-                text = getattr(part, "text", None)
-                image_url = getattr(part, "image_url", None)
-
-            if part_type in ("input_text", "output_text") and text:
-                normalized.append({"type": "input_text", "text": text})
-            elif part_type == "input_image" and image_url:
-                normalized.append({"type": "input_image", "image_url": image_url})
-
-        return normalized
-
-    def _append_assistant_message(self, role, content):
-        normalized_content = self._normalize_responses_message_content(content)
-        self.chat.append({
-            "type": "message",
-            "role": role,
-            "content": normalized_content,
-        })
-
     def _apply_runtime_config(self, override_tool_choice=None):
         if not self.runtime_config:
             return
@@ -244,10 +201,11 @@ class OpenApiModelHandler(BaseHandler):
                         if event.item.type == "function_call":
                             tools.append(event.item.model_dump())
                         elif event.item.type == "message":
-                            self._append_assistant_message(
-                                event.item.role,
-                                event.item.content,
-                            )
+                            self.chat.append({
+                                "type": "message",
+                                "role": event.item.role,
+                                "content": event.item.content,
+                            })
                     elif event.type == "response.completed":
                         usage = getattr(event.response, "usage", None)
                         if usage:
@@ -270,10 +228,11 @@ class OpenApiModelHandler(BaseHandler):
                         if message.type == "function_call":
                             tools.append(message.model_dump())
                         elif message.type == "message":
-                            self._append_assistant_message(
-                                message.role,
-                                message.content,
-                            )
+                            self.chat.append({
+                                "type": "message",
+                                "role": message.role,
+                                "content": message.content,
+                            })
                             for chunk in message.content:
                                 if chunk.type == "output_text":
                                     clean_text += remove_unspeechable(chunk.text)
