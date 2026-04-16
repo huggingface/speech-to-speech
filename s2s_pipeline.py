@@ -285,7 +285,6 @@ def build_pipeline(
     lm_response_queue = queues_and_events["lm_response_queue"]
     lm_processed_queue = queues_and_events["lm_processed_queue"]
     text_output_queue = None  # Only set for websocket/realtime modes; kept None otherwise to avoid unbounded queue growth
-    transcription_notifier = None
     if module_kwargs.mode == "local":
         from connections.local_audio_streamer import LocalAudioStreamer
 
@@ -296,7 +295,6 @@ def build_pipeline(
         should_listen.set()
     elif module_kwargs.mode == "websocket":
         from connections.websocket_streamer import WebSocketStreamer
-        from STT.transcription_notifier import TranscriptionNotifier
 
         text_output_queue = queues_and_events["text_output_queue"]
         websocket_streamer = WebSocketStreamer(
@@ -308,17 +306,10 @@ def build_pipeline(
             host=websocket_streamer_kwargs.ws_host,
             port=websocket_streamer_kwargs.ws_port,
         )
-        transcription_notifier = TranscriptionNotifier(
-            stop_event,
-            queue_in=stt_output_queue,
-            queue_out=text_prompt_queue,
-            setup_kwargs={"text_output_queue": text_output_queue},
-        )
-        comms_handlers = [websocket_streamer, transcription_notifier]
+        comms_handlers = [websocket_streamer]
     elif module_kwargs.mode == "realtime":
         from api.openai_realtime.server import RealtimeServer
         from api.openai_realtime.runtime_config import RuntimeConfig
-        from STT.transcription_notifier import TranscriptionNotifier
 
         text_output_queue = queues_and_events["text_output_queue"]
 
@@ -343,13 +334,6 @@ def build_pipeline(
 
         # Add text_output_queue to vad_handler_kwargs needed for realtime mode
         vars(vad_handler_kwargs)["text_output_queue"] = text_output_queue
-
-        transcription_notifier = TranscriptionNotifier(
-            stop_event,
-            queue_in=stt_output_queue,
-            queue_out=text_prompt_queue,
-            setup_kwargs={"text_output_queue": text_output_queue},
-        )
 
         for kw in (
             language_model_handler_kwargs,
@@ -376,7 +360,7 @@ def build_pipeline(
             host=websocket_streamer_kwargs.ws_host,
             port=websocket_streamer_kwargs.ws_port,
         )
-        comms_handlers = [realtime_conn, transcription_notifier]
+        comms_handlers = [realtime_conn]
     else:
         from connections.socket_receiver import SocketReceiver
         from connections.socket_sender import SocketSender
@@ -403,16 +387,6 @@ def build_pipeline(
         vad_handler_kwargs.enable_realtime_transcription = True
         vad_handler_kwargs.realtime_processing_pause = module_kwargs.live_transcription_update_interval
 
-        if transcription_notifier is None:
-            from STT.transcription_notifier import TranscriptionNotifier
-
-            transcription_notifier = TranscriptionNotifier(
-                stop_event,
-                queue_in=stt_output_queue,
-                queue_out=text_prompt_queue,
-                setup_kwargs={"text_output_queue": text_output_queue},
-            )
-
     vad = VADHandler(
         stop_event,
         queue_in=recv_audio_chunks_queue,
@@ -421,13 +395,18 @@ def build_pipeline(
         setup_kwargs=vars(vad_handler_kwargs),
     )
 
-    if transcription_notifier is not None:
-        # STT outputs to an intermediate queue so TranscriptionNotifier can
-        # intercept partials and emit transcription events before forwarding
-        # finals to the LLM.
-        stt_dest = stt_output_queue
-    else:
-        stt_dest = text_prompt_queue
+    from STT.transcription_notifier import TranscriptionNotifier
+
+    transcription_notifier = TranscriptionNotifier(
+        stop_event,
+        queue_in=stt_output_queue,
+        queue_out=text_prompt_queue,
+        setup_kwargs={"text_output_queue": text_output_queue},
+    )
+
+    # Always route STT through TranscriptionNotifier so every mode shares the
+    # same partial/final transcript contract before reaching the LLM.
+    stt_dest = stt_output_queue
 
     stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, stt_dest, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs)
 
@@ -445,10 +424,7 @@ def build_pipeline(
     tts = get_tts_handler(module_kwargs, stop_event, lm_processed_queue, send_audio_chunks_queue, should_listen, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs, qwen3_tts_handler_kwargs)
 
     # Build the handler chain
-    pipeline_handlers = [*comms_handlers, vad, stt]
-    if transcription_notifier is not None and transcription_notifier not in comms_handlers:
-        pipeline_handlers.append(transcription_notifier)
-    pipeline_handlers.extend([lm, lm_processor, tts])
+    pipeline_handlers = [*comms_handlers, vad, stt, transcription_notifier, lm, lm_processor, tts]
 
     return ThreadManager(pipeline_handlers)
 
