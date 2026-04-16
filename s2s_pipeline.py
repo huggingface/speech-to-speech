@@ -141,7 +141,7 @@ def optimal_mac_settings(mac_optimal_settings: Optional[str], *handler_kwargs):
             if hasattr(kwargs, "llm"):
                 kwargs.llm = "mlx-lm"
             if hasattr(kwargs, "tts"):
-                kwargs.tts = "melo"
+                kwargs.tts = "qwen3"
             if hasattr(kwargs, "lm_model_name"):
                 if kwargs.lm_model_name == TRANSFORMERS_DEFAULT_LM_MODEL:
                     kwargs.lm_model_name = MLX_DEFAULT_LM_MODEL
@@ -156,9 +156,9 @@ def check_mac_settings(module_kwargs):
             logger.warning(
                 "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm mlx-lm."
             )
-        if module_kwargs.tts not in ("melo", "pocket", "kokoro"):
+        if module_kwargs.tts not in ("melo", "pocket", "kokoro", "qwen3"):
             logger.warning(
-                "For macOS users, it is recommended to use melo for TTS (pocket and kokoro are also valid options)."
+                "For macOS users, it is recommended to use qwen3 for TTS (melo, pocket, and kokoro are also valid options)."
             )
 
 
@@ -181,7 +181,7 @@ def overwrite_device_argument(common_device: Optional[str], *handler_kwargs):
 def prepare_module_args(module_kwargs, *handler_kwargs):
     optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs, *handler_kwargs)
     if module_kwargs.tts is None:
-        module_kwargs.tts = "melo" if platform == "darwin" else "qwen3"
+        module_kwargs.tts = "qwen3"
     if platform == "darwin":
         check_mac_settings(module_kwargs)
     overwrite_device_argument(module_kwargs.device, *handler_kwargs)
@@ -295,7 +295,6 @@ def build_pipeline(
         should_listen.set()
     elif module_kwargs.mode == "websocket":
         from connections.websocket_streamer import WebSocketStreamer
-        from STT.transcription_notifier import TranscriptionNotifier
 
         text_output_queue = queues_and_events["text_output_queue"]
         websocket_streamer = WebSocketStreamer(
@@ -307,17 +306,10 @@ def build_pipeline(
             host=websocket_streamer_kwargs.ws_host,
             port=websocket_streamer_kwargs.ws_port,
         )
-        transcription_notifier = TranscriptionNotifier(
-            stop_event,
-            queue_in=stt_output_queue,
-            queue_out=text_prompt_queue,
-            setup_kwargs={"text_output_queue": text_output_queue},
-        )
-        comms_handlers = [websocket_streamer, transcription_notifier]
+        comms_handlers = [websocket_streamer]
     elif module_kwargs.mode == "realtime":
         from api.openai_realtime.server import RealtimeServer
         from api.openai_realtime.runtime_config import RuntimeConfig
-        from STT.transcription_notifier import TranscriptionNotifier
 
         text_output_queue = queues_and_events["text_output_queue"]
 
@@ -342,13 +334,6 @@ def build_pipeline(
 
         # Add text_output_queue to vad_handler_kwargs needed for realtime mode
         vars(vad_handler_kwargs)["text_output_queue"] = text_output_queue
-
-        transcription_notifier = TranscriptionNotifier(
-            stop_event,
-            queue_in=stt_output_queue,
-            queue_out=text_prompt_queue,
-            setup_kwargs={"text_output_queue": text_output_queue},
-        )
 
         for kw in (
             language_model_handler_kwargs,
@@ -375,7 +360,7 @@ def build_pipeline(
             host=websocket_streamer_kwargs.ws_host,
             port=websocket_streamer_kwargs.ws_port,
         )
-        comms_handlers = [realtime_conn, transcription_notifier]
+        comms_handlers = [realtime_conn]
     else:
         from connections.socket_receiver import SocketReceiver
         from connections.socket_sender import SocketSender
@@ -410,13 +395,18 @@ def build_pipeline(
         setup_kwargs=vars(vad_handler_kwargs),
     )
 
-    if module_kwargs.mode in ("websocket", "realtime"):
-        # STT outputs to an intermediate queue so TranscriptionNotifier can
-        # intercept partials and emit transcription events before forwarding
-        # finals to the LLM.
-        stt_dest = stt_output_queue
-    else:
-        stt_dest = text_prompt_queue
+    from STT.transcription_notifier import TranscriptionNotifier
+
+    transcription_notifier = TranscriptionNotifier(
+        stop_event,
+        queue_in=stt_output_queue,
+        queue_out=text_prompt_queue,
+        setup_kwargs={"text_output_queue": text_output_queue},
+    )
+
+    # Always route STT through TranscriptionNotifier so every mode shares the
+    # same partial/final transcript contract before reaching the LLM.
+    stt_dest = stt_output_queue
 
     stt = get_stt_handler(module_kwargs, stop_event, spoken_prompt_queue, stt_dest, whisper_stt_handler_kwargs, faster_whisper_stt_handler_kwargs, paraformer_stt_handler_kwargs, mlx_audio_whisper_stt_handler_kwargs, parakeet_tdt_stt_handler_kwargs)
 
@@ -434,7 +424,7 @@ def build_pipeline(
     tts = get_tts_handler(module_kwargs, stop_event, lm_processed_queue, send_audio_chunks_queue, should_listen, melo_tts_handler_kwargs, chat_tts_handler_kwargs, facebook_mms_tts_handler_kwargs, pocket_tts_handler_kwargs, kokoro_tts_handler_kwargs, qwen3_tts_handler_kwargs)
 
     # Build the handler chain
-    pipeline_handlers = [*comms_handlers, vad, stt, lm, lm_processor, tts]
+    pipeline_handlers = [*comms_handlers, vad, stt, transcription_notifier, lm, lm_processor, tts]
 
     return ThreadManager(pipeline_handlers)
 
@@ -547,7 +537,7 @@ def get_tts_handler(module_kwargs, stop_event, lm_response_queue, send_audio_chu
             from TTS.melo_handler import MeloTTSHandler
         except Exception as e:
             logger.error(
-                "Error importing MeloTTSHandler. For uv environments, run `uv run python -m unidic download`. On macOS, `--tts pocket` is also a valid option."
+                "Error importing MeloTTSHandler. For uv environments, run `uv run python -m unidic download`. On macOS, `--tts pocket`, `--tts kokoro`, and `--tts qwen3` are also valid options."
             )
             raise e
         return MeloTTSHandler(
