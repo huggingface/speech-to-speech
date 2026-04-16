@@ -79,7 +79,7 @@ class Qwen3TTSHandlerArguments:
     qwen3_tts_streaming_chunk_size: Optional[int] = field(
         default=None,
         metadata={
-            "help": "Codec steps per streaming chunk. If unset, the handler uses a backend-specific default: 8 on faster-qwen3-tts and 2 on mlx-audio to reduce audible pauses on macOS."
+            "help": "Codec steps per streaming chunk. If unset, the handler uses a backend-specific default: 8 on faster-qwen3-tts and 4 on mlx-audio."
         },
     )
     qwen3_tts_max_new_tokens: int = field(

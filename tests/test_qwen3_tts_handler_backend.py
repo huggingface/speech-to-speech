@@ -37,7 +37,7 @@ def test_setup_uses_mlx_backend_on_darwin_and_maps_qwen_repo_ids(monkeypatch):
 
     assert handler.backend == "mlx"
     assert handler.device == "mps"
-    assert handler.streaming_chunk_size == 2
+    assert handler.streaming_chunk_size == 4
     assert (
         recorded["model_name"]
         == "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16"
