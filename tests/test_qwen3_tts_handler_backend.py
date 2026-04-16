@@ -1,13 +1,16 @@
 from pathlib import Path
+from queue import Queue
 from threading import Event
 from types import SimpleNamespace
 import sys
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import TTS.qwen3_tts_handler as qwen3_tts_module
+from pipeline_messages import MessageTag
 from TTS.qwen3_tts_handler import Qwen3TTSHandler
 
 
@@ -201,3 +204,31 @@ def test_apply_session_voice_override_ignores_non_file_for_base_model():
 
     assert handler.ref_audio == "TTS/ref_audio.wav"
     assert handler.speaker is None
+
+
+def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.should_listen = Event()
+    handler.runtime_config = None
+    handler.cancel_scope = None
+    handler.ref_audio = "TTS/ref_audio.wav"
+    handler.speaker = None
+    handler.instruct = None
+    handler.language = "English"
+    handler.backend = "mlx"
+    handler.queue_in = Queue()
+    handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
+    handler._apply_session_voice_override = lambda model_type: None
+    handler._process_voice_clone = lambda text: iter([np.zeros(512, dtype=np.int16)])
+
+    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+
+    outputs = list(handler.process("Hello there."))
+
+    assert len(outputs) == 1
+    assert handler.should_listen.is_set() is False
+
+    end_outputs = list(handler.process((MessageTag.END_OF_RESPONSE, None)))
+
+    assert end_outputs == [qwen3_tts_module.AUDIO_RESPONSE_DONE]
+    assert handler.should_listen.is_set() is True

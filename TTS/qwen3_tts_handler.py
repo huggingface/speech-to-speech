@@ -537,6 +537,8 @@ class Qwen3TTSHandler(BaseHandler):
 
     def process(self, llm_sentence):
         if isinstance(llm_sentence, tuple) and llm_sentence[0] == MessageTag.END_OF_RESPONSE:
+            if not getattr(self, "runtime_config", None):
+                self.should_listen.set()
             yield AUDIO_RESPONSE_DONE
             return
 
@@ -566,9 +568,6 @@ class Qwen3TTSHandler(BaseHandler):
                 )
         except Exception as e:
             logger.error(f"Error during Qwen3-TTS generation: {e}", exc_info=True)
-        finally:
-            if not getattr(self, "runtime_config", None):
-                self.should_listen.set()
 
     def _mlx_streaming_interval(self):
         return max(1, self.streaming_chunk_size) / MLX_STREAMING_TOKENS_PER_SECOND
