@@ -145,6 +145,14 @@ This setting:
      uv run python -m unidic download
      ```
    - `--tts pocket`, `--tts kokoro`, and `--tts qwen3` are also valid TTS options on macOS.
+   - Qwen3 on Apple Silicon uses `mlx-audio` and supports `--qwen3_tts_mlx_quantization 4bit|6bit|8bit` for faster MLX variants.
+   - To compare the MLX variants locally, run:
+     ```bash
+     .venv/bin/python benchmark_tts.py \
+         --handlers qwen3 \
+         --iterations 3 \
+         --qwen3_mlx_quantizations bf16 4bit 6bit 8bit
+     ```
 
 ### Docker Server
 

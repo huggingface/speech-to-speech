@@ -67,7 +67,7 @@ class Qwen3TTSHandlerArguments:
     qwen3_tts_mlx_quantization: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Optional MLX quantization override on Apple Silicon. Use '6bit' to auto-map MLX Qwen3-TTS models to their 6-bit variant for faster inference, or leave unset for the default bf16 models."
+            "help": "Optional MLX quantization override on Apple Silicon. Supported values: 'bf16', '4bit', '6bit', '8bit'. Leave unset for the default bf16 models."
         },
     )
     qwen3_tts_language: str = field(

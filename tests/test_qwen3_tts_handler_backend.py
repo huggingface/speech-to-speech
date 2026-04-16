@@ -44,7 +44,8 @@ def test_setup_uses_mlx_backend_on_darwin_and_maps_qwen_repo_ids(monkeypatch):
     )
 
 
-def test_setup_supports_6bit_mlx_mapping_on_darwin(monkeypatch):
+@pytest.mark.parametrize("quantization", ["4bit", "6bit", "8bit"])
+def test_setup_supports_quantized_mlx_mapping_on_darwin(monkeypatch, quantization):
     recorded = {}
 
     def _setup_mlx(self, model_name):
@@ -58,14 +59,14 @@ def test_setup_supports_6bit_mlx_mapping_on_darwin(monkeypatch):
     handler.setup(
         Event(),
         model_name="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-        mlx_quantization="6bit",
+        mlx_quantization=quantization,
     )
 
     assert handler.backend == "mlx"
-    assert handler.mlx_quantization == "6bit"
+    assert handler.mlx_quantization == quantization
     assert (
         recorded["model_name"]
-        == "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit"
+        == f"mlx-community/Qwen3-TTS-12Hz-0.6B-Base-{quantization}"
     )
 
 
@@ -136,7 +137,7 @@ def test_setup_rejects_invalid_mlx_quantization(monkeypatch):
         handler.setup(
             Event(),
             model_name="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-            mlx_quantization="4bit",
+            mlx_quantization="5bit",
         )
 
 
