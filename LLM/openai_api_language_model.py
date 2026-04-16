@@ -111,6 +111,14 @@ class OpenApiModelHandler(BaseHandler):
         self.tools_choice = override_tool_choice or self.runtime_config.session.tool_choice
 
     def process(self, prompt):
+        if (
+            isinstance(prompt, tuple)
+            and len(prompt) == 2
+            and prompt[0] == MessageTag.PARTIAL
+        ):
+            logger.debug("Ignoring partial transcription update in OpenAPI LLM handler")
+            return
+
         if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == MessageTag.ADD_TO_CONTEXT:
             _, role, content = prompt
             self.chat.append({"type": "message", "role": role, "content": content})

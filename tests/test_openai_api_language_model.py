@@ -120,6 +120,23 @@ def test_process_read_timeout_ends_response_cleanly():
     ]
 
 
+def test_partial_transcription_updates_are_ignored():
+    handler = _make_handler(stream=False)
+
+    handler.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            create=lambda **kwargs: (_ for _ in ()).throw(
+                AssertionError("LLM should not be called for partial transcription updates")
+            )
+        )
+    )
+
+    outputs = list(handler.process((MessageTag.PARTIAL, "hey, who are")))
+
+    assert outputs == []
+    assert handler.chat.to_list() == []
+
+
 def test_disable_thinking_passes_extra_body():
     handler = _make_handler(disable_thinking=True)
     captured = {}
