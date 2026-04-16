@@ -34,7 +34,7 @@ class RuntimeConfig(BaseModel):
     'RealtimeSessionCreateRequest').
     """
 
-    model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True)
+    model_config = ConfigDict(validate_assignment=True)
 
     session: RealtimeSessionCreateRequest = Field(
         default_factory=lambda: RealtimeSessionCreateRequest(type="realtime"),

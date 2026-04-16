@@ -23,7 +23,7 @@ from api.openai_realtime.handlers.base import RealtimeBaseHandler, _generate_id
 if TYPE_CHECKING:
     from api.openai_realtime.service import ServerEvent, _ResponseStatus, _StatusReason
 
-from pipeline_messages import MessageTag
+from pipeline_messages import GenerateRequest, MessageTag
 
 logger = logging.getLogger(__name__)
 
@@ -153,18 +153,23 @@ class ResponseHandler(RealtimeBaseHandler):
                 logger.info("Per-response metadata stored (%d keys)", len(event.response.metadata))
             if event.response.input:
                 for input_item in event.response.input:
-                    self._service.conversation._enqueue_item(conn_id, input_item)
+                    self._service.conversation._append_item(conn_id, input_item)
 
         st = self._state(conn_id)
         st.in_response = True
         st.current_response_id = _generate_id("resp")
         self._start_item(conn_id)
 
+        cfg = self._config(conn_id)
         queue = self._queue(conn_id)
         if queue:
-            queue.put(
-                (MessageTag.GENERATE_RESPONSE, override_instructions, override_tool_choice)
-            )
+            queue.put((MessageTag.GENERATE_RESPONSE, GenerateRequest(
+                chat=st.chat,
+                instructions=cfg.session.instructions,
+                tools=cfg.session.tools,
+                tool_choice=override_tool_choice or cfg.session.tool_choice,
+                override_instructions=override_instructions,
+            )))
         logger.debug("response.create received, LLM generation triggered")
         return ResponseCreatedEvent(
             type="response.created",

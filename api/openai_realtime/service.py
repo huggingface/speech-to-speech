@@ -1,10 +1,13 @@
 import logging
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from queue import Queue
 from threading import Event as ThreadingEvent
 from typing import Callable, Literal, Optional, Union
 
 from pydantic import ValidationError
+
+from LLM.chat import Chat
+from pipeline_messages import GenerateRequest, MessageTag
 
 from openai.types.realtime import (
     InputAudioBufferAppendEvent,
@@ -124,8 +127,11 @@ class GlobalUsageMetrics(UsageMetrics):
 
 class ConnState(BaseModel):
     """Per-connection mutable state, including all protocol-level IDs."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     session_id: str = Field(default_factory=lambda: _generate_id("session"))
     conversation_id: str = Field(default_factory=lambda: _generate_id("conv"))
+    chat: Chat = Field(default_factory=lambda: Chat(10))
     in_response: bool = False
     audio_buffer_has_data: bool = False
     audio_remainder: bytes = b""
@@ -169,7 +175,7 @@ class RealtimeService:
             "assistant_text": self.response.on_assistant_text,
             "token_usage": self._on_token_usage,
             "partial_transcription": self.conversation.on_partial_transcription,
-            "transcription_completed": self.conversation.on_transcription_completed,
+            "transcription_completed": self._on_transcription_completed,
         }
 
     # ── Connection lifecycle ─────────────────────
@@ -258,6 +264,30 @@ class RealtimeService:
             logger.debug("Unhandled pipeline message type: %s", msg_type)
             return []
         return handler(conn_id, msg)
+
+    # ── STT → LM bridge ────────────────────────────
+
+    def _on_transcription_completed(self, conn_id: str, msg: dict) -> list[ServerEvent]:
+        """Handle a final STT transcription: emit protocol event, append to chat, trigger LM."""
+        events = self.conversation.on_transcription_completed(conn_id, msg)
+
+        st = self._state(conn_id)
+        transcript = msg.get("transcript", "")
+        if transcript:
+            st.chat.append({"role": "user", "content": transcript})
+
+        cfg = self.runtime_config
+        queue = self.text_prompt_queue
+        if queue and transcript:
+            queue.put((MessageTag.GENERATE_RESPONSE, GenerateRequest(
+                chat=st.chat,
+                instructions=cfg.session.instructions,
+                tools=cfg.session.tools,
+                tool_choice=cfg.session.tool_choice,
+                language_code=msg.get("language_code"),
+            )))
+
+        return events
 
     # ── Metrics ────────────────────────────────────
 

@@ -15,7 +15,6 @@ from openai.types.realtime.conversation_item_input_audio_transcription_completed
 )
 
 from api.openai_realtime.handlers.base import RealtimeBaseHandler
-from pipeline_messages import MessageTag
 
 if TYPE_CHECKING:
     from api.openai_realtime.service import ServerEvent
@@ -38,7 +37,7 @@ class ConversationHandler(RealtimeBaseHandler):
         events: list[ServerEvent] = []
         item = event.item
 
-        if not self._enqueue_item(conn_id, item):
+        if not self._append_item(conn_id, item):
             return []
 
         if item:
@@ -55,14 +54,12 @@ class ConversationHandler(RealtimeBaseHandler):
 
         return events
 
-    def _enqueue_item(self, conn_id: str, item: ConversationItem) -> bool:
-        """Enqueue a single conversation item into the LLM context.
+    def _append_item(self, conn_id: str, item: ConversationItem) -> bool:
+        """Add a conversation item directly to the connection's chat history.
 
         Returns ``True`` if the item was handled, ``False`` otherwise.
         """
-        queue = self._queue(conn_id)
-        if not queue:
-            return False
+        st = self._state(conn_id)
 
         if getattr(item, "type", None) == "message" and getattr(item, "content", None):
             role = getattr(item, "role", None)
@@ -76,15 +73,15 @@ class ConversationHandler(RealtimeBaseHandler):
                 else:
                     logger.warning("Unsupported content part type: %s", part.type)
             if content_parts:
-                queue.put((MessageTag.ADD_TO_CONTEXT, role, content_parts))
-                logger.debug("Enqueued message item (role=%s, %d parts)", role, len(content_parts))
+                st.chat.append({"role": role, "content": content_parts})
+                logger.debug("Added message to chat (role=%s, %d parts)", role, len(content_parts))
                 return True
             return False
 
         if getattr(item, "type", None) == "function_call_output" and getattr(item, "output", None):
             result_text = f"Call ID: {item.call_id}\nOutput: {item.output}"
-            queue.put((MessageTag.FUNCTION_RESULT, result_text))
-            logger.debug("Enqueued function_call_output (call_id=%s)", item.call_id)
+            st.chat.append({"role": "user", "content": result_text})
+            logger.debug("Added function_call_output to chat (call_id=%s)", item.call_id)
             return True
 
         logger.warning("Unsupported item type: %s", getattr(item, "type", None))

@@ -24,6 +24,13 @@ class Chat:
         else:
             return self.buffer
 
+    def copy(self) -> "Chat":
+        """Return a shallow snapshot safe for concurrent read access."""
+        clone = Chat(self.size)
+        clone.init_chat_message = self.init_chat_message
+        clone.buffer = list(self.buffer)
+        return clone
+
     def reset(self):
         self.buffer = []
         self.init_chat_message = None

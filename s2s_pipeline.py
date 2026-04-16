@@ -347,7 +347,7 @@ def build_pipeline(
             stop_event,
             queue_in=stt_output_queue,
             queue_out=text_prompt_queue,
-            setup_kwargs={"text_output_queue": text_output_queue},
+            setup_kwargs={"text_output_queue": text_output_queue, "suppress_yield": True},
         )
 
         for kw in (
