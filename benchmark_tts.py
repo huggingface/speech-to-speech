@@ -25,6 +25,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DEFAULT_SAMPLE_RATE = 16000
+VALID_QWEN3_MLX_QUANTIZATIONS = ("bf16", "4bit", "6bit", "8bit")
 
 
 class BenchmarkResult:
@@ -198,6 +199,49 @@ def benchmark_handler(handler_name: str, text: str, iterations: int, handler_kwa
     return result
 
 
+def normalize_qwen3_mlx_quantizations(values: List[str] | None) -> List[str]:
+    if not values:
+        return []
+
+    normalized = []
+    seen = set()
+    for value in values:
+        quantization = str(value).strip().lower()
+        if quantization in ("default", "none", ""):
+            quantization = "bf16"
+        if quantization not in VALID_QWEN3_MLX_QUANTIZATIONS:
+            raise ValueError(
+                "Unsupported qwen3 MLX quantization "
+                f"{value!r}. Supported values: {', '.join(VALID_QWEN3_MLX_QUANTIZATIONS)}"
+            )
+        if quantization in seen:
+            continue
+        seen.add(quantization)
+        normalized.append(quantization)
+    return normalized
+
+
+def build_benchmark_targets(args) -> List[tuple[str, str, Dict[str, Any]]]:
+    targets = []
+    qwen3_quantizations = normalize_qwen3_mlx_quantizations(args.qwen3_mlx_quantizations)
+
+    for handler_name in args.handlers:
+        if handler_name == "qwen3" and qwen3_quantizations:
+            for quantization in qwen3_quantizations:
+                targets.append(
+                    (
+                        f"qwen3[{quantization}]",
+                        "qwen3",
+                        {"mlx_quantization": quantization},
+                    )
+                )
+            continue
+
+        targets.append((handler_name, handler_name, {}))
+
+    return targets
+
+
 def print_results(results: List[BenchmarkResult]):
     print("\n" + "=" * 80)
     print("TTS BENCHMARK RESULTS")
@@ -291,6 +335,15 @@ def main():
         default="tts_benchmark_results.json",
         help="Output JSON file for results (default: tts_benchmark_results.json)",
     )
+    parser.add_argument(
+        "--qwen3_mlx_quantizations",
+        nargs="+",
+        default=None,
+        help=(
+            "Optional list of Apple Silicon MLX Qwen3-TTS quantizations to benchmark "
+            "as separate variants. Supported values: bf16, 4bit, 6bit, 8bit."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -298,9 +351,21 @@ def main():
         logger.error("No handlers provided")
         return
 
+    try:
+        targets = build_benchmark_targets(args)
+    except ValueError as e:
+        logger.error(str(e))
+        return
+
     results = []
-    for handler_name in args.handlers:
-        result = benchmark_handler(handler_name, args.text, args.iterations)
+    for result_name, handler_name, handler_kwargs in targets:
+        result = benchmark_handler(
+            handler_name,
+            args.text,
+            args.iterations,
+            handler_kwargs=handler_kwargs,
+        )
+        result.handler_name = result_name
         results.append(result)
 
     print_results(results)
