@@ -7,7 +7,7 @@ class Qwen3TTSHandlerArguments:
     qwen3_tts_model_name: str = field(
         default="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
         metadata={
-            "help": "The Qwen3-TTS model to use (HuggingFace Hub ID or local path). On Apple Silicon, Qwen/* model IDs are auto-mapped to the corresponding mlx-community/*-bf16 model when possible."
+            "help": "The Qwen3-TTS model to use (HuggingFace Hub ID or local path). On Apple Silicon, Qwen/* model IDs are auto-mapped to the corresponding mlx-community/* model when possible, defaulting to the 6bit MLX variant unless the model name already pins a specific suffix."
         },
     )
     qwen3_tts_device: str = field(
@@ -67,7 +67,7 @@ class Qwen3TTSHandlerArguments:
     qwen3_tts_mlx_quantization: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Optional MLX quantization override on Apple Silicon. Supported values: 'bf16', '4bit', '6bit', '8bit'. Leave unset for the default bf16 models."
+            "help": "Optional MLX quantization override on Apple Silicon. Supported values: 'bf16', '4bit', '6bit', '8bit'. Leave unset to use the default 6bit MLX variant unless the model name already includes a quantization suffix."
         },
     )
     qwen3_tts_language: str = field(

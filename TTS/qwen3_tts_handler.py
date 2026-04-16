@@ -26,6 +26,7 @@ console = Console()
 
 DEFAULT_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
 DEFAULT_MLX_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16"
+DEFAULT_MLX_QUANTIZATION = "6bit"
 DEFAULT_REF_TEXT = "I'm confused why some people have super short timelines, yet at the same time are bullish on scaling up reinforcement learning atop LLMs. If we're actually close to a human-like learner, then this whole approach of training on verifiable outcomes."
 DEFAULT_FASTER_STREAMING_CHUNK_SIZE = 8
 DEFAULT_MLX_STREAMING_CHUNK_SIZE = 4
@@ -85,6 +86,7 @@ class Qwen3TTSHandler(BaseHandler):
         self.max_new_tokens = max_new_tokens
         self.blocksize = blocksize
         self.dtype = None
+        self.effective_mlx_quantization = None
         self.gen_kwargs = gen_kwargs or {}
         self._mlx_ref_audio_cache = {}
         self._mlx_temp_ref_audio_files = set()
@@ -96,13 +98,17 @@ class Qwen3TTSHandler(BaseHandler):
 
         if self.backend == "mlx":
             self.device = "mps"
+            self.effective_mlx_quantization = self._effective_mlx_quantization(
+                model_name
+            )
             self.model_name = self._resolve_mlx_model_name(model_name)
             logger.info(
                 f"Loading Qwen3-TTS model: {self.model_name} via mlx-audio on Apple Silicon"
             )
-            if self.mlx_quantization:
+            if self.effective_mlx_quantization and self.effective_mlx_quantization != "bf16":
                 logger.info(
-                    "Using MLX quantized Qwen3-TTS variant: %s", self.mlx_quantization
+                    "Using MLX quantized Qwen3-TTS variant: %s",
+                    self.effective_mlx_quantization,
                 )
             self._setup_mlx(self.model_name)
         else:
@@ -198,16 +204,36 @@ class Qwen3TTSHandler(BaseHandler):
         return value
 
     def _apply_mlx_quantization_suffix(self, model_name):
-        if self.mlx_quantization is None:
+        quantization = self.effective_mlx_quantization
+        if quantization is None:
             return model_name
 
-        desired_suffix = f"-{self.mlx_quantization}"
+        desired_suffix = f"-{quantization}"
         for suffix in VALID_MLX_QUANTIZATION_SUFFIXES:
             current_suffix = f"-{suffix}"
             if model_name.endswith(current_suffix):
                 return model_name[: -len(current_suffix)] + desired_suffix
 
         return f"{model_name}{desired_suffix}"
+
+    def _model_name_quantization_suffix(self, model_name):
+        if not model_name:
+            return None
+
+        for suffix in VALID_MLX_QUANTIZATION_SUFFIXES:
+            if model_name.endswith(f"-{suffix}"):
+                return suffix
+
+        return None
+
+    def _effective_mlx_quantization(self, model_name):
+        if self.mlx_quantization is not None:
+            return self.mlx_quantization
+
+        if self._model_name_quantization_suffix(model_name) is not None:
+            return None
+
+        return DEFAULT_MLX_QUANTIZATION
 
     def _resolve_mlx_model_name(self, model_name):
         if not model_name:

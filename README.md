@@ -141,7 +141,7 @@ This setting:
    - Sets MLX LM for the language model (uses `--lm_model_name` to specify the model)
    - Sets Qwen3-TTS for TTS
    - `--tts melo`, `--tts pocket`, and `--tts kokoro` are also valid TTS options on macOS.
-   - Qwen3 on Apple Silicon uses `mlx-audio` and supports `--qwen3_tts_mlx_quantization 4bit|6bit|8bit` for faster MLX variants.
+   - Qwen3 on Apple Silicon uses `mlx-audio` and defaults to the `6bit` MLX variant unless you explicitly select a different quantization or model suffix.
    - To compare the MLX variants locally, run:
      ```bash
      .venv/bin/python benchmark_tts.py \

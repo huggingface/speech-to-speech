@@ -38,10 +38,11 @@ def test_setup_uses_mlx_backend_on_darwin_and_maps_qwen_repo_ids(monkeypatch):
     assert handler.backend == "mlx"
     assert handler.device == "mps"
     assert handler.dtype is None
+    assert handler.effective_mlx_quantization == "6bit"
     assert handler.streaming_chunk_size == 4
     assert (
         recorded["model_name"]
-        == "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16"
+        == "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit"
     )
 
 
@@ -65,10 +66,33 @@ def test_setup_supports_quantized_mlx_mapping_on_darwin(monkeypatch, quantizatio
 
     assert handler.backend == "mlx"
     assert handler.mlx_quantization == quantization
+    assert handler.effective_mlx_quantization == quantization
     assert (
         recorded["model_name"]
         == f"mlx-community/Qwen3-TTS-12Hz-0.6B-Base-{quantization}"
     )
+
+
+def test_setup_preserves_explicit_mlx_model_suffix_when_quantization_unset(monkeypatch):
+    recorded = {}
+
+    def _setup_mlx(self, model_name):
+        recorded["model_name"] = model_name
+
+    monkeypatch.setattr(qwen3_tts_module, "platform", "darwin")
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
+    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.setup(
+        Event(),
+        model_name="mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16",
+    )
+
+    assert handler.backend == "mlx"
+    assert handler.mlx_quantization is None
+    assert handler.effective_mlx_quantization is None
+    assert recorded["model_name"] == "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16"
 
 
 def test_setup_preserves_faster_backend_off_darwin(monkeypatch):
