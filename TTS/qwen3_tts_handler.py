@@ -10,7 +10,6 @@ from pathlib import Path
 from sys import platform
 import tempfile
 from time import perf_counter
-import types
 
 import numpy as np
 from rich.console import Console
@@ -127,7 +126,6 @@ class Qwen3TTSHandler(BaseHandler):
                 dtype=dtype,
                 attn_implementation=attn_implementation,
             )
-            self._install_faster_non_streaming_mode_override()
 
         logger.info(
             "Using Qwen3-TTS streaming chunk size %d (~%.0fms audio per chunk) on %s",
@@ -256,68 +254,6 @@ class Qwen3TTSHandler(BaseHandler):
         if self.backend == "mlx":
             return DEFAULT_MLX_STREAMING_CHUNK_SIZE
         return DEFAULT_FASTER_STREAMING_CHUNK_SIZE
-
-    def _install_faster_non_streaming_mode_override(self):
-        if self.backend != "faster_qwen3_tts" or self.non_streaming_mode is None:
-            return
-
-        override = bool(self.non_streaming_mode)
-        original = getattr(self.model, "_prepare_generation_custom", None)
-        if original is None:
-            logger.warning(
-                "Unable to apply qwen3_tts_non_streaming_mode override: "
-                "faster-qwen3-tts is missing _prepare_generation_custom."
-            )
-            return
-        if getattr(self.model, "_speech_to_speech_non_streaming_mode_override", None) == override:
-            return
-
-        def _prepare_generation_custom_with_override(model_self, text, language, speaker, instruct=None):
-            input_texts = [model_self.model._build_assistant_text(text)]
-            input_ids = model_self.model._tokenize_texts(input_texts)
-
-            instruct_ids = []
-            if instruct is None or instruct == "":
-                instruct_ids.append(None)
-            else:
-                instruct_ids.append(
-                    model_self.model._tokenize_texts(
-                        [model_self.model._build_instruct_text(instruct)]
-                    )[0]
-                )
-
-            m = model_self.model.model
-            tie, tam, tth, tpe = model_self._build_talker_inputs_local(
-                m=m,
-                input_ids=input_ids,
-                ref_ids=[None],
-                voice_clone_prompt=None,
-                languages=[language] if language is not None else ["Auto"],
-                speakers=[speaker],
-                non_streaming_mode=override,
-                instruct_ids=instruct_ids,
-            )
-
-            if not model_self._warmed_up:
-                model_self._warmup(tie.shape[1])
-
-            talker = m.talker
-            config = m.config.talker_config
-            talker.rope_deltas = None
-
-            return m, talker, config, tie, tam, tth, tpe
-
-        self.model._prepare_generation_custom = types.MethodType(
-            _prepare_generation_custom_with_override,
-            self.model,
-        )
-        self.model._speech_to_speech_original_prepare_generation_custom = original
-        self.model._speech_to_speech_non_streaming_mode_override = override
-
-    def _maybe_add_non_streaming_mode(self, kwargs):
-        if self.non_streaming_mode is not None:
-            kwargs["non_streaming_mode"] = self.non_streaming_mode
-        return kwargs
 
     def _infer_model_type_from_name(self):
         name = (self.model_name or "").lower()
@@ -704,22 +640,17 @@ class Qwen3TTSHandler(BaseHandler):
             )
             return
 
-        faster_kwargs = self._maybe_add_non_streaming_mode(
-            {
-                "text": text,
-                "language": self.language,
-                "ref_audio": self.ref_audio,
-                "ref_text": self.ref_text,
-                "xvec_only": self.xvec_only,
-                "chunk_size": self.streaming_chunk_size,
-                "max_new_tokens": self.max_new_tokens,
-                "parity_mode": self.parity_mode,
-            }
-        )
-
         yield from self._stream(
             self.model.generate_voice_clone_streaming(
-                **faster_kwargs,
+                text=text,
+                language=self.language,
+                ref_audio=self.ref_audio,
+                ref_text=self.ref_text,
+                xvec_only=self.xvec_only,
+                chunk_size=self.streaming_chunk_size,
+                max_new_tokens=self.max_new_tokens,
+                parity_mode=self.parity_mode,
+                non_streaming_mode=self.non_streaming_mode,
             ),
             label="voice_clone_parity" if self.parity_mode else "voice_clone",
         )
@@ -751,6 +682,7 @@ class Qwen3TTSHandler(BaseHandler):
                 instruct=self.instruct,
                 chunk_size=self.streaming_chunk_size,
                 max_new_tokens=self.max_new_tokens,
+                non_streaming_mode=self.non_streaming_mode,
             ),
             label="custom_voice",
         )
@@ -773,6 +705,7 @@ class Qwen3TTSHandler(BaseHandler):
                 language=self.language,
                 chunk_size=self.streaming_chunk_size,
                 max_new_tokens=self.max_new_tokens,
+                non_streaming_mode=self.non_streaming_mode,
             ),
             label="voice_design",
         )

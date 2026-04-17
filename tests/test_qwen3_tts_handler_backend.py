@@ -14,6 +14,10 @@ from pipeline_messages import MessageTag
 from TTS.qwen3_tts_handler import Qwen3TTSHandler
 
 
+def _audible_stream_chunk():
+    return np.full(512, 0.1, dtype=np.float32)
+
+
 def test_setup_uses_mlx_backend_on_darwin_and_maps_qwen_repo_ids(monkeypatch):
     recorded = {}
 
@@ -199,45 +203,6 @@ def test_mlx_helper_methods_use_model_config_and_streaming_conversion():
     assert handler._mlx_streaming_interval() == pytest.approx(0.64)
 
 
-@pytest.mark.parametrize("override", [True, False])
-def test_install_faster_non_streaming_mode_override_patches_custom_prepare(override):
-    recorded = {}
-    fake_model = SimpleNamespace(
-        _warmed_up=True,
-        model=SimpleNamespace(
-            _build_assistant_text=lambda text: f"assistant:{text}",
-            _tokenize_texts=lambda texts: [texts[0]],
-            _build_instruct_text=lambda text: f"instruct:{text}",
-            model=SimpleNamespace(
-                talker=SimpleNamespace(rope_deltas=None),
-                config=SimpleNamespace(talker_config=SimpleNamespace()),
-            ),
-        ),
-        _prepare_generation_custom=lambda *args, **kwargs: None,
-        _build_talker_inputs_local=lambda **kwargs: (
-            recorded.update(kwargs),
-            ("tie", "tam", "tth", "tpe"),
-        )[1],
-    )
-
-    handler = object.__new__(Qwen3TTSHandler)
-    handler.backend = "faster_qwen3_tts"
-    handler.non_streaming_mode = override
-    handler.model = fake_model
-
-    handler._install_faster_non_streaming_mode_override()
-    handler.model._prepare_generation_custom(
-        text="Hello there.",
-        language="English",
-        speaker="Vivian",
-        instruct="calm",
-    )
-
-    assert recorded["non_streaming_mode"] is override
-    assert recorded["languages"] == ["English"]
-    assert recorded["speakers"] == ["Vivian"]
-
-
 def test_prepare_mlx_ref_audio_normalizes_file_and_caches_result(monkeypatch, tmp_path):
     source = tmp_path / "source.wav"
     source.write_bytes(b"fake")
@@ -369,7 +334,7 @@ def test_process_voice_clone_passes_non_streaming_mode_to_faster_backend(monkeyp
         model=SimpleNamespace(model=SimpleNamespace(tts_model_type="base")),
         generate_voice_clone_streaming=lambda **kwargs: (
             captured.update(kwargs),
-            iter([(np.zeros(512, dtype=np.float32), 16000, {})]),
+            iter([(_audible_stream_chunk(), 16000, {})]),
         )[1],
     )
 
@@ -381,7 +346,7 @@ def test_process_voice_clone_passes_non_streaming_mode_to_faster_backend(monkeyp
     assert captured["non_streaming_mode"] is False
 
 
-def test_process_voice_clone_omits_non_streaming_mode_when_unset(monkeypatch):
+def test_process_voice_clone_passes_none_non_streaming_mode_when_unset(monkeypatch):
     captured = {}
     handler = object.__new__(Qwen3TTSHandler)
     handler.should_listen = Event()
@@ -404,7 +369,7 @@ def test_process_voice_clone_omits_non_streaming_mode_when_unset(monkeypatch):
         model=SimpleNamespace(model=SimpleNamespace(tts_model_type="base")),
         generate_voice_clone_streaming=lambda **kwargs: (
             captured.update(kwargs),
-            iter([(np.zeros(512, dtype=np.float32), 16000, {})]),
+            iter([(_audible_stream_chunk(), 16000, {})]),
         )[1],
     )
 
@@ -413,4 +378,76 @@ def test_process_voice_clone_omits_non_streaming_mode_when_unset(monkeypatch):
     outputs = list(handler.process("Hello there."))
 
     assert len(outputs) == 1
-    assert "non_streaming_mode" not in captured
+    assert captured["non_streaming_mode"] is None
+
+
+@pytest.mark.parametrize("override", [None, False, True])
+def test_process_custom_voice_passes_non_streaming_mode_to_faster_backend(monkeypatch, override):
+    captured = {}
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.should_listen = Event()
+    handler.runtime_config = None
+    handler.cancel_scope = None
+    handler.ref_audio = None
+    handler.ref_text = "Reference text."
+    handler.speaker = "Vivian"
+    handler.instruct = "calm"
+    handler.language = "English"
+    handler.xvec_only = False
+    handler.parity_mode = False
+    handler.non_streaming_mode = override
+    handler.streaming_chunk_size = 8
+    handler.max_new_tokens = 360
+    handler.blocksize = 512
+    handler.backend = "faster_qwen3_tts"
+    handler.queue_in = Queue()
+    handler.model = SimpleNamespace(
+        model=SimpleNamespace(model=SimpleNamespace(tts_model_type="custom_voice")),
+        generate_custom_voice_streaming=lambda **kwargs: (
+            captured.update(kwargs),
+            iter([(_audible_stream_chunk(), 16000, {})]),
+        )[1],
+    )
+
+    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+
+    outputs = list(handler.process("Hello there."))
+
+    assert len(outputs) == 1
+    assert captured["non_streaming_mode"] is override
+
+
+@pytest.mark.parametrize("override", [None, False, True])
+def test_process_voice_design_passes_non_streaming_mode_to_faster_backend(monkeypatch, override):
+    captured = {}
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.should_listen = Event()
+    handler.runtime_config = None
+    handler.cancel_scope = None
+    handler.ref_audio = None
+    handler.ref_text = "Reference text."
+    handler.speaker = None
+    handler.instruct = "bright radio voice"
+    handler.language = "English"
+    handler.xvec_only = False
+    handler.parity_mode = False
+    handler.non_streaming_mode = override
+    handler.streaming_chunk_size = 8
+    handler.max_new_tokens = 360
+    handler.blocksize = 512
+    handler.backend = "faster_qwen3_tts"
+    handler.queue_in = Queue()
+    handler.model = SimpleNamespace(
+        model=SimpleNamespace(model=SimpleNamespace(tts_model_type="voice_design")),
+        generate_voice_design_streaming=lambda **kwargs: (
+            captured.update(kwargs),
+            iter([(_audible_stream_chunk(), 16000, {})]),
+        )[1],
+    )
+
+    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+
+    outputs = list(handler.process("Hello there."))
+
+    assert len(outputs) == 1
+    assert captured["non_streaming_mode"] is override
