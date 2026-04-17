@@ -102,21 +102,20 @@ python s2s_pipeline.py \
 
 Behavior:
 - Uses `faster-qwen3-tts` on non-macOS platforms.
-- Uses `mlx-audio` on Apple Silicon and auto-maps `Qwen/...` model IDs to `mlx-community/...-bf16` when possible.
-- Supports opt-in MLX quantized models on Apple Silicon via `--qwen3_tts_mlx_quantization 4bit`, `6bit`, or `8bit`.
+- Uses `mlx-audio` on Apple Silicon and auto-maps `Qwen/...` model IDs to `mlx-community/...`, defaulting to the `6bit` MLX variant unless the model name already pins a suffix.
+- Supports MLX quantization overrides on Apple Silicon via `--qwen3_tts_mlx_quantization bf16|4bit|6bit|8bit`.
 - Keeps the existing voice-clone/custom-voice/voice-design handler flow intact.
 
-Example for Apple Silicon with the 6-bit MLX variant:
+Example for Apple Silicon using the default 6-bit MLX variant:
 
 ```bash
 python s2s_pipeline.py \
   --tts qwen3 \
   --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-0.6B-Base \
-  --qwen3_tts_mlx_quantization 6bit \
   --qwen3_tts_ref_audio TTS/ref_audio.wav
 ```
 
-You can also select `4bit` or `8bit` the same way:
+You can override the default and select `bf16`, `4bit`, or `8bit` explicitly:
 
 ```bash
 python s2s_pipeline.py \
