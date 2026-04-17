@@ -62,6 +62,7 @@ class Qwen3TTSHandler(BaseHandler):
         instruct=None,
         xvec_only=False,
         parity_mode=False,
+        non_streaming_mode=None,
         mlx_quantization=None,
         streaming_chunk_size=None,
         max_new_tokens=360,
@@ -81,6 +82,7 @@ class Qwen3TTSHandler(BaseHandler):
         self.instruct = instruct
         self.xvec_only = xvec_only
         self.parity_mode = parity_mode
+        self.non_streaming_mode = non_streaming_mode
         self.mlx_quantization = self._normalize_mlx_quantization(mlx_quantization)
         self.max_new_tokens = max_new_tokens
         self.blocksize = blocksize
@@ -100,6 +102,12 @@ class Qwen3TTSHandler(BaseHandler):
             logger.info(
                 f"Loading Qwen3-TTS model: {self.model_name} via mlx-audio on Apple Silicon"
             )
+            if self.non_streaming_mode is not None:
+                logger.warning(
+                    "qwen3_tts_non_streaming_mode=%s is ignored on Apple Silicon because "
+                    "mlx-audio does not expose non_streaming_mode yet.",
+                    self.non_streaming_mode,
+                )
             model_quantization = self._model_name_quantization_suffix(self.model_name)
             if model_quantization and model_quantization != "bf16":
                 logger.info(
@@ -642,6 +650,7 @@ class Qwen3TTSHandler(BaseHandler):
                 chunk_size=self.streaming_chunk_size,
                 max_new_tokens=self.max_new_tokens,
                 parity_mode=self.parity_mode,
+                non_streaming_mode=self.non_streaming_mode,
             ),
             label="voice_clone_parity" if self.parity_mode else "voice_clone",
         )
@@ -673,6 +682,7 @@ class Qwen3TTSHandler(BaseHandler):
                 instruct=self.instruct,
                 chunk_size=self.streaming_chunk_size,
                 max_new_tokens=self.max_new_tokens,
+                non_streaming_mode=self.non_streaming_mode,
             ),
             label="custom_voice",
         )
@@ -695,6 +705,7 @@ class Qwen3TTSHandler(BaseHandler):
                 language=self.language,
                 chunk_size=self.streaming_chunk_size,
                 max_new_tokens=self.max_new_tokens,
+                non_streaming_mode=self.non_streaming_mode,
             ),
             label="voice_design",
         )
