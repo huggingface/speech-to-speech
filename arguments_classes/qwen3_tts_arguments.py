@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -6,13 +7,13 @@ class Qwen3TTSHandlerArguments:
     qwen3_tts_model_name: str = field(
         default="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
         metadata={
-            "help": "The Qwen3-TTS model to use (HuggingFace Hub ID or local path)."
+            "help": "The Qwen3-TTS model to use (HuggingFace Hub ID or local path). On Apple Silicon, Qwen/* model IDs are auto-mapped to the corresponding mlx-community/* model when possible, defaulting to the 6bit MLX variant unless the model name already pins a specific suffix."
         },
     )
     qwen3_tts_device: str = field(
         default="cuda",
         metadata={
-            "help": "The device to run Qwen3-TTS on. Options: 'cuda', 'cpu'. Default is 'cuda'."
+            "help": "Preferred device for Qwen3-TTS. Options: 'cuda', 'cpu', 'mps', 'auto'. Default is 'cuda'. On Apple Silicon the mlx-audio backend is selected automatically."
         },
     )
     qwen3_tts_dtype: str = field(
@@ -63,16 +64,22 @@ class Qwen3TTSHandlerArguments:
             "help": "Disable CUDA-graph streaming path and use parity mode for stability. Default is False."
         },
     )
+    qwen3_tts_mlx_quantization: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Optional MLX quantization override on Apple Silicon. Supported values: 'bf16', '4bit', '6bit', '8bit'. Leave unset to use the default 6bit MLX variant unless the model name already includes a quantization suffix."
+        },
+    )
     qwen3_tts_language: str = field(
         default="English",
         metadata={
             "help": "Target language for synthesis. Default is 'English'."
         },
     )
-    qwen3_tts_streaming_chunk_size: int = field(
-        default=8,
+    qwen3_tts_streaming_chunk_size: Optional[int] = field(
+        default=None,
         metadata={
-            "help": "Codec steps per streaming chunk (8 = ~667ms of audio). Default is 8."
+            "help": "Codec steps per streaming chunk. If unset, the handler uses a backend-specific default: 8 on faster-qwen3-tts and 4 on mlx-audio."
         },
     )
     qwen3_tts_max_new_tokens: int = field(

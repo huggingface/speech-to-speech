@@ -100,6 +100,42 @@ python s2s_pipeline.py \
   --qwen3_tts_ref_audio TTS/ref_audio.wav
 ```
 
+Behavior:
+- Uses `faster-qwen3-tts` on non-macOS platforms.
+- Uses `mlx-audio` on Apple Silicon and auto-maps `Qwen/...` model IDs to `mlx-community/...`, defaulting to the `6bit` MLX variant unless the model name already pins a suffix.
+- Supports MLX quantization overrides on Apple Silicon via `--qwen3_tts_mlx_quantization bf16|4bit|6bit|8bit`.
+- Keeps the existing voice-clone/custom-voice/voice-design handler flow intact.
+
+Example for Apple Silicon using the default 6-bit MLX variant:
+
+```bash
+python s2s_pipeline.py \
+  --tts qwen3 \
+  --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-0.6B-Base \
+  --qwen3_tts_ref_audio TTS/ref_audio.wav
+```
+
+You can override the default and select `bf16`, `4bit`, or `8bit` explicitly:
+
+```bash
+python s2s_pipeline.py \
+  --tts qwen3 \
+  --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-0.6B-Base \
+  --qwen3_tts_mlx_quantization 4bit \
+  --qwen3_tts_ref_audio TTS/ref_audio.wav
+```
+
+To benchmark the Apple Silicon MLX variants side by side:
+
+```bash
+.venv/bin/python benchmark_tts.py \
+  --handlers qwen3 \
+  --iterations 3 \
+  --qwen3_mlx_quantizations bf16 4bit 6bit 8bit
+```
+
+This will run separate benchmark entries for `qwen3[bf16]`, `qwen3[4bit]`, `qwen3[6bit]`, and `qwen3[8bit]` using the same reference audio and text.
+
 ## Setup
 
 ### Low-latency GPU setup
@@ -114,8 +150,7 @@ python s2s_pipeline.py \
 
 ```bash
 python s2s_pipeline.py \
-  --local_mac_optimal_settings \
-  --tts melo
+  --local_mac_optimal_settings
 ```
 
-`--tts pocket` is also a valid option on macOS.
+`--tts melo`, `--tts pocket`, and `--tts kokoro` are also valid options on macOS.
