@@ -224,27 +224,6 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
             ctx.enter_code = enter_code
             ctx.end_code = end_code
 
-    def _extract_tools(self, text: str, ctx: StreamContext) -> tuple[str, list[dict]]:
-        """Strip code blocks from *text* and return (clean_text, tool_dicts).
-
-        When no tools are configured (``ctx.block_regex is None``), returns
-        the text unchanged with an empty tool list.
-        """
-        if not ctx.block_regex:
-            return text, []
-        clean_text, func_calls = extract_function_calls_from_text(
-            text, ctx.block_regex,
-        )
-        tools = []
-        for fc in func_calls:
-            try:
-                tools.append(
-                    fc.to_realtime_function_tool_call(ctx.function_tools).model_dump()
-                )
-            except ValueError as e:
-                logger.warning("Skipping invalid tool call: %s", e)
-        return clean_text, tools
-
     def _process_printable_text(
         self, printable_text: str, language_code: str | None, tools: list[dict],
         ctx: StreamContext,
