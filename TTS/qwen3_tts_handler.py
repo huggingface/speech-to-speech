@@ -314,6 +314,11 @@ class Qwen3TTSHandler(BaseHandler):
         self.model._speech_to_speech_original_prepare_generation_custom = original
         self.model._speech_to_speech_non_streaming_mode_override = override
 
+    def _maybe_add_non_streaming_mode(self, kwargs):
+        if self.non_streaming_mode is not None:
+            kwargs["non_streaming_mode"] = self.non_streaming_mode
+        return kwargs
+
     def _infer_model_type_from_name(self):
         name = (self.model_name or "").lower()
         if "voicedesign" in name:
@@ -699,19 +704,22 @@ class Qwen3TTSHandler(BaseHandler):
             )
             return
 
+        faster_kwargs = self._maybe_add_non_streaming_mode(
+            {
+                "text": text,
+                "language": self.language,
+                "ref_audio": self.ref_audio,
+                "ref_text": self.ref_text,
+                "xvec_only": self.xvec_only,
+                "chunk_size": self.streaming_chunk_size,
+                "max_new_tokens": self.max_new_tokens,
+                "parity_mode": self.parity_mode,
+            }
+        )
+
         yield from self._stream(
             self.model.generate_voice_clone_streaming(
-                text=text,
-                language=self.language,
-                ref_audio=self.ref_audio,
-                ref_text=self.ref_text,
-                xvec_only=self.xvec_only,
-                chunk_size=self.streaming_chunk_size,
-                max_new_tokens=self.max_new_tokens,
-                non_streaming_mode=self.non_streaming_mode
-                if self.non_streaming_mode is not None
-                else True,
-                parity_mode=self.parity_mode,
+                **faster_kwargs,
             ),
             label="voice_clone_parity" if self.parity_mode else "voice_clone",
         )
