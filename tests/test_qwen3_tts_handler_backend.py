@@ -145,6 +145,26 @@ def test_setup_preserves_explicit_chunk_size_on_darwin(monkeypatch):
     assert handler.streaming_chunk_size == 4
 
 
+def test_setup_warns_when_non_streaming_mode_set_on_darwin(monkeypatch, caplog):
+    def _setup_mlx(self, model_name):
+        return None
+
+    monkeypatch.setattr(qwen3_tts_module, "platform", "darwin")
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
+    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(Qwen3TTSHandler)
+
+    with caplog.at_level("WARNING"):
+        handler.setup(
+            Event(),
+            model_name="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+            non_streaming_mode=True,
+        )
+
+    assert "mlx-audio does not expose non_streaming_mode yet" in caplog.text
+
+
 def test_setup_rejects_invalid_mlx_quantization(monkeypatch):
     def _setup_mlx(self, model_name):
         return None
@@ -177,6 +197,45 @@ def test_mlx_helper_methods_use_model_config_and_streaming_conversion():
     assert handler._model_type() == "custom_voice"
     assert handler._resolve_speaker() == "Vivian"
     assert handler._mlx_streaming_interval() == pytest.approx(0.64)
+
+
+@pytest.mark.parametrize("override", [True, False])
+def test_install_faster_non_streaming_mode_override_patches_custom_prepare(override):
+    recorded = {}
+    fake_model = SimpleNamespace(
+        _warmed_up=True,
+        model=SimpleNamespace(
+            _build_assistant_text=lambda text: f"assistant:{text}",
+            _tokenize_texts=lambda texts: [texts[0]],
+            _build_instruct_text=lambda text: f"instruct:{text}",
+            model=SimpleNamespace(
+                talker=SimpleNamespace(rope_deltas=None),
+                config=SimpleNamespace(talker_config=SimpleNamespace()),
+            ),
+        ),
+        _prepare_generation_custom=lambda *args, **kwargs: None,
+        _build_talker_inputs_local=lambda **kwargs: (
+            recorded.update(kwargs),
+            ("tie", "tam", "tth", "tpe"),
+        )[1],
+    )
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.backend = "faster_qwen3_tts"
+    handler.non_streaming_mode = override
+    handler.model = fake_model
+
+    handler._install_faster_non_streaming_mode_override()
+    handler.model._prepare_generation_custom(
+        text="Hello there.",
+        language="English",
+        speaker="Vivian",
+        instruct="calm",
+    )
+
+    assert recorded["non_streaming_mode"] is override
+    assert recorded["languages"] == ["English"]
+    assert recorded["speakers"] == ["Vivian"]
 
 
 def test_prepare_mlx_ref_audio_normalizes_file_and_caches_result(monkeypatch, tmp_path):
@@ -285,3 +344,38 @@ def test_process_reenables_listening_when_generation_fails_outside_realtime(monk
 
     assert outputs == []
     assert handler.should_listen.is_set() is True
+
+
+def test_process_voice_clone_passes_non_streaming_mode_to_faster_backend(monkeypatch):
+    captured = {}
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.should_listen = Event()
+    handler.runtime_config = None
+    handler.cancel_scope = None
+    handler.ref_audio = "TTS/ref_audio.wav"
+    handler.ref_text = "Reference text."
+    handler.speaker = None
+    handler.instruct = None
+    handler.language = "English"
+    handler.xvec_only = False
+    handler.parity_mode = False
+    handler.non_streaming_mode = False
+    handler.streaming_chunk_size = 8
+    handler.max_new_tokens = 360
+    handler.blocksize = 512
+    handler.backend = "faster_qwen3_tts"
+    handler.queue_in = Queue()
+    handler.model = SimpleNamespace(
+        model=SimpleNamespace(model=SimpleNamespace(tts_model_type="base")),
+        generate_voice_clone_streaming=lambda **kwargs: (
+            captured.update(kwargs),
+            iter([(np.zeros(512, dtype=np.float32), 16000, {})]),
+        )[1],
+    )
+
+    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+
+    outputs = list(handler.process("Hello there."))
+
+    assert len(outputs) == 1
+    assert captured["non_streaming_mode"] is False
