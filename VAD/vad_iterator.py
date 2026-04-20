@@ -1,3 +1,5 @@
+from collections import deque
+
 import torch
 
 
@@ -29,7 +31,8 @@ class VADIterator:
             In the end of each speech chunk wait for min_silence_duration_ms before separating it
 
         speech_pad_ms: int (default - 30 milliseconds)
-            Final speech chunks are padded by speech_pad_ms each side
+            Retain up to speech_pad_ms of audio before VAD triggers and prepend it
+            to the detected speech chunk
         """
 
         self.model = model
@@ -37,14 +40,17 @@ class VADIterator:
         self.sampling_rate = sampling_rate
         self.is_speaking = False
         self.buffer = []
+        self.prefix_buffer = []
+        self._pre_speech_buffer = deque()
+        self._pre_speech_samples = 0
 
         if sampling_rate not in [8000, 16000]:
             raise ValueError(
                 "VADIterator does not support sampling rates other than [8000, 16000]"
             )
 
-        self.min_silence_samples = sampling_rate * min_silence_duration_ms / 1000
-        self.speech_pad_samples = sampling_rate * speech_pad_ms / 1000
+        self.min_silence_samples = int(sampling_rate * min_silence_duration_ms / 1000)
+        self.speech_pad_samples = int(sampling_rate * speech_pad_ms / 1000)
         self.reset_states()
 
     def reset_states(self):
@@ -52,6 +58,49 @@ class VADIterator:
         self.triggered = False
         self.temp_end = 0
         self.current_sample = 0
+        self.buffer = []
+        self.prefix_buffer = []
+        self._pre_speech_buffer.clear()
+        self._pre_speech_samples = 0
+
+    def _num_samples(self, chunk: torch.Tensor) -> int:
+        return len(chunk[0]) if chunk.dim() == 2 else len(chunk)
+
+    def _trim_pre_speech_buffer(self) -> None:
+        while (
+            self.speech_pad_samples > 0
+            and self._pre_speech_buffer
+            and self._pre_speech_samples > self.speech_pad_samples
+        ):
+            first = self._pre_speech_buffer[0]
+            first_samples = self._num_samples(first)
+            excess = self._pre_speech_samples - self.speech_pad_samples
+
+            if excess >= first_samples:
+                self._pre_speech_buffer.popleft()
+                self._pre_speech_samples -= first_samples
+                continue
+
+            if first.dim() == 2:
+                self._pre_speech_buffer[0] = first[:, excess:]
+            else:
+                self._pre_speech_buffer[0] = first[excess:]
+            self._pre_speech_samples -= excess
+
+    def _remember_pre_speech(self, chunk: torch.Tensor) -> None:
+        if self.speech_pad_samples <= 0:
+            self._pre_speech_buffer.clear()
+            self._pre_speech_samples = 0
+            return
+
+        self._pre_speech_buffer.append(chunk)
+        self._pre_speech_samples += self._num_samples(chunk)
+        self._trim_pre_speech_buffer()
+
+    def buffer_with_pad(self) -> list[torch.Tensor]:
+        if not self.prefix_buffer:
+            return list(self.buffer)
+        return [*self.prefix_buffer, *self.buffer]
 
     @torch.no_grad()
     def __call__(self, x):
@@ -79,6 +128,9 @@ class VADIterator:
 
         if (speech_prob >= self.threshold) and not self.triggered:
             self.triggered = True
+            self.prefix_buffer = list(self._pre_speech_buffer)
+            self._pre_speech_buffer.clear()
+            self._pre_speech_samples = 0
             self.buffer.append(x)
             return None
 
@@ -91,9 +143,14 @@ class VADIterator:
                 # end of speak
                 self.temp_end = 0
                 self.triggered = False
-                spoken_utterance = self.buffer
+                spoken_utterance = self.buffer_with_pad()
                 self.buffer = []
+                self.prefix_buffer = []
                 return spoken_utterance
+
+        if not self.triggered:
+            self._remember_pre_speech(x)
+            return None
 
         if self.triggered:
             self.buffer.append(x)
