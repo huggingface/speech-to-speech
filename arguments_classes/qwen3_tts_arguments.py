@@ -89,9 +89,9 @@ class Qwen3TTSHandlerArguments:
         },
     )
     qwen3_tts_max_new_tokens: int = field(
-        default=360,
+        default=1536,
         metadata={
-            "help": "Maximum codec tokens to generate (~12 tokens per second of audio, ~30s max). Default is 360."
+            "help": "Upper cap for Qwen3-TTS codec tokens. The handler estimates a per-utterance budget from the text and clamps it to this ceiling (~12 tokens per second of audio). Raise this above 1536 if you want to allow longer utterances."
         },
     )
     qwen3_tts_blocksize: int = field(

@@ -6,10 +6,13 @@ Qwen3 TTS Handler
 """
 
 import logging
+import math
 from pathlib import Path
+import re
 from sys import platform
 import tempfile
 from time import perf_counter
+import unicodedata
 
 import numpy as np
 from rich.console import Console
@@ -29,9 +32,16 @@ DEFAULT_MLX_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit"
 DEFAULT_REF_TEXT = "I'm confused why some people have super short timelines, yet at the same time are bullish on scaling up reinforcement learning atop LLMs. If we're actually close to a human-like learner, then this whole approach of training on verifiable outcomes."
 DEFAULT_FASTER_STREAMING_CHUNK_SIZE = 8
 DEFAULT_MLX_STREAMING_CHUNK_SIZE = 4
+DEFAULT_QWEN3_TTS_MAX_NEW_TOKENS = 1536
+MIN_QWEN3_TTS_UTTERANCE_TOKENS = 360
 VALID_MLX_QUANTIZATION_SUFFIXES = ("bf16", "4bit", "6bit", "8bit")
 MLX_STREAMING_TOKENS_PER_SECOND = 12.5
 PIPELINE_SR = 16000
+ESTIMATED_QWEN3_WORDS_PER_SECOND = 2.6
+ESTIMATED_QWEN3_CHARS_PER_SECOND = 14.0
+QWEN3_TOKEN_SAFETY_MARGIN = 1.35
+QWEN3_BASE_PROMPT_SECONDS = 1.0
+QWEN3_PUNCTUATION_PAUSE_SECONDS = 0.5
 
 
 class Qwen3TTSHandler(BaseHandler):
@@ -65,7 +75,7 @@ class Qwen3TTSHandler(BaseHandler):
         non_streaming_mode=None,
         mlx_quantization=None,
         streaming_chunk_size=None,
-        max_new_tokens=360,
+        max_new_tokens=DEFAULT_QWEN3_TTS_MAX_NEW_TOKENS,
         blocksize=512,
         gen_kwargs=None,
         runtime_config: RuntimeConfig | None = None,
@@ -417,6 +427,56 @@ class Qwen3TTSHandler(BaseHandler):
     def _to_int16(self, audio):
         return np.clip(audio * 32768, -32768, 32767).astype(np.int16)
 
+    def _estimate_max_new_tokens(self, text):
+        text = (text or "").strip()
+        chunk_size = max(1, int(getattr(self, "streaming_chunk_size", 1)))
+        configured_cap = max(1, int(getattr(self, "max_new_tokens", DEFAULT_QWEN3_TTS_MAX_NEW_TOKENS)))
+
+        if not text:
+            return min(configured_cap, MIN_QWEN3_TTS_UTTERANCE_TOKENS)
+
+        word_count = len(re.findall(r"\w+", text, flags=re.UNICODE))
+        char_count = len(re.sub(r"\s+", "", text))
+        word_seconds = (
+            word_count / ESTIMATED_QWEN3_WORDS_PER_SECOND if word_count else 0.0
+        )
+        char_seconds = (
+            char_count / ESTIMATED_QWEN3_CHARS_PER_SECOND if char_count else 0.0
+        )
+        punctuation_count = sum(
+            unicodedata.category(ch).startswith("P") for ch in text
+        )
+        punctuation_seconds = punctuation_count * QWEN3_PUNCTUATION_PAUSE_SECONDS
+        estimated_seconds = max(word_seconds, char_seconds) + punctuation_seconds + QWEN3_BASE_PROMPT_SECONDS
+        estimated_tokens = math.ceil(
+            estimated_seconds
+            * MLX_STREAMING_TOKENS_PER_SECOND
+            * QWEN3_TOKEN_SAFETY_MARGIN
+        )
+        aligned_tokens = max(
+            chunk_size,
+            math.ceil(estimated_tokens / chunk_size) * chunk_size,
+        )
+        requested_tokens = max(MIN_QWEN3_TTS_UTTERANCE_TOKENS, aligned_tokens)
+        resolved_tokens = min(configured_cap, requested_tokens)
+
+        if resolved_tokens < requested_tokens:
+            logger.warning(
+                "Qwen3-TTS estimated %d codec tokens for a %d-character utterance, "
+                "but max_new_tokens is capped at %d; output may still truncate.",
+                requested_tokens,
+                len(text),
+                configured_cap,
+            )
+
+        logger.debug(
+            "Qwen3-TTS using max_new_tokens=%d for utterance with %d words and %d chars",
+            resolved_tokens,
+            word_count,
+            char_count,
+        )
+        return resolved_tokens
+
     def _warmup_process(self, llm_sentence):
         model_type = self._model_type()
         if self.ref_audio:
@@ -602,28 +662,29 @@ class Qwen3TTSHandler(BaseHandler):
     def _mlx_streaming_interval(self):
         return max(1, self.streaming_chunk_size) / MLX_STREAMING_TOKENS_PER_SECOND
 
-    def _mlx_stream_kwargs(self):
+    def _mlx_stream_kwargs(self, max_tokens):
         return {
-            "max_tokens": self.max_new_tokens,
+            "max_tokens": max_tokens,
             "verbose": False,
             "stream": True,
             "streaming_interval": self._mlx_streaming_interval(),
             **self.gen_kwargs,
         }
 
-    def _stream_mlx_generation(self, generation_fn, label, **generation_kwargs):
+    def _stream_mlx_generation(self, generation_fn, label, max_tokens, **generation_kwargs):
         with MLXLockContext(handler_name="Qwen3TTS", timeout=10.0) as acquired:
             if not acquired:
                 raise TimeoutError("Timed out waiting for MLX lock")
             yield from self._stream(
                 generation_fn(
-                    **self._mlx_stream_kwargs(),
+                    **self._mlx_stream_kwargs(max_tokens=max_tokens),
                     **generation_kwargs,
                 ),
                 label=label,
             )
 
     def _process_voice_clone(self, text):
+        utterance_max_new_tokens = self._estimate_max_new_tokens(text)
         if self.backend == "mlx":
             if self.xvec_only:
                 logger.warning("mlx-audio Qwen3-TTS does not support xvec_only; ignoring it")
@@ -633,6 +694,7 @@ class Qwen3TTSHandler(BaseHandler):
             yield from self._stream_mlx_generation(
                 self.model.generate,
                 label="voice_clone_mlx",
+                max_tokens=utterance_max_new_tokens,
                 text=text,
                 ref_audio=self._prepare_mlx_ref_audio(self.ref_audio),
                 ref_text=self.ref_text,
@@ -648,7 +710,7 @@ class Qwen3TTSHandler(BaseHandler):
                 ref_text=self.ref_text,
                 xvec_only=self.xvec_only,
                 chunk_size=self.streaming_chunk_size,
-                max_new_tokens=self.max_new_tokens,
+                max_new_tokens=utterance_max_new_tokens,
                 parity_mode=self.parity_mode,
                 non_streaming_mode=self.non_streaming_mode,
             ),
@@ -656,6 +718,7 @@ class Qwen3TTSHandler(BaseHandler):
         )
 
     def _process_custom_voice(self, text):
+        utterance_max_new_tokens = self._estimate_max_new_tokens(text)
         speaker = self._resolve_speaker()
         if not speaker:
             raise ValueError(
@@ -667,6 +730,7 @@ class Qwen3TTSHandler(BaseHandler):
             yield from self._stream_mlx_generation(
                 self.model.generate_custom_voice,
                 label="custom_voice_mlx",
+                max_tokens=utterance_max_new_tokens,
                 text=text,
                 speaker=speaker,
                 language=self.language,
@@ -681,17 +745,19 @@ class Qwen3TTSHandler(BaseHandler):
                 language=self.language,
                 instruct=self.instruct,
                 chunk_size=self.streaming_chunk_size,
-                max_new_tokens=self.max_new_tokens,
+                max_new_tokens=utterance_max_new_tokens,
                 non_streaming_mode=self.non_streaming_mode,
             ),
             label="custom_voice",
         )
 
     def _process_voice_design(self, text):
+        utterance_max_new_tokens = self._estimate_max_new_tokens(text)
         if self.backend == "mlx":
             yield from self._stream_mlx_generation(
                 self.model.generate_voice_design,
                 label="voice_design_mlx",
+                max_tokens=utterance_max_new_tokens,
                 text=text,
                 instruct=self.instruct,
                 language=self.language,
@@ -704,7 +770,7 @@ class Qwen3TTSHandler(BaseHandler):
                 instruct=self.instruct,
                 language=self.language,
                 chunk_size=self.streaming_chunk_size,
-                max_new_tokens=self.max_new_tokens,
+                max_new_tokens=utterance_max_new_tokens,
                 non_streaming_mode=self.non_streaming_mode,
             ),
             label="voice_design",
