@@ -64,6 +64,12 @@ class Qwen3TTSHandlerArguments:
             "help": "Disable CUDA-graph streaming path and use parity mode for stability. Default is False."
         },
     )
+    qwen3_tts_non_streaming_mode: Optional[bool] = field(
+        default=None,
+        metadata={
+            "help": "Optional override for Qwen3-TTS text prefill behavior. Leave unset to keep each backend/mode default. Set to true to prefill the full target text before decode, or false to feed trailing text token-by-token during decode. Currently ignored on Apple Silicon because mlx-audio does not expose this yet."
+        },
+    )
     qwen3_tts_mlx_quantization: Optional[str] = field(
         default=None,
         metadata={
@@ -83,9 +89,9 @@ class Qwen3TTSHandlerArguments:
         },
     )
     qwen3_tts_max_new_tokens: int = field(
-        default=360,
+        default=1536,
         metadata={
-            "help": "Maximum codec tokens to generate (~12 tokens per second of audio, ~30s max). Default is 360."
+            "help": "Upper cap for Qwen3-TTS codec tokens. The handler estimates a per-utterance budget from the text and clamps it to this ceiling (~12 tokens per second of audio). Raise this above 1536 if you want to allow longer utterances."
         },
     )
     qwen3_tts_blocksize: int = field(
