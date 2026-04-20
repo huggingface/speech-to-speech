@@ -5,7 +5,6 @@ import time
 
 import httpx
 from nltk import sent_tokenize
-from rich.console import Console
 from openai import OpenAI, Stream
 from openai.types.responses import Response, ResponseStreamEvent
 
@@ -23,8 +22,6 @@ from pipeline_messages import (
 )
 
 logger = logging.getLogger(__name__)
-
-console = Console()
 
 
 class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
@@ -133,19 +130,18 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
             language_code, lang_name = resolve_auto_language(language_code)
             if lang_name:
                 active_chat.append({"role": self.user_role, "content": [{"type": "input_text", "text": f"Please reply to my message in {lang_name}."}]})
-        else:
+        elif isinstance(request, Transcription):
             original_chat = self.chat
             active_chat = original_chat
             logger.debug("call api language model...")
-            if isinstance(request, Transcription):
-                language_code = request.language_code
-                prompt_text = request.text
-                language_code, lang_name = resolve_auto_language(language_code)
-                if lang_name:
-                    prompt_text = f"Please reply to my message in {lang_name}. " + prompt_text
-                active_chat.append({"role": self.user_role, "content": [{"type": "input_text", "text": prompt_text}]})
-            else:
-                active_chat.append({"role": self.user_role, "content": [{"type": "input_text", "text": request}]})
+            language_code = request.language_code
+            prompt_text = request.text
+            language_code, lang_name = resolve_auto_language(language_code)
+            if lang_name:
+                prompt_text = f"Please reply to my message in {lang_name}. " + prompt_text
+            active_chat.append({"role": self.user_role, "content": [{"type": "input_text", "text": prompt_text}]})
+        else:
+            raise TypeError(f"Unexpected request type: {type(request)}")
 
         optional_kwargs = {}
         if req_tools is not None:
@@ -164,8 +160,6 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
         clean_text = ""
         input_tokens = 0
         output_tokens = 0
-        print(f"active_chat: {active_chat.to_list()}")
-        print(f"original_chat: {original_chat.to_list()}")
         try:
             api_response = self.client.responses.create(
                 model=self.model_name,

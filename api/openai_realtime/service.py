@@ -1,10 +1,8 @@
 import logging
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from queue import Queue
 from threading import Event as ThreadingEvent
 from typing import Callable, Literal, Optional, Union
-
-from pydantic import ValidationError
 
 from api.openai_realtime.events import (
     AssistantTextEvent,

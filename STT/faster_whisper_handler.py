@@ -5,7 +5,6 @@ import os
 from time import perf_counter
 
 from faster_whisper import WhisperModel
-import numpy as np
 from rich.console import Console
 
 from baseHandler import BaseHandler

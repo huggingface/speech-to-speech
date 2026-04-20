@@ -28,12 +28,6 @@ from threading import Event as ThreadingEvent
 
 from openai import AsyncOpenAI
 
-from openai.types.realtime import RealtimeSessionCreateRequest
-from openai.types.realtime.realtime_audio_config import RealtimeAudioConfig
-from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfigInput
-from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
-from openai.types.realtime.realtime_audio_formats import AudioPCM
-
 from cancel_scope import CancelScope
 from api.openai_realtime.events import (
     AssistantTextEvent,
@@ -45,17 +39,6 @@ from api.openai_realtime.events import (
 from api.openai_realtime.service import RealtimeService
 from api.openai_realtime.websocket_router import create_app
 from pipeline_messages import AUDIO_RESPONSE_DONE, PIPELINE_END
-
-
-def _session_16k() -> RealtimeSessionCreateRequest:
-    fmt = AudioPCM.model_construct(rate=16000, type="audio/pcm")
-    return RealtimeSessionCreateRequest.model_construct(
-        type="realtime",
-        audio=RealtimeAudioConfig.model_construct(
-            input=RealtimeAudioConfigInput.model_construct(format=fmt),
-            output=RealtimeAudioConfigOutput.model_construct(format=fmt),
-        ),
-    )
 
 
 # ---------------------------------------------------------------------------

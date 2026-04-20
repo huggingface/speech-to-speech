@@ -5,7 +5,6 @@ from transformers import (
     AutoProcessor,
     AutoModelForSpeechSeq2Seq
 )
-import numpy as np
 import torch
 from copy import copy
 from baseHandler import BaseHandler
@@ -129,7 +128,7 @@ class WhisperSTTHandler(BaseHandler[VADAudio]):
         language_code = self.processor.tokenizer.decode(pred_ids[0, 1])[2:-2]  # remove "<|" and "|>"
 
         if language_code not in SUPPORTED_LANGUAGES:  # reprocess with the last language
-            logger.warning("Whisper detected unsupported language:", language_code)
+            logger.warning("Whisper detected unsupported language: %s", language_code)
             gen_kwargs = copy(self.gen_kwargs)
             gen_kwargs['language'] = self.last_language
             language_code = self.last_language

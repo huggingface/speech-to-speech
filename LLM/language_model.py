@@ -26,7 +26,6 @@ from LLM.tool_call.tool_prompt import build_tool_system_prompt, build_block_rege
 from typing import Any, Literal
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
-from rich.console import Console
 from LLM.utils import remove_unspeechable, resolve_auto_language, image_url_to_pil
 from LLM.voice_prompt import build_voice_system_prompt
 from pipeline_messages import (
@@ -52,8 +51,6 @@ except ImportError:
     HAS_MLX_VLM = False
 
 logger = logging.getLogger(__name__)
-
-console = Console()
 
 
 class _CancelCriteria(StoppingCriteria):
@@ -99,7 +96,7 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
     """Abstract base for text-only and vision language model handlers.
 
     Holds shared pipeline logic (streaming, tool extraction, chat management)
-    and delegates model-specific behaviour to three abstract hooks:
+    and delegates model-specific behaviour to two abstract hooks:
     ``_load_model`` and ``_generate``.
     """
 
@@ -332,19 +329,18 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
             language_code, lang_name = resolve_auto_language(language_code)
             if lang_name:
                 active_chat.append({"role": self.user_role, "content": f"Please reply to my message in {lang_name}."})
-        else:
+        elif isinstance(request, Transcription):
             original_chat = self.chat
             active_chat = original_chat
             logger.debug("infering language model...")
-            if isinstance(request, Transcription):
-                language_code = request.language_code
-                prompt_text = request.text
-                language_code, lang_name = resolve_auto_language(language_code)
-                if lang_name:
-                    prompt_text = f"Please reply to my message in {lang_name}. " + prompt_text
-                active_chat.append({"role": self.user_role, "content": prompt_text})
-            else:
-                active_chat.append({"role": self.user_role, "content": request})
+            language_code = request.language_code
+            prompt_text = request.text
+            language_code, lang_name = resolve_auto_language(language_code)
+            if lang_name:
+                prompt_text = f"Please reply to my message in {lang_name}. " + prompt_text
+            active_chat.append({"role": self.user_role, "content": prompt_text})
+        else:
+            raise TypeError(f"Unexpected request type: {type(request)}")
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
 
@@ -544,7 +540,6 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
         else:
             self.torch_dtype = getattr(torch, torch_dtype)
             self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-            print(self.processor)
             self.tokenizer = self.processor.tokenizer
             self.model = AutoModelForImageTextToText.from_pretrained(
                 model_name, torch_dtype=self.torch_dtype, trust_remote_code=True

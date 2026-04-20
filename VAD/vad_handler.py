@@ -6,7 +6,6 @@ from VAD.vad_iterator import VADIterator
 from baseHandler import BaseHandler
 import numpy as np
 import torch
-from rich.console import Console
 
 from api.openai_realtime.events import SpeechStartedEvent, SpeechStoppedEvent
 from api.openai_realtime.runtime_config import RuntimeConfig
@@ -23,8 +22,6 @@ try:
 except (ImportError, ModuleNotFoundError) as e:
     HAS_DF = False
     logger.warning(f"DeepFilterNet not available for audio enhancement: {e}")
-
-console = Console()
 
 
 class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):

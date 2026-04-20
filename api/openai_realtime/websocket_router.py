@@ -7,7 +7,7 @@ from typing import Callable
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from api.openai_realtime.events import AssistantTextEvent, PipelineEvent, SpeechStartedEvent, SpeechStoppedEvent, TokenUsageEvent
+from api.openai_realtime.events import AssistantTextEvent, SpeechStartedEvent, SpeechStoppedEvent, TokenUsageEvent
 from api.openai_realtime.service import RealtimeService, ServerEvent
 from cancel_scope import CancelScope
 from pipeline_control import SESSION_END, is_control_message

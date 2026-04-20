@@ -546,7 +546,6 @@ class Qwen3TTSHandler(BaseHandler[TTSInput | EndOfResponse]):
 
     def process(self, tts_input: TTSInput | EndOfResponse):
         if isinstance(tts_input, EndOfResponse):
-            self.should_listen.set()
             yield AUDIO_RESPONSE_DONE
             return
 
@@ -575,9 +574,10 @@ class Qwen3TTSHandler(BaseHandler[TTSInput | EndOfResponse]):
                     "Provide qwen3_tts_ref_audio or use a CustomVoice/VoiceDesign model."
                 )
         except Exception as e:
-            if not runtime_config:
-                self.should_listen.set()
             logger.error(f"Error during Qwen3-TTS generation: {e}", exc_info=True)
+
+        if not runtime_config:
+            self.should_listen.set()
 
     def _mlx_streaming_interval(self):
         return max(1, self.streaming_chunk_size) / MLX_STREAMING_TOKENS_PER_SECOND

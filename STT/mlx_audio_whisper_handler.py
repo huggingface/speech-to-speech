@@ -6,7 +6,6 @@ from baseHandler import BaseHandler
 from pipeline_messages import Transcription, VADAudio
 import numpy as np
 from rich.console import Console
-import mlx.core as mx
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +101,7 @@ class MLXAudioWhisperSTTHandler(BaseHandler[VADAudio]):
         global pipeline_start
         pipeline_start = perf_counter()
 
+        assert isinstance(vad_audio.audio, np.ndarray), "Audio must be a numpy array"
         audio_input = vad_audio.audio.astype(np.float32)
 
         # Prepare generation kwargs - only pass valid parameters
