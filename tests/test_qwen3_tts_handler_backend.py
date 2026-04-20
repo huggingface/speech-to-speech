@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import TTS.qwen3_tts_handler as qwen3_tts_module
-from pipeline_messages import MessageTag
+from pipeline_messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from TTS.qwen3_tts_handler import Qwen3TTSHandler
 
 
@@ -242,19 +242,19 @@ def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     handler.backend = "mlx"
     handler.queue_in = Queue()
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
-    handler._apply_session_voice_override = lambda model_type, runtime_config=None: None
+    handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
     handler._process_voice_clone = lambda text: iter([np.zeros(512, dtype=np.int16)])
 
     monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
 
-    outputs = list(handler.process("Hello there."))
+    outputs = list(handler.process(TTSInput(text="Hello there.")))
 
     assert len(outputs) == 1
     assert handler.should_listen.is_set() is False
 
-    end_outputs = list(handler.process((MessageTag.END_OF_RESPONSE, None)))
+    end_outputs = list(handler.process(EndOfResponse()))
 
-    assert end_outputs == [qwen3_tts_module.AUDIO_RESPONSE_DONE]
+    assert end_outputs == [AUDIO_RESPONSE_DONE]
     assert handler.should_listen.is_set() is True
 
 
@@ -269,7 +269,7 @@ def test_process_reenables_listening_when_generation_fails_outside_realtime(monk
     handler.backend = "mlx"
     handler.queue_in = Queue()
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
-    handler._apply_session_voice_override = lambda model_type, runtime_config=None: None
+    handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
 
     def _boom(text):
         raise RuntimeError("boom")
@@ -279,7 +279,7 @@ def test_process_reenables_listening_when_generation_fails_outside_realtime(monk
 
     monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
 
-    outputs = list(handler.process("Hello there."))
+    outputs = list(handler.process(TTSInput(text="Hello there.")))
 
     assert outputs == []
     assert handler.should_listen.is_set() is True

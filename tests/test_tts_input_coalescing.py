@@ -6,7 +6,7 @@ from threading import Event
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pipeline_control import SESSION_END
-from pipeline_messages import MessageTag
+from pipeline_messages import EndOfResponse, TTSInput
 from TTS.qwen3_tts_handler import Qwen3TTSHandler
 
 
@@ -21,23 +21,26 @@ def _make_handler():
 def test_coalesce_pending_tts_input_merges_ready_sentences_and_absorbs_response_end():
     handler = _make_handler()
 
-    handler.queue_in.put(("Second sentence.", "en"))
-    handler.queue_in.put(("Third sentence.", "en"))
-    handler.queue_in.put((MessageTag.END_OF_RESPONSE, None))
+    handler.queue_in.put(TTSInput(text="Second sentence.", language_code="en"))
+    handler.queue_in.put(TTSInput(text="Third sentence.", language_code="en"))
+    handler.queue_in.put(EndOfResponse())
 
-    combined, saw_end = handler._coalesce_pending_tts_input(("First sentence.", "en"))
+    text, lang, saw_end = handler._coalesce_pending_tts_input(TTSInput(text="First sentence.", language_code="en"))
 
-    assert combined == ("First sentence. Second sentence. Third sentence.", "en")
+    assert text == "First sentence. Second sentence. Third sentence."
+    assert lang == "en"
     assert saw_end is True
-    assert handler.queue_in.get_nowait() == (MessageTag.END_OF_RESPONSE, None)
+    remaining = handler.queue_in.get_nowait()
+    assert isinstance(remaining, EndOfResponse)
 
 
 def test_coalesce_pending_tts_input_stops_before_control_messages():
     handler = _make_handler()
 
     handler.queue_in.put(SESSION_END)
-    combined, saw_end = handler._coalesce_pending_tts_input(("Hello.", "en"))
+    text, lang, saw_end = handler._coalesce_pending_tts_input(TTSInput(text="Hello.", language_code="en"))
 
-    assert combined == ("Hello.", "en")
+    assert text == "Hello."
+    assert lang == "en"
     assert saw_end is False
     assert handler.queue_in.get_nowait() == SESSION_END

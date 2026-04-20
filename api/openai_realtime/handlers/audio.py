@@ -13,6 +13,8 @@ from openai.types.realtime import (
     ResponseCreatedEvent,
 )
 
+from api.openai_realtime.events import SpeechStartedEvent, SpeechStoppedEvent
+
 from api.openai_realtime.handlers.base import RealtimeBaseHandler
 from api.openai_realtime.utils import resample
 
@@ -78,7 +80,7 @@ class AudioHandler(RealtimeBaseHandler):
 
     # ── Pipeline event handlers ────────────────────
 
-    def on_speech_started(self, conn_id: str, msg: dict) -> list[ServerEvent]:
+    def on_speech_started(self, conn_id: str, event: SpeechStartedEvent) -> list[ServerEvent]:
         """Handle VAD speech_started: cancel active response if interrupts enabled, start new input item."""
         response = self._service.response
         events: list[ServerEvent] = []
@@ -91,21 +93,20 @@ class AudioHandler(RealtimeBaseHandler):
         events.append(InputAudioBufferSpeechStartedEvent(
             type="input_audio_buffer.speech_started",
             event_id=self._next_event_id(),
-            audio_start_ms=msg.get("audio_start_ms", 0),
+            audio_start_ms=event.audio_start_ms,
             item_id=input_item_id,
         ))
         return events
 
-    def on_speech_stopped(self, conn_id: str, msg: dict) -> list[ServerEvent]:
+    def on_speech_stopped(self, conn_id: str, event: SpeechStoppedEvent) -> list[ServerEvent]:
         """Handle VAD speech_stopped: record duration and emit stopped event."""
         response = self._service.response
-        duration_s = msg.get("duration_s", 0.0)
-        if duration_s:
-            self._state(conn_id).input_audio_duration_s = duration_s
+        if event.duration_s:
+            self._state(conn_id).input_audio_duration_s = event.duration_s
         return [InputAudioBufferSpeechStoppedEvent(
             type="input_audio_buffer.speech_stopped",
             event_id=self._next_event_id(),
-            audio_end_ms=msg.get("audio_end_ms", msg.get("audio_stop_ms", 0)),
+            audio_end_ms=event.audio_end_ms,
             item_id=response._current_item_id(conn_id),
         )]
 

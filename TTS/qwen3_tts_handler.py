@@ -5,6 +5,8 @@ Qwen3 TTS Handler
 - On CUDA/CPU: Uses faster-qwen3-tts for low-latency streaming.
 """
 
+from __future__ import annotations
+
 import logging
 from pathlib import Path
 from sys import platform
@@ -17,7 +19,7 @@ from rich.console import Console
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
 from pipeline_control import SESSION_END, is_control_message
-from pipeline_messages import AUDIO_RESPONSE_DONE, PIPELINE_END, MessageTag
+from pipeline_messages import AUDIO_RESPONSE_DONE, PIPELINE_END, EndOfResponse, TTSInput
 from utils.mlx_lock import MLXLockContext
 
 logger = logging.getLogger(__name__)
@@ -33,7 +35,7 @@ MLX_STREAMING_TOKENS_PER_SECOND = 12.5
 PIPELINE_SR = 16000
 
 
-class Qwen3TTSHandler(BaseHandler):
+class Qwen3TTSHandler(BaseHandler[TTSInput | EndOfResponse]):
     """
     Handles Text-to-Speech using Qwen3-TTS.
 
@@ -122,6 +124,9 @@ class Qwen3TTSHandler(BaseHandler):
             self.streaming_chunk_size / MLX_STREAMING_TOKENS_PER_SECOND * 1000,
             self.backend,
         )
+
+        self._initial_speaker = self.speaker
+        self._initial_ref_audio = self.ref_audio
 
         self.warmup()
 
@@ -500,24 +505,13 @@ class Qwen3TTSHandler(BaseHandler):
             f"(RTF: {rtf:.2f}, {label})"
         )
 
-    def _coalesce_pending_tts_input(self, current_input):
+    def _coalesce_pending_tts_input(self, current_input: TTSInput):
         """Combine already-queued text chunks before the next TTS synthesis call."""
         if not hasattr(self.queue_in, "mutex") or not hasattr(self.queue_in, "queue"):
-            return current_input, False
+            return current_input.text, current_input.language_code, False
 
-        def _decode(item):
-            if isinstance(item, tuple):
-                if item and item[0] == MessageTag.END_OF_RESPONSE:
-                    return None, None, True
-                if len(item) == 2 and isinstance(item[0], str):
-                    return item[0], item[1], False
-            elif isinstance(item, str):
-                return item, None, False
-            return None, None, False
-
-        text, language_code, _ = _decode(current_input)
-        if text is None:
-            return current_input, False
+        text = current_input.text
+        language_code = current_input.language_code
 
         parts = [text.strip()] if text and text.strip() else []
         saw_end_of_response = False
@@ -529,65 +523,52 @@ class Qwen3TTSHandler(BaseHandler):
                     break
                 if isinstance(next_item, bytes) and next_item == PIPELINE_END:
                     break
-
-                next_text, next_language_code, is_end = _decode(next_item)
-                if is_end:
+                if isinstance(next_item, EndOfResponse):
                     saw_end_of_response = True
                     break
-                if next_text is None:
+                if not isinstance(next_item, TTSInput):
                     break
                 if (
                     language_code is not None
-                    and next_language_code is not None
-                    and next_language_code != language_code
+                    and next_item.language_code is not None
+                    and next_item.language_code != language_code
                 ):
                     break
 
                 self.queue_in.queue.popleft()
-                if next_text.strip():
-                    parts.append(next_text.strip())
+                if next_item.text.strip():
+                    parts.append(next_item.text.strip())
                 if language_code is None:
-                    language_code = next_language_code
+                    language_code = next_item.language_code
 
         combined_text = " ".join(parts).strip()
-        if isinstance(current_input, tuple):
-            return (combined_text, language_code), saw_end_of_response
-        return combined_text, saw_end_of_response
+        return combined_text, language_code, saw_end_of_response
 
-    def process(self, llm_sentence):
-        if isinstance(llm_sentence, tuple) and llm_sentence[0] == MessageTag.END_OF_RESPONSE:
+    def process(self, tts_input: TTSInput | EndOfResponse):
+        if isinstance(tts_input, EndOfResponse):
             self.should_listen.set()
             yield AUDIO_RESPONSE_DONE
             return
 
-        runtime_config = None
-        response = None
-        if isinstance(llm_sentence, tuple) and len(llm_sentence) == 4:
-            text, language_code, runtime_config, response = llm_sentence
-            llm_sentence = (text, language_code)
-        elif isinstance(llm_sentence, tuple) and len(llm_sentence) == 3:
-            text, language_code, runtime_config = llm_sentence
-            llm_sentence = (text, language_code)
+        runtime_config = tts_input.runtime_config
+        response = tts_input.response
 
-        llm_sentence, _saw_end_of_response = self._coalesce_pending_tts_input(llm_sentence)
+        coalesced_text, _language_code, _saw_end_of_response = self._coalesce_pending_tts_input(tts_input)
 
-        if isinstance(llm_sentence, tuple):
-            llm_sentence, _ = llm_sentence
-        if not llm_sentence:
-            llm_sentence = "Hello."
+        text = coalesced_text or "Hello."
 
         model_type = self._model_type()
         self._apply_session_voice_override(model_type, runtime_config, response)
 
-        console.print(f"[green]ASSISTANT: {llm_sentence}")
+        console.print(f"[green]ASSISTANT: {text}")
 
         try:
             if self.ref_audio:
-                yield from self._process_voice_clone(llm_sentence)
+                yield from self._process_voice_clone(text)
             elif model_type == "custom_voice":
-                yield from self._process_custom_voice(llm_sentence)
+                yield from self._process_custom_voice(text)
             elif model_type == "voice_design":
-                yield from self._process_voice_design(llm_sentence)
+                yield from self._process_voice_design(text)
             else:
                 raise ValueError(
                     "Qwen3-TTS Base model requires ref_audio for voice cloning. "
@@ -705,6 +686,11 @@ class Qwen3TTSHandler(BaseHandler):
             ),
             label="voice_design",
         )
+
+    def on_session_end(self):
+        self.speaker = self._initial_speaker
+        self.ref_audio = self._initial_ref_audio
+        logger.debug("Qwen3-TTS session state reset")
 
     def cleanup(self):
         try:

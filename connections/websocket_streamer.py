@@ -195,9 +195,9 @@ class WebSocketStreamer:
                     try:
                         text_message = self.text_output_queue.get_nowait()
                         if self.clients:
-                            # Send as JSON string
+                            payload = text_message.model_dump() if hasattr(text_message, "model_dump") else text_message
                             await asyncio.gather(
-                                *[client.send(json.dumps(text_message)) for client in self.clients],
+                                *[client.send(json.dumps(payload)) for client in self.clients],
                                 return_exceptions=True
                             )
                     except Empty:

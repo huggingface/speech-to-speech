@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import ChatTTS
 import logging
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
-from pipeline_messages import MessageTag, AUDIO_RESPONSE_DONE
+from pipeline_messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 import librosa
 import numpy as np
 from rich.console import Console
@@ -17,7 +19,7 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-class ChatTTSHandler(BaseHandler):
+class ChatTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
     def setup(
         self,
         should_listen,
@@ -44,22 +46,16 @@ class ChatTTSHandler(BaseHandler):
         logger.info(f"Warming up {self.__class__.__name__}")
         _ = self.model.infer("text")
 
-    def process(self, llm_sentence):
-        if isinstance(llm_sentence, tuple) and llm_sentence[0] == MessageTag.END_OF_RESPONSE:
+    def process(self, tts_input: TTSInput | EndOfResponse):
+        if isinstance(tts_input, EndOfResponse):
             yield AUDIO_RESPONSE_DONE
             return
 
-        runtime_config = None
-        response = None
-        if isinstance(llm_sentence, tuple) and len(llm_sentence) == 4:
-            llm_sentence, _, runtime_config, response = llm_sentence
-        elif isinstance(llm_sentence, tuple) and len(llm_sentence) == 3:
-            llm_sentence, _, runtime_config = llm_sentence
-        elif isinstance(llm_sentence, tuple):
-            llm_sentence, _ = llm_sentence
+        runtime_config = tts_input.runtime_config
+        text = tts_input.text
 
         _cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
-        console.print(f"[green]ASSISTANT: {llm_sentence}")
+        console.print(f"[green]ASSISTANT: {text}")
         if self.device == "mps":
             import time
 
@@ -71,7 +67,7 @@ class ChatTTSHandler(BaseHandler):
             )  # Removing this line makes it fail more often. I'm looking into it.
 
         wavs_gen = self.model.infer(
-            llm_sentence, params_infer_code=self.params_infer_code, stream=self.stream
+            text, params_infer_code=self.params_infer_code, stream=self.stream
         )
 
         if self.stream:

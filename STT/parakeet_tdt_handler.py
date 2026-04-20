@@ -8,6 +8,8 @@ Supports NVIDIA Parakeet TDT model for high-quality multilingual ASR.
 Model supports 25 European languages with automatic language detection.
 """
 
+from __future__ import annotations
+
 import logging
 from sys import platform
 from threading import Lock
@@ -16,7 +18,7 @@ from baseHandler import BaseHandler
 import numpy as np
 from rich.console import Console
 from utils.mlx_lock import MLXLockContext
-from pipeline_messages import MessageTag
+from pipeline_messages import PartialTranscription, Transcription, VADAudio
 
 try:
     from lingua import Language, LanguageDetectorBuilder
@@ -51,7 +53,7 @@ if LINGUA_AVAILABLE:
     _lingua_detector = LanguageDetectorBuilder.from_languages(*_lingua_languages).build()
 
 
-class ParakeetTDTSTTHandler(BaseHandler):
+class ParakeetTDTSTTHandler(BaseHandler[VADAudio]):
     """
     Handles Speech-to-Text using NVIDIA Parakeet TDT model.
 
@@ -192,24 +194,15 @@ class ParakeetTDTSTTHandler(BaseHandler):
         except Exception as e:
             logger.warning(f"Warmup failed: {e}")
 
-    def process(self, spoken_prompt):
+    def process(self, vad_audio: VADAudio):
         """
         Process audio and generate transcription.
 
-        Args:
-            spoken_prompt: Audio data as numpy array (float32, 16kHz)
-                         OR tuple of ("progressive"/"final", audio_array) for realtime mode
-
         Yields:
-            Tuple of (transcription_text, language_code)
+            :class:`PartialTranscription` or :class:`Transcription`
         """
-        # Check if this is progressive audio from VAD
-        is_progressive = False
-        if isinstance(spoken_prompt, tuple) and len(spoken_prompt) == 2:
-            mode, audio_input = spoken_prompt
-            is_progressive = (mode == "progressive")
-        else:
-            audio_input = spoken_prompt
+        is_progressive = vad_audio.mode == "progressive"
+        audio_input = vad_audio.audio
 
         # Ensure audio is float32 numpy array
         if not isinstance(audio_input, np.ndarray):
@@ -230,7 +223,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
                     try:
                         progressive_text = self._show_progressive_transcription(audio_input)
                         if progressive_text:
-                            yield (MessageTag.PARTIAL, progressive_text)
+                            yield PartialTranscription(text=progressive_text)
                             return
                     except Exception as e:
                         logger.debug(f"Progressive transcription failed: {e}")
@@ -272,7 +265,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
             if language_code:
                 console.print(f"[dim]Language: {language_code}[/dim]")
 
-        yield (pred_text, language_code)
+        yield Transcription(text=pred_text, language_code=language_code)
 
         # Reset processing_final flag for next utterance
         if self.enable_live_transcription:
@@ -460,6 +453,7 @@ class ParakeetTDTSTTHandler(BaseHandler):
             del self.model
 
     def on_session_end(self):
+        self.last_language = self.start_language if self.start_language else "en"
         if self.enable_live_transcription:
             self.processing_final = False
             if self.streaming_handler is not None:

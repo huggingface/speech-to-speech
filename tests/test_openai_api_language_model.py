@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cancel_scope import CancelScope
 from LLM.chat import Chat
 from LLM.openai_api_language_model import OpenApiModelHandler
-from pipeline_messages import MessageTag
+from pipeline_messages import EndOfResponse, LLMResponseChunk, Transcription
 
 
 def _make_text_delta_event(text):
@@ -71,13 +71,12 @@ def test_process_streams_text_from_response_events():
         )
     )
 
-    outputs = list(handler.process("Hi"))
+    outputs = list(handler.process(Transcription(text="Hi")))
 
-    assert outputs == [
-        ("Hello.", None, [], None, None),
-        ("How are you?", None, [], None, None),
-        (MessageTag.END_OF_RESPONSE, None, None),
-    ]
+    assert len(outputs) == 3
+    assert isinstance(outputs[0], LLMResponseChunk) and outputs[0].text == "Hello."
+    assert isinstance(outputs[1], LLMResponseChunk) and outputs[1].text == "How are you?"
+    assert isinstance(outputs[2], EndOfResponse)
 
 
 def test_process_handles_cancellation():
@@ -92,9 +91,10 @@ def test_process_handles_cancellation():
         responses=SimpleNamespace(create=fake_create)
     )
 
-    outputs = list(handler.process("Hi"))
+    outputs = list(handler.process(Transcription(text="Hi")))
 
-    assert outputs == [(MessageTag.END_OF_RESPONSE, None, None)]
+    assert len(outputs) == 1
+    assert isinstance(outputs[0], EndOfResponse)
 
 
 def test_process_read_timeout_ends_response_cleanly():
@@ -111,12 +111,11 @@ def test_process_read_timeout_ends_response_cleanly():
         responses=SimpleNamespace(create=lambda **kwargs: TimeoutStream())
     )
 
-    outputs = list(handler.process("Hi"))
+    outputs = list(handler.process(Transcription(text="Hi")))
 
-    assert outputs == [
-        ("Wow I'm a bit slow today, could you repeat that?", None, None, None, None),
-        (MessageTag.END_OF_RESPONSE, None, None),
-    ]
+    assert len(outputs) == 2
+    assert isinstance(outputs[0], LLMResponseChunk) and outputs[0].text == "Wow I'm a bit slow today, could you repeat that?"
+    assert isinstance(outputs[1], EndOfResponse)
 
 
 def test_disable_thinking_passes_extra_body():
@@ -134,7 +133,7 @@ def test_disable_thinking_passes_extra_body():
         responses=SimpleNamespace(create=fake_create)
     )
 
-    list(handler.process("Hi"))
+    list(handler.process(Transcription(text="Hi")))
 
     assert captured["extra_body"] == {
         "chat_template_kwargs": {"enable_thinking": False}
@@ -156,7 +155,7 @@ def test_no_disable_thinking_omits_extra_body():
         responses=SimpleNamespace(create=fake_create)
     )
 
-    list(handler.process("Hi"))
+    list(handler.process(Transcription(text="Hi")))
 
     assert captured.get("extra_body") is None
 
@@ -190,8 +189,8 @@ def test_second_turn_flattens_assistant_history_for_responses():
         responses=SimpleNamespace(create=fake_create)
     )
 
-    list(handler.process("Hi"))
-    list(handler.process("Again"))
+    list(handler.process(Transcription(text="Hi")))
+    list(handler.process(Transcription(text="Again")))
 
     assistant_items = [
         item for item in captured["input"]

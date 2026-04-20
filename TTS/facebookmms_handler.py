@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from transformers import VitsModel, AutoTokenizer
 import torch
 import numpy as np
@@ -5,7 +7,7 @@ import librosa
 from rich.console import Console
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
-from pipeline_messages import MessageTag, AUDIO_RESPONSE_DONE
+from pipeline_messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 import logging
 
 logging.basicConfig(
@@ -58,7 +60,7 @@ WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE = {
     "cy": "cym", # Welsh
 }
 
-class FacebookMMSTTSHandler(BaseHandler):
+class FacebookMMSTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
     def setup(
         self,
         should_listen,
@@ -78,6 +80,7 @@ class FacebookMMSTTSHandler(BaseHandler):
         self.chunk_size = chunk_size
         self.language = language
 
+        self._initial_language = self.language
         self.load_model(self.language)
         self.warmup()
 
@@ -127,25 +130,18 @@ class FacebookMMSTTSHandler(BaseHandler):
             logger.exception("Full traceback:")
             return None
 
-    def process(self, llm_sentence):
-        if isinstance(llm_sentence, tuple) and llm_sentence[0] == MessageTag.END_OF_RESPONSE:
+    def process(self, tts_input: TTSInput | EndOfResponse):
+        if isinstance(tts_input, EndOfResponse):
             yield AUDIO_RESPONSE_DONE
             return
 
-        runtime_config = None
-        response = None
         gen = self.cancel_scope.generation if self.cancel_scope else None
-        language_code = None
+        language_code = tts_input.language_code
+        runtime_config = tts_input.runtime_config
+        text = tts_input.text
 
-        if isinstance(llm_sentence, tuple) and len(llm_sentence) == 4:
-            llm_sentence, language_code, runtime_config, response = llm_sentence
-        elif isinstance(llm_sentence, tuple) and len(llm_sentence) == 3:
-            llm_sentence, language_code, runtime_config = llm_sentence
-        elif isinstance(llm_sentence, tuple):
-            llm_sentence, language_code = llm_sentence
-
-        console.print(f"[green]ASSISTANT: {llm_sentence}")
-        logger.debug(f"Processing text: {llm_sentence}")
+        console.print(f"[green]ASSISTANT: {text}")
+        logger.debug(f"Processing text: {text}")
         logger.debug(f"Language code: {language_code}")
 
         if language_code is not None and self.language != language_code:
@@ -156,7 +152,7 @@ class FacebookMMSTTSHandler(BaseHandler):
                 console.print(f"[red]Language {language_code} not supported by Facebook MMS. Using {self.language} instead.")
                 logger.warning(f"Unsupported language: {language_code}")
 
-        audio_output = self.generate_audio(llm_sentence)
+        audio_output = self.generate_audio(text)
         
         if audio_output is None or audio_output.numel() == 0:
             logger.warning("No audio output generated")
@@ -192,3 +188,8 @@ class FacebookMMSTTSHandler(BaseHandler):
 
         if not runtime_config:
             self.should_listen.set()
+
+    def on_session_end(self):
+        if self.language != self._initial_language:
+            self.load_model(self._initial_language)
+        logger.debug("Facebook MMS TTS session state reset")

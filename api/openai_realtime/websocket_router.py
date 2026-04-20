@@ -7,6 +7,7 @@ from typing import Callable
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from api.openai_realtime.events import AssistantTextEvent, PipelineEvent, SpeechStartedEvent, SpeechStoppedEvent, TokenUsageEvent
 from api.openai_realtime.service import RealtimeService, ServerEvent
 from cancel_scope import CancelScope
 from pipeline_control import SESSION_END, is_control_message
@@ -42,9 +43,7 @@ def _keep_audio_sentinel(item) -> bool:
 
 
 def _keep_user_text_event(item) -> bool:
-    if not isinstance(item, dict):
-        return False
-    return item.get("type") in ("speech_stopped", "token_usage")
+    return isinstance(item, (SpeechStoppedEvent, TokenUsageEvent))
 
 
 def create_app(
@@ -226,14 +225,13 @@ def create_app(
                 if text_output_queue:
                     try:
                         text_msg = text_output_queue.get_nowait()
-                        is_speech_start = text_msg.get("type") == "speech_started"
+                        is_speech_start = isinstance(text_msg, SpeechStartedEvent)
 
-                        # Capture response state before translate modifies it. To change when multiple sessions are supported.
                         was_in_response = False
                         if is_speech_start and app.state.active_session:
                             was_in_response = service._state(app.state.active_session).in_response
 
-                        if cancel_scope and cancel_scope.discarding and text_msg.get("type") == "assistant_text":
+                        if cancel_scope and cancel_scope.discarding and isinstance(text_msg, AssistantTextEvent):
                             pass
                         else:
                             for cid in service.connection_ids:

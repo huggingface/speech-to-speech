@@ -21,6 +21,7 @@ from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfi
 from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
 from openai.types.realtime.realtime_audio_formats import AudioPCM
 
+from api.openai_realtime.events import AssistantTextEvent, SpeechStartedEvent
 from api.openai_realtime.service import RealtimeService, CHUNK_SIZE_BYTES
 from api.openai_realtime.websocket_router import create_app
 from pipeline_control import SESSION_END, is_control_message
@@ -181,7 +182,7 @@ class TestClientEventDispatch:
                 response_playing.set()
                 output_queue.put(_pcm_bytes(256))
                 output_queue.put(_pcm_bytes(256))
-                text_output_queue.put({"type": "assistant_text", "text": "stale"})
+                text_output_queue.put(AssistantTextEvent(text="stale"))
                 ws.send_json({"type": "response.cancel"})
                 ws.receive_json()  # response.output_audio.done
                 ws.receive_json()  # response.done
@@ -309,13 +310,10 @@ class TestSendLoop:
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
-                text_output_queue.put({
-                    "type": "speech_started",
-                    "audio_start_ms": 100,
-                })
+                text_output_queue.put(SpeechStartedEvent())
                 msg = ws.receive_json()
                 assert msg["type"] == "input_audio_buffer.speech_started"
-                assert msg["audio_start_ms"] == 100
+                assert msg["audio_start_ms"] == 0
 
     def test_barge_in_discard_clears_after_response_done(self, setup):
         """After barge-in sets discarding=True, __RESPONSE_DONE__ must clear it back to False."""
@@ -327,7 +325,7 @@ class TestSendLoop:
                 service.response._ensure_response(conn_id)
                 response_playing.set()
                 # Trigger barge-in
-                text_output_queue.put({"type": "speech_started", "audio_start_ms": 0})
+                text_output_queue.put(SpeechStartedEvent())
                 ws.receive_json()  # input_audio_buffer.speech_started
                 ws.receive_json()  # response.output_audio.done
                 ws.receive_json()  # response.done
@@ -350,7 +348,7 @@ class TestSendLoop:
                 )
                 service.response._ensure_response(conn_id)
                 response_playing.set()
-                text_output_queue.put({"type": "speech_started", "audio_start_ms": 0})
+                text_output_queue.put(SpeechStartedEvent())
                 msg = ws.receive_json()
                 assert msg["type"] == "input_audio_buffer.speech_started"
                 time.sleep(0.15)
@@ -407,7 +405,7 @@ class TestCleanup:
                 service.response._ensure_response(conn_id)
                 response_playing.set()
                 output_queue.put(_pcm_bytes(256))
-                text_output_queue.put({"type": "assistant_text", "text": "stale"})
+                text_output_queue.put(AssistantTextEvent(text="stale"))
             time.sleep(0.2)
 
         assert not cancel_scope.discarding

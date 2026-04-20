@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import logging
 from time import perf_counter
 from baseHandler import BaseHandler
+from pipeline_messages import Transcription, VADAudio
 import numpy as np
 from rich.console import Console
 import mlx.core as mx
@@ -25,7 +28,7 @@ SUPPORTED_LANGUAGES = [
 ]
 
 
-class MLXAudioWhisperSTTHandler(BaseHandler):
+class MLXAudioWhisperSTTHandler(BaseHandler[VADAudio]):
     """
     Handles the Speech To Text generation using MLX Audio's Whisper implementation.
     Optimized for Apple Silicon using the MLX framework.
@@ -93,19 +96,13 @@ class MLXAudioWhisperSTTHandler(BaseHandler):
         except Exception as e:
             logger.warning(f"Warmup failed: {e}")
 
-    def process(self, spoken_prompt):
+    def process(self, vad_audio: VADAudio):
         logger.debug("inferring mlx-audio whisper...")
 
         global pipeline_start
         pipeline_start = perf_counter()
 
-        # Convert to numpy array if needed
-        if isinstance(spoken_prompt, mx.array):
-            audio_input = np.array(spoken_prompt)
-        elif not isinstance(spoken_prompt, np.ndarray):
-            audio_input = np.array(spoken_prompt, dtype=np.float32)
-        else:
-            audio_input = spoken_prompt.astype(np.float32)
+        audio_input = vad_audio.audio.astype(np.float32)
 
         # Prepare generation kwargs - only pass valid parameters
         gen_kwargs = {}
@@ -156,4 +153,4 @@ class MLXAudioWhisperSTTHandler(BaseHandler):
         if self.start_language == "auto":
             language_code += "-auto"
 
-        yield (pred_text, language_code)
+        yield Transcription(text=pred_text, language_code=language_code)

@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 from time import perf_counter
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
-from pipeline_messages import MessageTag, AUDIO_RESPONSE_DONE
+from pipeline_messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 import numpy as np
 import logging
 from rich.console import Console
@@ -10,7 +12,7 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-class PocketTTSHandler(BaseHandler):
+class PocketTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
     """
     Handler for Pocket TTS model from Kyutai Labs.
     Supports streaming audio generation with voice cloning.
@@ -85,28 +87,21 @@ class PocketTTSHandler(BaseHandler):
         """
         return 0.1  # 100ms threshold
 
-    def process(self, llm_sentence):
-        if isinstance(llm_sentence, tuple) and llm_sentence[0] == MessageTag.END_OF_RESPONSE:
+    def process(self, tts_input: TTSInput | EndOfResponse):
+        if isinstance(tts_input, EndOfResponse):
             yield AUDIO_RESPONSE_DONE
             return
 
-        runtime_config = None
-        response = None
         gen = self.cancel_scope.generation if self.cancel_scope else None
-        if isinstance(llm_sentence, tuple) and len(llm_sentence) == 4:
-            llm_sentence, language_code, runtime_config, response = llm_sentence
-            logger.debug(f"Received language code: {language_code}")
-        elif isinstance(llm_sentence, tuple) and len(llm_sentence) == 3:
-            llm_sentence, language_code, runtime_config = llm_sentence
-            logger.debug(f"Received language code: {language_code}")
-        elif isinstance(llm_sentence, tuple):
-            llm_sentence, language_code = llm_sentence
-            logger.debug(f"Received language code: {language_code}")
+        language_code = tts_input.language_code
+        runtime_config = tts_input.runtime_config
+        text = tts_input.text
+        logger.debug(f"Received language code: {language_code}")
 
-        console.print(f"[green]ASSISTANT: {llm_sentence}")
+        console.print(f"[green]ASSISTANT: {text}")
 
         # Generate audio stream
-        logger.debug(f"Generating audio for: {llm_sentence[:50]}...")
+        logger.debug(f"Generating audio for: {text[:50]}...")
 
         global pipeline_start
         first_chunk = True
@@ -134,7 +129,7 @@ class PocketTTSHandler(BaseHandler):
 
         for audio_chunk in self.model.generate_audio_stream(
             self.voice_state,
-            llm_sentence,
+            text,
             max_tokens=self.max_tokens,
             copy_state=True,  # Don't modify the original voice state
         ):

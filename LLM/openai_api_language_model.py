@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import time
 
@@ -12,14 +14,20 @@ from cancel_scope import CancelScope
 from LLM.chat import Chat
 from LLM.utils import remove_unspeechable, resolve_auto_language
 from LLM.voice_prompt import build_voice_system_prompt
-from pipeline_messages import GenerateResponseRequest, MessageTag
+from pipeline_messages import (
+    EndOfResponse,
+    GenerateResponseRequest,
+    LLMResponseChunk,
+    TokenUsage,
+    Transcription,
+)
 
 logger = logging.getLogger(__name__)
 
 console = Console()
 
 
-class OpenApiModelHandler(BaseHandler):
+class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
     """
     Handles the language model part.
     """
@@ -104,15 +112,15 @@ class OpenApiModelHandler(BaseHandler):
             full_instructions = build_voice_system_prompt(instructions)
             chat.init_chat({"role": "system", "content": [{"type": "input_text", "text": full_instructions}]})
 
-    def process(self, prompt):
+    def process(self, request: Transcription | GenerateResponseRequest):
         language_code = None
         runtime_config = None
         response = None
         req_tools = None
         req_tool_choice = None
 
-        if isinstance(prompt, tuple) and len(prompt) == 2 and prompt[0] == MessageTag.GENERATE_RESPONSE:
-            req: GenerateResponseRequest = prompt[1]
+        if isinstance(request, GenerateResponseRequest):
+            req = request
             runtime_config = req.runtime_config
             response = req.response
             original_chat = runtime_config.chat
@@ -129,12 +137,15 @@ class OpenApiModelHandler(BaseHandler):
             original_chat = self.chat
             active_chat = original_chat
             logger.debug("call api language model...")
-            if isinstance(prompt, tuple):
-                prompt, language_code = prompt
+            if isinstance(request, Transcription):
+                language_code = request.language_code
+                prompt_text = request.text
                 language_code, lang_name = resolve_auto_language(language_code)
                 if lang_name:
-                    prompt = f"Please reply to my message in {lang_name}. " + prompt
-            active_chat.append({"role": self.user_role, "content": [{"type": "input_text", "text": prompt}]})
+                    prompt_text = f"Please reply to my message in {lang_name}. " + prompt_text
+                active_chat.append({"role": self.user_role, "content": [{"type": "input_text", "text": prompt_text}]})
+            else:
+                active_chat.append({"role": self.user_role, "content": [{"type": "input_text", "text": request}]})
 
         optional_kwargs = {}
         if req_tools is not None:
@@ -179,7 +190,7 @@ class OpenApiModelHandler(BaseHandler):
                         sentences = sent_tokenize(printable_text)
                         if len(sentences) > 1:
                             for s in sentences[:-1]:
-                                yield s, language_code, [], runtime_config, response
+                                yield LLMResponseChunk(text=s, language_code=language_code, runtime_config=runtime_config, response=response)
                             printable_text = sentences[-1]
                     elif event.type == "response.output_item.done":
                         if event.item.type == "function_call":
@@ -198,7 +209,7 @@ class OpenApiModelHandler(BaseHandler):
                     if printable_text.strip() or tools:
                         logger.debug(f"Clean text: {clean_text}")
                         logger.info(f"Tools: {tools}")
-                        yield printable_text.strip(), language_code, tools, runtime_config, response
+                        yield LLMResponseChunk(text=printable_text.strip(), language_code=language_code, tools=tools, runtime_config=runtime_config, response=response)
             else:
                 if gen is not None and self.cancel_scope.is_stale(gen):
                     logger.info("LLM generation cancelled (interruption)")
@@ -223,13 +234,13 @@ class OpenApiModelHandler(BaseHandler):
                     logger.debug(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
                     if clean_text.strip() or tools:
-                        yield clean_text.strip(), language_code, tools, runtime_config, response
+                        yield LLMResponseChunk(text=clean_text.strip(), language_code=language_code, tools=tools, runtime_config=runtime_config, response=response)
         except httpx.ReadTimeout:
             logger.warning(
                 "OpenAI API read timed out after %.1fs; ending the current response",
                 self.request_timeout_s,
             )
-            yield ("Wow I'm a bit slow today, could you repeat that?", None, None, runtime_config, response)
+            yield LLMResponseChunk(text="Wow I'm a bit slow today, could you repeat that?", runtime_config=runtime_config, response=response)
         finally:
             if api_response is not None and hasattr(api_response, "close"):
                 try:
@@ -239,8 +250,8 @@ class OpenApiModelHandler(BaseHandler):
 
         original_chat.strip_images()
         if input_tokens or output_tokens:
-            yield (MessageTag.TOKEN_USAGE, input_tokens, output_tokens)
-        yield (MessageTag.END_OF_RESPONSE, None, None)
+            yield TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens)
+        yield EndOfResponse()
 
     def on_session_end(self):
         logger.debug("OpenAI API language model session state reset")

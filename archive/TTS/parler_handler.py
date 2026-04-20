@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 from threading import Event, Thread
 from time import perf_counter
 from baseHandler import BaseHandler
-from pipeline_messages import MessageTag, AUDIO_RESPONSE_DONE
+from pipeline_messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 import numpy as np
 import torch
 from transformers import (
@@ -45,7 +47,7 @@ WHISPER_LANGUAGE_TO_PARLER_SPEAKER = {
 }
 
 
-class ParlerTTSHandler(BaseHandler):
+class ParlerTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
     def setup(
         self,
         should_listen,
@@ -173,20 +175,15 @@ class ParlerTTSHandler(BaseHandler):
                 f"{self.__class__.__name__}:  warmed up! time: {start_event.elapsed_time(end_event) * 1e-3:.3f} s"
             )
 
-    def process(self, llm_sentence):
-        if isinstance(llm_sentence, tuple) and llm_sentence[0] == MessageTag.END_OF_RESPONSE:
+    def process(self, tts_input: TTSInput | EndOfResponse):
+        if isinstance(tts_input, EndOfResponse):
             yield AUDIO_RESPONSE_DONE
             return
 
-        runtime_config = None
-        response = None
-        if isinstance(llm_sentence, tuple) and len(llm_sentence) == 4:
-            llm_sentence, language_code, runtime_config, response = llm_sentence
-        elif isinstance(llm_sentence, tuple) and len(llm_sentence) == 3:
-            llm_sentence, language_code, runtime_config = llm_sentence
-        elif isinstance(llm_sentence, tuple):
-            llm_sentence, language_code = llm_sentence
-            language_code = None
+        runtime_config = tts_input.runtime_config
+        response = tts_input.response
+        language_code = tts_input.language_code
+        text = tts_input.text
 
         voice = None
         if response and response.audio and response.audio.output:
@@ -195,13 +192,11 @@ class ParlerTTSHandler(BaseHandler):
             voice = runtime_config.session.audio.output.voice
         if voice:
             self.speaker = voice
-        elif isinstance(llm_sentence, str):
-            pass
-        else:
+        elif language_code:
             self.speaker = WHISPER_LANGUAGE_TO_PARLER_SPEAKER.get(language_code, "Jason")
             
-        console.print(f"[green]ASSISTANT: {llm_sentence}")
-        nb_tokens = len(self.prompt_tokenizer(llm_sentence).input_ids)
+        console.print(f"[green]ASSISTANT: {text}")
+        nb_tokens = len(self.prompt_tokenizer(text).input_ids)
 
         pad_args = {}
         if self.compile_mode:
@@ -212,7 +207,7 @@ class ParlerTTSHandler(BaseHandler):
             pad_args["max_length_prompt"] = pad_length
 
         tts_gen_kwargs = self.prepare_model_inputs(
-            llm_sentence,
+            text,
             **pad_args,
         )
 

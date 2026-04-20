@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import logging
 from time import perf_counter
 from baseHandler import BaseHandler
+from pipeline_messages import Transcription, VADAudio
 from lightning_whisper_mlx import LightningWhisperMLX
 import numpy as np
 from rich.console import Console
@@ -26,7 +29,7 @@ SUPPORTED_LANGUAGES = [
 ]
 
 
-class LightningWhisperSTTHandler(BaseHandler):
+class LightningWhisperSTTHandler(BaseHandler[VADAudio]):
     """
     Handles the Speech To Text generation using a Whisper model.
     """
@@ -59,21 +62,22 @@ class LightningWhisperSTTHandler(BaseHandler):
         for _ in range(n_steps):
             _ = self.model.transcribe(dummy_input)["text"].strip()
 
-    def process(self, spoken_prompt):
+    def process(self, vad_audio: VADAudio):
         logger.debug("infering whisper...")
 
         global pipeline_start
         pipeline_start = perf_counter()
 
+        audio = vad_audio.audio
         if self.start_language != 'auto':
-            transcription_dict = self.model.transcribe(spoken_prompt, language=self.start_language)
+            transcription_dict = self.model.transcribe(audio, language=self.start_language)
         else:
-            transcription_dict = self.model.transcribe(spoken_prompt)
+            transcription_dict = self.model.transcribe(audio)
             language_code = transcription_dict["language"]
             if language_code not in SUPPORTED_LANGUAGES:
                 logger.warning(f"Whisper detected unsupported language: {language_code}")
                 if self.last_language in SUPPORTED_LANGUAGES:  # reprocess with the last language
-                    transcription_dict = self.model.transcribe(spoken_prompt, language=self.last_language)
+                    transcription_dict = self.model.transcribe(audio, language=self.last_language)
                 else:
                     transcription_dict = {"text": "", "language": "en"}
             else:
@@ -90,4 +94,4 @@ class LightningWhisperSTTHandler(BaseHandler):
         if self.start_language == "auto":
             language_code += "-auto"
                     
-        yield (pred_text, language_code)
+        yield Transcription(text=pred_text, language_code=language_code)

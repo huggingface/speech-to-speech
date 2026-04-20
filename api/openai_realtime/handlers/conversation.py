@@ -14,6 +14,7 @@ from openai.types.realtime.conversation_item_input_audio_transcription_completed
     UsageTranscriptTextUsageDuration,
 )
 
+from api.openai_realtime.events import PartialTranscriptionEvent, TranscriptionCompletedEvent
 from api.openai_realtime.handlers.base import RealtimeBaseHandler
 
 if TYPE_CHECKING:
@@ -89,7 +90,7 @@ class ConversationHandler(RealtimeBaseHandler):
 
     # ── Pipeline event handlers ────────────────────
 
-    def on_partial_transcription(self, conn_id: str, msg: dict) -> list[ServerEvent]:
+    def on_partial_transcription(self, conn_id: str, event: PartialTranscriptionEvent) -> list[ServerEvent]:
         """Handle partial_transcription: emit transcription delta event."""
         response = self._service.response
         return [ConversationItemInputAudioTranscriptionDeltaEvent(
@@ -97,10 +98,10 @@ class ConversationHandler(RealtimeBaseHandler):
             event_id=self._next_event_id(),
             content_index=response._next_content_index(conn_id),
             item_id=response._current_item_id(conn_id),
-            delta=msg.get("delta", ""),
+            delta=event.delta,
         )]
 
-    def on_transcription_completed(self, conn_id: str, msg: dict) -> list[ServerEvent]:
+    def on_transcription_completed(self, conn_id: str, event: TranscriptionCompletedEvent) -> list[ServerEvent]:
         """Handle transcription_completed: accumulate duration and emit completed event."""
         response = self._service.response
         st = self._state(conn_id)
@@ -110,7 +111,7 @@ class ConversationHandler(RealtimeBaseHandler):
             event_id=self._next_event_id(),
             content_index=0,
             item_id=response._current_item_id(conn_id),
-            transcript=msg.get("transcript", ""),
+            transcript=event.transcript,
             usage=UsageTranscriptTextUsageDuration(
                 seconds=st.input_audio_duration_s, type="duration",
             ),

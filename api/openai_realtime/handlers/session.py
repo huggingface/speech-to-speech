@@ -5,7 +5,6 @@ from typing import Optional
 
 from openai.types.realtime import (
     RealtimeErrorEvent,
-    RealtimeSessionCreateRequest,
     SessionCreatedEvent,
     SessionUpdateEvent,
 )

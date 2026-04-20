@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from threading import Thread
@@ -27,7 +29,13 @@ from cancel_scope import CancelScope
 from rich.console import Console
 from LLM.utils import remove_unspeechable, resolve_auto_language, image_url_to_pil
 from LLM.voice_prompt import build_voice_system_prompt
-from pipeline_messages import GenerateResponseRequest, MessageTag
+from pipeline_messages import (
+    EndOfResponse,
+    GenerateResponseRequest,
+    LLMResponseChunk,
+    TokenUsage,
+    Transcription,
+)
 
 try:
     from mlx_lm import load as mlx_load, stream_generate as mlx_stream_generate, generate as mlx_generate
@@ -87,7 +95,7 @@ class StreamContext(BaseModel):
         return self.cancelled or self.stopped
 
 
-class BaseLanguageModelHandler(BaseHandler, ABC):
+class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseRequest], ABC):
     """Abstract base for text-only and vision language model handlers.
 
     Holds shared pipeline logic (streaming, tool extraction, chat management)
@@ -148,7 +156,7 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
         ctx: StreamContext,
         runtime_config=None,
         response=None,
-    ) -> Iterator[tuple[str, str | None, list, object, object]]:
+    ) -> Iterator[LLMResponseChunk]:
         """Run model generation, stream sentence chunks, set ``ctx.input_tokens``."""
 
     # ------------------------------------------------------------------
@@ -215,15 +223,14 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
     def _process_printable_text(
         self, printable_text: str, language_code: str | None, tools: list[dict],
         ctx: StreamContext, runtime_config=None, response=None,
-    ) -> tuple[list[tuple], list[dict], str]:
+    ) -> tuple[list[LLMResponseChunk], list[dict], str]:
         """Extract complete code blocks and return complete sentences to yield.
 
         Returns ``(chunks_to_yield, updated_tools, remaining_printable_text)``.
-        Each element in *chunks_to_yield* is a
-        ``(text, language_code, [], runtime_config, response)`` 5-tuple ready
-        to be yielded to the downstream pipeline.
+        Each element in *chunks_to_yield* is an :class:`LLMResponseChunk`
+        ready to be yielded to the downstream pipeline.
         """
-        chunks: list[tuple] = []
+        chunks: list[LLMResponseChunk] = []
 
         if ctx.block_regex and ctx.end_code and ctx.end_code in printable_text:
             stripped, func_calls = extract_function_calls_from_text(
@@ -243,7 +250,7 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
             before = printable_text[:idx]
             if before.strip():
                 for s in sent_tokenize(before):
-                    chunks.append((s, language_code, [], runtime_config, response))
+                    chunks.append(LLMResponseChunk(text=s, language_code=language_code, runtime_config=runtime_config, response=response))
             printable_text = printable_text[idx:]
             return chunks, tools, printable_text
 
@@ -251,7 +258,7 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
             sentences = sent_tokenize(printable_text)
             if len(sentences) > 1:
                 for s in sentences[:-1]:
-                    chunks.append((s, language_code, [], runtime_config, response))
+                    chunks.append(LLMResponseChunk(text=s, language_code=language_code, runtime_config=runtime_config, response=response))
                 printable_text = sentences[-1]
 
         return chunks, tools, printable_text
@@ -276,7 +283,7 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
         ctx: StreamContext,
         runtime_config=None,
         response=None,
-    ) -> Iterator[tuple[str, str | None, list, object, object]]:
+    ) -> Iterator[LLMResponseChunk]:
         """Consume *token_iter*, accumulate text in *ctx*, yield sentence chunks."""
         while True:
             try:
@@ -305,14 +312,14 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
     # Main pipeline entry point
     # ------------------------------------------------------------------
 
-    def process(self, prompt: str | tuple) -> Iterator[tuple]:
+    def process(self, request: Transcription | GenerateResponseRequest):
         language_code = None
         runtime_config = None
         response = None
         ctx = StreamContext()
 
-        if isinstance(prompt, tuple) and len(prompt) == 2 and prompt[0] == MessageTag.GENERATE_RESPONSE:
-            req: GenerateResponseRequest = prompt[1]
+        if isinstance(request, GenerateResponseRequest):
+            req = request
             runtime_config = req.runtime_config
             response = req.response
             original_chat = runtime_config.chat
@@ -329,12 +336,15 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
             original_chat = self.chat
             active_chat = original_chat
             logger.debug("infering language model...")
-            if isinstance(prompt, tuple):
-                prompt, language_code = prompt
+            if isinstance(request, Transcription):
+                language_code = request.language_code
+                prompt_text = request.text
                 language_code, lang_name = resolve_auto_language(language_code)
                 if lang_name:
-                    prompt = f"Please reply to my message in {lang_name}. " + prompt
-            active_chat.append({"role": self.user_role, "content": prompt})
+                    prompt_text = f"Please reply to my message in {lang_name}. " + prompt_text
+                active_chat.append({"role": self.user_role, "content": prompt_text})
+            else:
+                active_chat.append({"role": self.user_role, "content": request})
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
 
@@ -349,12 +359,12 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
         logger.info(f"Tools: {ctx.tools}")
 
         if not ctx.cancelled and (ctx.printable_text.strip() or ctx.tools):
-            yield (ctx.printable_text.strip(), language_code, ctx.tools, runtime_config, response)
+            yield LLMResponseChunk(text=ctx.printable_text.strip(), language_code=language_code, tools=ctx.tools, runtime_config=runtime_config, response=response)
 
         output_tokens = len(self.tokenizer.encode(ctx.raw_generated_text)) if ctx.raw_generated_text else 0
         if ctx.input_tokens or output_tokens:
-            yield (MessageTag.TOKEN_USAGE, ctx.input_tokens, output_tokens)
-        yield (MessageTag.END_OF_RESPONSE, None, None)
+            yield TokenUsage(input_tokens=ctx.input_tokens, output_tokens=output_tokens)
+        yield EndOfResponse()
 
     def on_session_end(self) -> None:
         logger.debug("Language model session state reset")
@@ -415,7 +425,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
                 **gen_kwargs,
             }
 
-    def _generate(self, chat: Chat, language_code: str | None, gen: int | None, ctx: StreamContext, runtime_config=None, response=None) -> Iterator[tuple[str, str | None, list, object, object]]:
+    def _generate(self, chat: Chat, language_code: str | None, gen: int | None, ctx: StreamContext, runtime_config=None, response=None) -> Iterator[LLMResponseChunk]:
         chat_messages = chat.to_list()
         chat_input = self.tokenizer.apply_chat_template(chat_messages, tokenize=True)
         ctx.input_tokens += len(chat_input if isinstance(chat_input, list) else chat_input["input_ids"])
@@ -548,7 +558,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             self._cancel_criteria = _CancelCriteria()
             self.gen_kwargs = gen_kwargs
 
-    def _generate(self, chat: Chat, language_code: str | None, gen: int | None, ctx: StreamContext, runtime_config=None, response=None) -> Iterator[tuple[str, str | None, list, object, object]]:
+    def _generate(self, chat: Chat, language_code: str | None, gen: int | None, ctx: StreamContext, runtime_config=None, response=None) -> Iterator[LLMResponseChunk]:
         if self.backend == "mlx":
             images, formatted_prompt = self._prepare_mlx_vlm_inputs(chat.to_list())
             ctx.input_tokens += len(self.tokenizer.encode(formatted_prompt))

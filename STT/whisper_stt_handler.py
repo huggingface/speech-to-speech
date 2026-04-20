@@ -1,11 +1,15 @@
+from __future__ import annotations
+
 from time import perf_counter
 from transformers import (
     AutoProcessor,
     AutoModelForSpeechSeq2Seq
 )
+import numpy as np
 import torch
 from copy import copy
 from baseHandler import BaseHandler
+from pipeline_messages import Transcription, VADAudio
 from rich.console import Console
 import logging
 
@@ -28,7 +32,7 @@ SUPPORTED_LANGUAGES = [
 ]
 
 
-class WhisperSTTHandler(BaseHandler):
+class WhisperSTTHandler(BaseHandler[VADAudio]):
     """
     Handles the Speech To Text generation using a Whisper model.
     """
@@ -65,9 +69,9 @@ class WhisperSTTHandler(BaseHandler):
             )
         self.warmup()
 
-    def prepare_model_inputs(self, spoken_prompt):
+    def prepare_model_inputs(self, audio):
         input_features = self.processor(
-            spoken_prompt, sampling_rate=16000, return_tensors="pt"
+            audio, sampling_rate=16000, return_tensors="pt"
         ).input_features
         input_features = input_features.to(self.device, dtype=self.torch_dtype)
 
@@ -114,13 +118,13 @@ class WhisperSTTHandler(BaseHandler):
                 f"{self.__class__.__name__}:  warmed up! time: {start_event.elapsed_time(end_event) * 1e-3:.3f} s"
             )
 
-    def process(self, spoken_prompt):
+    def process(self, vad_audio: VADAudio):
         logger.debug("infering whisper...")
 
         global pipeline_start
         pipeline_start = perf_counter()
 
-        input_features = self.prepare_model_inputs(spoken_prompt)
+        input_features = self.prepare_model_inputs(vad_audio.audio)
         pred_ids = self.model.generate(input_features, **self.gen_kwargs)
         language_code = self.processor.tokenizer.decode(pred_ids[0, 1])[2:-2]  # remove "<|" and "|>"
 
@@ -145,4 +149,4 @@ class WhisperSTTHandler(BaseHandler):
         if self.start_language == "auto":
             language_code += "-auto"
             
-        yield (pred_text, language_code)
+        yield Transcription(text=pred_text, language_code=language_code)
