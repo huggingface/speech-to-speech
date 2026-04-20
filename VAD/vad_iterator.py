@@ -97,10 +97,13 @@ class VADIterator:
         self._pre_speech_samples += self._num_samples(chunk)
         self._trim_pre_speech_buffer()
 
-    def buffer_with_pad(self) -> list[torch.Tensor]:
+    def _speech_buffer(self) -> list[torch.Tensor]:
         if not self.prefix_buffer:
             return list(self.buffer)
         return [*self.prefix_buffer, *self.buffer]
+
+    def speech_buffer(self) -> list[torch.Tensor]:
+        return self._speech_buffer()
 
     @torch.no_grad()
     def __call__(self, x):
@@ -123,9 +126,6 @@ class VADIterator:
 
         speech_prob = self.model(x, self.sampling_rate).item()
 
-        if (speech_prob >= self.threshold) and self.temp_end:
-            self.temp_end = 0
-
         if (speech_prob >= self.threshold) and not self.triggered:
             self.triggered = True
             self.prefix_buffer = list(self._pre_speech_buffer)
@@ -134,25 +134,29 @@ class VADIterator:
             self.buffer.append(x)
             return None
 
-        if (speech_prob < self.threshold - 0.15) and self.triggered:
-            if not self.temp_end:
-                self.temp_end = self.current_sample
-            if self.current_sample - self.temp_end < self.min_silence_samples:
-                return None
-            else:
-                # end of speak
-                self.temp_end = 0
-                self.triggered = False
-                spoken_utterance = self.buffer_with_pad()
-                self.buffer = []
-                self.prefix_buffer = []
-                return spoken_utterance
-
         if not self.triggered:
             self._remember_pre_speech(x)
             return None
 
         if self.triggered:
             self.buffer.append(x)
+            if (speech_prob >= self.threshold) and self.temp_end:
+                self.temp_end = 0
+                return None
+
+            if speech_prob < self.threshold - 0.15:
+                if not self.temp_end:
+                    self.temp_end = self.current_sample
+                if self.current_sample - self.temp_end < self.min_silence_samples:
+                    return None
+
+                # End of speech: keep the final low-confidence chunks that were
+                # observed before VAD decided the utterance was done.
+                self.temp_end = 0
+                self.triggered = False
+                spoken_utterance = self.speech_buffer()
+                self.buffer = []
+                self.prefix_buffer = []
+                return spoken_utterance
 
         return None

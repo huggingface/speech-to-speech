@@ -36,7 +36,7 @@ class VADHandlerArguments:
     speech_pad_ms: int = field(
         default=500,
         metadata={
-            "help": "Amount of audio retained before VAD triggers and prepended to detected speech segments. Measured in milliseconds. Default is 500 ms."
+            "help": "Amount of audio retained before VAD triggers and prepended to detected speech segments. Once speech is detected, audio continues to be kept until VAD declares the segment done. Measured in milliseconds. Default is 500 ms."
         },
     )
     audio_enhancement: bool = field(

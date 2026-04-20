@@ -170,7 +170,7 @@ class VADHandler(BaseHandler):
 
             # Yield accumulated audio periodically while speaking
             if (current_time - self.last_process_time) >= self.realtime_processing_pause:
-                array = torch.cat(self.iterator.buffer_with_pad()).cpu().numpy()
+                array = torch.cat(self.iterator.speech_buffer()).cpu().numpy()
                 duration_ms = len(array) / self.sample_rate * 1000
 
                 if duration_ms >= self.min_speech_ms:
