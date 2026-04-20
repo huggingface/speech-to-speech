@@ -394,6 +394,8 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
         yield (MessageTag.END_OF_RESPONSE, None, None)
 
     def on_session_end(self) -> None:
+        # reset() also clears init_chat_message, so a previous session's
+        # instructions cannot persist into the next one.
         self.chat.reset()
         self._last_instructions = None
         self.tools = None
