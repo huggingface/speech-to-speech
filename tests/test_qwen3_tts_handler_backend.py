@@ -451,3 +451,142 @@ def test_process_voice_design_passes_non_streaming_mode_to_faster_backend(monkey
 
     assert len(outputs) == 1
     assert captured["non_streaming_mode"] is override
+
+
+def test_estimate_max_new_tokens_scales_with_utterance_length():
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.streaming_chunk_size = 8
+    handler.max_new_tokens = 1536
+
+    short_budget = handler._estimate_max_new_tokens("Hello there.")
+    long_text = " ".join(
+        ["This is a deliberately long sentence for the Qwen3 TTS budget estimator."]
+        * 12
+    )
+    long_budget = handler._estimate_max_new_tokens(long_text)
+
+    assert short_budget == 360
+    assert long_budget > short_budget
+    assert long_budget % handler.streaming_chunk_size == 0
+    assert long_budget <= handler.max_new_tokens
+
+
+def test_estimate_max_new_tokens_respects_configured_cap():
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.streaming_chunk_size = 8
+    handler.max_new_tokens = 400
+
+    long_text = " ".join(
+        ["This is a deliberately long sentence for the Qwen3 TTS budget estimator."]
+        * 12
+    )
+
+    assert handler._estimate_max_new_tokens(long_text) == 400
+
+
+def test_estimate_max_new_tokens_can_exceed_default_ceiling_when_raised():
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.streaming_chunk_size = 8
+    handler.max_new_tokens = 2400
+
+    long_text = " ".join(
+        ["This is a deliberately long sentence for the Qwen3 TTS budget estimator."]
+        * 30
+    )
+
+    assert handler._estimate_max_new_tokens(long_text) > 1536
+
+
+def test_process_voice_clone_scales_max_new_tokens_for_faster_backend(monkeypatch):
+    captured = {}
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.should_listen = Event()
+    handler.runtime_config = None
+    handler.cancel_scope = None
+    handler.ref_audio = "TTS/ref_audio.wav"
+    handler.ref_text = "Reference text."
+    handler.speaker = None
+    handler.instruct = None
+    handler.language = "English"
+    handler.xvec_only = False
+    handler.parity_mode = False
+    handler.non_streaming_mode = None
+    handler.streaming_chunk_size = 8
+    handler.max_new_tokens = 1536
+    handler.blocksize = 512
+    handler.backend = "faster_qwen3_tts"
+    handler.queue_in = Queue()
+    handler.model = SimpleNamespace(
+        model=SimpleNamespace(model=SimpleNamespace(tts_model_type="base")),
+        generate_voice_clone_streaming=lambda **kwargs: (
+            captured.update(kwargs),
+            iter([(_audible_stream_chunk(), 16000, {})]),
+        )[1],
+    )
+
+    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+
+    long_text = " ".join(
+        ["This is a deliberately long sentence for the faster Qwen3 TTS backend."]
+        * 12
+    )
+    outputs = list(handler.process(long_text))
+
+    assert len(outputs) == 1
+    assert captured["max_new_tokens"] == handler._estimate_max_new_tokens(long_text)
+    assert captured["max_new_tokens"] > 360
+
+
+def test_process_voice_clone_scales_max_tokens_for_mlx_backend(monkeypatch):
+    captured = {}
+
+    class _FakeMLXLockContext:
+        def __init__(self, handler_name, timeout):
+            self.handler_name = handler_name
+            self.timeout = timeout
+
+        def __enter__(self):
+            return True
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.should_listen = Event()
+    handler.runtime_config = None
+    handler.cancel_scope = None
+    handler.ref_audio = "TTS/ref_audio.wav"
+    handler.ref_text = "Reference text."
+    handler.speaker = None
+    handler.instruct = None
+    handler.language = "English"
+    handler.xvec_only = False
+    handler.parity_mode = False
+    handler.non_streaming_mode = None
+    handler.streaming_chunk_size = 4
+    handler.max_new_tokens = 1536
+    handler.blocksize = 512
+    handler.backend = "mlx"
+    handler.gen_kwargs = {}
+    handler.queue_in = Queue()
+    handler.model = SimpleNamespace(
+        config=SimpleNamespace(tts_model_type="base"),
+        generate=lambda **kwargs: (
+            captured.update(kwargs),
+            iter([(_audible_stream_chunk(), 16000, {})]),
+        )[1],
+    )
+    handler._prepare_mlx_ref_audio = lambda ref_audio: ref_audio
+
+    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+    monkeypatch.setattr(qwen3_tts_module, "MLXLockContext", _FakeMLXLockContext)
+
+    long_text = " ".join(
+        ["This is a deliberately long sentence for the MLX Qwen3 TTS backend."]
+        * 12
+    )
+    outputs = list(handler.process(long_text))
+
+    assert len(outputs) == 1
+    assert captured["max_tokens"] == handler._estimate_max_new_tokens(long_text)
+    assert captured["max_tokens"] > 360
