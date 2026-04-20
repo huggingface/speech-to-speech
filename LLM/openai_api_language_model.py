@@ -11,9 +11,8 @@ from baseHandler import BaseHandler
 from cancel_scope import CancelScope
 from LLM.chat import Chat
 from LLM.utils import remove_unspeechable, resolve_auto_language
-from api.openai_realtime.runtime_config import RuntimeConfig
 from LLM.voice_prompt import build_voice_system_prompt
-from pipeline_messages import GenerateRequest, MessageTag
+from pipeline_messages import GenerateResponseRequest, MessageTag
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +36,6 @@ class OpenApiModelHandler(BaseHandler):
         chat_size=1,
         init_chat_role="system",
         init_chat_prompt="You are a helpful AI assistant.",
-        runtime_config: RuntimeConfig | None = None,
         cancel_scope: CancelScope | None = None,
         disable_thinking=True,
         request_timeout_s=20.0,
@@ -63,7 +61,6 @@ class OpenApiModelHandler(BaseHandler):
             self.chat.init_chat({"role": init_chat_role, "content": full_prompt})
         
         self.user_role = user_role
-        self.runtime_config = runtime_config
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self._extra_body = (
             {"chat_template_kwargs": {"enable_thinking": False}}
@@ -98,12 +95,6 @@ class OpenApiModelHandler(BaseHandler):
         logger.info(
             f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s"
         )
-    def _apply_runtime_config(self):
-        """Legacy path: read instructions from runtime_config (non-realtime)."""
-        if not self.runtime_config:
-            return
-        self._apply_config(self.chat, self.runtime_config.session.instructions)
-
     def _apply_config(
         self,
         chat: Chat,
@@ -115,28 +106,28 @@ class OpenApiModelHandler(BaseHandler):
 
     def process(self, prompt):
         language_code = None
+        runtime_config = None
+        response = None
         req_tools = None
         req_tool_choice = None
 
         if isinstance(prompt, tuple) and len(prompt) == 2 and prompt[0] == MessageTag.GENERATE_RESPONSE:
-            req: GenerateRequest = prompt[1]
-            original_chat = req.chat
+            req: GenerateResponseRequest = prompt[1]
+            runtime_config = req.runtime_config
+            response = req.response
+            original_chat = runtime_config.chat
             active_chat = original_chat.copy()
             language_code = req.language_code
-            req_tools = req.tools
-            req_tool_choice = req.tool_choice
-            self._apply_config(active_chat, req.instructions)
-            if req.override_instructions:
-                active_chat.append({"role": self.user_role, "content": [{"type": "input_text", "text": req.override_instructions}]})
-            print(f"language_code: {language_code}")
+            instructions = response.instructions if response and response.instructions else runtime_config.session.instructions
+            req_tools = response.tools if response and response.tools else runtime_config.session.tools
+            req_tool_choice = response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
+            self._apply_config(active_chat, instructions)
             language_code, lang_name = resolve_auto_language(language_code)
-            print(f"lang_name: {lang_name}")
             if lang_name:
                 active_chat.append({"role": self.user_role, "content": [{"type": "input_text", "text": f"Please reply to my message in {lang_name}."}]})
         else:
             original_chat = self.chat
             active_chat = original_chat
-            self._apply_runtime_config()
             logger.debug("call api language model...")
             if isinstance(prompt, tuple):
                 prompt, language_code = prompt
@@ -157,7 +148,7 @@ class OpenApiModelHandler(BaseHandler):
         # option is to run this API call in a child process and terminate() on session
         # end (IPC and lifecycle cost).
         gen = self.cancel_scope.generation if self.cancel_scope else None
-        response: Response | Stream[ResponseStreamEvent] | None = None
+        api_response: Response | Stream[ResponseStreamEvent] | None = None
         tools: list[dict[str, str]] = []
         clean_text = ""
         input_tokens = 0
@@ -165,7 +156,7 @@ class OpenApiModelHandler(BaseHandler):
         print(f"active_chat: {active_chat.to_list()}")
         print(f"original_chat: {original_chat.to_list()}")
         try:
-            response = self.client.responses.create(
+            api_response = self.client.responses.create(
                 model=self.model_name,
                 input=self._prepare_chat_messages(active_chat),
                 stream=self.stream,
@@ -176,7 +167,7 @@ class OpenApiModelHandler(BaseHandler):
             if self.stream:
                 cancelled = False
                 printable_text = ""
-                for event in response:
+                for event in api_response:
                     if gen is not None and self.cancel_scope.is_stale(gen):
                         logger.info("LLM generation cancelled (interruption)")
                         cancelled = True
@@ -188,7 +179,7 @@ class OpenApiModelHandler(BaseHandler):
                         sentences = sent_tokenize(printable_text)
                         if len(sentences) > 1:
                             for s in sentences[:-1]:
-                                yield s, language_code, []
+                                yield s, language_code, [], runtime_config, response
                             printable_text = sentences[-1]
                     elif event.type == "response.output_item.done":
                         if event.item.type == "function_call":
@@ -207,16 +198,16 @@ class OpenApiModelHandler(BaseHandler):
                     if printable_text.strip() or tools:
                         logger.debug(f"Clean text: {clean_text}")
                         logger.info(f"Tools: {tools}")
-                        yield printable_text.strip(), language_code, tools
+                        yield printable_text.strip(), language_code, tools, runtime_config, response
             else:
                 if gen is not None and self.cancel_scope.is_stale(gen):
                     logger.info("LLM generation cancelled (interruption)")
                 else:
-                    usage = getattr(response, "usage", None)
+                    usage = getattr(api_response, "usage", None)
                     if usage:
                         input_tokens = usage.input_tokens or 0
                         output_tokens = usage.output_tokens or 0
-                    for message in response.output:
+                    for message in api_response.output:
                         if message.type == "function_call":
                             tools.append(message.model_dump())
                         elif message.type == "message":
@@ -232,17 +223,17 @@ class OpenApiModelHandler(BaseHandler):
                     logger.debug(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
                     if clean_text.strip() or tools:
-                        yield clean_text.strip(), language_code, tools
+                        yield clean_text.strip(), language_code, tools, runtime_config, response
         except httpx.ReadTimeout:
             logger.warning(
                 "OpenAI API read timed out after %.1fs; ending the current response",
                 self.request_timeout_s,
             )
-            yield ("Wow I'm a bit slow today, could you repeat that?", None, None)
+            yield ("Wow I'm a bit slow today, could you repeat that?", None, None, runtime_config, response)
         finally:
-            if response is not None and hasattr(response, "close"):
+            if api_response is not None and hasattr(api_response, "close"):
                 try:
-                    response.close()
+                    api_response.close()
                 except Exception:
                     pass
 

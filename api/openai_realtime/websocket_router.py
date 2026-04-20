@@ -161,8 +161,9 @@ def create_app(
 
                 if isinstance(event, InputAudioBufferAppendEvent):
                     chunks = service.handle_audio_append(session_id, event)
+                    rt_cfg = service._state(session_id).runtime_config
                     for chunk in chunks:
-                        input_queue.put(chunk)
+                        input_queue.put((chunk, rt_cfg))
 
                 elif isinstance(event, InputAudioBufferCommitEvent):
                     err = service.handle_audio_commit(session_id)
@@ -206,9 +207,8 @@ def create_app(
             clean_session()
             service.unregister(session_id)
             if not service._conns:
-                service.runtime_config.reset()
                 input_queue.put(SESSION_END)
-                logger.info("Last client disconnected, reset RuntimeConfig and sent SESSION_END")
+                logger.info("Last client disconnected, sent SESSION_END")
             app.state.websockets.pop(session_id, None)
             app.state.active_session = None
             logger.info(f"Client {session_id} removed")
@@ -244,7 +244,8 @@ def create_app(
                                         await _send_events(ws, events)
 
                         if is_speech_start and was_in_response:
-                            if service.runtime_config.interrupt_response_enabled:
+                            active_cfg = service._state(app.state.active_session).runtime_config if app.state.active_session else None
+                            if active_cfg is None or active_cfg.interrupt_response_enabled:
                                 if cancel_scope:
                                     cancel_scope.cancel()
                                 _flush_queue(output_queue, preserve=_keep_audio_sentinel)

@@ -7,7 +7,6 @@ from baseHandler import BaseHandler
 from cancel_scope import CancelScope
 from pipeline_messages import MessageTag, AUDIO_RESPONSE_DONE
 import logging
-from api.openai_realtime.runtime_config import RuntimeConfig
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -68,12 +67,10 @@ class FacebookMMSTTSHandler(BaseHandler):
         language="en",
         stream=True,
         chunk_size=512,
-        runtime_config: RuntimeConfig | None = None, # accepted but unused; implement voice-switch logic in process() to support dynamic voice change
         cancel_scope: CancelScope | None = None,
         **kwargs
     ):
         self.should_listen = should_listen
-        self.runtime_config = runtime_config
         self.cancel_scope = cancel_scope
         self.device = device
         self.torch_dtype = getattr(torch, torch_dtype)
@@ -135,10 +132,16 @@ class FacebookMMSTTSHandler(BaseHandler):
             yield AUDIO_RESPONSE_DONE
             return
 
+        runtime_config = None
+        response = None
         gen = self.cancel_scope.generation if self.cancel_scope else None
         language_code = None
 
-        if isinstance(llm_sentence, tuple):
+        if isinstance(llm_sentence, tuple) and len(llm_sentence) == 4:
+            llm_sentence, language_code, runtime_config, response = llm_sentence
+        elif isinstance(llm_sentence, tuple) and len(llm_sentence) == 3:
+            llm_sentence, language_code, runtime_config = llm_sentence
+        elif isinstance(llm_sentence, tuple):
             llm_sentence, language_code = llm_sentence
 
         console.print(f"[green]ASSISTANT: {llm_sentence}")
@@ -157,7 +160,7 @@ class FacebookMMSTTSHandler(BaseHandler):
         
         if audio_output is None or audio_output.numel() == 0:
             logger.warning("No audio output generated")
-            if not getattr(self, 'runtime_config', None):
+            if not runtime_config:
                 self.should_listen.set()
             return
 
@@ -187,5 +190,5 @@ class FacebookMMSTTSHandler(BaseHandler):
                     (0, self.chunk_size - len(audio_int16[i : i + self.chunk_size])),
                 )
 
-        if not getattr(self, 'runtime_config', None):
+        if not runtime_config:
             self.should_listen.set()

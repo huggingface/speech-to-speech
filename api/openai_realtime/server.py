@@ -5,7 +5,6 @@ from threading import Event
 
 import uvicorn
 
-from api.openai_realtime.runtime_config import RuntimeConfig
 from api.openai_realtime.service import RealtimeService
 from api.openai_realtime.websocket_router import create_app
 from cancel_scope import CancelScope
@@ -31,9 +30,9 @@ class RealtimeServer:
         cancel_scope: CancelScope | None = None,
         text_output_queue: Queue | None = None,
         text_prompt_queue: Queue | None = None,
-        runtime_config: RuntimeConfig | None = None,
         host: str = "0.0.0.0",
         port: int = 8765,
+        chat_size: int = 10,
     ):
         self.stop_event = stop_event
         self.input_queue = input_queue
@@ -43,16 +42,16 @@ class RealtimeServer:
         self.should_listen = should_listen
         self.response_playing = response_playing
         self.cancel_scope = cancel_scope
-        self.runtime_config = runtime_config or RuntimeConfig()
         self.host = host
         self.port = port
+        self.chat_size = chat_size
 
     def run(self):
         """Start the FastAPI/uvicorn server (called from a ThreadManager thread)."""
         service = RealtimeService(
-            runtime_config=self.runtime_config,
             text_prompt_queue=self.text_prompt_queue,
             should_listen=self.should_listen,
+            chat_size=self.chat_size,
         )
         app = create_app(
             service=service,

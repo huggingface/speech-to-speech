@@ -6,8 +6,6 @@ import numpy as np
 import logging
 from rich.console import Console
 
-from api.openai_realtime.runtime_config import RuntimeConfig
-
 logger = logging.getLogger(__name__)
 console = Console()
 
@@ -27,7 +25,6 @@ class PocketTTSHandler(BaseHandler):
         blocksize=512,
         max_tokens=50,
         gen_kwargs=None,  # For compatibility with pipeline, not used
-        runtime_config: RuntimeConfig | None = None,
         cancel_scope: CancelScope | None = None,
     ):
         """
@@ -46,7 +43,6 @@ class PocketTTSHandler(BaseHandler):
         """
         self.should_listen = should_listen
         self.cancel_scope = cancel_scope
-        self.runtime_config = runtime_config
         self.device = device
         self.voice = voice
         self.sample_rate = sample_rate
@@ -90,19 +86,20 @@ class PocketTTSHandler(BaseHandler):
         return 0.1  # 100ms threshold
 
     def process(self, llm_sentence):
-        """
-        Process text from LLM and generate audio.
-
-        Args:
-            llm_sentence: Text to convert to speech, or tuple of (text, language_code)
-        """
         if isinstance(llm_sentence, tuple) and llm_sentence[0] == MessageTag.END_OF_RESPONSE:
             yield AUDIO_RESPONSE_DONE
             return
 
+        runtime_config = None
+        response = None
         gen = self.cancel_scope.generation if self.cancel_scope else None
-        # Handle tuple input (text, language_code)
-        if isinstance(llm_sentence, tuple):
+        if isinstance(llm_sentence, tuple) and len(llm_sentence) == 4:
+            llm_sentence, language_code, runtime_config, response = llm_sentence
+            logger.debug(f"Received language code: {language_code}")
+        elif isinstance(llm_sentence, tuple) and len(llm_sentence) == 3:
+            llm_sentence, language_code, runtime_config = llm_sentence
+            logger.debug(f"Received language code: {language_code}")
+        elif isinstance(llm_sentence, tuple):
             llm_sentence, language_code = llm_sentence
             logger.debug(f"Received language code: {language_code}")
 
@@ -212,5 +209,5 @@ class PocketTTSHandler(BaseHandler):
                     chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
                 yield chunk
 
-        if not getattr(self, 'runtime_config', None):
+        if not runtime_config:
             self.should_listen.set()

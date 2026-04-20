@@ -1,10 +1,10 @@
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from LLM.chat import Chat
 from openai.types.realtime import RealtimeSessionCreateRequest
 from openai.types.realtime.realtime_audio_config import RealtimeAudioConfig
 from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfigInput
 from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
-
 
 def _apply_update(current: BaseModel, update: BaseModel) -> None:
     """Apply explicitly-set fields from *update* onto *current* in-place,
@@ -34,8 +34,9 @@ class RuntimeConfig(BaseModel):
     'RealtimeSessionCreateRequest').
     """
 
-    model_config = ConfigDict(validate_assignment=True)
+    model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True)
 
+    chat: Chat = Field(default_factory=lambda: Chat(10))
     session: RealtimeSessionCreateRequest = Field(
         default_factory=lambda: RealtimeSessionCreateRequest(type="realtime"),
         validate_default=True,
@@ -80,4 +81,6 @@ class RuntimeConfig(BaseModel):
     def reset(self) -> None:
         """Reset session to defaults, discarding all accumulated state from
         previous connections (instructions, tools, voice, turn_detection, etc.)."""
+        chat_size = self.chat.size
+        self.chat = Chat(chat_size)
         self.session = RealtimeSessionCreateRequest(type="realtime")

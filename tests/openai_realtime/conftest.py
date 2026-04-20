@@ -45,15 +45,16 @@ def should_listen():
 
 @pytest.fixture
 def service(runtime_config, text_prompt_queue, should_listen):
-    return RealtimeService(
-        runtime_config=runtime_config,
+    svc = RealtimeService(
         text_prompt_queue=text_prompt_queue,
         should_listen=should_listen,
     )
+    return svc
 
 
 @pytest.fixture
-def conn_id(service):
+def conn_id(service, runtime_config):
     cid = service.register()
+    service._state(cid).runtime_config = runtime_config
     yield cid
     service.unregister(cid)

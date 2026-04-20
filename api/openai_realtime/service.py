@@ -6,9 +6,8 @@ from typing import Callable, Literal, Optional, Union
 
 from pydantic import ValidationError
 
+from pipeline_messages import GenerateResponseRequest, MessageTag
 from LLM.chat import Chat
-from pipeline_messages import GenerateRequest, MessageTag
-
 from openai.types.realtime import (
     InputAudioBufferAppendEvent,
     SessionUpdateEvent,
@@ -30,6 +29,7 @@ from openai.types.realtime import (
     ResponseAudioTranscriptDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
 )
+from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
 from api.openai_realtime.runtime_config import RuntimeConfig
 from api.openai_realtime.handlers import (
@@ -131,7 +131,7 @@ class ConnState(BaseModel):
 
     session_id: str = Field(default_factory=lambda: _generate_id("session"))
     conversation_id: str = Field(default_factory=lambda: _generate_id("conv"))
-    chat: Chat = Field(default_factory=lambda: Chat(10))
+    runtime_config: RuntimeConfig = Field(default_factory=RuntimeConfig)
     in_response: bool = False
     audio_buffer_has_data: bool = False
     audio_remainder: bytes = b""
@@ -140,7 +140,7 @@ class ConnState(BaseModel):
     content_index: int = 0
     input_audio_duration_s: float = 0.0
     last_item_id: str | None = None
-    response_metadata: dict[str, str] | None = None
+    current_response_params: RealtimeResponseCreateParams | None = None
     response_usage: UsageMetrics = Field(default_factory=UsageMetrics)
 
 
@@ -154,13 +154,13 @@ class RealtimeService:
 
     def __init__(
         self,
-        runtime_config: RuntimeConfig | None = None,
         text_prompt_queue: Queue | None = None,
         should_listen: ThreadingEvent | None = None,
+        chat_size: int = 10,
     ):
-        self.runtime_config = runtime_config or RuntimeConfig()
         self.text_prompt_queue = text_prompt_queue
         self.should_listen = should_listen
+        self._chat_size = chat_size
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
 
@@ -182,7 +182,7 @@ class RealtimeService:
 
     def register(self) -> str:
         """Register a new connection and return its session_id."""
-        state = ConnState()
+        state = ConnState(runtime_config=RuntimeConfig(chat=Chat(self._chat_size)))
         self._conns[state.session_id] = state
         self.total_usage.connections += 1
         return state.session_id
@@ -272,18 +272,15 @@ class RealtimeService:
         events = self.conversation.on_transcription_completed(conn_id, msg)
 
         st = self._state(conn_id)
+        cfg = st.runtime_config
         transcript = msg.get("transcript", "")
         if transcript:
-            st.chat.append({"role": "user", "content": transcript})
+            cfg.chat.append({"role": "user", "content": transcript})
 
-        cfg = self.runtime_config
         queue = self.text_prompt_queue
         if queue and transcript:
-            queue.put((MessageTag.GENERATE_RESPONSE, GenerateRequest(
-                chat=st.chat,
-                instructions=cfg.session.instructions,
-                tools=cfg.session.tools,
-                tool_choice=cfg.session.tool_choice,
+            queue.put((MessageTag.GENERATE_RESPONSE, GenerateResponseRequest(
+                runtime_config=cfg,
                 language_code=msg.get("language_code"),
             )))
 

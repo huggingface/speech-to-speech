@@ -16,7 +16,6 @@ from transformers.utils.import_utils import (
     is_flash_attn_2_available,
 )
 
-from api.openai_realtime.runtime_config import RuntimeConfig
 
 torch._inductor.config.fx_graph_cache = True
 # mind about this parameter ! should be >= 2 * number of padded prompt sizes for TTS
@@ -62,11 +61,9 @@ class ParlerTTSHandler(BaseHandler):
         play_steps_s=1,
         blocksize=512,
         use_default_speakers_list=True,
-        runtime_config: RuntimeConfig | None = None,
         cancel_response: Event | None = None,
     ):
         self.should_listen = should_listen
-        self.runtime_config = runtime_config
         self.cancel_response = cancel_response
         self.device = device
         self.torch_dtype = getattr(torch, torch_dtype)
@@ -181,13 +178,27 @@ class ParlerTTSHandler(BaseHandler):
             yield AUDIO_RESPONSE_DONE
             return
 
-        if self.runtime_config and self.runtime_config.session.audio.output.voice:
-            self.speaker = self.runtime_config.session.audio.output.voice
-
-        if isinstance(llm_sentence, tuple):
+        runtime_config = None
+        response = None
+        if isinstance(llm_sentence, tuple) and len(llm_sentence) == 4:
+            llm_sentence, language_code, runtime_config, response = llm_sentence
+        elif isinstance(llm_sentence, tuple) and len(llm_sentence) == 3:
+            llm_sentence, language_code, runtime_config = llm_sentence
+        elif isinstance(llm_sentence, tuple):
             llm_sentence, language_code = llm_sentence
-            if not (self.runtime_config and self.runtime_config.session.audio.output.voice):
-                self.speaker = WHISPER_LANGUAGE_TO_PARLER_SPEAKER.get(language_code, "Jason")
+            language_code = None
+
+        voice = None
+        if response and response.audio and response.audio.output:
+            voice = response.audio.output.voice
+        if not voice and runtime_config:
+            voice = runtime_config.session.audio.output.voice
+        if voice:
+            self.speaker = voice
+        elif isinstance(llm_sentence, str):
+            pass
+        else:
+            self.speaker = WHISPER_LANGUAGE_TO_PARLER_SPEAKER.get(language_code, "Jason")
             
         console.print(f"[green]ASSISTANT: {llm_sentence}")
         nb_tokens = len(self.prompt_tokenizer(llm_sentence).input_ids)
@@ -230,5 +241,5 @@ class ParlerTTSHandler(BaseHandler):
                     (0, self.blocksize - len(audio_chunk[i : i + self.blocksize])),
                 )
 
-        if not getattr(self, 'runtime_config', None):
+        if not runtime_config:
             self.should_listen.set()

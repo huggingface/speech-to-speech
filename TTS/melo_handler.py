@@ -8,8 +8,6 @@ import numpy as np
 from rich.console import Console
 import torch
 
-from api.openai_realtime.runtime_config import RuntimeConfig
-
 logger = logging.getLogger(__name__)
 
 console = Console()
@@ -42,11 +40,9 @@ class MeloTTSHandler(BaseHandler):
         speaker_to_id="en",
         gen_kwargs={},  # Unused
         blocksize=512,
-        runtime_config: RuntimeConfig | None = None, # accepted but unused; implement voice-switch logic in process() to support dynamic voice change
         cancel_scope: CancelScope | None = None,
     ):
         self.should_listen = should_listen
-        self.runtime_config = runtime_config
         self.cancel_scope = cancel_scope
         self.device = device
         self.language = language
@@ -68,10 +64,16 @@ class MeloTTSHandler(BaseHandler):
             yield AUDIO_RESPONSE_DONE
             return
 
+        runtime_config = None
+        response = None
         gen = self.cancel_scope.generation if self.cancel_scope else None
         language_code = None
 
-        if isinstance(llm_sentence, tuple):
+        if isinstance(llm_sentence, tuple) and len(llm_sentence) == 4:
+            llm_sentence, language_code, runtime_config, response = llm_sentence
+        elif isinstance(llm_sentence, tuple) and len(llm_sentence) == 3:
+            llm_sentence, language_code, runtime_config = llm_sentence
+        elif isinstance(llm_sentence, tuple):
             llm_sentence, language_code = llm_sentence
 
         console.print(f"[green]ASSISTANT: {llm_sentence}")
@@ -109,7 +111,7 @@ class MeloTTSHandler(BaseHandler):
             logger.error(f"Error in MeloTTSHandler: {e}")
             audio_chunk = np.array([])
         if len(audio_chunk) == 0:
-            if not getattr(self, 'runtime_config', None):
+            if not runtime_config:
                 self.should_listen.set()
             return
         audio_chunk = librosa.resample(audio_chunk, orig_sr=44100, target_sr=16000)
@@ -123,5 +125,5 @@ class MeloTTSHandler(BaseHandler):
                 (0, self.blocksize - len(audio_chunk[i : i + self.blocksize])),
             )
 
-        if not getattr(self, 'runtime_config', None):
+        if not runtime_config:
             self.should_listen.set()

@@ -43,7 +43,7 @@ class SessionHandler(RealtimeBaseHandler):
         if model is not None:
             logger.info(f"Session model set to: {model}")
 
-        cfg = self._config(conn_id)
+        cfg = self._state(conn_id).runtime_config
         current = cfg.session
         if current is None:
             cfg.session = s
@@ -54,8 +54,8 @@ class SessionHandler(RealtimeBaseHandler):
 
     def build_session_created(self, conn_id: str) -> SessionCreatedEvent:
         """Build a SessionCreatedEvent populated with the current config."""
-        cfg = self._config(conn_id)
-        session = cfg.session or RealtimeSessionCreateRequest(type="realtime")
+        cfg = self._state(conn_id).runtime_config
+        session = cfg.session
         return SessionCreatedEvent(
             type="session.created",
             event_id=self._next_event_id(),

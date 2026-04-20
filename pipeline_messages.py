@@ -5,11 +5,14 @@ are represented by :class:`MessageTag`.  Binary sentinels carried on the
 audio/output queue are plain ``bytes`` constants.
 """
 
+from __future__ import annotations
+
 from enum import Enum
 
 from pydantic import BaseModel, ConfigDict
 
-from LLM.chat import Chat
+from api.openai_realtime.runtime_config import RuntimeConfig
+from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
 
 class MessageTag(str, Enum):
@@ -23,19 +26,20 @@ class MessageTag(str, Enum):
     PARTIAL = "__PARTIAL__"
 
 
-class GenerateRequest(BaseModel):
+class GenerateResponseRequest(BaseModel):
     """Payload for ``GENERATE_RESPONSE`` queue messages.
 
     Carries everything the LM handler needs to produce a response so it
-    never has to reach back into shared objects.
+    never has to reach back into shared objects.  ``runtime_config``
+    holds the per-connection session config *and* the conversation chat;
+    ``response`` carries per-response overrides from ``response.create``.
+    Downstream handlers resolve each attribute by preferring the
+    per-response value over the session default.
     """
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    chat: Chat
-    instructions: str | None = None
-    tools: list | None = None
-    tool_choice: str | None = None
-    override_instructions: str | None = None
+    runtime_config: RuntimeConfig
+    response: RealtimeResponseCreateParams | None = None
     language_code: str | None = None
 
 

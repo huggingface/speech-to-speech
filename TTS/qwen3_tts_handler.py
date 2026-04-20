@@ -14,7 +14,6 @@ from time import perf_counter
 import numpy as np
 from rich.console import Console
 
-from api.openai_realtime.runtime_config import RuntimeConfig
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
 from pipeline_control import SESSION_END, is_control_message
@@ -67,10 +66,8 @@ class Qwen3TTSHandler(BaseHandler):
         max_new_tokens=360,
         blocksize=512,
         gen_kwargs=None,
-        runtime_config: RuntimeConfig | None = None,
         cancel_scope: CancelScope | None = None,
     ):
-        self.runtime_config = runtime_config
         self.cancel_scope = cancel_scope
         self.should_listen = should_listen
         self.requested_device = device
@@ -342,10 +339,12 @@ class Qwen3TTSHandler(BaseHandler):
         self._mlx_temp_ref_audio_files.add(normalized_path)
         return normalized_path
 
-    def _apply_session_voice_override(self, model_type):
+    def _apply_session_voice_override(self, model_type, runtime_config=None, response=None):
         session_voice = None
-        if getattr(self, "runtime_config", None):
-            session_voice = self.runtime_config.session.audio.output.voice
+        if response and response.audio and response.audio.output:
+            session_voice = response.audio.output.voice
+        if not session_voice and runtime_config is not None:
+            session_voice = runtime_config.session.audio.output.voice
         if not session_voice:
             return
 
@@ -557,10 +556,18 @@ class Qwen3TTSHandler(BaseHandler):
 
     def process(self, llm_sentence):
         if isinstance(llm_sentence, tuple) and llm_sentence[0] == MessageTag.END_OF_RESPONSE:
-            if not getattr(self, "runtime_config", None):
-                self.should_listen.set()
+            self.should_listen.set()
             yield AUDIO_RESPONSE_DONE
             return
+
+        runtime_config = None
+        response = None
+        if isinstance(llm_sentence, tuple) and len(llm_sentence) == 4:
+            text, language_code, runtime_config, response = llm_sentence
+            llm_sentence = (text, language_code)
+        elif isinstance(llm_sentence, tuple) and len(llm_sentence) == 3:
+            text, language_code, runtime_config = llm_sentence
+            llm_sentence = (text, language_code)
 
         llm_sentence, _saw_end_of_response = self._coalesce_pending_tts_input(llm_sentence)
 
@@ -570,7 +577,7 @@ class Qwen3TTSHandler(BaseHandler):
             llm_sentence = "Hello."
 
         model_type = self._model_type()
-        self._apply_session_voice_override(model_type)
+        self._apply_session_voice_override(model_type, runtime_config, response)
 
         console.print(f"[green]ASSISTANT: {llm_sentence}")
 
@@ -587,7 +594,7 @@ class Qwen3TTSHandler(BaseHandler):
                     "Provide qwen3_tts_ref_audio or use a CustomVoice/VoiceDesign model."
                 )
         except Exception as e:
-            if not getattr(self, "runtime_config", None):
+            if not runtime_config:
                 self.should_listen.set()
             logger.error(f"Error during Qwen3-TTS generation: {e}", exc_info=True)
 

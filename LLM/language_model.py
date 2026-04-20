@@ -27,8 +27,7 @@ from cancel_scope import CancelScope
 from rich.console import Console
 from LLM.utils import remove_unspeechable, resolve_auto_language, image_url_to_pil
 from LLM.voice_prompt import build_voice_system_prompt
-from api.openai_realtime.runtime_config import RuntimeConfig
-from pipeline_messages import GenerateRequest, MessageTag
+from pipeline_messages import GenerateResponseRequest, MessageTag
 
 try:
     from mlx_lm import load as mlx_load, stream_generate as mlx_stream_generate, generate as mlx_generate
@@ -106,7 +105,6 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
         chat_size: int = 1,
         init_chat_role: str | None = None,
         init_chat_prompt: str = "You are a helpful AI assistant.",
-        runtime_config: RuntimeConfig | None = None,
         cancel_scope: CancelScope | None = None,
         backend: Literal["transformers", "mlx"] = "transformers",
         enable_thinking: bool = False,
@@ -130,7 +128,6 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
             self.chat.init_chat({"role": init_chat_role, "content": full_prompt})
 
         self.user_role = user_role
-        self.runtime_config = runtime_config
 
     @abstractmethod
     def _load_model(
@@ -149,7 +146,9 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
         language_code: str | None,
         gen: int | None,
         ctx: StreamContext,
-    ) -> Iterator[tuple[str, str | None, list]]:
+        runtime_config=None,
+        response=None,
+    ) -> Iterator[tuple[str, str | None, list, object, object]]:
         """Run model generation, stream sentence chunks, set ``ctx.input_tokens``."""
 
     # ------------------------------------------------------------------
@@ -173,17 +172,6 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
     # ------------------------------------------------------------------
     # Shared helpers
     # ------------------------------------------------------------------
-
-    def _apply_runtime_instructions(self, ctx: StreamContext) -> None:
-        """Legacy path: read instructions/tools from runtime_config (non-realtime)."""
-        if not self.runtime_config:
-            return
-        new_instructions = self.runtime_config.session.instructions
-        if not new_instructions:
-            return
-        raw_tools = self.runtime_config.session.tools or []
-        tool_choice = self.runtime_config.session.tool_choice
-        self._apply_instructions(self.chat, new_instructions, raw_tools, tool_choice, ctx)
 
     def _apply_instructions(
         self,
@@ -226,13 +214,14 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
 
     def _process_printable_text(
         self, printable_text: str, language_code: str | None, tools: list[dict],
-        ctx: StreamContext,
+        ctx: StreamContext, runtime_config=None, response=None,
     ) -> tuple[list[tuple], list[dict], str]:
         """Extract complete code blocks and return complete sentences to yield.
 
         Returns ``(chunks_to_yield, updated_tools, remaining_printable_text)``.
-        Each element in *chunks_to_yield* is a ``(text, language_code, [])`` tuple
-        ready to be yielded to the downstream pipeline.
+        Each element in *chunks_to_yield* is a
+        ``(text, language_code, [], runtime_config, response)`` 5-tuple ready
+        to be yielded to the downstream pipeline.
         """
         chunks: list[tuple] = []
 
@@ -254,7 +243,7 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
             before = printable_text[:idx]
             if before.strip():
                 for s in sent_tokenize(before):
-                    chunks.append((s, language_code, []))
+                    chunks.append((s, language_code, [], runtime_config, response))
             printable_text = printable_text[idx:]
             return chunks, tools, printable_text
 
@@ -262,7 +251,7 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
             sentences = sent_tokenize(printable_text)
             if len(sentences) > 1:
                 for s in sentences[:-1]:
-                    chunks.append((s, language_code, []))
+                    chunks.append((s, language_code, [], runtime_config, response))
                 printable_text = sentences[-1]
 
         return chunks, tools, printable_text
@@ -285,7 +274,9 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
         gen: int | None,
         language_code: str | None,
         ctx: StreamContext,
-    ) -> Iterator[tuple[str, str | None, list]]:
+        runtime_config=None,
+        response=None,
+    ) -> Iterator[tuple[str, str | None, list, object, object]]:
         """Consume *token_iter*, accumulate text in *ctx*, yield sentence chunks."""
         while True:
             try:
@@ -306,7 +297,7 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
             ctx.generated_text += clean
             ctx.printable_text += clean
             chunks, ctx.tools, ctx.printable_text = self._process_printable_text(
-                ctx.printable_text, language_code, ctx.tools, ctx,
+                ctx.printable_text, language_code, ctx.tools, ctx, runtime_config, response,
             )
             yield from chunks
 
@@ -316,23 +307,27 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
 
     def process(self, prompt: str | tuple) -> Iterator[tuple]:
         language_code = None
+        runtime_config = None
+        response = None
         ctx = StreamContext()
 
         if isinstance(prompt, tuple) and len(prompt) == 2 and prompt[0] == MessageTag.GENERATE_RESPONSE:
-            req: GenerateRequest = prompt[1]
-            original_chat = req.chat
+            req: GenerateResponseRequest = prompt[1]
+            runtime_config = req.runtime_config
+            response = req.response
+            original_chat = runtime_config.chat
             active_chat = original_chat.copy()
             language_code = req.language_code
-            self._apply_instructions(active_chat, req.instructions, req.tools, req.tool_choice, ctx)
-            if req.override_instructions:
-                active_chat.append({"role": self.user_role, "content": req.override_instructions})
+            instructions = response.instructions if response and response.instructions else runtime_config.session.instructions
+            tools = response.tools if response and response.tools else runtime_config.session.tools
+            tool_choice = response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
+            self._apply_instructions(active_chat, instructions, tools, tool_choice, ctx)
             language_code, lang_name = resolve_auto_language(language_code)
             if lang_name:
                 active_chat.append({"role": self.user_role, "content": f"Please reply to my message in {lang_name}."})
         else:
             original_chat = self.chat
             active_chat = original_chat
-            self._apply_runtime_instructions(ctx)
             logger.debug("infering language model...")
             if isinstance(prompt, tuple):
                 prompt, language_code = prompt
@@ -343,7 +338,7 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
 
-        yield from self._generate(active_chat, language_code, gen, ctx)
+        yield from self._generate(active_chat, language_code, gen, ctx, runtime_config, response)
 
         if ctx.stopped:
             return
@@ -354,7 +349,7 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
         logger.info(f"Tools: {ctx.tools}")
 
         if not ctx.cancelled and (ctx.printable_text.strip() or ctx.tools):
-            yield (ctx.printable_text.strip(), language_code, ctx.tools)
+            yield (ctx.printable_text.strip(), language_code, ctx.tools, runtime_config, response)
 
         output_tokens = len(self.tokenizer.encode(ctx.raw_generated_text)) if ctx.raw_generated_text else 0
         if ctx.input_tokens or output_tokens:
@@ -420,7 +415,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
                 **gen_kwargs,
             }
 
-    def _generate(self, chat: Chat, language_code: str | None, gen: int | None, ctx: StreamContext) -> Iterator[tuple[str, str | None, list]]:
+    def _generate(self, chat: Chat, language_code: str | None, gen: int | None, ctx: StreamContext, runtime_config=None, response=None) -> Iterator[tuple[str, str | None, list, object, object]]:
         chat_messages = chat.to_list()
         chat_input = self.tokenizer.apply_chat_template(chat_messages, tokenize=True)
         ctx.input_tokens += len(chat_input if isinstance(chat_input, list) else chat_input["input_ids"])
@@ -438,7 +433,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
                     chat_prompt,
                     max_tokens=self.gen_kwargs["max_new_tokens"],
                 )
-                yield from self._stream_tokens(token_iter, gen, language_code, ctx)
+                yield from self._stream_tokens(token_iter, gen, language_code, ctx, runtime_config, response)
                 self._finish_mlx_generation(token_iter)
             try:
                 mx.clear_cache()
@@ -451,7 +446,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
                 target=self.pipe, args=(chat_prompt,), kwargs=self.gen_kwargs
             )
             thread.start()
-            yield from self._stream_tokens(self.streamer, gen, language_code, ctx)
+            yield from self._stream_tokens(self.streamer, gen, language_code, ctx, runtime_config, response)
             self._finish_transformers_generation(thread)
             if self.device == "mps":
                 torch.mps.empty_cache()
@@ -553,7 +548,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             self._cancel_criteria = _CancelCriteria()
             self.gen_kwargs = gen_kwargs
 
-    def _generate(self, chat: Chat, language_code: str | None, gen: int | None, ctx: StreamContext) -> Iterator[tuple[str, str | None, list]]:
+    def _generate(self, chat: Chat, language_code: str | None, gen: int | None, ctx: StreamContext, runtime_config=None, response=None) -> Iterator[tuple[str, str | None, list, object, object]]:
         if self.backend == "mlx":
             images, formatted_prompt = self._prepare_mlx_vlm_inputs(chat.to_list())
             ctx.input_tokens += len(self.tokenizer.encode(formatted_prompt))
@@ -568,7 +563,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                     max_tokens=self.gen_kwargs.get("max_new_tokens", 1024),
                     enable_thinking=self.enable_thinking,
                 )
-                yield from self._stream_tokens(token_iter, gen, language_code, ctx)
+                yield from self._stream_tokens(token_iter, gen, language_code, ctx, runtime_config, response)
                 self._finish_mlx_generation(token_iter)
             try:
                 mx.clear_cache()
@@ -589,7 +584,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             }
             thread = Thread(target=self.model.generate, kwargs=generate_kwargs)
             thread.start()
-            yield from self._stream_tokens(self.streamer, gen, language_code, ctx)
+            yield from self._stream_tokens(self.streamer, gen, language_code, ctx, runtime_config, response)
             self._finish_transformers_generation(thread)
             if self.device == "mps":
                 torch.mps.empty_cache()

@@ -17,7 +17,6 @@ from pipeline_messages import MessageTag, AUDIO_RESPONSE_DONE
 from rich.console import Console
 from utils.mlx_lock import MLXLockContext
 
-from api.openai_realtime.runtime_config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -88,7 +87,6 @@ class KokoroTTSHandler(BaseHandler):
         speed=1.0,
         blocksize=512,
         gen_kwargs=None,
-        runtime_config: RuntimeConfig | None = None,
         cancel_scope: CancelScope | None = None,
     ):
         """
@@ -110,7 +108,6 @@ class KokoroTTSHandler(BaseHandler):
         self.lang_code = lang_code
         self.speed = speed
         self.blocksize = blocksize
-        self.runtime_config = runtime_config
         self.cancel_scope = cancel_scope
 
         # Determine device
@@ -236,15 +233,29 @@ class KokoroTTSHandler(BaseHandler):
             yield AUDIO_RESPONSE_DONE
             return
 
-        if self.runtime_config and self.runtime_config.session.audio.output.voice:
-            self.voice = self.runtime_config.session.audio.output.voice
+        runtime_config = None
+        response = None
+        if isinstance(llm_sentence, tuple) and len(llm_sentence) == 4:
+            text, language_code, runtime_config, response = llm_sentence
+            llm_sentence = (text, language_code)
+        elif isinstance(llm_sentence, tuple) and len(llm_sentence) == 3:
+            text, language_code, runtime_config = llm_sentence
+            llm_sentence = (text, language_code)
+
+        voice = None
+        if response and response.audio and response.audio.output:
+            voice = response.audio.output.voice
+        if not voice and runtime_config:
+            voice = runtime_config.session.audio.output.voice
+        if voice:
+            self.voice = voice
 
         if self.backend == "mlx":
             yield from self._process_mlx(llm_sentence)
         else:
             yield from self._process_kokoro(llm_sentence)
 
-        if not getattr(self, 'runtime_config', None):
+        if not runtime_config:
             self.should_listen.set()
 
     def _process_mlx(self, llm_sentence):

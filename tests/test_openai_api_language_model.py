@@ -50,7 +50,6 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     )
     handler.user_role = "user"
     handler.chat = Chat(1)
-    handler.runtime_config = None
     handler.cancel_scope = cancel_scope
     handler.tools = None
     handler.tools_choice = None
@@ -75,8 +74,8 @@ def test_process_streams_text_from_response_events():
     outputs = list(handler.process("Hi"))
 
     assert outputs == [
-        ("Hello.", None, []),
-        ("How are you?", None, []),
+        ("Hello.", None, [], None, None),
+        ("How are you?", None, [], None, None),
         (MessageTag.END_OF_RESPONSE, None, None),
     ]
 
@@ -115,7 +114,7 @@ def test_process_read_timeout_ends_response_cleanly():
     outputs = list(handler.process("Hi"))
 
     assert outputs == [
-        ("Wow I'm a bit slow today, could you repeat that?", None, None),
+        ("Wow I'm a bit slow today, could you repeat that?", None, None, None, None),
         (MessageTag.END_OF_RESPONSE, None, None),
     ]
 

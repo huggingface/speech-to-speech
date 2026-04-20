@@ -377,7 +377,12 @@ class TestHandleResponseCreate:
         result = service.handle_response_create(conn_id, evt)
         assert isinstance(result, ResponseCreatedEvent)
         sentinel = text_prompt_queue.get()
-        assert sentinel == (MessageTag.GENERATE_RESPONSE, "override instructions", "auto")
+        assert sentinel[0] == MessageTag.GENERATE_RESPONSE
+        req = sentinel[1]
+        assert req.response is not None
+        assert req.response.instructions == "override instructions"
+        assert req.response.tool_choice == "auto"
+        assert req.runtime_config is runtime_config
 
     def test_response_create_rejects_complex_tool_choice(self, service, conn_id, runtime_config):
         evt = ResponseCreateEvent(
@@ -401,7 +406,7 @@ class TestHandleResponseCreate:
             assert isinstance(result, ResponseCreatedEvent), f"Expected ResponseCreatedEvent for tool_choice={choice!r}"
             sentinel = text_prompt_queue.get()
             assert sentinel[0] == MessageTag.GENERATE_RESPONSE
-            assert sentinel[2] == choice
+            assert sentinel[1].response.tool_choice == choice
             service.response._end_response(conn_id)
 
     def test_response_create_with_image_input_items(self, service, conn_id, text_prompt_queue):
@@ -489,7 +494,10 @@ class TestEncodeAudioChunk:
         assert events[0].content_index == 1
 
     def test_response_created_includes_metadata(self, service, conn_id):
-        service._state(conn_id).response_metadata = {"key": "value"}
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            metadata={"key": "value"},
+        )
         events = service.encode_audio_chunk(conn_id, _pcm_bytes(256))
         resp = events[0].response
         assert resp.metadata == {"key": "value"}
@@ -517,14 +525,17 @@ class TestFinishAudioResponse:
         assert done.response.status_details.reason == "turn_detected"
 
     def test_finish_resets_state(self, service, conn_id):
-        service._state(conn_id).response_metadata = {"k": "v"}
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            metadata={"k": "v"},
+        )
         service.response._ensure_response(conn_id)
         service.finish_audio_response(conn_id)
         st = service._state(conn_id)
         assert st.in_response is False
         assert st.current_response_id is None
         assert st.current_item_id is None
-        assert st.response_metadata is None
+        assert st.current_response_params is None
 
 
 # ===================================================================
@@ -569,7 +580,7 @@ class TestDispatchPipelineEvent:
     def test_speech_started_does_not_cancel_when_interrupt_disabled(self, service, conn_id):
         """With interrupt_response=False, speech_started emits the started event but does NOT cancel the active response."""
         from openai.types.realtime.realtime_audio_input_turn_detection import ServerVad
-        service.runtime_config.session.audio.input.turn_detection = ServerVad(
+        service._state(conn_id).runtime_config.session.audio.input.turn_detection = ServerVad(
             type="server_vad", interrupt_response=False,
         )
         service.response._ensure_response(conn_id)

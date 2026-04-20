@@ -21,7 +21,6 @@ from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfi
 from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
 from openai.types.realtime.realtime_audio_formats import AudioPCM
 
-from api.openai_realtime.runtime_config import RuntimeConfig
 from api.openai_realtime.service import RealtimeService, CHUNK_SIZE_BYTES
 from api.openai_realtime.websocket_router import create_app
 from pipeline_control import SESSION_END, is_control_message
@@ -46,13 +45,10 @@ def _session_16k() -> RealtimeSessionCreateRequest:
 @pytest.fixture
 def setup():
     """Return (app, service, input_queue, output_queue, text_output_queue, should_listen, stop_event, response_playing, cancel_scope)."""
-    runtime_config = RuntimeConfig()
-    runtime_config.session = _session_16k()
     text_prompt_queue = Queue()
     should_listen = ThreadingEvent()
     should_listen.set()
     service = RealtimeService(
-        runtime_config=runtime_config,
         text_prompt_queue=text_prompt_queue,
         should_listen=should_listen,
     )
@@ -110,7 +106,9 @@ class TestClientEventDispatch:
                     "audio": audio_b64,
                 })
                 time.sleep(0.1)
-                chunk = input_queue.get(timeout=1)
+                item = input_queue.get(timeout=1)
+                assert isinstance(item, tuple) and len(item) == 2
+                chunk, rt_cfg = item
                 assert isinstance(chunk, bytes)
                 assert len(chunk) == CHUNK_SIZE_BYTES
 
@@ -127,7 +125,8 @@ class TestClientEventDispatch:
                     },
                 })
                 time.sleep(0.1)
-                assert service.runtime_config.session.audio.output.voice == "coral"
+                cid = service.connection_ids[0]
+                assert service._state(cid).runtime_config.session.audio.output.voice == "coral"
 
     def test_conversation_item_create_returns_events(self, setup):
         app, *_ = setup
@@ -342,13 +341,13 @@ class TestSendLoop:
         """With interrupt_response=False, speech during playback should NOT cancel or flush."""
         from openai.types.realtime.realtime_audio_input_turn_detection import ServerVad
         app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
-        service.runtime_config.session.audio.input.turn_detection = ServerVad(
-            type="server_vad", interrupt_response=False,
-        )
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()  # session.created
                 conn_id = list(service._conns.keys())[0]
+                service._state(conn_id).runtime_config.session.audio.input.turn_detection = ServerVad(
+                    type="server_vad", interrupt_response=False,
+                )
                 service.response._ensure_response(conn_id)
                 response_playing.set()
                 text_output_queue.put({"type": "speech_started", "audio_start_ms": 0})

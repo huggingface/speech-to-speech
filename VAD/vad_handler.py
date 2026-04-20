@@ -9,8 +9,6 @@ from rich.console import Console
 from utils.utils import int2float
 import logging
 
-from api.openai_realtime.runtime_config import RuntimeConfig
-
 logger = logging.getLogger(__name__)
 
 # Optional import for audio enhancement
@@ -43,7 +41,6 @@ class VADHandler(BaseHandler):
         enable_realtime_transcription=False,
         realtime_processing_pause=0.25,
         text_output_queue=None,
-        runtime_config: RuntimeConfig | None = None,
     ):
         self.should_listen = should_listen
         self.sample_rate = sample_rate
@@ -53,7 +50,6 @@ class VADHandler(BaseHandler):
         self.enable_realtime_transcription = enable_realtime_transcription
         self.realtime_processing_pause = realtime_processing_pause
         self.text_output_queue = text_output_queue
-        self.runtime_config = runtime_config
         self._last_turn_detection = None
         self.model, _ = torch.hub.load(
             "snakers4/silero-vad",
@@ -87,11 +83,11 @@ class VADHandler(BaseHandler):
         self._log_progressive_yields = 0
         self._speech_started_emitted = False
 
-    def _apply_runtime_turn_detection(self):
+    def _apply_runtime_turn_detection(self, runtime_config=None):
         """Check RuntimeConfig for turn_detection changes and apply them."""
-        if not self.runtime_config or not self.runtime_config.session.audio.input.turn_detection:
+        if not runtime_config or not runtime_config.session.audio.input.turn_detection:
             return
-        td_raw = self.runtime_config.session.audio.input.turn_detection
+        td_raw = runtime_config.session.audio.input.turn_detection
         if td_raw is self._last_turn_detection:
             return
         self._last_turn_detection = td_raw
@@ -116,7 +112,10 @@ class VADHandler(BaseHandler):
             logger.info(f"VAD silence duration updated to {td['silence_duration_ms']}ms")
 
     def process(self, audio_chunk):
-        self._apply_runtime_turn_detection()
+        runtime_config = None
+        if isinstance(audio_chunk, tuple):
+            audio_chunk, runtime_config = audio_chunk
+        self._apply_runtime_turn_detection(runtime_config)
         logger.debug(f"VAD received {len(audio_chunk)} bytes")
 
         if not self.should_listen.is_set():

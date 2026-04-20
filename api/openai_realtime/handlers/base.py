@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING
 
 from openai.types.realtime import RealtimeErrorEvent
 
-from api.openai_realtime.runtime_config import RuntimeConfig
-
 if TYPE_CHECKING:
     from api.openai_realtime.service import ConnState, RealtimeService
 
@@ -24,17 +22,14 @@ class RealtimeBaseHandler:
     """Shared base for domain handlers.
 
     Provides conn_id-keyed accessors for per-connection state, config,
-    and queues.  Today these return the service-wide singletons; when
-    multi-session lands, only these accessors need to change.
+    and queues.  Each connection owns its own ``RuntimeConfig`` via
+    ``ConnState``.
     """
 
     def __init__(self, service: RealtimeService) -> None:
         self._service = service
 
-    # ── conn_id-keyed accessors (multi-session seam) ──
-
-    def _config(self, conn_id: str) -> RuntimeConfig:
-        return self._service.runtime_config
+    # ── conn_id-keyed accessors ──
 
     def _queue(self, conn_id: str) -> Queue | None:
         return self._service.text_prompt_queue

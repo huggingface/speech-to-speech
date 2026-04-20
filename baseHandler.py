@@ -53,6 +53,7 @@ class BaseHandler:
                 continue
 
             if isinstance(input, bytes) and input == PIPELINE_END:
+                # sentinelle signal to avoid queue deadlock
                 logger.debug("Stopping thread")
                 break
             start_time = perf_counter()

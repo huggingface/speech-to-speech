@@ -309,30 +309,9 @@ def build_pipeline(
         comms_handlers = [websocket_streamer]
     elif module_kwargs.mode == "realtime":
         from api.openai_realtime.server import RealtimeServer
-        from api.openai_realtime.runtime_config import RuntimeConfig
 
         text_output_queue = queues_and_events["text_output_queue"]
 
-        # Single shared instance: RealtimeService writes to it on
-        # session.update, pipeline handlers read from it at processing time.
-        # TODO: For multiple concurrent sessions, we need to make a RuntimeConfigManager class
-        #       that manages a dict of RuntimeConfig instances. Encapsulating each session's state.
-        runtime_config = RuntimeConfig()
-
-        for kw in (
-            vad_handler_kwargs,
-            language_model_handler_kwargs,
-            open_api_language_model_handler_kwargs,
-            kokoro_tts_handler_kwargs,
-            qwen3_tts_handler_kwargs,
-            pocket_tts_handler_kwargs,
-            melo_tts_handler_kwargs,
-            chat_tts_handler_kwargs,
-            facebook_mms_tts_handler_kwargs,
-        ):
-            vars(kw)["runtime_config"] = runtime_config
-
-        # Add text_output_queue to vad_handler_kwargs needed for realtime mode
         vars(vad_handler_kwargs)["text_output_queue"] = text_output_queue
 
         for kw in (
@@ -347,6 +326,11 @@ def build_pipeline(
         ):
             vars(kw)["cancel_scope"] = cancel_scope
 
+        if module_kwargs.llm == "open_api":
+            chat_size = vars(open_api_language_model_handler_kwargs).get("chat_size", 10)
+        else:
+            chat_size = vars(language_model_handler_kwargs).get("chat_size", 10)
+
         realtime_conn = RealtimeServer(
             stop_event,
             input_queue=recv_audio_chunks_queue,
@@ -356,9 +340,9 @@ def build_pipeline(
             cancel_scope=cancel_scope,
             text_output_queue=text_output_queue,
             text_prompt_queue=text_prompt_queue,
-            runtime_config=runtime_config,
             host=websocket_streamer_kwargs.ws_host,
             port=websocket_streamer_kwargs.ws_port,
+            chat_size=chat_size,
         )
         comms_handlers = [realtime_conn]
     else:

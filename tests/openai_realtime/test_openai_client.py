@@ -35,7 +35,6 @@ from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConf
 from openai.types.realtime.realtime_audio_formats import AudioPCM
 
 from cancel_scope import CancelScope
-from api.openai_realtime.runtime_config import RuntimeConfig
 from api.openai_realtime.service import RealtimeService
 from api.openai_realtime.websocket_router import create_app
 from pipeline_messages import AUDIO_RESPONSE_DONE, PIPELINE_END
@@ -70,13 +69,10 @@ class _ServerEnv:
     """Wraps a running uvicorn server + all pipeline queues."""
 
     def __init__(self):
-        self.runtime_config = RuntimeConfig()
-        self.runtime_config.session = _session_16k()
         self.text_prompt_queue: Queue = Queue()
         self.should_listen = ThreadingEvent()
         self.should_listen.set()
         self.service = RealtimeService(
-            runtime_config=self.runtime_config,
             text_prompt_queue=self.text_prompt_queue,
             should_listen=self.should_listen,
         )
@@ -215,7 +211,8 @@ class TestSDKSessionUpdate:
             })
             await asyncio.sleep(0.2)
 
-            s = server_env.runtime_config.session
+            cid = server_env.service.connection_ids[0]
+            s = server_env.service._state(cid).runtime_config.session
             assert s.audio.output.voice == "alloy"
             assert s.instructions == "You are a helpful robot"
             assert s.audio.input.turn_detection.type == "server_vad"
