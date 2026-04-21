@@ -354,6 +354,9 @@ class BaseLanguageModelHandler(BaseHandler, ABC):
             yield from chunks
 
         if ctx.sentence_batch:
+            if ctx.printable_text.strip():
+                ctx.sentence_batch.append(ctx.printable_text.strip())
+                ctx.printable_text = ""
             yield (" ".join(ctx.sentence_batch), language_code, [])
             ctx.sentence_batch = []
 

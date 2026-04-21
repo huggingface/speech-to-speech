@@ -218,11 +218,9 @@ class OpenApiModelHandler(BaseHandler):
                             input_tokens = usage.input_tokens or 0
                             output_tokens = usage.output_tokens or 0
                 if not cancelled:
-                    remaining = " ".join(sentence_batch) if sentence_batch else ""
-                    if remaining and printable_text.strip():
-                        remaining += " " + printable_text.strip()
-                    elif printable_text.strip():
-                        remaining = printable_text.strip()
+                    if printable_text.strip():
+                        sentence_batch.append(printable_text.strip())
+                    remaining = " ".join(sentence_batch)
                     if remaining or tools:
                         logger.debug(f"Clean text: {clean_text}")
                         logger.info(f"Tools: {tools}")
