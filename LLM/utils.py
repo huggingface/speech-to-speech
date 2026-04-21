@@ -38,13 +38,14 @@ def resolve_auto_language(language_code: str | None) -> tuple[str | None, str | 
     """Strip the ``-auto`` suffix and resolve the human-readable language name.
 
     Returns ``(clean_code, language_name)``.  ``language_name`` is non-None
-    only when the original code had the ``-auto`` suffix and maps to a
-    known language.
+    when the code (with or without ``-auto``) maps to a known language.
     """
     if not language_code:
         return language_code, None
     if language_code.endswith("-auto"):
         language_code = language_code[:-5]
+    if language_code not in WHISPER_LANGUAGE_TO_LLM_LANGUAGE:
+        return language_code, None
     return language_code, WHISPER_LANGUAGE_TO_LLM_LANGUAGE.get(language_code)
 
 
