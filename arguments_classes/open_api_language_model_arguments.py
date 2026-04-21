@@ -62,3 +62,10 @@ class OpenApiLanguageModelHandlerArguments:
                     "For Together Qwen3.5 models this sends chat_template_kwargs.enable_thinking=false."
         },
     )
+    open_api_stream_batch_sentences: int = field(
+        default=3,
+        metadata={
+            "help": "Number of sentences to accumulate before yielding a batch during streaming. "
+                    "Set to 1 for sentence-by-sentence streaming. Default is 3."
+        },
+    )

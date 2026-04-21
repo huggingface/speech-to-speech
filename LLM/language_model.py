@@ -85,6 +85,7 @@ class StreamContext(BaseModel):
     enter_code: str | None = None
     end_code: str | None = None
     input_tokens: int = 0
+    sentence_batch: list[str] = Field(default_factory=list)
 
     @property
     def interrupted(self) -> bool:
@@ -113,12 +114,14 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
         cancel_scope: CancelScope | None = None,
         backend: Literal["transformers", "mlx"] = "transformers",
         enable_thinking: bool = False,
+        stream_batch_sentences: int = 3,
     ):
         self.backend = backend
         self.cancel_scope = cancel_scope
         self.device = device
         self.model_name = model_name
         self.enable_thinking = enable_thinking
+        self.stream_batch_sentences = max(1, stream_batch_sentences)
 
         self._load_model(model_name, device, torch_dtype, gen_kwargs)
 
@@ -226,6 +229,9 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
         Returns ``(chunks_to_yield, updated_tools, remaining_printable_text)``.
         Each element in *chunks_to_yield* is an :class:`LLMResponseChunk`
         ready to be yielded to the downstream pipeline.
+
+        Sentences are accumulated in ``ctx.sentence_batch`` and only yielded
+        when the batch reaches ``self.stream_batch_sentences``.
         """
         chunks: list[LLMResponseChunk] = []
 
@@ -247,7 +253,10 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
             before = printable_text[:idx]
             if before.strip():
                 for s in sent_tokenize(before):
-                    chunks.append(LLMResponseChunk(text=s, language_code=language_code, runtime_config=runtime_config, response=response))
+                    ctx.sentence_batch.append(s)
+                    if len(ctx.sentence_batch) >= self.stream_batch_sentences:
+                        chunks.append(LLMResponseChunk(text=" ".join(ctx.sentence_batch), language_code=language_code, runtime_config=runtime_config, response=response))
+                        ctx.sentence_batch = []
             printable_text = printable_text[idx:]
             return chunks, tools, printable_text
 
@@ -255,7 +264,10 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
             sentences = sent_tokenize(printable_text)
             if len(sentences) > 1:
                 for s in sentences[:-1]:
-                    chunks.append(LLMResponseChunk(text=s, language_code=language_code, runtime_config=runtime_config, response=response))
+                    ctx.sentence_batch.append(s)
+                    if len(ctx.sentence_batch) >= self.stream_batch_sentences:
+                        chunks.append(LLMResponseChunk(text=" ".join(ctx.sentence_batch), language_code=language_code, runtime_config=runtime_config, response=response))
+                        ctx.sentence_batch = []
                 printable_text = sentences[-1]
 
         return chunks, tools, printable_text
@@ -304,6 +316,13 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
                 ctx.printable_text, language_code, ctx.tools, ctx, runtime_config, response,
             )
             yield from chunks
+
+        if ctx.sentence_batch:
+            if ctx.printable_text.strip():
+                ctx.sentence_batch.append(ctx.printable_text.strip())
+                ctx.printable_text = ""
+            yield LLMResponseChunk(text=" ".join(ctx.sentence_batch), language_code=language_code, runtime_config=runtime_config, response=response)
+            ctx.sentence_batch = []
 
     # ------------------------------------------------------------------
     # Main pipeline entry point

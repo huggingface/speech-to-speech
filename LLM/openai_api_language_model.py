@@ -44,10 +44,12 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
         cancel_scope: CancelScope | None = None,
         disable_thinking=True,
         request_timeout_s=20.0,
+        stream_batch_sentences=3,
     ):
         self.cancel_scope = cancel_scope
         self.model_name = model_name
         self.stream = stream
+        self.stream_batch_sentences = max(1, stream_batch_sentences)
         self.gen_kwargs = dict(gen_kwargs)
         self.request_timeout_s = float(request_timeout_s)
         self.request_timeout = httpx.Timeout(
@@ -172,6 +174,7 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
             if self.stream:
                 cancelled = False
                 printable_text = ""
+                sentence_batch: list[str] = []
                 for event in api_response:
                     if gen is not None and self.cancel_scope.is_stale(gen):
                         logger.info("LLM generation cancelled (interruption)")
@@ -184,7 +187,10 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
                         sentences = sent_tokenize(printable_text)
                         if len(sentences) > 1:
                             for s in sentences[:-1]:
-                                yield LLMResponseChunk(text=s, language_code=language_code, runtime_config=runtime_config, response=response)
+                                sentence_batch.append(s)
+                                if len(sentence_batch) >= self.stream_batch_sentences:
+                                    yield LLMResponseChunk(text=" ".join(sentence_batch), language_code=language_code, runtime_config=runtime_config, response=response)
+                                    sentence_batch = []
                             printable_text = sentences[-1]
                     elif event.type == "response.output_item.done":
                         if event.item.type == "function_call":
@@ -200,10 +206,13 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
                             input_tokens = usage.input_tokens or 0
                             output_tokens = usage.output_tokens or 0
                 if not cancelled:
-                    if printable_text.strip() or tools:
+                    if printable_text.strip():
+                        sentence_batch.append(printable_text.strip())
+                    remaining = " ".join(sentence_batch)
+                    if remaining or tools:
                         logger.debug(f"Clean text: {clean_text}")
                         logger.info(f"Tools: {tools}")
-                        yield LLMResponseChunk(text=printable_text.strip(), language_code=language_code, tools=tools, runtime_config=runtime_config, response=response)
+                        yield LLMResponseChunk(text=remaining, language_code=language_code, tools=tools, runtime_config=runtime_config, response=response)
             else:
                 if gen is not None and self.cancel_scope.is_stale(gen):
                     logger.info("LLM generation cancelled (interruption)")

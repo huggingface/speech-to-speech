@@ -77,3 +77,10 @@ metadata={
                     "Default is False."
         },
     )
+    lm_stream_batch_sentences: int = field(
+        default=3,
+        metadata={
+            "help": "Number of sentences to accumulate before yielding a batch during streaming. "
+                    "Set to 1 for sentence-by-sentence streaming. Default is 3."
+        },
+    )
