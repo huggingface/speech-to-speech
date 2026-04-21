@@ -19,11 +19,10 @@ from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
 
 from api.openai_realtime.events import AssistantTextEvent
 from api.openai_realtime.handlers.base import RealtimeBaseHandler, _generate_id
+from pipeline_messages import GenerateResponseRequest
 
 if TYPE_CHECKING:
     from api.openai_realtime.service import ServerEvent, _ResponseStatus, _StatusReason
-
-from pipeline_messages import GenerateResponseRequest
 
 logger = logging.getLogger(__name__)
 
