@@ -50,10 +50,12 @@ class OpenApiModelHandler(BaseHandler):
         cancel_scope: CancelScope | None = None,
         disable_thinking=True,
         request_timeout_s=20.0,
+        stream_batch_sentences=3,
     ):
         self.cancel_scope = cancel_scope
         self.model_name = model_name
         self.stream = stream
+        self.stream_batch_sentences = max(1, stream_batch_sentences)
         self.gen_kwargs = dict(gen_kwargs)
         self.request_timeout_s = float(request_timeout_s)
         self.request_timeout = httpx.Timeout(
@@ -182,6 +184,7 @@ class OpenApiModelHandler(BaseHandler):
             if self.stream:
                 cancelled = False
                 printable_text = ""
+                sentence_batch: list[str] = []
                 for event in response:
                     if gen is not None and self.cancel_scope.is_stale(gen):
                         logger.info("LLM generation cancelled (interruption)")
@@ -194,7 +197,10 @@ class OpenApiModelHandler(BaseHandler):
                         sentences = sent_tokenize(printable_text)
                         if len(sentences) > 1:
                             for s in sentences[:-1]:
-                                yield s, language_code, []
+                                sentence_batch.append(s)
+                                if len(sentence_batch) >= self.stream_batch_sentences:
+                                    yield " ".join(sentence_batch), language_code, []
+                                    sentence_batch = []
                             printable_text = sentences[-1]
                     elif event.type == "response.output_item.done":
 
@@ -212,10 +218,15 @@ class OpenApiModelHandler(BaseHandler):
                             input_tokens = usage.input_tokens or 0
                             output_tokens = usage.output_tokens or 0
                 if not cancelled:
-                    if printable_text.strip() or tools:
+                    remaining = " ".join(sentence_batch) if sentence_batch else ""
+                    if remaining and printable_text.strip():
+                        remaining += " " + printable_text.strip()
+                    elif printable_text.strip():
+                        remaining = printable_text.strip()
+                    if remaining or tools:
                         logger.debug(f"Clean text: {clean_text}")
                         logger.info(f"Tools: {tools}")
-                        yield printable_text.strip(), language_code, tools
+                        yield remaining, language_code, tools
             else:
                 if gen is not None and self.cancel_scope.is_stale(gen):
                     logger.info("LLM generation cancelled (interruption)")
