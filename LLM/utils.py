@@ -18,6 +18,37 @@ def remove_unspeechable(text: str) -> str:
     return SPEECHABLE_PATTERN.sub('', text)
 
 
+WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
+    "en": "english",
+    "fr": "french",
+    "es": "spanish",
+    "zh": "chinese",
+    "ja": "japanese",
+    "ko": "korean",
+    "hi": "hindi",
+    "de": "german",
+    "pt": "portuguese",
+    "pl": "polish",
+    "it": "italian",
+    "nl": "dutch",
+}
+
+
+def resolve_auto_language(language_code: str | None) -> tuple[str | None, str | None]:
+    """Strip the ``-auto`` suffix and resolve the human-readable language name.
+
+    Returns ``(clean_code, language_name)``.  ``language_name`` is non-None
+    when the code (with or without ``-auto``) maps to a known language.
+    """
+    if not language_code:
+        return language_code, None
+    if language_code.endswith("-auto"):
+        language_code = language_code[:-5]
+    if language_code not in WHISPER_LANGUAGE_TO_LLM_LANGUAGE:
+        return language_code, None
+    return language_code, WHISPER_LANGUAGE_TO_LLM_LANGUAGE.get(language_code)
+
+
 def image_url_to_pil(image_url: str) -> Image.Image:
     """Convert an image URL or base64 data URI to a PIL Image.
 

@@ -1,14 +1,14 @@
+from __future__ import annotations
+
 from melo.api import TTS
 import logging
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
-from pipeline_messages import MessageTag, AUDIO_RESPONSE_DONE
+from pipeline_messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 import librosa
 import numpy as np
 from rich.console import Console
 import torch
-
-from api.openai_realtime.runtime_config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ WHISPER_LANGUAGE_TO_MELO_SPEAKER = {
 }
 
 
-class MeloTTSHandler(BaseHandler):
+class MeloTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
     def setup(
         self,
         should_listen,
@@ -42,11 +42,9 @@ class MeloTTSHandler(BaseHandler):
         speaker_to_id="en",
         gen_kwargs={},  # Unused
         blocksize=512,
-        runtime_config: RuntimeConfig | None = None, # accepted but unused; implement voice-switch logic in process() to support dynamic voice change
         cancel_scope: CancelScope | None = None,
     ):
         self.should_listen = should_listen
-        self.runtime_config = runtime_config
         self.cancel_scope = cancel_scope
         self.device = device
         self.language = language
@@ -57,24 +55,24 @@ class MeloTTSHandler(BaseHandler):
             WHISPER_LANGUAGE_TO_MELO_SPEAKER[speaker_to_id]
         ]
         self.blocksize = blocksize
+        self._initial_language = self.language
         self.warmup()
 
     def warmup(self):
         logger.info(f"Warming up {self.__class__.__name__}")
         _ = self.model.tts_to_file("text", self.speaker_id, quiet=True)
 
-    def process(self, llm_sentence):
-        if isinstance(llm_sentence, tuple) and llm_sentence[0] == MessageTag.END_OF_RESPONSE:
+    def process(self, tts_input: TTSInput | EndOfResponse):
+        if isinstance(tts_input, EndOfResponse):
             yield AUDIO_RESPONSE_DONE
             return
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
-        language_code = None
+        language_code = tts_input.language_code
+        runtime_config = tts_input.runtime_config
+        text = tts_input.text
 
-        if isinstance(llm_sentence, tuple):
-            llm_sentence, language_code = llm_sentence
-
-        console.print(f"[green]ASSISTANT: {llm_sentence}")
+        console.print(f"[green]ASSISTANT: {text}")
 
         if language_code is not None and self.language != language_code:
             try:
@@ -103,13 +101,13 @@ class MeloTTSHandler(BaseHandler):
 
         try:
             audio_chunk = self.model.tts_to_file(
-                llm_sentence, self.speaker_id, quiet=True
+                text, self.speaker_id, quiet=True
             )
         except (AssertionError, RuntimeError) as e:
             logger.error(f"Error in MeloTTSHandler: {e}")
             audio_chunk = np.array([])
         if len(audio_chunk) == 0:
-            if not getattr(self, 'runtime_config', None):
+            if not runtime_config:
                 self.should_listen.set()
             return
         audio_chunk = librosa.resample(audio_chunk, orig_sr=44100, target_sr=16000)
@@ -123,5 +121,16 @@ class MeloTTSHandler(BaseHandler):
                 (0, self.blocksize - len(audio_chunk[i : i + self.blocksize])),
             )
 
-        if not getattr(self, 'runtime_config', None):
+        if not runtime_config:
             self.should_listen.set()
+
+    def on_session_end(self):
+        if self.language != self._initial_language:
+            self.language = self._initial_language
+            self.model = TTS(
+                language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[self.language], device=self.device
+            )
+            self.speaker_id = self.model.hps.data.spk2id[
+                WHISPER_LANGUAGE_TO_MELO_SPEAKER[self.language]
+            ]
+        logger.debug("Melo TTS session state reset")

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import os
 from time import perf_counter
@@ -6,13 +8,14 @@ from faster_whisper import WhisperModel
 from rich.console import Console
 
 from baseHandler import BaseHandler
+from pipeline_messages import Transcription, VADAudio
 
 console = Console()
 
 logger = logging.getLogger(__name__)
 
 
-class FasterWhisperSTTHandler(BaseHandler):
+class FasterWhisperSTTHandler(BaseHandler[VADAudio]):
     """
     Handles the Speech To Text generation using a Whisper model.
     """
@@ -29,13 +32,13 @@ class FasterWhisperSTTHandler(BaseHandler):
         os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
         self.model = WhisperModel(model_name, device=device, compute_type=compute_type)
 
-    def process(self, audio):
+    def process(self, vad_audio: VADAudio):
         logger.debug("infering faster whisper...")
 
         global pipeline_start
         pipeline_start = perf_counter()
 
-        segments, info = self.model.transcribe(audio, **self.gen_kwargs)
+        segments, info = self.model.transcribe(vad_audio.audio, **self.gen_kwargs)
         output_text = []
 
         for segment in segments:
@@ -50,7 +53,7 @@ class FasterWhisperSTTHandler(BaseHandler):
         if pred_text:
             console.print(f"[yellow]USER: {pred_text}")
 
-            yield pred_text
+            yield Transcription(text=pred_text)
         else:
             logger.debug("no text detected. skipping...")
 

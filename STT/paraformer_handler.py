@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 import logging
 from time import perf_counter
 
 from baseHandler import BaseHandler
+from pipeline_messages import Transcription, VADAudio
 from funasr import AutoModel
 import numpy as np
 from rich.console import Console
@@ -15,7 +18,7 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-class ParaformerSTTHandler(BaseHandler):
+class ParaformerSTTHandler(BaseHandler[VADAudio]):
     """
     Handles the Speech To Text generation using a Paraformer model.
     The default for this model is set to Chinese.
@@ -44,18 +47,18 @@ class ParaformerSTTHandler(BaseHandler):
         for _ in range(n_steps):
             _ = self.model.generate(dummy_input)[0]["text"].strip().replace(" ", "")
 
-    def process(self, spoken_prompt):
+    def process(self, vad_audio: VADAudio):
         logger.debug("infering paraformer...")
 
         global pipeline_start
         pipeline_start = perf_counter()
 
         pred_text = (
-            self.model.generate(spoken_prompt)[0]["text"].strip().replace(" ", "")
+            self.model.generate(vad_audio.audio)[0]["text"].strip().replace(" ", "")
         )
         torch.mps.empty_cache()
 
         logger.debug("finished paraformer inference")
         console.print(f"[yellow]USER: {pred_text}")
 
-        yield pred_text
+        yield Transcription(text=pred_text)

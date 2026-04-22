@@ -30,10 +30,18 @@ from openai.types.realtime import (
     SessionUpdateEvent,
 )
 
+from api.openai_realtime.events import (
+    AssistantTextEvent,
+    PartialTranscriptionEvent,
+    SpeechStartedEvent,
+    SpeechStoppedEvent,
+    TokenUsageEvent,
+    TranscriptionCompletedEvent,
+)
 from api.openai_realtime.service import (
     CHUNK_SIZE_BYTES,
 )
-from pipeline_messages import MessageTag
+from pipeline_messages import GenerateResponseRequest
 
 
 # ---------------------------------------------------------------------------
@@ -263,9 +271,9 @@ class TestHandleConversationItemCreate:
         assert evt.item.role == "user"
         assert evt.item.content[0].type == "input_text"
         assert evt.item.content[0].text == "hi"
-        assert not text_prompt_queue.empty()
-        msg = text_prompt_queue.get()
-        assert msg == (MessageTag.ADD_TO_CONTEXT, "user", [{"type": "input_text", "text": "hi"}])
+        chat = service._state(conn_id).runtime_config.chat.to_list()
+        assert chat[-1]["role"] == "user"
+        assert chat[-1]["content"] == [{"type": "input_text", "text": "hi"}]
 
     def test_text_input_previous_item_id_chain(self, service, conn_id):
         e1 = service.handle_conversation_item_create(conn_id, self._text_event("a", "item_1"))
@@ -281,8 +289,8 @@ class TestHandleConversationItemCreate:
         events = service.handle_conversation_item_create(conn_id, evt)
         assert len(events) == 1
         assert isinstance(events[0], ConversationItemCreatedEvent)
-        msg = text_prompt_queue.get()
-        assert msg == (MessageTag.FUNCTION_RESULT, 'Call ID: call_1\nOutput: {"result": 42}')
+        chat = service._state(conn_id).runtime_config.chat.to_list()
+        assert chat[-1] == {"type": "function_call_output", "call_id": "call_1", "output": '{"result": 42}'}
 
     def test_input_image_forwarded(self, service, conn_id, text_prompt_queue):
         evt = ConversationItemCreateEvent(
@@ -296,12 +304,12 @@ class TestHandleConversationItemCreate:
         events = service.handle_conversation_item_create(conn_id, evt)
         assert len(events) == 1
         assert isinstance(events[0], ConversationItemCreatedEvent)
-        msg = text_prompt_queue.get()
-        assert msg[0] == MessageTag.ADD_TO_CONTEXT
-        assert msg[1] == "user"
-        assert isinstance(msg[2], list)
-        assert msg[2][0]["type"] == "input_image"
-        assert msg[2][0]["image_url"] == "https://example.com/img.png"
+        chat = service._state(conn_id).runtime_config.chat.to_list()
+        last = chat[-1]
+        assert last["role"] == "user"
+        assert isinstance(last["content"], list)
+        assert last["content"][0]["type"] == "input_image"
+        assert last["content"][0]["image_url"] == "https://example.com/img.png"
 
     def test_mixed_text_and_image_forwarded(self, service, conn_id, text_prompt_queue):
         evt = ConversationItemCreateEvent(
@@ -317,14 +325,14 @@ class TestHandleConversationItemCreate:
         )
         events = service.handle_conversation_item_create(conn_id, evt)
         assert len(events) == 1
-        msg = text_prompt_queue.get()
-        assert msg[0] == MessageTag.ADD_TO_CONTEXT
-        assert msg[1] == "user"
-        assert isinstance(msg[2], list)
-        assert len(msg[2]) == 2
-        assert msg[2][0] == {"type": "input_text", "text": "What is this?"}
-        assert msg[2][1]["type"] == "input_image"
-        assert msg[2][1]["image_url"] == "data:image/png;base64,abc123"
+        chat = service._state(conn_id).runtime_config.chat.to_list()
+        last = chat[-1]
+        assert last["role"] == "user"
+        assert isinstance(last["content"], list)
+        assert len(last["content"]) == 2
+        assert last["content"][0] == {"type": "input_text", "text": "What is this?"}
+        assert last["content"][1]["type"] == "input_image"
+        assert last["content"][1]["image_url"] == "data:image/png;base64,abc123"
 
 
 # ===================================================================
@@ -376,8 +384,12 @@ class TestHandleResponseCreate:
         )
         result = service.handle_response_create(conn_id, evt)
         assert isinstance(result, ResponseCreatedEvent)
-        sentinel = text_prompt_queue.get()
-        assert sentinel == (MessageTag.GENERATE_RESPONSE, "override instructions", "auto")
+        req = text_prompt_queue.get()
+        assert isinstance(req, GenerateResponseRequest)
+        assert req.response is not None
+        assert req.response.instructions == "override instructions"
+        assert req.response.tool_choice == "auto"
+        assert req.runtime_config is runtime_config
 
     def test_response_create_rejects_complex_tool_choice(self, service, conn_id, runtime_config):
         evt = ResponseCreateEvent(
@@ -399,9 +411,9 @@ class TestHandleResponseCreate:
             )
             result = service.handle_response_create(conn_id, evt)
             assert isinstance(result, ResponseCreatedEvent), f"Expected ResponseCreatedEvent for tool_choice={choice!r}"
-            sentinel = text_prompt_queue.get()
-            assert sentinel[0] == MessageTag.GENERATE_RESPONSE
-            assert sentinel[2] == choice
+            req = text_prompt_queue.get()
+            assert isinstance(req, GenerateResponseRequest)
+            assert req.response.tool_choice == choice
             service.response._end_response(conn_id)
 
     def test_response_create_with_image_input_items(self, service, conn_id, text_prompt_queue):
@@ -422,14 +434,8 @@ class TestHandleResponseCreate:
         )
         result = service.handle_response_create(conn_id, evt)
         assert isinstance(result, ResponseCreatedEvent)
-        context_msg = text_prompt_queue.get()
-        assert context_msg[0] == MessageTag.ADD_TO_CONTEXT
-        assert context_msg[1] == "user"
-        assert isinstance(context_msg[2], list)
-        assert any(p["type"] == "input_image" for p in context_msg[2])
-        assert any(p["type"] == "input_text" for p in context_msg[2])
         gen_msg = text_prompt_queue.get()
-        assert gen_msg[0] == MessageTag.GENERATE_RESPONSE
+        assert isinstance(gen_msg, GenerateResponseRequest)
 
     def test_double_response_create_rejected(self, service, conn_id, text_prompt_queue):
         """Second response.create is rejected because in_response is set immediately."""
@@ -489,7 +495,10 @@ class TestEncodeAudioChunk:
         assert events[0].content_index == 1
 
     def test_response_created_includes_metadata(self, service, conn_id):
-        service._state(conn_id).response_metadata = {"key": "value"}
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            metadata={"key": "value"},
+        )
         events = service.encode_audio_chunk(conn_id, _pcm_bytes(256))
         resp = events[0].response
         assert resp.metadata == {"key": "value"}
@@ -517,14 +526,17 @@ class TestFinishAudioResponse:
         assert done.response.status_details.reason == "turn_detected"
 
     def test_finish_resets_state(self, service, conn_id):
-        service._state(conn_id).response_metadata = {"k": "v"}
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            metadata={"k": "v"},
+        )
         service.response._ensure_response(conn_id)
         service.finish_audio_response(conn_id)
         st = service._state(conn_id)
         assert st.in_response is False
         assert st.current_response_id is None
         assert st.current_item_id is None
-        assert st.response_metadata is None
+        assert st.current_response_params is None
 
 
 # ===================================================================
@@ -537,18 +549,18 @@ class TestDispatchPipelineEvent:
 
     def test_speech_started_emits_event(self, service, conn_id):
         events = service.dispatch_pipeline_event(
-            conn_id, {"type": "speech_started", "audio_start_ms": 1000},
+            conn_id, SpeechStartedEvent(),
         )
         assert len(events) == 1
         evt = events[0]
         assert isinstance(evt, InputAudioBufferSpeechStartedEvent)
-        assert evt.audio_start_ms == 1000
+        assert evt.audio_start_ms == 0
         assert evt.item_id.startswith("item_")
 
     def test_speech_started_cancels_active_response(self, service, conn_id):
         service.response._ensure_response(conn_id)
         events = service.dispatch_pipeline_event(
-            conn_id, {"type": "speech_started", "audio_start_ms": 0},
+            conn_id, SpeechStartedEvent(),
         )
         cancel_events = [e for e in events if isinstance(e, (ResponseAudioDoneEvent, ResponseDoneEvent))]
         assert len(cancel_events) == 2
@@ -561,7 +573,7 @@ class TestDispatchPipelineEvent:
     def test_speech_started_no_response_emits_only_started(self, service, conn_id):
         """speech_started without active response emits only the started event."""
         events = service.dispatch_pipeline_event(
-            conn_id, {"type": "speech_started"},
+            conn_id, SpeechStartedEvent(),
         )
         assert len(events) == 1
         assert isinstance(events[0], InputAudioBufferSpeechStartedEvent)
@@ -569,12 +581,12 @@ class TestDispatchPipelineEvent:
     def test_speech_started_does_not_cancel_when_interrupt_disabled(self, service, conn_id):
         """With interrupt_response=False, speech_started emits the started event but does NOT cancel the active response."""
         from openai.types.realtime.realtime_audio_input_turn_detection import ServerVad
-        service.runtime_config.session.audio.input.turn_detection = ServerVad(
+        service._state(conn_id).runtime_config.session.audio.input.turn_detection = ServerVad(
             type="server_vad", interrupt_response=False,
         )
         service.response._ensure_response(conn_id)
         events = service.dispatch_pipeline_event(
-            conn_id, {"type": "speech_started", "audio_start_ms": 0},
+            conn_id, SpeechStartedEvent(),
         )
         assert len(events) == 1
         assert isinstance(events[0], InputAudioBufferSpeechStartedEvent)
@@ -582,11 +594,11 @@ class TestDispatchPipelineEvent:
 
     def test_consecutive_speech_cycles_get_distinct_item_ids(self, service, conn_id):
         """Each speech_started/stopped cycle generates a new unique item_id."""
-        started_1 = service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
-        stopped_1 = service.dispatch_pipeline_event(conn_id, {"type": "speech_stopped"})
+        started_1 = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+        stopped_1 = service.dispatch_pipeline_event(conn_id, SpeechStoppedEvent())
 
-        started_2 = service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
-        stopped_2 = service.dispatch_pipeline_event(conn_id, {"type": "speech_stopped"})
+        started_2 = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+        stopped_2 = service.dispatch_pipeline_event(conn_id, SpeechStoppedEvent())
 
         id_1 = started_1[0].item_id
         id_2 = started_2[0].item_id
@@ -597,36 +609,36 @@ class TestDispatchPipelineEvent:
     # -- speech_stopped --
 
     def test_speech_stopped_emits_event(self, service, conn_id):
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_started", "audio_start_ms": 0})
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
         events = service.dispatch_pipeline_event(
-            conn_id, {"type": "speech_stopped", "audio_end_ms": 2000},
+            conn_id, SpeechStoppedEvent(),
         )
         assert len(events) == 1
         evt = events[0]
         assert isinstance(evt, InputAudioBufferSpeechStoppedEvent)
-        assert evt.audio_end_ms == 2000
+        assert evt.audio_end_ms == 0
 
     def test_speech_stopped_same_item_id_as_started(self, service, conn_id):
         started = service.dispatch_pipeline_event(
-            conn_id, {"type": "speech_started", "audio_start_ms": 0},
+            conn_id, SpeechStartedEvent(),
         )
         stopped = service.dispatch_pipeline_event(
-            conn_id, {"type": "speech_stopped", "audio_end_ms": 500},
+            conn_id, SpeechStoppedEvent(),
         )
         assert started[0].item_id == stopped[0].item_id
 
     def test_speech_stopped_stores_duration(self, service, conn_id):
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
         service.dispatch_pipeline_event(
-            conn_id, {"type": "speech_stopped", "duration_s": 2.5},
+            conn_id, SpeechStoppedEvent(duration_s=2.5),
         )
         assert service._state(conn_id).input_audio_duration_s == 2.5
 
     def test_speech_stopped_zero_duration_not_stored(self, service, conn_id):
         """Phantom trigger (duration_s=0) emits stopped event but doesn't overwrite duration."""
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
         events = service.dispatch_pipeline_event(
-            conn_id, {"type": "speech_stopped", "duration_s": 0},
+            conn_id, SpeechStoppedEvent(),
         )
         assert len(events) == 1
         assert isinstance(events[0], InputAudioBufferSpeechStoppedEvent)
@@ -636,7 +648,7 @@ class TestDispatchPipelineEvent:
 
     def test_assistant_text_emits_transcript_done(self, service, conn_id):
         events = service.dispatch_pipeline_event(
-            conn_id, {"type": "assistant_text", "text": "Hello there"},
+            conn_id, AssistantTextEvent(text="Hello there"),
         )
         assert len(events) == 1
         evt = events[0]
@@ -648,14 +660,13 @@ class TestDispatchPipelineEvent:
     def test_assistant_text_with_tools(self, service, conn_id):
         events = service.dispatch_pipeline_event(
             conn_id,
-            {
-                "type": "assistant_text",
-                "text": "Let me check",
-                "tools": [
+            AssistantTextEvent(
+                text="Let me check",
+                tools=[
                     {"call_id": "c1", "name": "get_weather", "arguments": '{"city": "Paris"}'},
                     {"call_id": "c2", "name": "get_time", "arguments": "{}"},
                 ],
-            },
+            ),
         )
         assert len(events) == 3
         assert isinstance(events[0], ResponseAudioTranscriptDoneEvent)
@@ -671,11 +682,10 @@ class TestDispatchPipelineEvent:
     def test_assistant_text_tools_only(self, service, conn_id):
         events = service.dispatch_pipeline_event(
             conn_id,
-            {
-                "type": "assistant_text",
-                "text": "",
-                "tools": [{"call_id": "c1", "name": "f1", "arguments": "{}"}],
-            },
+            AssistantTextEvent(
+                text="",
+                tools=[{"call_id": "c1", "name": "f1", "arguments": "{}"}],
+            ),
         )
         assert len(events) == 1
         assert isinstance(events[0], ResponseFunctionCallArgumentsDoneEvent)
@@ -684,12 +694,12 @@ class TestDispatchPipelineEvent:
     # -- partial_transcription --
 
     def test_partial_transcription_emits_delta(self, service, conn_id):
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
         e1 = service.dispatch_pipeline_event(
-            conn_id, {"type": "partial_transcription", "delta": "hel"},
+            conn_id, PartialTranscriptionEvent(delta="hel"),
         )
         e2 = service.dispatch_pipeline_event(
-            conn_id, {"type": "partial_transcription", "delta": "lo"},
+            conn_id, PartialTranscriptionEvent(delta="lo"),
         )
         assert isinstance(e1[0], ConversationItemInputAudioTranscriptionDeltaEvent)
         assert e1[0].content_index == 0
@@ -700,12 +710,12 @@ class TestDispatchPipelineEvent:
     # -- transcription_completed --
 
     def test_transcription_completed_emits_event(self, service, conn_id):
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
         service.dispatch_pipeline_event(
-            conn_id, {"type": "speech_stopped", "duration_s": 3.2},
+            conn_id, SpeechStoppedEvent(duration_s=3.2),
         )
         events = service.dispatch_pipeline_event(
-            conn_id, {"type": "transcription_completed", "transcript": "hello world"},
+            conn_id, TranscriptionCompletedEvent(transcript="hello world"),
         )
         assert len(events) == 1
         evt = events[0]
@@ -718,7 +728,8 @@ class TestDispatchPipelineEvent:
     # -- unknown --
 
     def test_unknown_type_returns_empty(self, service, conn_id):
-        events = service.dispatch_pipeline_event(conn_id, {"type": "something_else"})
+        from api.openai_realtime.events import PipelineEvent
+        events = service.dispatch_pipeline_event(conn_id, PipelineEvent(type="something_else"))
         assert events == []
 
 
@@ -745,12 +756,12 @@ class TestIdAndStateManagement:
         assert st.last_item_id is None
 
         # 1) speech_started sets last_item_id via dispatch_pipeline_event
-        events = service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        events = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
         input_id = events[0].item_id
         assert st.last_item_id == input_id
 
         # 2) assistant_text sets last_item_id via dispatch_pipeline_event
-        events = service.dispatch_pipeline_event(conn_id, {"type": "assistant_text", "text": "hi"})
+        events = service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="hi"))
         output_id = st.current_item_id
         assert st.last_item_id == output_id
 
@@ -840,7 +851,7 @@ class TestUsageMetricsTracking:
     def test_token_usage_accumulates_in_conn_state(self, service, conn_id):
         service.response._ensure_response(conn_id)
         service.dispatch_pipeline_event(
-            conn_id, {"type": "token_usage", "input_tokens": 10, "output_tokens": 20},
+            conn_id, TokenUsageEvent(input_tokens=10, output_tokens=20),
         )
         usage = service._state(conn_id).response_usage
         assert usage.input_tokens == 10
@@ -849,10 +860,10 @@ class TestUsageMetricsTracking:
     def test_token_usage_accumulates_multiple(self, service, conn_id):
         service.response._ensure_response(conn_id)
         service.dispatch_pipeline_event(
-            conn_id, {"type": "token_usage", "input_tokens": 5, "output_tokens": 10},
+            conn_id, TokenUsageEvent(input_tokens=5, output_tokens=10),
         )
         service.dispatch_pipeline_event(
-            conn_id, {"type": "token_usage", "input_tokens": 3, "output_tokens": 7},
+            conn_id, TokenUsageEvent(input_tokens=3, output_tokens=7),
         )
         usage = service._state(conn_id).response_usage
         assert usage.input_tokens == 8
@@ -860,14 +871,14 @@ class TestUsageMetricsTracking:
 
     def test_token_usage_emits_no_events(self, service, conn_id):
         events = service.dispatch_pipeline_event(
-            conn_id, {"type": "token_usage", "input_tokens": 10, "output_tokens": 20},
+            conn_id, TokenUsageEvent(input_tokens=10, output_tokens=20),
         )
         assert events == []
 
     def test_response_done_reflects_token_usage(self, service, conn_id):
         service.response._ensure_response(conn_id)
         service.dispatch_pipeline_event(
-            conn_id, {"type": "token_usage", "input_tokens": 100, "output_tokens": 50},
+            conn_id, TokenUsageEvent(input_tokens=100, output_tokens=50),
         )
         events = service.finish_audio_response(conn_id)
         done_evt = events[1]
@@ -888,7 +899,7 @@ class TestUsageMetricsTracking:
     def test_end_response_rolls_into_global(self, service, conn_id):
         service.response._ensure_response(conn_id)
         service.dispatch_pipeline_event(
-            conn_id, {"type": "token_usage", "input_tokens": 10, "output_tokens": 20},
+            conn_id, TokenUsageEvent(input_tokens=10, output_tokens=20),
         )
         service.response._end_response(conn_id)
         assert service.total_usage.input_tokens == 10
@@ -900,13 +911,13 @@ class TestUsageMetricsTracking:
     def test_multiple_responses_accumulate_global(self, service, conn_id):
         service.response._ensure_response(conn_id)
         service.dispatch_pipeline_event(
-            conn_id, {"type": "token_usage", "input_tokens": 10, "output_tokens": 20},
+            conn_id, TokenUsageEvent(input_tokens=10, output_tokens=20),
         )
         service.response._end_response(conn_id)
 
         service.response._ensure_response(conn_id)
         service.dispatch_pipeline_event(
-            conn_id, {"type": "token_usage", "input_tokens": 5, "output_tokens": 15},
+            conn_id, TokenUsageEvent(input_tokens=5, output_tokens=15),
         )
         service.response._end_response(conn_id)
 
@@ -917,7 +928,7 @@ class TestUsageMetricsTracking:
         cid = service.register()
         service.response._ensure_response(cid)
         service.dispatch_pipeline_event(
-            cid, {"type": "token_usage", "input_tokens": 7, "output_tokens": 3},
+            cid, TokenUsageEvent(input_tokens=7, output_tokens=3),
         )
         service.unregister(cid)
         assert service.total_usage.input_tokens == 7
@@ -933,7 +944,7 @@ class TestUsageMetricsTracking:
         """After finish_audio_response, per-response counters are zero."""
         service.response._ensure_response(conn_id)
         service.dispatch_pipeline_event(
-            conn_id, {"type": "token_usage", "input_tokens": 50, "output_tokens": 25},
+            conn_id, TokenUsageEvent(input_tokens=50, output_tokens=25),
         )
         service.finish_audio_response(conn_id)
         usage = service._state(conn_id).response_usage
@@ -945,26 +956,26 @@ class TestUsageMetricsTracking:
     # -- audio duration accumulation --
 
     def test_transcription_completed_accumulates_duration(self, service, conn_id):
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_stopped", "duration_s": 2.5})
-        service.dispatch_pipeline_event(conn_id, {"type": "transcription_completed", "transcript": "hi"})
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+        service.dispatch_pipeline_event(conn_id, SpeechStoppedEvent(duration_s=2.5))
+        service.dispatch_pipeline_event(conn_id, TranscriptionCompletedEvent(transcript="hi"))
         assert service._state(conn_id).response_usage.audio_duration_s == 2.5
 
     def test_multiple_transcriptions_accumulate_duration(self, service, conn_id):
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_stopped", "duration_s": 1.0})
-        service.dispatch_pipeline_event(conn_id, {"type": "transcription_completed", "transcript": "a"})
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+        service.dispatch_pipeline_event(conn_id, SpeechStoppedEvent(duration_s=1.0))
+        service.dispatch_pipeline_event(conn_id, TranscriptionCompletedEvent(transcript="a"))
 
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_stopped", "duration_s": 2.0})
-        service.dispatch_pipeline_event(conn_id, {"type": "transcription_completed", "transcript": "b"})
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+        service.dispatch_pipeline_event(conn_id, SpeechStoppedEvent(duration_s=2.0))
+        service.dispatch_pipeline_event(conn_id, TranscriptionCompletedEvent(transcript="b"))
 
         assert service._state(conn_id).response_usage.audio_duration_s == 3.0
 
     def test_end_response_rolls_duration_into_global(self, service, conn_id):
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_stopped", "duration_s": 4.0})
-        service.dispatch_pipeline_event(conn_id, {"type": "transcription_completed", "transcript": "x"})
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+        service.dispatch_pipeline_event(conn_id, SpeechStoppedEvent(duration_s=4.0))
+        service.dispatch_pipeline_event(conn_id, TranscriptionCompletedEvent(transcript="x"))
         service.response._ensure_response(conn_id)
         service.response._end_response(conn_id)
         assert service.total_usage.audio_duration_s == 4.0
@@ -972,9 +983,9 @@ class TestUsageMetricsTracking:
 
     def test_unregister_rolls_duration_into_global(self, service):
         cid = service.register()
-        service.dispatch_pipeline_event(cid, {"type": "speech_started"})
-        service.dispatch_pipeline_event(cid, {"type": "speech_stopped", "duration_s": 1.5})
-        service.dispatch_pipeline_event(cid, {"type": "transcription_completed", "transcript": "y"})
+        service.dispatch_pipeline_event(cid, SpeechStartedEvent())
+        service.dispatch_pipeline_event(cid, SpeechStoppedEvent(duration_s=1.5))
+        service.dispatch_pipeline_event(cid, TranscriptionCompletedEvent(transcript="y"))
         service.unregister(cid)
         assert service.total_usage.audio_duration_s == 1.5
 
@@ -1005,23 +1016,21 @@ class TestUsageMetricsTracking:
     # -- tool_calls --
 
     def test_tool_calls_increments(self, service, conn_id):
-        service.dispatch_pipeline_event(conn_id, {
-            "type": "assistant_text",
-            "text": "",
-            "tools": [
+        service.dispatch_pipeline_event(conn_id, AssistantTextEvent(
+            text="",
+            tools=[
                 {"call_id": "c1", "name": "f1", "arguments": "{}"},
                 {"call_id": "c2", "name": "f2", "arguments": "{}"},
             ],
-        })
+        ))
         assert service._state(conn_id).response_usage.tool_calls == 2
 
     def test_tool_calls_rolls_into_global(self, service, conn_id):
         service.response._ensure_response(conn_id)
-        service.dispatch_pipeline_event(conn_id, {
-            "type": "assistant_text",
-            "text": "",
-            "tools": [{"call_id": "c1", "name": "f1", "arguments": "{}"}],
-        })
+        service.dispatch_pipeline_event(conn_id, AssistantTextEvent(
+            text="",
+            tools=[{"call_id": "c1", "name": "f1", "arguments": "{}"}],
+        ))
         service.finish_audio_response(conn_id)
         assert service.total_usage.tool_calls == 1
         assert service._state(conn_id).response_usage.tool_calls == 0
@@ -1040,13 +1049,13 @@ class TestUsageMetricsTracking:
     # -- turns --
 
     def test_turns_increments(self, service, conn_id):
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
         assert service._state(conn_id).response_usage.turns == 3
 
     def test_turns_rolls_into_global(self, service, conn_id):
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
         service.response._ensure_response(conn_id)
         service.response._end_response(conn_id)
         assert service.total_usage.turns == 1
@@ -1071,18 +1080,18 @@ class TestUsageMetricsTracking:
 
     def test_get_usage(self, service, conn_id):
         # Speech cycle before response so speech_started doesn't cancel anything
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_started"})
-        service.dispatch_pipeline_event(conn_id, {"type": "speech_stopped", "duration_s": 3.0})
-        service.dispatch_pipeline_event(conn_id, {"type": "transcription_completed", "transcript": "z"})
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+        service.dispatch_pipeline_event(conn_id, SpeechStoppedEvent(duration_s=3.0))
+        service.dispatch_pipeline_event(conn_id, TranscriptionCompletedEvent(transcript="z"))
 
         service.response._ensure_response(conn_id)
         service.dispatch_pipeline_event(
-            conn_id, {"type": "token_usage", "input_tokens": 10, "output_tokens": 20},
+            conn_id, TokenUsageEvent(input_tokens=10, output_tokens=20),
         )
-        service.dispatch_pipeline_event(conn_id, {
-            "type": "assistant_text", "text": "hi",
-            "tools": [{"call_id": "c1", "name": "f1", "arguments": "{}"}],
-        })
+        service.dispatch_pipeline_event(conn_id, AssistantTextEvent(
+            text="hi",
+            tools=[{"call_id": "c1", "name": "f1", "arguments": "{}"}],
+        ))
         service.finish_audio_response(conn_id)
         service.make_error("oops", "some_error")
         usage = service.get_usage()

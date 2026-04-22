@@ -19,6 +19,7 @@ import json
 from queue import Queue
 from threading import Event
 import soundfile as sf
+from pipeline_messages import VADAudio
 
 logging.basicConfig(
     level=logging.INFO,
@@ -216,7 +217,7 @@ def benchmark_handler(
         logger.info(f"Handler {handler_name} initialized and warmed up")
 
         # Additional warmup on the actual audio (excluded from timings)
-        for _ in handler.process(audio):
+        for _ in handler.process(VADAudio(audio=audio)):
             pass
 
         # Run benchmark iterations
@@ -230,7 +231,7 @@ def benchmark_handler(
             time_to_first_token = None
             first_output = True
 
-            for output in handler.process(audio):
+            for output in handler.process(VADAudio(audio=audio)):
                 # Measure time to first token
                 if first_output:
                     time_to_first_token = time.perf_counter() - start_time

@@ -1,14 +1,19 @@
+from __future__ import annotations
+
 from time import perf_counter
 from queue import Empty
 import logging
+from typing import Generic, Iterator, TypeVar
 
 from pipeline_control import SESSION_END, is_control_message
 from pipeline_messages import PIPELINE_END
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar("T")
 
-class BaseHandler:
+
+class BaseHandler(Generic[T]):
     """
     Base class for pipeline parts. Each part of the pipeline has an input and an output queue.
     The `setup` method along with `setup_args` and `setup_kwargs` can be used to address the specific requirements of the implemented pipeline part.
@@ -28,7 +33,7 @@ class BaseHandler:
     def setup(self, *arg, **kwargs):
         pass
 
-    def process(self):
+    def process(self, input: T) -> Iterator:
         raise NotImplementedError
 
     def run(self):
@@ -53,6 +58,7 @@ class BaseHandler:
                 continue
 
             if isinstance(input, bytes) and input == PIPELINE_END:
+                # sentinel signal to avoid queue deadlock
                 logger.debug("Stopping thread")
                 break
             start_time = perf_counter()

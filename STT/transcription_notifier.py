@@ -1,35 +1,46 @@
+from __future__ import annotations
+
 import logging
 
 from baseHandler import BaseHandler
-from pipeline_messages import MessageTag
+from api.openai_realtime.events import PartialTranscriptionEvent, TranscriptionCompletedEvent
+from pipeline_messages import PartialTranscription, Transcription
 
 logger = logging.getLogger(__name__)
 
 
-class TranscriptionNotifier(BaseHandler):
+class TranscriptionNotifier(BaseHandler[PartialTranscription | Transcription]):
     """
     Sits between STT and LLM.  Intercepts partial and final transcriptions,
     emitting events on ``text_output_queue`` for connected clients (Realtime
     API or plain WebSocket) while only forwarding final transcripts to the LLM.
     """
 
-    def setup(self, text_output_queue=None):
+    def setup(self, text_output_queue=None, suppress_yield=False):
         self.text_output_queue = text_output_queue
+        self.suppress_yield = suppress_yield
 
-    def process(self, transcription):
-        if isinstance(transcription, tuple) and len(transcription) == 2 and transcription[0] == MessageTag.PARTIAL:
-            _, text = transcription
-            if self.text_output_queue and text:
+    def process(self, transcription: PartialTranscription | Transcription):
+        if isinstance(transcription, PartialTranscription):
+            if self.text_output_queue and transcription.text:
                 self.text_output_queue.put(
-                    {"type": "partial_transcription", "delta": str(text)}
+                    PartialTranscriptionEvent(delta=str(transcription.text))
                 )
-                logger.debug("Partial transcription: %s", str(text)[:80])
+                logger.debug("Partial transcription: %s", str(transcription.text)[:80])
             return
 
-        text = transcription[0] if isinstance(transcription, tuple) else transcription
+        if isinstance(transcription, Transcription):
+            text = transcription.text
+            language_code = transcription.language_code
+        else:
+            text = transcription
+            language_code = None
+
         if self.text_output_queue and text:
             self.text_output_queue.put(
-                {"type": "transcription_completed", "transcript": str(text)}
+                TranscriptionCompletedEvent(transcript=str(text), language_code=language_code)
             )
             logger.debug("Transcription completed: %s", str(text)[:80])
-        yield transcription
+
+        if not self.suppress_yield:
+            yield transcription

@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from openai.types.realtime import (
     RealtimeResponse,
-    RealtimeSessionCreateRequest,
     ResponseAudioDoneEvent,
     ResponseAudioTranscriptDoneEvent,
     ResponseCreatedEvent,
@@ -18,12 +17,12 @@ from openai.types.realtime.realtime_response import Audio, AudioOutput
 from openai.types.realtime.realtime_response_status import RealtimeResponseStatus
 from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
 
+from api.openai_realtime.events import AssistantTextEvent
 from api.openai_realtime.handlers.base import RealtimeBaseHandler, _generate_id
+from pipeline_messages import GenerateResponseRequest
 
 if TYPE_CHECKING:
     from api.openai_realtime.service import ServerEvent, _ResponseStatus, _StatusReason
-
-from pipeline_messages import MessageTag
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +62,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_item_id = None
         st.content_index = 0
         st.in_response = False
-        st.response_metadata = None
+        st.current_response_params = None
 
     def _start_item(self, conn_id: str) -> str:
         """Generate a new item ID, reset content index, and store it."""
@@ -95,9 +94,18 @@ class ResponseHandler(RealtimeBaseHandler):
         status_details = None
         if reason or status in ("completed", "cancelled", "incomplete", "failed"):
             status_details = RealtimeResponseStatus(type=status, reason=reason)  # type: ignore[arg-type]
-        audio_cfg = self._config(conn_id).session.audio
-        audio_output = audio_cfg.output if audio_cfg is not None else None
-        voice = audio_output.voice if audio_output is not None else None
+
+        rp = st.current_response_params
+        metadata = rp.metadata if rp and rp.metadata else None
+
+        voice = None
+        if rp and rp.audio and rp.audio.output:
+            voice = rp.audio.output.voice
+        if not voice:
+            audio_cfg = st.runtime_config.session.audio
+            audio_output = audio_cfg.output if audio_cfg is not None else None
+            voice = audio_output.voice if audio_output is not None else None
+
         return RealtimeResponse(
             id=st.current_response_id,
             object="realtime.response",
@@ -105,7 +113,7 @@ class ResponseHandler(RealtimeBaseHandler):
             status_details=status_details,
             audio=Audio(output=AudioOutput(voice=voice)),
             conversation_id=st.conversation_id,
-            metadata=st.response_metadata,
+            metadata=metadata,
             usage=RealtimeResponseUsage(
                 input_tokens=st.response_usage.input_tokens,
                 output_tokens=st.response_usage.output_tokens,
@@ -121,50 +129,36 @@ class ResponseHandler(RealtimeBaseHandler):
         Returns a ``ResponseCreatedEvent`` on success, a ``RealtimeErrorEvent``
         on failure, or ``None`` if there is no text_prompt_queue.
         """
-        if self._state(conn_id).in_response:
+        st = self._state(conn_id)
+        if event.response:
+            if event.response.tool_choice and not isinstance(event.response.tool_choice, str):
+                return self.make_error(
+                    message="Only string tool_choice values are supported for now (auto, required, none).",
+                    _type="tool_choice_not_supported",
+                )
+        if st.in_response:
             return self.make_error(
                 message="Cannot create response while another response is in progress.",
                 _type="conversation_already_has_active_response",
             )
+        else:
+            st.in_response = True
 
-        override_instructions: str | None = None
-        override_tool_choice: str | None = None
-        if event.response:
-            if event.response.tool_choice:
-                if not isinstance(event.response.tool_choice, str):
-                    return self.make_error(
-                        message="Only string tool_choice values are supported for now (auto, required, none).",
-                        _type="tool_choice_not_supported",
-                    )
-                override_tool_choice = event.response.tool_choice
-                logger.info("Per-response tool_choice: %s", override_tool_choice)
-            cfg = self._config(conn_id)
-            if cfg.session is None:
-                cfg.session = RealtimeSessionCreateRequest(type="realtime")
-            if event.response.instructions:
-                override_instructions = event.response.instructions
-                logger.info(
-                    "Per-response instructions (%d chars): %s...",
-                    len(override_instructions),
-                    override_instructions[:60],
-                )
-            if hasattr(event.response, "metadata") and event.response.metadata:
-                self._state(conn_id).response_metadata = event.response.metadata
-                logger.info("Per-response metadata stored (%d keys)", len(event.response.metadata))
-            if event.response.input:
-                for input_item in event.response.input:
-                    self._service.conversation._enqueue_item(conn_id, input_item)
+        if event.response and event.response.input:
+            for input_item in event.response.input:
+                self._service.conversation._append_item(conn_id, input_item)
 
-        st = self._state(conn_id)
-        st.in_response = True
+        st.current_response_params = event.response
         st.current_response_id = _generate_id("resp")
         self._start_item(conn_id)
 
+        cfg = st.runtime_config
         queue = self._queue(conn_id)
         if queue:
-            queue.put(
-                (MessageTag.GENERATE_RESPONSE, override_instructions, override_tool_choice)
-            )
+            queue.put(GenerateResponseRequest(
+                runtime_config=cfg,
+                response=event.response,
+            ))
         logger.debug("response.create received, LLM generation triggered")
         return ResponseCreatedEvent(
             type="response.created",
@@ -210,14 +204,14 @@ class ResponseHandler(RealtimeBaseHandler):
 
     # ── Pipeline event handlers ───────────────────
 
-    def on_assistant_text(self, conn_id: str, msg: dict) -> list[ServerEvent]:
+    def on_assistant_text(self, conn_id: str, event: AssistantTextEvent) -> list[ServerEvent]:
         """Handle assistant_text: emit transcript and/or tool-call events."""
+        st = self._state(conn_id)
         events: list[ServerEvent] = []
         resp_id, item_id = self._ensure_response(conn_id)
-        self._state(conn_id).last_item_id = item_id
+        st.last_item_id = item_id
         output_idx = 0
-        text = msg.get("text", "")
-        if text:
+        if event.text:
             events.append(ResponseAudioTranscriptDoneEvent(
                 type="response.output_audio_transcript.done",
                 event_id=self._next_event_id(),
@@ -225,13 +219,12 @@ class ResponseHandler(RealtimeBaseHandler):
                 item_id=item_id,
                 output_index=output_idx,
                 response_id=resp_id,
-                transcript=text,
+                transcript=event.text,
             ))
             output_idx += 1
-        tools = msg.get("tools")
-        if tools:
-            self._state(conn_id).response_usage.tool_calls += len(tools)
-            for tool in tools:
+        if event.tools:
+            st.response_usage.tool_calls += len(event.tools)
+            for tool in event.tools:
                 if isinstance(tool.get("arguments"), str):
                     arguments = tool.get("arguments")
                 else:

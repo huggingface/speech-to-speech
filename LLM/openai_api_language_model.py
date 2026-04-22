@@ -1,35 +1,30 @@
+from __future__ import annotations
+
 import logging
 import time
 
 import httpx
 from nltk import sent_tokenize
-from rich.console import Console
 from openai import OpenAI, Stream
 from openai.types.responses import Response, ResponseStreamEvent
 
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
 from LLM.chat import Chat
-from LLM.utils import remove_unspeechable
-from api.openai_realtime.runtime_config import RuntimeConfig
+from LLM.utils import remove_unspeechable, resolve_auto_language
 from LLM.voice_prompt import build_voice_system_prompt
-from pipeline_messages import MessageTag
+from pipeline_messages import (
+    EndOfResponse,
+    GenerateResponseRequest,
+    LLMResponseChunk,
+    TokenUsage,
+    Transcription,
+)
 
 logger = logging.getLogger(__name__)
 
-console = Console()
 
-WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
-    "en": "english",
-    "fr": "french",
-    "es": "spanish",
-    "zh": "chinese",
-    "ja": "japanese",
-    "ko": "korean",
-}
-
-
-class OpenApiModelHandler(BaseHandler):
+class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
     """
     Handles the language model part.
     """
@@ -46,7 +41,6 @@ class OpenApiModelHandler(BaseHandler):
         chat_size=1,
         init_chat_role="system",
         init_chat_prompt="You are a helpful AI assistant.",
-        runtime_config: RuntimeConfig | None = None,
         cancel_scope: CancelScope | None = None,
         disable_thinking=True,
         request_timeout_s=20.0,
@@ -62,6 +56,8 @@ class OpenApiModelHandler(BaseHandler):
             self.request_timeout_s,
             connect=min(10.0, self.request_timeout_s),
         )
+
+        # TODO: chat is not used in the realtime pipeline, but still need to be kept for backward compatibility. Remove it in the future.
         self.chat = Chat(chat_size)
         if init_chat_role:
             if not init_chat_prompt:
@@ -70,18 +66,30 @@ class OpenApiModelHandler(BaseHandler):
                 )
             full_prompt = build_voice_system_prompt(init_chat_prompt)
             self.chat.init_chat({"role": init_chat_role, "content": full_prompt})
+        
         self.user_role = user_role
-        self.runtime_config = runtime_config
-        self._last_instructions = init_chat_prompt
         self.client = OpenAI(api_key=api_key, base_url=base_url)
-        self.tools = None
-        self.tools_choice = None
         self._extra_body = (
             {"chat_template_kwargs": {"enable_thinking": False}}
             if disable_thinking and base_url is not None # Only for other than OpenAI Official Server
             else None
         )
         self.warmup()
+
+    def _prepare_chat_messages(self, chat: Chat) -> list[dict]:
+        """Convert chat messages to OpenAI Responses API input format.
+
+        Regular messages are wrapped with ``type: "message"``.
+        Tool-related items (``function_call``, ``function_call_output``)
+        are passed through as top-level input items per the Responses API spec.
+        """
+        result = []
+        for msg in chat.to_list():
+            if msg.get("type") in ("function_call", "function_call_output"):
+                result.append(msg)
+            else:
+                result.append({"type": "message", "role": msg["role"], "content": msg["content"]})
+        return result
 
     def warmup(self):
         logger.info(f"Warming up {self.__class__.__name__}")
@@ -98,68 +106,54 @@ class OpenApiModelHandler(BaseHandler):
         logger.info(
             f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s"
         )
-    def _apply_runtime_config(self, override_tool_choice=None):
-        if not self.runtime_config:
-            return
+    def _apply_config(
+        self,
+        chat: Chat,
+        instructions: str | None,
+    ) -> None:
+        if instructions:
+            full_instructions = build_voice_system_prompt(instructions)
+            chat.init_chat({"role": "system", "content": [{"type": "input_text", "text": full_instructions}]})
 
-        new_instructions = self.runtime_config.session.instructions
-        if new_instructions and new_instructions != self._last_instructions:
-            self._last_instructions = new_instructions
-            full_instructions = build_voice_system_prompt(new_instructions)
-            self.chat.init_chat({"type": "message", "role": "system", "content": [{"type": "input_text", "text": full_instructions}]})
-            logger.info(f"LLM instructions updated ({len(new_instructions)} chars)")
-
-        self.tools = self.runtime_config.session.tools
-        self.tools_choice = override_tool_choice or self.runtime_config.session.tool_choice
-
-    def process(self, prompt):
-        if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == MessageTag.ADD_TO_CONTEXT:
-            _, role, content = prompt
-            self.chat.append({"type": "message", "role": role, "content": content})
-            logger.debug("Added to LLM context (role=%s)", role)
-            return
-
-        if isinstance(prompt, tuple) and len(prompt) == 2 and prompt[0] == MessageTag.FUNCTION_RESULT:
-            _, result_text = prompt
-            self.chat.append({
-                "type": "message",
-                "role": self.user_role,
-                "content": [{"type": "input_text", "text": result_text}],
-            })
-            logger.debug("Added function result to LLM context (%d chars)", len(result_text))
-            return
-
+    def process(self, request: Transcription | GenerateResponseRequest):
         language_code = None
+        runtime_config = None
+        response = None
+        req_tools = None
+        req_tool_choice = None
 
-        if isinstance(prompt, tuple) and len(prompt) == 3 and prompt[0] == MessageTag.GENERATE_RESPONSE:
-            _, override_instructions, override_tool_choice = prompt
-            self._apply_runtime_config(override_tool_choice)
-            if override_instructions:
-                self.chat.append({
-                    "type": "message",
-                    "role": self.user_role,
-                    "content": [{"type": "input_text", "text": override_instructions}],
-                })
-        else:
-            self._apply_runtime_config()
-            # Regular text from STT pipeline
+        if isinstance(request, GenerateResponseRequest):
+            req = request
+            runtime_config = req.runtime_config
+            response = req.response
+            original_chat = runtime_config.chat
+            active_chat = original_chat.copy()
+            language_code = req.language_code
+            instructions = response.instructions if response and response.instructions else runtime_config.session.instructions
+            req_tools = response.tools if response and response.tools else runtime_config.session.tools
+            req_tool_choice = response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
+            self._apply_config(active_chat, instructions)
+            language_code, lang_name = resolve_auto_language(language_code)
+            if lang_name:
+                active_chat.append({"role": self.user_role, "content": [{"type": "input_text", "text": f"Please reply to my message in {lang_name}."}]})
+        elif isinstance(request, Transcription):
+            original_chat = self.chat
+            active_chat = original_chat
             logger.debug("call api language model...")
-            if isinstance(prompt, tuple):
-                prompt, language_code = prompt
-                if language_code[-5:] == "-auto":
-                    language_code = language_code[:-5]
-                    prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
-            self.chat.append({
-                "type": "message",
-                "role": self.user_role,
-                "content": [{"type": "input_text", "text": prompt}],
-            })
+            language_code = request.language_code
+            prompt_text = request.text
+            language_code, lang_name = resolve_auto_language(language_code)
+            if lang_name:
+                prompt_text = f"Please reply to my message in {lang_name}. " + prompt_text
+            active_chat.append({"role": self.user_role, "content": [{"type": "input_text", "text": prompt_text}]})
+        else:
+            raise TypeError(f"Unexpected request type: {type(request)}")
 
         optional_kwargs = {}
-        if self.tools is not None:
-            optional_kwargs["tools"] = self.tools
-        if self.tools_choice is not None:
-            optional_kwargs["tool_choice"] = self.tools_choice
+        if req_tools is not None:
+            optional_kwargs["tools"] = req_tools
+        if req_tool_choice is not None:
+            optional_kwargs["tool_choice"] = req_tool_choice
 
         # CancelScope.is_stale(gen) is checked when the stream iterator advances; a
         # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from
@@ -167,15 +161,15 @@ class OpenApiModelHandler(BaseHandler):
         # option is to run this API call in a child process and terminate() on session
         # end (IPC and lifecycle cost).
         gen = self.cancel_scope.generation if self.cancel_scope else None
-        response: Response | Stream[ResponseStreamEvent] | None = None
+        api_response: Response | Stream[ResponseStreamEvent] | None = None
         tools: list[dict[str, str]] = []
         clean_text = ""
         input_tokens = 0
         output_tokens = 0
         try:
-            response = self.client.responses.create(
+            api_response = self.client.responses.create(
                 model=self.model_name,
-                input=self.chat.to_list(),
+                input=self._prepare_chat_messages(active_chat),
                 stream=self.stream,
                 extra_body=self._extra_body,
                 timeout=self.request_timeout,
@@ -185,7 +179,7 @@ class OpenApiModelHandler(BaseHandler):
                 cancelled = False
                 printable_text = ""
                 sentence_batch: list[str] = []
-                for event in response:
+                for event in api_response:
                     if gen is not None and self.cancel_scope.is_stale(gen):
                         logger.info("LLM generation cancelled (interruption)")
                         cancelled = True
@@ -199,16 +193,14 @@ class OpenApiModelHandler(BaseHandler):
                             for s in sentences[:-1]:
                                 sentence_batch.append(s)
                                 if len(sentence_batch) >= self.stream_batch_sentences:
-                                    yield " ".join(sentence_batch), language_code, []
+                                    yield LLMResponseChunk(text=" ".join(sentence_batch), language_code=language_code, runtime_config=runtime_config, response=response)
                                     sentence_batch = []
                             printable_text = sentences[-1]
                     elif event.type == "response.output_item.done":
-
                         if event.item.type == "function_call":
                             tools.append(event.item.model_dump())
                         elif event.item.type == "message":
-                            self.chat.append({
-                                "type": "message",
+                            original_chat.append({
                                 "role": event.item.role,
                                 "content": event.item.content,
                             })
@@ -218,27 +210,28 @@ class OpenApiModelHandler(BaseHandler):
                             input_tokens = usage.input_tokens or 0
                             output_tokens = usage.output_tokens or 0
                 if not cancelled:
+                    for tool in tools:
+                        original_chat.append(tool)
                     if printable_text.strip():
                         sentence_batch.append(printable_text.strip())
                     remaining = " ".join(sentence_batch)
                     if remaining or tools:
                         logger.debug(f"Clean text: {clean_text}")
                         logger.info(f"Tools: {tools}")
-                        yield remaining, language_code, tools
+                        yield LLMResponseChunk(text=remaining, language_code=language_code, tools=tools, runtime_config=runtime_config, response=response)
             else:
                 if gen is not None and self.cancel_scope.is_stale(gen):
                     logger.info("LLM generation cancelled (interruption)")
                 else:
-                    usage = getattr(response, "usage", None)
+                    usage = getattr(api_response, "usage", None)
                     if usage:
                         input_tokens = usage.input_tokens or 0
                         output_tokens = usage.output_tokens or 0
-                    for message in response.output:
+                    for message in api_response.output:
                         if message.type == "function_call":
                             tools.append(message.model_dump())
                         elif message.type == "message":
-                            self.chat.append({
-                                "type": "message",
+                            original_chat.append({
                                 "role": message.role,
                                 "content": message.content,
                             })
@@ -247,31 +240,29 @@ class OpenApiModelHandler(BaseHandler):
                                     clean_text += remove_unspeechable(chunk.text)
                         else:
                             logger.warning(f"Not supported message type: {message.type}")
+                    for tool in tools:
+                        original_chat.append(tool)
                     logger.debug(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
                     if clean_text.strip() or tools:
-                        yield clean_text.strip(), language_code, tools
+                        yield LLMResponseChunk(text=clean_text.strip(), language_code=language_code, tools=tools, runtime_config=runtime_config, response=response)
         except httpx.ReadTimeout:
             logger.warning(
                 "OpenAI API read timed out after %.1fs; ending the current response",
                 self.request_timeout_s,
             )
-            yield ("Wow I'm a bit slow today, could you repeat that?", None, None)
+            yield LLMResponseChunk(text="Wow I'm a bit slow today, could you repeat that?", runtime_config=runtime_config, response=response)
         finally:
-            if response is not None and hasattr(response, "close"):
+            if api_response is not None and hasattr(api_response, "close"):
                 try:
-                    response.close()
+                    api_response.close()
                 except Exception:
                     pass
 
-        self.chat.strip_images()
+        original_chat.strip_images()
         if input_tokens or output_tokens:
-            yield (MessageTag.TOKEN_USAGE, input_tokens, output_tokens)
-        yield (MessageTag.END_OF_RESPONSE, None, None)
+            yield TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens)
+        yield EndOfResponse()
 
     def on_session_end(self):
-        self.chat.reset()
-        self._last_instructions = None
-        self.tools = None
-        self.tools_choice = None
-        logger.debug("OpenAI API language model session state reset (chat + tool cache)")
+        logger.debug("OpenAI API language model session state reset")

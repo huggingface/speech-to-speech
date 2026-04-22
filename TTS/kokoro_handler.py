@@ -8,16 +8,17 @@ Supports NVIDIA Kokoro TTS model for high-quality multilingual speech synthesis.
 Model supports 8 languages with multiple voices per language.
 """
 
+from __future__ import annotations
+
 import logging
 import numpy as np
 from sys import platform
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
-from pipeline_messages import MessageTag, AUDIO_RESPONSE_DONE
+from pipeline_messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from rich.console import Console
 from utils.mlx_lock import MLXLockContext
 
-from api.openai_realtime.runtime_config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -67,7 +68,7 @@ KOKORO_LANG_DEFAULT_VOICES = {
 }
 
 
-class KokoroTTSHandler(BaseHandler):
+class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
     """
     Handles Text-to-Speech using Kokoro TTS model.
 
@@ -88,7 +89,6 @@ class KokoroTTSHandler(BaseHandler):
         speed=1.0,
         blocksize=512,
         gen_kwargs=None,
-        runtime_config: RuntimeConfig | None = None,
         cancel_scope: CancelScope | None = None,
     ):
         """
@@ -110,7 +110,6 @@ class KokoroTTSHandler(BaseHandler):
         self.lang_code = lang_code
         self.speed = speed
         self.blocksize = blocksize
-        self.runtime_config = runtime_config
         self.cancel_scope = cancel_scope
 
         # Determine device
@@ -138,6 +137,9 @@ class KokoroTTSHandler(BaseHandler):
             self._setup_mlx(model_name)
         else:
             self._setup_kokoro(model_name)
+
+        self._initial_voice = self.voice
+        self._initial_lang_code = self.lang_code
 
         self.warmup()
 
@@ -222,61 +224,60 @@ class KokoroTTSHandler(BaseHandler):
 
         logger.info(f"{self.__class__.__name__} warmed up")
 
-    def process(self, llm_sentence):
+    def process(self, tts_input: TTSInput | EndOfResponse):
         """
         Process text input and generate audio output.
-
-        Args:
-            llm_sentence: Either a string or tuple of (text, language_code)
 
         Yields:
             Audio chunks as numpy int16 arrays
         """
-        if isinstance(llm_sentence, tuple) and llm_sentence[0] == MessageTag.END_OF_RESPONSE:
+        if isinstance(tts_input, EndOfResponse):
             yield AUDIO_RESPONSE_DONE
             return
 
-        if self.runtime_config and self.runtime_config.session.audio.output.voice:
-            self.voice = self.runtime_config.session.audio.output.voice
+        runtime_config = tts_input.runtime_config
+        response = tts_input.response
+        language_code = tts_input.language_code
+        text = tts_input.text
+
+        voice = None
+        if response and response.audio and response.audio.output:
+            voice = response.audio.output.voice
+        if not voice and runtime_config:
+            voice = runtime_config.session.audio.output.voice
+        if voice:
+            self.voice = voice
 
         if self.backend == "mlx":
-            yield from self._process_mlx(llm_sentence)
+            yield from self._process_mlx(text, language_code)
         else:
-            yield from self._process_kokoro(llm_sentence)
+            yield from self._process_kokoro(text, language_code)
 
-        if not getattr(self, 'runtime_config', None):
+        if not runtime_config:
             self.should_listen.set()
 
-    def _process_mlx(self, llm_sentence):
+    def _process_mlx(self, llm_sentence, language_code=None):
         """Process using MLX backend with Apple Silicon optimizations."""
         from scipy.signal import resample_poly
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
-        # Acquire global MLX lock to prevent concurrent access with STT
         with MLXLockContext(handler_name="KokoroTTS", timeout=10.0):
-            language_code = None
-            if isinstance(llm_sentence, tuple):
-                llm_sentence, language_code = llm_sentence
-                # Map Whisper language code to Kokoro language code
+            if language_code is not None:
                 new_lang_code = WHISPER_LANGUAGE_TO_KOKORO_LANG.get(
                     language_code, self.lang_code
                 )
-                # If language changed, get new pipeline and switch to appropriate voice
                 if new_lang_code != self.lang_code:
-                    # Get the default voice for this language
                     new_voice = KOKORO_LANG_DEFAULT_VOICES.get(new_lang_code, self.voice)
                     logger.info(f"Language change detected: {self.lang_code} -> {new_lang_code}, voice: {self.voice} -> {new_voice}")
                     try:
                         new_pipeline = self.model._get_pipeline(new_lang_code)
                         new_voice_tensor = new_pipeline.load_voice(new_voice)
-                        # Only update state after successful loading
                         self.lang_code = new_lang_code
                         self.voice = new_voice
                         self._pipeline = new_pipeline
                         self._voice_tensor = new_voice_tensor
                     except Exception as e:
                         logger.warning(f"Failed to switch language/voice: {e}. Keeping current language: {self.lang_code}")
-                        # Continue with existing pipeline and voice
 
             console.print(f"[green]ASSISTANT: {llm_sentence}")
 
@@ -327,21 +328,16 @@ class KokoroTTSHandler(BaseHandler):
                     logger.debug(f"TTS yielding audio chunk: {len(chunk)} samples")
                     yield chunk
 
-    def _process_kokoro(self, llm_sentence):
+    def _process_kokoro(self, llm_sentence, language_code=None):
         """Process using native kokoro library."""
         from scipy.signal import resample_poly
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
-        language_code = None
-        if isinstance(llm_sentence, tuple):
-            llm_sentence, language_code = llm_sentence
-            # Map Whisper language code to Kokoro language code
+        if language_code is not None:
             new_lang_code = WHISPER_LANGUAGE_TO_KOKORO_LANG.get(
                 language_code, self.lang_code
             )
-            # Reinitialize pipeline if language changed
             if new_lang_code != self.lang_code:
-                # Get the default voice for this language
                 new_voice = KOKORO_LANG_DEFAULT_VOICES.get(new_lang_code, self.voice)
                 logger.info(f"Language change detected: {self.lang_code} -> {new_lang_code}, voice: {self.voice} -> {new_voice}")
                 self.lang_code = new_lang_code
@@ -383,3 +379,17 @@ class KokoroTTSHandler(BaseHandler):
                 if len(chunk) < self.blocksize:
                     chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
                 yield chunk
+
+    def on_session_end(self):
+        self.voice = self._initial_voice
+        self.lang_code = self._initial_lang_code
+        if self.backend == "mlx":
+            try:
+                self._pipeline = self.model._get_pipeline(self.lang_code)
+                self._voice_tensor = self._pipeline.load_voice(self.voice)
+            except Exception as e:
+                logger.warning(f"Failed to restore initial voice/language on session end: {e}")
+        else:
+            from kokoro import KPipeline
+            self.pipeline = KPipeline(lang_code=self.lang_code)
+        logger.debug("Kokoro TTS session state reset")

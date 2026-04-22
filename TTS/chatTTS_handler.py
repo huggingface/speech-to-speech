@@ -1,13 +1,14 @@
+from __future__ import annotations
+
 import ChatTTS
 import logging
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
-from pipeline_messages import MessageTag, AUDIO_RESPONSE_DONE
+from pipeline_messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 import librosa
 import numpy as np
 from rich.console import Console
 import torch
-from api.openai_realtime.runtime_config import RuntimeConfig
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-class ChatTTSHandler(BaseHandler):
+class ChatTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
     def setup(
         self,
         should_listen,
@@ -26,11 +27,9 @@ class ChatTTSHandler(BaseHandler):
         gen_kwargs={},  # Unused
         stream=True,
         chunk_size=512,
-        runtime_config: RuntimeConfig | None = None,   # accepted but unused; implement voice-switch logic in process() to support dynamic voice change
         cancel_scope: CancelScope | None = None,
     ):
         self.should_listen = should_listen
-        self.runtime_config = runtime_config
         self.cancel_scope = cancel_scope
         self.device = device
         self.model = ChatTTS.Chat()
@@ -47,13 +46,16 @@ class ChatTTSHandler(BaseHandler):
         logger.info(f"Warming up {self.__class__.__name__}")
         _ = self.model.infer("text")
 
-    def process(self, llm_sentence):
-        if isinstance(llm_sentence, tuple) and llm_sentence[0] == MessageTag.END_OF_RESPONSE:
+    def process(self, tts_input: TTSInput | EndOfResponse):
+        if isinstance(tts_input, EndOfResponse):
             yield AUDIO_RESPONSE_DONE
             return
 
+        runtime_config = tts_input.runtime_config
+        text = tts_input.text
+
         _cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
-        console.print(f"[green]ASSISTANT: {llm_sentence}")
+        console.print(f"[green]ASSISTANT: {text}")
         if self.device == "mps":
             import time
 
@@ -65,7 +67,7 @@ class ChatTTSHandler(BaseHandler):
             )  # Removing this line makes it fail more often. I'm looking into it.
 
         wavs_gen = self.model.infer(
-            llm_sentence, params_infer_code=self.params_infer_code, stream=self.stream
+            text, params_infer_code=self.params_infer_code, stream=self.stream
         )
 
         if self.stream:
@@ -75,7 +77,7 @@ class ChatTTSHandler(BaseHandler):
                     logger.info("TTS generation cancelled (interruption)")
                     return
                 if gen[0] is None or len(gen[0]) == 0:
-                    if not getattr(self, 'runtime_config', None):
+                    if not runtime_config:
                         self.should_listen.set()
                     return
                 audio_chunk = librosa.resample(gen[0], orig_sr=24000, target_sr=16000)
@@ -87,7 +89,7 @@ class ChatTTSHandler(BaseHandler):
         else:
             wavs = wavs_gen
             if len(wavs[0]) == 0:
-                if not getattr(self, 'runtime_config', None):
+                if not runtime_config:
                     self.should_listen.set()
                 return
             audio_chunk = librosa.resample(wavs[0], orig_sr=24000, target_sr=16000)
@@ -97,5 +99,5 @@ class ChatTTSHandler(BaseHandler):
                     audio_chunk[i : i + self.chunk_size],
                     (0, self.chunk_size - len(audio_chunk[i : i + self.chunk_size])),
                 )
-        if not getattr(self, 'runtime_config', None):
+        if not runtime_config:
             self.should_listen.set()

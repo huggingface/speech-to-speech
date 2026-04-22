@@ -14,8 +14,8 @@ from openai.types.realtime.conversation_item_input_audio_transcription_completed
     UsageTranscriptTextUsageDuration,
 )
 
+from api.openai_realtime.events import PartialTranscriptionEvent, TranscriptionCompletedEvent
 from api.openai_realtime.handlers.base import RealtimeBaseHandler
-from pipeline_messages import MessageTag
 
 if TYPE_CHECKING:
     from api.openai_realtime.service import ServerEvent
@@ -38,7 +38,7 @@ class ConversationHandler(RealtimeBaseHandler):
         events: list[ServerEvent] = []
         item = event.item
 
-        if not self._enqueue_item(conn_id, item):
+        if not self._append_item(conn_id, item):
             return []
 
         if item:
@@ -55,14 +55,12 @@ class ConversationHandler(RealtimeBaseHandler):
 
         return events
 
-    def _enqueue_item(self, conn_id: str, item: ConversationItem) -> bool:
-        """Enqueue a single conversation item into the LLM context.
+    def _append_item(self, conn_id: str, item: ConversationItem) -> bool:
+        """Add a conversation item directly to the connection's chat history.
 
         Returns ``True`` if the item was handled, ``False`` otherwise.
         """
-        queue = self._queue(conn_id)
-        if not queue:
-            return False
+        st = self._state(conn_id)
 
         if getattr(item, "type", None) == "message" and getattr(item, "content", None):
             role = getattr(item, "role", None)
@@ -76,15 +74,18 @@ class ConversationHandler(RealtimeBaseHandler):
                 else:
                     logger.warning("Unsupported content part type: %s", part.type)
             if content_parts:
-                queue.put((MessageTag.ADD_TO_CONTEXT, role, content_parts))
-                logger.debug("Enqueued message item (role=%s, %d parts)", role, len(content_parts))
+                st.runtime_config.chat.append({"role": role, "content": content_parts})
+                logger.debug("Added message to chat (role=%s, %d parts)", role, len(content_parts))
                 return True
             return False
 
         if getattr(item, "type", None) == "function_call_output" and getattr(item, "output", None):
-            result_text = f"Call ID: {item.call_id}\nOutput: {item.output}"
-            queue.put((MessageTag.FUNCTION_RESULT, result_text))
-            logger.debug("Enqueued function_call_output (call_id=%s)", item.call_id)
+            st.runtime_config.chat.append({
+                "type": "function_call_output",
+                "call_id": item.call_id,
+                "output": item.output,
+            })
+            logger.debug("Added function_call_output to chat (call_id=%s)", item.call_id)
             return True
 
         logger.warning("Unsupported item type: %s", getattr(item, "type", None))
@@ -92,7 +93,7 @@ class ConversationHandler(RealtimeBaseHandler):
 
     # ── Pipeline event handlers ────────────────────
 
-    def on_partial_transcription(self, conn_id: str, msg: dict) -> list[ServerEvent]:
+    def on_partial_transcription(self, conn_id: str, event: PartialTranscriptionEvent) -> list[ServerEvent]:
         """Handle partial_transcription: emit transcription delta event."""
         response = self._service.response
         return [ConversationItemInputAudioTranscriptionDeltaEvent(
@@ -100,10 +101,10 @@ class ConversationHandler(RealtimeBaseHandler):
             event_id=self._next_event_id(),
             content_index=response._next_content_index(conn_id),
             item_id=response._current_item_id(conn_id),
-            delta=msg.get("delta", ""),
+            delta=event.delta,
         )]
 
-    def on_transcription_completed(self, conn_id: str, msg: dict) -> list[ServerEvent]:
+    def on_transcription_completed(self, conn_id: str, event: TranscriptionCompletedEvent) -> list[ServerEvent]:
         """Handle transcription_completed: accumulate duration and emit completed event."""
         response = self._service.response
         st = self._state(conn_id)
@@ -113,7 +114,7 @@ class ConversationHandler(RealtimeBaseHandler):
             event_id=self._next_event_id(),
             content_index=0,
             item_id=response._current_item_id(conn_id),
-            transcript=msg.get("transcript", ""),
+            transcript=event.transcript,
             usage=UsageTranscriptTextUsageDuration(
                 seconds=st.input_audio_duration_s, type="duration",
             ),

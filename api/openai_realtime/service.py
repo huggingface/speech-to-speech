@@ -1,11 +1,20 @@
 import logging
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from queue import Queue
 from threading import Event as ThreadingEvent
 from typing import Callable, Literal, Optional, Union
 
-from pydantic import ValidationError
-
+from api.openai_realtime.events import (
+    AssistantTextEvent,
+    PartialTranscriptionEvent,
+    PipelineEvent,
+    SpeechStartedEvent,
+    SpeechStoppedEvent,
+    TokenUsageEvent,
+    TranscriptionCompletedEvent,
+)
+from pipeline_messages import GenerateResponseRequest
+from LLM.chat import Chat
 from openai.types.realtime import (
     InputAudioBufferAppendEvent,
     SessionUpdateEvent,
@@ -27,6 +36,7 @@ from openai.types.realtime import (
     ResponseAudioTranscriptDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
 )
+from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
 from api.openai_realtime.runtime_config import RuntimeConfig
 from api.openai_realtime.handlers import (
@@ -124,8 +134,11 @@ class GlobalUsageMetrics(UsageMetrics):
 
 class ConnState(BaseModel):
     """Per-connection mutable state, including all protocol-level IDs."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     session_id: str = Field(default_factory=lambda: _generate_id("session"))
     conversation_id: str = Field(default_factory=lambda: _generate_id("conv"))
+    runtime_config: RuntimeConfig = Field(default_factory=RuntimeConfig)
     in_response: bool = False
     audio_buffer_has_data: bool = False
     audio_remainder: bytes = b""
@@ -134,7 +147,7 @@ class ConnState(BaseModel):
     content_index: int = 0
     input_audio_duration_s: float = 0.0
     last_item_id: str | None = None
-    response_metadata: dict[str, str] | None = None
+    current_response_params: RealtimeResponseCreateParams | None = None
     response_usage: UsageMetrics = Field(default_factory=UsageMetrics)
 
 
@@ -148,13 +161,13 @@ class RealtimeService:
 
     def __init__(
         self,
-        runtime_config: RuntimeConfig | None = None,
         text_prompt_queue: Queue | None = None,
         should_listen: ThreadingEvent | None = None,
+        chat_size: int = 10,
     ):
-        self.runtime_config = runtime_config or RuntimeConfig()
         self.text_prompt_queue = text_prompt_queue
         self.should_listen = should_listen
+        self._chat_size = chat_size
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
 
@@ -163,20 +176,20 @@ class RealtimeService:
         self.response = ResponseHandler(self)
         self.conversation = ConversationHandler(self)
 
-        self._pipeline_dispatch: dict[str, Callable[[str, dict], list[ServerEvent]]] = {
-            "speech_started": self.audio.on_speech_started,
-            "speech_stopped": self.audio.on_speech_stopped,
-            "assistant_text": self.response.on_assistant_text,
-            "token_usage": self._on_token_usage,
-            "partial_transcription": self.conversation.on_partial_transcription,
-            "transcription_completed": self.conversation.on_transcription_completed,
+        self._pipeline_dispatch: dict[type[PipelineEvent], Callable[[str, PipelineEvent], list[ServerEvent]]] = {
+            SpeechStartedEvent: self.audio.on_speech_started,
+            SpeechStoppedEvent: self.audio.on_speech_stopped,
+            AssistantTextEvent: self.response.on_assistant_text,
+            TokenUsageEvent: self._on_token_usage,
+            PartialTranscriptionEvent: self.conversation.on_partial_transcription,
+            TranscriptionCompletedEvent: self._on_transcription_completed,
         }
 
     # ── Connection lifecycle ─────────────────────
 
     def register(self) -> str:
         """Register a new connection and return its session_id."""
-        state = ConnState()
+        state = ConnState(runtime_config=RuntimeConfig(chat=Chat(self._chat_size)))
         self._conns[state.session_id] = state
         self.total_usage.connections += 1
         return state.session_id
@@ -250,22 +263,42 @@ class RealtimeService:
     def handle_conversation_item_create(self, conn_id: str, event: ConversationItemCreateEvent) -> list[ServerEvent]:
         return self.conversation.handle_conversation_item_create(conn_id, event)
 
-    def dispatch_pipeline_event(self, conn_id: str, msg: dict) -> list[ServerEvent]:
-        """Route a pipeline text_output_queue message to the appropriate handler."""
-        msg_type = msg.get("type")
-        handler = self._pipeline_dispatch.get(msg_type)
+    def dispatch_pipeline_event(self, conn_id: str, event: PipelineEvent) -> list[ServerEvent]:
+        """Route a pipeline text_output_queue event to the appropriate handler."""
+        handler = self._pipeline_dispatch.get(type(event))
         if handler is None:
-            logger.debug("Unhandled pipeline message type: %s", msg_type)
+            logger.debug("Unhandled pipeline event type: %s", type(event).__name__)
             return []
-        return handler(conn_id, msg)
+        return handler(conn_id, event)
+
+    # ── STT → LM bridge ────────────────────────────
+
+    def _on_transcription_completed(self, conn_id: str, event: TranscriptionCompletedEvent) -> list[ServerEvent]:
+        """Handle a final STT transcription: emit protocol event, append to chat, trigger LM."""
+        events = self.conversation.on_transcription_completed(conn_id, event)
+
+        st = self._state(conn_id)
+        cfg = st.runtime_config
+        transcript = event.transcript
+        if transcript:
+            cfg.chat.append({"role": "user", "content": transcript})
+
+        queue = self.text_prompt_queue
+        if queue and transcript:
+            queue.put(GenerateResponseRequest(
+                runtime_config=cfg,
+                language_code=event.language_code,
+            ))
+
+        return events
 
     # ── Metrics ────────────────────────────────────
 
-    def _on_token_usage(self, conn_id: str, msg: dict) -> list[ServerEvent]:
+    def _on_token_usage(self, conn_id: str, event: TokenUsageEvent) -> list[ServerEvent]:
         """Accumulate input/output token counts on the connection's usage metrics."""
         st = self._state(conn_id)
-        st.response_usage.input_tokens += msg.get("input_tokens", 0)
-        st.response_usage.output_tokens += msg.get("output_tokens", 0)
+        st.response_usage.input_tokens += event.input_tokens
+        st.response_usage.output_tokens += event.output_tokens
         logger.info(
             "Token usage (response): input=%d, output=%d",
             st.response_usage.input_tokens, st.response_usage.output_tokens,

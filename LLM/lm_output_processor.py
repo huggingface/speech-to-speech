@@ -6,20 +6,23 @@ Intercepts LLM output to:
 2. Forward clean text to TTS pipeline
 """
 
+from __future__ import annotations
+
 import logging
 from baseHandler import BaseHandler
-from pipeline_messages import MessageTag
+from api.openai_realtime.events import AssistantTextEvent, TokenUsageEvent
+from pipeline_messages import EndOfResponse, LLMResponseChunk, TokenUsage, TTSInput
 
 logger = logging.getLogger(__name__)
 
 
-class LMOutputProcessor(BaseHandler):
+class LMOutputProcessor(BaseHandler[LLMResponseChunk | TokenUsage | EndOfResponse]):
     """
     Processes LLM output to extract tool calls and forward clean text to TTS.
 
-    Input: (text, language_code, tools) tuples from LLM
-    Output: (text, language_code) tuples to TTS
-    Side effect: Sends {"type": "assistant_text", "text": ..., "tools": ...} to text_output_queue
+    Input: :class:`LLMResponseChunk`, :class:`TokenUsage`, or :class:`EndOfResponse` from LLM
+    Output: :class:`TTSInput` or :class:`EndOfResponse` to TTS
+    Side effect: Sends :class:`AssistantTextEvent` / :class:`TokenUsageEvent` to text_output_queue
     """
 
     def setup(self, text_output_queue=None):
@@ -31,50 +34,45 @@ class LMOutputProcessor(BaseHandler):
         """
         self.text_output_queue = text_output_queue
 
-    def process(self, lm_output):
+    def process(self, lm_output: LLMResponseChunk | TokenUsage | EndOfResponse):
         """
         Process LLM output: send text/tools to WebSocket, forward clean text to TTS.
 
-        Args:
-            lm_output: Tuple of (text, language_code, tools)
-
         Yields:
-            Tuple of (text, language_code) for TTS
+            :class:`TTSInput` or :class:`EndOfResponse` for TTS
         """
-        sentinel, *_ = lm_output
-
-        if sentinel == MessageTag.TOKEN_USAGE:
-            _, input_tokens, output_tokens = lm_output
+        if isinstance(lm_output, TokenUsage):
             if self.text_output_queue is not None:
-                self.text_output_queue.put({
-                    "type": "token_usage",
-                    "input_tokens": input_tokens or 0,
-                    "output_tokens": output_tokens or 0,
-                })
+                self.text_output_queue.put(TokenUsageEvent(
+                    input_tokens=lm_output.input_tokens or 0,
+                    output_tokens=lm_output.output_tokens or 0,
+                ))
             return
 
-        text_chunk, language_code, tools = lm_output
-
-        if text_chunk == MessageTag.END_OF_RESPONSE:
-            yield (MessageTag.END_OF_RESPONSE, None)
+        if isinstance(lm_output, EndOfResponse):
+            yield EndOfResponse()
             return
 
-        logger.debug(f"LM processor: text='{text_chunk}', tools={tools}")
+        if not isinstance(lm_output, LLMResponseChunk):
+            logger.warning("LMOutputProcessor received unexpected type: %s", type(lm_output))
+            return
 
-        # Send text + tools to WebSocket clients
+        logger.debug(f"LM processor: text='{lm_output.text}', tools={lm_output.tools}")
+
         if self.text_output_queue is not None:
-            message = {
-                "type": "assistant_text",
-                "text": text_chunk
-            }
-            if tools:
-                message["tools"] = tools
-                logger.info(f"Sending to clients: text='{text_chunk}', tools={[t['name'] for t in tools]}")
+            event = AssistantTextEvent(text=lm_output.text)
+            if lm_output.tools:
+                event.tools = lm_output.tools
+                logger.info(f"Sending to clients: text='{lm_output.text}', tools={[t['name'] for t in lm_output.tools]}")
             else:
-                logger.debug(f"Sending to clients: text='{text_chunk}' (no tools)")
-            self.text_output_queue.put(message)
+                logger.debug(f"Sending to clients: text='{lm_output.text}' (no tools)")
+            self.text_output_queue.put(event)
 
-        # Forward clean text to TTS (yield to maintain streaming)
-        if text_chunk:
-            logger.debug(f"Forwarding to TTS: '{text_chunk}'")
-            yield (text_chunk, language_code)
+        if lm_output.text:
+            logger.debug(f"Forwarding to TTS: '{lm_output.text}'")
+            yield TTSInput(
+                text=lm_output.text,
+                language_code=lm_output.language_code,
+                runtime_config=lm_output.runtime_config,
+                response=lm_output.response,
+            )

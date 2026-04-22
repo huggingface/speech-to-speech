@@ -28,28 +28,17 @@ from threading import Event as ThreadingEvent
 
 from openai import AsyncOpenAI
 
-from openai.types.realtime import RealtimeSessionCreateRequest
-from openai.types.realtime.realtime_audio_config import RealtimeAudioConfig
-from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfigInput
-from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
-from openai.types.realtime.realtime_audio_formats import AudioPCM
-
 from cancel_scope import CancelScope
-from api.openai_realtime.runtime_config import RuntimeConfig
+from api.openai_realtime.events import (
+    AssistantTextEvent,
+    PartialTranscriptionEvent,
+    SpeechStartedEvent,
+    SpeechStoppedEvent,
+    TranscriptionCompletedEvent,
+)
 from api.openai_realtime.service import RealtimeService
 from api.openai_realtime.websocket_router import create_app
 from pipeline_messages import AUDIO_RESPONSE_DONE, PIPELINE_END
-
-
-def _session_16k() -> RealtimeSessionCreateRequest:
-    fmt = AudioPCM.model_construct(rate=16000, type="audio/pcm")
-    return RealtimeSessionCreateRequest.model_construct(
-        type="realtime",
-        audio=RealtimeAudioConfig.model_construct(
-            input=RealtimeAudioConfigInput.model_construct(format=fmt),
-            output=RealtimeAudioConfigOutput.model_construct(format=fmt),
-        ),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -70,13 +59,10 @@ class _ServerEnv:
     """Wraps a running uvicorn server + all pipeline queues."""
 
     def __init__(self):
-        self.runtime_config = RuntimeConfig()
-        self.runtime_config.session = _session_16k()
         self.text_prompt_queue: Queue = Queue()
         self.should_listen = ThreadingEvent()
         self.should_listen.set()
         self.service = RealtimeService(
-            runtime_config=self.runtime_config,
             text_prompt_queue=self.text_prompt_queue,
             should_listen=self.should_listen,
         )
@@ -215,7 +201,8 @@ class TestSDKSessionUpdate:
             })
             await asyncio.sleep(0.2)
 
-            s = server_env.runtime_config.session
+            cid = server_env.service.connection_ids[0]
+            s = server_env.service._state(cid).runtime_config.session
             assert s.audio.output.voice == "alloy"
             assert s.instructions == "You are a helpful robot"
             assert s.audio.input.turn_detection.type == "server_vad"
@@ -240,25 +227,25 @@ class TestSDKVoiceTurn:
             await _recv(conn)  # session.created
 
             # -- User speech --
-            server_env.text_output_queue.put({"type": "speech_started", "audio_start_ms": 100})
+            server_env.text_output_queue.put(SpeechStartedEvent())
             event = await _recv(conn)
             assert event.type == SPEECH_STARTED
-            assert event.audio_start_ms == 100
+            assert event.audio_start_ms == 0
             item_id = event.item_id
 
-            server_env.text_output_queue.put({"type": "partial_transcription", "delta": "hel"})
+            server_env.text_output_queue.put(PartialTranscriptionEvent(delta="hel"))
             event = await _recv(conn)
             assert event.type == TRANSCRIPTION_DELTA
             assert event.delta == "hel"
             assert event.item_id == item_id
 
-            server_env.text_output_queue.put({"type": "speech_stopped", "audio_end_ms": 2000, "duration_s": 1.9})
+            server_env.text_output_queue.put(SpeechStoppedEvent(duration_s=1.9))
             event = await _recv(conn)
             assert event.type == SPEECH_STOPPED
-            assert event.audio_end_ms == 2000
+            assert event.audio_end_ms == 0
             assert event.item_id == item_id
 
-            server_env.text_output_queue.put({"type": "transcription_completed", "transcript": "hello"})
+            server_env.text_output_queue.put(TranscriptionCompletedEvent(transcript="hello"))
             event = await _recv(conn)
             assert event.type == TRANSCRIPTION_COMPLETED
             assert event.transcript == "hello"
@@ -277,7 +264,7 @@ class TestSDKVoiceTurn:
             decoded = base64.b64decode(event.delta)
             assert len(decoded) == len(_pcm_bytes(256))
 
-            server_env.text_output_queue.put({"type": "assistant_text", "text": "Hi there!"})
+            server_env.text_output_queue.put(AssistantTextEvent(text="Hi there!"))
             event = await _recv(conn)
             assert event.type == TRANSCRIPT_DONE
             assert event.transcript == "Hi there!"
@@ -309,7 +296,7 @@ class TestSDKBargeIn:
             assert event.type == RESPONSE_CREATED
             await _recv(conn)  # audio delta
 
-            server_env.text_output_queue.put({"type": "speech_started", "audio_start_ms": 500})
+            server_env.text_output_queue.put(SpeechStartedEvent())
 
             events = []
             for _ in range(3):
@@ -336,8 +323,8 @@ class TestSDKBargeIn:
             assert event.type == RESPONSE_CREATED
             await _recv(conn)  # audio delta
 
-            server_env.text_output_queue.put({"type": "speech_started", "audio_start_ms": 500})
-            server_env.text_output_queue.put({"type": "assistant_text", "text": "stale response text"})
+            server_env.text_output_queue.put(SpeechStartedEvent())
+            server_env.text_output_queue.put(AssistantTextEvent(text="stale response text"))
 
             events = []
             for _ in range(3):
@@ -367,21 +354,19 @@ class TestSDKPhantomSpeech:
         async with client.realtime.connect(model="test") as conn:
             await _recv(conn)  # session.created
 
-            server_env.text_output_queue.put({"type": "speech_started", "audio_start_ms": 0})
+            server_env.text_output_queue.put(SpeechStartedEvent())
             event = await _recv(conn)
             assert event.type == SPEECH_STARTED
 
-            server_env.text_output_queue.put({"type": "speech_stopped", "duration_s": 0})
+            server_env.text_output_queue.put(SpeechStoppedEvent())
             event = await _recv(conn)
             assert event.type == SPEECH_STOPPED
 
-            server_env.text_output_queue.put({"type": "speech_started", "audio_start_ms": 1000})
+            server_env.text_output_queue.put(SpeechStartedEvent())
             event = await _recv(conn)
             assert event.type == SPEECH_STARTED
 
-            server_env.text_output_queue.put(
-                {"type": "speech_stopped", "duration_s": 2.0, "audio_end_ms": 3000},
-            )
+            server_env.text_output_queue.put(SpeechStoppedEvent(duration_s=2.0))
             event = await _recv(conn)
             assert event.type == SPEECH_STOPPED
 
@@ -415,9 +400,7 @@ class TestSDKInterruptionState:
             await _recv(conn)  # audio delta
             assert server_env.response_playing.is_set()
 
-            server_env.text_output_queue.put(
-                {"type": "speech_started", "audio_start_ms": 500},
-            )
+            server_env.text_output_queue.put(SpeechStartedEvent())
             events = []
             for _ in range(3):
                 events.append(await _recv(conn))
@@ -443,15 +426,14 @@ class TestSDKToolCalling:
         async with client.realtime.connect(model="test") as conn:
             await _recv(conn)
 
-            server_env.text_output_queue.put({
-                "type": "assistant_text",
-                "text": "Checking weather",
-                "tools": [{
+            server_env.text_output_queue.put(AssistantTextEvent(
+                text="Checking weather",
+                tools=[{
                     "call_id": "call_xyz",
                     "name": "get_weather",
                     "arguments": {"city": "Tokyo"},
                 }],
-            })
+            ))
 
             event = await _recv(conn)
             assert event.type == TRANSCRIPT_DONE
@@ -470,14 +452,13 @@ class TestSDKToolCalling:
         async with client.realtime.connect(model="test") as conn:
             await _recv(conn)
 
-            server_env.text_output_queue.put({
-                "type": "assistant_text",
-                "text": "",
-                "tools": [
+            server_env.text_output_queue.put(AssistantTextEvent(
+                text="",
+                tools=[
                     {"call_id": "c1", "name": "tool_a", "arguments": {}},
                     {"call_id": "c2", "name": "tool_b", "arguments": {"x": 1}},
                 ],
-            })
+            ))
 
             e1 = await _recv(conn)
             e2 = await _recv(conn)
@@ -621,13 +602,13 @@ class TestSDKMultiTurn:
             await _recv(conn)  # session.created
 
             # Turn 1
-            server_env.text_output_queue.put({"type": "speech_started", "audio_start_ms": 0})
+            server_env.text_output_queue.put(SpeechStartedEvent())
             await _recv(conn)
 
-            server_env.text_output_queue.put({"type": "speech_stopped", "audio_end_ms": 500})
+            server_env.text_output_queue.put(SpeechStoppedEvent())
             await _recv(conn)
 
-            server_env.text_output_queue.put({"type": "transcription_completed", "transcript": "hi"})
+            server_env.text_output_queue.put(TranscriptionCompletedEvent(transcript="hi"))
             await _recv(conn)
 
             server_env.output_queue.put(_pcm_bytes(128))
@@ -636,7 +617,7 @@ class TestSDKMultiTurn:
             await _recv(conn)  # audio delta
 
             # Barge-in
-            server_env.text_output_queue.put({"type": "speech_started", "audio_start_ms": 2000})
+            server_env.text_output_queue.put(SpeechStartedEvent())
             events = []
             for _ in range(3):
                 events.append(await _recv(conn))
@@ -648,10 +629,10 @@ class TestSDKMultiTurn:
             await asyncio.sleep(0.15)
 
             # Turn 2
-            server_env.text_output_queue.put({"type": "speech_stopped", "audio_end_ms": 3000})
+            server_env.text_output_queue.put(SpeechStoppedEvent())
             await _recv(conn)
 
-            server_env.text_output_queue.put({"type": "transcription_completed", "transcript": "bye"})
+            server_env.text_output_queue.put(TranscriptionCompletedEvent(transcript="bye"))
             await _recv(conn)
 
             server_env.output_queue.put(_pcm_bytes(128))

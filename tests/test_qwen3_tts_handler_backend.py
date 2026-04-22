@@ -10,7 +10,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import TTS.qwen3_tts_handler as qwen3_tts_module
-from pipeline_messages import MessageTag
+from api.openai_realtime.runtime_config import RuntimeConfig
+from pipeline_messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from TTS.qwen3_tts_handler import Qwen3TTSHandler
 
 
@@ -237,7 +238,7 @@ def test_prepare_mlx_ref_audio_normalizes_file_and_caches_result(monkeypatch, tm
 
 def test_apply_session_voice_override_warns_for_non_file_for_base_model(caplog):
     handler = object.__new__(Qwen3TTSHandler)
-    handler.runtime_config = SimpleNamespace(
+    fake_cfg = SimpleNamespace(
         session=SimpleNamespace(
             audio=SimpleNamespace(
                 output=SimpleNamespace(voice="alloy")
@@ -248,7 +249,7 @@ def test_apply_session_voice_override_warns_for_non_file_for_base_model(caplog):
     handler.speaker = None
 
     with caplog.at_level("WARNING"):
-        handler._apply_session_voice_override("base")
+        handler._apply_session_voice_override("base", runtime_config=fake_cfg)
 
     assert handler.ref_audio == "TTS/ref_audio.wav"
     assert handler.speaker is None
@@ -258,7 +259,6 @@ def test_apply_session_voice_override_warns_for_non_file_for_base_model(caplog):
 def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     handler = object.__new__(Qwen3TTSHandler)
     handler.should_listen = Event()
-    handler.runtime_config = None
     handler.cancel_scope = None
     handler.ref_audio = "TTS/ref_audio.wav"
     handler.speaker = None
@@ -267,26 +267,24 @@ def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     handler.backend = "mlx"
     handler.queue_in = Queue()
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
-    handler._apply_session_voice_override = lambda model_type: None
+    handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
     handler._process_voice_clone = lambda text: iter([np.zeros(512, dtype=np.int16)])
 
     monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
 
-    outputs = list(handler.process("Hello there."))
+    outputs = list(handler.process(TTSInput(text="Hello there.", runtime_config=RuntimeConfig())))
 
     assert len(outputs) == 1
     assert handler.should_listen.is_set() is False
 
-    end_outputs = list(handler.process((MessageTag.END_OF_RESPONSE, None)))
+    end_outputs = list(handler.process(EndOfResponse()))
 
-    assert end_outputs == [qwen3_tts_module.AUDIO_RESPONSE_DONE]
-    assert handler.should_listen.is_set() is True
+    assert end_outputs == [AUDIO_RESPONSE_DONE]
 
 
 def test_process_reenables_listening_when_generation_fails_outside_realtime(monkeypatch):
     handler = object.__new__(Qwen3TTSHandler)
     handler.should_listen = Event()
-    handler.runtime_config = None
     handler.cancel_scope = None
     handler.ref_audio = "TTS/ref_audio.wav"
     handler.speaker = None
@@ -295,7 +293,7 @@ def test_process_reenables_listening_when_generation_fails_outside_realtime(monk
     handler.backend = "mlx"
     handler.queue_in = Queue()
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
-    handler._apply_session_voice_override = lambda model_type: None
+    handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
 
     def _boom(text):
         raise RuntimeError("boom")
@@ -305,7 +303,7 @@ def test_process_reenables_listening_when_generation_fails_outside_realtime(monk
 
     monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
 
-    outputs = list(handler.process("Hello there."))
+    outputs = list(handler.process(TTSInput(text="Hello there.")))
 
     assert outputs == []
     assert handler.should_listen.is_set() is True
@@ -315,7 +313,6 @@ def test_process_voice_clone_passes_non_streaming_mode_to_faster_backend(monkeyp
     captured = {}
     handler = object.__new__(Qwen3TTSHandler)
     handler.should_listen = Event()
-    handler.runtime_config = None
     handler.cancel_scope = None
     handler.ref_audio = "TTS/ref_audio.wav"
     handler.ref_text = "Reference text."
@@ -340,7 +337,7 @@ def test_process_voice_clone_passes_non_streaming_mode_to_faster_backend(monkeyp
 
     monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
 
-    outputs = list(handler.process("Hello there."))
+    outputs = list(handler.process(TTSInput(text="Hello there.")))
 
     assert len(outputs) == 1
     assert captured["non_streaming_mode"] is False
@@ -350,7 +347,6 @@ def test_process_voice_clone_passes_none_non_streaming_mode_when_unset(monkeypat
     captured = {}
     handler = object.__new__(Qwen3TTSHandler)
     handler.should_listen = Event()
-    handler.runtime_config = None
     handler.cancel_scope = None
     handler.ref_audio = "TTS/ref_audio.wav"
     handler.ref_text = "Reference text."
@@ -375,7 +371,7 @@ def test_process_voice_clone_passes_none_non_streaming_mode_when_unset(monkeypat
 
     monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
 
-    outputs = list(handler.process("Hello there."))
+    outputs = list(handler.process(TTSInput(text="Hello there.")))
 
     assert len(outputs) == 1
     assert captured["non_streaming_mode"] is None
@@ -386,7 +382,6 @@ def test_process_custom_voice_passes_non_streaming_mode_to_faster_backend(monkey
     captured = {}
     handler = object.__new__(Qwen3TTSHandler)
     handler.should_listen = Event()
-    handler.runtime_config = None
     handler.cancel_scope = None
     handler.ref_audio = None
     handler.ref_text = "Reference text."
@@ -411,7 +406,7 @@ def test_process_custom_voice_passes_non_streaming_mode_to_faster_backend(monkey
 
     monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
 
-    outputs = list(handler.process("Hello there."))
+    outputs = list(handler.process(TTSInput(text="Hello there.")))
 
     assert len(outputs) == 1
     assert captured["non_streaming_mode"] is override
@@ -422,7 +417,6 @@ def test_process_voice_design_passes_non_streaming_mode_to_faster_backend(monkey
     captured = {}
     handler = object.__new__(Qwen3TTSHandler)
     handler.should_listen = Event()
-    handler.runtime_config = None
     handler.cancel_scope = None
     handler.ref_audio = None
     handler.ref_text = "Reference text."
@@ -447,7 +441,7 @@ def test_process_voice_design_passes_non_streaming_mode_to_faster_backend(monkey
 
     monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
 
-    outputs = list(handler.process("Hello there."))
+    outputs = list(handler.process(TTSInput(text="Hello there.")))
 
     assert len(outputs) == 1
     assert captured["non_streaming_mode"] is override
@@ -501,7 +495,6 @@ def test_process_voice_clone_scales_max_new_tokens_for_faster_backend(monkeypatc
     captured = {}
     handler = object.__new__(Qwen3TTSHandler)
     handler.should_listen = Event()
-    handler.runtime_config = None
     handler.cancel_scope = None
     handler.ref_audio = "TTS/ref_audio.wav"
     handler.ref_text = "Reference text."
@@ -530,7 +523,7 @@ def test_process_voice_clone_scales_max_new_tokens_for_faster_backend(monkeypatc
         ["This is a deliberately long sentence for the faster Qwen3 TTS backend."]
         * 12
     )
-    outputs = list(handler.process(long_text))
+    outputs = list(handler.process(TTSInput(text=long_text)))
 
     assert len(outputs) == 1
     assert captured["max_new_tokens"] == handler._estimate_max_new_tokens(long_text)
@@ -553,7 +546,6 @@ def test_process_voice_clone_scales_max_tokens_for_mlx_backend(monkeypatch):
 
     handler = object.__new__(Qwen3TTSHandler)
     handler.should_listen = Event()
-    handler.runtime_config = None
     handler.cancel_scope = None
     handler.ref_audio = "TTS/ref_audio.wav"
     handler.ref_text = "Reference text."
@@ -585,7 +577,7 @@ def test_process_voice_clone_scales_max_tokens_for_mlx_backend(monkeypatch):
         ["This is a deliberately long sentence for the MLX Qwen3 TTS backend."]
         * 12
     )
-    outputs = list(handler.process(long_text))
+    outputs = list(handler.process(TTSInput(text=long_text)))
 
     assert len(outputs) == 1
     assert captured["max_tokens"] == handler._estimate_max_new_tokens(long_text)

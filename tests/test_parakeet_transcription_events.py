@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from STT import parakeet_tdt_handler
 from STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
-from pipeline_messages import MessageTag
+from pipeline_messages import PartialTranscription, Transcription, VADAudio
 
 
 def test_show_progressive_transcription_returns_combined_text(monkeypatch):
@@ -40,9 +40,11 @@ def test_process_yields_partial_tagged_tuple(monkeypatch):
     handler._show_progressive_transcription = lambda audio: "partial text"
     monkeypatch.setattr(parakeet_tdt_handler.console, "print", lambda *args, **kwargs: None)
 
-    result = list(handler.process(("progressive", np.zeros(16000, dtype=np.float32))))
+    result = list(handler.process(VADAudio(audio=np.zeros(16000, dtype=np.float32), mode="progressive")))
 
-    assert result == [(MessageTag.PARTIAL, "partial text")]
+    assert len(result) == 1
+    assert isinstance(result[0], PartialTranscription)
+    assert result[0].text == "partial text"
 
 
 def test_process_yields_final_transcript(monkeypatch):
@@ -60,13 +62,17 @@ def test_process_yields_final_transcript(monkeypatch):
     handler._process_nano_parakeet = lambda audio_input: ("I am here.", "en")
     monkeypatch.setattr(parakeet_tdt_handler.console, "print", lambda *args, **kwargs: None)
 
-    result = list(handler.process(np.zeros(16000, dtype=np.float32)))
+    result = list(handler.process(VADAudio(audio=np.zeros(16000, dtype=np.float32))))
 
-    assert result == [("I am here.", "en")]
+    assert len(result) == 1
+    assert isinstance(result[0], Transcription)
+    assert result[0].text == "I am here."
+    assert result[0].language_code == "en"
 
 
 def test_on_session_end_resets_streaming_state():
     handler = object.__new__(ParakeetTDTSTTHandler)
+    handler.start_language = "en"
     handler.enable_live_transcription = True
     handler.processing_final = True
     reset_calls = []
@@ -75,4 +81,5 @@ def test_on_session_end_resets_streaming_state():
     handler.on_session_end()
 
     assert handler.processing_final is False
+    assert handler.last_language == "en"
     assert reset_calls == [True]
