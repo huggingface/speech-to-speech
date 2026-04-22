@@ -63,7 +63,7 @@ metadata={
             "help": "Whether to use sampling; set this to False for deterministic outputs. Default is False."
         },
     )
-    lm_chat_size: int = field(
+    chat_size: int = field(
         default=10,
         metadata={
             "help": "Number of interactions assitant-user to keep for the chat. None for no limitations."
