@@ -80,8 +80,11 @@ class ConversationHandler(RealtimeBaseHandler):
             return False
 
         if getattr(item, "type", None) == "function_call_output" and getattr(item, "output", None):
-            result_text = f"Call ID: {item.call_id}\nOutput: {item.output}"
-            st.runtime_config.chat.append({"role": "user", "content": result_text})
+            st.runtime_config.chat.append({
+                "type": "function_call_output",
+                "call_id": item.call_id,
+                "output": item.output,
+            })
             logger.debug("Added function_call_output to chat (call_id=%s)", item.call_id)
             return True
 

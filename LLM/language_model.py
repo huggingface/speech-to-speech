@@ -13,6 +13,7 @@ from transformers import (
     pipeline,
     TextIteratorStreamer,
 )
+import json
 import torch
 import logging
 from queue import Empty
@@ -22,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from LLM.chat import Chat
 from LLM.tool_call.function_call import extract_function_calls_from_text
 from LLM.tool_call.function_tool import FunctionTool
+from openai.types.responses import ResponseFunctionToolCall
 from LLM.tool_call.tool_prompt import build_tool_system_prompt, build_block_regex, ENTER_CODE, END_CODE
 from typing import Any, Literal
 from baseHandler import BaseHandler
@@ -79,7 +81,7 @@ class StreamContext(BaseModel):
     raw_generated_text: str = ""
     generated_text: str = ""
     printable_text: str = ""
-    tools: list[dict] = Field(default_factory=list)
+    tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
     function_tools: list[FunctionTool] = Field(default_factory=list)
     block_regex: str | None = None
     enter_code: str | None = None
@@ -181,6 +183,57 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
     # Shared helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _prepare_chat_for_transformers(chat_messages: list[dict]) -> list[dict]:
+        """Convert Responses-API-style tool items to the transformers chat format.
+
+        - ``function_call_output`` items become ``{"role": "tool", ...}``
+        - Messages with ``tool_calls`` and regular messages pass through as-is
+        - ``function_call`` items (from the OpenAI Responses API path) are
+          converted to assistant messages with ``tool_calls``
+        """
+        result = []
+        for msg in chat_messages:
+            item_type = msg.get("type")
+            if item_type == "function_call_output":
+                call_id = msg.get("call_id", "")
+                name = ""
+                for prev in reversed(result):
+                    if prev.get("role") == "assistant" and "tool_calls" in prev:
+                        for tc in prev["tool_calls"]:
+                            if tc.get("id") == call_id:
+                                name = tc.get("function", {}).get("name", "")
+                                break
+                        if name:
+                            break
+                result.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": name,
+                    "content": msg.get("output", ""),
+                })
+            elif item_type == "function_call":
+                args = msg.get("arguments", "{}")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+                result.append({
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "type": "function",
+                        "id": msg.get("call_id", ""),
+                        "function": {
+                            "name": msg.get("name", ""),
+                            "arguments": args,
+                        },
+                    }],
+                })
+            else:
+                result.append(msg)
+        return result
+
     def _apply_instructions(
         self,
         chat: Chat,
@@ -221,9 +274,9 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
             ctx.end_code = end_code
 
     def _process_printable_text(
-        self, printable_text: str, language_code: str | None, tools: list[dict],
+        self, printable_text: str, language_code: str | None, tools: list[ResponseFunctionToolCall],
         ctx: StreamContext, runtime_config=None, response=None,
-    ) -> tuple[list[LLMResponseChunk], list[dict], str]:
+    ) -> tuple[list[LLMResponseChunk], list[ResponseFunctionToolCall], str]:
         """Extract complete code blocks and return complete sentences to yield.
 
         Returns ``(chunks_to_yield, updated_tools, remaining_printable_text)``.
@@ -242,7 +295,7 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
             for fc in func_calls:
                 try:
                     tools.append(
-                        fc.to_realtime_function_tool_call(ctx.function_tools).model_dump()
+                        fc.to_realtime_function_tool_call(ctx.function_tools)
                     )
                 except ValueError as e:
                     logger.warning("Skipping invalid tool call: %s", e)
@@ -369,12 +422,24 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
             return
 
         original_chat.append({"role": "assistant", "content": ctx.generated_text})
+        if ctx.tools:
+            original_chat.append({"role": "assistant", "tool_calls": [
+                {
+                    "type": "function",
+                    "id": t.call_id or "",
+                    "function": {
+                        "name": t.name or "",
+                        "arguments": json.loads(t.arguments) if isinstance(t.arguments, str) else (t.arguments or {}),
+                    },
+                }
+                for t in ctx.tools
+            ]})
         original_chat.strip_images()
         logger.debug("Clean text: %s", ctx.generated_text)
         logger.info(f"Tools: {ctx.tools}")
 
         if not ctx.cancelled and (ctx.printable_text.strip() or ctx.tools):
-            yield LLMResponseChunk(text=ctx.printable_text.strip(), language_code=language_code, tools=ctx.tools, runtime_config=runtime_config, response=response)
+            yield LLMResponseChunk(text=ctx.printable_text.strip(), language_code=language_code, tools=[t.model_dump() for t in ctx.tools], runtime_config=runtime_config, response=response)
 
         output_tokens = len(self.tokenizer.encode(ctx.raw_generated_text)) if ctx.raw_generated_text else 0
         if ctx.input_tokens or output_tokens:
@@ -441,7 +506,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
             }
 
     def _generate(self, chat: Chat, language_code: str | None, gen: int | None, ctx: StreamContext, runtime_config=None, response=None) -> Iterator[LLMResponseChunk]:
-        chat_messages = chat.to_list()
+        chat_messages = self._prepare_chat_for_transformers(chat.to_list())
         chat_input = self.tokenizer.apply_chat_template(chat_messages, tokenize=True)
         ctx.input_tokens += len(chat_input if isinstance(chat_input, list) else chat_input["input_ids"])
         logger.debug("Prompt token count: %d", ctx.input_tokens)
@@ -573,8 +638,9 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             self.gen_kwargs = gen_kwargs
 
     def _generate(self, chat: Chat, language_code: str | None, gen: int | None, ctx: StreamContext, runtime_config=None, response=None) -> Iterator[LLMResponseChunk]:
+        prepared = self._prepare_chat_for_transformers(chat.to_list())
         if self.backend == "mlx":
-            images, formatted_prompt = self._prepare_mlx_vlm_inputs(chat.to_list())
+            images, formatted_prompt = self._prepare_mlx_vlm_inputs(prepared)
             ctx.input_tokens += len(self.tokenizer.encode(formatted_prompt))
             logger.debug("MLX VLM prompt token count: %d", ctx.input_tokens)
 
@@ -595,7 +661,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                 pass
             torch.mps.empty_cache()
         else:
-            inputs, input_tokens = self._prepare_vlm_inputs(chat.to_list())
+            inputs, input_tokens = self._prepare_vlm_inputs(prepared)
             ctx.input_tokens += input_tokens
             logger.debug("VLM prompt token count: %d", ctx.input_tokens)
 

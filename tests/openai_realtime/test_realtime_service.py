@@ -290,7 +290,7 @@ class TestHandleConversationItemCreate:
         assert len(events) == 1
         assert isinstance(events[0], ConversationItemCreatedEvent)
         chat = service._state(conn_id).runtime_config.chat.to_list()
-        assert chat[-1] == {"role": "user", "content": 'Call ID: call_1\nOutput: {"result": 42}'}
+        assert chat[-1] == {"type": "function_call_output", "call_id": "call_1", "output": '{"result": 42}'}
 
     def test_input_image_forwarded(self, service, conn_id, text_prompt_queue):
         evt = ConversationItemCreateEvent(

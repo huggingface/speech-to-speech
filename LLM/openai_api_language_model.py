@@ -79,12 +79,16 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
     def _prepare_chat_messages(self, chat: Chat) -> list[dict]:
         """Convert chat messages to OpenAI Responses API input format.
 
-        Wraps each message with ``type: "message"`` and normalises string
-        content into a single-element ``input_text`` list.
+        Regular messages are wrapped with ``type: "message"``.
+        Tool-related items (``function_call``, ``function_call_output``)
+        are passed through as top-level input items per the Responses API spec.
         """
         result = []
         for msg in chat.to_list():
-            result.append({"type": "message", "role": msg["role"], "content": msg["content"]})
+            if msg.get("type") in ("function_call", "function_call_output"):
+                result.append(msg)
+            else:
+                result.append({"type": "message", "role": msg["role"], "content": msg["content"]})
         return result
 
     def warmup(self):
@@ -206,6 +210,8 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
                             input_tokens = usage.input_tokens or 0
                             output_tokens = usage.output_tokens or 0
                 if not cancelled:
+                    for tool in tools:
+                        original_chat.append(tool)
                     if printable_text.strip():
                         sentence_batch.append(printable_text.strip())
                     remaining = " ".join(sentence_batch)
@@ -234,6 +240,8 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
                                     clean_text += remove_unspeechable(chunk.text)
                         else:
                             logger.warning(f"Not supported message type: {message.type}")
+                    for tool in tools:
+                        original_chat.append(tool)
                     logger.debug(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
                     if clean_text.strip() or tools:
