@@ -570,7 +570,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
                 "text-generation", model=self.model, tokenizer=self.tokenizer, device=device
             )
             self.streamer = TextIteratorStreamer(
-                self.tokenizer, # type: ignore[arg-type]
+                self.tokenizer,  # type: ignore[arg-type]
                 skip_prompt=True,
                 skip_special_tokens=True,
                 timeout=1.0,
@@ -706,7 +706,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                 model_name, torch_dtype=self.torch_dtype, trust_remote_code=True
             ).to(device)  # type: ignore[arg-type]
             self.streamer = TextIteratorStreamer(
-                self.tokenizer, # type: ignore[arg-type]
+                self.tokenizer,  # type: ignore[arg-type]
                 skip_prompt=True,
                 skip_special_tokens=True,
                 timeout=1.0,
