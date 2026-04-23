@@ -1,6 +1,23 @@
 from collections import deque
+from dataclasses import dataclass
 
 import torch
+
+
+@dataclass(frozen=True)
+class VADStateSnapshot:
+    current_sample: int
+    window_size_samples: int
+    speech_prob: float
+    threshold: float
+    negative_threshold: float
+    triggered: bool
+    pre_speech_samples: int
+    active_speech_samples: int
+    prefix_samples: int
+    temp_end_sample: int
+    transition: str
+    emitted_speech_samples: int = 0
 
 
 class VADIterator:
@@ -62,9 +79,36 @@ class VADIterator:
         self.prefix_buffer = []
         self._pre_speech_buffer.clear()
         self._pre_speech_samples = 0
+        self.last_snapshot = None
 
     def _num_samples(self, chunk: torch.Tensor) -> int:
         return len(chunk[0]) if chunk.dim() == 2 else len(chunk)
+
+    def _chunks_num_samples(self, chunks: list[torch.Tensor]) -> int:
+        return sum(self._num_samples(chunk) for chunk in chunks)
+
+    def _update_snapshot(
+        self,
+        *,
+        speech_prob: float,
+        window_size_samples: int,
+        transition: str,
+        emitted_speech_samples: int = 0,
+    ) -> None:
+        self.last_snapshot = VADStateSnapshot(
+            current_sample=self.current_sample,
+            window_size_samples=window_size_samples,
+            speech_prob=float(speech_prob),
+            threshold=float(self.threshold),
+            negative_threshold=float(self.threshold - 0.15),
+            triggered=self.triggered,
+            pre_speech_samples=self._pre_speech_samples,
+            active_speech_samples=self._chunks_num_samples(self.buffer),
+            prefix_samples=self._chunks_num_samples(self.prefix_buffer),
+            temp_end_sample=self.temp_end,
+            transition=transition,
+            emitted_speech_samples=emitted_speech_samples,
+        )
 
     def _trim_pre_speech_buffer(self) -> None:
         while (
@@ -132,31 +176,63 @@ class VADIterator:
             self._pre_speech_buffer.clear()
             self._pre_speech_samples = 0
             self.buffer.append(x)
+            self._update_snapshot(
+                speech_prob=speech_prob,
+                window_size_samples=window_size_samples,
+                transition="speech_start",
+            )
             return None
 
         if not self.triggered:
             self._remember_pre_speech(x)
+            self._update_snapshot(
+                speech_prob=speech_prob,
+                window_size_samples=window_size_samples,
+                transition="silence",
+            )
             return None
 
         if self.triggered:
             self.buffer.append(x)
             if (speech_prob >= self.threshold) and self.temp_end:
                 self.temp_end = 0
+                self._update_snapshot(
+                    speech_prob=speech_prob,
+                    window_size_samples=window_size_samples,
+                    transition="speech_resumed",
+                )
                 return None
 
             if speech_prob < self.threshold - 0.15:
                 if not self.temp_end:
                     self.temp_end = self.current_sample
                 if self.current_sample - self.temp_end < self.min_silence_samples:
+                    self._update_snapshot(
+                        speech_prob=speech_prob,
+                        window_size_samples=window_size_samples,
+                        transition="ending_grace",
+                    )
                     return None
 
                 # End of speech: keep the final low-confidence chunks that were
                 # observed before VAD decided the utterance was done.
+                emitted_speech_samples = len(torch.cat(self.speech_buffer()))
                 self.temp_end = 0
                 self.triggered = False
                 spoken_utterance = self.speech_buffer()
                 self.buffer = []
                 self.prefix_buffer = []
+                self._update_snapshot(
+                    speech_prob=speech_prob,
+                    window_size_samples=window_size_samples,
+                    transition="speech_end",
+                    emitted_speech_samples=emitted_speech_samples,
+                )
                 return spoken_utterance
 
+        self._update_snapshot(
+            speech_prob=speech_prob,
+            window_size_samples=window_size_samples,
+            transition="speech",
+        )
         return None
