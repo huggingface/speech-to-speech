@@ -10,6 +10,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 import torch
 from nltk import sent_tokenize
+from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel, ConfigDict, Field
 from transformers import (
@@ -26,6 +27,7 @@ from transformers import (
     pipeline,
 )
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import Chat
 from speech_to_speech.LLM.tool_call.function_call import extract_function_calls_from_text
@@ -85,7 +87,7 @@ class _Processor(Protocol):
 class _CancelCriteria(StoppingCriteria):
     """Stopping criteria that can be signalled externally to abort generation."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -94,7 +96,7 @@ class _CancelCriteria(StoppingCriteria):
     def reset(self) -> None:
         self._cancelled = False
 
-    def __call__(self, input_ids, scores, **kwargs) -> bool:
+    def __call__(self, input_ids: Any, scores: Any, **kwargs: Any) -> bool:
         return self._cancelled
 
 
@@ -140,7 +142,7 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
         model_name: str = "Qwen/Qwen3-4B-Instruct-2507",
         device: str = "cuda",
         torch_dtype: str = "float16",
-        gen_kwargs: dict = {},
+        gen_kwargs: dict[str, Any] = {},
         user_role: str = "user",
         chat_size: int = 1,
         init_chat_role: str | None = None,
@@ -149,7 +151,7 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
         backend: Literal["transformers", "mlx"] = "transformers",
         enable_thinking: bool = False,
         stream_batch_sentences: int = 3,
-    ):
+    ) -> None:
         self.backend = backend
         self.cancel_scope = cancel_scope
         self.device = device
@@ -175,7 +177,7 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
         model_name: str,
         device: str,
         torch_dtype: str,
-        gen_kwargs: dict,
+        gen_kwargs: dict[str, Any],
     ) -> None:
         """Load the model, tokenizer, and any backend-specific resources."""
 
@@ -186,8 +188,8 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
         language_code: str | None,
         gen: int | None,
         ctx: StreamContext,
-        runtime_config=None,
-        response=None,
+        runtime_config: RuntimeConfig | None = None,
+        response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
         """Run model generation, stream sentence chunks, set ``ctx.input_tokens``."""
 
@@ -214,7 +216,7 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _prepare_chat_for_transformers(chat_messages: list[dict]) -> list[dict]:
+    def _prepare_chat_for_transformers(chat_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Convert Responses-API-style tool items to the transformers chat format.
 
         - ``function_call_output`` items become ``{"role": "tool", ...}``
@@ -274,7 +276,7 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
         self,
         chat: Chat,
         instructions: str | None,
-        raw_tools: list | None,
+        raw_tools: list[Any] | None,
         tool_choice: str | None,
         ctx: StreamContext | None = None,
     ) -> None:
@@ -311,8 +313,8 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
         language_code: str | None,
         tools: list[ResponseFunctionToolCall],
         ctx: StreamContext,
-        runtime_config=None,
-        response=None,
+        runtime_config: RuntimeConfig | None = None,
+        response: RealtimeResponseCreateParams | None = None,
     ) -> tuple[list[LLMResponseChunk], list[ResponseFunctionToolCall], str]:
         """Extract complete code blocks and return complete sentences to yield.
 
@@ -389,12 +391,12 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
 
     def _stream_tokens(
         self,
-        token_iter: Iterator,
+        token_iter: Iterator[Any],
         gen: int | None,
         language_code: str | None,
         ctx: StreamContext,
-        runtime_config=None,
-        response=None,
+        runtime_config: RuntimeConfig | None = None,
+        response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
         """Consume *token_iter*, accumulate text in *ctx*, yield sentence chunks."""
         while True:
@@ -441,7 +443,9 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
     # Main pipeline entry point
     # ------------------------------------------------------------------
 
-    def process(self, request: Transcription | GenerateResponseRequest):
+    def process(
+        self, request: Transcription | GenerateResponseRequest
+    ) -> Iterator[LLMResponseChunk | TokenUsage | EndOfResponse]:
         language_code = None
         runtime_config = None
         response = None
@@ -547,7 +551,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
         logger.info(f"LLM Backend: {self.backend}")
         self.warmup()
 
-    def _load_model(self, model_name: str, device: str, torch_dtype: str, gen_kwargs: dict) -> None:
+    def _load_model(self, model_name: str, device: str, torch_dtype: str, gen_kwargs: dict[str, Any]) -> None:
 
         logger.info("LLM Language Model Handler setup")
 
@@ -585,8 +589,8 @@ class LanguageModelHandler(BaseLanguageModelHandler):
         language_code: str | None,
         gen: int | None,
         ctx: StreamContext,
-        runtime_config=None,
-        response=None,
+        runtime_config: RuntimeConfig | None = None,
+        response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
         chat_messages = self._prepare_chat_for_transformers(chat.to_list())
         chat_input = self.tokenizer.apply_chat_template(chat_messages, tokenize=True)
@@ -684,7 +688,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
         super().setup(**kwargs)
         logger.info(f"VLM Backend: {self.backend}")
 
-    def _load_model(self, model_name: str, device: str, torch_dtype: str, gen_kwargs: dict) -> None:
+    def _load_model(self, model_name: str, device: str, torch_dtype: str, gen_kwargs: dict[str, Any]) -> None:
 
         logger.info("VLM Language Model Handler setup")
 
@@ -716,8 +720,8 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
         language_code: str | None,
         gen: int | None,
         ctx: StreamContext,
-        runtime_config=None,
-        response=None,
+        runtime_config: RuntimeConfig | None = None,
+        response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
         prepared = self._prepare_chat_for_transformers(chat.to_list())
         if self.backend == "mlx":
@@ -760,7 +764,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             if self.device == "mps":
                 torch.mps.empty_cache()
 
-    def _prepare_vlm_inputs(self, chat_messages: list[dict]) -> tuple[Any, int]:
+    def _prepare_vlm_inputs(self, chat_messages: list[dict[str, Any]]) -> tuple[Any, int]:
         """Build processor inputs for transformers VLM generation.
 
         Converts Realtime-style content (``input_text``/``input_image``) to the
@@ -797,7 +801,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
         ).to(self.device)
         return inputs, len(inputs["input_ids"][0])
 
-    def _prepare_mlx_vlm_inputs(self, chat_messages: list[dict]) -> tuple[list, str]:
+    def _prepare_mlx_vlm_inputs(self, chat_messages: list[dict[str, Any]]) -> tuple[list[Any], str]:
         """Build formatted prompt and extract PIL images for MLX VLM generation.
 
         Converts Realtime-style content (``input_text``/``input_image``) to the

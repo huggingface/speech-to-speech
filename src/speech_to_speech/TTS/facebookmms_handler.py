@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from threading import Event
+from typing import Any, Iterator
 
 import librosa
 import numpy as np
@@ -63,15 +65,15 @@ WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE = {
 class FacebookMMSTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
     def setup(
         self,
-        should_listen,
-        device="cuda",
-        torch_dtype="float32",
-        language="en",
-        stream=True,
-        chunk_size=512,
+        should_listen: Event,
+        device: str = "cuda",
+        torch_dtype: str = "float32",
+        language: str = "en",
+        stream: bool = True,
+        chunk_size: int = 512,
         cancel_scope: CancelScope | None = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         self.should_listen = should_listen
         self.cancel_scope = cancel_scope
         self.device = device
@@ -84,22 +86,22 @@ class FacebookMMSTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         self.load_model(self.language)
         self.warmup()
 
-    def load_model(self, language_code):
+    def load_model(self, language_code: str) -> None:
         try:
             model_name = f"facebook/mms-tts-{WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE[language_code]}"
             logger.info(f"Loading model: {model_name}")
-            self.model = VitsModel.from_pretrained(model_name).to(self.device)
+            self.model = VitsModel.from_pretrained(model_name).to(self.device)  # type: ignore[arg-type]
             self.tokenizer = AutoTokenizer.from_pretrained(model_name)
             self.language = language_code
         except KeyError:
             logger.warning(f"Unsupported language: {language_code}. Falling back to English.")
             self.load_model("en")
 
-    def warmup(self):
+    def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
         self.generate_audio("Hello, this is a test")
 
-    def generate_audio(self, text):
+    def generate_audio(self, text: str) -> torch.Tensor | None:
         if not text:
             logger.warning("Received empty text input")
             return None
@@ -130,7 +132,7 @@ class FacebookMMSTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
             logger.exception("Full traceback:")
             return None
 
-    def process(self, tts_input: TTSInput | EndOfResponse):
+    def process(self, tts_input: TTSInput | EndOfResponse) -> Iterator[bytes | np.ndarray]:
         if isinstance(tts_input, EndOfResponse):
             yield AUDIO_RESPONSE_DONE
             return
@@ -191,7 +193,7 @@ class FacebookMMSTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         if not runtime_config:
             self.should_listen.set()
 
-    def on_session_end(self):
+    def on_session_end(self) -> None:
         if self.language != self._initial_language:
             self.load_model(self._initial_language)
         logger.debug("Facebook MMS TTS session state reset")

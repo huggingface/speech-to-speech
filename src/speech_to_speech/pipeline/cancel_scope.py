@@ -10,7 +10,7 @@ class CancelScope:
     reads and writes atomic at the bytecode level, so no lock is needed.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._gen: int = 0
         self._discarding: bool = False
 

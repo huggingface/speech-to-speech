@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from threading import Event
+from typing import Any, Iterator
 
 import ChatTTS
 import librosa
@@ -24,13 +26,13 @@ console = Console()
 class ChatTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
     def setup(
         self,
-        should_listen,
-        device="cuda",
-        gen_kwargs={},  # Unused
-        stream=True,
-        chunk_size=512,
+        should_listen: Event,
+        device: str = "cuda",
+        gen_kwargs: dict[str, Any] = {},  # Unused
+        stream: bool = True,
+        chunk_size: int = 512,
         cancel_scope: CancelScope | None = None,
-    ):
+    ) -> None:
         self.should_listen = should_listen
         self.cancel_scope = cancel_scope
         self.device = device
@@ -44,11 +46,11 @@ class ChatTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         )
         self.warmup()
 
-    def warmup(self):
+    def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
         _ = self.model.infer("text")
 
-    def process(self, tts_input: TTSInput | EndOfResponse):
+    def process(self, tts_input: TTSInput | EndOfResponse) -> Iterator[bytes | np.ndarray]:
         if isinstance(tts_input, EndOfResponse):
             yield AUDIO_RESPONSE_DONE
             return

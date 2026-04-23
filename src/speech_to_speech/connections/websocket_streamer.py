@@ -1,7 +1,11 @@
 import asyncio
 import json
 import logging
-from queue import Empty
+from queue import Empty, Queue
+from threading import Event
+from typing import Any
+
+from websockets.asyncio.server import ServerConnection
 
 from speech_to_speech.pipeline.control import SESSION_END, is_control_message
 from speech_to_speech.pipeline.messages import PIPELINE_END
@@ -20,14 +24,14 @@ class WebSocketStreamer:
 
     def __init__(
         self,
-        stop_event,
-        input_queue,
-        output_queue,
-        should_listen,
-        text_output_queue=None,
-        host="0.0.0.0",
-        port=8765,
-    ):
+        stop_event: Event,
+        input_queue: Queue[Any],
+        output_queue: Queue[Any],
+        should_listen: Event,
+        text_output_queue: Queue[Any] | None = None,
+        host: str = "0.0.0.0",
+        port: int = 8765,
+    ) -> None:
         self.stop_event = stop_event
         self.input_queue = input_queue  # clients -> VAD
         self.output_queue = output_queue  # TTS -> clients
@@ -35,11 +39,11 @@ class WebSocketStreamer:
         self.should_listen = should_listen
         self.host = host
         self.port = port
-        self.clients = set()
-        self.loop = None
-        self.server = None
+        self.clients: set[ServerConnection] = set()
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.server: Any = None
 
-    def run(self):
+    def run(self) -> None:
         """Run the WebSocket server (called from a thread)."""
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
@@ -51,7 +55,7 @@ class WebSocketStreamer:
         finally:
             self.loop.close()
 
-    async def _run_server(self):
+    async def _run_server(self) -> None:
         """Main async server loop."""
         import websockets
 
@@ -90,7 +94,7 @@ class WebSocketStreamer:
         await self.server.wait_closed()
         logger.info("WebSocket server closed")
 
-    async def _handle_client(self, websocket):
+    async def _handle_client(self, websocket: ServerConnection) -> None:
         """Handle a single WebSocket client connection."""
         client_id = id(websocket)
         logger.info(f"Client {client_id} connected")
@@ -142,7 +146,7 @@ class WebSocketStreamer:
                 logger.debug("Last WebSocket client disconnected, ending session")
                 self.input_queue.put(SESSION_END)
 
-    async def _send_loop(self):
+    async def _send_loop(self) -> None:
         """Send audio and text from queues to all connected clients."""
         # Buffer audio until we have at least 100ms worth (3200 bytes = 1600 samples at 16kHz int16)
         MIN_AUDIO_BYTES = 3200

@@ -12,7 +12,7 @@ JSON_TYPE_TO_PYTHON_TYPE = {
 }
 
 
-def _dedupe_types(types: list) -> list:
+def _dedupe_types(types: list[Any]) -> list[Any]:
     seen = []
     for t in types:
         if t not in seen:
@@ -20,7 +20,7 @@ def _dedupe_types(types: list) -> list:
     return seen
 
 
-def _annotation_from_spec(spec: dict):
+def _annotation_from_spec(spec: dict[str, Any]) -> Any:
     if not spec or not isinstance(spec, dict):
         return Any
 

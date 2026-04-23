@@ -14,12 +14,14 @@ import logging
 from contextlib import contextmanager
 from sys import platform
 from threading import Lock
+from typing import Any, Iterator
 
 import numpy as np
 from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, VADAudio
+from speech_to_speech.STT.smart_progressive_streaming import PartialTranscription as ProgressiveStreamPartial
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 
 try:
@@ -89,14 +91,14 @@ class ParakeetTDTSTTHandler(BaseHandler[VADAudio]):
 
     def setup(
         self,
-        model_name=None,
-        device="auto",
-        compute_type="float16",
-        language=None,
-        gen_kwargs={},
-        enable_live_transcription=False,
-        live_transcription_update_interval=0.25,
-    ):
+        model_name: str | None = None,
+        device: str = "auto",
+        compute_type: str = "float16",
+        language: str | None = None,
+        gen_kwargs: dict[str, Any] = {},
+        enable_live_transcription: bool = False,
+        live_transcription_update_interval: float = 0.25,
+    ) -> None:
         """
         Initialize the Parakeet TDT model.
 
@@ -162,7 +164,7 @@ class ParakeetTDTSTTHandler(BaseHandler[VADAudio]):
 
         self.warmup()
 
-    def _setup_mlx(self, model_name):
+    def _setup_mlx(self, model_name: str) -> None:
         """Setup for Apple Silicon using mlx-audio."""
         try:
             from mlx_audio.stt.generate import load_model
@@ -175,7 +177,7 @@ class ParakeetTDTSTTHandler(BaseHandler[VADAudio]):
                 "mlx-audio is required for Parakeet TDT on Apple Silicon. Install with: pip install mlx-audio"
             ) from e
 
-    def _setup_nano_parakeet(self, model_name):
+    def _setup_nano_parakeet(self, model_name: str) -> None:
         """Setup for CUDA/CPU using nano-parakeet."""
         try:
             import torch
@@ -195,7 +197,7 @@ class ParakeetTDTSTTHandler(BaseHandler[VADAudio]):
                 "nano-parakeet is required for Parakeet TDT on CUDA/CPU. Install with: pip install nano-parakeet"
             ) from e
 
-    def warmup(self):
+    def warmup(self) -> None:
         """Warm up the model with a dummy input."""
         logger.info(f"Warming up {self.__class__.__name__}")
 
@@ -218,7 +220,7 @@ class ParakeetTDTSTTHandler(BaseHandler[VADAudio]):
         except Exception as e:
             logger.warning(f"Warmup failed: {e}")
 
-    def process(self, vad_audio: VADAudio):
+    def process(self, vad_audio: VADAudio) -> Iterator[PartialTranscription | Transcription]:
         """
         Process audio and generate transcription.
 
@@ -295,7 +297,7 @@ class ParakeetTDTSTTHandler(BaseHandler[VADAudio]):
         if self.enable_live_transcription:
             self.processing_final = False
 
-    def _detect_language_from_text(self, text):
+    def _detect_language_from_text(self, text: str) -> str | None:
         """
         Detect language from transcribed text using lingua-py.
 
@@ -322,7 +324,7 @@ class ParakeetTDTSTTHandler(BaseHandler[VADAudio]):
         return {v: k for k, v in _LINGUA_CODE_MAP.items()}.get(code, code)
 
     @contextmanager
-    def _compute_lock_context(self, handler_name: str, timeout: float):
+    def _compute_lock_context(self, handler_name: str, timeout: float) -> Iterator[bool]:
         if self.backend == "mlx":
             with MLXLockContext(handler_name=handler_name, timeout=timeout) as acquired:
                 yield acquired
@@ -335,7 +337,7 @@ class ParakeetTDTSTTHandler(BaseHandler[VADAudio]):
             if acquired:
                 self.compute_lock.release()
 
-    def _show_progressive_transcription(self, audio_input):
+    def _show_progressive_transcription(self, audio_input: np.ndarray) -> str:
         """Run progressive transcription, print to console, and return the text."""
         from rich.text import Text
 
@@ -361,7 +363,7 @@ class ParakeetTDTSTTHandler(BaseHandler[VADAudio]):
 
         return progressive_text
 
-    def _build_progressive_text(self, result):
+    def _build_progressive_text(self, result: ProgressiveStreamPartial) -> str:
         parts = []
         if result.fixed_text:
             parts.append(result.fixed_text.strip())
@@ -369,7 +371,7 @@ class ParakeetTDTSTTHandler(BaseHandler[VADAudio]):
             parts.append(result.active_text.strip())
         return " ".join(part for part in parts if part).strip()
 
-    def _process_mlx_final(self, audio_input):
+    def _process_mlx_final(self, audio_input: np.ndarray) -> tuple[str, str]:
         """Process final audio using MLX backend with streaming handler."""
         # If we have fixed sentences from progressive updates, only transcribe the new part
         if (
@@ -427,7 +429,7 @@ class ParakeetTDTSTTHandler(BaseHandler[VADAudio]):
 
         return pred_text, language_code
 
-    def _process_mlx(self, audio_input):
+    def _process_mlx(self, audio_input: np.ndarray) -> tuple[str, str]:
         """Process audio using MLX backend."""
         import mlx.core as mx
 
@@ -459,7 +461,7 @@ class ParakeetTDTSTTHandler(BaseHandler[VADAudio]):
 
         return pred_text, language_code
 
-    def _process_nano_parakeet(self, audio_input):
+    def _process_nano_parakeet(self, audio_input: np.ndarray) -> tuple[str, str]:
         """Process audio using nano-parakeet backend."""
         pred_text = self.model.transcribe(audio_input).strip()
 
@@ -474,13 +476,13 @@ class ParakeetTDTSTTHandler(BaseHandler[VADAudio]):
 
         return pred_text, language_code
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         """Clean up model resources."""
         logger.info(f"Cleaning up {self.__class__.__name__}")
         if hasattr(self, "model"):
             del self.model
 
-    def on_session_end(self):
+    def on_session_end(self) -> None:
         self.last_language = self.start_language if self.start_language else "en"
         if self.enable_live_transcription:
             self.processing_final = False

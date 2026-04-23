@@ -2,6 +2,7 @@ import logging
 import threading
 from queue import Queue
 from threading import Event
+from typing import Any, cast
 
 import uvicorn
 
@@ -23,17 +24,17 @@ class RealtimeServer:
     def __init__(
         self,
         stop_event: Event,
-        input_queue: Queue,
-        output_queue: Queue,
+        input_queue: Queue[Any],
+        output_queue: Queue[Any],
         should_listen: Event,
         response_playing: Event | None = None,
         cancel_scope: CancelScope | None = None,
-        text_output_queue: Queue | None = None,
-        text_prompt_queue: Queue | None = None,
+        text_output_queue: Queue[Any] | None = None,
+        text_prompt_queue: Queue[Any] | None = None,
         host: str = "0.0.0.0",
         port: int = 8765,
         chat_size: int = 10,
-    ):
+    ) -> None:
         self.stop_event = stop_event
         self.input_queue = input_queue
         self.output_queue = output_queue
@@ -46,7 +47,7 @@ class RealtimeServer:
         self.port = port
         self.chat_size = chat_size
 
-    def run(self):
+    def run(self) -> None:
         """Start the FastAPI/uvicorn server (called from a ThreadManager thread)."""
         service = RealtimeService(
             text_prompt_queue=self.text_prompt_queue,
@@ -57,7 +58,7 @@ class RealtimeServer:
             service=service,
             input_queue=self.input_queue,
             output_queue=self.output_queue,
-            text_output_queue=self.text_output_queue,
+            text_output_queue=cast(Queue[Any], self.text_output_queue),
             should_listen=self.should_listen,
             response_playing=self.response_playing,
             cancel_scope=self.cancel_scope,
@@ -74,9 +75,9 @@ class RealtimeServer:
         )
         server = uvicorn.Server(config)
 
-        server.install_signal_handlers = lambda: None
+        server.install_signal_handlers = lambda: None  # type: ignore[attr-defined]
 
-        def _watch_stop():
+        def _watch_stop() -> None:
             self.stop_event.wait()
             server.should_exit = True
 

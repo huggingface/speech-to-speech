@@ -11,7 +11,7 @@ class VADIterator:
         sampling_rate: int = 16000,
         min_silence_duration_ms: int = 100,
         speech_pad_ms: int = 30,
-    ):
+    ) -> None:
         """
         Mainly taken from https://github.com/snakers4/silero-vad
         Class for stream imitation
@@ -51,7 +51,7 @@ class VADIterator:
         self.speech_pad_samples = int(sampling_rate * speech_pad_ms / 1000)
         self.reset_states()
 
-    def reset_states(self):
+    def reset_states(self) -> None:
         self.model.reset_states()
         self.triggered = False
         self.temp_end = 0
@@ -104,7 +104,7 @@ class VADIterator:
         return self._speech_buffer()
 
     @torch.no_grad()
-    def __call__(self, x):
+    def __call__(self, x: torch.Tensor) -> list[torch.Tensor] | None:
         """
         x: torch.Tensor
             audio chunk (see examples in repo)

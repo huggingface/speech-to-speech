@@ -1,6 +1,8 @@
 import logging
 import threading
 import time
+from queue import Queue
+from typing import Any
 
 import numpy as np
 import sounddevice as sd
@@ -11,22 +13,22 @@ logger = logging.getLogger(__name__)
 class LocalAudioStreamer:
     def __init__(
         self,
-        input_queue,
-        output_queue,
-        list_play_chunk_size=512,
-    ):
+        input_queue: Queue[Any],
+        output_queue: Queue[Any],
+        list_play_chunk_size: int = 512,
+    ) -> None:
         self.list_play_chunk_size = list_play_chunk_size
 
         self.stop_event = threading.Event()
         self.input_queue = input_queue
         self.output_queue = output_queue
 
-    def run(self):
+    def run(self) -> None:
         # Pre-generate a static dither buffer (±1 LSB, -96 dB) to keep the
         # audio sink active without calling numpy inside the real-time callback.
         dither = np.random.randint(-1, 2, size=(self.list_play_chunk_size, 1), dtype=np.int16)
 
-        def callback(indata, outdata, frames, time, status):
+        def callback(indata: np.ndarray, outdata: np.ndarray, frames: int, time: float, status: str) -> None:
             # During shutdown, just output silence
             if self.stop_event.is_set():
                 outdata[:] = 0 * outdata

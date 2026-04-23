@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterator
+from queue import Queue
+from threading import Event
+from typing import Any
 
 import numpy as np
 import torch
@@ -34,18 +38,18 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
 
     def setup(
         self,
-        should_listen,
-        thresh=0.3,
-        sample_rate=16000,
-        min_silence_ms=1000,
-        min_speech_ms=500,
-        max_speech_ms=float("inf"),
-        speech_pad_ms=30,
-        audio_enhancement=False,
-        enable_realtime_transcription=False,
-        realtime_processing_pause=0.25,
-        text_output_queue=None,
-    ):
+        should_listen: Event,
+        thresh: float = 0.3,
+        sample_rate: int = 16000,
+        min_silence_ms: int = 1000,
+        min_speech_ms: int = 500,
+        max_speech_ms: float = float("inf"),
+        speech_pad_ms: int = 30,
+        audio_enhancement: bool = False,
+        enable_realtime_transcription: bool = False,
+        realtime_processing_pause: float = 0.25,
+        text_output_queue: Queue[Any] | None = None,
+    ) -> None:
         self.should_listen = should_listen
         self.sample_rate = sample_rate
         self.min_silence_ms = min_silence_ms
@@ -54,7 +58,7 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
         self.enable_realtime_transcription = enable_realtime_transcription
         self.realtime_processing_pause = realtime_processing_pause
         self.text_output_queue = text_output_queue
-        self._last_turn_detection = None
+        self._last_turn_detection: dict | None = None
         self.model, _ = torch.hub.load(
             "snakers4/silero-vad",
             "silero_vad",
@@ -97,14 +101,13 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
         """Cumulative audio received so far, in milliseconds."""
         return int(self._total_samples / self.sample_rate * 1000)
 
-    def _apply_runtime_turn_detection(self, runtime_config=None):
+    def _apply_runtime_turn_detection(self, runtime_config: RuntimeConfig | None = None) -> None:
         """Check RuntimeConfig for turn_detection changes and apply them."""
-        if not runtime_config or not runtime_config.session.audio.input.turn_detection:
+        audio = runtime_config.session.audio if runtime_config else None
+        audio_input = audio.input if audio is not None else None
+        if not runtime_config or not audio_input or not audio_input.turn_detection:
             return
-        td_raw = runtime_config.session.audio.input.turn_detection
-        if td_raw is self._last_turn_detection:
-            return
-        self._last_turn_detection = td_raw
+        td_raw = audio_input.turn_detection
 
         # Convert Pydantic models (e.g. OpenAI SDK ServerVad) to dict;
         # plain dicts pass through unchanged.
@@ -116,6 +119,12 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
             logger.warning(f"Unexpected turn_detection type: {type(td_raw)}")
             return
 
+        # Compare normalized snapshot (identity on td_raw vs stored dict was wrong after first apply).
+        if td == self._last_turn_detection:
+            return
+
+        self._last_turn_detection = dict(td)
+
         if "threshold" in td:
             self.iterator.threshold = td["threshold"]
             logger.info(f"VAD threshold updated to {td['threshold']}")
@@ -123,7 +132,7 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
             self.iterator.min_silence_samples = self.sample_rate * td["silence_duration_ms"] / 1000
             logger.info(f"VAD silence duration updated to {td['silence_duration_ms']}ms")
 
-    def process(self, audio_chunk: bytes | tuple[bytes, RuntimeConfig]):
+    def process(self, audio_chunk: bytes | tuple[bytes, RuntimeConfig]) -> Iterator[VADAudio]:
         runtime_config = None
         if isinstance(audio_chunk, tuple):
             audio_chunk, runtime_config = audio_chunk
@@ -226,7 +235,7 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
                 self.last_process_time = 0
                 self._speech_started_emitted = False
 
-    def _process_normal(self, vad_output):
+    def _process_normal(self, vad_output: list[torch.Tensor] | None) -> Iterator[VADAudio]:
         """Original processing: yield only when speech ends."""
         if vad_output is not None:
             if len(vad_output) == 0:
@@ -259,7 +268,7 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
                 yield VADAudio(audio=array)
                 self._speech_started_emitted = False
 
-    def _apply_audio_enhancement(self, array):
+    def _apply_audio_enhancement(self, array: np.ndarray) -> np.ndarray:
         """Apply audio enhancement if enabled."""
         if self.sample_rate != self.df_state.sr():
             audio_float32 = torchaudio.functional.resample(
@@ -291,5 +300,5 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
         logger.debug("VAD session state reset")
 
     @property
-    def min_time_to_debug(self):
+    def min_time_to_debug(self) -> float:
         return 0.00001

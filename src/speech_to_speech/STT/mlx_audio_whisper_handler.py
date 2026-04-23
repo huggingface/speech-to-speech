@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any, Iterator
 
 import numpy as np
 from rich.console import Console
@@ -36,10 +37,10 @@ class MLXAudioWhisperSTTHandler(BaseHandler[VADAudio]):
 
     def setup(
         self,
-        model_name="mlx-community/whisper-large-v3-turbo",
-        language=None,
-        gen_kwargs={},
-    ):
+        model_name: str = "mlx-community/whisper-large-v3-turbo",
+        language: str | None = None,
+        gen_kwargs: dict[str, Any] = {},
+    ) -> None:
         from mlx_audio.stt.generate import load_model
         from transformers import WhisperProcessor
 
@@ -80,7 +81,7 @@ class MLXAudioWhisperSTTHandler(BaseHandler[VADAudio]):
 
         self.warmup()
 
-    def warmup(self):
+    def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
 
         # Warmup with a dummy input
@@ -93,7 +94,7 @@ class MLXAudioWhisperSTTHandler(BaseHandler[VADAudio]):
         except Exception as e:
             logger.warning(f"Warmup failed: {e}")
 
-    def process(self, vad_audio: VADAudio):
+    def process(self, vad_audio: VADAudio) -> Iterator[Transcription]:
         logger.debug("inferring mlx-audio whisper...")
 
         assert isinstance(vad_audio.audio, np.ndarray), "Audio must be a numpy array"

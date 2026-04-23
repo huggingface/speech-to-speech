@@ -1,11 +1,11 @@
 import numpy as np
 
 
-def next_power_of_2(x):
+def next_power_of_2(x: int) -> int:
     return 1 if x == 0 else 2 ** (x - 1).bit_length()
 
 
-def int2float(sound):
+def int2float(sound: np.ndarray) -> np.ndarray:
     """
     Taken from https://github.com/snakers4/silero-vad
     """

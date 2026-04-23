@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from queue import Queue
+from typing import Any, Iterator
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.events import PartialTranscriptionEvent, TranscriptionCompletedEvent
@@ -16,11 +18,11 @@ class TranscriptionNotifier(BaseHandler[PartialTranscription | Transcription]):
     API or plain WebSocket) while only forwarding final transcripts to the LLM.
     """
 
-    def setup(self, text_output_queue=None, suppress_yield=False):
+    def setup(self, text_output_queue: Queue[Any] | None = None, suppress_yield: bool = False) -> None:
         self.text_output_queue = text_output_queue
         self.suppress_yield = suppress_yield
 
-    def process(self, transcription: PartialTranscription | Transcription):
+    def process(self, transcription: PartialTranscription | Transcription) -> Iterator[PartialTranscription | Transcription]:
         if isinstance(transcription, PartialTranscription):
             if self.text_output_queue and transcription.text:
                 self.text_output_queue.put(PartialTranscriptionEvent(delta=str(transcription.text)))

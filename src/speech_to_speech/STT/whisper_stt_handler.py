@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 from copy import copy
+from typing import Any, Iterator
 
+import numpy as np
 import torch
 from rich.console import Console
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
@@ -36,13 +38,13 @@ class WhisperSTTHandler(BaseHandler[VADAudio]):
 
     def setup(
         self,
-        model_name="distil-whisper/distil-large-v3",
-        device="cuda",
-        torch_dtype="float16",
-        compile_mode=None,
-        language=None,
-        gen_kwargs={},
-    ):
+        model_name: str = "distil-whisper/distil-large-v3",
+        device: str = "cuda",
+        torch_dtype: str = "float16",
+        compile_mode: str | None = None,
+        language: str | None = None,
+        gen_kwargs: dict[str, Any] = {},
+    ) -> None:
         self.device = device
         self.torch_dtype = getattr(torch, torch_dtype)
         self.compile_mode = compile_mode
@@ -64,13 +66,13 @@ class WhisperSTTHandler(BaseHandler[VADAudio]):
             self.model.forward = torch.compile(self.model.forward, mode=self.compile_mode, fullgraph=True)
         self.warmup()
 
-    def prepare_model_inputs(self, audio):
+    def prepare_model_inputs(self, audio: np.ndarray) -> torch.Tensor:
         input_features = self.processor(audio, sampling_rate=16000, return_tensors="pt").input_features
         input_features = input_features.to(self.device, dtype=self.torch_dtype)
 
         return input_features
 
-    def warmup(self):
+    def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
 
         # 2 warmup steps for no compile or compile mode with CUDA graphs capture
@@ -109,7 +111,7 @@ class WhisperSTTHandler(BaseHandler[VADAudio]):
                 f"{self.__class__.__name__}:  warmed up! time: {start_event.elapsed_time(end_event) * 1e-3:.3f} s"
             )
 
-    def process(self, vad_audio: VADAudio):
+    def process(self, vad_audio: VADAudio) -> Iterator[Transcription]:
         logger.debug("infering whisper...")
 
         input_features = self.prepare_model_inputs(vad_audio.audio)

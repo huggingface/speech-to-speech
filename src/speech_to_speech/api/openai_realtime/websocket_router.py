@@ -1,10 +1,12 @@
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from queue import Empty, Queue
 from threading import Event as ThreadingEvent
-from typing import Callable
+from typing import Any, Callable
 
+import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from openai.types.realtime import (
     ConversationItemCreateEvent,
@@ -37,33 +39,33 @@ async def _send_events(ws: WebSocket, events: list[ServerEvent]) -> None:
         await _send_event(ws, event)
 
 
-def _keep_audio_sentinel(item) -> bool:
+def _keep_audio_sentinel(item: Any) -> bool:
     return isinstance(item, bytes) and item == AUDIO_RESPONSE_DONE
 
 
-def _keep_user_text_event(item) -> bool:
+def _keep_user_text_event(item: Any) -> bool:
     return isinstance(item, (SpeechStoppedEvent, TokenUsageEvent))
 
 
 def create_app(
     service: RealtimeService,
-    input_queue: Queue,
-    output_queue: Queue,
-    text_output_queue: Queue,
+    input_queue: Queue[Any],
+    output_queue: Queue[Any],
+    text_output_queue: Queue[Any],
     should_listen: ThreadingEvent,
     response_playing: ThreadingEvent | None,
     cancel_scope: CancelScope | None,
     stop_event: ThreadingEvent,
 ) -> FastAPI:
 
-    def _flush_queue(q: Queue, *, preserve: Callable | None = None) -> None:
+    def _flush_queue(q: Queue[Any], *, preserve: Callable[[Any], bool] | None = None) -> None:
         """Drain a queue, optionally preserving items matching *preserve*.
 
         Preserved items are re-inserted at the **front** of the queue
         (atomically under the queue's mutex) so they are processed before
         anything a pipeline thread may have enqueued during the drain.
         """
-        preserved: list = []
+        preserved: list[Any] = []
         while True:
             try:
                 item = q.get_nowait()
@@ -77,7 +79,7 @@ def create_app(
                     q.queue.appendleft(item)
                 q.not_empty.notify(len(preserved))
 
-    def clean_session(preserve: Callable | None = None):
+    def clean_session(preserve: Callable[[Any], bool] | None = None) -> None:
         # Invalidate in-flight LLM/TTS work (cooperative cancel via is_stale), then
         # flush queues. reset() clears discarding only; generation stays bumped.
         # Blocking HTTP reads are not interrupted here; see OpenApiModelHandler.process.
@@ -91,13 +93,13 @@ def create_app(
             cancel_scope.reset()
         should_listen.set()
 
-    def _to_audio_bytes(audio_chunk) -> bytes:
-        if hasattr(audio_chunk, "tobytes"):
+    def _to_audio_bytes(audio_chunk: bytes | np.ndarray) -> bytes:
+        if isinstance(audio_chunk, np.ndarray) or hasattr(audio_chunk, "tobytes"):
             return audio_chunk.tobytes()
         return audio_chunk
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.websockets = {}
         app.state.active_session: str | None = None  # type: ignore[misc]
         app.state.send_task = asyncio.create_task(_send_loop())
@@ -116,7 +118,7 @@ def create_app(
     app = FastAPI(lifespan=lifespan)
 
     @app.websocket("/v1/realtime")
-    async def realtime_endpoint(ws: WebSocket):
+    async def realtime_endpoint(ws: WebSocket) -> None:
         await ws.accept()
 
         if app.state.websockets:
@@ -212,10 +214,10 @@ def create_app(
             logger.info(f"Client {session_id} removed")
 
     @app.get("/v1/usage")
-    async def usage_endpoint():
+    async def usage_endpoint() -> dict[str, Any]:
         return service.get_usage()
 
-    async def _send_loop():
+    async def _send_loop() -> None:
         """Poll pipeline output queues and send to each connected client."""
         pending_output_item = None
         while not stop_event.is_set():

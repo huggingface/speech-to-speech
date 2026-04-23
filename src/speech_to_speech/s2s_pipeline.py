@@ -7,7 +7,8 @@ from pathlib import Path
 from queue import Queue
 from sys import platform
 from threading import Event
-from typing import Optional
+from types import FrameType
+from typing import Any, Optional
 
 import nltk
 import torch
@@ -40,6 +41,7 @@ from speech_to_speech.arguments_classes.socket_sender_arguments import SocketSen
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 from speech_to_speech.arguments_classes.websocket_streamer_arguments import WebSocketStreamerArguments
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
+from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.utils.thread_manager import ThreadManager
 from speech_to_speech.VAD.vad_handler import VADHandler
@@ -60,10 +62,11 @@ CURRENT_DIR = Path(__file__).resolve().parent
 os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(CURRENT_DIR, "tmp")
 
 console = Console()
+logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.WARNING)  # quiet down numba logs
 
 
-def rename_args(args, prefix):
+def rename_args(args: Any, prefix: str) -> None:
     """
     Rename arguments by removing the prefix and prepares the gen_kwargs.
     """
@@ -80,9 +83,9 @@ def rename_args(args, prefix):
     args.__dict__["gen_kwargs"] = gen_kwargs
 
 
-def parse_arguments():
+def parse_arguments() -> tuple[Any, ...]:
     parser = HfArgumentParser(
-        (
+        (  # type: ignore[arg-type]
             ModuleArguments,
             SocketReceiverArguments,
             SocketSenderArguments,
@@ -112,7 +115,7 @@ def parse_arguments():
         return parser.parse_args_into_dataclasses()
 
 
-def setup_logger(log_level):
+def setup_logger(log_level: str) -> None:
     global logger
     logging.basicConfig(
         level=log_level.upper(),
@@ -129,7 +132,7 @@ MLX_DEFAULT_LM_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-bf16"
 TRANSFORMERS_DEFAULT_LM_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
 
 
-def optimal_mac_settings(mac_optimal_settings: Optional[str], *handler_kwargs):
+def optimal_mac_settings(mac_optimal_settings: bool, *handler_kwargs: Any) -> None:
     if mac_optimal_settings:
         for kwargs in handler_kwargs:
             if hasattr(kwargs, "device"):
@@ -147,7 +150,7 @@ def optimal_mac_settings(mac_optimal_settings: Optional[str], *handler_kwargs):
                     kwargs.lm_model_name = MLX_DEFAULT_LM_MODEL
 
 
-def check_mac_settings(module_kwargs):
+def check_mac_settings(module_kwargs: ModuleArguments) -> None:
     if platform == "darwin":
         if module_kwargs.device == "cuda":
             raise ValueError("Cannot use CUDA on macOS. Please set the device to 'cpu' or 'mps'.")
@@ -161,7 +164,7 @@ def check_mac_settings(module_kwargs):
             )
 
 
-def overwrite_device_argument(common_device: Optional[str], *handler_kwargs):
+def overwrite_device_argument(common_device: Optional[str], *handler_kwargs: Any) -> None:
     if common_device:
         for kwargs in handler_kwargs:
             if hasattr(kwargs, "lm_device"):
@@ -178,7 +181,7 @@ def overwrite_device_argument(common_device: Optional[str], *handler_kwargs):
                 kwargs.qwen3_tts_device = common_device
 
 
-def prepare_module_args(module_kwargs, *handler_kwargs):
+def prepare_module_args(module_kwargs: ModuleArguments, *handler_kwargs: Any) -> None:
     optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs, *handler_kwargs)
     if module_kwargs.tts is None:
         module_kwargs.tts = "qwen3"
@@ -188,21 +191,21 @@ def prepare_module_args(module_kwargs, *handler_kwargs):
 
 
 def prepare_all_args(
-    module_kwargs,
-    whisper_stt_handler_kwargs,
-    paraformer_stt_handler_kwargs,
-    faster_whisper_stt_handler_kwargs,
-    mlx_audio_whisper_stt_handler_kwargs,
-    parakeet_tdt_stt_handler_kwargs,
-    language_model_handler_kwargs,
-    open_api_language_model_handler_kwargs,
-    melo_tts_handler_kwargs,
-    chat_tts_handler_kwargs,
-    facebook_mms_tts_handler_kwargs,
-    pocket_tts_handler_kwargs,
-    kokoro_tts_handler_kwargs,
-    qwen3_tts_handler_kwargs,
-):
+    module_kwargs: ModuleArguments,
+    whisper_stt_handler_kwargs: WhisperSTTHandlerArguments,
+    paraformer_stt_handler_kwargs: ParaformerSTTHandlerArguments,
+    faster_whisper_stt_handler_kwargs: FasterWhisperSTTHandlerArguments,
+    mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments,
+    parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
+    language_model_handler_kwargs: LanguageModelHandlerArguments,
+    open_api_language_model_handler_kwargs: OpenApiLanguageModelHandlerArguments,
+    melo_tts_handler_kwargs: MeloTTSHandlerArguments,
+    chat_tts_handler_kwargs: ChatTTSHandlerArguments,
+    facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
+    pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
+    kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
+    qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
+) -> None:
     prepare_module_args(
         module_kwargs,
         whisper_stt_handler_kwargs,
@@ -235,7 +238,7 @@ def prepare_all_args(
     rename_args(qwen3_tts_handler_kwargs, "qwen3_tts")
 
 
-def initialize_queues_and_events():
+def initialize_queues_and_events() -> dict[str, Any]:
     return {
         "stop_event": Event(),
         "should_listen": Event(),
@@ -253,26 +256,26 @@ def initialize_queues_and_events():
 
 
 def build_pipeline(
-    module_kwargs,
-    socket_receiver_kwargs,
-    socket_sender_kwargs,
-    websocket_streamer_kwargs,
-    vad_handler_kwargs,
-    whisper_stt_handler_kwargs,
-    faster_whisper_stt_handler_kwargs,
-    paraformer_stt_handler_kwargs,
-    mlx_audio_whisper_stt_handler_kwargs,
-    parakeet_tdt_stt_handler_kwargs,
-    language_model_handler_kwargs,
-    open_api_language_model_handler_kwargs,
-    melo_tts_handler_kwargs,
-    chat_tts_handler_kwargs,
-    facebook_mms_tts_handler_kwargs,
-    pocket_tts_handler_kwargs,
-    kokoro_tts_handler_kwargs,
-    qwen3_tts_handler_kwargs,
-    queues_and_events,
-):
+    module_kwargs: ModuleArguments,
+    socket_receiver_kwargs: SocketReceiverArguments,
+    socket_sender_kwargs: SocketSenderArguments,
+    websocket_streamer_kwargs: WebSocketStreamerArguments,
+    vad_handler_kwargs: VADHandlerArguments,
+    whisper_stt_handler_kwargs: WhisperSTTHandlerArguments,
+    faster_whisper_stt_handler_kwargs: FasterWhisperSTTHandlerArguments,
+    paraformer_stt_handler_kwargs: ParaformerSTTHandlerArguments,
+    mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments,
+    parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
+    language_model_handler_kwargs: LanguageModelHandlerArguments,
+    open_api_language_model_handler_kwargs: OpenApiLanguageModelHandlerArguments,
+    melo_tts_handler_kwargs: MeloTTSHandlerArguments,
+    chat_tts_handler_kwargs: ChatTTSHandlerArguments,
+    facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
+    pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
+    kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
+    qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
+    queues_and_events: dict[str, Any],
+) -> ThreadManager:
     stop_event = queues_and_events["stop_event"]
     should_listen = queues_and_events["should_listen"]
     response_playing = queues_and_events["response_playing"]
@@ -287,6 +290,7 @@ def build_pipeline(
     text_output_queue = (
         None  # Only set for websocket/realtime modes; kept None otherwise to avoid unbounded queue growth
     )
+    comms_handlers: list[Any] = []
     if module_kwargs.mode == "local":
         from speech_to_speech.connections.local_audio_streamer import LocalAudioStreamer
 
@@ -449,16 +453,16 @@ def build_pipeline(
 
 
 def get_stt_handler(
-    module_kwargs,
-    stop_event,
-    spoken_prompt_queue,
-    text_prompt_queue,
-    whisper_stt_handler_kwargs,
-    faster_whisper_stt_handler_kwargs,
-    paraformer_stt_handler_kwargs,
-    mlx_audio_whisper_stt_handler_kwargs,
-    parakeet_tdt_stt_handler_kwargs,
-):
+    module_kwargs: ModuleArguments,
+    stop_event: Event,
+    spoken_prompt_queue: Queue[Any],
+    text_prompt_queue: Queue[Any],
+    whisper_stt_handler_kwargs: WhisperSTTHandlerArguments,
+    faster_whisper_stt_handler_kwargs: FasterWhisperSTTHandlerArguments,
+    paraformer_stt_handler_kwargs: ParaformerSTTHandlerArguments,
+    mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments,
+    parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
+) -> BaseHandler[Any]:
     if module_kwargs.stt == "whisper":
         from speech_to_speech.STT.whisper_stt_handler import WhisperSTTHandler
 
@@ -529,13 +533,13 @@ def get_stt_handler(
 
 
 def get_llm_handler(
-    module_kwargs,
-    stop_event,
-    text_prompt_queue,
-    lm_response_queue,
-    language_model_handler_kwargs,
-    open_api_language_model_handler_kwargs,
-):
+    module_kwargs: ModuleArguments,
+    stop_event: Event,
+    text_prompt_queue: Queue[Any],
+    lm_response_queue: Queue[Any],
+    language_model_handler_kwargs: LanguageModelHandlerArguments,
+    open_api_language_model_handler_kwargs: OpenApiLanguageModelHandlerArguments,
+) -> BaseHandler[Any]:
     if module_kwargs.llm == "open_api":
         from speech_to_speech.LLM.openai_api_language_model import OpenApiModelHandler
 
@@ -553,11 +557,17 @@ def get_llm_handler(
             lm_kwargs["backend"] = "mlx"
 
         if is_vlm:
-            from speech_to_speech.LLM.language_model import VisionLanguageModelHandler as HandlerClass
-        else:
-            from speech_to_speech.LLM.language_model import LanguageModelHandler as HandlerClass
+            from speech_to_speech.LLM.language_model import VisionLanguageModelHandler
 
-        return HandlerClass(
+            return VisionLanguageModelHandler(
+                stop_event,
+                queue_in=text_prompt_queue,
+                queue_out=lm_response_queue,
+                setup_kwargs=lm_kwargs,
+            )
+        from speech_to_speech.LLM.language_model import LanguageModelHandler
+
+        return LanguageModelHandler(
             stop_event,
             queue_in=text_prompt_queue,
             queue_out=lm_response_queue,
@@ -568,18 +578,18 @@ def get_llm_handler(
 
 
 def get_tts_handler(
-    module_kwargs,
-    stop_event,
-    lm_response_queue,
-    send_audio_chunks_queue,
-    should_listen,
-    melo_tts_handler_kwargs,
-    chat_tts_handler_kwargs,
-    facebook_mms_tts_handler_kwargs,
-    pocket_tts_handler_kwargs,
-    kokoro_tts_handler_kwargs,
-    qwen3_tts_handler_kwargs,
-):
+    module_kwargs: ModuleArguments,
+    stop_event: Event,
+    lm_response_queue: Queue[Any],
+    send_audio_chunks_queue: Queue[Any],
+    should_listen: Event,
+    melo_tts_handler_kwargs: MeloTTSHandlerArguments,
+    chat_tts_handler_kwargs: ChatTTSHandlerArguments,
+    facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
+    pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
+    kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
+    qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
+) -> BaseHandler[Any]:
     if module_kwargs.tts == "melo":
         try:
             from speech_to_speech.TTS.melo_handler import MeloTTSHandler
@@ -652,7 +662,7 @@ def get_tts_handler(
         raise ValueError("The TTS should be either melo, chatTTS, facebookMMS, pocket, kokoro, or qwen3")
 
 
-def main():
+def main() -> None:
     (
         module_kwargs,
         socket_receiver_kwargs,
@@ -720,7 +730,7 @@ def main():
     # Set up graceful shutdown handler
     shutdown_requested = [False]  # Use list for nonlocal mutation
 
-    def signal_handler(_sig, _frame):
+    def signal_handler(_sig: int, _frame: Optional[FrameType]) -> None:
         if not shutdown_requested[0]:
             shutdown_requested[0] = True
             console.print("\n[yellow]Shutting down gracefully...[/yellow]")

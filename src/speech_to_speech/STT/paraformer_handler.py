@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any, Iterator
 
 import numpy as np
 import torch
@@ -27,10 +28,10 @@ class ParaformerSTTHandler(BaseHandler[VADAudio]):
 
     def setup(
         self,
-        model_name="paraformer-zh",
-        device="cuda",
-        gen_kwargs={},
-    ):
+        model_name: str = "paraformer-zh",
+        device: str = "cuda",
+        gen_kwargs: dict[str, Any] = {},
+    ) -> None:
         print(model_name)
         if len(model_name.split("/")) > 1:
             model_name = model_name.split("/")[-1]
@@ -38,7 +39,7 @@ class ParaformerSTTHandler(BaseHandler[VADAudio]):
         self.model = AutoModel(model=model_name, device=device)
         self.warmup()
 
-    def warmup(self):
+    def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
 
         # 2 warmup steps for no compile or compile mode with CUDA graphs capture
@@ -47,7 +48,7 @@ class ParaformerSTTHandler(BaseHandler[VADAudio]):
         for _ in range(n_steps):
             _ = self.model.generate(dummy_input)[0]["text"].strip().replace(" ", "")
 
-    def process(self, vad_audio: VADAudio):
+    def process(self, vad_audio: VADAudio) -> Iterator[Transcription]:
         logger.debug("infering paraformer...")
 
         pred_text = self.model.generate(vad_audio.audio)[0]["text"].strip().replace(" ", "")

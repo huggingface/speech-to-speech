@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 from sys import platform
+from threading import Event
+from typing import Any, Iterator
 
 import numpy as np
 from rich.console import Console
@@ -82,16 +84,16 @@ class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
 
     def setup(
         self,
-        should_listen,
-        model_name=None,
-        device="auto",
-        voice="bm_fable",
-        lang_code="b",
-        speed=1.0,
-        blocksize=512,
-        gen_kwargs=None,
+        should_listen: Event,
+        model_name: str | None = None,
+        device: str = "auto",
+        voice: str = "bm_fable",
+        lang_code: str = "b",
+        speed: float = 1.0,
+        blocksize: int = 512,
+        gen_kwargs: dict[str, Any] | None = None,
         cancel_scope: CancelScope | None = None,
-    ):
+    ) -> None:
         """
         Initialize the Kokoro TTS model.
 
@@ -145,7 +147,7 @@ class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
 
         self.warmup()
 
-    def _setup_mlx(self, model_name):
+    def _setup_mlx(self, model_name: str) -> None:
         """Setup for Apple Silicon using mlx-audio."""
         try:
             from mlx_audio.tts.utils import load_model
@@ -174,7 +176,7 @@ class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
                 "mlx-audio is required for Kokoro TTS on Apple Silicon. Install with: pip install mlx-audio"
             ) from e
 
-    def _setup_kokoro(self, model_name):
+    def _setup_kokoro(self, model_name: str) -> None:
         """Setup for CUDA/CPU using native kokoro library."""
         try:
             from kokoro import KPipeline
@@ -189,7 +191,7 @@ class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
                 "Also ensure espeak-ng is installed: apt-get install espeak-ng (Linux) or brew install espeak-ng (macOS)"
             ) from e
 
-    def _preload_multilingual_voices(self):
+    def _preload_multilingual_voices(self) -> None:
         """Preload voices for common languages to avoid download delays during inference."""
         # Only preload a few commonly used language voices to avoid excessive startup time
         # Users speaking other languages will experience a one-time download delay
@@ -206,7 +208,7 @@ class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
                 except Exception as e:
                     logger.warning(f"Failed to preload voice {voice}: {e}")
 
-    def warmup(self):
+    def warmup(self) -> None:
         """Warm up the model with a dummy inference."""
         logger.info(f"Warming up {self.__class__.__name__}")
 
@@ -225,7 +227,7 @@ class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
 
         logger.info(f"{self.__class__.__name__} warmed up")
 
-    def process(self, tts_input: TTSInput | EndOfResponse):
+    def process(self, tts_input: TTSInput | EndOfResponse) -> Iterator[bytes | np.ndarray]:
         """
         Process text input and generate audio output.
 
@@ -259,7 +261,7 @@ class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         if not runtime_config:
             self.should_listen.set()
 
-    def _process_mlx(self, llm_sentence, language_code=None):
+    def _process_mlx(self, llm_sentence: str, language_code: str | None = None) -> Iterator[np.ndarray]:
         """Process using MLX backend with Apple Silicon optimizations."""
         from scipy.signal import resample_poly
 
@@ -305,8 +307,8 @@ class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
                 # Find first and last samples above threshold
                 above_threshold = abs_audio > threshold
                 if np.any(above_threshold):
-                    start_idx = np.argmax(above_threshold)
-                    end_idx = len(audio) - np.argmax(above_threshold[::-1])
+                    start_idx = int(np.argmax(above_threshold))
+                    end_idx = len(audio) - int(np.argmax(above_threshold[::-1]))
                     # Add small padding (5ms = 120 samples at 24kHz) to avoid cutting speech
                     padding = 120
                     start_idx = max(0, start_idx - padding)
@@ -323,7 +325,7 @@ class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
 
                 # Yield audio in fixed-size chunks
                 for i in range(0, len(audio), self.blocksize):
-                    if gen is not None and self.cancel_scope.is_stale(gen):
+                    if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
                         logger.info("TTS generation cancelled (interruption)")
                         return
                     chunk = audio[i : i + self.blocksize]
@@ -333,7 +335,7 @@ class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
                     logger.debug(f"TTS yielding audio chunk: {len(chunk)} samples")
                     yield chunk
 
-    def _process_kokoro(self, llm_sentence, language_code=None):
+    def _process_kokoro(self, llm_sentence: str, language_code: str | None = None) -> Iterator[np.ndarray]:
         """Process using native kokoro library."""
         from scipy.signal import resample_poly
 
@@ -375,7 +377,7 @@ class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
 
             # Yield audio in fixed-size chunks
             for i in range(0, len(audio), self.blocksize):
-                if gen is not None and self.cancel_scope.is_stale(gen):
+                if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
                     logger.info("TTS generation cancelled (interruption)")
                     return
                 chunk = audio[i : i + self.blocksize]
@@ -384,7 +386,7 @@ class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
                     chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
                 yield chunk
 
-    def on_session_end(self):
+    def on_session_end(self) -> None:
         self.voice = self._initial_voice
         self.lang_code = self._initial_lang_code
         if self.backend == "mlx":

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
-from queue import Empty
+from queue import Empty, Queue
+from threading import Event
 from time import perf_counter
-from typing import Generic, Iterator, TypeVar
+from typing import Any, Generic, Iterator, TypeVar
 
 from speech_to_speech.pipeline.control import SESSION_END, is_control_message
 from speech_to_speech.pipeline.messages import PIPELINE_END
@@ -23,20 +24,20 @@ class BaseHandler(Generic[T]):
     The cleanup method handles stopping the handler, and PIPELINE_END is placed in the output queue.
     """
 
-    def __init__(self, stop_event, queue_in, queue_out, setup_args=(), setup_kwargs={}):
+    def __init__(self, stop_event: Event, queue_in: Queue[Any], queue_out: Queue[Any], setup_args: tuple[Any, ...] = (), setup_kwargs: dict[str, Any] = {}) -> None:
         self.stop_event = stop_event
         self.queue_in = queue_in
         self.queue_out = queue_out
         self.setup(*setup_args, **setup_kwargs)
-        self._times = []
+        self._times: list[float] = []
 
-    def setup(self, *arg, **kwargs):
+    def setup(self, *arg: Any, **kwargs: Any) -> None:
         pass
 
     def process(self, input: T) -> Iterator:
         raise NotImplementedError
 
-    def run(self):
+    def run(self) -> None:
         logger.debug(f"{self.__class__.__name__}: Handler thread started")
         while not self.stop_event.is_set():
             try:
@@ -76,15 +77,15 @@ class BaseHandler(Generic[T]):
         self.queue_out.put(PIPELINE_END)
 
     @property
-    def last_time(self):
+    def last_time(self) -> float:
         return self._times[-1]
 
     @property
-    def min_time_to_debug(self):
+    def min_time_to_debug(self) -> float:
         return 0.001
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         pass
 
-    def on_session_end(self):
+    def on_session_end(self) -> None:
         pass

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from threading import Event, Thread
 from time import perf_counter
+from typing import Any
 
 import librosa
 import numpy as np
@@ -201,7 +202,7 @@ class ParlerTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         console.print(f"[green]ASSISTANT: {text}")
         nb_tokens = len(self.prompt_tokenizer(text).input_ids)
 
-        pad_args = {}
+        pad_args: dict[str, Any] = {}
         if self.compile_mode:
             # pad to closest upper power of two
             pad_length = next_power_of_2(nb_tokens)

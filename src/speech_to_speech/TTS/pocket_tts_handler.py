@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+from threading import Event
 from time import perf_counter
+from typing import Any, Iterator
 
 import numpy as np
 from rich.console import Console
@@ -22,15 +24,15 @@ class PocketTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
 
     def setup(
         self,
-        should_listen,
-        device="cpu",
-        voice="alba",  # Default voice from catalog
-        sample_rate=16000,  # Match the pipeline's audio output (LocalAudioStreamer uses 16kHz)
-        blocksize=512,
-        max_tokens=50,
-        gen_kwargs=None,  # For compatibility with pipeline, not used
+        should_listen: Event,
+        device: str = "cpu",
+        voice: str = "alba",  # Default voice from catalog
+        sample_rate: int = 16000,  # Match the pipeline's audio output (LocalAudioStreamer uses 16kHz)
+        blocksize: int = 512,
+        max_tokens: int = 50,
+        gen_kwargs: dict[str, Any] | None = None,  # For compatibility with pipeline, not used
         cancel_scope: CancelScope | None = None,
-    ):
+    ) -> None:
         """
         Initialize Pocket TTS handler.
 
@@ -81,7 +83,7 @@ class PocketTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         logger.info(f"Pocket TTS model sample rate: {self.model.sample_rate}")
 
     @property
-    def min_time_to_debug(self):
+    def min_time_to_debug(self) -> float:
         """
         Override to suppress logging for individual audio chunks.
         Pocket TTS yields many small chunks (~10-20ms each), which would flood logs.
@@ -89,7 +91,7 @@ class PocketTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         """
         return 0.1  # 100ms threshold
 
-    def process(self, tts_input: TTSInput | EndOfResponse):
+    def process(self, tts_input: TTSInput | EndOfResponse) -> Iterator[bytes | np.ndarray]:
         if isinstance(tts_input, EndOfResponse):
             yield AUDIO_RESPONSE_DONE
             return

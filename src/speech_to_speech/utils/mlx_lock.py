@@ -7,7 +7,9 @@ a global lock that all MLX handlers should acquire before using their models.
 """
 
 import logging
+import types
 from threading import RLock
+from typing import Literal
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +18,7 @@ logger = logging.getLogger(__name__)
 _mlx_lock = RLock()
 
 
-def acquire_mlx_lock(timeout=None, handler_name="Unknown"):
+def acquire_mlx_lock(timeout: float | None = None, handler_name: str = "Unknown") -> bool:
     """
     Acquire the global MLX lock.
 
@@ -38,7 +40,7 @@ def acquire_mlx_lock(timeout=None, handler_name="Unknown"):
     return acquired
 
 
-def release_mlx_lock(handler_name="Unknown"):
+def release_mlx_lock(handler_name: str = "Unknown") -> None:
     """
     Release the global MLX lock.
 
@@ -55,16 +57,21 @@ def release_mlx_lock(handler_name="Unknown"):
 class MLXLockContext:
     """Context manager for MLX lock."""
 
-    def __init__(self, handler_name="Unknown", timeout=None):
+    def __init__(self, handler_name: str = "Unknown", timeout: float | None = None) -> None:
         self.handler_name = handler_name
         self.timeout = timeout
         self.acquired = False
 
-    def __enter__(self):
+    def __enter__(self) -> bool:
         self.acquired = acquire_mlx_lock(timeout=self.timeout, handler_name=self.handler_name)
         return self.acquired
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: types.TracebackType | None,
+    ) -> Literal[False]:
         if self.acquired:
             release_mlx_lock(handler_name=self.handler_name)
-        return False  # Don't suppress exceptions
+        return False  # Do not suppress exceptions

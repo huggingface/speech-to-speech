@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any, Iterator
 
 from faster_whisper import WhisperModel
 from rich.console import Console
@@ -24,14 +25,14 @@ class FasterWhisperSTTHandler(BaseHandler[VADAudio]):
         model_name: str = "tiny.en",
         device: str = "auto",
         compute_type: str = "auto",
-        gen_kwargs={},
-    ):
+        gen_kwargs: dict[str, Any] = {},
+    ) -> None:
         self.gen_kwargs = self.adapt_gen_kwargs(gen_kwargs)
 
         os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
         self.model = WhisperModel(model_name, device=device, compute_type=compute_type)
 
-    def process(self, vad_audio: VADAudio):
+    def process(self, vad_audio: VADAudio) -> Iterator[Transcription]:
         logger.debug("infering faster whisper...")
 
         segments, info = self.model.transcribe(vad_audio.audio, **self.gen_kwargs)
@@ -51,11 +52,11 @@ class FasterWhisperSTTHandler(BaseHandler[VADAudio]):
         else:
             logger.debug("no text detected. skipping...")
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         print("Stopping FasterWhisperSTTHandler")
         del self.model
 
-    def adapt_gen_kwargs(self, gen_kwargs: dict):
+    def adapt_gen_kwargs(self, gen_kwargs: dict[str, Any]) -> dict[str, Any]:
         gen_kwargs["without_timestamps"] = not gen_kwargs.pop("return_timestamps", True)
 
         return gen_kwargs

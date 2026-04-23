@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any, Iterator
 
 import numpy as np
 import torch
@@ -37,13 +38,13 @@ class LightningWhisperSTTHandler(BaseHandler[VADAudio]):
 
     def setup(
         self,
-        model_name="distil-large-v3",
-        device="mps",
-        torch_dtype="float16",
-        compile_mode=None,
-        language=None,
-        gen_kwargs={},
-    ):
+        model_name: str = "distil-large-v3",
+        device: str = "mps",
+        torch_dtype: str = "float16",
+        compile_mode: str | None = None,
+        language: str | None = None,
+        gen_kwargs: dict[str, Any] = {},
+    ) -> None:
         if len(model_name.split("/")) > 1:
             model_name = model_name.split("/")[-1]
         self.device = device
@@ -53,7 +54,7 @@ class LightningWhisperSTTHandler(BaseHandler[VADAudio]):
 
         self.warmup()
 
-    def warmup(self):
+    def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
 
         # 2 warmup steps for no compile or compile mode with CUDA graphs capture
@@ -63,7 +64,7 @@ class LightningWhisperSTTHandler(BaseHandler[VADAudio]):
         for _ in range(n_steps):
             _ = self.model.transcribe(dummy_input)["text"].strip()
 
-    def process(self, vad_audio: VADAudio):
+    def process(self, vad_audio: VADAudio) -> Iterator[Transcription]:
         logger.debug("infering whisper...")
 
         audio = vad_audio.audio

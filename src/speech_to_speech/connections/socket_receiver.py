@@ -1,6 +1,9 @@
 import logging
 import socket
 import time
+from queue import Queue
+from threading import Event
+from typing import Any
 
 from rich.console import Console
 
@@ -23,13 +26,13 @@ class SocketReceiver:
 
     def __init__(
         self,
-        stop_event,
-        queue_out,
-        should_listen,
-        host="0.0.0.0",
-        port=12345,
-        chunk_size=1024,
-    ):
+        stop_event: Event,
+        queue_out: Queue[Any],
+        should_listen: Event,
+        host: str = "0.0.0.0",
+        port: int = 12345,
+        chunk_size: int = 1024,
+    ) -> None:
         self.stop_event = stop_event
         self.queue_out = queue_out
         self.should_listen = should_listen
@@ -37,7 +40,7 @@ class SocketReceiver:
         self.host = host
         self.port = port
 
-    def receive_full_chunk(self, conn, chunk_size):
+    def receive_full_chunk(self, conn: socket.socket, chunk_size: int) -> bytes | None:
         data = b""
         while len(data) < chunk_size:
             packet = conn.recv(chunk_size - len(data))
@@ -47,7 +50,7 @@ class SocketReceiver:
             data += packet
         return data
 
-    def run(self):
+    def run(self) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.socket.bind((self.host, self.port))

@@ -10,7 +10,7 @@ Provides frequent partial transcriptions (every 250ms) with:
 
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Generator
+from typing import Any, Generator
 
 import numpy as np
 
@@ -38,8 +38,12 @@ class SmartProgressiveStreamingHandler:
     """
 
     def __init__(
-        self, model, emission_interval: float = 0.25, max_window_size: float = 15.0, sentence_buffer: float = 2.0
-    ):
+        self,
+        model: Any,
+        emission_interval: float = 0.25,
+        max_window_size: float = 15.0,
+        sentence_buffer: float = 2.0,
+    ) -> None:
         """
         Args:
             model: Parakeet model with sentence alignment
@@ -56,13 +60,13 @@ class SmartProgressiveStreamingHandler:
         # State for incremental streaming
         self.reset()
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset state for new streaming session."""
-        self.fixed_sentences = []
-        self.fixed_end_time = 0.0
-        self.last_transcribed_length = 0
+        self.fixed_sentences: list[str] = []
+        self.fixed_end_time: float = 0.0
+        self.last_transcribed_length: int = 0
 
-    def _decode_window(self, audio_window: np.ndarray):
+    def _decode_window(self, audio_window: np.ndarray) -> Any:
         """
         Decode an audio window and return an object with:
           - text: full transcript for the window
@@ -236,7 +240,7 @@ class SmartProgressiveStreamingHandler:
                 break
 
 
-def demo_smart_progressive():
+def demo_smart_progressive() -> None:
     """Demonstrate smart progressive streaming."""
     import time
 

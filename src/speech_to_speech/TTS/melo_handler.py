@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from threading import Event
+from typing import Any, Iterator
 
 import librosa
 import numpy as np
@@ -38,14 +40,14 @@ WHISPER_LANGUAGE_TO_MELO_SPEAKER = {
 class MeloTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
     def setup(
         self,
-        should_listen,
-        device="mps",
-        language="en",
-        speaker_to_id="en",
-        gen_kwargs={},  # Unused
-        blocksize=512,
+        should_listen: Event,
+        device: str = "mps",
+        language: str = "en",
+        speaker_to_id: str = "en",
+        gen_kwargs: dict[str, Any] = {},  # Unused
+        blocksize: int = 512,
         cancel_scope: CancelScope | None = None,
-    ):
+    ) -> None:
         self.should_listen = should_listen
         self.cancel_scope = cancel_scope
         self.device = device
@@ -56,11 +58,11 @@ class MeloTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         self._initial_language = self.language
         self.warmup()
 
-    def warmup(self):
+    def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
         _ = self.model.tts_to_file("text", self.speaker_id, quiet=True)
 
-    def process(self, tts_input: TTSInput | EndOfResponse):
+    def process(self, tts_input: TTSInput | EndOfResponse) -> Iterator[bytes | np.ndarray]:
         if isinstance(tts_input, EndOfResponse):
             yield AUDIO_RESPONSE_DONE
             return
@@ -114,7 +116,7 @@ class MeloTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         if not runtime_config:
             self.should_listen.set()
 
-    def on_session_end(self):
+    def on_session_end(self) -> None:
         if self.language != self._initial_language:
             self.language = self._initial_language
             self.model = TTS(language=WHISPER_LANGUAGE_TO_MELO_LANGUAGE[self.language], device=self.device)

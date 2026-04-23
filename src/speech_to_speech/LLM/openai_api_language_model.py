@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -40,21 +41,21 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
 
     def setup(
         self,
-        model_name="deepseek-chat",
-        device="cuda",
-        gen_kwargs={},
-        base_url=None,
-        api_key=None,
-        stream=False,
-        user_role="user",
-        chat_size=1,
-        init_chat_role="system",
-        init_chat_prompt="You are a helpful AI assistant.",
+        model_name: str = "deepseek-chat",
+        device: str = "cuda",
+        gen_kwargs: dict[str, Any] = {},
+        base_url: str | None = None,
+        api_key: str | None = None,
+        stream: bool = False,
+        user_role: str = "user",
+        chat_size: int = 1,
+        init_chat_role: str = "system",
+        init_chat_prompt: str = "You are a helpful AI assistant.",
         cancel_scope: CancelScope | None = None,
-        disable_thinking=True,
-        request_timeout_s=20.0,
-        stream_batch_sentences=3,
-    ):
+        disable_thinking: bool = True,
+        request_timeout_s: float = 20.0,
+        stream_batch_sentences: int = 3,
+    ) -> None:
         self.cancel_scope = cancel_scope
         self.model_name = model_name
         self.stream = stream
@@ -83,14 +84,14 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
         )
         self.warmup()
 
-    def _prepare_chat_messages(self, chat: Chat) -> list[dict]:
+    def _prepare_chat_messages(self, chat: Chat) -> list[dict[str, Any]]:
         """Convert chat messages to OpenAI Responses API input format.
 
         Regular messages are wrapped with ``type: "message"``.
         Tool-related items (``function_call``, ``function_call_output``)
         are passed through as top-level input items per the Responses API spec.
         """
-        result = []
+        result: list[dict[str, Any]] = []
         for msg in chat.to_list():
             if msg.get("type") in ("function_call", "function_call_output"):
                 result.append(msg)
@@ -98,7 +99,7 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
                 result.append({"type": "message", "role": msg["role"], "content": msg["content"]})
         return result
 
-    def warmup(self):
+    def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
         start = time.time()
         self.client.responses.create(
@@ -125,7 +126,9 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
             full_instructions = build_voice_system_prompt(instructions)
             chat.init_chat({"role": "system", "content": [{"type": "input_text", "text": full_instructions}]})
 
-    def process(self, request: Transcription | GenerateResponseRequest):
+    def process(
+        self, request: Transcription | GenerateResponseRequest
+    ) -> Iterator[LLMResponseChunk | TokenUsage | EndOfResponse]:
         language_code = None
         runtime_config = None
         response = None
@@ -308,5 +311,5 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
             yield TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens)
         yield EndOfResponse()
 
-    def on_session_end(self):
+    def on_session_end(self) -> None:
         logger.debug("OpenAI API language model session state reset")

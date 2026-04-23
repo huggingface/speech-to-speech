@@ -1,7 +1,7 @@
 import logging
 from queue import Queue
 from threading import Event as ThreadingEvent
-from typing import Callable, Literal, Optional, Self, Union
+from typing import Any, Callable, Literal, Optional, Self, Union
 
 from openai.types.realtime import (
     ConversationItemCreatedEvent,
@@ -164,10 +164,10 @@ class RealtimeService:
 
     def __init__(
         self,
-        text_prompt_queue: Queue | None = None,
+        text_prompt_queue: Queue[Any] | None = None,
         should_listen: ThreadingEvent | None = None,
         chat_size: int = 10,
-    ):
+    ) -> None:
         self.text_prompt_queue = text_prompt_queue
         self.should_listen = should_listen
         self._chat_size = chat_size
@@ -222,7 +222,7 @@ class RealtimeService:
     def _next_event_id() -> str:
         return _generate_id("event")
 
-    def parse_client_event(self, raw: dict) -> Optional[ClientEvent]:
+    def parse_client_event(self, raw: dict[str, Any]) -> Optional[ClientEvent]:
         event_type: str | None = raw.get("type")
         if event_type is None:
             logger.warning("Client event missing 'type' field")
@@ -316,7 +316,7 @@ class RealtimeService:
         )
         return []
 
-    def get_usage(self) -> dict:
+    def get_usage(self) -> dict[str, Any]:
         """Return cumulative usage metrics across all completed responses."""
         data = self.total_usage.model_dump()
         data["total_tokens"] = data["input_tokens"] + data["output_tokens"]

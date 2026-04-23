@@ -9,6 +9,9 @@ Intercepts LLM output to:
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from queue import Queue
+from typing import Any
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.events import AssistantTextEvent, TokenUsageEvent
@@ -26,7 +29,7 @@ class LMOutputProcessor(BaseHandler[LLMResponseChunk | TokenUsage | EndOfRespons
     Side effect: Sends :class:`AssistantTextEvent` / :class:`TokenUsageEvent` to text_output_queue
     """
 
-    def setup(self, text_output_queue=None):
+    def setup(self, text_output_queue: Queue[Any] | None = None) -> None:
         """
         Initialize the processor.
 
@@ -35,7 +38,7 @@ class LMOutputProcessor(BaseHandler[LLMResponseChunk | TokenUsage | EndOfRespons
         """
         self.text_output_queue = text_output_queue
 
-    def process(self, lm_output: LLMResponseChunk | TokenUsage | EndOfResponse):
+    def process(self, lm_output: LLMResponseChunk | TokenUsage | EndOfResponse) -> Iterator[TTSInput | EndOfResponse]:
         """
         Process LLM output: send text/tools to WebSocket, forward clean text to TTS.
 
