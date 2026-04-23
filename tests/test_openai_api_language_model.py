@@ -16,7 +16,9 @@ def _make_text_delta_event(text):
     return SimpleNamespace(type="response.output_text.delta", delta=text)
 
 
-def _make_output_item_done_event(role="assistant", content="Hello.", item_type="message"):
+def _make_output_item_done_event(
+    role="assistant", content="Hello.", item_type="message"
+):
     if item_type == "function_call":
         return SimpleNamespace(
             type="response.output_item.done",
@@ -39,6 +41,7 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler = object.__new__(OpenApiModelHandler)
     handler.model_name = "test-model"
     handler.stream = stream
+    handler.stream_batch_sentences = 1
     handler.gen_kwargs = {}
     handler.request_timeout_s = 20.0
     handler.request_timeout = 20.0
@@ -75,7 +78,9 @@ def test_process_streams_text_from_response_events():
 
     assert len(outputs) == 3
     assert isinstance(outputs[0], LLMResponseChunk) and outputs[0].text == "Hello."
-    assert isinstance(outputs[1], LLMResponseChunk) and outputs[1].text == "How are you?"
+    assert (
+        isinstance(outputs[1], LLMResponseChunk) and outputs[1].text == "How are you?"
+    )
     assert isinstance(outputs[2], EndOfResponse)
 
 
@@ -87,9 +92,7 @@ def test_process_handles_cancellation():
         scope.cancel()
         return iter([_make_text_delta_event("Hello")])
 
-    handler.client = SimpleNamespace(
-        responses=SimpleNamespace(create=fake_create)
-    )
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
 
     outputs = list(handler.process(Transcription(text="Hi")))
 
@@ -114,7 +117,10 @@ def test_process_read_timeout_ends_response_cleanly():
     outputs = list(handler.process(Transcription(text="Hi")))
 
     assert len(outputs) == 2
-    assert isinstance(outputs[0], LLMResponseChunk) and outputs[0].text == "Wow I'm a bit slow today, could you repeat that?"
+    assert (
+        isinstance(outputs[0], LLMResponseChunk)
+        and outputs[0].text == "Wow I'm a bit slow today, could you repeat that?"
+    )
     assert isinstance(outputs[1], EndOfResponse)
 
 
@@ -124,14 +130,14 @@ def test_disable_thinking_passes_extra_body():
 
     def fake_create(**kwargs):
         captured.update(kwargs)
-        return iter([
-            _make_text_delta_event("Ok"),
-            _make_output_item_done_event(content="Ok"),
-        ])
+        return iter(
+            [
+                _make_text_delta_event("Ok"),
+                _make_output_item_done_event(content="Ok"),
+            ]
+        )
 
-    handler.client = SimpleNamespace(
-        responses=SimpleNamespace(create=fake_create)
-    )
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
 
     list(handler.process(Transcription(text="Hi")))
 
@@ -146,14 +152,14 @@ def test_no_disable_thinking_omits_extra_body():
 
     def fake_create(**kwargs):
         captured.update(kwargs)
-        return iter([
-            _make_text_delta_event("Ok"),
-            _make_output_item_done_event(content="Ok"),
-        ])
+        return iter(
+            [
+                _make_text_delta_event("Ok"),
+                _make_output_item_done_event(content="Ok"),
+            ]
+        )
 
-    handler.client = SimpleNamespace(
-        responses=SimpleNamespace(create=fake_create)
-    )
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
 
     list(handler.process(Transcription(text="Hi")))
 
@@ -185,16 +191,13 @@ def test_second_turn_flattens_assistant_history_for_responses():
         captured.update(kwargs)
         return second_response
 
-    handler.client = SimpleNamespace(
-        responses=SimpleNamespace(create=fake_create)
-    )
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
 
     list(handler.process(Transcription(text="Hi")))
     list(handler.process(Transcription(text="Again")))
 
     assistant_items = [
-        item for item in captured["input"]
-        if item.get("role") == "assistant"
+        item for item in captured["input"] if item.get("role") == "assistant"
     ]
     assert assistant_items == [
         {
