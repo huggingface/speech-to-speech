@@ -5,6 +5,15 @@ import re
 import requests  # type: ignore[import-untyped]
 from PIL import Image
 
+SMART_PUNCT_TRANSLATION = str.maketrans(
+    {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+    }
+)
+
 SPEECHABLE_PATTERN = re.compile(
     r"[^\w\s.,!?;:'\"\-()\/\\@#%&*+=$€£¥₹₽¢\[\]{}<>~`^|…—–\n\r\t]",
     flags=re.UNICODE,
@@ -15,7 +24,8 @@ def remove_unspeechable(text: str) -> str:
     """Keep only speechable characters: letters, digits, punctuation, whitespace.
     support unicode characters (english, arabic, chinese, japanese, korean, etc.)
     """
-    return SPEECHABLE_PATTERN.sub('', text)
+    text = text.translate(SMART_PUNCT_TRANSLATION)
+    return SPEECHABLE_PATTERN.sub("", text)
 
 
 WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
