@@ -29,5 +29,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --group dev
+      - name: NLTK data (punkt_tab for sent_tokenize)
+        run: uv run python -c "import nltk; nltk.download('punkt_tab')"
       - name: Pytest
         run: uv run pytest tests/ -x -q
