@@ -312,6 +312,18 @@ class VADDiagnosticsRecorder:
         ]
         return ", ".join(details) if details else "-"
 
+    def _event_marker_label(self, kind: str) -> str:
+        labels = {
+            "speech_started": "SS",
+            "speech_stopped": "ST",
+            "segment_emitted": "EM",
+            "segment_discarded": "DD",
+            "phantom_trigger": "PT",
+            "session_end": "SE",
+            "cleanup_flush": "CF",
+        }
+        return labels.get(kind, kind[:2].upper())
+
     def _build_probability_svg(
         self,
         frames: list[dict[str, object]],
@@ -361,7 +373,8 @@ class VADDiagnosticsRecorder:
                 f'x2="{x_pos(float(event["timestamp_ms"])):.2f}" y2="{height - bottom}" '
                 f'stroke="#6f6f6f" stroke-width="1" stroke-dasharray="4 4" />'
                 f'<text x="{x_pos(float(event["timestamp_ms"])) + 4:.2f}" y="14" font-size="11" fill="#555">'
-                f"{html.escape(str(event['kind']))}</text>"
+                f"<title>{html.escape(str(event['kind']))}</title>"
+                f"{html.escape(self._event_marker_label(str(event['kind'])))}</text>"
             )
             for event in events
         )
