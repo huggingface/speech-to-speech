@@ -176,8 +176,9 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
                 timeout=self.request_timeout,
                 **optional_kwargs,
             )
+            logger.info(f"API response: is stream: {isinstance(api_response, Stream)}")
+            logger.info(f"API response: is response: {isinstance(api_response, Response)}")
             if isinstance(api_response, Stream):
-                logger.debug(f"API response: {api_response}")
                 cancelled = False
                 printable_text = ""
                 sentence_batch: list[str] = []
