@@ -27,6 +27,12 @@ class VADHandlerArguments:
             "help": "Minimum length of speech segments to be considered valid speech. Measured in milliseconds. Default is 500 ms."
         },
     )
+    start_persistence_ms: int = field(
+        default=128,
+        metadata={
+            "help": "Minimum contiguous above-threshold speech required before VAD opens a speech segment. Measured in milliseconds. Default is 128 ms."
+        },
+    )
     max_speech_ms: float = field(
         default=float("inf"),
         metadata={

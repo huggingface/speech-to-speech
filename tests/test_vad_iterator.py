@@ -31,6 +31,7 @@ def test_triggering_chunk_is_kept_in_buffer() -> None:
         sampling_rate=16000,
         min_silence_duration_ms=100,
         speech_pad_ms=0,
+        start_persistence_ms=0,
     )
 
     first_chunk = torch.ones(512)
@@ -56,6 +57,7 @@ def test_pre_speech_padding_is_prepended_to_final_utterance() -> None:
         sampling_rate=16000,
         min_silence_duration_ms=100,
         speech_pad_ms=64,
+        start_persistence_ms=0,
     )
 
     first_chunk = torch.ones(512)
@@ -88,6 +90,7 @@ def test_speech_buffer_keeps_prefix_out_of_active_speech_buffer() -> None:
         sampling_rate=16000,
         min_silence_duration_ms=100,
         speech_pad_ms=32,
+        start_persistence_ms=0,
     )
 
     older_chunk = torch.ones(512)
@@ -115,6 +118,7 @@ def test_final_samples_are_kept_until_vad_declares_done() -> None:
         sampling_rate=16000,
         min_silence_duration_ms=100,
         speech_pad_ms=64,
+        start_persistence_ms=0,
     )
 
     first_chunk = torch.ones(512)
@@ -147,6 +151,7 @@ def test_brief_silence_is_preserved_when_speech_resumes() -> None:
         sampling_rate=16000,
         min_silence_duration_ms=100,
         speech_pad_ms=0,
+        start_persistence_ms=0,
     )
 
     first_chunk = torch.ones(512)
@@ -168,3 +173,100 @@ def test_brief_silence_is_preserved_when_speech_resumes() -> None:
     assert torch.equal(spoken_utterance[2], pause_chunks[1])
     assert torch.equal(spoken_utterance[3], resumed_chunk)
     assert all(torch.equal(chunk, ending_silence) for chunk in spoken_utterance[4:])
+
+
+def test_start_persistence_requires_contiguous_speech_before_triggering() -> None:
+    model = _FakeVADModel([0.9, 0.9, 0.9, 0.9, 0.1, 0.1, 0.1, 0.1, 0.1])
+    iterator = VADIterator(
+        model=model,
+        threshold=0.5,
+        sampling_rate=16000,
+        min_silence_duration_ms=100,
+        speech_pad_ms=0,
+        start_persistence_ms=128,
+    )
+
+    speech_chunks = [torch.ones(512) * value for value in (1, 2, 3, 4)]
+    silence_chunk = torch.zeros(512)
+
+    for chunk in speech_chunks[:3]:
+        assert iterator(chunk) is None
+        assert not iterator.triggered
+        assert iterator.buffer == []
+
+    assert iterator(speech_chunks[3]) is None
+    assert iterator.triggered
+    assert len(iterator.buffer) == 4
+    for buffered, expected in zip(iterator.buffer, speech_chunks):
+        assert torch.equal(buffered, expected)
+
+    spoken_utterance = _finish_utterance(iterator, silence_chunk)
+
+    assert spoken_utterance is not None
+    assert len(spoken_utterance) == 9
+    for buffered, expected in zip(spoken_utterance[:4], speech_chunks):
+        assert torch.equal(buffered, expected)
+    assert all(torch.equal(chunk, silence_chunk) for chunk in spoken_utterance[4:])
+
+
+def test_false_start_is_discarded_when_start_persistence_is_not_met() -> None:
+    model = _FakeVADModel(
+        [
+            0.9,
+            0.9,
+            0.1,
+            0.9,
+            0.9,
+            0.9,
+            0.9,
+            0.1,
+            0.1,
+            0.1,
+            0.1,
+            0.1,
+        ]
+    )
+    iterator = VADIterator(
+        model=model,
+        threshold=0.5,
+        sampling_rate=16000,
+        min_silence_duration_ms=100,
+        speech_pad_ms=32,
+        start_persistence_ms=128,
+    )
+
+    false_start_chunks = [torch.ones(512) * value for value in (1, 2)]
+    separating_silence = torch.zeros(512)
+    real_speech_chunks = [torch.ones(512) * value for value in (10, 11, 12, 13)]
+
+    for chunk in false_start_chunks:
+        assert iterator(chunk) is None
+        assert not iterator.triggered
+        assert iterator.buffer == []
+
+    assert iterator(separating_silence) is None
+    assert not iterator.triggered
+    assert iterator.buffer == []
+
+    for chunk in real_speech_chunks[:-1]:
+        assert iterator(chunk) is None
+        assert not iterator.triggered
+        assert iterator.buffer == []
+
+    assert iterator(real_speech_chunks[-1]) is None
+    assert iterator.triggered
+
+    spoken_utterance = _finish_utterance(iterator, separating_silence)
+
+    assert spoken_utterance is not None
+    assert len(spoken_utterance) == 10
+    assert torch.equal(spoken_utterance[0], separating_silence)
+    for buffered, expected in zip(spoken_utterance[1:5], real_speech_chunks):
+        assert torch.equal(buffered, expected)
+    assert all(torch.equal(chunk, separating_silence) for chunk in spoken_utterance[5:])
+    assert all(
+        not torch.equal(chunk, false_start_chunks[0]) for chunk in spoken_utterance
+    )
+    assert all(
+        not torch.equal(chunk, false_start_chunks[1]) for chunk in spoken_utterance
+    )
