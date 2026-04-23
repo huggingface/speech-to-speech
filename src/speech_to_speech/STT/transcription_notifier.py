@@ -22,7 +22,9 @@ class TranscriptionNotifier(BaseHandler[PartialTranscription | Transcription]):
         self.text_output_queue = text_output_queue
         self.suppress_yield = suppress_yield
 
-    def process(self, transcription: PartialTranscription | Transcription) -> Iterator[PartialTranscription | Transcription]:
+    def process(
+        self, transcription: PartialTranscription | Transcription
+    ) -> Iterator[PartialTranscription | Transcription]:
         if isinstance(transcription, PartialTranscription):
             if self.text_output_queue and transcription.text:
                 self.text_output_queue.put(PartialTranscriptionEvent(delta=str(transcription.text)))

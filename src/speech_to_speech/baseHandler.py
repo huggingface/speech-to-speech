@@ -24,7 +24,14 @@ class BaseHandler(Generic[T]):
     The cleanup method handles stopping the handler, and PIPELINE_END is placed in the output queue.
     """
 
-    def __init__(self, stop_event: Event, queue_in: Queue[Any], queue_out: Queue[Any], setup_args: tuple[Any, ...] = (), setup_kwargs: dict[str, Any] = {}) -> None:
+    def __init__(
+        self,
+        stop_event: Event,
+        queue_in: Queue[Any],
+        queue_out: Queue[Any],
+        setup_args: tuple[Any, ...] = (),
+        setup_kwargs: dict[str, Any] = {},
+    ) -> None:
         self.stop_event = stop_event
         self.queue_in = queue_in
         self.queue_out = queue_out
