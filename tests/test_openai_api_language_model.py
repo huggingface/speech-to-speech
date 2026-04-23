@@ -1,23 +1,18 @@
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
-import sys
 
 import httpx
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from openai import Stream
 from openai.types.responses import (
     Response,
-    ResponseTextDeltaEvent,
     ResponseOutputItemDoneEvent,
+    ResponseTextDeltaEvent,
 )
 
-from cancel_scope import CancelScope
-from LLM.chat import Chat
-from LLM.openai_api_language_model import OpenApiModelHandler
-from pipeline_messages import EndOfResponse, LLMResponseChunk, Transcription
+from speech_to_speech.LLM.chat import Chat
+from speech_to_speech.LLM.openai_api_language_model import OpenApiModelHandler
+from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk, Transcription
 
 
 def _make_text_delta_event(text):
@@ -27,9 +22,7 @@ def _make_text_delta_event(text):
     return evt
 
 
-def _make_output_item_done_event(
-    role="assistant", content="Hello.", item_type="message"
-):
+def _make_output_item_done_event(role="assistant", content="Hello.", item_type="message"):
     evt = MagicMock(spec=ResponseOutputItemDoneEvent)
     evt.type = "response.output_item.done"
     if item_type == "function_call":
@@ -68,11 +61,7 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler.request_timeout_s = 20.0
     handler.request_timeout = 20.0
     handler.disable_thinking = disable_thinking
-    handler._extra_body = (
-        {"chat_template_kwargs": {"enable_thinking": False}}
-        if disable_thinking
-        else None
-    )
+    handler._extra_body = {"chat_template_kwargs": {"enable_thinking": False}} if disable_thinking else None
     handler.user_role = "user"
     handler.chat = Chat(1)
     handler.cancel_scope = cancel_scope
@@ -100,9 +89,7 @@ def test_process_streams_text_from_response_events():
 
     assert len(outputs) == 3
     assert isinstance(outputs[0], LLMResponseChunk) and outputs[0].text == "Hello."
-    assert (
-        isinstance(outputs[1], LLMResponseChunk) and outputs[1].text == "How are you?"
-    )
+    assert isinstance(outputs[1], LLMResponseChunk) and outputs[1].text == "How are you?"
     assert isinstance(outputs[2], EndOfResponse)
 
 
@@ -130,9 +117,7 @@ def test_process_read_timeout_ends_response_cleanly():
         stream.__iter__.side_effect = httpx.ReadTimeout("timed out")
         return stream
 
-    handler.client = SimpleNamespace(
-        responses=SimpleNamespace(create=lambda **kwargs: make_timeout_stream())
-    )
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: make_timeout_stream()))
 
     outputs = list(handler.process(Transcription(text="Hi")))
 
@@ -161,9 +146,7 @@ def test_disable_thinking_passes_extra_body():
 
     list(handler.process(Transcription(text="Hi")))
 
-    assert captured["extra_body"] == {
-        "chat_template_kwargs": {"enable_thinking": False}
-    }
+    assert captured["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
 
 
 def test_no_disable_thinking_omits_extra_body():
@@ -215,9 +198,7 @@ def test_second_turn_flattens_assistant_history_for_responses():
     list(handler.process(Transcription(text="Hi")))
     list(handler.process(Transcription(text="Again")))
 
-    assistant_items = [
-        item for item in captured["input"] if item.get("role") == "assistant"
-    ]
+    assistant_items = [item for item in captured["input"] if item.get("role") == "assistant"]
     assert assistant_items == [
         {
             "type": "message",

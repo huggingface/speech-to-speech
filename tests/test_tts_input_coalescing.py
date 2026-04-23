@@ -1,13 +1,9 @@
-from pathlib import Path
 from queue import Queue
-import sys
 from threading import Event
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from pipeline_control import SESSION_END
-from pipeline_messages import EndOfResponse, TTSInput
-from TTS.qwen3_tts_handler import Qwen3TTSHandler
+from speech_to_speech.pipeline.control import SESSION_END
+from speech_to_speech.pipeline.messages import EndOfResponse, TTSInput
+from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 
 
 def _make_handler():

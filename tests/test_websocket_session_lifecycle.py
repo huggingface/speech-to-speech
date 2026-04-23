@@ -1,15 +1,11 @@
 import asyncio
-from pathlib import Path
 from queue import Queue
-import sys
 from threading import Event, Thread
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from baseHandler import BaseHandler
-from connections.websocket_streamer import WebSocketStreamer
-from pipeline_control import SESSION_END, is_control_message
-from pipeline_messages import PIPELINE_END
+from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.connections.websocket_streamer import WebSocketStreamer
+from speech_to_speech.pipeline.control import SESSION_END, is_control_message
+from speech_to_speech.pipeline.messages import PIPELINE_END
 
 
 class EchoHandler(BaseHandler):

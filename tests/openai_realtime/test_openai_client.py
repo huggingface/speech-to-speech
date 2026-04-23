@@ -20,30 +20,29 @@ import json
 import socket
 import threading
 import time
-
-import pytest
-import uvicorn
 from queue import Queue
 from threading import Event as ThreadingEvent
 
+import pytest
+import uvicorn
 from openai import AsyncOpenAI
 
-from cancel_scope import CancelScope
-from api.openai_realtime.events import (
+from speech_to_speech.api.openai_realtime.service import RealtimeService
+from speech_to_speech.api.openai_realtime.websocket_router import create_app
+from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
     PartialTranscriptionEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TranscriptionCompletedEvent,
 )
-from api.openai_realtime.service import RealtimeService
-from api.openai_realtime.websocket_router import create_app
-from pipeline_messages import AUDIO_RESPONSE_DONE, PIPELINE_END
-
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -154,6 +153,7 @@ ERROR = "error"
 # 1. Connection and session.created
 # ===================================================================
 
+
 class TestSDKConnection:
     @pytest.mark.asyncio
     async def test_connect_receives_session_created(self, server_env):
@@ -170,6 +170,7 @@ class TestSDKConnection:
 # 2. Session update
 # ===================================================================
 
+
 class TestSDKSessionUpdate:
     @pytest.mark.asyncio
     async def test_session_update_applies_config(self, server_env):
@@ -178,27 +179,29 @@ class TestSDKSessionUpdate:
         async with client.realtime.connect(model="test") as conn:
             await _recv(conn)  # session.created
 
-            await conn.send({
-                "type": "session.update",
-                "session": {
-                    "type": "realtime",
-                    "instructions": "You are a helpful robot",
-                    "audio": {
-                        "input": {
-                            "transcription": {"model": "gpt-4o-transcribe", "language": "en"},
-                            "turn_detection": {
-                                "type": "server_vad",
-                                "interrupt_response": True,
+            await conn.send(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "instructions": "You are a helpful robot",
+                        "audio": {
+                            "input": {
+                                "transcription": {"model": "gpt-4o-transcribe", "language": "en"},
+                                "turn_detection": {
+                                    "type": "server_vad",
+                                    "interrupt_response": True,
+                                },
+                            },
+                            "output": {
+                                "voice": "alloy",
                             },
                         },
-                        "output": {
-                            "voice": "alloy",
-                        },
+                        "tools": [{"type": "function", "name": "get_weather"}],
+                        "tool_choice": "auto",
                     },
-                    "tools": [{"type": "function", "name": "get_weather"}],
-                    "tool_choice": "auto",
-                },
-            })
+                }
+            )
             await asyncio.sleep(0.2)
 
             cid = server_env.service.connection_ids[0]
@@ -213,6 +216,7 @@ class TestSDKSessionUpdate:
 # ===================================================================
 # 3. Full voice conversation turn
 # ===================================================================
+
 
 class TestSDKVoiceTurn:
     @pytest.mark.asyncio
@@ -283,6 +287,7 @@ class TestSDKVoiceTurn:
 # 4. Interruption (barge-in)
 # ===================================================================
 
+
 class TestSDKBargeIn:
     @pytest.mark.asyncio
     async def test_speech_interrupts_active_response(self, server_env):
@@ -345,6 +350,7 @@ class TestSDKBargeIn:
 # ===================================================================
 # 4b. Phantom speech & interruption state
 # ===================================================================
+
 
 class TestSDKPhantomSpeech:
     @pytest.mark.asyncio
@@ -418,6 +424,7 @@ class TestSDKInterruptionState:
 # 5. Tool calling
 # ===================================================================
 
+
 class TestSDKToolCalling:
     @pytest.mark.asyncio
     async def test_tool_call_events(self, server_env):
@@ -426,14 +433,18 @@ class TestSDKToolCalling:
         async with client.realtime.connect(model="test") as conn:
             await _recv(conn)
 
-            server_env.text_output_queue.put(AssistantTextEvent(
-                text="Checking weather",
-                tools=[{
-                    "call_id": "call_xyz",
-                    "name": "get_weather",
-                    "arguments": {"city": "Tokyo"},
-                }],
-            ))
+            server_env.text_output_queue.put(
+                AssistantTextEvent(
+                    text="Checking weather",
+                    tools=[
+                        {
+                            "call_id": "call_xyz",
+                            "name": "get_weather",
+                            "arguments": {"city": "Tokyo"},
+                        }
+                    ],
+                )
+            )
 
             event = await _recv(conn)
             assert event.type == TRANSCRIPT_DONE
@@ -452,13 +463,15 @@ class TestSDKToolCalling:
         async with client.realtime.connect(model="test") as conn:
             await _recv(conn)
 
-            server_env.text_output_queue.put(AssistantTextEvent(
-                text="",
-                tools=[
-                    {"call_id": "c1", "name": "tool_a", "arguments": {}},
-                    {"call_id": "c2", "name": "tool_b", "arguments": {"x": 1}},
-                ],
-            ))
+            server_env.text_output_queue.put(
+                AssistantTextEvent(
+                    text="",
+                    tools=[
+                        {"call_id": "c1", "name": "tool_a", "arguments": {}},
+                        {"call_id": "c2", "name": "tool_b", "arguments": {"x": 1}},
+                    ],
+                )
+            )
 
             e1 = await _recv(conn)
             e2 = await _recv(conn)
@@ -472,6 +485,7 @@ class TestSDKToolCalling:
 # 6. Text input via SDK
 # ===================================================================
 
+
 class TestSDKTextInput:
     @pytest.mark.asyncio
     async def test_send_conversation_item_create(self, server_env):
@@ -480,15 +494,17 @@ class TestSDKTextInput:
         async with client.realtime.connect(model="test") as conn:
             await _recv(conn)
 
-            await conn.send({
-                "type": "conversation.item.create",
-                "item": {
-                    "id": "item_sdk_1",
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "Hello from SDK"}],
-                },
-            })
+            await conn.send(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "id": "item_sdk_1",
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Hello from SDK"}],
+                    },
+                }
+            )
 
             event = await _recv(conn)
             assert event.type == ITEM_CREATED
@@ -503,27 +519,31 @@ class TestSDKTextInput:
         async with client.realtime.connect(model="test") as conn:
             await _recv(conn)
 
-            await conn.send({
-                "type": "conversation.item.create",
-                "item": {
-                    "id": "item_a",
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "first"}],
-                },
-            })
+            await conn.send(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "id": "item_a",
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "first"}],
+                    },
+                }
+            )
             e1 = await _recv(conn)
             assert e1.previous_item_id is None
 
-            await conn.send({
-                "type": "conversation.item.create",
-                "item": {
-                    "id": "item_b",
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "second"}],
-                },
-            })
+            await conn.send(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "id": "item_b",
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "second"}],
+                    },
+                }
+            )
             e2 = await _recv(conn)
             assert e2.previous_item_id == "item_a"
 
@@ -531,6 +551,7 @@ class TestSDKTextInput:
 # ===================================================================
 # 7. Error handling
 # ===================================================================
+
 
 class TestSDKErrorHandling:
     @pytest.mark.asyncio
@@ -566,6 +587,7 @@ class TestSDKErrorHandling:
 # 8. Response cancel
 # ===================================================================
 
+
 class TestSDKResponseCancel:
     @pytest.mark.asyncio
     async def test_cancel_active_response(self, server_env):
@@ -592,6 +614,7 @@ class TestSDKResponseCancel:
 # ===================================================================
 # 9. Multi-turn conversation_id consistency
 # ===================================================================
+
 
 class TestSDKMultiTurn:
     @pytest.mark.asyncio

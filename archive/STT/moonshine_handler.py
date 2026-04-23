@@ -1,12 +1,15 @@
 import os
+
 os.environ['KERAS_BACKEND'] = 'torch'
+
+import logging
 
 import moonshine
 import torch
-from baseHandler import BaseHandler
-from pipeline_messages import VADAudio
 from rich.console import Console
-import logging
+
+from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.pipeline.messages import VADAudio
 
 logger = logging.getLogger(__name__)
 console = Console()

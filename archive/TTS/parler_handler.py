@@ -1,24 +1,24 @@
 from __future__ import annotations
 
+import logging
 from threading import Event, Thread
 from time import perf_counter
-from baseHandler import BaseHandler
-from pipeline_messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+
+import librosa
 import numpy as np
 import torch
+from parler_tts import ParlerTTSForConditionalGeneration, ParlerTTSStreamer
+from rich.console import Console
 from transformers import (
     AutoTokenizer,
 )
-from parler_tts import ParlerTTSForConditionalGeneration, ParlerTTSStreamer
-import librosa
-import logging
-from rich.console import Console
-
-from utils.utils import next_power_of_2
 from transformers.utils.import_utils import (
     is_flash_attn_2_available,
 )
 
+from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.utils.utils import next_power_of_2
 
 torch._inductor.config.fx_graph_cache = True
 # mind about this parameter ! should be >= 2 * number of padded prompt sizes for TTS
@@ -83,7 +83,7 @@ class ParlerTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         self.model = ParlerTTSForConditionalGeneration.from_pretrained(
             model_name, torch_dtype=self.torch_dtype
         ).to(device)
-        
+
         self.description_tokenizer = AutoTokenizer.from_pretrained(self.model.config.text_encoder._name_or_path)
         self.prompt_tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -197,7 +197,7 @@ class ParlerTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
             self.speaker = voice
         elif language_code:
             self.speaker = WHISPER_LANGUAGE_TO_PARLER_SPEAKER.get(language_code, "Jason")
-            
+
         console.print(f"[green]ASSISTANT: {text}")
         nb_tokens = len(self.prompt_tokenizer(text).input_ids)
 

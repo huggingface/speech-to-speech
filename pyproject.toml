@@ -37,6 +37,9 @@ dependencies = [
     "faster-qwen3-tts>=0.2.6; platform_system != 'Darwin'",
 ]
 
+[project.scripts]
+speech-to-speech = "speech_to_speech.s2s_pipeline:main"
+
 [dependency-groups]
 dev = [
     "ruff",
@@ -49,29 +52,24 @@ dev = [
 asyncio_mode = "auto"
 
 [tool.uv]
-package = false
+package = true
 prerelease = "allow"
 
-[tool.setuptools]
-py-modules = [
-    "baseHandler",
-    "cancel_scope",
-    "pipeline_control",
-    "pipeline_messages",
-]
-
 [tool.setuptools.packages.find]
-include = [
-    "LLM*",
-    "STT*",
-    "TTS*",
-    "VAD*",
-    "api*",
-    "archive*",
-    "arguments_classes*",
-    "connections*",
-    "utils*",
-]
-exclude = [
-    "tests*",
-]
+where = ["src"]
+include = ["speech_to_speech*"]
+exclude = ["tests*"]
+
+[tool.ruff]
+src = ["src"]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_configs = true
+check_untyped_defs = false

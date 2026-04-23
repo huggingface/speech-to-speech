@@ -1,18 +1,16 @@
+import sys
 from pathlib import Path
 from queue import Queue
 from threading import Event
 from types import SimpleNamespace
-import sys
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-import TTS.qwen3_tts_handler as qwen3_tts_module
-from api.openai_realtime.runtime_config import RuntimeConfig
-from pipeline_messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
-from TTS.qwen3_tts_handler import Qwen3TTSHandler
+import speech_to_speech.TTS.qwen3_tts_handler as qwen3_tts_module
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 
 
 def _audible_stream_chunk():
@@ -44,10 +42,7 @@ def test_setup_uses_mlx_backend_on_darwin_and_maps_qwen_repo_ids(monkeypatch):
     assert handler.device == "mps"
     assert handler.dtype is None
     assert handler.streaming_chunk_size == 4
-    assert (
-        recorded["model_name"]
-        == "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit"
-    )
+    assert recorded["model_name"] == "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit"
 
 
 @pytest.mark.parametrize("quantization", ["4bit", "6bit", "8bit"])
@@ -70,10 +65,7 @@ def test_setup_supports_quantized_mlx_mapping_on_darwin(monkeypatch, quantizatio
 
     assert handler.backend == "mlx"
     assert handler.mlx_quantization == quantization
-    assert (
-        recorded["model_name"]
-        == f"mlx-community/Qwen3-TTS-12Hz-0.6B-Base-{quantization}"
-    )
+    assert recorded["model_name"] == f"mlx-community/Qwen3-TTS-12Hz-0.6B-Base-{quantization}"
 
 
 def test_setup_preserves_explicit_mlx_model_suffix_when_quantization_unset(monkeypatch):
@@ -238,13 +230,7 @@ def test_prepare_mlx_ref_audio_normalizes_file_and_caches_result(monkeypatch, tm
 
 def test_apply_session_voice_override_warns_for_non_file_for_base_model(caplog):
     handler = object.__new__(Qwen3TTSHandler)
-    fake_cfg = SimpleNamespace(
-        session=SimpleNamespace(
-            audio=SimpleNamespace(
-                output=SimpleNamespace(voice="alloy")
-            )
-        )
-    )
+    fake_cfg = SimpleNamespace(session=SimpleNamespace(audio=SimpleNamespace(output=SimpleNamespace(voice="alloy"))))
     handler.ref_audio = "TTS/ref_audio.wav"
     handler.speaker = None
 
@@ -453,10 +439,7 @@ def test_estimate_max_new_tokens_scales_with_utterance_length():
     handler.max_new_tokens = 1536
 
     short_budget = handler._estimate_max_new_tokens("Hello there.")
-    long_text = " ".join(
-        ["This is a deliberately long sentence for the Qwen3 TTS budget estimator."]
-        * 12
-    )
+    long_text = " ".join(["This is a deliberately long sentence for the Qwen3 TTS budget estimator."] * 12)
     long_budget = handler._estimate_max_new_tokens(long_text)
 
     assert short_budget == 360
@@ -470,10 +453,7 @@ def test_estimate_max_new_tokens_respects_configured_cap():
     handler.streaming_chunk_size = 8
     handler.max_new_tokens = 400
 
-    long_text = " ".join(
-        ["This is a deliberately long sentence for the Qwen3 TTS budget estimator."]
-        * 12
-    )
+    long_text = " ".join(["This is a deliberately long sentence for the Qwen3 TTS budget estimator."] * 12)
 
     assert handler._estimate_max_new_tokens(long_text) == 400
 
@@ -483,10 +463,7 @@ def test_estimate_max_new_tokens_can_exceed_default_ceiling_when_raised():
     handler.streaming_chunk_size = 8
     handler.max_new_tokens = 2400
 
-    long_text = " ".join(
-        ["This is a deliberately long sentence for the Qwen3 TTS budget estimator."]
-        * 30
-    )
+    long_text = " ".join(["This is a deliberately long sentence for the Qwen3 TTS budget estimator."] * 30)
 
     assert handler._estimate_max_new_tokens(long_text) > 1536
 
@@ -519,10 +496,7 @@ def test_process_voice_clone_scales_max_new_tokens_for_faster_backend(monkeypatc
 
     monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
 
-    long_text = " ".join(
-        ["This is a deliberately long sentence for the faster Qwen3 TTS backend."]
-        * 12
-    )
+    long_text = " ".join(["This is a deliberately long sentence for the faster Qwen3 TTS backend."] * 12)
     outputs = list(handler.process(TTSInput(text=long_text)))
 
     assert len(outputs) == 1
@@ -573,10 +547,7 @@ def test_process_voice_clone_scales_max_tokens_for_mlx_backend(monkeypatch):
     monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
     monkeypatch.setattr(qwen3_tts_module, "MLXLockContext", _FakeMLXLockContext)
 
-    long_text = " ".join(
-        ["This is a deliberately long sentence for the MLX Qwen3 TTS backend."]
-        * 12
-    )
+    long_text = " ".join(["This is a deliberately long sentence for the MLX Qwen3 TTS backend."] * 12)
     outputs = list(handler.process(TTSInput(text=long_text)))
 
     assert len(outputs) == 1

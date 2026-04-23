@@ -1,13 +1,12 @@
 from typing import Any, Literal, Optional, Union
-from LLM.tool_call.signature_from_schema import _annotation_from_spec, signature_from_schema
 
-from LLM.tool_call.function_tool import FunctionTool
-
+from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
+from speech_to_speech.LLM.tool_call.signature_from_schema import _annotation_from_spec, signature_from_schema
 
 # --- _annotation_from_spec tests ---
 
-class TestAnnotationFromSpec:
 
+class TestAnnotationFromSpec:
     def test_basic_string(self):
         assert _annotation_from_spec({"type": "string"}) is str
 
@@ -82,8 +81,8 @@ class TestAnnotationFromSpec:
 
 # --- signature_from_schema tests ---
 
-class TestSignatureFromSchema:
 
+class TestSignatureFromSchema:
     def test_empty_schema(self):
         sig = signature_from_schema({})
         assert str(sig) == "()"
@@ -181,8 +180,8 @@ class TestSignatureFromSchema:
 
 # --- Tool.to_code_prompt tests ---
 
-class TestToolToCodePrompt:
 
+class TestToolToCodePrompt:
     def _make_tool(self, name, description, parameters):
         tool = FunctionTool()
         tool.name = name
@@ -192,39 +191,51 @@ class TestToolToCodePrompt:
         return tool
 
     def test_basic_code_prompt(self):
-        tool = self._make_tool("greet", "Greet the user.", {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "User name."},
+        tool = self._make_tool(
+            "greet",
+            "Greet the user.",
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "User name."},
+                },
+                "required": ["name"],
             },
-            "required": ["name"],
-        })
+        )
         result = tool.to_code_prompt(include_args_doc=True)
         assert "def greet(name: str):" in result
         assert "Greet the user." in result
         assert "name: User name." in result
 
     def test_no_params(self):
-        tool = self._make_tool("ping", "Ping the server.", {
-            "type": "object",
-            "properties": {},
-        })
+        tool = self._make_tool(
+            "ping",
+            "Ping the server.",
+            {
+                "type": "object",
+                "properties": {},
+            },
+        )
         result = tool.to_code_prompt()
         assert "def ping():" in result
 
     def test_enum_and_optional(self):
-        tool = self._make_tool("move", "Move robot.", {
-            "type": "object",
-            "properties": {
-                "direction": {
-                    "type": "string",
-                    "enum": ["left", "right"],
-                    "description": "Direction.",
+        tool = self._make_tool(
+            "move",
+            "Move robot.",
+            {
+                "type": "object",
+                "properties": {
+                    "direction": {
+                        "type": "string",
+                        "enum": ["left", "right"],
+                        "description": "Direction.",
+                    },
+                    "speed": {"type": "number", "description": "Speed."},
                 },
-                "speed": {"type": "number", "description": "Speed."},
+                "required": ["direction"],
             },
-            "required": ["direction"],
-        })
+        )
         result = tool.to_code_prompt()
         assert "Literal['left', 'right']" in result
         assert "speed: float = None" in result

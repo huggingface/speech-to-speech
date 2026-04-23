@@ -1,15 +1,15 @@
-import pytest
 from queue import Queue
 from threading import Event as ThreadingEvent
 
+import pytest
 from openai.types.realtime import RealtimeSessionCreateRequest
 from openai.types.realtime.realtime_audio_config import RealtimeAudioConfig
 from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfigInput
 from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
 from openai.types.realtime.realtime_audio_formats import AudioPCM
 
-from api.openai_realtime.service import RealtimeService
-from api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.api.openai_realtime.service import RealtimeService
 
 
 def _session_16k() -> RealtimeSessionCreateRequest:

@@ -7,25 +7,23 @@ app, service, and set of queues so there is no cross-test state.
 
 import base64
 import time
-
-import pytest
 from queue import Queue
 from threading import Event as ThreadingEvent
 
+import pytest
 from starlette.testclient import TestClient
 
-from cancel_scope import CancelScope
-
-from api.openai_realtime.events import AssistantTextEvent, SpeechStartedEvent
-from api.openai_realtime.service import RealtimeService, CHUNK_SIZE_BYTES
-from api.openai_realtime.websocket_router import create_app
-from pipeline_control import SESSION_END, is_control_message
-from pipeline_messages import AUDIO_RESPONSE_DONE, PIPELINE_END
-
+from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService
+from speech_to_speech.api.openai_realtime.websocket_router import create_app
+from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.control import SESSION_END, is_control_message
+from speech_to_speech.pipeline.events import AssistantTextEvent, SpeechStartedEvent
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def setup():
@@ -43,8 +41,20 @@ def setup():
     stop_event = ThreadingEvent()
     response_playing = ThreadingEvent()
     cancel_scope = CancelScope()
-    app = create_app(service, input_queue, output_queue, text_output_queue, should_listen, response_playing, cancel_scope, stop_event)
-    return app, service, input_queue, output_queue, text_output_queue, should_listen, stop_event, response_playing, cancel_scope
+    app = create_app(
+        service, input_queue, output_queue, text_output_queue, should_listen, response_playing, cancel_scope, stop_event
+    )
+    return (
+        app,
+        service,
+        input_queue,
+        output_queue,
+        text_output_queue,
+        should_listen,
+        stop_event,
+        response_playing,
+        cancel_scope,
+    )
 
 
 def _pcm_bytes(n_samples: int) -> bytes:
@@ -54,6 +64,7 @@ def _pcm_bytes(n_samples: int) -> bytes:
 # ===================================================================
 # Connection
 # ===================================================================
+
 
 class TestConnection:
     def test_connect_receives_session_created(self, setup):
@@ -79,6 +90,7 @@ class TestConnection:
 # Client event dispatch
 # ===================================================================
 
+
 class TestClientEventDispatch:
     def test_audio_append_forwarded_to_input_queue(self, setup):
         app, _, input_queue, *_ = setup
@@ -86,10 +98,12 @@ class TestClientEventDispatch:
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()  # session.created
-                ws.send_json({
-                    "type": "input_audio_buffer.append",
-                    "audio": audio_b64,
-                })
+                ws.send_json(
+                    {
+                        "type": "input_audio_buffer.append",
+                        "audio": audio_b64,
+                    }
+                )
                 time.sleep(0.1)
                 item = input_queue.get(timeout=1)
                 assert isinstance(item, tuple) and len(item) == 2
@@ -102,13 +116,15 @@ class TestClientEventDispatch:
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
-                ws.send_json({
-                    "type": "session.update",
-                    "session": {
-                        "type": "realtime",
-                        "audio": {"output": {"voice": "coral"}},
-                    },
-                })
+                ws.send_json(
+                    {
+                        "type": "session.update",
+                        "session": {
+                            "type": "realtime",
+                            "audio": {"output": {"voice": "coral"}},
+                        },
+                    }
+                )
                 time.sleep(0.1)
                 cid = service.connection_ids[0]
                 assert service._state(cid).runtime_config.session.audio.output.voice == "coral"
@@ -118,14 +134,16 @@ class TestClientEventDispatch:
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()  # session.created
-                ws.send_json({
-                    "type": "conversation.item.create",
-                    "item": {
-                        "type": "message",
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": "ping"}],
-                    },
-                })
+                ws.send_json(
+                    {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "ping"}],
+                        },
+                    }
+                )
                 msg = ws.receive_json()
                 assert msg["type"] == "conversation.item.created"
                 assert msg["item"]["content"][0]["text"] == "ping"
@@ -223,6 +241,7 @@ class TestClientEventDispatch:
 # ===================================================================
 # Send loop (pipeline -> client)
 # ===================================================================
+
 
 class TestSendLoop:
     def test_audio_output_ignores_session_end_control_message(self, setup):
@@ -322,13 +341,15 @@ class TestSendLoop:
     def test_speech_started_does_not_cancel_when_interrupt_disabled(self, setup):
         """With interrupt_response=False, speech during playback should NOT cancel or flush."""
         from openai.types.realtime.realtime_audio_input_turn_detection import ServerVad
+
         app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()  # session.created
                 conn_id = list(service._conns.keys())[0]
                 service._state(conn_id).runtime_config.session.audio.input.turn_detection = ServerVad(
-                    type="server_vad", interrupt_response=False,
+                    type="server_vad",
+                    interrupt_response=False,
                 )
                 service.response._ensure_response(conn_id)
                 response_playing.set()
@@ -344,6 +365,7 @@ class TestSendLoop:
 # ===================================================================
 # Cleanup
 # ===================================================================
+
 
 class TestCleanup:
     def test_new_connection_resets_discard_after_invalidating_generation(self, setup):
