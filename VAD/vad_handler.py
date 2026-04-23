@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import torchaudio
+from VAD.vad_diagnostics import VADDiagnosticsRecorder
 from VAD.vad_iterator import VADIterator
 from baseHandler import BaseHandler
 import numpy as np
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 # Optional import for audio enhancement
 try:
     from df.enhance import enhance, init_df
+
     HAS_DF = True
 except (ImportError, ModuleNotFoundError) as e:
     HAS_DF = False
@@ -43,6 +45,7 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
         enable_realtime_transcription=False,
         realtime_processing_pause=0.25,
         text_output_queue=None,
+        vad_diagnostics_dir: str | None = None,
     ):
         self.should_listen = should_listen
         self.sample_rate = sample_rate
@@ -66,10 +69,29 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
             min_silence_duration_ms=min_silence_ms,
             speech_pad_ms=speech_pad_ms,
         )
+        self.diagnostics_recorder = (
+            VADDiagnosticsRecorder(
+                vad_diagnostics_dir,
+                sample_rate=sample_rate,
+                config={
+                    "threshold": thresh,
+                    "min_silence_ms": min_silence_ms,
+                    "min_speech_ms": min_speech_ms,
+                    "max_speech_ms": max_speech_ms,
+                    "speech_pad_ms": speech_pad_ms,
+                    "enable_realtime_transcription": enable_realtime_transcription,
+                    "realtime_processing_pause": realtime_processing_pause,
+                },
+            )
+            if vad_diagnostics_dir
+            else None
+        )
         self.audio_enhancement = audio_enhancement
         if audio_enhancement:
             if not HAS_DF:
-                logger.error("Audio enhancement requested but DeepFilterNet is not available. Disabling audio enhancement.")
+                logger.error(
+                    "Audio enhancement requested but DeepFilterNet is not available. Disabling audio enhancement."
+                )
                 self.audio_enhancement = False
             else:
                 self.enhanced_model, self.df_state, _ = init_df()
@@ -119,7 +141,21 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
             self.iterator.min_silence_samples = (
                 self.sample_rate * td["silence_duration_ms"] / 1000
             )
-            logger.info(f"VAD silence duration updated to {td['silence_duration_ms']}ms")
+            logger.info(
+                f"VAD silence duration updated to {td['silence_duration_ms']}ms"
+            )
+
+    def _record_vad_chunk(self, audio_int16: np.ndarray) -> None:
+        if self.diagnostics_recorder is None:
+            return
+        self.diagnostics_recorder.record_chunk(audio_int16, self.iterator.last_snapshot)
+
+    def _record_vad_event(
+        self, kind: str, timestamp_ms: float, **payload: object
+    ) -> None:
+        if self.diagnostics_recorder is None:
+            return
+        self.diagnostics_recorder.record_event(kind, timestamp_ms, **payload)
 
     def process(self, audio_chunk: bytes | tuple[bytes, RuntimeConfig]):
         runtime_config = None
@@ -138,6 +174,7 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
         audio_float32 = int2float(audio_int16)
 
         vad_output = self.iterator(torch.from_numpy(audio_float32))
+        self._record_vad_chunk(audio_int16)
 
         # Deferred speech_started: only emit once buffer >= min_speech_ms
         is_triggered_now = self.iterator.triggered
@@ -148,9 +185,19 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
                 self._speech_started_emitted = True
                 self._log_speech_starts += 1
                 start_ms = max(0, self._audio_ms - int(buffer_duration_ms))
-                logger.info("Speech started (confirmed, %.0fms buffered)", buffer_duration_ms)
+                logger.info(
+                    "Speech started (confirmed, %.0fms buffered)", buffer_duration_ms
+                )
+                self._record_vad_event(
+                    "speech_started",
+                    start_ms,
+                    audio_start_ms=start_ms,
+                    buffered_ms=round(buffer_duration_ms, 3),
+                )
                 if self.text_output_queue:
-                    self.text_output_queue.put(SpeechStartedEvent(audio_start_ms=start_ms))
+                    self.text_output_queue.put(
+                        SpeechStartedEvent(audio_start_ms=start_ms)
+                    )
 
         # Log a summary once per second instead of every chunk
         now = time.time()
@@ -180,13 +227,17 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
             current_time = time.time()
 
             # Yield accumulated audio periodically while speaking
-            if (current_time - self.last_process_time) >= self.realtime_processing_pause:
+            if (
+                current_time - self.last_process_time
+            ) >= self.realtime_processing_pause:
                 array = torch.cat(self.iterator.speech_buffer()).cpu().numpy()
                 duration_ms = len(array) / self.sample_rate * 1000
 
                 if duration_ms >= self.min_speech_ms:
                     self._log_progressive_yields += 1
-                    logger.debug(f"VAD: yielding progressive audio ({duration_ms:.0f}ms)")
+                    logger.debug(
+                        f"VAD: yielding progressive audio ({duration_ms:.0f}ms)"
+                    )
                     yield VADAudio(audio=array, mode="progressive")
                     self.last_process_time = current_time
 
@@ -194,8 +245,16 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
         if vad_output is not None:
             if len(vad_output) == 0:
                 logger.info("VAD: phantom trigger (empty buffer), closing speech pair")
+                self._record_vad_event("phantom_trigger", self._audio_ms)
                 if self._speech_started_emitted and self.text_output_queue:
-                    self.text_output_queue.put(SpeechStoppedEvent(audio_end_ms=self._audio_ms))
+                    self._record_vad_event(
+                        "speech_stopped",
+                        self._audio_ms,
+                        audio_end_ms=self._audio_ms,
+                    )
+                    self.text_output_queue.put(
+                        SpeechStoppedEvent(audio_end_ms=self._audio_ms)
+                    )
                 self._speech_started_emitted = False
                 return
 
@@ -207,18 +266,58 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
                     f"VAD: discarding {duration_ms:.0f}ms segment "
                     f"(bounds: {self.min_speech_ms}-{self.max_speech_ms}ms)"
                 )
+                self._record_vad_event(
+                    "segment_discarded",
+                    self._audio_ms,
+                    duration_ms=round(duration_ms, 3),
+                    audio_end_ms=self._audio_ms,
+                )
                 if self._speech_started_emitted and self.text_output_queue:
-                    self.text_output_queue.put(SpeechStoppedEvent(audio_end_ms=self._audio_ms))
+                    self._record_vad_event(
+                        "speech_stopped",
+                        self._audio_ms,
+                        audio_end_ms=self._audio_ms,
+                    )
+                    self.text_output_queue.put(
+                        SpeechStoppedEvent(audio_end_ms=self._audio_ms)
+                    )
                 self._speech_started_emitted = False
             else:
                 end_ms = self._audio_ms
+                start_ms = max(0, end_ms - int(duration_ms))
                 if not self._speech_started_emitted and self.text_output_queue:
-                    self.text_output_queue.put(SpeechStartedEvent(audio_start_ms=max(0, end_ms - int(duration_ms))))
+                    self._record_vad_event(
+                        "speech_started",
+                        start_ms,
+                        audio_start_ms=start_ms,
+                        buffered_ms=round(duration_ms, 3),
+                    )
+                    self.text_output_queue.put(
+                        SpeechStartedEvent(audio_start_ms=start_ms)
+                    )
                 self._log_speech_ends += 1
                 self.should_listen.clear()
                 logger.info(f"Speech ended ({duration_ms:.0f}ms), stop listening")
+                self._record_vad_event(
+                    "segment_emitted",
+                    end_ms,
+                    duration_ms=round(duration_ms, 3),
+                    audio_start_ms=start_ms,
+                    audio_end_ms=end_ms,
+                    mode="final",
+                )
                 if self.text_output_queue:
-                    self.text_output_queue.put(SpeechStoppedEvent(duration_s=duration_ms / 1000.0, audio_end_ms=end_ms))
+                    self._record_vad_event(
+                        "speech_stopped",
+                        end_ms,
+                        duration_s=round(duration_ms / 1000.0, 3),
+                        audio_end_ms=end_ms,
+                    )
+                    self.text_output_queue.put(
+                        SpeechStoppedEvent(
+                            duration_s=duration_ms / 1000.0, audio_end_ms=end_ms
+                        )
+                    )
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
                 yield VADAudio(audio=array, mode="final")
@@ -230,8 +329,16 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
         if vad_output is not None:
             if len(vad_output) == 0:
                 logger.info("VAD: phantom trigger (empty buffer), closing speech pair")
+                self._record_vad_event("phantom_trigger", self._audio_ms)
                 if self._speech_started_emitted and self.text_output_queue:
-                    self.text_output_queue.put(SpeechStoppedEvent(audio_end_ms=self._audio_ms))
+                    self._record_vad_event(
+                        "speech_stopped",
+                        self._audio_ms,
+                        audio_end_ms=self._audio_ms,
+                    )
+                    self.text_output_queue.put(
+                        SpeechStoppedEvent(audio_end_ms=self._audio_ms)
+                    )
                 self._speech_started_emitted = False
                 return
 
@@ -242,18 +349,58 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
                     f"VAD: discarding {duration_ms:.0f}ms segment "
                     f"(bounds: {self.min_speech_ms}-{self.max_speech_ms}ms)"
                 )
+                self._record_vad_event(
+                    "segment_discarded",
+                    self._audio_ms,
+                    duration_ms=round(duration_ms, 3),
+                    audio_end_ms=self._audio_ms,
+                )
                 if self._speech_started_emitted and self.text_output_queue:
-                    self.text_output_queue.put(SpeechStoppedEvent(audio_end_ms=self._audio_ms))
+                    self._record_vad_event(
+                        "speech_stopped",
+                        self._audio_ms,
+                        audio_end_ms=self._audio_ms,
+                    )
+                    self.text_output_queue.put(
+                        SpeechStoppedEvent(audio_end_ms=self._audio_ms)
+                    )
                 self._speech_started_emitted = False
             else:
                 end_ms = self._audio_ms
+                start_ms = max(0, end_ms - int(duration_ms))
                 if not self._speech_started_emitted and self.text_output_queue:
-                    self.text_output_queue.put(SpeechStartedEvent(audio_start_ms=max(0, end_ms - int(duration_ms))))
+                    self._record_vad_event(
+                        "speech_started",
+                        start_ms,
+                        audio_start_ms=start_ms,
+                        buffered_ms=round(duration_ms, 3),
+                    )
+                    self.text_output_queue.put(
+                        SpeechStartedEvent(audio_start_ms=start_ms)
+                    )
                 self._log_speech_ends += 1
                 self.should_listen.clear()
                 logger.info(f"Speech ended ({duration_ms:.0f}ms), stop listening")
+                self._record_vad_event(
+                    "segment_emitted",
+                    end_ms,
+                    duration_ms=round(duration_ms, 3),
+                    audio_start_ms=start_ms,
+                    audio_end_ms=end_ms,
+                    mode="normal",
+                )
                 if self.text_output_queue:
-                    self.text_output_queue.put(SpeechStoppedEvent(duration_s=duration_ms / 1000.0, audio_end_ms=end_ms))
+                    self._record_vad_event(
+                        "speech_stopped",
+                        end_ms,
+                        duration_s=round(duration_ms / 1000.0, 3),
+                        audio_end_ms=end_ms,
+                    )
+                    self.text_output_queue.put(
+                        SpeechStoppedEvent(
+                            duration_s=duration_ms / 1000.0, audio_end_ms=end_ms
+                        )
+                    )
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
                 yield VADAudio(audio=array)
@@ -284,6 +431,9 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
         return enhanced.numpy().squeeze()
 
     def on_session_end(self):
+        if self.diagnostics_recorder is not None and self.diagnostics_recorder.has_data:
+            self._record_vad_event("session_end", self._audio_ms)
+            self.diagnostics_recorder.flush_session("session_end")
         self.iterator.reset_states()
         self.iterator.buffer = []
         self.last_process_time = 0
@@ -291,6 +441,11 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
         self._speech_started_emitted = False
         self.should_listen.set()
         logger.debug("VAD session state reset")
+
+    def cleanup(self):
+        if self.diagnostics_recorder is not None and self.diagnostics_recorder.has_data:
+            self._record_vad_event("cleanup_flush", self._audio_ms)
+            self.diagnostics_recorder.flush_session("cleanup")
 
     @property
     def min_time_to_debug(self):

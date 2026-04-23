@@ -263,6 +263,7 @@ See [VADHandlerArguments](https://github.com/huggingface/speech-to-speech/blob/d
 - `--thresh`: Threshold value to trigger voice activity detection.
 - `--min_speech_ms`: Minimum duration of detected voice activity to be considered speech.
 - `--min_silence_ms`: Minimum length of silence intervals for segmenting speech, balancing sentence cutting and latency reduction.
+- `--vad_diagnostics_dir`: Save one directory per session with `audio.wav`, raw VAD frame data, and an HTML report that visualizes the waveform, speech state, and thresholds.
 
 
 ### STT, LM and TTS parameters

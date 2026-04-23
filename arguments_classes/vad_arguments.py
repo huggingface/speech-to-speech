@@ -57,3 +57,9 @@ class VADHandlerArguments:
             "help": "Interval (in seconds) for releasing progressive audio chunks during speech. Default is 0.2s."
         },
     )
+    vad_diagnostics_dir: str | None = field(
+        default=None,
+        metadata={
+            "help": "Optional output directory for per-session VAD diagnostics artifacts. Each session writes audio.wav, diagnostics.json, and report.html."
+        },
+    )
