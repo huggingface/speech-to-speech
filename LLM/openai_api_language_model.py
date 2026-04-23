@@ -7,7 +7,7 @@ import httpx
 from nltk import sent_tokenize
 from typing import Any, get_args
 from openai import OpenAI, Stream
-from openai.types.responses import Response, ResponseStreamEvent
+from openai.types.responses import Response, ResponseOutputMessage, ResponseOutputItemDoneEvent, ResponseCompletedEvent, ResponseFunctionToolCall, ResponseTextDeltaEvent, ResponseStreamEvent
 
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
@@ -177,17 +177,16 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
                 **optional_kwargs,
             )
             if isinstance(api_response, Stream):
+                logger.debug(f"API response: {api_response}")
                 cancelled = False
                 printable_text = ""
                 sentence_batch: list[str] = []
                 for raw_event in api_response:
-                    if not isinstance(raw_event, get_args(ResponseStreamEvent)):
-                        continue
                     if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
                         logger.info("LLM generation cancelled (interruption)")
                         cancelled = True
                         break
-                    if raw_event.type == "response.output_text.delta":
+                    if isinstance(raw_event, ResponseTextDeltaEvent):
                         new_text = remove_unspeechable(raw_event.delta)
                         clean_text += new_text
                         printable_text += new_text
@@ -199,15 +198,15 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
                                     yield LLMResponseChunk(text=" ".join(sentence_batch), language_code=language_code, runtime_config=runtime_config, response=response)
                                     sentence_batch = []
                             printable_text = sentences[-1]
-                    elif raw_event.type == "response.output_item.done":
-                        if raw_event.item.type == "function_call":
+                    elif isinstance(raw_event, ResponseOutputItemDoneEvent):
+                        if isinstance(raw_event.item, ResponseFunctionToolCall):
                             tools.append(raw_event.item.model_dump())
-                        elif raw_event.item.type == "message":
+                        elif isinstance(raw_event.item, ResponseOutputMessage):
                             original_chat.append({
                                 "role": raw_event.item.role,
                                 "content": raw_event.item.content,
                             })
-                    elif raw_event.type == "response.completed":
+                    elif isinstance(raw_event, ResponseCompletedEvent):
                         usage = getattr(raw_event.response, "usage", None)
                         if usage:
                             input_tokens = usage.input_tokens or 0
