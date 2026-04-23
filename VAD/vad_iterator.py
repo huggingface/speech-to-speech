@@ -11,6 +11,7 @@ class VADIterator:
         sampling_rate: int = 16000,
         min_silence_duration_ms: int = 100,
         speech_pad_ms: int = 30,
+        start_persistence_ms: int = 128,
     ):
         """
         Mainly taken from https://github.com/snakers4/silero-vad
@@ -33,6 +34,10 @@ class VADIterator:
         speech_pad_ms: int (default - 30 milliseconds)
             Retain up to speech_pad_ms of audio before VAD triggers and prepend it
             to the detected speech chunk
+
+        start_persistence_ms: int (default - 128 milliseconds)
+            Require this much contiguous above-threshold speech before the iterator
+            promotes pending chunks into an active speech segment.
         """
 
         self.model = model
@@ -43,6 +48,8 @@ class VADIterator:
         self.prefix_buffer = []
         self._pre_speech_buffer = deque()
         self._pre_speech_samples = 0
+        self._pending_speech_buffer = []
+        self._pending_speech_samples = 0
 
         if sampling_rate not in [8000, 16000]:
             raise ValueError(
@@ -51,6 +58,9 @@ class VADIterator:
 
         self.min_silence_samples = int(sampling_rate * min_silence_duration_ms / 1000)
         self.speech_pad_samples = int(sampling_rate * speech_pad_ms / 1000)
+        self.start_persistence_samples = int(
+            sampling_rate * start_persistence_ms / 1000
+        )
         self.reset_states()
 
     def reset_states(self):
@@ -62,6 +72,8 @@ class VADIterator:
         self.prefix_buffer = []
         self._pre_speech_buffer.clear()
         self._pre_speech_samples = 0
+        self._pending_speech_buffer = []
+        self._pending_speech_samples = 0
 
     def _num_samples(self, chunk: torch.Tensor) -> int:
         return len(chunk[0]) if chunk.dim() == 2 else len(chunk)
@@ -102,6 +114,10 @@ class VADIterator:
             return list(self.buffer)
         return [*self.prefix_buffer, *self.buffer]
 
+    def _reset_pending_speech(self) -> None:
+        self._pending_speech_buffer = []
+        self._pending_speech_samples = 0
+
     def speech_buffer(self) -> list[torch.Tensor]:
         return self._speech_buffer()
 
@@ -126,15 +142,22 @@ class VADIterator:
 
         speech_prob = self.model(x, self.sampling_rate).item()
 
-        if (speech_prob >= self.threshold) and not self.triggered:
-            self.triggered = True
-            self.prefix_buffer = list(self._pre_speech_buffer)
-            self._pre_speech_buffer.clear()
-            self._pre_speech_samples = 0
-            self.buffer.append(x)
+        if not self.triggered and speech_prob >= self.threshold:
+            self._pending_speech_buffer.append(x)
+            self._pending_speech_samples += window_size_samples
+
+            if self._pending_speech_samples >= self.start_persistence_samples:
+                self.triggered = True
+                self.prefix_buffer = list(self._pre_speech_buffer)
+                self._pre_speech_buffer.clear()
+                self._pre_speech_samples = 0
+                self.buffer = list(self._pending_speech_buffer)
+                self._reset_pending_speech()
             return None
 
         if not self.triggered:
+            if self._pending_speech_buffer:
+                self._reset_pending_speech()
             self._remember_pre_speech(x)
             return None
 
