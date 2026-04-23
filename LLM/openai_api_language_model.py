@@ -5,6 +5,7 @@ import time
 
 import httpx
 from nltk import sent_tokenize
+from typing import Any, get_args
 from openai import OpenAI, Stream
 from openai.types.responses import Response, ResponseStreamEvent
 
@@ -149,7 +150,7 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
         else:
             raise TypeError(f"Unexpected request type: {type(request)}")
 
-        optional_kwargs = {}
+        optional_kwargs: dict[str, Any] = {}
         if req_tools is not None:
             optional_kwargs["tools"] = req_tools
         if req_tool_choice is not None:
@@ -169,23 +170,25 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
         try:
             api_response = self.client.responses.create(
                 model=self.model_name,
-                input=self._prepare_chat_messages(active_chat),
+                input=self._prepare_chat_messages(active_chat),  # type: ignore[arg-type]
                 stream=self.stream,
                 extra_body=self._extra_body,
                 timeout=self.request_timeout,
                 **optional_kwargs,
             )
-            if self.stream:
+            if isinstance(api_response, Stream):
                 cancelled = False
                 printable_text = ""
                 sentence_batch: list[str] = []
-                for event in api_response:
-                    if gen is not None and self.cancel_scope.is_stale(gen):
+                for raw_event in api_response:
+                    if not isinstance(raw_event, get_args(ResponseStreamEvent)):
+                        continue
+                    if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
                         logger.info("LLM generation cancelled (interruption)")
                         cancelled = True
                         break
-                    if event.type == "response.output_text.delta":
-                        new_text = remove_unspeechable(event.delta)
+                    if raw_event.type == "response.output_text.delta":
+                        new_text = remove_unspeechable(raw_event.delta)
                         clean_text += new_text
                         printable_text += new_text
                         sentences = sent_tokenize(printable_text)
@@ -196,16 +199,16 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
                                     yield LLMResponseChunk(text=" ".join(sentence_batch), language_code=language_code, runtime_config=runtime_config, response=response)
                                     sentence_batch = []
                             printable_text = sentences[-1]
-                    elif event.type == "response.output_item.done":
-                        if event.item.type == "function_call":
-                            tools.append(event.item.model_dump())
-                        elif event.item.type == "message":
+                    elif raw_event.type == "response.output_item.done":
+                        if raw_event.item.type == "function_call":
+                            tools.append(raw_event.item.model_dump())
+                        elif raw_event.item.type == "message":
                             original_chat.append({
-                                "role": event.item.role,
-                                "content": event.item.content,
+                                "role": raw_event.item.role,
+                                "content": raw_event.item.content,
                             })
-                    elif event.type == "response.completed":
-                        usage = getattr(event.response, "usage", None)
+                    elif raw_event.type == "response.completed":
+                        usage = getattr(raw_event.response, "usage", None)
                         if usage:
                             input_tokens = usage.input_tokens or 0
                             output_tokens = usage.output_tokens or 0
@@ -219,11 +222,11 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
                         logger.debug(f"Clean text: {clean_text}")
                         logger.info(f"Tools: {tools}")
                         yield LLMResponseChunk(text=remaining, language_code=language_code, tools=tools, runtime_config=runtime_config, response=response)
-            else:
-                if gen is not None and self.cancel_scope.is_stale(gen):
+            elif isinstance(api_response, Response):
+                if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
                     logger.info("LLM generation cancelled (interruption)")
                 else:
-                    usage = getattr(api_response, "usage", None)
+                    usage = api_response.usage
                     if usage:
                         input_tokens = usage.input_tokens or 0
                         output_tokens = usage.output_tokens or 0

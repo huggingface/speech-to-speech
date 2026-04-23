@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from time import perf_counter
 from baseHandler import BaseHandler
 from pipeline_messages import Transcription, VADAudio
 import numpy as np
@@ -97,9 +96,6 @@ class MLXAudioWhisperSTTHandler(BaseHandler[VADAudio]):
 
     def process(self, vad_audio: VADAudio):
         logger.debug("inferring mlx-audio whisper...")
-
-        global pipeline_start
-        pipeline_start = perf_counter()
 
         assert isinstance(vad_audio.audio, np.ndarray), "Audio must be a numpy array"
         audio_input = vad_audio.audio.astype(np.float32)

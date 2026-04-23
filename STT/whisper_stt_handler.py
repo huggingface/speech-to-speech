@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from time import perf_counter
 from transformers import (
     AutoProcessor,
     AutoModelForSpeechSeq2Seq
@@ -119,9 +118,6 @@ class WhisperSTTHandler(BaseHandler[VADAudio]):
 
     def process(self, vad_audio: VADAudio):
         logger.debug("infering whisper...")
-
-        global pipeline_start
-        pipeline_start = perf_counter()
 
         input_features = self.prepare_model_inputs(vad_audio.audio)
         pred_ids = self.model.generate(input_features, **self.gen_kwargs)

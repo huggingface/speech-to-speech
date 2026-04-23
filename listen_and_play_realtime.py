@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass, field
 from queue import Empty, Queue
 from threading import Event, Lock
-from typing import Optional
+from typing import Any, Optional
 
 from openai import AsyncOpenAI
 
@@ -108,7 +108,7 @@ def _build_session_update(args: ListenAndPlayRealtimeArguments) -> dict:
     input_cfg = {
         "turn_detection": {"type": "server_vad", "interrupt_response": True},
     }
-    output_cfg = {}
+    output_cfg: dict[str, Any] = {}
 
     input_format = maybe_pcm_format(args.send_rate)
     output_format = maybe_pcm_format(args.recv_rate)
@@ -300,7 +300,7 @@ async def listen_and_play_realtime(args: ListenAndPlayRealtimeArguments) -> None
 
     try:
         async with client.realtime.connect(model=args.model) as conn:
-            await conn.send(_build_session_update(args))
+            await conn.send(_build_session_update(args))  # type: ignore[arg-type]
 
             sender_task = asyncio.create_task(send_audio(conn))
             receiver_task = asyncio.create_task(receive_events(conn))

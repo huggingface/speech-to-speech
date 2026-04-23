@@ -1,9 +1,10 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
 class KokoroTTSHandlerArguments:
-    kokoro_model_name: str = field(
+    kokoro_model_name: Optional[str] = field(
         default=None,
         metadata={
             "help": "The Kokoro TTS model to use. Auto-selects based on device: 'mlx-community/Kokoro-82M-bf16' for MPS, 'hexgrad/Kokoro-82M' for CUDA/CPU."

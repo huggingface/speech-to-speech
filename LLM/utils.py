@@ -2,7 +2,7 @@ import base64
 import io
 import re
 
-import requests
+import requests  # type: ignore[import-untyped]
 from PIL import Image
 
 SPEECHABLE_PATTERN = re.compile(

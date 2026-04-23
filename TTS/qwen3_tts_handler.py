@@ -8,6 +8,7 @@ Qwen3 TTS Handler
 from __future__ import annotations
 
 import logging
+from typing import Any
 import math
 from pathlib import Path
 import re
@@ -97,8 +98,8 @@ class Qwen3TTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         self.blocksize = blocksize
         self.dtype = None
         self.gen_kwargs = gen_kwargs or {}
-        self._mlx_ref_audio_cache = {}
-        self._mlx_temp_ref_audio_files = set()
+        self._mlx_ref_audio_cache: dict[str, Any] = {}
+        self._mlx_temp_ref_audio_files: set[str] = set()
 
         self.backend = "mlx" if platform == "darwin" else "faster_qwen3_tts"
         self.streaming_chunk_size = self._resolve_streaming_chunk_size(

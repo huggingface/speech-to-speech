@@ -100,7 +100,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.websockets = {}
-        app.state.active_session: str | None = None
+        app.state.active_session: str | None = None  # type: ignore[misc]
         app.state.send_task = asyncio.create_task(_send_loop())
         yield
         app.state.send_task.cancel()

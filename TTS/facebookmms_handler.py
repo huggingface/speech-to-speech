@@ -171,14 +171,14 @@ class FacebookMMSTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
 
         if self.stream:
             for i in range(0, len(audio_int16), self.chunk_size):
-                if gen is not None and self.cancel_scope.is_stale(gen):
+                if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
                     logger.info("TTS generation cancelled (interruption)")
                     return
                 chunk = audio_int16[i:i + self.chunk_size]
                 yield np.pad(chunk, (0, self.chunk_size - len(chunk)))
         else:
             for i in range(0, len(audio_int16), self.chunk_size):
-                if gen is not None and self.cancel_scope.is_stale(gen):
+                if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
                     logger.info("TTS generation cancelled (interruption)")
                     return
                 yield np.pad(

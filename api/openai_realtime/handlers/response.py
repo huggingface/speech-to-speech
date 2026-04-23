@@ -98,20 +98,20 @@ class ResponseHandler(RealtimeBaseHandler):
         rp = st.current_response_params
         metadata = rp.metadata if rp and rp.metadata else None
 
-        voice = None
-        if rp and rp.audio and rp.audio.output:
-            voice = rp.audio.output.voice
+        voice: str | None = None
+        if rp and rp.audio and rp.audio.output and rp.audio.output.voice:
+            voice = str(rp.audio.output.voice)
         if not voice:
             audio_cfg = st.runtime_config.session.audio
             audio_output = audio_cfg.output if audio_cfg is not None else None
-            voice = audio_output.voice if audio_output is not None else None
+            voice = str(audio_output.voice) if audio_output is not None and audio_output.voice else None
 
         return RealtimeResponse(
             id=st.current_response_id,
             object="realtime.response",
             status=status,
             status_details=status_details,
-            audio=Audio(output=AudioOutput(voice=voice)),
+            audio=Audio(output=AudioOutput(voice=str(voice) if voice else None)),  # type: ignore[arg-type]
             conversation_id=st.conversation_id,
             metadata=metadata,
             usage=RealtimeResponseUsage(
@@ -225,10 +225,8 @@ class ResponseHandler(RealtimeBaseHandler):
         if event.tools:
             st.response_usage.tool_calls += len(event.tools)
             for tool in event.tools:
-                if isinstance(tool.get("arguments"), str):
-                    arguments = tool.get("arguments")
-                else:
-                    arguments = json.dumps(tool.get("arguments", {}))
+                raw_args = tool.get("arguments")
+                arguments = raw_args if isinstance(raw_args, str) else json.dumps(raw_args or {})
                 events.append(
                     ResponseFunctionCallArgumentsDoneEvent(
                         type="response.function_call_arguments.done",

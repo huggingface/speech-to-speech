@@ -14,7 +14,7 @@ import logging
 import time
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import json
 from queue import Queue
 from threading import Event
@@ -34,12 +34,12 @@ class BenchmarkResult:
     def __init__(self, handler_name: str):
         self.handler_name = handler_name
         self.warmup_time = 0.0
-        self.inference_times = []
-        self.time_to_first_token = []
-        self.transcriptions = []
-        self.errors = []
+        self.inference_times: list[float] = []
+        self.time_to_first_token: list[float] = []
+        self.transcriptions: list[str] = []
+        self.errors: list[str] = []
 
-    def add_inference(self, time_taken: float, transcription: str, ttft: float = None):
+    def add_inference(self, time_taken: float, transcription: Any, ttft: Optional[float] = None):
         self.inference_times.append(time_taken)
         self.transcriptions.append(transcription)
         if ttft is not None:
@@ -109,7 +109,7 @@ def benchmark_handler(
     handler_name: str,
     audio: np.ndarray,
     iterations: int,
-    handler_kwargs: Dict[str, Any] = None
+    handler_kwargs: Optional[Dict[str, Any]] = None
 ) -> BenchmarkResult:
     """Benchmark a single STT handler."""
     logger.info(f"Benchmarking {handler_name}...")
@@ -118,11 +118,10 @@ def benchmark_handler(
     try:
         # Create queues and events for handler
         stop_event = Event()
-        queue_in = Queue()
-        queue_out = Queue()
+        queue_in: Queue[Any] = Queue()
+        queue_out: Queue[Any] = Queue()
 
-        # Import and instantiate handler
-        handler = None
+        handler: Any = None
         if handler_name == "whisper":
             from STT.whisper_stt_handler import WhisperSTTHandler
             setup_kwargs = handler_kwargs or {
@@ -248,7 +247,8 @@ def benchmark_handler(
             result.add_inference(time_taken, transcription, time_to_first_token)
 
             ttft_str = f", TTFT: {time_to_first_token:.4f}s" if time_to_first_token else ""
-            logger.info(f"  Time: {time_taken:.4f}s{ttft_str}, Text: {transcription[:50]}...")
+            text_preview = str(transcription)[:50] if transcription is not None else "(none)"
+            logger.info(f"  Time: {time_taken:.4f}s{ttft_str}, Text: {text_preview}...")
 
         # Cleanup
         handler.cleanup()

@@ -13,7 +13,7 @@ import argparse
 import logging
 import time
 import numpy as np
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import json
 from queue import Queue
 from threading import Event
@@ -34,12 +34,12 @@ class BenchmarkResult:
     def __init__(self, handler_name: str):
         self.handler_name = handler_name
         self.warmup_time = 0.0
-        self.inference_times = []
-        self.time_to_first_chunk = []
-        self.audio_durations = []
-        self.errors = []
+        self.inference_times: list[float] = []
+        self.time_to_first_chunk: list[float] = []
+        self.audio_durations: list[float] = []
+        self.errors: list[str] = []
 
-    def add_inference(self, time_taken: float, audio_duration: float, ttfc: float = None):
+    def add_inference(self, time_taken: float, audio_duration: float, ttfc: Optional[float] = None):
         self.inference_times.append(time_taken)
         self.audio_durations.append(audio_duration)
         if ttfc is not None:
@@ -85,17 +85,17 @@ class BenchmarkResult:
         return stats
 
 
-def benchmark_handler(handler_name: str, text: str, iterations: int, handler_kwargs: Dict[str, Any] = None) -> BenchmarkResult:
+def benchmark_handler(handler_name: str, text: str, iterations: int, handler_kwargs: Optional[Dict[str, Any]] = None) -> BenchmarkResult:
     logger.info(f"Benchmarking {handler_name}...")
     result = BenchmarkResult(handler_name)
 
     try:
         stop_event = Event()
         should_listen = Event()
-        queue_in = Queue()
-        queue_out = Queue()
+        queue_in: Queue[Any] = Queue()
+        queue_out: Queue[Any] = Queue()
 
-        handler = None
+        handler: Any = None
         setup_kwargs = handler_kwargs or {}
 
         start_setup = time.perf_counter()

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-from time import perf_counter
 
 from faster_whisper import WhisperModel
 from rich.console import Console
@@ -34,9 +33,6 @@ class FasterWhisperSTTHandler(BaseHandler[VADAudio]):
 
     def process(self, vad_audio: VADAudio):
         logger.debug("infering faster whisper...")
-
-        global pipeline_start
-        pipeline_start = perf_counter()
 
         segments, info = self.model.transcribe(vad_audio.audio, **self.gen_kwargs)
         output_text = []

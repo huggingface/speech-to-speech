@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from time import perf_counter
 
 from baseHandler import BaseHandler
 from pipeline_messages import Transcription, VADAudio
@@ -49,9 +48,6 @@ class ParaformerSTTHandler(BaseHandler[VADAudio]):
 
     def process(self, vad_audio: VADAudio):
         logger.debug("infering paraformer...")
-
-        global pipeline_start
-        pipeline_start = perf_counter()
 
         pred_text = (
             self.model.generate(vad_audio.audio)[0]["text"].strip().replace(" ", "")

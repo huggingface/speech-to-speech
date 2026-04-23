@@ -73,7 +73,7 @@ class ChatTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         if self.stream:
             wavs = [np.array([])]
             for gen in wavs_gen:
-                if _cancel_gen is not None and self.cancel_scope.is_stale(_cancel_gen):
+                if _cancel_gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(_cancel_gen):
                     logger.info("TTS generation cancelled (interruption)")
                     return
                 if gen[0] is None or len(gen[0]) == 0:

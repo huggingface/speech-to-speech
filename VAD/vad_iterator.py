@@ -39,9 +39,9 @@ class VADIterator:
         self.threshold = threshold
         self.sampling_rate = sampling_rate
         self.is_speaking = False
-        self.buffer = []
-        self.prefix_buffer = []
-        self._pre_speech_buffer = deque()
+        self.buffer: list[torch.Tensor] = []
+        self.prefix_buffer: list[torch.Tensor] = []
+        self._pre_speech_buffer: deque[torch.Tensor] = deque()
         self._pre_speech_samples = 0
 
         if sampling_rate not in [8000, 16000]:

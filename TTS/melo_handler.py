@@ -113,7 +113,7 @@ class MeloTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         audio_chunk = librosa.resample(audio_chunk, orig_sr=44100, target_sr=16000)
         audio_chunk = (audio_chunk * 32768).astype(np.int16)
         for i in range(0, len(audio_chunk), self.blocksize):
-            if gen is not None and self.cancel_scope.is_stale(gen):
+            if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
                 logger.info("TTS generation cancelled (interruption)")
                 return
             yield np.pad(

@@ -185,7 +185,7 @@ class TestHandleAudioAppend:
 class TestHandleSessionUpdate:
     def _make_update(self, **session_fields) -> SessionUpdateEvent:
         session_fields.setdefault("type", "realtime")
-        return SessionUpdateEvent(type="session.update", session=session_fields)
+        return SessionUpdateEvent(type="session.update", session=session_fields)  # type: ignore[arg-type]
 
     def test_session_update_voice(self, service, conn_id, runtime_config):
         evt = self._make_update(
@@ -252,7 +252,7 @@ class TestHandleConversationItemCreate:
     def _text_event(self, text: str = "hello", item_id: str = "item_abc") -> ConversationItemCreateEvent:
         return ConversationItemCreateEvent(
             type="conversation.item.create",
-            item={
+            item={  # type: ignore[arg-type]
                 "id": item_id,
                 "type": "message",
                 "role": "user",

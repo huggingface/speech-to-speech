@@ -130,6 +130,6 @@ def listen_and_play(
 
 
 if __name__ == "__main__":
-    parser = HfArgumentParser((ListenAndPlayArguments,))
+    parser = HfArgumentParser((ListenAndPlayArguments,))  # type: ignore[arg-type]
     (listen_and_play_kwargs,) = parser.parse_args_into_dataclasses()
     listen_and_play(**vars(listen_and_play_kwargs))

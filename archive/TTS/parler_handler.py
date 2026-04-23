@@ -13,6 +13,7 @@ from parler_tts import ParlerTTSForConditionalGeneration, ParlerTTSStreamer
 import librosa
 import logging
 from rich.console import Console
+
 from utils.utils import next_power_of_2
 from transformers.utils.import_utils import (
     is_flash_attn_2_available,
@@ -185,11 +186,13 @@ class ParlerTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         language_code = tts_input.language_code
         text = tts_input.text
 
-        voice = None
+        voice: str | None = None
         if response and response.audio and response.audio.output:
-            voice = response.audio.output.voice
+            voice = str(response.audio.output.voice) if response.audio.output.voice else None
         if not voice and runtime_config:
-            voice = runtime_config.session.audio.output.voice
+            audio_cfg = runtime_config.session.audio
+            audio_output = audio_cfg.output if audio_cfg is not None else None
+            voice = str(audio_output.voice) if audio_output is not None and audio_output.voice else None
         if voice:
             self.speaker = voice
         elif language_code:
@@ -219,14 +222,14 @@ class ParlerTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         thread = Thread(target=self.model.generate, kwargs=tts_gen_kwargs)
         thread.start()
 
+        pipeline_start = perf_counter()
         for i, audio_chunk in enumerate(streamer):
             if self.cancel_response and self.cancel_response.is_set():
                 logger.info("TTS generation cancelled (interruption)")
                 return
-            global pipeline_start
-            if i == 0 and "pipeline_start" in globals():
+            if i == 0:
                 logger.info(
-                    f"Time to first audio: {perf_counter() - pipeline_start:.3f}"
+                    f"Time to first audio: {perf_counter() - pipeline_start:.3f}s"
                 )
             audio_chunk = librosa.resample(audio_chunk, orig_sr=44100, target_sr=16000)
             audio_chunk = (audio_chunk * 32768).astype(np.int16)

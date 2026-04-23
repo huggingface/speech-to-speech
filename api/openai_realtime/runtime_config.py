@@ -62,6 +62,7 @@ class RuntimeConfig(BaseModel):
         handling both Pydantic models ('ServerVad') and plain dicts.
         Defaults to 'True' (OpenAI API default).
         """
+        assert self.session.audio is not None and self.session.audio.input is not None
         td = self.session.audio.input.turn_detection
         if td is None:
             return True

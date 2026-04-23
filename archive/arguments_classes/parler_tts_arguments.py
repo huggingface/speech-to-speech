@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -21,7 +22,7 @@ class ParlerTTSHandlerArguments:
             "help": "The PyTorch data type for the model and input tensors. One of `float32` (full-precision), `float16` or `bfloat16` (both half-precision)."
         },
     )
-    tts_compile_mode: str = field(
+    tts_compile_mode: Optional[str] = field(
         default=None,
         metadata={
             "help": "Compile mode for torch compile. Either 'default', 'reduce-overhead' and 'max-autotune'. Default is None (no compilation)"

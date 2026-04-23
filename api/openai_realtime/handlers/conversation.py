@@ -68,8 +68,8 @@ class ConversationHandler(RealtimeBaseHandler):
                 logger.warning("Unsupported message role: %s", role)
                 return False
             content_parts: list[dict] = []
-            for part in item.content:
-                if (part.type == "input_text" and part.text) or (part.type == "input_image" and part.image_url):
+            for part in item.content:  # type: ignore[union-attr]
+                if (part.type == "input_text" and part.text) or (part.type == "input_image" and part.image_url):  # type: ignore[union-attr]
                     content_parts.append(part.model_dump(exclude_none=True))
                 else:
                     logger.warning("Unsupported content part type: %s", part.type)
@@ -82,10 +82,10 @@ class ConversationHandler(RealtimeBaseHandler):
         if getattr(item, "type", None) == "function_call_output" and getattr(item, "output", None):
             st.runtime_config.chat.append({
                 "type": "function_call_output",
-                "call_id": item.call_id,
-                "output": item.output,
+                "call_id": item.call_id,  # type: ignore[union-attr]
+                "output": item.output,  # type: ignore[union-attr]
             })
-            logger.debug("Added function_call_output to chat (call_id=%s)", item.call_id)
+            logger.debug("Added function_call_output to chat (call_id=%s)", item.call_id)  # type: ignore[union-attr]
             return True
 
         logger.warning("Unsupported item type: %s", getattr(item, "type", None))

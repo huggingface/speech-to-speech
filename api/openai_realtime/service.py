@@ -2,7 +2,7 @@ import logging
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from queue import Queue
 from threading import Event as ThreadingEvent
-from typing import Callable, Literal, Optional, Union
+from typing import Callable, Literal, Optional, Self, Union
 
 from api.openai_realtime.events import (
     AssistantTextEvent,
@@ -106,7 +106,7 @@ class UsageMetrics(BaseModel):
     tool_calls: int = 0
     turns: int = 0
 
-    def __iadd__(self, other: "UsageMetrics") -> "UsageMetrics":
+    def __iadd__(self, other: "UsageMetrics") -> Self:
         for field in UsageMetrics.model_fields:
             setattr(self, field, getattr(self, field) + getattr(other, field))
         return self
@@ -176,7 +176,7 @@ class RealtimeService:
         self.response = ResponseHandler(self)
         self.conversation = ConversationHandler(self)
 
-        self._pipeline_dispatch: dict[type[PipelineEvent], Callable[[str, PipelineEvent], list[ServerEvent]]] = {
+        self._pipeline_dispatch: dict[type[PipelineEvent], Callable[..., list[ServerEvent]]] = {
             SpeechStartedEvent: self.audio.on_speech_started,
             SpeechStoppedEvent: self.audio.on_speech_stopped,
             AssistantTextEvent: self.response.on_assistant_text,

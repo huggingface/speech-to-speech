@@ -240,11 +240,13 @@ class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         language_code = tts_input.language_code
         text = tts_input.text
 
-        voice = None
-        if response and response.audio and response.audio.output:
-            voice = response.audio.output.voice
+        voice: str | None = None
+        if response and response.audio and response.audio.output and response.audio.output.voice:
+            voice = str(response.audio.output.voice)
         if not voice and runtime_config:
-            voice = runtime_config.session.audio.output.voice
+            audio_cfg = runtime_config.session.audio
+            audio_output = audio_cfg.output if audio_cfg is not None else None
+            voice = str(audio_output.voice) if audio_output is not None and audio_output.voice else None
         if voice:
             self.voice = voice
 

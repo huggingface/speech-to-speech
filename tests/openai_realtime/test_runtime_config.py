@@ -18,7 +18,7 @@ def _parse_session(**session_fields) -> RealtimeSessionCreateRequest:
         "type": "session.update",
         "session": session_fields,
     })
-    return evt.session
+    return evt.session  # type: ignore[return-value]
 
 
 class TestApplySessionUpdate:

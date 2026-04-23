@@ -8,6 +8,9 @@ from transformers import (
     AutoModelForImageTextToText,
     AutoProcessor,
     AutoTokenizer,
+    Pipeline,
+    PreTrainedModel,
+    PreTrainedTokenizerBase,
     StoppingCriteria,
     StoppingCriteriaList,
     pipeline,
@@ -25,7 +28,8 @@ from LLM.tool_call.function_call import extract_function_calls_from_text
 from LLM.tool_call.function_tool import FunctionTool
 from openai.types.responses import ResponseFunctionToolCall
 from LLM.tool_call.tool_prompt import build_tool_system_prompt, build_block_regex, ENTER_CODE, END_CODE
-from typing import Any, Literal
+from collections.abc import Iterable, Sized
+from typing import Any, Literal, Protocol, runtime_checkable
 from baseHandler import BaseHandler
 from cancel_scope import CancelScope
 from LLM.utils import remove_unspeechable, resolve_auto_language, image_url_to_pil
@@ -53,6 +57,20 @@ except ImportError:
     HAS_MLX_VLM = False
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class _Tokenizer(Protocol):
+    """Minimal interface the base class needs from any tokenizer."""
+    def encode(self, text: str, /, **kwargs: Any) -> list[int] | Sized: ...
+
+
+@runtime_checkable
+class _Processor(Protocol):
+    """Minimal interface the VLM handler needs from any processor."""
+    tokenizer: _Tokenizer
+    def apply_chat_template(self, conversation: Any, /, **kwargs: Any) -> Any: ...
+    def __call__(self, **kwargs: Any) -> Any: ...
 
 
 class _CancelCriteria(StoppingCriteria):
@@ -102,6 +120,10 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
     and delegates model-specific behaviour to two abstract hooks:
     ``_load_model`` and ``_generate``.
     """
+    
+    _cancel_criteria: _CancelCriteria
+    streamer: Iterable[str]
+    tokenizer: _Tokenizer
 
     def setup(
         self,
@@ -165,7 +187,7 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
     # Generation lifecycle helpers
     # ------------------------------------------------------------------
 
-    def _finish_mlx_generation(self, token_iter) -> None:
+    def _finish_mlx_generation(self, token_iter: Any) -> None:
         """Close the MLX generator to release resources immediately."""
         token_iter.close()
 
@@ -192,7 +214,7 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
         - ``function_call`` items (from the OpenAI Responses API path) are
           converted to assistant messages with ``tool_calls``
         """
-        result = []
+        result: list[dict[str, Any]] = []
         for msg in chat_messages:
             item_type = msg.get("type")
             if item_type == "function_call_output":
@@ -327,7 +349,7 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
 
     def _check_stop(self, gen: int | None, ctx: StreamContext) -> bool:
         """Check whether generation should be aborted and mark the reason on *ctx*."""
-        if gen is not None and self.cancel_scope.is_stale(gen):
+        if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
             ctx.cancelled = True
             logger.info("LLM generation cancelled (interruption)")
             return True
@@ -397,7 +419,7 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
             instructions = response.instructions if response and response.instructions else runtime_config.session.instructions
             tools = response.tools if response and response.tools else runtime_config.session.tools
             tool_choice = response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
-            self._apply_instructions(active_chat, instructions, tools, tool_choice, ctx)
+            self._apply_instructions(active_chat, instructions, tools, str(tool_choice) if tool_choice else None, ctx)
             language_code, lang_name = resolve_auto_language(language_code)
             if lang_name:
                 active_chat.append({"role": self.user_role, "content": f"Please reply to my message in {lang_name}."})
@@ -458,14 +480,14 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
 class LanguageModelHandler(BaseLanguageModelHandler):
     """Text-only language model handler (transformers or MLX backend)."""
 
-    model: AutoModelForCausalLM
-    tokenizer: AutoTokenizer
+    model: PreTrainedModel
+    tokenizer: PreTrainedTokenizerBase
     gen_kwargs: dict
     torch_dtype: torch.dtype
-    pipe: pipeline
+    pipe: Pipeline
     streamer: TextIteratorStreamer
 
-    def setup(self, **kwargs: Any) -> None:
+    def setup(self, **kwargs: Any) -> None:  # type: ignore[override]
         super().setup(**kwargs)
         logger.info(f"LLM Backend: {self.backend}")
         self.warmup()
@@ -480,19 +502,19 @@ class LanguageModelHandler(BaseLanguageModelHandler):
                     "mlx_lm is required for the 'mlx' backend. "
                     "Install with: pip install mlx-lm"
                 )
-            self.model, self.tokenizer = mlx_load(model_name)  # type: ignore[misc]
+            self.model, self.tokenizer = mlx_load(model_name)  # type: ignore[assignment, misc]
             self.gen_kwargs = gen_kwargs
         else:
             self.torch_dtype = getattr(torch, torch_dtype)
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)  # type: ignore[assignment]
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_name, torch_dtype=torch_dtype, trust_remote_code=True
-            ).to(device)
-            self.pipe = pipeline(
+            ).to(device)  # type: ignore[arg-type]
+            self.pipe = pipeline(  # type: ignore[call-overload]
                 "text-generation", model=self.model, tokenizer=self.tokenizer, device=device
             )
             self.streamer = TextIteratorStreamer(
-                self.tokenizer,  # type: ignore[arg-type]
+                self.tokenizer,
                 skip_prompt=True,
                 skip_special_tokens=True,
                 timeout=1.0,
@@ -508,7 +530,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
     def _generate(self, chat: Chat, language_code: str | None, gen: int | None, ctx: StreamContext, runtime_config=None, response=None) -> Iterator[LLMResponseChunk]:
         chat_messages = self._prepare_chat_for_transformers(chat.to_list())
         chat_input = self.tokenizer.apply_chat_template(chat_messages, tokenize=True)
-        ctx.input_tokens += len(chat_input if isinstance(chat_input, list) else chat_input["input_ids"])
+        ctx.input_tokens += len(chat_input if isinstance(chat_input, list) else chat_input["input_ids"])  # type: ignore[index]
         logger.debug("Prompt token count: %d", ctx.input_tokens)
 
         chat_prompt = self.tokenizer.apply_chat_template(
@@ -518,9 +540,9 @@ class LanguageModelHandler(BaseLanguageModelHandler):
         if self.backend == "mlx":
             with MLXLockContext(handler_name="MLX-LLM", timeout=10.0):
                 token_iter = mlx_stream_generate(
-                    self.model,
-                    self.tokenizer,
-                    chat_prompt,
+                    self.model,  # type: ignore[arg-type]
+                    self.tokenizer,  # type: ignore[arg-type]
+                    chat_prompt,  # type: ignore[arg-type]
                     max_tokens=self.gen_kwargs["max_new_tokens"],
                 )
                 yield from self._stream_tokens(token_iter, gen, language_code, ctx, runtime_config, response)
@@ -554,9 +576,9 @@ class LanguageModelHandler(BaseLanguageModelHandler):
                     dummy_chat, tokenize=False
                 )
                 mlx_generate(
-                    self.model,
-                    self.tokenizer,
-                    prompt=prompt,
+                    self.model,  # type: ignore[arg-type]
+                    self.tokenizer,  # type: ignore[arg-type]
+                    prompt=prompt,  # type: ignore[arg-type]
                     max_tokens=self.gen_kwargs["max_new_tokens"],
                     verbose=False,
                 )
@@ -597,14 +619,14 @@ class LanguageModelHandler(BaseLanguageModelHandler):
 class VisionLanguageModelHandler(BaseLanguageModelHandler):
     """Vision language model handler (transformers or MLX-VLM backend)."""
 
-    model: AutoModelForImageTextToText
-    tokenizer: AutoTokenizer
-    processor: AutoProcessor
+    model: PreTrainedModel
+    tokenizer: PreTrainedTokenizerBase
+    processor: _Processor
     gen_kwargs: dict
     torch_dtype: torch.dtype
     streamer: TextIteratorStreamer
 
-    def setup(self, **kwargs: Any) -> None:
+    def setup(self, **kwargs: Any) -> None:  # type: ignore[override]
         super().setup(**kwargs)
         logger.info(f"VLM Backend: {self.backend}")
 
@@ -618,16 +640,16 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                     "mlx-vlm is required for MLX VLM models. "
                     "Install with: pip install mlx-vlm"
                 )
-            self.model, self.processor = mlx_vlm_load(model_name)
-            self.tokenizer = self.processor.tokenizer
+            self.model, self.processor = mlx_vlm_load(model_name)  # type: ignore[assignment]
+            self.tokenizer = self.processor.tokenizer  # type: ignore[assignment]
             self.gen_kwargs = gen_kwargs
         else:
             self.torch_dtype = getattr(torch, torch_dtype)
-            self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-            self.tokenizer = self.processor.tokenizer
+            self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)  # type: ignore[assignment]
+            self.tokenizer = self.processor.tokenizer  # type: ignore[assignment]
             self.model = AutoModelForImageTextToText.from_pretrained(
                 model_name, torch_dtype=self.torch_dtype, trust_remote_code=True
-            ).to(device)
+            ).to(device)  # type: ignore[arg-type]
             self.streamer = TextIteratorStreamer(
                 self.tokenizer,
                 skip_prompt=True,
@@ -645,7 +667,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             logger.debug("MLX VLM prompt token count: %d", ctx.input_tokens)
 
             with MLXLockContext(handler_name="MLX-VLM", timeout=10.0):
-                token_iter = mlx_vlm_stream_generate(
+                token_iter = mlx_vlm_stream_generate(  # type: ignore[arg-type]
                     self.model,
                     self.processor,
                     formatted_prompt,
@@ -672,7 +694,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                 "streamer": self.streamer,
                 "stopping_criteria": StoppingCriteriaList([self._cancel_criteria]),
             }
-            thread = Thread(target=self.model.generate, kwargs=generate_kwargs)
+            thread = Thread(target=self.model.generate, kwargs=generate_kwargs)  # type: ignore[arg-type]
             thread.start()
             yield from self._stream_tokens(self.streamer, gen, language_code, ctx, runtime_config, response)
             self._finish_transformers_generation(thread)

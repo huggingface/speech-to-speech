@@ -71,7 +71,7 @@ def _annotation_from_spec(spec: dict):
     # array with items → list[ItemType]
     if json_type == "array" and "items" in spec:
         item_type = _annotation_from_spec(spec["items"])
-        return list[item_type]
+        return list[item_type]  # type: ignore[valid-type]
 
     return JSON_TYPE_TO_PYTHON_TYPE.get(json_type, Any)
 

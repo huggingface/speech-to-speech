@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from time import perf_counter
 from baseHandler import BaseHandler
 from pipeline_messages import Transcription, VADAudio
 from lightning_whisper_mlx import LightningWhisperMLX
@@ -64,9 +63,6 @@ class LightningWhisperSTTHandler(BaseHandler[VADAudio]):
 
     def process(self, vad_audio: VADAudio):
         logger.debug("infering whisper...")
-
-        global pipeline_start
-        pipeline_start = perf_counter()
 
         audio = vad_audio.audio
         if self.start_language != 'auto':

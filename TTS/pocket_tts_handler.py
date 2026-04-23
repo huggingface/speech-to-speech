@@ -103,7 +103,7 @@ class PocketTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         # Generate audio stream
         logger.debug(f"Generating audio for: {text[:50]}...")
 
-        global pipeline_start
+        pipeline_start = perf_counter()
         first_chunk = True
 
         # Calculate target chunk size in original sample rate
@@ -133,10 +133,10 @@ class PocketTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
             max_tokens=self.max_tokens,
             copy_state=True,  # Don't modify the original voice state
         ):
-            if gen is not None and self.cancel_scope.is_stale(gen):
+            if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
                 logger.info("TTS generation cancelled (interruption)")
                 return
-            if first_chunk and "pipeline_start" in globals():
+            if first_chunk:
                 logger.debug(
                     f"Time to first audio: {perf_counter() - pipeline_start:.3f}s"
                 )

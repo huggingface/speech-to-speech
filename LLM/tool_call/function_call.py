@@ -113,6 +113,7 @@ def _literal_from_ast(node: ast.AST) -> Any:
         return {
             _literal_from_ast(key): _literal_from_ast(value)
             for key, value in zip(node.keys, node.values)
+            if key is not None
         }
 
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
