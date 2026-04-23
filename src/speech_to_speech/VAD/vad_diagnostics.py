@@ -164,6 +164,15 @@ class VADDiagnosticsRecorder:
             )
             for event in events
         )
+        event_chips = "".join(
+            (
+                f'<button class="event-chip" type="button" data-seek-ms="{float(event["timestamp_ms"]):.3f}">'
+                f"{html.escape(self._event_marker_label(str(event['kind'])))} "
+                f"<span>{float(event['timestamp_ms']):.1f} ms</span>"
+                "</button>"
+            )
+            for event in events
+        )
         return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -238,6 +247,40 @@ class VADDiagnosticsRecorder:
       padding: 1px 5px;
       border-radius: 6px;
     }}
+    .audio-toolbar {{
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-top: 10px;
+      font-size: 13px;
+      color: #555;
+    }}
+    .charts-note {{
+      margin-top: 8px;
+      font-size: 13px;
+      color: #666;
+    }}
+    .event-jumps {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 14px;
+    }}
+    .event-chip {{
+      border: 1px solid #d7d7cf;
+      background: #f8f8f4;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }}
+    .event-chip:hover {{
+      background: #efefe8;
+    }}
+    .event-chip span {{
+      color: #666;
+    }}
   </style>
 </head>
 <body>
@@ -246,7 +289,14 @@ class VADDiagnosticsRecorder:
   <div class="section">
     <h2>Audio</h2>
     <p>The raw mono recording captured by the VAD path for this session.</p>
-    <audio controls preload="metadata" src="audio.wav"></audio>
+    <audio id="session-audio" controls preload="metadata" src="audio.wav"></audio>
+    <div class="audio-toolbar">
+      <span id="playback-time">Playback: 0.0 ms</span>
+      <span>Click a chart or event chip to seek the audio.</span>
+    </div>
+    <div class="event-jumps">
+      {event_chips or "<span>No event markers recorded.</span>"}
+    </div>
   </div>
   <div class="section">
     <h2>Summary</h2>
@@ -270,6 +320,7 @@ class VADDiagnosticsRecorder:
   <div class="section">
     <h2>VAD Probability</h2>
     {self._build_probability_svg(frames, events, duration_ms)}
+    <p class="charts-note">The red playhead follows audio playback. Click inside the chart to seek.</p>
     <div class="legend">
       <span><span class="swatch" style="background:#cdeccf"></span>Triggered speech</span>
       <span><span class="swatch" style="background:#ffe1b5"></span>End-candidate grace period</span>
@@ -280,7 +331,7 @@ class VADDiagnosticsRecorder:
   </div>
   <div class="section">
     <h2>Waveform</h2>
-    {self._build_waveform_svg(audio, frames, duration_ms)}
+    {self._build_waveform_svg(audio, frames, events, duration_ms)}
   </div>
   <div class="section">
     <h2>Events</h2>
@@ -294,6 +345,80 @@ class VADDiagnosticsRecorder:
     </table>
     <p>Raw frame-by-frame data is stored in <code>diagnostics.json</code>.</p>
   </div>
+  <script>
+    (() => {{
+      const audio = document.getElementById("session-audio");
+      const playbackTime = document.getElementById("playback-time");
+      const charts = Array.from(document.querySelectorAll("svg[data-duration-ms]"));
+      const eventButtons = Array.from(document.querySelectorAll(".event-chip[data-seek-ms]"));
+
+      function clamp(value, min, max) {{
+        return Math.min(Math.max(value, min), max);
+      }}
+
+      function formatMs(ms) {{
+        return `${{ms.toFixed(1)}} ms`;
+      }}
+
+      function updatePlayheads() {{
+        const currentMs = audio.currentTime * 1000;
+        playbackTime.textContent = `Playback: ${{formatMs(currentMs)}}`;
+        for (const svg of charts) {{
+          const durationMs = parseFloat(svg.dataset.durationMs || "0");
+          const left = parseFloat(svg.dataset.left || "0");
+          const right = parseFloat(svg.dataset.right || "0");
+          const playhead = svg.querySelector(".playhead");
+          if (!playhead || durationMs <= 0 || right <= left) {{
+            continue;
+          }}
+          const progress = clamp(currentMs / durationMs, 0, 1);
+          const x = left + progress * (right - left);
+          const line = playhead.querySelector("line");
+          const text = playhead.querySelector("text");
+          line.setAttribute("x1", x.toFixed(2));
+          line.setAttribute("x2", x.toFixed(2));
+          text.setAttribute("x", (x + 6).toFixed(2));
+          text.textContent = formatMs(currentMs);
+          playhead.setAttribute("visibility", "visible");
+        }}
+      }}
+
+      function seekFromSvgEvent(svg, event) {{
+        const rect = svg.getBoundingClientRect();
+        const viewBox = svg.viewBox.baseVal;
+        const left = parseFloat(svg.dataset.left || "0");
+        const right = parseFloat(svg.dataset.right || "0");
+        const durationMs = parseFloat(svg.dataset.durationMs || "0");
+        if (durationMs <= 0 || right <= left || rect.width <= 0) {{
+          return;
+        }}
+        const relativeX = (event.clientX - rect.left) / rect.width;
+        const svgX = viewBox.x + relativeX * viewBox.width;
+        const clampedX = clamp(svgX, left, right);
+        const timeMs = ((clampedX - left) / (right - left)) * durationMs;
+        audio.currentTime = timeMs / 1000;
+        updatePlayheads();
+      }}
+
+      for (const svg of charts) {{
+        svg.style.cursor = "pointer";
+        svg.addEventListener("click", (event) => seekFromSvgEvent(svg, event));
+      }}
+
+      for (const button of eventButtons) {{
+        button.addEventListener("click", () => {{
+          const ms = parseFloat(button.dataset.seekMs || "0");
+          audio.currentTime = ms / 1000;
+          updatePlayheads();
+        }});
+      }}
+
+      audio.addEventListener("timeupdate", updatePlayheads);
+      audio.addEventListener("seeked", updatePlayheads);
+      audio.addEventListener("loadedmetadata", updatePlayheads);
+      updatePlayheads();
+    }})();
+  </script>
 </body>
 </html>
 """
@@ -367,19 +492,21 @@ class VADDiagnosticsRecorder:
             f"{x_pos((frame['start_ms'] + frame['end_ms']) / 2):.2f},{y_pos(frame['negative_threshold']):.2f}"
             for frame in frames
         )
-        event_lines = "".join(
-            (
-                f'<line x1="{x_pos(float(event["timestamp_ms"])):.2f}" y1="{top}" '
-                f'x2="{x_pos(float(event["timestamp_ms"])):.2f}" y2="{height - bottom}" '
-                f'stroke="#6f6f6f" stroke-width="1" stroke-dasharray="4 4" />'
-                f'<text x="{x_pos(float(event["timestamp_ms"])) + 4:.2f}" y="14" font-size="11" fill="#555">'
-                f"<title>{html.escape(str(event['kind']))}</title>"
-                f"{html.escape(self._event_marker_label(str(event['kind'])))}</text>"
-            )
-            for event in events
+        event_lines = self._build_event_lines(
+            events,
+            x_pos=x_pos,
+            top=top,
+            bottom=height - bottom,
+            label_y=14,
+        )
+        playhead = self._build_playhead(
+            left=left,
+            top=top,
+            bottom=height - bottom,
+            label_y=top + 16,
         )
         return f"""
-<svg viewBox="0 0 {width} {height}" role="img" aria-label="VAD probability chart">
+<svg viewBox="0 0 {width} {height}" role="img" aria-label="VAD probability chart" data-duration-ms="{duration_ms:.3f}" data-left="{left}" data-right="{width - right}">
   <rect x="{left}" y="{top}" width="{plot_width}" height="{plot_height}" fill="#fcfcfb" />
   {grid_lines}
   {state_rects}
@@ -388,6 +515,7 @@ class VADDiagnosticsRecorder:
   <polyline fill="none" stroke="#4d8fe6" stroke-width="2.5" points="{probability_points}" />
   <rect x="{left}" y="{top}" width="{plot_width}" height="{plot_height}" fill="none" stroke="#cfcfc8" />
   {event_lines}
+  {playhead}
   <text x="{left}" y="{height - 8}" font-size="12" fill="#666">time (ms)</text>
   <text x="{width - right - 70}" y="{height - 8}" font-size="12" fill="#666">{duration_ms:.1f} ms</text>
 </svg>
@@ -397,6 +525,7 @@ class VADDiagnosticsRecorder:
         self,
         audio: np.ndarray,
         frames: list[dict[str, object]],
+        events: list[dict[str, object]],
         duration_ms: float,
     ) -> str:
         width = 1120
@@ -414,19 +543,69 @@ class VADDiagnosticsRecorder:
             return left + (ms / duration_ms) * plot_width
 
         state_rects = self._build_state_rects(frames, x_pos, top, plot_height)
+        event_lines = self._build_event_lines(
+            events,
+            x_pos=x_pos,
+            top=top,
+            bottom=height - bottom,
+            label_y=top + 12,
+        )
         path_commands = self._waveform_path(
             audio, left, plot_width, center_y, amplitude
         )
+        playhead = self._build_playhead(
+            left=left,
+            top=top,
+            bottom=height - bottom,
+            label_y=top + 16,
+        )
         return f"""
-<svg viewBox="0 0 {width} {height}" role="img" aria-label="Audio waveform chart">
+<svg viewBox="0 0 {width} {height}" role="img" aria-label="Audio waveform chart" data-duration-ms="{duration_ms:.3f}" data-left="{left}" data-right="{width - right}">
   <rect x="{left}" y="{top}" width="{plot_width}" height="{plot_height}" fill="#fcfcfb" />
   {state_rects}
   <line x1="{left}" y1="{center_y:.2f}" x2="{width - right}" y2="{center_y:.2f}" stroke="#ecece7" stroke-width="1" />
   <path d="{path_commands}" fill="none" stroke="#303f59" stroke-width="1.2" />
   <rect x="{left}" y="{top}" width="{plot_width}" height="{plot_height}" fill="none" stroke="#cfcfc8" />
+  {event_lines}
+  {playhead}
   <text x="{left}" y="{height - 6}" font-size="12" fill="#666">recorded waveform</text>
 </svg>
 """
+
+    def _build_event_lines(
+        self,
+        events: list[dict[str, object]],
+        *,
+        x_pos,
+        top: int,
+        bottom: int,
+        label_y: int,
+    ) -> str:
+        return "".join(
+            (
+                f'<line x1="{x_pos(float(event["timestamp_ms"])):.2f}" y1="{top}" '
+                f'x2="{x_pos(float(event["timestamp_ms"])):.2f}" y2="{bottom}" '
+                f'stroke="#6f6f6f" stroke-width="1" stroke-dasharray="4 4" />'
+                f'<text x="{x_pos(float(event["timestamp_ms"])) + 4:.2f}" y="{label_y}" font-size="11" fill="#555">'
+                f"<title>{html.escape(str(event['kind']))}</title>"
+                f"{html.escape(self._event_marker_label(str(event['kind'])))}</text>"
+            )
+            for event in events
+        )
+
+    def _build_playhead(
+        self,
+        *,
+        left: int,
+        top: int,
+        bottom: int,
+        label_y: int,
+    ) -> str:
+        return f"""
+  <g class="playhead" visibility="hidden">
+    <line x1="{left}" y1="{top}" x2="{left}" y2="{bottom}" stroke="#d13a2f" stroke-width="2" />
+    <text x="{left + 6}" y="{label_y}" font-size="11" fill="#d13a2f">0.0 ms</text>
+  </g>"""
 
     def _build_state_rects(
         self,
