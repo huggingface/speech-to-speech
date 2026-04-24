@@ -40,8 +40,9 @@ class ConversationHandler(RealtimeBaseHandler):
         events: list[ServerEvent] = []
         item = event.item
 
-        if not self._append_item(conn_id, item):
-            return []
+        error = self._append_item(conn_id, item)
+        if error is not None:
+            return [self.make_error(error, "invalid_conversation_item")]
 
         if item:
             st = self._state(conn_id)
@@ -57,10 +58,10 @@ class ConversationHandler(RealtimeBaseHandler):
 
         return events
 
-    def _append_item(self, conn_id: str, item: ConversationItem) -> bool:
+    def _append_item(self, conn_id: str, item: ConversationItem) -> str | None:
         """Add a conversation item directly to the connection's chat history.
 
-        Returns ``True`` if the item was handled, ``False`` otherwise.
+        Returns ``None`` on success or an error message string on failure.
         """
         st = self._state(conn_id)
 
@@ -68,7 +69,7 @@ class ConversationHandler(RealtimeBaseHandler):
             role = getattr(item, "role", None)
             if not role or role not in ("user", "assistant"):
                 logger.warning("Unsupported message role: %s", role)
-                return False
+                return f"Unsupported message role: {role}"
             content_parts: list[dict] = []
             for part in item.content:  # type: ignore[union-attr]
                 if (part.type == "input_text" and part.text) or (part.type == "input_image" and part.image_url):  # type: ignore[union-attr]
@@ -78,22 +79,25 @@ class ConversationHandler(RealtimeBaseHandler):
             if content_parts:
                 st.runtime_config.chat.append({"role": role, "content": content_parts})
                 logger.debug("Added message to chat (role=%s, %d parts)", role, len(content_parts))
-                return True
-            return False
+                return None
+            return "Message has no supported content parts."
 
         if getattr(item, "type", None) == "function_call_output" and getattr(item, "output", None):
-            st.runtime_config.chat.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": item.call_id,  # type: ignore[union-attr]
-                    "output": item.output,  # type: ignore[union-attr]
-                }
-            )
-            logger.debug("Added function_call_output to chat (call_id=%s)", item.call_id)  # type: ignore[union-attr]
-            return True
+            call_id: str = item.call_id or ""  # type: ignore[union-attr]
+            output_item = {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": item.output,  # type: ignore[union-attr]
+            }
+            error = st.runtime_config.chat.append_tool_output(call_id, output_item)
+            if error:
+                logger.warning("Rejected function_call_output: %s", error)
+                return error
+            logger.debug("Added function_call_output to chat (call_id=%s)", call_id)
+            return None
 
         logger.warning("Unsupported item type: %s", getattr(item, "type", None))
-        return False
+        return f"Unsupported item type: {getattr(item, 'type', None)}"
 
     # ── Pipeline event handlers ────────────────────
 

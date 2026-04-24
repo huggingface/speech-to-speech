@@ -143,12 +143,14 @@ class ResponseHandler(RealtimeBaseHandler):
                 message="Cannot create response while another response is in progress.",
                 _type="conversation_already_has_active_response",
             )
-        else:
-            st.in_response = True
 
         if event.response and event.response.input:
             for input_item in event.response.input:
-                self._service.conversation._append_item(conn_id, input_item)
+                error = self._service.conversation._append_item(conn_id, input_item)
+                if error is not None:
+                    return self.make_error(message=error, _type="invalid_input_item")
+
+        st.in_response = True
 
         st.current_response_params = event.response
         st.current_response_id = _generate_id("resp")
