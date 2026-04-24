@@ -14,13 +14,14 @@ import logging
 from contextlib import contextmanager
 from sys import platform
 from threading import Lock
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional
 
 import numpy as np
 from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, VADAudio
+from speech_to_speech.pipeline.handler_types import STTIn, STTOut
+from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.smart_progressive_streaming import PartialTranscription as ProgressiveStreamPartial
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 
@@ -78,7 +79,7 @@ if LINGUA_AVAILABLE:
     _lingua_detector = LanguageDetectorBuilder.from_languages(*_lingua_languages).build()
 
 
-class ParakeetTDTSTTHandler(BaseHandler[VADAudio]):
+class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
     """
     Handles Speech-to-Text using NVIDIA Parakeet TDT model.
 
@@ -91,10 +92,10 @@ class ParakeetTDTSTTHandler(BaseHandler[VADAudio]):
 
     def setup(
         self,
-        model_name: str | None = None,
+        model_name: Optional[str] = None,
         device: str = "auto",
         compute_type: str = "float16",
-        language: str | None = None,
+        language: Optional[str] = None,
         gen_kwargs: dict[str, Any] = {},
         enable_live_transcription: bool = False,
         live_transcription_update_interval: float = 0.25,
@@ -220,7 +221,7 @@ class ParakeetTDTSTTHandler(BaseHandler[VADAudio]):
         except Exception as e:
             logger.warning(f"Warmup failed: {e}")
 
-    def process(self, vad_audio: VADAudio) -> Iterator[PartialTranscription | Transcription]:
+    def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         """
         Process audio and generate transcription.
 
@@ -297,7 +298,7 @@ class ParakeetTDTSTTHandler(BaseHandler[VADAudio]):
         if self.enable_live_transcription:
             self.processing_final = False
 
-    def _detect_language_from_text(self, text: str) -> str | None:
+    def _detect_language_from_text(self, text: str) -> Optional[str]:
         """
         Detect language from transcribed text using lingua-py.
 

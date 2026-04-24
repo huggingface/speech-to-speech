@@ -1,20 +1,23 @@
 from __future__ import annotations
 
+# ruff: noqa: I001
+
 import logging
 from queue import Empty, Queue
 from threading import Event
 from time import perf_counter
 from typing import Any, Generic, Iterator, TypeVar
 
-from speech_to_speech.pipeline.control import SESSION_END, is_control_message
+from speech_to_speech.pipeline.control import PipelineControlMessage, is_control_message, SESSION_END
 from speech_to_speech.pipeline.messages import PIPELINE_END
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar("T")
+InT = TypeVar("InT")
+OutT = TypeVar("OutT")
 
 
-class BaseHandler(Generic[T]):
+class BaseHandler(Generic[InT, OutT]):
     """
     Base class for pipeline parts. Each part of the pipeline has an input and an output queue.
     The `setup` method along with `setup_args` and `setup_kwargs` can be used to address the specific requirements of the implemented pipeline part.
@@ -27,8 +30,8 @@ class BaseHandler(Generic[T]):
     def __init__(
         self,
         stop_event: Event,
-        queue_in: Queue[Any],
-        queue_out: Queue[Any],
+        queue_in: Queue[InT | PipelineControlMessage | bytes],
+        queue_out: Queue[OutT | PipelineControlMessage | bytes],
         setup_args: tuple[Any, ...] = (),
         setup_kwargs: dict[str, Any] = {},
     ) -> None:
@@ -41,7 +44,7 @@ class BaseHandler(Generic[T]):
     def setup(self, *arg: Any, **kwargs: Any) -> None:
         pass
 
-    def process(self, input: T) -> Iterator:
+    def process(self, input: InT) -> Iterator[OutT]:
         raise NotImplementedError
 
     def run(self) -> None:
@@ -49,11 +52,11 @@ class BaseHandler(Generic[T]):
         while not self.stop_event.is_set():
             try:
                 # Use timeout to check stop_event periodically
-                input = self.queue_in.get(timeout=0.1)
+                item = self.queue_in.get(timeout=0.1)
             except Empty:
                 continue
 
-            if is_control_message(input, SESSION_END.kind):
+            if isinstance(item, PipelineControlMessage) and is_control_message(item, SESSION_END.kind):
                 logger.debug(f"{self.__class__.__name__}: session end received")
                 try:
                     self.on_session_end()
@@ -62,16 +65,22 @@ class BaseHandler(Generic[T]):
                         f"{self.__class__.__name__}: Error in on_session_end(): {type(e).__name__}: {e}",
                         exc_info=True,
                     )
-                self.queue_out.put(input)
+                self.queue_out.put(item)
                 continue
 
-            if isinstance(input, bytes) and input == PIPELINE_END:
+            if isinstance(item, bytes) and item == PIPELINE_END:
                 # sentinel signal to avoid queue deadlock
                 logger.debug("Stopping thread")
                 break
+
+            # After filtering control + sentinel, the remaining items are handler inputs.
+            if isinstance(item, (bytes, PipelineControlMessage)):
+                logger.warning("%s: unexpected queue item type: %s", self.__class__.__name__, type(item).__name__)
+                continue
+
             start_time = perf_counter()
             try:
-                for output in self.process(input):
+                for output in self.process(item):
                     self._times.append(perf_counter() - start_time)
                     if self.last_time > self.min_time_to_debug:
                         logger.debug(f"{self.__class__.__name__}: {self.last_time: .3f} s")

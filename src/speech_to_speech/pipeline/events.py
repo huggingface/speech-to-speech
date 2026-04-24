@@ -8,7 +8,7 @@ literals that were previously put on the queue.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -48,7 +48,7 @@ class PartialTranscriptionEvent(PipelineEvent):
 class TranscriptionCompletedEvent(PipelineEvent):
     type: Literal["transcription_completed"] = "transcription_completed"
     transcript: str
-    language_code: str | None = None
+    language_code: Optional[str] = None
 
 
 # ── LLM output events (LMOutputProcessor) ────────────────────────────

@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Sized
 from queue import Empty
 from threading import Thread
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Optional, Protocol, runtime_checkable
 
 import torch
 from nltk import sent_tokenize
@@ -36,6 +36,7 @@ from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, bui
 from speech_to_speech.LLM.utils import image_url_to_pil, remove_unspeechable, resolve_auto_language
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
 from speech_to_speech.pipeline.messages import (
     EndOfResponse,
     GenerateResponseRequest,
@@ -113,9 +114,9 @@ class StreamContext(BaseModel):
     printable_text: str = ""
     tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
     function_tools: list[FunctionTool] = Field(default_factory=list)
-    block_regex: str | None = None
-    enter_code: str | None = None
-    end_code: str | None = None
+    block_regex: Optional[str] = None
+    enter_code: Optional[str] = None
+    end_code: Optional[str] = None
     input_tokens: int = 0
     sentence_batch: list[str] = Field(default_factory=list)
 
@@ -125,7 +126,7 @@ class StreamContext(BaseModel):
         return self.cancelled or self.stopped
 
 
-class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseRequest], ABC):
+class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
     """Abstract base for text-only and vision language model handlers.
 
     Holds shared pipeline logic (streaming, tool extraction, chat management)
@@ -145,7 +146,7 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
         gen_kwargs: dict[str, Any] = {},
         user_role: str = "user",
         chat_size: int = 1,
-        init_chat_role: str | None = None,
+        init_chat_role: Optional[str] = None,
         init_chat_prompt: str = "You are a helpful AI assistant.",
         cancel_scope: CancelScope | None = None,
         backend: Literal["transformers", "mlx"] = "transformers",
@@ -185,7 +186,7 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
     def _generate(
         self,
         chat: Chat,
-        language_code: str | None,
+        language_code: Optional[str],
         gen: int | None,
         ctx: StreamContext,
         runtime_config: RuntimeConfig | None = None,
@@ -275,9 +276,9 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
     def _apply_instructions(
         self,
         chat: Chat,
-        instructions: str | None,
+        instructions: Optional[str],
         raw_tools: list[Any] | None,
-        tool_choice: str | None,
+        tool_choice: Optional[str],
         ctx: StreamContext | None = None,
     ) -> None:
         if not instructions:
@@ -310,7 +311,7 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
     def _process_printable_text(
         self,
         printable_text: str,
-        language_code: str | None,
+        language_code: Optional[str],
         tools: list[ResponseFunctionToolCall],
         ctx: StreamContext,
         runtime_config: RuntimeConfig | None = None,
@@ -393,7 +394,7 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
         self,
         token_iter: Iterator[Any],
         gen: int | None,
-        language_code: str | None,
+        language_code: Optional[str],
         ctx: StreamContext,
         runtime_config: RuntimeConfig | None = None,
         response: RealtimeResponseCreateParams | None = None,
@@ -443,9 +444,7 @@ class BaseLanguageModelHandler(BaseHandler[Transcription | GenerateResponseReque
     # Main pipeline entry point
     # ------------------------------------------------------------------
 
-    def process(
-        self, request: Transcription | GenerateResponseRequest
-    ) -> Iterator[LLMResponseChunk | TokenUsage | EndOfResponse]:
+    def process(self, request: LLMIn) -> Iterator[LLMOut]:
         language_code = None
         runtime_config = None
         response = None
@@ -586,7 +585,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
     def _generate(
         self,
         chat: Chat,
-        language_code: str | None,
+        language_code: Optional[str],
         gen: int | None,
         ctx: StreamContext,
         runtime_config: RuntimeConfig | None = None,
@@ -717,7 +716,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
     def _generate(
         self,
         chat: Chat,
-        language_code: str | None,
+        language_code: Optional[str],
         gen: int | None,
         ctx: StreamContext,
         runtime_config: RuntimeConfig | None = None,

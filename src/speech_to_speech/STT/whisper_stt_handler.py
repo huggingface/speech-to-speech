@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from copy import copy
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional
 
 import numpy as np
 import torch
@@ -10,7 +10,8 @@ from rich.console import Console
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.pipeline.messages import Transcription, VADAudio
+from speech_to_speech.pipeline.handler_types import STTIn, STTOut
+from speech_to_speech.pipeline.messages import Transcription
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -31,7 +32,7 @@ SUPPORTED_LANGUAGES = [
 ]
 
 
-class WhisperSTTHandler(BaseHandler[VADAudio]):
+class WhisperSTTHandler(BaseHandler[STTIn, STTOut]):
     """
     Handles the Speech To Text generation using a Whisper model.
     """
@@ -41,8 +42,8 @@ class WhisperSTTHandler(BaseHandler[VADAudio]):
         model_name: str = "distil-whisper/distil-large-v3",
         device: str = "cuda",
         torch_dtype: str = "float16",
-        compile_mode: str | None = None,
-        language: str | None = None,
+        compile_mode: Optional[str] = None,
+        language: Optional[str] = None,
         gen_kwargs: dict[str, Any] = {},
     ) -> None:
         self.device = device
@@ -111,7 +112,7 @@ class WhisperSTTHandler(BaseHandler[VADAudio]):
                 f"{self.__class__.__name__}:  warmed up! time: {start_event.elapsed_time(end_event) * 1e-3:.3f} s"
             )
 
-    def process(self, vad_audio: VADAudio) -> Iterator[Transcription]:
+    def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("infering whisper...")
 
         input_features = self.prepare_model_inputs(vad_audio.audio)

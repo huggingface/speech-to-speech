@@ -9,7 +9,8 @@ from funasr import AutoModel
 from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.pipeline.messages import Transcription, VADAudio
+from speech_to_speech.pipeline.handler_types import STTIn, STTOut
+from speech_to_speech.pipeline.messages import Transcription
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-class ParaformerSTTHandler(BaseHandler[VADAudio]):
+class ParaformerSTTHandler(BaseHandler[STTIn, STTOut]):
     """
     Handles the Speech To Text generation using a Paraformer model.
     The default for this model is set to Chinese.
@@ -48,7 +49,7 @@ class ParaformerSTTHandler(BaseHandler[VADAudio]):
         for _ in range(n_steps):
             _ = self.model.generate(dummy_input)[0]["text"].strip().replace(" ", "")
 
-    def process(self, vad_audio: VADAudio) -> Iterator[Transcription]:
+    def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("infering paraformer...")
 
         pred_text = self.model.generate(vad_audio.audio)[0]["text"].strip().replace(" ", "")

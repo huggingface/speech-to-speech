@@ -5,7 +5,7 @@ import time
 from collections.abc import Iterator
 from queue import Queue
 from threading import Event
-from typing import Any
+from typing import TypeAlias
 
 import numpy as np
 import torch
@@ -14,11 +14,15 @@ import torchaudio
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
+from speech_to_speech.pipeline.handler_types import VADIn, VADOut
 from speech_to_speech.pipeline.messages import VADAudio
+from speech_to_speech.pipeline.queue_types import TextEventItem
 from speech_to_speech.utils.utils import int2float
 from speech_to_speech.VAD.vad_iterator import VADIterator
 
 logger = logging.getLogger(__name__)
+
+VADInput: TypeAlias = bytes | tuple[bytes, RuntimeConfig]
 
 # Optional import for audio enhancement
 try:
@@ -30,7 +34,7 @@ except (ImportError, ModuleNotFoundError) as e:
     logger.warning(f"DeepFilterNet not available for audio enhancement: {e}")
 
 
-class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
+class VADHandler(BaseHandler[VADIn, VADOut]):
     """
     Handles voice activity detection. When voice activity is detected, audio will be accumulated until the end of speech is detected and then passed
     to the following part.
@@ -48,7 +52,7 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
         audio_enhancement: bool = False,
         enable_realtime_transcription: bool = False,
         realtime_processing_pause: float = 0.25,
-        text_output_queue: Queue[Any] | None = None,
+        text_output_queue: Queue[TextEventItem] | None = None,
     ) -> None:
         self.should_listen = should_listen
         self.sample_rate = sample_rate
@@ -83,7 +87,7 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
                 self.enhanced_model, self.df_state, _ = init_df()
 
         # State for progressive audio release
-        self.last_process_time = 0
+        self.last_process_time: float = 0.0
 
         # Cumulative sample counter for audio_start_ms / audio_end_ms
         self._total_samples: int = 0
@@ -132,7 +136,7 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
             self.iterator.min_silence_samples = self.sample_rate * td["silence_duration_ms"] / 1000
             logger.info(f"VAD silence duration updated to {td['silence_duration_ms']}ms")
 
-    def process(self, audio_chunk: bytes | tuple[bytes, RuntimeConfig]) -> Iterator[VADAudio]:
+    def process(self, audio_chunk: VADIn) -> Iterator[VADOut]:
         runtime_config = None
         if isinstance(audio_chunk, tuple):
             audio_chunk, runtime_config = audio_chunk
@@ -184,7 +188,7 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
             # Original mode: yield only when speech ends
             yield from self._process_normal(vad_output)
 
-    def _process_realtime(self, vad_output):
+    def _process_realtime(self, vad_output: list[torch.Tensor] | None) -> Iterator[VADOut]:
         """Process with real-time progressive audio release."""
         # Check if we're currently in a speech segment
         if hasattr(self.iterator, "buffer") and len(self.iterator.buffer) > 0:
@@ -232,10 +236,10 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
                 yield VADAudio(audio=array, mode="final")
-                self.last_process_time = 0
+                self.last_process_time = 0.0
                 self._speech_started_emitted = False
 
-    def _process_normal(self, vad_output: list[torch.Tensor] | None) -> Iterator[VADAudio]:
+    def _process_normal(self, vad_output: list[torch.Tensor] | None) -> Iterator[VADOut]:
         """Original processing: yield only when speech ends."""
         if vad_output is not None:
             if len(vad_output) == 0:
@@ -293,7 +297,7 @@ class VADHandler(BaseHandler[bytes | tuple[bytes, RuntimeConfig]]):
     def on_session_end(self):
         self.iterator.reset_states()
         self.iterator.buffer = []
-        self.last_process_time = 0
+        self.last_process_time = 0.0
         self._total_samples = 0
         self._speech_started_emitted = False
         self.should_listen.set()

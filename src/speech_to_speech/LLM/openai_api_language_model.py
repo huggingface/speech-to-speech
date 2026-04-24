@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from nltk import sent_tokenize
@@ -23,6 +23,7 @@ from speech_to_speech.LLM.chat import Chat
 from speech_to_speech.LLM.utils import remove_unspeechable, resolve_auto_language
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
 from speech_to_speech.pipeline.messages import (
     EndOfResponse,
     GenerateResponseRequest,
@@ -34,7 +35,7 @@ from speech_to_speech.pipeline.messages import (
 logger = logging.getLogger(__name__)
 
 
-class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
+class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
     """
     Handles the language model part.
     """
@@ -44,8 +45,8 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
         model_name: str = "deepseek-chat",
         device: str = "cuda",
         gen_kwargs: dict[str, Any] = {},
-        base_url: str | None = None,
-        api_key: str | None = None,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
         stream: bool = False,
         user_role: str = "user",
         chat_size: int = 1,
@@ -120,15 +121,13 @@ class OpenApiModelHandler(BaseHandler[Transcription | GenerateResponseRequest]):
     def _apply_config(
         self,
         chat: Chat,
-        instructions: str | None,
+        instructions: Optional[str],
     ) -> None:
         if instructions:
             full_instructions = build_voice_system_prompt(instructions)
             chat.init_chat({"role": "system", "content": [{"type": "input_text", "text": full_instructions}]})
 
-    def process(
-        self, request: Transcription | GenerateResponseRequest
-    ) -> Iterator[LLMResponseChunk | TokenUsage | EndOfResponse]:
+    def process(self, request: LLMIn) -> Iterator[LLMOut]:
         language_code = None
         runtime_config = None
         response = None

@@ -17,7 +17,7 @@ from pathlib import Path
 from sys import platform
 from threading import Event
 from time import perf_counter
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional
 
 import numpy as np
 import torch
@@ -28,6 +28,7 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, is_control_message
+from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, EndOfResponse, TTSInput
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 
@@ -51,7 +52,7 @@ QWEN3_BASE_PROMPT_SECONDS = 1.0
 QWEN3_PUNCTUATION_PAUSE_SECONDS = 0.5
 
 
-class Qwen3TTSHandler(BaseHandler[TTSInput | EndOfResponse]):
+class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
     """
     Handles Text-to-Speech using Qwen3-TTS.
 
@@ -75,12 +76,12 @@ class Qwen3TTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         ref_audio: str | Path | None = None,
         ref_text: str = DEFAULT_REF_TEXT,
         language: str = "English",
-        speaker: str | None = None,
-        instruct: str | None = None,
+        speaker: Optional[str] = None,
+        instruct: Optional[str] = None,
         xvec_only: bool = False,
         parity_mode: bool = False,
         non_streaming_mode: bool | None = None,
-        mlx_quantization: str | None = None,
+        mlx_quantization: Optional[str] = None,
         streaming_chunk_size: int | None = None,
         max_new_tokens: int = DEFAULT_QWEN3_TTS_MAX_NEW_TOKENS,
         blocksize: int = 512,
@@ -204,7 +205,7 @@ class Qwen3TTSHandler(BaseHandler[TTSInput | EndOfResponse]):
 
         logger.info("MLX Audio Qwen3-TTS model loaded")
 
-    def _normalize_mlx_quantization(self, mlx_quantization: Any) -> str | None:
+    def _normalize_mlx_quantization(self, mlx_quantization: Any) -> Optional[str]:
         if mlx_quantization is None:
             return None
 
@@ -230,7 +231,7 @@ class Qwen3TTSHandler(BaseHandler[TTSInput | EndOfResponse]):
 
         return f"{model_name}{desired_suffix}"
 
-    def _model_name_quantization_suffix(self, model_name: str) -> str | None:
+    def _model_name_quantization_suffix(self, model_name: str) -> Optional[str]:
         if not model_name:
             return None
 
@@ -360,7 +361,7 @@ class Qwen3TTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         runtime_config: RuntimeConfig | None = None,
         response: RealtimeResponseCreateParams | None = None,
     ) -> None:
-        session_voice: str | None = None
+        session_voice: Optional[str] = None
         if response and response.audio and response.audio.output:
             resp_voice = response.audio.output.voice
             session_voice = str(resp_voice) if resp_voice else None
@@ -413,7 +414,7 @@ class Qwen3TTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         inner = getattr(getattr(self.model, "model", None), "model", None)
         return getattr(inner, "tts_model_type", None) or self._infer_model_type_from_name()
 
-    def _resolve_speaker(self) -> str | None:
+    def _resolve_speaker(self) -> Optional[str]:
         if self.speaker:
             return self.speaker
 
@@ -432,7 +433,7 @@ class Qwen3TTSHandler(BaseHandler[TTSInput | EndOfResponse]):
     def _to_int16(self, audio: np.ndarray) -> np.ndarray:
         return np.clip(audio * 32768, -32768, 32767).astype(np.int16)
 
-    def _estimate_max_new_tokens(self, text: str | None) -> int:
+    def _estimate_max_new_tokens(self, text: Optional[str]) -> int:
         text = (text or "").strip()
         chunk_size = max(1, int(getattr(self, "streaming_chunk_size", 1)))
         configured_cap = max(1, int(getattr(self, "max_new_tokens", DEFAULT_QWEN3_TTS_MAX_NEW_TOKENS)))
@@ -563,7 +564,7 @@ class Qwen3TTSHandler(BaseHandler[TTSInput | EndOfResponse]):
             f"Qwen3-TTS generated {audio_duration:.2f}s audio in {generation_time:.2f}s (RTF: {rtf:.2f}, {label})"
         )
 
-    def _coalesce_pending_tts_input(self, current_input: TTSInput) -> tuple[str, str | None, bool]:
+    def _coalesce_pending_tts_input(self, current_input: TTSInput) -> tuple[str, Optional[str], bool]:
         """Combine already-queued text chunks before the next TTS synthesis call."""
         if not hasattr(self.queue_in, "mutex") or not hasattr(self.queue_in, "queue"):
             return current_input.text, current_input.language_code, False
@@ -602,7 +603,7 @@ class Qwen3TTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         combined_text = " ".join(parts).strip()
         return combined_text, language_code, saw_end_of_response
 
-    def process(self, tts_input: TTSInput | EndOfResponse) -> Iterator[bytes | np.ndarray]:
+    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         if isinstance(tts_input, EndOfResponse):
             yield AUDIO_RESPONSE_DONE
             return

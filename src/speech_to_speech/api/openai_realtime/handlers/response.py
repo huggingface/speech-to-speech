@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from openai.types.realtime import (
     RealtimeResponse,
@@ -100,7 +100,7 @@ class ResponseHandler(RealtimeBaseHandler):
         rp = st.current_response_params
         metadata = rp.metadata if rp and rp.metadata else None
 
-        voice: str | None = None
+        voice: Optional[str] = None
         if rp and rp.audio and rp.audio.output and rp.audio.output.voice:
             voice = str(rp.audio.output.voice)
         if not voice:

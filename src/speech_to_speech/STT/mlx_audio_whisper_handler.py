@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional
 
 import numpy as np
 from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.pipeline.messages import Transcription, VADAudio
+from speech_to_speech.pipeline.handler_types import STTIn, STTOut
+from speech_to_speech.pipeline.messages import Transcription
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ SUPPORTED_LANGUAGES = [
 ]
 
 
-class MLXAudioWhisperSTTHandler(BaseHandler[VADAudio]):
+class MLXAudioWhisperSTTHandler(BaseHandler[STTIn, STTOut]):
     """
     Handles the Speech To Text generation using MLX Audio's Whisper implementation.
     Optimized for Apple Silicon using the MLX framework.
@@ -38,7 +39,7 @@ class MLXAudioWhisperSTTHandler(BaseHandler[VADAudio]):
     def setup(
         self,
         model_name: str = "mlx-community/whisper-large-v3-turbo",
-        language: str | None = None,
+        language: Optional[str] = None,
         gen_kwargs: dict[str, Any] = {},
     ) -> None:
         from mlx_audio.stt.generate import load_model
@@ -94,7 +95,7 @@ class MLXAudioWhisperSTTHandler(BaseHandler[VADAudio]):
         except Exception as e:
             logger.warning(f"Warmup failed: {e}")
 
-    def process(self, vad_audio: VADAudio) -> Iterator[Transcription]:
+    def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("inferring mlx-audio whisper...")
 
         assert isinstance(vad_audio.audio, np.ndarray), "Audio must be a numpy array"

@@ -12,7 +12,8 @@ from transformers import AutoTokenizer, VitsModel
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.DEBUG)
 
@@ -62,7 +63,7 @@ WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE = {
 }
 
 
-class FacebookMMSTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
+class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def setup(
         self,
         should_listen: Event,
@@ -132,7 +133,7 @@ class FacebookMMSTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
             logger.exception("Full traceback:")
             return None
 
-    def process(self, tts_input: TTSInput | EndOfResponse) -> Iterator[bytes | np.ndarray]:
+    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         if isinstance(tts_input, EndOfResponse):
             yield AUDIO_RESPONSE_DONE
             return

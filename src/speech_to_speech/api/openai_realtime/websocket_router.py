@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from queue import Empty, Queue
 from threading import Event as ThreadingEvent
-from typing import Any, Callable
+from typing import Any, Callable, Optional, TypeVar
 
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -19,12 +19,20 @@ from openai.types.realtime import (
 
 from speech_to_speech.api.openai_realtime.service import RealtimeService, ServerEvent
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.control import SESSION_END, is_control_message
-from speech_to_speech.pipeline.events import AssistantTextEvent, SpeechStartedEvent, SpeechStoppedEvent, TokenUsageEvent
+from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
+from speech_to_speech.pipeline.events import (
+    AssistantTextEvent,
+    PipelineEvent,
+    SpeechStartedEvent,
+    SpeechStoppedEvent,
+    TokenUsageEvent,
+)
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
+from speech_to_speech.pipeline.queue_types import AudioInItem, AudioOutItem, TextEventItem
 
 logger = logging.getLogger(__name__)
 MAX_AUDIO_BATCH_BYTES = 6400
+QItem = TypeVar("QItem")
 
 
 async def _send_event(ws: WebSocket, event: ServerEvent) -> None:
@@ -49,23 +57,23 @@ def _keep_user_text_event(item: Any) -> bool:
 
 def create_app(
     service: RealtimeService,
-    input_queue: Queue[Any],
-    output_queue: Queue[Any],
-    text_output_queue: Queue[Any],
+    input_queue: Queue[AudioInItem],
+    output_queue: Queue[AudioOutItem],
+    text_output_queue: Queue[TextEventItem],
     should_listen: ThreadingEvent,
     response_playing: ThreadingEvent | None,
     cancel_scope: CancelScope | None,
     stop_event: ThreadingEvent,
 ) -> FastAPI:
 
-    def _flush_queue(q: Queue[Any], *, preserve: Callable[[Any], bool] | None = None) -> None:
+    def _flush_queue(q: Queue[QItem], *, preserve: Callable[[QItem], bool] | None = None) -> None:
         """Drain a queue, optionally preserving items matching *preserve*.
 
         Preserved items are re-inserted at the **front** of the queue
         (atomically under the queue's mutex) so they are processed before
         anything a pipeline thread may have enqueued during the drain.
         """
-        preserved: list[Any] = []
+        preserved: list[QItem] = []
         while True:
             try:
                 item = q.get_nowait()
@@ -93,15 +101,17 @@ def create_app(
             cancel_scope.reset()
         should_listen.set()
 
-    def _to_audio_bytes(audio_chunk: bytes | np.ndarray) -> bytes:
-        if isinstance(audio_chunk, np.ndarray) or hasattr(audio_chunk, "tobytes"):
-            return audio_chunk.tobytes()
-        return audio_chunk
+    def _to_audio_bytes(chunk: AudioOutItem) -> bytes:
+        if isinstance(chunk, PipelineControlMessage):
+            raise TypeError(f"unexpected control message on audio output queue: {chunk!r}")
+        if isinstance(chunk, np.ndarray) or hasattr(chunk, "tobytes"):
+            return chunk.tobytes()
+        return chunk
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.websockets = {}
-        app.state.active_session: str | None = None  # type: ignore[misc]
+        app.state.active_session: Optional[str] = None  # type: ignore[misc]
         app.state.send_task = asyncio.create_task(_send_loop())
         yield
         app.state.send_task.cancel()
@@ -237,7 +247,7 @@ def create_app(
                         else:
                             for cid in service.connection_ids:
                                 ws = app.state.websockets.get(cid)
-                                if ws:
+                                if ws and isinstance(text_msg, PipelineEvent):
                                     events = service.dispatch_pipeline_event(cid, text_msg)
                                     if events:
                                         await _send_events(ws, events)
@@ -288,7 +298,7 @@ def create_app(
                         logger.info("Response complete, listening re-enabled")
                         continue
 
-                    if is_control_message(audio_chunk, SESSION_END.kind):
+                    if is_control_message(audio_chunk):
                         continue
 
                     if cancel_scope and cancel_scope.discarding:

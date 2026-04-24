@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional
 
 import numpy as np
 import torch
@@ -9,7 +9,8 @@ from lightning_whisper_mlx import LightningWhisperMLX
 from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.pipeline.messages import Transcription, VADAudio
+from speech_to_speech.pipeline.handler_types import STTIn, STTOut
+from speech_to_speech.pipeline.messages import Transcription
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ SUPPORTED_LANGUAGES = [
 ]
 
 
-class LightningWhisperSTTHandler(BaseHandler[VADAudio]):
+class LightningWhisperSTTHandler(BaseHandler[STTIn, STTOut]):
     """
     Handles the Speech To Text generation using a Whisper model.
     """
@@ -41,8 +42,8 @@ class LightningWhisperSTTHandler(BaseHandler[VADAudio]):
         model_name: str = "distil-large-v3",
         device: str = "mps",
         torch_dtype: str = "float16",
-        compile_mode: str | None = None,
-        language: str | None = None,
+        compile_mode: Optional[str] = None,
+        language: Optional[str] = None,
         gen_kwargs: dict[str, Any] = {},
     ) -> None:
         if len(model_name.split("/")) > 1:
@@ -64,7 +65,7 @@ class LightningWhisperSTTHandler(BaseHandler[VADAudio]):
         for _ in range(n_steps):
             _ = self.model.transcribe(dummy_input)["text"].strip()
 
-    def process(self, vad_audio: VADAudio) -> Iterator[Transcription]:
+    def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("infering whisper...")
 
         audio = vad_audio.audio

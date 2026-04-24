@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from threading import Event, Thread
 from time import perf_counter
-from typing import Any
+from typing import Any, Optional
 
 import librosa
 import numpy as np
@@ -187,9 +187,9 @@ class ParlerTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         language_code = tts_input.language_code
         text = tts_input.text
 
-        voice: str | None = None
+        voice: Optional[str] = None
         if response and response.audio and response.audio.output:
-            voice = str(response.audio.output.voice) if response.audio.output.voice else None
+            voice = str(response.audio.output.voice) if response.audio.output.voice is not None else None
         if not voice and runtime_config:
             audio_cfg = runtime_config.session.audio
             audio_output = audio_cfg.output if audio_cfg is not None else None

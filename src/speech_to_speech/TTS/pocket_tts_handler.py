@@ -10,13 +10,14 @@ from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 
 logger = logging.getLogger(__name__)
 console = Console()
 
 
-class PocketTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
+class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
     """
     Handler for Pocket TTS model from Kyutai Labs.
     Supports streaming audio generation with voice cloning.
@@ -91,7 +92,7 @@ class PocketTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         """
         return 0.1  # 100ms threshold
 
-    def process(self, tts_input: TTSInput | EndOfResponse) -> Iterator[bytes | np.ndarray]:
+    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         if isinstance(tts_input, EndOfResponse):
             yield AUDIO_RESPONSE_DONE
             return

@@ -2,11 +2,13 @@ import logging
 import socket
 from queue import Empty, Queue
 from threading import Event
-from typing import Any
 
+import numpy as np
 from rich.console import Console
 
+from speech_to_speech.pipeline.control import PipelineControlMessage
 from speech_to_speech.pipeline.messages import PIPELINE_END
+from speech_to_speech.pipeline.queue_types import AudioOutItem
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +23,7 @@ class SocketSender:
     def __init__(
         self,
         stop_event: Event,
-        queue_in: Queue[Any],
+        queue_in: Queue[AudioOutItem],
         host: str = "0.0.0.0",
         port: int = 12346,
     ) -> None:
@@ -44,7 +46,18 @@ class SocketSender:
                 audio_chunk = self.queue_in.get(timeout=0.5)
             except Empty:
                 continue
-            self.conn.sendall(audio_chunk)
+            if isinstance(audio_chunk, PipelineControlMessage):
+                continue
+            payload: bytes
+            if isinstance(audio_chunk, bytes):
+                payload = audio_chunk
+            elif isinstance(audio_chunk, np.ndarray):
+                payload = audio_chunk.tobytes()
+            elif hasattr(audio_chunk, "tobytes"):
+                payload = audio_chunk.tobytes()
+            else:
+                continue
+            self.conn.sendall(payload)
             if isinstance(audio_chunk, bytes) and audio_chunk == PIPELINE_END:
                 break
         self.conn.close()

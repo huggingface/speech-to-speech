@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Mapping
 from queue import Queue
 from threading import Event as ThreadingEvent
 from typing import Any, Callable, Literal, Optional, Self, Union
@@ -46,6 +47,7 @@ from speech_to_speech.pipeline.events import (
     TranscriptionCompletedEvent,
 )
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
+from speech_to_speech.pipeline.queue_types import TextPromptItem
 
 logger = logging.getLogger(__name__)
 
@@ -145,11 +147,11 @@ class ConnState(BaseModel):
     in_response: bool = False
     audio_buffer_has_data: bool = False
     audio_remainder: bytes = b""
-    current_response_id: str | None = None
-    current_item_id: str | None = None
+    current_response_id: Optional[str] = None
+    current_item_id: Optional[str] = None
     content_index: int = 0
     input_audio_duration_s: float = 0.0
-    last_item_id: str | None = None
+    last_item_id: Optional[str] = None
     current_response_params: RealtimeResponseCreateParams | None = None
     response_usage: UsageMetrics = Field(default_factory=UsageMetrics)
 
@@ -164,7 +166,7 @@ class RealtimeService:
 
     def __init__(
         self,
-        text_prompt_queue: Queue[Any] | None = None,
+        text_prompt_queue: Queue[TextPromptItem] | None = None,
         should_listen: ThreadingEvent | None = None,
         chat_size: int = 10,
     ) -> None:
@@ -222,8 +224,9 @@ class RealtimeService:
     def _next_event_id() -> str:
         return _generate_id("event")
 
-    def parse_client_event(self, raw: dict[str, Any]) -> Optional[ClientEvent]:
-        event_type: str | None = raw.get("type")
+    def parse_client_event(self, raw: Mapping[str, object]) -> Optional[ClientEvent]:
+        raw_type = raw.get("type")
+        event_type: Optional[str] = raw_type if isinstance(raw_type, str) else None
         if event_type is None:
             logger.warning("Client event missing 'type' field")
             return None

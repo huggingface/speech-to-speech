@@ -2,13 +2,14 @@ import logging
 import threading
 from queue import Queue
 from threading import Event
-from typing import Any, cast
+from typing import cast
 
 import uvicorn
 
 from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.queue_types import AudioInItem, AudioOutItem, TextEventItem, TextPromptItem
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +25,13 @@ class RealtimeServer:
     def __init__(
         self,
         stop_event: Event,
-        input_queue: Queue[Any],
-        output_queue: Queue[Any],
+        input_queue: Queue[AudioInItem],
+        output_queue: Queue[AudioOutItem],
         should_listen: Event,
         response_playing: Event | None = None,
         cancel_scope: CancelScope | None = None,
-        text_output_queue: Queue[Any] | None = None,
-        text_prompt_queue: Queue[Any] | None = None,
+        text_output_queue: Queue[TextEventItem] | None = None,
+        text_prompt_queue: Queue[TextPromptItem] | None = None,
         host: str = "0.0.0.0",
         port: int = 8765,
         chat_size: int = 10,
@@ -58,7 +59,7 @@ class RealtimeServer:
             service=service,
             input_queue=self.input_queue,
             output_queue=self.output_queue,
-            text_output_queue=cast(Queue[Any], self.text_output_queue),
+            text_output_queue=cast(Queue[TextEventItem], self.text_output_queue),
             should_listen=self.should_listen,
             response_playing=self.response_playing,
             cancel_scope=self.cancel_scope,

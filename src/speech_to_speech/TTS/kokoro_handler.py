@@ -13,14 +13,15 @@ from __future__ import annotations
 import logging
 from sys import platform
 from threading import Event
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional
 
 import numpy as np
 from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 
 logger = logging.getLogger(__name__)
@@ -71,7 +72,7 @@ KOKORO_LANG_DEFAULT_VOICES = {
 }
 
 
-class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
+class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
     """
     Handles Text-to-Speech using Kokoro TTS model.
 
@@ -85,7 +86,7 @@ class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
     def setup(
         self,
         should_listen: Event,
-        model_name: str | None = None,
+        model_name: Optional[str] = None,
         device: str = "auto",
         voice: str = "bm_fable",
         lang_code: str = "b",
@@ -227,7 +228,7 @@ class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
 
         logger.info(f"{self.__class__.__name__} warmed up")
 
-    def process(self, tts_input: TTSInput | EndOfResponse) -> Iterator[bytes | np.ndarray]:
+    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         """
         Process text input and generate audio output.
 
@@ -243,7 +244,7 @@ class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         language_code = tts_input.language_code
         text = tts_input.text
 
-        voice: str | None = None
+        voice: Optional[str] = None
         if response and response.audio and response.audio.output and response.audio.output.voice:
             voice = str(response.audio.output.voice)
         if not voice and runtime_config:
@@ -261,7 +262,7 @@ class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         if not runtime_config:
             self.should_listen.set()
 
-    def _process_mlx(self, llm_sentence: str, language_code: str | None = None) -> Iterator[np.ndarray]:
+    def _process_mlx(self, llm_sentence: str, language_code: Optional[str] = None) -> Iterator[np.ndarray]:
         """Process using MLX backend with Apple Silicon optimizations."""
         from scipy.signal import resample_poly
 
@@ -335,7 +336,7 @@ class KokoroTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
                     logger.debug(f"TTS yielding audio chunk: {len(chunk)} samples")
                     yield chunk
 
-    def _process_kokoro(self, llm_sentence: str, language_code: str | None = None) -> Iterator[np.ndarray]:
+    def _process_kokoro(self, llm_sentence: str, language_code: Optional[str] = None) -> Iterator[np.ndarray]:
         """Process using native kokoro library."""
         from scipy.signal import resample_poly
 

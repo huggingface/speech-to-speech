@@ -5,10 +5,13 @@ from queue import Empty, Queue
 from threading import Event
 from typing import Any
 
+import numpy as np
 from websockets.asyncio.server import ServerConnection
 
-from speech_to_speech.pipeline.control import SESSION_END, is_control_message
+from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
+from speech_to_speech.pipeline.events import PipelineEvent
 from speech_to_speech.pipeline.messages import PIPELINE_END
+from speech_to_speech.pipeline.queue_types import AudioInItem, AudioOutItem, TextEventItem
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +28,10 @@ class WebSocketStreamer:
     def __init__(
         self,
         stop_event: Event,
-        input_queue: Queue[Any],
-        output_queue: Queue[Any],
+        input_queue: Queue[AudioInItem],
+        output_queue: Queue[AudioOutItem],
         should_listen: Event,
-        text_output_queue: Queue[Any] | None = None,
+        text_output_queue: Queue[TextEventItem] | None = None,
         host: str = "0.0.0.0",
         port: int = 8765,
     ) -> None:
@@ -170,10 +173,20 @@ class WebSocketStreamer:
                         audio_buffer.clear()
                         continue
 
+                    if isinstance(audio_chunk, PipelineControlMessage):
+                        continue
+
                     if self.clients:
-                        if hasattr(audio_chunk, "tobytes"):
-                            audio_chunk = audio_chunk.tobytes()
-                        audio_buffer.extend(audio_chunk)
+                        chunk_bytes: bytes
+                        if isinstance(audio_chunk, bytes):
+                            chunk_bytes = audio_chunk
+                        elif isinstance(audio_chunk, np.ndarray):
+                            chunk_bytes = audio_chunk.tobytes()
+                        elif hasattr(audio_chunk, "tobytes"):
+                            chunk_bytes = audio_chunk.tobytes()
+                        else:
+                            continue
+                        audio_buffer.extend(chunk_bytes)
 
                         if len(audio_buffer) >= MIN_AUDIO_BYTES:
                             data = bytes(audio_buffer)
@@ -195,10 +208,14 @@ class WebSocketStreamer:
                     try:
                         text_message = self.text_output_queue.get_nowait()
                         if self.clients:
-                            payload = text_message.model_dump() if hasattr(text_message, "model_dump") else text_message
-                            await asyncio.gather(
-                                *[client.send(json.dumps(payload)) for client in self.clients], return_exceptions=True
-                            )
+                            if isinstance(text_message, PipelineEvent):
+                                payload = text_message.model_dump()
+                                await asyncio.gather(
+                                    *[client.send(json.dumps(payload)) for client in self.clients],
+                                    return_exceptions=True,
+                                )
+                            elif isinstance(text_message, (PipelineControlMessage, bytes)):
+                                continue
                     except Empty:
                         pass
 

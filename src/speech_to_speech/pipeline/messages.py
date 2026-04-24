@@ -8,7 +8,7 @@ constants.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal, Optional, TypeAlias
 
 import numpy as np
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
@@ -57,7 +57,7 @@ class Transcription(PipelineMessage):
 
     tag: Literal["transcription"] = "transcription"
     text: str
-    language_code: str | None = None
+    language_code: Optional[str] = None
 
 
 # ── LLM → LMOutputProcessor ──────────────────────────────────────────
@@ -68,7 +68,7 @@ class LLMResponseChunk(PipelineMessage):
 
     tag: Literal["llm_response_chunk"] = "llm_response_chunk"
     text: str
-    language_code: str | None = None
+    language_code: Optional[str] = None
     tools: list = Field(default_factory=list)
     runtime_config: RuntimeConfig | None = None
     response: RealtimeResponseCreateParams | None = None
@@ -96,7 +96,7 @@ class TTSInput(PipelineMessage):
 
     tag: Literal["tts_input"] = "tts_input"
     text: str
-    language_code: str | None = None
+    language_code: Optional[str] = None
     runtime_config: RuntimeConfig | None = None
     response: RealtimeResponseCreateParams | None = None
 
@@ -118,10 +118,14 @@ class GenerateResponseRequest(PipelineMessage):
     tag: Literal["generate_response"] = "generate_response"
     runtime_config: RuntimeConfig
     response: RealtimeResponseCreateParams | None = None
-    language_code: str | None = None
+    language_code: Optional[str] = None
 
 
 # ── Binary sentinels (audio/output queue) ─────────────────────────────
 
-AUDIO_RESPONSE_DONE: bytes = b"__RESPONSE_DONE__"
-PIPELINE_END: bytes = b"END"
+AUDIO_RESPONSE_DONE: Final[bytes] = b"__RESPONSE_DONE__"
+PIPELINE_END: Final[bytes] = b"END"
+
+PipelineEndSentinel: TypeAlias = Literal[b"END"]
+AudioResponseDoneSentinel: TypeAlias = Literal[b"__RESPONSE_DONE__"]
+SentinelMessage: TypeAlias = PipelineEndSentinel | AudioResponseDoneSentinel

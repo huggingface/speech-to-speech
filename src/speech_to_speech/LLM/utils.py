@@ -1,6 +1,7 @@
 import base64
 import io
 import re
+from typing import Optional
 
 import requests  # type: ignore[import-untyped]
 from PIL import Image
@@ -44,7 +45,7 @@ WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
 }
 
 
-def resolve_auto_language(language_code: str | None) -> tuple[str | None, str | None]:
+def resolve_auto_language(language_code: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     """Strip the ``-auto`` suffix and resolve the human-readable language name.
 
     Returns ``(clean_code, language_name)``.  ``language_name`` is non-None

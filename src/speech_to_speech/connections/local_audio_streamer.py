@@ -2,10 +2,11 @@ import logging
 import threading
 import time
 from queue import Queue
-from typing import Any
 
 import numpy as np
 import sounddevice as sd
+
+from speech_to_speech.pipeline.queue_types import AudioInItem, AudioOutItem
 
 logger = logging.getLogger(__name__)
 
@@ -13,8 +14,8 @@ logger = logging.getLogger(__name__)
 class LocalAudioStreamer:
     def __init__(
         self,
-        input_queue: Queue[Any],
-        output_queue: Queue[Any],
+        input_queue: Queue[AudioInItem],
+        output_queue: Queue[AudioOutItem],
         list_play_chunk_size: int = 512,
     ) -> None:
         self.list_play_chunk_size = list_play_chunk_size
@@ -35,7 +36,8 @@ class LocalAudioStreamer:
                 return
 
             if self.output_queue.empty():
-                self.input_queue.put(indata.copy())
+                pcm = np.ascontiguousarray(indata, dtype=np.int16)
+                self.input_queue.put(pcm.tobytes())
                 outdata[:] = dither
             else:
                 try:

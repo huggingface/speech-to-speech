@@ -12,7 +12,8 @@ from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-class ChatTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
+class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def setup(
         self,
         should_listen: Event,
@@ -50,7 +51,7 @@ class ChatTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         logger.info(f"Warming up {self.__class__.__name__}")
         _ = self.model.infer("text")
 
-    def process(self, tts_input: TTSInput | EndOfResponse) -> Iterator[bytes | np.ndarray]:
+    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         if isinstance(tts_input, EndOfResponse):
             yield AUDIO_RESPONSE_DONE
             return

@@ -13,9 +13,7 @@ from typing import Any, Optional
 import nltk
 import torch
 from rich.console import Console
-from transformers import (
-    HfArgumentParser,
-)
+from transformers import HfArgumentParser
 
 from speech_to_speech.arguments_classes.chat_tts_arguments import ChatTTSHandlerArguments
 from speech_to_speech.arguments_classes.facebookmms_tts_arguments import FacebookMMSTTSHandlerArguments
@@ -43,6 +41,17 @@ from speech_to_speech.arguments_classes.websocket_streamer_arguments import WebS
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut, STTIn, STTOut, TTSIn, TTSOut
+from speech_to_speech.pipeline.queue_types import (
+    AudioInItem,
+    AudioOutItem,
+    LMOutItem,
+    STTOutItem,
+    TextEventItem,
+    TextPromptItem,
+    TTSInItem,
+    VADOutItem,
+)
 from speech_to_speech.utils.thread_manager import ThreadManager
 from speech_to_speech.VAD.vad_handler import VADHandler
 
@@ -244,14 +253,14 @@ def initialize_queues_and_events() -> dict[str, Any]:
         "should_listen": Event(),
         "response_playing": Event(),
         "cancel_scope": CancelScope(),
-        "recv_audio_chunks_queue": Queue(),
-        "send_audio_chunks_queue": Queue(),
-        "spoken_prompt_queue": Queue(),
-        "stt_output_queue": Queue(),
-        "text_prompt_queue": Queue(),
-        "lm_response_queue": Queue(),
-        "lm_processed_queue": Queue(),  # NEW: LLM -> LM processor -> TTS
-        "text_output_queue": Queue(),  # NEW: for text messages to WebSocket
+        "recv_audio_chunks_queue": Queue[AudioInItem](),
+        "send_audio_chunks_queue": Queue[AudioOutItem](),
+        "spoken_prompt_queue": Queue[VADOutItem](),
+        "stt_output_queue": Queue[STTOutItem](),
+        "text_prompt_queue": Queue[TextPromptItem](),
+        "lm_response_queue": Queue[LMOutItem](),
+        "lm_processed_queue": Queue[TTSInItem](),  # NEW: LLM -> LM processor -> TTS
+        "text_output_queue": Queue[TextEventItem](),  # NEW: for text messages to WebSocket
     }
 
 
@@ -455,14 +464,14 @@ def build_pipeline(
 def get_stt_handler(
     module_kwargs: ModuleArguments,
     stop_event: Event,
-    spoken_prompt_queue: Queue[Any],
-    text_prompt_queue: Queue[Any],
+    spoken_prompt_queue: Queue[VADOutItem],
+    text_prompt_queue: Queue[STTOutItem],
     whisper_stt_handler_kwargs: WhisperSTTHandlerArguments,
     faster_whisper_stt_handler_kwargs: FasterWhisperSTTHandlerArguments,
     paraformer_stt_handler_kwargs: ParaformerSTTHandlerArguments,
     mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments,
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
-) -> BaseHandler[Any]:
+) -> BaseHandler[STTIn, STTOut]:
     if module_kwargs.stt == "whisper":
         from speech_to_speech.STT.whisper_stt_handler import WhisperSTTHandler
 
@@ -535,11 +544,11 @@ def get_stt_handler(
 def get_llm_handler(
     module_kwargs: ModuleArguments,
     stop_event: Event,
-    text_prompt_queue: Queue[Any],
-    lm_response_queue: Queue[Any],
+    text_prompt_queue: Queue[TextPromptItem],
+    lm_response_queue: Queue[LMOutItem],
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     open_api_language_model_handler_kwargs: OpenApiLanguageModelHandlerArguments,
-) -> BaseHandler[Any]:
+) -> BaseHandler[LLMIn, LLMOut]:
     if module_kwargs.llm == "open_api":
         from speech_to_speech.LLM.openai_api_language_model import OpenApiModelHandler
 
@@ -580,8 +589,8 @@ def get_llm_handler(
 def get_tts_handler(
     module_kwargs: ModuleArguments,
     stop_event: Event,
-    lm_response_queue: Queue[Any],
-    send_audio_chunks_queue: Queue[Any],
+    lm_response_queue: Queue[TTSInItem],
+    send_audio_chunks_queue: Queue[AudioOutItem],
     should_listen: Event,
     melo_tts_handler_kwargs: MeloTTSHandlerArguments,
     chat_tts_handler_kwargs: ChatTTSHandlerArguments,
@@ -589,7 +598,7 @@ def get_tts_handler(
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
     kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
-) -> BaseHandler[Any]:
+) -> BaseHandler[TTSIn, TTSOut]:
     if module_kwargs.tts == "melo":
         try:
             from speech_to_speech.TTS.melo_handler import MeloTTSHandler

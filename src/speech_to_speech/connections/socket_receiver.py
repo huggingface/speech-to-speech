@@ -3,11 +3,11 @@ import socket
 import time
 from queue import Queue
 from threading import Event
-from typing import Any
 
 from rich.console import Console
 
 from speech_to_speech.pipeline.messages import PIPELINE_END
+from speech_to_speech.pipeline.queue_types import AudioInItem
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class SocketReceiver:
     def __init__(
         self,
         stop_event: Event,
-        queue_out: Queue[Any],
+        queue_out: Queue[AudioInItem],
         should_listen: Event,
         host: str = "0.0.0.0",
         port: int = 12345,

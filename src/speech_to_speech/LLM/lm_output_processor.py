@@ -11,16 +11,17 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from queue import Queue
-from typing import Any
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.events import AssistantTextEvent, TokenUsageEvent
+from speech_to_speech.pipeline.handler_types import LLMOut, TTSIn
 from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk, TokenUsage, TTSInput
+from speech_to_speech.pipeline.queue_types import TextEventItem
 
 logger = logging.getLogger(__name__)
 
 
-class LMOutputProcessor(BaseHandler[LLMResponseChunk | TokenUsage | EndOfResponse]):
+class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
     """
     Processes LLM output to extract tool calls and forward clean text to TTS.
 
@@ -29,7 +30,7 @@ class LMOutputProcessor(BaseHandler[LLMResponseChunk | TokenUsage | EndOfRespons
     Side effect: Sends :class:`AssistantTextEvent` / :class:`TokenUsageEvent` to text_output_queue
     """
 
-    def setup(self, text_output_queue: Queue[Any] | None = None) -> None:
+    def setup(self, text_output_queue: Queue[TextEventItem] | None = None) -> None:
         """
         Initialize the processor.
 
@@ -38,7 +39,7 @@ class LMOutputProcessor(BaseHandler[LLMResponseChunk | TokenUsage | EndOfRespons
         """
         self.text_output_queue = text_output_queue
 
-    def process(self, lm_output: LLMResponseChunk | TokenUsage | EndOfResponse) -> Iterator[TTSInput | EndOfResponse]:
+    def process(self, lm_output: LLMOut) -> Iterator[TTSIn]:
         """
         Process LLM output: send text/tools to WebSocket, forward clean text to TTS.
 

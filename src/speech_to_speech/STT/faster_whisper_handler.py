@@ -8,14 +8,15 @@ from faster_whisper import WhisperModel
 from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.pipeline.messages import Transcription, VADAudio
+from speech_to_speech.pipeline.handler_types import STTIn, STTOut
+from speech_to_speech.pipeline.messages import Transcription
 
 console = Console()
 
 logger = logging.getLogger(__name__)
 
 
-class FasterWhisperSTTHandler(BaseHandler[VADAudio]):
+class FasterWhisperSTTHandler(BaseHandler[STTIn, STTOut]):
     """
     Handles the Speech To Text generation using a Whisper model.
     """
@@ -32,7 +33,7 @@ class FasterWhisperSTTHandler(BaseHandler[VADAudio]):
         os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
         self.model = WhisperModel(model_name, device=device, compute_type=compute_type)
 
-    def process(self, vad_audio: VADAudio) -> Iterator[Transcription]:
+    def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("infering faster whisper...")
 
         segments, info = self.model.transcribe(vad_audio.audio, **self.gen_kwargs)
