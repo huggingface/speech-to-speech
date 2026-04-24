@@ -1,12 +1,7 @@
-from pathlib import Path
-import sys
-
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from STT import parakeet_tdt_handler
-from STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
+from speech_to_speech.STT import parakeet_tdt_handler
+from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
 
 
 def test_detect_language_from_short_text_returns_none_without_querying_detector(monkeypatch):

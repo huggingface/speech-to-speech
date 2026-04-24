@@ -1,13 +1,15 @@
 import os
+
 os.environ['KERAS_BACKEND'] = 'torch'
 
-from time import perf_counter
+import logging
+
 import moonshine
 import torch
-from baseHandler import BaseHandler
-from pipeline_messages import VADAudio
 from rich.console import Console
-import logging
+
+from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.pipeline.messages import VADAudio
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -60,9 +62,6 @@ class MoonshineSTTHandler(BaseHandler[VADAudio]):
 
     def process(self, vad_audio: VADAudio):
         logger.debug("infering moonshine...")
-
-        global pipeline_start
-        pipeline_start = perf_counter()
 
         pred_ids = self.model.generate(vad_audio.audio[None, :])
         pred_text = self.tokenizer.decode_batch(pred_ids)[0]

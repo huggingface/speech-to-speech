@@ -2,38 +2,40 @@ import json
 
 import pytest
 
-from LLM.tool_call.function_call import (
+from speech_to_speech.LLM.tool_call.function_call import (
     FunctionToolCall,
     extract_function_calls_from_text,
     parse_function_call,
 )
-from LLM.tool_call.function_tool import FunctionTool
-
+from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 
 # ---------------------------------------------------------------------------
 # parse_function_call – single calls
 # ---------------------------------------------------------------------------
 
-class TestParseFunctionCall:
 
-    @pytest.mark.parametrize("call_str, expected_name, expected_params", [
-        ("mobile.home()", "mobile.home", {}),
-        ("mobile.back()", "mobile.back", {}),
-        ("mobile.open_app(app_name='drupe')", "mobile.open_app", {"app_name": "drupe"}),
-        ("mobile.long_press(x=0.799, y=0.911)", "mobile.long_press", {"x": 0.799, "y": 0.911}),
-        ("mobile.terminate(status='success')", "mobile.terminate", {"status": "success"}),
-        ("answer('text')", "answer", {"__arg_0__": "text"}),
-        ("pyautogui.hscroll(page=-0.1)", "pyautogui.hscroll", {"page": -0.1}),
-        ("pyautogui.scroll(page=-0.1)", "pyautogui.scroll", {"page": -0.1}),
-        ("pyautogui.scroll(0.13)", "pyautogui.scroll", {"__arg_0__": 0.13}),
-        ("pyautogui.click(x=0.8102, y=0.9463)", "pyautogui.click", {"x": 0.8102, "y": 0.9463}),
-        ("pyautogui.hotkey(keys=['ctrl', 'c'])", "pyautogui.hotkey", {"keys": ["ctrl", "c"]}),
-        ("pyautogui.press(keys='enter')", "pyautogui.press", {"keys": "enter"}),
-        ("pyautogui.press(keys=['enter'])", "pyautogui.press", {"keys": ["enter"]}),
-        ("pyautogui.moveTo(x=0.04, y=0.405)", "pyautogui.moveTo", {"x": 0.04, "y": 0.405}),
-        ("pyautogui.write(message='bread buns')", "pyautogui.write", {"message": "bread buns"}),
-        ("pyautogui.dragTo(x=0.8102, y=0.9463)", "pyautogui.dragTo", {"x": 0.8102, "y": 0.9463}),
-    ])
+class TestParseFunctionCall:
+    @pytest.mark.parametrize(
+        "call_str, expected_name, expected_params",
+        [
+            ("mobile.home()", "mobile.home", {}),
+            ("mobile.back()", "mobile.back", {}),
+            ("mobile.open_app(app_name='drupe')", "mobile.open_app", {"app_name": "drupe"}),
+            ("mobile.long_press(x=0.799, y=0.911)", "mobile.long_press", {"x": 0.799, "y": 0.911}),
+            ("mobile.terminate(status='success')", "mobile.terminate", {"status": "success"}),
+            ("answer('text')", "answer", {"__arg_0__": "text"}),
+            ("pyautogui.hscroll(page=-0.1)", "pyautogui.hscroll", {"page": -0.1}),
+            ("pyautogui.scroll(page=-0.1)", "pyautogui.scroll", {"page": -0.1}),
+            ("pyautogui.scroll(0.13)", "pyautogui.scroll", {"__arg_0__": 0.13}),
+            ("pyautogui.click(x=0.8102, y=0.9463)", "pyautogui.click", {"x": 0.8102, "y": 0.9463}),
+            ("pyautogui.hotkey(keys=['ctrl', 'c'])", "pyautogui.hotkey", {"keys": ["ctrl", "c"]}),
+            ("pyautogui.press(keys='enter')", "pyautogui.press", {"keys": "enter"}),
+            ("pyautogui.press(keys=['enter'])", "pyautogui.press", {"keys": ["enter"]}),
+            ("pyautogui.moveTo(x=0.04, y=0.405)", "pyautogui.moveTo", {"x": 0.04, "y": 0.405}),
+            ("pyautogui.write(message='bread buns')", "pyautogui.write", {"message": "bread buns"}),
+            ("pyautogui.dragTo(x=0.8102, y=0.9463)", "pyautogui.dragTo", {"x": 0.8102, "y": 0.9463}),
+        ],
+    )
     def test_single_call(self, call_str, expected_name, expected_params):
         results = parse_function_call(call_str)
         assert len(results) == 1
@@ -41,9 +43,7 @@ class TestParseFunctionCall:
         assert results[0].parameters == expected_params
 
     def test_swipe_with_list_params(self):
-        results = parse_function_call(
-            "mobile.swipe(from_coord=[0.581, 0.898], to_coord=[0.601, 0.518])"
-        )
+        results = parse_function_call("mobile.swipe(from_coord=[0.581, 0.898], to_coord=[0.601, 0.518])")
         assert len(results) == 1
         assert results[0].function_name == "mobile.swipe"
         assert results[0].parameters["from_coord"] == [0.581, 0.898]
@@ -54,8 +54,8 @@ class TestParseFunctionCall:
 # parse_function_call – multiple positional arguments
 # ---------------------------------------------------------------------------
 
-class TestPositionalArguments:
 
+class TestPositionalArguments:
     def test_bare_identifiers(self):
         results = parse_function_call("function(arg1, arg2, arg3)")
         assert len(results) == 1
@@ -92,8 +92,8 @@ class TestPositionalArguments:
 # parse_function_call – nested parens / special characters (Bug 1 fixes)
 # ---------------------------------------------------------------------------
 
-class TestNestedParens:
 
+class TestNestedParens:
     def test_closing_paren_inside_string(self):
         results = parse_function_call("tool(msg='hello ) world')")
         assert len(results) == 1
@@ -120,8 +120,8 @@ class TestNestedParens:
 # parse_function_call – multi-line (multiple calls)
 # ---------------------------------------------------------------------------
 
-class TestMultiLineParsing:
 
+class TestMultiLineParsing:
     def test_two_calls_on_separate_lines(self):
         text = "mobile.wait(seconds=3)\nmobile.swipe(from_coord=[0.581, 0.898], to_coord=[0.601, 0.518])"
         results = parse_function_call(text)
@@ -134,8 +134,8 @@ class TestMultiLineParsing:
 # extract_function_calls_from_text
 # ---------------------------------------------------------------------------
 
-class TestExtractFromText:
 
+class TestExtractFromText:
     CODE_BLOCK_REGEX = r"<code>.*?</code>"
 
     def test_no_code_block_returns_original_text_no_calls(self):
@@ -195,6 +195,7 @@ class TestExtractFromText:
 # to_realtime_function_tool_call – arg stripping & validation (Bug 2 fixes)
 # ---------------------------------------------------------------------------
 
+
 def _make_tool(name: str, properties: dict, required: list[str] | None = None) -> FunctionTool:
     schema = {"type": "object", "properties": properties}
     if required is not None:
@@ -203,7 +204,6 @@ def _make_tool(name: str, properties: dict, required: list[str] | None = None) -
 
 
 class TestToRealtimeToolCall:
-
     def test_positional_args_stripped_when_required_present(self):
         fc = FunctionToolCall(
             function_name="greet",

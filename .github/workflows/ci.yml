@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+      - run: uv sync --group dev
+      - name: Ruff check
+        run: uv run ruff check src/ tests/
+      - name: Ruff format
+        run: uv run ruff format --check src/ tests/
+
+  mypy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+      - run: uv sync --group dev
+      - name: Mypy
+        run: uv run mypy src/
+
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+      - run: uv sync --group dev
+      - name: NLTK data (punkt_tab for sent_tokenize)
+        run: uv run python -c "import nltk; nltk.download('punkt_tab')"
+      - name: Pytest
+        run: uv run pytest tests/ -x -q

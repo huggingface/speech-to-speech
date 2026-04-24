@@ -65,7 +65,7 @@ Install dependencies with [uv](https://github.com/astral-sh/uv):
 uv sync
 ```
 
-The project now uses a single `pyproject.toml` with platform markers, so macOS and non-macOS dependencies are resolved automatically from one file.
+This installs the `speech_to_speech` package in editable mode and makes the `speech-to-speech` CLI command available. The project uses a single `pyproject.toml` with platform markers, so macOS and non-macOS dependencies are resolved automatically from one file.
 
 If you use Melo TTS, run this once after install:
 ```bash
@@ -102,19 +102,19 @@ The pipeline can be run in three ways:
 
 1. Run the pipeline on the server:
    ```bash
-   python s2s_pipeline.py --recv_host 0.0.0.0 --send_host 0.0.0.0
+   speech-to-speech --recv_host 0.0.0.0 --send_host 0.0.0.0
    ```
 
 2. Run the client locally to handle microphone input and receive generated audio:
    ```bash
-   python listen_and_play.py --host <IP address of your server>
+   python scripts/listen_and_play.py --host <IP address of your server>
    ```
 
 ### WebSocket Approach
 
 1. Run the pipeline with WebSocket mode:
    ```bash
-   python s2s_pipeline.py --mode websocket --ws_host 0.0.0.0 --ws_port 8765
+   speech-to-speech --mode websocket --ws_host 0.0.0.0 --ws_port 8765
    ```
 
 2. Connect to the WebSocket server from your client application at `ws://<server-ip>:8765`. The server handles bidirectional audio streaming:
@@ -125,12 +125,12 @@ The pipeline can be run in three ways:
 
 1. For optimal settings on Mac:
    ```bash
-   python s2s_pipeline.py --local_mac_optimal_settings
+   speech-to-speech --local_mac_optimal_settings
    ```
 
    You can also specify a particular LLM model:
    ```bash
-   python s2s_pipeline.py \
+   speech-to-speech \
        --local_mac_optimal_settings \
        --lm_model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
    ```
@@ -144,7 +144,7 @@ This setting:
    - Qwen3 on Apple Silicon uses `mlx-audio` and defaults to the `6bit` MLX variant unless you explicitly select a different quantization or model suffix.
    - To compare the MLX variants locally, run:
      ```bash
-     .venv/bin/python benchmark_tts.py \
+     python scripts/benchmark_tts.py \
          --handlers qwen3 \
          --iterations 3 \
          --qwen3_mlx_quantizations bf16 4bit 6bit 8bit
@@ -166,7 +166,7 @@ https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install
 Leverage Torch Compile for Whisper with Pocket TTS for a simple low-latency setup:
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech \
 	--lm_model_name microsoft/Phi-3-mini-4k-instruct \
 	--stt_compile_mode reduce-overhead \
   --tts pocket \
@@ -189,7 +189,7 @@ Please note that you must use STT and LLM checkpoints compatible with the target
 For automatic language detection:
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech \
     --stt whisper-mlx \
     --stt_model_name large-v3 \
     --language auto \
@@ -200,7 +200,7 @@ python s2s_pipeline.py \
 Or for one language in particular, chinese in this example
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech \
     --stt whisper-mlx \
     --stt_model_name large-v3 \
     --language zh \
@@ -213,7 +213,7 @@ python s2s_pipeline.py \
 For automatic language detection (note: `--stt whisper-mlx` overrides the default parakeet-tdt from optimal settings, since Whisper `large-v3` has broader language coverage):
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech \
     --local_mac_optimal_settings \
     --stt whisper-mlx \
     --stt_model_name large-v3 \
@@ -224,7 +224,7 @@ python s2s_pipeline.py \
 Or for one language in particular, chinese in this example
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech \
     --local_mac_optimal_settings \
     --stt whisper-mlx \
     --stt_model_name large-v3 \
@@ -237,7 +237,7 @@ python s2s_pipeline.py \
 Pocket TTS from Kyutai Labs provides streaming TTS with voice cloning capabilities. To use it:
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech \
     --tts pocket \
     --pocket_tts_voice jean \
     --pocket_tts_device cpu
@@ -247,10 +247,10 @@ Available voice presets: `alba`, `marius`, `javert`, `jean`, `fantine`, `cosette
 
 ## Command-line Usage
 
-> **_NOTE:_** References for all the CLI arguments can be found directly in the [arguments classes](https://github.com/huggingface/speech-to-speech/tree/d5e460721e578fef286c7b64e68ad6a57a25cf1b/arguments_classes) or by running `python s2s_pipeline.py -h`.
+> **_NOTE:_** References for all the CLI arguments can be found directly in the [arguments classes](./src/speech_to_speech/arguments_classes) or by running `speech-to-speech -h`.
 
 ### Module level Parameters 
-See [ModuleArguments](https://github.com/huggingface/speech-to-speech/blob/d5e460721e578fef286c7b64e68ad6a57a25cf1b/arguments_classes/module_arguments.py) class. Allows to set:
+See [ModuleArguments](./src/speech_to_speech/arguments_classes/module_arguments.py) class. Allows to set:
 - a common `--device` (if one wants each part to run on the same device)
 - `--mode` `local` or `server`
 - chosen STT implementation 
@@ -259,7 +259,7 @@ See [ModuleArguments](https://github.com/huggingface/speech-to-speech/blob/d5e46
 - logging level
 
 ### VAD parameters
-See [VADHandlerArguments](https://github.com/huggingface/speech-to-speech/blob/d5e460721e578fef286c7b64e68ad6a57a25cf1b/arguments_classes/vad_arguments.py) class. Notably:
+See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments.py) class. Notably:
 - `--thresh`: Threshold value to trigger voice activity detection.
 - `--min_speech_ms`: Minimum duration of detected voice activity to be considered speech.
 - `--min_silence_ms`: Minimum length of silence intervals for segmenting speech, balancing sentence cutting and latency reduction.
@@ -267,7 +267,7 @@ See [VADHandlerArguments](https://github.com/huggingface/speech-to-speech/blob/d
 
 ### STT, LM and TTS parameters
 
-`model_name`, `torch_dtype`, and `device` are exposed for each implementation of the Speech to Text, Language Model, and Text to Speech. Specify the targeted pipeline part with the corresponding prefix (e.g. `stt`, `lm` or `tts`, check the implementations' [arguments classes](https://github.com/huggingface/speech-to-speech/tree/d5e460721e578fef286c7b64e68ad6a57a25cf1b/arguments_classes) for more details).
+`model_name`, `torch_dtype`, and `device` are exposed for each implementation of the Speech to Text, Language Model, and Text to Speech. Specify the targeted pipeline part with the corresponding prefix (e.g. `stt`, `lm` or `tts`, check the implementations' [arguments classes](./src/speech_to_speech/arguments_classes) for more details).
 
 For example:
 ```bash

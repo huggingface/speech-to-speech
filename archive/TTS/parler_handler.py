@@ -1,23 +1,25 @@
 from __future__ import annotations
 
+import logging
 from threading import Event, Thread
 from time import perf_counter
-from baseHandler import BaseHandler
-from pipeline_messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from typing import Any, Optional
+
+import librosa
 import numpy as np
 import torch
+from parler_tts import ParlerTTSForConditionalGeneration, ParlerTTSStreamer
+from rich.console import Console
 from transformers import (
     AutoTokenizer,
 )
-from parler_tts import ParlerTTSForConditionalGeneration, ParlerTTSStreamer
-import librosa
-import logging
-from rich.console import Console
-from utils.utils import next_power_of_2
 from transformers.utils.import_utils import (
     is_flash_attn_2_available,
 )
 
+from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.utils.utils import next_power_of_2
 
 torch._inductor.config.fx_graph_cache = True
 # mind about this parameter ! should be >= 2 * number of padded prompt sizes for TTS
@@ -82,7 +84,7 @@ class ParlerTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         self.model = ParlerTTSForConditionalGeneration.from_pretrained(
             model_name, torch_dtype=self.torch_dtype
         ).to(device)
-        
+
         self.description_tokenizer = AutoTokenizer.from_pretrained(self.model.config.text_encoder._name_or_path)
         self.prompt_tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -185,20 +187,22 @@ class ParlerTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         language_code = tts_input.language_code
         text = tts_input.text
 
-        voice = None
+        voice: Optional[str] = None
         if response and response.audio and response.audio.output:
-            voice = response.audio.output.voice
+            voice = str(response.audio.output.voice) if response.audio.output.voice is not None else None
         if not voice and runtime_config:
-            voice = runtime_config.session.audio.output.voice
+            audio_cfg = runtime_config.session.audio
+            audio_output = audio_cfg.output if audio_cfg is not None else None
+            voice = str(audio_output.voice) if audio_output is not None and audio_output.voice else None
         if voice:
             self.speaker = voice
         elif language_code:
             self.speaker = WHISPER_LANGUAGE_TO_PARLER_SPEAKER.get(language_code, "Jason")
-            
+
         console.print(f"[green]ASSISTANT: {text}")
         nb_tokens = len(self.prompt_tokenizer(text).input_ids)
 
-        pad_args = {}
+        pad_args: dict[str, Any] = {}
         if self.compile_mode:
             # pad to closest upper power of two
             pad_length = next_power_of_2(nb_tokens)
@@ -219,14 +223,14 @@ class ParlerTTSHandler(BaseHandler[TTSInput | EndOfResponse]):
         thread = Thread(target=self.model.generate, kwargs=tts_gen_kwargs)
         thread.start()
 
+        pipeline_start = perf_counter()
         for i, audio_chunk in enumerate(streamer):
             if self.cancel_response and self.cancel_response.is_set():
                 logger.info("TTS generation cancelled (interruption)")
                 return
-            global pipeline_start
-            if i == 0 and "pipeline_start" in globals():
+            if i == 0:
                 logger.info(
-                    f"Time to first audio: {perf_counter() - pipeline_start:.3f}"
+                    f"Time to first audio: {perf_counter() - pipeline_start:.3f}s"
                 )
             audio_chunk = librosa.resample(audio_chunk, orig_sr=44100, target_sr=16000)
             audio_chunk = (audio_chunk * 32768).astype(np.int16)

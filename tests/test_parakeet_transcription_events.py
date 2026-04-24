@@ -1,15 +1,11 @@
 from contextlib import contextmanager
-from pathlib import Path
 from types import SimpleNamespace
-import sys
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from STT import parakeet_tdt_handler
-from STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
-from pipeline_messages import PartialTranscription, Transcription, VADAudio
+from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, VADAudio
+from speech_to_speech.STT import parakeet_tdt_handler
+from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
 
 
 def test_show_progressive_transcription_returns_combined_text(monkeypatch):
