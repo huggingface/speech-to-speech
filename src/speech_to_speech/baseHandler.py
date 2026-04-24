@@ -73,9 +73,8 @@ class BaseHandler(Generic[InT, OutT]):
                 logger.debug("Stopping thread")
                 break
 
-            # After filtering control + sentinel, the remaining items are handler inputs.
-            if isinstance(item, (bytes, PipelineControlMessage)):
-                logger.warning("%s: unexpected queue item type: %s", self.__class__.__name__, type(item).__name__)
+            if isinstance(item, PipelineControlMessage):
+                logger.warning("%s: unexpected control message kind: %s", self.__class__.__name__, item.kind)
                 continue
 
             start_time = perf_counter()
