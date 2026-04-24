@@ -6,7 +6,7 @@ import logging
 from queue import Empty, Queue
 from threading import Event
 from time import perf_counter
-from typing import Any, Generic, Iterator, TypeVar
+from typing import Any, Generic, Iterator, TypeVar, cast
 
 from speech_to_speech.pipeline.control import PipelineControlMessage, is_control_message, SESSION_END
 from speech_to_speech.pipeline.messages import PIPELINE_END
@@ -79,7 +79,7 @@ class BaseHandler(Generic[InT, OutT]):
 
             start_time = perf_counter()
             try:
-                for output in self.process(item):
+                for output in self.process(cast(InT, item)):
                     self._times.append(perf_counter() - start_time)
                     if self.last_time > self.min_time_to_debug:
                         logger.debug(f"{self.__class__.__name__}: {self.last_time: .3f} s")
