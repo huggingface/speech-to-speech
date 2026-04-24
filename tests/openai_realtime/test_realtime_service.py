@@ -295,6 +295,9 @@ class TestHandleConversationItemCreate:
         assert e2[0].previous_item_id == "item_1"
 
     def test_function_call_output_forwarded(self, service, conn_id, text_prompt_queue):
+        service._state(conn_id).runtime_config.chat.append(
+            {"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{}"}
+        )
         evt = ConversationItemCreateEvent(
             type="conversation.item.create",
             item={"type": "function_call_output", "output": '{"result": 42}', "call_id": "call_1"},
@@ -304,6 +307,18 @@ class TestHandleConversationItemCreate:
         assert isinstance(events[0], ConversationItemCreatedEvent)
         chat = service._state(conn_id).runtime_config.chat.to_list()
         assert chat[-1] == {"type": "function_call_output", "call_id": "call_1", "output": '{"result": 42}'}
+
+    def test_function_call_output_rejected_for_unknown_call_id(self, service, conn_id, text_prompt_queue):
+        evt = ConversationItemCreateEvent(
+            type="conversation.item.create",
+            item={"type": "function_call_output", "output": '{"result": 42}', "call_id": "call_unknown"},
+        )
+        events = service.handle_conversation_item_create(conn_id, evt)
+        assert len(events) == 1
+        assert isinstance(events[0], RealtimeErrorEvent)
+        assert "call_unknown" in events[0].error.message
+        chat = service._state(conn_id).runtime_config.chat.to_list()
+        assert not any(entry.get("type") == "function_call_output" for entry in chat)
 
     def test_input_image_forwarded(self, service, conn_id, text_prompt_queue):
         evt = ConversationItemCreateEvent(
@@ -451,6 +466,22 @@ class TestHandleResponseCreate:
         assert isinstance(result, ResponseCreatedEvent)
         gen_msg = text_prompt_queue.get()
         assert isinstance(gen_msg, GenerateResponseRequest)
+
+    def test_response_create_rejects_invalid_function_call_output_in_input(
+        self, service, conn_id, text_prompt_queue
+    ):
+        evt = ResponseCreateEvent(
+            type="response.create",
+            response={
+                "input": [
+                    {"type": "function_call_output", "output": '{"x": 1}', "call_id": "call_bogus"},
+                ],
+            },
+        )
+        result = service.handle_response_create(conn_id, evt)
+        assert isinstance(result, RealtimeErrorEvent)
+        assert "call_bogus" in result.error.message
+        assert service._state(conn_id).in_response is False
 
     def test_double_response_create_rejected(self, service, conn_id, text_prompt_queue):
         """Second response.create is rejected because in_response is set immediately."""
@@ -1239,3 +1270,177 @@ class TestChatImageLifecycle:
         last_user = chat.buffer[-1]
         assert isinstance(last_user["content"], list)
         assert any(p.get("image_url") == "new_url" for p in last_user["content"])
+
+
+# ===================================================================
+# Chat tool call tracking
+# ===================================================================
+
+
+class TestChatToolCallTracking:
+    """Tests for Chat._pending_tool_calls and append_tool_output."""
+
+    def _make_chat(self, size=10):
+        from speech_to_speech.LLM.chat import Chat
+
+        return Chat(size=size)
+
+    def _fc(self, call_id="call_1", name="f1"):
+        return {"type": "function_call", "call_id": call_id, "name": name, "arguments": "{}"}
+
+    def _fco(self, call_id="call_1"):
+        return {"type": "function_call_output", "call_id": call_id, "output": '{"ok": true}'}
+
+    def test_append_registers_pending_tool_call(self):
+        chat = self._make_chat()
+        fc = self._fc()
+        chat.append(fc)
+        assert "call_1" in chat._pending_tool_calls
+        assert chat._pending_tool_calls["call_1"] is fc
+
+    def test_append_tool_output_clears_pending(self):
+        chat = self._make_chat()
+        chat.append(self._fc())
+        assert "call_1" in chat._pending_tool_calls
+        err = chat.append_tool_output("call_1", self._fco())
+        assert err is None
+        assert "call_1" not in chat._pending_tool_calls
+        assert chat.buffer[-1]["type"] == "function_call_output"
+
+    def test_append_tool_output_reinjects_evicted_call(self):
+        chat = self._make_chat(size=1)
+        # size=1 keeps 1 user turn. The 2nd user message evicts the 1st turn
+        # (user + fc + assistant), but _pending_tool_calls retains the fc.
+        chat.append({"role": "user", "content": "hi"})
+        chat.append(self._fc("call_x"))
+        chat.append({"role": "assistant", "content": "ok"})
+        chat.append({"role": "user", "content": "more"})
+        assert not any(e.get("call_id") == "call_x" for e in chat.buffer)
+        assert "call_x" in chat._pending_tool_calls
+
+        err = chat.append_tool_output("call_x", self._fco("call_x"))
+        assert err is None
+        assert "call_x" not in chat._pending_tool_calls
+        types = [e.get("type") for e in chat.buffer]
+        assert "function_call" in types
+        assert "function_call_output" in types
+        fc_idx = next(i for i, e in enumerate(chat.buffer) if e.get("type") == "function_call")
+        fco_idx = next(i for i, e in enumerate(chat.buffer) if e.get("type") == "function_call_output")
+        assert fc_idx < fco_idx
+
+    def test_append_tool_output_rejects_unknown_call_id(self):
+        chat = self._make_chat()
+        err = chat.append_tool_output("call_nope", self._fco("call_nope"))
+        assert err is not None
+        assert "call_nope" in err
+        assert not any(e.get("type") == "function_call_output" for e in chat.buffer)
+
+    def test_copy_preserves_pending_tool_calls(self):
+        chat = self._make_chat()
+        chat.append(self._fc("call_a"))
+        clone = chat.copy()
+        assert "call_a" in clone._pending_tool_calls
+        # Mutating the clone does not affect the original
+        clone._pending_tool_calls.pop("call_a")
+        assert "call_a" in chat._pending_tool_calls
+
+    def test_reset_clears_pending_tool_calls(self):
+        chat = self._make_chat()
+        chat.append(self._fc())
+        assert chat._pending_tool_calls
+        chat.reset()
+        assert chat._pending_tool_calls == {}
+        assert chat.buffer == []
+
+    # -- transformers / Chat Completions tool_calls format --
+
+    def _assistant_with_tool_calls(self, *call_ids):
+        """Build an assistant message with tool_calls (local LLM format)."""
+        return {
+            "role": "assistant",
+            "tool_calls": [
+                {"type": "function", "id": cid, "function": {"name": f"fn_{cid}", "arguments": {}}}
+                for cid in call_ids
+            ],
+        }
+
+    def test_append_registers_pending_from_tool_calls_format(self):
+        chat = self._make_chat()
+        msg = self._assistant_with_tool_calls("tc_1", "tc_2")
+        chat.append(msg)
+        assert "tc_1" in chat._pending_tool_calls
+        assert "tc_2" in chat._pending_tool_calls
+
+    def test_append_tool_output_accepts_tool_calls_format_in_buffer(self):
+        chat = self._make_chat()
+        chat.append(self._assistant_with_tool_calls("tc_1"))
+        err = chat.append_tool_output("tc_1", self._fco("tc_1"))
+        assert err is None
+        assert chat.buffer[-1] == self._fco("tc_1")
+        assert "tc_1" not in chat._pending_tool_calls
+
+    def test_append_tool_output_reinjects_evicted_tool_calls_format(self):
+        chat = self._make_chat(size=1)
+        chat.append({"role": "user", "content": "hi"})
+        chat.append(self._assistant_with_tool_calls("tc_x"))
+        chat.append({"role": "user", "content": "a"})
+        assert not any(e.get("tool_calls") for e in chat.buffer)
+        assert "tc_x" in chat._pending_tool_calls
+
+        err = chat.append_tool_output("tc_x", self._fco("tc_x"))
+        assert err is None
+        assert "tc_x" not in chat._pending_tool_calls
+        assert any(
+            e.get("role") == "assistant" and any(tc.get("id") == "tc_x" for tc in e.get("tool_calls", []))
+            for e in chat.buffer
+        )
+        assert chat.buffer[-1] == self._fco("tc_x")
+
+    # -- turn-based eviction --
+
+    def test_eviction_removes_complete_turn(self):
+        chat = self._make_chat(size=1)
+        chat.append({"role": "user", "content": "turn 1"})
+        chat.append({"role": "assistant", "content": "thinking"})
+        chat.append(self._fc("c1"))
+        chat.append(self._fco("c1"))
+        chat.append({"role": "assistant", "content": "done"})
+        # Still 1 user turn, no eviction yet
+        assert len(chat.buffer) == 5
+
+        chat.append({"role": "user", "content": "turn 2"})
+        # 2 user turns > size=1 → oldest turn fully evicted
+        user_msgs = [e for e in chat.buffer if e.get("role") == "user"]
+        assert len(user_msgs) == 1
+        assert user_msgs[0]["content"] == "turn 2"
+        assert not any(e.get("content") == "thinking" for e in chat.buffer)
+        assert not any(e.get("call_id") == "c1" and e.get("type") == "function_call" for e in chat.buffer)
+
+    def test_eviction_preserves_size_user_turns(self):
+        chat = self._make_chat(size=2)
+        # Turn 1: short
+        chat.append({"role": "user", "content": "t1"})
+        chat.append({"role": "assistant", "content": "r1"})
+        # Turn 2: long (with tool call)
+        chat.append({"role": "user", "content": "t2"})
+        chat.append({"role": "assistant", "content": "let me check"})
+        chat.append(self._fc("c2"))
+        chat.append(self._fco("c2"))
+        chat.append({"role": "assistant", "content": "here"})
+        assert chat._count_user_turns() == 2
+
+        # Turn 3: triggers eviction of turn 1
+        chat.append({"role": "user", "content": "t3"})
+        assert chat._count_user_turns() == 2
+        user_contents = [e["content"] for e in chat.buffer if e.get("role") == "user"]
+        assert user_contents == ["t2", "t3"]
+
+    def test_pending_tool_calls_cleaned_after_reinjection(self):
+        chat = self._make_chat(size=1)
+        chat.append({"role": "user", "content": "hi"})
+        chat.append(self._fc("call_z"))
+        chat.append({"role": "user", "content": "bye"})
+        assert "call_z" in chat._pending_tool_calls
+
+        chat.append_tool_output("call_z", self._fco("call_z"))
+        assert "call_z" not in chat._pending_tool_calls

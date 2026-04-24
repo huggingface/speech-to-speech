@@ -52,7 +52,7 @@ def _make_response(output, usage=None):
     return resp
 
 
-def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
+def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None, chat_size=2):
     handler = object.__new__(OpenApiModelHandler)
     handler.model_name = "test-model"
     handler.stream = stream
@@ -63,7 +63,7 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler.disable_thinking = disable_thinking
     handler._extra_body = {"chat_template_kwargs": {"enable_thinking": False}} if disable_thinking else None
     handler.user_role = "user"
-    handler.chat = Chat(1)
+    handler.chat = Chat(chat_size)
     handler.cancel_scope = cancel_scope
     handler.tools = None
     handler.tools_choice = None
