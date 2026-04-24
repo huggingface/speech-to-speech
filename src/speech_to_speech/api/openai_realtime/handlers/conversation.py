@@ -83,7 +83,7 @@ class ConversationHandler(RealtimeBaseHandler):
             return "Message has no supported content parts."
 
         if getattr(item, "type", None) == "function_call_output" and getattr(item, "output", None):
-            call_id = item.call_id  # type: ignore[union-attr]
+            call_id: str = item.call_id or ""  # type: ignore[union-attr]
             output_item = {
                 "type": "function_call_output",
                 "call_id": call_id,

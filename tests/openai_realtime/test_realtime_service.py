@@ -467,9 +467,7 @@ class TestHandleResponseCreate:
         gen_msg = text_prompt_queue.get()
         assert isinstance(gen_msg, GenerateResponseRequest)
 
-    def test_response_create_rejects_invalid_function_call_output_in_input(
-        self, service, conn_id, text_prompt_queue
-    ):
+    def test_response_create_rejects_invalid_function_call_output_in_input(self, service, conn_id, text_prompt_queue):
         evt = ResponseCreateEvent(
             type="response.create",
             response={
@@ -1359,8 +1357,7 @@ class TestChatToolCallTracking:
         return {
             "role": "assistant",
             "tool_calls": [
-                {"type": "function", "id": cid, "function": {"name": f"fn_{cid}", "arguments": {}}}
-                for cid in call_ids
+                {"type": "function", "id": cid, "function": {"name": f"fn_{cid}", "arguments": {}}} for cid in call_ids
             ],
         }
 
