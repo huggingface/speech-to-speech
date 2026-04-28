@@ -141,7 +141,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         if isinstance(audio_chunk, tuple):
             audio_chunk, runtime_config = audio_chunk
         self._apply_runtime_turn_detection(runtime_config)
-        logger.debug(f"VAD received {len(audio_chunk)} bytes")
 
         if not self.should_listen.is_set():
             return

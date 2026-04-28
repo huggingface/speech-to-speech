@@ -753,6 +753,7 @@ def main() -> None:
 
     try:
         pipeline_manager.start()
+        pipeline_manager.wait()
     except KeyboardInterrupt:
         if not shutdown_requested[0]:
             console.print("\n[yellow]Shutting down gracefully...[/yellow]")
