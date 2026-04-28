@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from typing import TYPE_CHECKING, Optional
 
@@ -17,9 +16,11 @@ from openai.types.realtime.realtime_response import Audio, AudioOutput
 from openai.types.realtime.realtime_response_status import RealtimeResponseStatus
 from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
 
-from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler, _generate_id
+from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
+from speech_to_speech.LLM.chat import ChatItemError
 from speech_to_speech.pipeline.events import AssistantTextEvent
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
+from speech_to_speech.utils.utils import _generate_id
 
 if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import ServerEvent, _ResponseStatus, _StatusReason
@@ -146,9 +147,10 @@ class ResponseHandler(RealtimeBaseHandler):
 
         if event.response and event.response.input:
             for input_item in event.response.input:
-                error = self._service.conversation._append_item(conn_id, input_item)
-                if error is not None:
-                    return self.make_error(message=error, _type="invalid_input_item")
+                try:
+                    self._service.conversation._append_item(conn_id, input_item)
+                except ChatItemError as exc:
+                    return self.make_error(message=str(exc), _type="invalid_input_item")
 
         st.in_response = True
 
@@ -237,15 +239,13 @@ class ResponseHandler(RealtimeBaseHandler):
         if event.tools:
             st.response_usage.tool_calls += len(event.tools)
             for tool in event.tools:
-                raw_args = tool.get("arguments")
-                arguments = raw_args if isinstance(raw_args, str) else json.dumps(raw_args or {})
                 events.append(
                     ResponseFunctionCallArgumentsDoneEvent(
                         type="response.function_call_arguments.done",
                         event_id=self._next_event_id(),
-                        call_id=tool.get("call_id", ""),
-                        name=tool.get("name", ""),
-                        arguments=arguments,
+                        call_id=tool.call_id,
+                        name=tool.name,
+                        arguments=tool.arguments,
                         item_id=item_id,
                         output_index=output_idx,
                         response_id=resp_id,

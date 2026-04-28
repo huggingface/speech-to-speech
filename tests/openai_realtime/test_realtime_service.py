@@ -284,19 +284,26 @@ class TestHandleConversationItemCreate:
         assert evt.item.role == "user"
         assert evt.item.content[0].type == "input_text"
         assert evt.item.content[0].text == "hi"
-        chat = service._state(conn_id).runtime_config.chat.to_list()
-        assert chat[-1]["role"] == "user"
-        assert chat[-1]["content"] == [{"type": "input_text", "text": "hi"}]
+        last = service._state(conn_id).runtime_config.chat.buffer[-1]
+        assert last.role == "user"
+        assert last.content[0].type == "input_text"
+        assert last.content[0].text == "hi"
 
     def test_text_input_previous_item_id_chain(self, service, conn_id):
         e1 = service.handle_conversation_item_create(conn_id, self._text_event("a", "item_1"))
         e2 = service.handle_conversation_item_create(conn_id, self._text_event("b", "item_2"))
         assert e1[0].previous_item_id is None
-        assert e2[0].previous_item_id == "item_1"
+        assert e2[0].previous_item_id == e1[0].item.id
 
     def test_function_call_output_forwarded(self, service, conn_id, text_prompt_queue):
-        service._state(conn_id).runtime_config.chat.append(
-            {"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{}"}
+        from openai.types.realtime.realtime_conversation_item_function_call import (
+            RealtimeConversationItemFunctionCall,
+        )
+
+        service._state(conn_id).runtime_config.chat.add_item(
+            RealtimeConversationItemFunctionCall(
+                type="function_call", call_id="call_1", name="get_weather", arguments="{}"
+            )
         )
         evt = ConversationItemCreateEvent(
             type="conversation.item.create",
@@ -305,8 +312,10 @@ class TestHandleConversationItemCreate:
         events = service.handle_conversation_item_create(conn_id, evt)
         assert len(events) == 1
         assert isinstance(events[0], ConversationItemCreatedEvent)
-        chat = service._state(conn_id).runtime_config.chat.to_list()
-        assert chat[-1] == {"type": "function_call_output", "call_id": "call_1", "output": '{"result": 42}'}
+        last = service._state(conn_id).runtime_config.chat.buffer[-1]
+        assert last.type == "function_call_output"
+        assert last.call_id == "call_1"
+        assert last.output == '{"result": 42}'
 
     def test_function_call_output_rejected_for_unknown_call_id(self, service, conn_id, text_prompt_queue):
         evt = ConversationItemCreateEvent(
@@ -317,8 +326,10 @@ class TestHandleConversationItemCreate:
         assert len(events) == 1
         assert isinstance(events[0], RealtimeErrorEvent)
         assert "call_unknown" in events[0].error.message
-        chat = service._state(conn_id).runtime_config.chat.to_list()
-        assert not any(entry.get("type") == "function_call_output" for entry in chat)
+        assert not any(
+            getattr(e, "type", None) == "function_call_output"
+            for e in service._state(conn_id).runtime_config.chat.buffer
+        )
 
     def test_input_image_forwarded(self, service, conn_id, text_prompt_queue):
         evt = ConversationItemCreateEvent(
@@ -332,12 +343,10 @@ class TestHandleConversationItemCreate:
         events = service.handle_conversation_item_create(conn_id, evt)
         assert len(events) == 1
         assert isinstance(events[0], ConversationItemCreatedEvent)
-        chat = service._state(conn_id).runtime_config.chat.to_list()
-        last = chat[-1]
-        assert last["role"] == "user"
-        assert isinstance(last["content"], list)
-        assert last["content"][0]["type"] == "input_image"
-        assert last["content"][0]["image_url"] == "https://example.com/img.png"
+        last = service._state(conn_id).runtime_config.chat.buffer[-1]
+        assert last.role == "user"
+        assert last.content[0].type == "input_image"
+        assert last.content[0].image_url == "https://example.com/img.png"
 
     def test_mixed_text_and_image_forwarded(self, service, conn_id, text_prompt_queue):
         evt = ConversationItemCreateEvent(
@@ -353,14 +362,13 @@ class TestHandleConversationItemCreate:
         )
         events = service.handle_conversation_item_create(conn_id, evt)
         assert len(events) == 1
-        chat = service._state(conn_id).runtime_config.chat.to_list()
-        last = chat[-1]
-        assert last["role"] == "user"
-        assert isinstance(last["content"], list)
-        assert len(last["content"]) == 2
-        assert last["content"][0] == {"type": "input_text", "text": "What is this?"}
-        assert last["content"][1]["type"] == "input_image"
-        assert last["content"][1]["image_url"] == "data:image/png;base64,abc123"
+        last = service._state(conn_id).runtime_config.chat.buffer[-1]
+        assert last.role == "user"
+        assert len(last.content) == 2
+        assert last.content[0].type == "input_text"
+        assert last.content[0].text == "What is this?"
+        assert last.content[1].type == "input_image"
+        assert last.content[1].image_url == "data:image/png;base64,abc123"
 
 
 # ===================================================================
@@ -724,8 +732,8 @@ class TestDispatchPipelineEvent:
             AssistantTextEvent(
                 text="Let me check",
                 tools=[
-                    {"call_id": "c1", "name": "get_weather", "arguments": '{"city": "Paris"}'},
-                    {"call_id": "c2", "name": "get_time", "arguments": "{}"},
+                    {"type": "function_call", "call_id": "c1", "name": "get_weather", "arguments": '{"city": "Paris"}'},
+                    {"type": "function_call", "call_id": "c2", "name": "get_time", "arguments": "{}"},
                 ],
             ),
         )
@@ -745,7 +753,7 @@ class TestDispatchPipelineEvent:
             conn_id,
             AssistantTextEvent(
                 text="",
-                tools=[{"call_id": "c1", "name": "f1", "arguments": "{}"}],
+                tools=[{"type": "function_call", "call_id": "c1", "name": "f1", "arguments": "{}"}],
             ),
         )
         assert len(events) == 1
@@ -845,7 +853,7 @@ class TestIdAndStateManagement:
             },
         )
         events = service.handle_conversation_item_create(conn_id, evt)
-        assert st.last_item_id == "item_manual"
+        assert st.last_item_id == events[0].item.id
         assert events[0].previous_item_id == output_id
 
     def test_content_index_resets_on_new_item(self, service, conn_id):
@@ -1107,8 +1115,8 @@ class TestUsageMetricsTracking:
             AssistantTextEvent(
                 text="",
                 tools=[
-                    {"call_id": "c1", "name": "f1", "arguments": "{}"},
-                    {"call_id": "c2", "name": "f2", "arguments": "{}"},
+                    {"type": "function_call", "call_id": "c1", "name": "f1", "arguments": "{}"},
+                    {"type": "function_call", "call_id": "c2", "name": "f2", "arguments": "{}"},
                 ],
             ),
         )
@@ -1120,7 +1128,7 @@ class TestUsageMetricsTracking:
             conn_id,
             AssistantTextEvent(
                 text="",
-                tools=[{"call_id": "c1", "name": "f1", "arguments": "{}"}],
+                tools=[{"type": "function_call", "call_id": "c1", "name": "f1", "arguments": "{}"}],
             ),
         )
         service.finish_audio_response(conn_id)
@@ -1185,7 +1193,7 @@ class TestUsageMetricsTracking:
             conn_id,
             AssistantTextEvent(
                 text="hi",
-                tools=[{"call_id": "c1", "name": "f1", "arguments": "{}"}],
+                tools=[{"type": "function_call", "call_id": "c1", "name": "f1", "arguments": "{}"}],
             ),
         )
         service.finish_audio_response(conn_id)
@@ -1217,57 +1225,57 @@ class TestChatImageLifecycle:
 
         return Chat(size=10)
 
-    def test_strip_images_removes_image_parts(self):
-        chat = self._make_chat()
-        chat.append(
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": "What is this?"},
-                    {"type": "input_image", "image_url": "data:image/png;base64,abc"},
-                ],
-            }
+    def _user_msg(self, *parts):
+        from openai.types.realtime.realtime_conversation_item_user_message import (
+            Content as UserContent,
         )
-        chat.append({"role": "assistant", "content": "It's a cat."})
+        from openai.types.realtime.realtime_conversation_item_user_message import (
+            RealtimeConversationItemUserMessage,
+        )
+
+        content = []
+        for p in parts:
+            if p[0] == "text":
+                content.append(UserContent(type="input_text", text=p[1]))
+            elif p[0] == "image":
+                content.append(UserContent(type="input_image", image_url=p[1]))
+        return RealtimeConversationItemUserMessage(type="message", role="user", content=content)
+
+    def test_strip_images_removes_image_parts(self):
+        from speech_to_speech.LLM.chat import make_assistant_message
+
+        chat = self._make_chat()
+        chat.add_item(self._user_msg(("text", "What is this?"), ("image", "data:image/png;base64,abc")))
+        chat.add_item(make_assistant_message("It's a cat."))
         chat.strip_images()
         user_msg = chat.buffer[0]
-        assert user_msg["content"] == [{"type": "input_text", "text": "What is this?"}]
+        assert len(user_msg.content) == 1
+        assert user_msg.content[0].type == "input_text"
+        assert user_msg.content[0].text == "What is this?"
 
     def test_strip_images_noop_on_text_only(self):
+        from speech_to_speech.LLM.chat import make_assistant_message, make_user_message
+
         chat = self._make_chat()
-        chat.append({"role": "user", "content": "hello"})
-        chat.append({"role": "assistant", "content": "hi"})
+        chat.add_item(make_user_message("hello"))
+        chat.add_item(make_assistant_message("hi"))
         chat.strip_images()
-        assert chat.buffer[0]["content"] == "hello"
-        assert chat.buffer[1]["content"] == "hi"
+        assert chat.buffer[0].content[0].text == "hello"
+        assert chat.buffer[1].content[0].text == "hi"
 
     def test_strip_then_new_image_cycle(self):
-        chat = self._make_chat()
-        chat.append(
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": "look"},
-                    {"type": "input_image", "image_url": "old_url"},
-                ],
-            }
-        )
-        chat.append({"role": "assistant", "content": "I see it."})
-        chat.strip_images()
-        assert chat.buffer[0]["content"] == [{"type": "input_text", "text": "look"}]
+        from speech_to_speech.LLM.chat import make_assistant_message
 
-        chat.append(
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": "now this"},
-                    {"type": "input_image", "image_url": "new_url"},
-                ],
-            }
-        )
+        chat = self._make_chat()
+        chat.add_item(self._user_msg(("text", "look"), ("image", "old_url")))
+        chat.add_item(make_assistant_message("I see it."))
+        chat.strip_images()
+        assert len(chat.buffer[0].content) == 1
+        assert chat.buffer[0].content[0].type == "input_text"
+
+        chat.add_item(self._user_msg(("text", "now this"), ("image", "new_url")))
         last_user = chat.buffer[-1]
-        assert isinstance(last_user["content"], list)
-        assert any(p.get("image_url") == "new_url" for p in last_user["content"])
+        assert any(p.image_url == "new_url" for p in last_user.content)
 
 
 # ===================================================================
@@ -1284,160 +1292,135 @@ class TestChatToolCallTracking:
         return Chat(size=size)
 
     def _fc(self, call_id="call_1", name="f1"):
-        return {"type": "function_call", "call_id": call_id, "name": name, "arguments": "{}"}
+        from openai.types.realtime.realtime_conversation_item_function_call import (
+            RealtimeConversationItemFunctionCall,
+        )
+
+        return RealtimeConversationItemFunctionCall(type="function_call", call_id=call_id, name=name, arguments="{}")
 
     def _fco(self, call_id="call_1"):
-        return {"type": "function_call_output", "call_id": call_id, "output": '{"ok": true}'}
+        from openai.types.realtime.realtime_conversation_item_function_call_output import (
+            RealtimeConversationItemFunctionCallOutput,
+        )
 
-    def test_append_registers_pending_tool_call(self):
+        return RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output", call_id=call_id, output='{"ok": true}'
+        )
+
+    def _user(self, text):
+        from speech_to_speech.LLM.chat import make_user_message
+
+        return make_user_message(text)
+
+    def _assistant(self, text):
+        from speech_to_speech.LLM.chat import make_assistant_message
+
+        return make_assistant_message(text)
+
+    def test_add_item_registers_pending_tool_call(self):
         chat = self._make_chat()
         fc = self._fc()
-        chat.append(fc)
+        chat.add_item(fc)
         assert "call_1" in chat._pending_tool_calls
         assert chat._pending_tool_calls["call_1"] is fc
 
     def test_append_tool_output_clears_pending(self):
         chat = self._make_chat()
-        chat.append(self._fc())
+        chat.add_item(self._fc())
         assert "call_1" in chat._pending_tool_calls
-        err = chat.append_tool_output("call_1", self._fco())
-        assert err is None
+        chat.append_tool_output("call_1", self._fco())
         assert "call_1" not in chat._pending_tool_calls
-        assert chat.buffer[-1]["type"] == "function_call_output"
+        assert chat.buffer[-1].type == "function_call_output"
 
     def test_append_tool_output_reinjects_evicted_call(self):
         chat = self._make_chat(size=1)
-        # size=1 keeps 1 user turn. The 2nd user message evicts the 1st turn
-        # (user + fc + assistant), but _pending_tool_calls retains the fc.
-        chat.append({"role": "user", "content": "hi"})
-        chat.append(self._fc("call_x"))
-        chat.append({"role": "assistant", "content": "ok"})
-        chat.append({"role": "user", "content": "more"})
-        assert not any(e.get("call_id") == "call_x" for e in chat.buffer)
+        chat.add_item(self._user("hi"))
+        chat.add_item(self._fc("call_x"))
+        chat.add_item(self._assistant("ok"))
+        chat.add_item(self._user("more"))
+        assert not any(getattr(e, "call_id", None) == "call_x" for e in chat.buffer)
         assert "call_x" in chat._pending_tool_calls
 
-        err = chat.append_tool_output("call_x", self._fco("call_x"))
-        assert err is None
-        assert "call_x" not in chat._pending_tool_calls
-        types = [e.get("type") for e in chat.buffer]
+        chat.append_tool_output("call_x", self._fco("call_x"))
+        assert chat._has_call_id_in_buffer("call_x")
+        types = [e.type for e in chat.buffer]
         assert "function_call" in types
         assert "function_call_output" in types
-        fc_idx = next(i for i, e in enumerate(chat.buffer) if e.get("type") == "function_call")
-        fco_idx = next(i for i, e in enumerate(chat.buffer) if e.get("type") == "function_call_output")
+        fc_idx = next(i for i, e in enumerate(chat.buffer) if e.type == "function_call")
+        fco_idx = next(i for i, e in enumerate(chat.buffer) if e.type == "function_call_output")
         assert fc_idx < fco_idx
 
     def test_append_tool_output_rejects_unknown_call_id(self):
+        from speech_to_speech.LLM.chat import ChatItemError
+
         chat = self._make_chat()
-        err = chat.append_tool_output("call_nope", self._fco("call_nope"))
-        assert err is not None
-        assert "call_nope" in err
-        assert not any(e.get("type") == "function_call_output" for e in chat.buffer)
+        with pytest.raises(ChatItemError, match="call_nope"):
+            chat.append_tool_output("call_nope", self._fco("call_nope"))
+        assert not any(getattr(e, "type", None) == "function_call_output" for e in chat.buffer)
 
     def test_copy_preserves_pending_tool_calls(self):
         chat = self._make_chat()
-        chat.append(self._fc("call_a"))
+        chat.add_item(self._fc("call_a"))
         clone = chat.copy()
         assert "call_a" in clone._pending_tool_calls
-        # Mutating the clone does not affect the original
         clone._pending_tool_calls.pop("call_a")
         assert "call_a" in chat._pending_tool_calls
 
     def test_reset_clears_pending_tool_calls(self):
         chat = self._make_chat()
-        chat.append(self._fc())
+        chat.add_item(self._fc())
         assert chat._pending_tool_calls
         chat.reset()
         assert chat._pending_tool_calls == {}
         assert chat.buffer == []
 
-    # -- transformers / Chat Completions tool_calls format --
-
-    def _assistant_with_tool_calls(self, *call_ids):
-        """Build an assistant message with tool_calls (local LLM format)."""
-        return {
-            "role": "assistant",
-            "tool_calls": [
-                {"type": "function", "id": cid, "function": {"name": f"fn_{cid}", "arguments": {}}} for cid in call_ids
-            ],
-        }
-
-    def test_append_registers_pending_from_tool_calls_format(self):
-        chat = self._make_chat()
-        msg = self._assistant_with_tool_calls("tc_1", "tc_2")
-        chat.append(msg)
-        assert "tc_1" in chat._pending_tool_calls
-        assert "tc_2" in chat._pending_tool_calls
-
-    def test_append_tool_output_accepts_tool_calls_format_in_buffer(self):
-        chat = self._make_chat()
-        chat.append(self._assistant_with_tool_calls("tc_1"))
-        err = chat.append_tool_output("tc_1", self._fco("tc_1"))
-        assert err is None
-        assert chat.buffer[-1] == self._fco("tc_1")
-        assert "tc_1" not in chat._pending_tool_calls
-
-    def test_append_tool_output_reinjects_evicted_tool_calls_format(self):
-        chat = self._make_chat(size=1)
-        chat.append({"role": "user", "content": "hi"})
-        chat.append(self._assistant_with_tool_calls("tc_x"))
-        chat.append({"role": "user", "content": "a"})
-        assert not any(e.get("tool_calls") for e in chat.buffer)
-        assert "tc_x" in chat._pending_tool_calls
-
-        err = chat.append_tool_output("tc_x", self._fco("tc_x"))
-        assert err is None
-        assert "tc_x" not in chat._pending_tool_calls
-        assert any(
-            e.get("role") == "assistant" and any(tc.get("id") == "tc_x" for tc in e.get("tool_calls", []))
-            for e in chat.buffer
-        )
-        assert chat.buffer[-1] == self._fco("tc_x")
-
     # -- turn-based eviction --
 
     def test_eviction_removes_complete_turn(self):
         chat = self._make_chat(size=1)
-        chat.append({"role": "user", "content": "turn 1"})
-        chat.append({"role": "assistant", "content": "thinking"})
-        chat.append(self._fc("c1"))
-        chat.append(self._fco("c1"))
-        chat.append({"role": "assistant", "content": "done"})
-        # Still 1 user turn, no eviction yet
+        chat.add_item(self._user("turn 1"))
+        chat.add_item(self._assistant("thinking"))
+        chat.add_item(self._fc("c1"))
+        chat.add_item(self._fco("c1"))
+        chat.add_item(self._assistant("done"))
         assert len(chat.buffer) == 5
 
-        chat.append({"role": "user", "content": "turn 2"})
-        # 2 user turns > size=1 → oldest turn fully evicted
-        user_msgs = [e for e in chat.buffer if e.get("role") == "user"]
+        chat.add_item(self._user("turn 2"))
+        from openai.types.realtime.realtime_conversation_item_user_message import (
+            RealtimeConversationItemUserMessage,
+        )
+
+        user_msgs = [e for e in chat.buffer if isinstance(e, RealtimeConversationItemUserMessage)]
         assert len(user_msgs) == 1
-        assert user_msgs[0]["content"] == "turn 2"
-        assert not any(e.get("content") == "thinking" for e in chat.buffer)
-        assert not any(e.get("call_id") == "c1" and e.get("type") == "function_call" for e in chat.buffer)
+        assert user_msgs[0].content[0].text == "turn 2"
+        assert not any(getattr(e, "call_id", None) == "c1" and e.type == "function_call" for e in chat.buffer)
 
     def test_eviction_preserves_size_user_turns(self):
-        chat = self._make_chat(size=2)
-        # Turn 1: short
-        chat.append({"role": "user", "content": "t1"})
-        chat.append({"role": "assistant", "content": "r1"})
-        # Turn 2: long (with tool call)
-        chat.append({"role": "user", "content": "t2"})
-        chat.append({"role": "assistant", "content": "let me check"})
-        chat.append(self._fc("c2"))
-        chat.append(self._fco("c2"))
-        chat.append({"role": "assistant", "content": "here"})
-        assert chat._count_user_turns() == 2
+        from openai.types.realtime.realtime_conversation_item_user_message import (
+            RealtimeConversationItemUserMessage,
+        )
 
-        # Turn 3: triggers eviction of turn 1
-        chat.append({"role": "user", "content": "t3"})
-        assert chat._count_user_turns() == 2
-        user_contents = [e["content"] for e in chat.buffer if e.get("role") == "user"]
-        assert user_contents == ["t2", "t3"]
+        chat = self._make_chat(size=2)
+        chat.add_item(self._user("t1"))
+        chat.add_item(self._assistant("r1"))
+        chat.add_item(self._user("t2"))
+        chat.add_item(self._assistant("let me check"))
+        chat.add_item(self._fc("c2"))
+        chat.add_item(self._fco("c2"))
+        chat.add_item(self._assistant("here"))
+        assert chat._user_turn_count == 2
+
+        chat.add_item(self._user("t3"))
+        assert chat._user_turn_count == 2
+        user_texts = [e.content[0].text for e in chat.buffer if isinstance(e, RealtimeConversationItemUserMessage)]
+        assert user_texts == ["t2", "t3"]
 
     def test_pending_tool_calls_cleaned_after_reinjection(self):
         chat = self._make_chat(size=1)
-        chat.append({"role": "user", "content": "hi"})
-        chat.append(self._fc("call_z"))
-        chat.append({"role": "user", "content": "bye"})
+        chat.add_item(self._user("hi"))
+        chat.add_item(self._fc("call_z"))
+        chat.add_item(self._user("bye"))
         assert "call_z" in chat._pending_tool_calls
 
         chat.append_tool_output("call_z", self._fco("call_z"))
-        assert "call_z" not in chat._pending_tool_calls
+        assert chat._has_call_id_in_buffer("call_z")

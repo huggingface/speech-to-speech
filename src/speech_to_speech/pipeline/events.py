@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
+from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from pydantic import BaseModel, Field
 
 
@@ -57,7 +58,7 @@ class TranscriptionCompletedEvent(PipelineEvent):
 class AssistantTextEvent(PipelineEvent):
     type: Literal["assistant_text"] = "assistant_text"
     text: str
-    tools: list[dict] = Field(default_factory=list)
+    tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
 
 
 class TokenUsageEvent(PipelineEvent):

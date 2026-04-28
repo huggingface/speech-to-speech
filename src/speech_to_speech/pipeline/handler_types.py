@@ -35,7 +35,7 @@ STTIn: TypeAlias = VADAudio
 STTOut: TypeAlias = PartialTranscription | Transcription
 
 # ── LLM stage ─────────────────────────────────────────────────────────
-LLMIn: TypeAlias = Transcription | GenerateResponseRequest
+LLMIn: TypeAlias = GenerateResponseRequest
 LLMOut: TypeAlias = LLMResponseChunk | TokenUsage | EndOfResponse
 
 # ── TTS stage ─────────────────────────────────────────────────────────

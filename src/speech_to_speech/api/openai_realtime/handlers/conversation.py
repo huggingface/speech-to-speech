@@ -10,11 +10,19 @@ from openai.types.realtime import (
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
 )
+from openai.types.realtime.conversation_item import (
+    RealtimeConversationItemAssistantMessage,
+    RealtimeConversationItemFunctionCall,
+    RealtimeConversationItemFunctionCallOutput,
+    RealtimeConversationItemSystemMessage,
+    RealtimeConversationItemUserMessage,
+)
 from openai.types.realtime.conversation_item_input_audio_transcription_completed_event import (
     UsageTranscriptTextUsageDuration,
 )
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
+from speech_to_speech.LLM.chat import ChatItemError
 from speech_to_speech.pipeline.events import PartialTranscriptionEvent, TranscriptionCompletedEvent
 
 if TYPE_CHECKING:
@@ -40,9 +48,10 @@ class ConversationHandler(RealtimeBaseHandler):
         events: list[ServerEvent] = []
         item = event.item
 
-        error = self._append_item(conn_id, item)
-        if error is not None:
-            return [self.make_error(error, "invalid_conversation_item")]
+        try:
+            self._append_item(conn_id, item)
+        except ChatItemError as exc:
+            return [self.make_error(str(exc), "invalid_conversation_item")]
 
         if item:
             st = self._state(conn_id)
@@ -58,46 +67,26 @@ class ConversationHandler(RealtimeBaseHandler):
 
         return events
 
-    def _append_item(self, conn_id: str, item: ConversationItem) -> str | None:
-        """Add a conversation item directly to the connection's chat history.
+    def _append_item(self, conn_id: str, item: ConversationItem) -> None:
+        """Narrow ``ConversationItem`` to ``SupportedItem`` and delegate to ``Chat.add_item``.
 
-        Returns ``None`` on success or an error message string on failure.
+        Raises :class:`ChatItemError` on validation failure or unsupported type.
         """
-        st = self._state(conn_id)
+        chat = self._state(conn_id).runtime_config.chat
+        if isinstance(
+            item,
+            (
+                RealtimeConversationItemSystemMessage,
+                RealtimeConversationItemUserMessage,
+                RealtimeConversationItemAssistantMessage,
+                RealtimeConversationItemFunctionCall,
+                RealtimeConversationItemFunctionCallOutput,
+            ),
+        ):
+            chat.add_item(item)
+            return
 
-        if getattr(item, "type", None) == "message" and getattr(item, "content", None):
-            role = getattr(item, "role", None)
-            if not role or role not in ("user", "assistant"):
-                logger.warning("Unsupported message role: %s", role)
-                return f"Unsupported message role: {role}"
-            content_parts: list[dict] = []
-            for part in item.content:  # type: ignore[union-attr]
-                if (part.type == "input_text" and part.text) or (part.type == "input_image" and part.image_url):  # type: ignore[union-attr]
-                    content_parts.append(part.model_dump(exclude_none=True))
-                else:
-                    logger.warning("Unsupported content part type: %s", part.type)
-            if content_parts:
-                st.runtime_config.chat.append({"role": role, "content": content_parts})
-                logger.debug("Added message to chat (role=%s, %d parts)", role, len(content_parts))
-                return None
-            return "Message has no supported content parts."
-
-        if getattr(item, "type", None) == "function_call_output" and getattr(item, "output", None):
-            call_id: str = item.call_id or ""  # type: ignore[union-attr]
-            output_item = {
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": item.output,  # type: ignore[union-attr]
-            }
-            error = st.runtime_config.chat.append_tool_output(call_id, output_item)
-            if error:
-                logger.warning("Rejected function_call_output: %s", error)
-                return error
-            logger.debug("Added function_call_output to chat (call_id=%s)", call_id)
-            return None
-
-        logger.warning("Unsupported item type: %s", getattr(item, "type", None))
-        return f"Unsupported item type: {getattr(item, 'type', None)}"
+        raise ChatItemError(f"Unsupported item type: {getattr(item, 'type', None)}")
 
     # ── Pipeline event handlers ────────────────────
 

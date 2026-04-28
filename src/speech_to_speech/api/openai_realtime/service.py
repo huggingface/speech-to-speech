@@ -34,9 +34,8 @@ from speech_to_speech.api.openai_realtime.handlers import (
     ResponseHandler,
     SessionHandler,
 )
-from speech_to_speech.api.openai_realtime.handlers.base import _generate_id
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.LLM.chat import Chat
+from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
     PartialTranscriptionEvent,
@@ -48,6 +47,7 @@ from speech_to_speech.pipeline.events import (
 )
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
 from speech_to_speech.pipeline.queue_types import TextPromptItem
+from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
 
@@ -292,7 +292,7 @@ class RealtimeService:
         cfg = st.runtime_config
         transcript = event.transcript
         if transcript:
-            cfg.chat.append({"role": "user", "content": transcript})
+            cfg.chat.add_item(make_user_message(transcript))
 
         queue = self.text_prompt_queue
         if queue and transcript:

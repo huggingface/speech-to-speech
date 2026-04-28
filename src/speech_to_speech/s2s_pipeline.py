@@ -15,6 +15,7 @@ import torch
 from rich.console import Console
 from transformers import HfArgumentParser
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.arguments_classes.chat_tts_arguments import ChatTTSHandlerArguments
 from speech_to_speech.arguments_classes.facebookmms_tts_arguments import FacebookMMSTTSHandlerArguments
 from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import (
@@ -40,6 +41,7 @@ from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 from speech_to_speech.arguments_classes.websocket_streamer_arguments import WebSocketStreamerArguments
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
 from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.LLM.chat import Chat
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut, STTIn, STTOut, TTSIn, TTSOut
 from speech_to_speech.pipeline.queue_types import (
@@ -52,6 +54,7 @@ from speech_to_speech.pipeline.queue_types import (
     TTSInItem,
     VADOutItem,
 )
+from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.utils.thread_manager import ThreadManager
 from speech_to_speech.VAD.vad_handler import VADHandler
 
@@ -299,6 +302,7 @@ def build_pipeline(
     text_output_queue = (
         None  # Only set for websocket/realtime modes; kept None otherwise to avoid unbounded queue growth
     )
+
     comms_handlers: list[Any] = []
     if module_kwargs.mode == "local":
         from speech_to_speech.connections.local_audio_streamer import LocalAudioStreamer
@@ -394,14 +398,12 @@ def build_pipeline(
         setup_kwargs=vars(vad_handler_kwargs),
     )
 
-    from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
-
-    transcription_notifier_kwargs = {
+    transcription_notifier_kwargs: dict[str, Any] = {
         "text_output_queue": text_output_queue,
-        "suppress_yield": False,
     }
-    if module_kwargs.mode == "realtime":
-        transcription_notifier_kwargs["suppress_yield"] = True
+    if module_kwargs.mode != "realtime":
+        _lm_vars = vars(language_model_handler_kwargs)
+        transcription_notifier_kwargs["runtime_config"] = RuntimeConfig(chat=Chat(_lm_vars.get("chat_size", 30)))
 
     transcription_notifier = TranscriptionNotifier(
         stop_event,

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Sized
@@ -10,6 +9,9 @@ from typing import Any, Literal, Optional, Protocol, runtime_checkable
 
 import torch
 from nltk import sent_tokenize
+from openai.types.realtime.realtime_conversation_item_function_call import (
+    RealtimeConversationItemFunctionCall,
+)
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel, ConfigDict, Field
@@ -29,7 +31,7 @@ from transformers import (
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.LLM.chat import Chat
+from speech_to_speech.LLM.chat import Chat, make_assistant_message, make_system_message, make_user_message
 from speech_to_speech.LLM.tool_call.function_call import extract_function_calls_from_text
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
@@ -42,7 +44,6 @@ from speech_to_speech.pipeline.messages import (
     GenerateResponseRequest,
     LLMResponseChunk,
     TokenUsage,
-    Transcription,
 )
 
 try:
@@ -145,13 +146,11 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         torch_dtype: str = "float16",
         gen_kwargs: dict[str, Any] = {},
         user_role: str = "user",
-        chat_size: int = 1,
-        init_chat_role: Optional[str] = None,
-        init_chat_prompt: str = "You are a helpful AI assistant.",
         cancel_scope: CancelScope | None = None,
         backend: Literal["transformers", "mlx"] = "transformers",
         enable_thinking: bool = False,
         stream_batch_sentences: int = 3,
+        **_kwargs: Any,
     ) -> None:
         self.backend = backend
         self.cancel_scope = cancel_scope
@@ -161,14 +160,6 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.stream_batch_sentences = max(1, stream_batch_sentences)
 
         self._load_model(model_name, device, torch_dtype, gen_kwargs)
-
-        # TODO: chat is not used in the realtime pipeline, but still need to be kept for backward compatibility. Remove it in the future.
-        self.chat = Chat(chat_size)
-        if init_chat_role:
-            if not init_chat_prompt:
-                raise ValueError("An initial promt needs to be specified when setting init_chat_role.")
-            full_prompt = build_voice_system_prompt(init_chat_prompt)
-            self.chat.init_chat({"role": init_chat_role, "content": full_prompt})
 
         self.user_role = user_role
 
@@ -216,63 +207,6 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
     # Shared helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _prepare_chat_for_transformers(chat_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Convert Responses-API-style tool items to the transformers chat format.
-
-        - ``function_call_output`` items become ``{"role": "tool", ...}``
-        - Messages with ``tool_calls`` and regular messages pass through as-is
-        - ``function_call`` items (from the OpenAI Responses API path) are
-          converted to assistant messages with ``tool_calls``
-        """
-        result: list[dict[str, Any]] = []
-        for msg in chat_messages:
-            item_type = msg.get("type")
-            if item_type == "function_call_output":
-                call_id = msg.get("call_id", "")
-                name = ""
-                for prev in reversed(result):
-                    if prev.get("role") == "assistant" and "tool_calls" in prev:
-                        for tc in prev["tool_calls"]:
-                            if tc.get("id") == call_id:
-                                name = tc.get("function", {}).get("name", "")
-                                break
-                        if name:
-                            break
-                result.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "name": name,
-                        "content": msg.get("output", ""),
-                    }
-                )
-            elif item_type == "function_call":
-                args = msg.get("arguments", "{}")
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except (json.JSONDecodeError, TypeError):
-                        args = {}
-                result.append(
-                    {
-                        "role": "assistant",
-                        "tool_calls": [
-                            {
-                                "type": "function",
-                                "id": msg.get("call_id", ""),
-                                "function": {
-                                    "name": msg.get("name", ""),
-                                    "arguments": args,
-                                },
-                            }
-                        ],
-                    }
-                )
-            else:
-                result.append(msg)
-        return result
-
     def _apply_instructions(
         self,
         chat: Chat,
@@ -300,7 +234,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             enter_code = None
             end_code = None
 
-        chat.init_chat({"role": "system", "content": full_instructions})
+        chat.add_item(make_system_message(full_instructions))
 
         if ctx is not None:
             ctx.function_tools = function_tools
@@ -445,41 +379,25 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
     # ------------------------------------------------------------------
 
     def process(self, request: LLMIn) -> Iterator[LLMOut]:
-        language_code = None
-        runtime_config = None
-        response = None
         ctx = StreamContext()
 
-        if isinstance(request, GenerateResponseRequest):
-            req = request
-            runtime_config = req.runtime_config
-            response = req.response
-            original_chat = runtime_config.chat
-            active_chat = original_chat.copy()
-            language_code = req.language_code
-            instructions = (
-                response.instructions if response and response.instructions else runtime_config.session.instructions
-            )
-            tools = response.tools if response and response.tools else runtime_config.session.tools
-            tool_choice = (
-                response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
-            )
-            self._apply_instructions(active_chat, instructions, tools, str(tool_choice) if tool_choice else None, ctx)
-            language_code, lang_name = resolve_auto_language(language_code)
-            if lang_name:
-                active_chat.append({"role": self.user_role, "content": f"Please reply to my message in {lang_name}."})
-        elif isinstance(request, Transcription):
-            original_chat = self.chat
-            active_chat = original_chat
-            logger.debug("infering language model...")
-            language_code = request.language_code
-            prompt_text = request.text
-            language_code, lang_name = resolve_auto_language(language_code)
-            if lang_name:
-                prompt_text = f"Please reply to my message in {lang_name}. " + prompt_text
-            active_chat.append({"role": self.user_role, "content": prompt_text})
-        else:
+        if not isinstance(request, GenerateResponseRequest):
             raise TypeError(f"Unexpected request type: {type(request)}")
+
+        runtime_config = request.runtime_config
+        response = request.response
+        original_chat = runtime_config.chat
+        active_chat = original_chat.copy()
+        language_code = request.language_code
+        instructions = (
+            response.instructions if response and response.instructions else runtime_config.session.instructions
+        )
+        tools = response.tools if response and response.tools else runtime_config.session.tools
+        tool_choice = response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
+        self._apply_instructions(active_chat, instructions, tools, str(tool_choice) if tool_choice else None, ctx)
+        language_code, lang_name = resolve_auto_language(language_code)
+        if lang_name:
+            active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
 
@@ -488,26 +406,17 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         if ctx.stopped:
             return
 
-        original_chat.append({"role": "assistant", "content": ctx.generated_text})
+        original_chat.add_item(make_assistant_message(ctx.generated_text))
         if ctx.tools:
-            original_chat.append(
-                {
-                    "role": "assistant",
-                    "tool_calls": [
-                        {
-                            "type": "function",
-                            "id": t.call_id or "",
-                            "function": {
-                                "name": t.name or "",
-                                "arguments": json.loads(t.arguments)
-                                if isinstance(t.arguments, str)
-                                else (t.arguments or {}),
-                            },
-                        }
-                        for t in ctx.tools
-                    ],
-                }
-            )
+            for t in ctx.tools:
+                original_chat.add_item(
+                    RealtimeConversationItemFunctionCall(
+                        type="function_call",
+                        name=t.name,
+                        arguments=t.arguments,
+                        status=t.status,
+                    )
+                )
         original_chat.strip_images()
         logger.debug("Clean text: %s", ctx.generated_text)
         logger.info(f"Tools: {ctx.tools}")
@@ -516,7 +425,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             yield LLMResponseChunk(
                 text=ctx.printable_text.strip(),
                 language_code=language_code,
-                tools=[t.model_dump() for t in ctx.tools],
+                tools=list(ctx.tools),
                 runtime_config=runtime_config,
                 response=response,
             )
@@ -591,7 +500,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
         runtime_config: RuntimeConfig | None = None,
         response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
-        chat_messages = self._prepare_chat_for_transformers(chat.to_list())
+        chat_messages = chat.to_transformers_chat()
         chat_input = self.tokenizer.apply_chat_template(chat_messages, tokenize=True)
         ctx.input_tokens += len(chat_input if isinstance(chat_input, list) else chat_input["input_ids"])  # type: ignore[index]
         logger.debug("Prompt token count: %d", ctx.input_tokens)
@@ -722,7 +631,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
         runtime_config: RuntimeConfig | None = None,
         response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
-        prepared = self._prepare_chat_for_transformers(chat.to_list())
+        prepared = chat.to_transformers_chat()
         if self.backend == "mlx":
             images, formatted_prompt = self._prepare_mlx_vlm_inputs(prepared)
             ctx.input_tokens += len(self.tokenizer.encode(formatted_prompt))

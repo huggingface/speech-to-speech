@@ -199,6 +199,8 @@ class FunctionToolCall(BaseModel):
             arguments=json.dumps(arguments),
             call_id=f"call_{uuid4()}",
             type="function_call",
+            id=f"fc_{uuid4()}",
+            status="in_progress",
         )
 
 
