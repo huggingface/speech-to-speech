@@ -54,6 +54,7 @@ def _system(text: str) -> RealtimeConversationItemSystemMessage:
 def _fc(call_id: str = "call_1", name: str = "my_func", arguments: str = "{}") -> RealtimeConversationItemFunctionCall:
     return RealtimeConversationItemFunctionCall(
         type="function_call",
+        id=f"fc_{call_id}",
         call_id=call_id,
         name=name,
         arguments=arguments,

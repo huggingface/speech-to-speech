@@ -412,6 +412,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 original_chat.add_item(
                     RealtimeConversationItemFunctionCall(
                         type="function_call",
+                        id=t.id,
+                        call_id=t.call_id,
                         name=t.name,
                         arguments=t.arguments,
                         status=t.status,

@@ -14,12 +14,12 @@ import re
 import tokenize
 from collections import OrderedDict
 from typing import Any, Dict, List, Tuple
-from uuid import uuid4
 
 from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel
 
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
+from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
 
@@ -197,9 +197,9 @@ class FunctionToolCall(BaseModel):
         return ResponseFunctionToolCall(
             name=self.function_name,
             arguments=json.dumps(arguments),
-            call_id=f"call_{uuid4()}",
+            call_id=_generate_id("call"),
             type="function_call",
-            id=f"fc_{uuid4()}",
+            id=_generate_id("fc"),
             status="in_progress",
         )
 

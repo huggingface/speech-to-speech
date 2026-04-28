@@ -32,6 +32,7 @@ from openai.types.responses.response_input_param import (
 )
 from openai.types.responses.response_input_text_param import ResponseInputTextParam
 from openai.types.responses.response_output_text_param import ResponseOutputTextParam
+from pydantic import BaseModel
 
 from speech_to_speech.utils.utils import _generate_id
 
@@ -154,7 +155,6 @@ class Chat:
             logger.debug("Added assistant message to chat (%d parts)", len(item.content))
 
         elif isinstance(item, RealtimeConversationItemFunctionCall):
-            item.id = _generate_id("fc")
             if not item.call_id:
                 raise ChatItemError("function_call item is missing a call_id.")
             self.buffer.append(item)
@@ -253,66 +253,58 @@ class Chat:
         User messages containing images keep ``content`` as a list of dicts so
         VLM pipelines can process them.
         """
-        result: list[dict[str, Any]] = []
+        messages: list[TransformersChatMessage] = []
         if self.init_chat_message:
             text = " ".join(p.text for p in self.init_chat_message.content if p.text)
-            result.append({"role": "system", "content": text})
+            messages.append(TransformersSystemMessage(content=text))
         for item in self.buffer:
             if isinstance(item, RealtimeConversationItemUserMessage):
                 has_images = any(p.type == "input_image" for p in item.content)
                 if has_images:
-                    result.append(
-                        {
-                            "role": "user",
-                            "content": [p.model_dump(exclude_none=True) for p in item.content],
-                        }
+                    messages.append(
+                        TransformersUserMessage(content=[p.model_dump(exclude_none=True) for p in item.content])
                     )
                 else:
                     text = " ".join(p.text for p in item.content if p.type == "input_text" and p.text)
-                    result.append({"role": "user", "content": text})
+                    messages.append(TransformersUserMessage(content=text))
             elif isinstance(item, RealtimeConversationItemAssistantMessage):
                 text = " ".join(p.text for p in item.content if p.text)
-                result.append({"role": "assistant", "content": text})
+                messages.append(TransformersAssistantMessage(content=text))
             elif isinstance(item, RealtimeConversationItemFunctionCall):
+                assert item.call_id is not None and item.call_id != ""
                 args: Any = item.arguments
                 try:
                     args = json.loads(args) if isinstance(args, str) else args
                 except (json.JSONDecodeError, TypeError):
                     args = {}
-                result.append(
-                    {
-                        "role": "assistant",
-                        "tool_calls": [
-                            {
-                                "type": "function",
-                                "id": item.call_id,
-                                "function": {
-                                    "name": item.name,
-                                    "arguments": args,
-                                },
-                            }
-                        ],
-                    }
+                messages.append(
+                    TransformersFunctionCallMessage(
+                        tool_calls=[
+                            TransformersToolCall(
+                                id=item.call_id,
+                                function=TransformersToolCallFunction(name=item.name, arguments=args),
+                            )
+                        ]
+                    )
                 )
             elif isinstance(item, RealtimeConversationItemFunctionCallOutput):
                 name = ""
-                for prev in reversed(result):
-                    if prev.get("role") == "assistant" and "tool_calls" in prev:
-                        for tc in prev["tool_calls"]:
-                            if tc.get("id") == item.call_id:
-                                name = tc.get("function", {}).get("name", "")
+                for prev in reversed(messages):
+                    if isinstance(prev, TransformersFunctionCallMessage):
+                        for tc in prev.tool_calls:
+                            if tc.id == item.call_id:
+                                name = tc.function.name
                                 break
                         if name:
                             break
-                result.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": item.call_id,
-                        "name": name,
-                        "content": item.output,
-                    }
+                messages.append(
+                    TransformersToolMessage(
+                        tool_call_id=item.call_id,
+                        name=name,
+                        content=item.output,
+                    )
                 )
-        return result
+        return [m.model_dump() for m in messages]
 
     def copy(self) -> Chat:
         """Return a shallow snapshot safe for concurrent read access."""
@@ -338,6 +330,58 @@ class Chat:
         for item in self.buffer:
             if isinstance(item, RealtimeConversationItemUserMessage):
                 item.content = [p for p in item.content if p.type != "input_image"]
+
+
+# ---------------------------------------------------------------------------
+# Transformers chat message models
+# ---------------------------------------------------------------------------
+
+
+class TransformersToolCallFunction(BaseModel):
+    name: str
+    arguments: dict[str, Any]
+
+
+class TransformersToolCall(BaseModel):
+    type: Literal["function"] = "function"
+    id: str
+    function: TransformersToolCallFunction
+
+
+class TransformersSystemMessage(BaseModel):
+    role: Literal["system"] = "system"
+    content: str
+
+
+class TransformersUserMessage(BaseModel):
+    role: Literal["user"] = "user"
+    content: str | list[dict[str, Any]]
+
+
+class TransformersAssistantMessage(BaseModel):
+    role: Literal["assistant"] = "assistant"
+    content: str
+
+
+class TransformersFunctionCallMessage(BaseModel):
+    role: Literal["assistant"] = "assistant"
+    tool_calls: list[TransformersToolCall]
+
+
+class TransformersToolMessage(BaseModel):
+    role: Literal["tool"] = "tool"
+    tool_call_id: str
+    name: str
+    content: str
+
+
+TransformersChatMessage = Union[
+    TransformersSystemMessage,
+    TransformersUserMessage,
+    TransformersAssistantMessage,
+    TransformersFunctionCallMessage,
+    TransformersToolMessage,
+]
 
 
 # ---------------------------------------------------------------------------

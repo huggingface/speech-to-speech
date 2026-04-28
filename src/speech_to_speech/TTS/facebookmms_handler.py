@@ -140,7 +140,6 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
         language_code = tts_input.language_code
-        runtime_config = tts_input.runtime_config
         text = tts_input.text
 
         console.print(f"[green]ASSISTANT: {text}")

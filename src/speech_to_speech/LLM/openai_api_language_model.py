@@ -190,6 +190,8 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                             printable_text = sentences[-1]
                     elif isinstance(raw_event, ResponseOutputItemDoneEvent):
                         if isinstance(raw_event.item, ResponseFunctionToolCall):
+                            raw_event.item.call_id = _generate_id("call")
+                            raw_event.item.id = _generate_id("fc")
                             tools.append(raw_event.item)
                             original_chat.add_item(
                                 RealtimeConversationItemFunctionCall(

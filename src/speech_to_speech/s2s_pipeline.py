@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 import nltk
 import torch
+from openai.types.realtime import RealtimeSessionCreateRequest
 from rich.console import Console
 from transformers import HfArgumentParser
 
@@ -405,7 +406,13 @@ def build_pipeline(
     }
     if module_kwargs.mode != "realtime":
         _lm_vars = vars(language_model_handler_kwargs)
-        transcription_notifier_kwargs["runtime_config"] = RuntimeConfig(chat=Chat(_lm_vars.get("chat_size", 30)))
+        transcription_notifier_kwargs["runtime_config"] = RuntimeConfig(
+            chat=Chat(_lm_vars.get("chat_size", 30)),
+            session=RealtimeSessionCreateRequest(
+                type="realtime",
+                instructions=_lm_vars.get("init_chat_prompt"),
+            ),
+        )
 
     transcription_notifier = TranscriptionNotifier(
         stop_event,
