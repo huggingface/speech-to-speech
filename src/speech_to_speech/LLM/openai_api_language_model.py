@@ -20,7 +20,7 @@ from openai.types.responses import (
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import Chat
-from speech_to_speech.LLM.utils import remove_unspeechable, resolve_auto_language
+from speech_to_speech.LLM.utils import remove_unspeechable
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
@@ -140,7 +140,6 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
             response = req.response
             original_chat = runtime_config.chat
             active_chat = original_chat.copy()
-            language_code = req.language_code
             instructions = (
                 response.instructions if response and response.instructions else runtime_config.session.instructions
             )
@@ -149,23 +148,11 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                 response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
             )
             self._apply_config(active_chat, instructions)
-            language_code, lang_name = resolve_auto_language(language_code)
-            if lang_name:
-                active_chat.append(
-                    {
-                        "role": self.user_role,
-                        "content": [{"type": "input_text", "text": f"Please reply to my message in {lang_name}."}],
-                    }
-                )
         elif isinstance(request, Transcription):
             original_chat = self.chat
             active_chat = original_chat
             logger.debug("call api language model...")
-            language_code = request.language_code
             prompt_text = request.text
-            language_code, lang_name = resolve_auto_language(language_code)
-            if lang_name:
-                prompt_text = f"Please reply to my message in {lang_name}. " + prompt_text
             active_chat.append({"role": self.user_role, "content": [{"type": "input_text", "text": prompt_text}]})
         else:
             raise TypeError(f"Unexpected request type: {type(request)}")

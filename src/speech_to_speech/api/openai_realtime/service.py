@@ -296,12 +296,7 @@ class RealtimeService:
 
         queue = self.text_prompt_queue
         if queue and transcript:
-            queue.put(
-                GenerateResponseRequest(
-                    runtime_config=cfg,
-                    language_code=event.language_code,
-                )
-            )
+            queue.put(GenerateResponseRequest(runtime_config=cfg))
 
         return events
 

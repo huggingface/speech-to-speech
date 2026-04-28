@@ -25,7 +25,7 @@ python s2s_pipeline.py \
   --melo_speaker_to_id en
 ```
 
-Language switching can occur automatically when STT emits `(text, language_code)` tuples.
+Language selection is controlled by the TTS handler configuration.
 
 Apple Silicon MPS note:
 - If MeloTTS fails with `Output channels > 65536 not supported at the MPS device`, update macOS first.

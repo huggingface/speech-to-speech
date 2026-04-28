@@ -118,7 +118,6 @@ class GenerateResponseRequest(PipelineMessage):
     tag: Literal["generate_response"] = "generate_response"
     runtime_config: RuntimeConfig
     response: RealtimeResponseCreateParams | None = None
-    language_code: Optional[str] = None
 
 
 # ── Binary sentinels (audio/output queue) ─────────────────────────────

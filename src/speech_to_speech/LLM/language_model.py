@@ -33,7 +33,7 @@ from speech_to_speech.LLM.chat import Chat
 from speech_to_speech.LLM.tool_call.function_call import extract_function_calls_from_text
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
-from speech_to_speech.LLM.utils import image_url_to_pil, remove_unspeechable, resolve_auto_language
+from speech_to_speech.LLM.utils import image_url_to_pil, remove_unspeechable
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
@@ -456,7 +456,6 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             response = req.response
             original_chat = runtime_config.chat
             active_chat = original_chat.copy()
-            language_code = req.language_code
             instructions = (
                 response.instructions if response and response.instructions else runtime_config.session.instructions
             )
@@ -465,18 +464,11 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
             )
             self._apply_instructions(active_chat, instructions, tools, str(tool_choice) if tool_choice else None, ctx)
-            language_code, lang_name = resolve_auto_language(language_code)
-            if lang_name:
-                active_chat.append({"role": self.user_role, "content": f"Please reply to my message in {lang_name}."})
         elif isinstance(request, Transcription):
             original_chat = self.chat
             active_chat = original_chat
             logger.debug("infering language model...")
-            language_code = request.language_code
             prompt_text = request.text
-            language_code, lang_name = resolve_auto_language(language_code)
-            if lang_name:
-                prompt_text = f"Please reply to my message in {lang_name}. " + prompt_text
             active_chat.append({"role": self.user_role, "content": prompt_text})
         else:
             raise TypeError(f"Unexpected request type: {type(request)}")

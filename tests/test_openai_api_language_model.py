@@ -9,10 +9,11 @@ from openai.types.responses import (
     ResponseTextDeltaEvent,
 )
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat
 from speech_to_speech.LLM.openai_api_language_model import OpenApiModelHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk, Transcription
+from speech_to_speech.pipeline.messages import EndOfResponse, GenerateResponseRequest, LLMResponseChunk, Transcription
 
 
 def _make_text_delta_event(text):
@@ -167,6 +168,68 @@ def test_no_disable_thinking_omits_extra_body():
     list(handler.process(Transcription(text="Hi")))
 
     assert captured.get("extra_body") is None
+
+
+def test_transcription_language_code_is_not_sent_to_llm_or_chunks():
+    handler = _make_handler()
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _make_stream(
+            [
+                _make_text_delta_event("Ok."),
+                _make_output_item_done_event(content="Ok."),
+            ]
+        )
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+
+    outputs = list(handler.process(Transcription(text="Hi", language_code="en-auto")))
+
+    user_messages = [item for item in captured["input"] if item.get("role") == "user"]
+    assert user_messages == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Hi"}],
+        }
+    ]
+    assert "Please reply to my message" not in str(captured["input"])
+    assert "en-auto" not in str(captured["input"])
+
+    chunks = [output for output in outputs if isinstance(output, LLMResponseChunk)]
+    assert chunks[0].language_code is None
+
+
+def test_realtime_generation_does_not_add_language_instruction():
+    handler = _make_handler(stream=False)
+    runtime_config = RuntimeConfig()
+    runtime_config.chat.append({"role": "user", "content": "Hi"})
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _make_response(
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    role="assistant",
+                    content=[SimpleNamespace(type="output_text", text="Ok.")],
+                )
+            ]
+        )
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+
+    outputs = list(handler.process(GenerateResponseRequest(runtime_config=runtime_config)))
+
+    user_messages = [item for item in captured["input"] if item.get("role") == "user"]
+    assert user_messages == [{"type": "message", "role": "user", "content": "Hi"}]
+    assert "Please reply to my message" not in str(captured["input"])
+
+    chunks = [output for output in outputs if isinstance(output, LLMResponseChunk)]
+    assert chunks[0].language_code is None
 
 
 def test_second_turn_flattens_assistant_history_for_responses():

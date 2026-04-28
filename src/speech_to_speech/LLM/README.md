@@ -74,11 +74,7 @@ Common options:
 
 ## LLM Behavior
 
-When STT is set to language auto-detection (`--language auto`), LLM handlers can receive `(text, language_code)` and prepend a language control instruction like:
-
-- `Please reply to my message in <language>.`
-
-This helps the assistant respond in the detected language.
+LLM handlers generate responses from the conversation text and configured instructions.
 
 ## Setup
 
