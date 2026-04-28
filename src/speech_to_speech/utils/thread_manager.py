@@ -22,6 +22,10 @@ class ThreadManager:
             self.threads.append(thread)
             thread.start()
 
+    def wait(self) -> None:
+        for thread in self.threads:
+            thread.join()
+
     def stop(self) -> None:
         # Signal all handlers to stop
         for handler in self.handlers:
