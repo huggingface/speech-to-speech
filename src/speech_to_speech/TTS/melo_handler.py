@@ -100,8 +100,6 @@ class MeloTTSHandler(BaseHandler[TTSIn, TTSOut]):
             logger.error(f"Error in MeloTTSHandler: {e}")
             audio_chunk = np.array([])
         if len(audio_chunk) == 0:
-            if not runtime_config:
-                self.should_listen.set()
             return
         audio_chunk = librosa.resample(audio_chunk, orig_sr=44100, target_sr=16000)
         audio_chunk = (audio_chunk * 32768).astype(np.int16)
@@ -113,9 +111,6 @@ class MeloTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 audio_chunk[i : i + self.blocksize],
                 (0, self.blocksize - len(audio_chunk[i : i + self.blocksize])),
             )
-
-        if not runtime_config:
-            self.should_listen.set()
 
     def on_session_end(self) -> None:
         if self.language != self._initial_language:

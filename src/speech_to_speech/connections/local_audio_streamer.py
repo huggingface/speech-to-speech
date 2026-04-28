@@ -6,6 +6,7 @@ from queue import Queue
 import numpy as np
 import sounddevice as sd
 
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE
 from speech_to_speech.pipeline.queue_types import AudioInItem, AudioOutItem
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,7 @@ class LocalAudioStreamer:
         self,
         input_queue: Queue[AudioInItem],
         output_queue: Queue[AudioOutItem],
+        should_listen: threading.Event,
         list_play_chunk_size: int = 512,
     ) -> None:
         self.list_play_chunk_size = list_play_chunk_size
@@ -23,6 +25,7 @@ class LocalAudioStreamer:
         self.stop_event = threading.Event()
         self.input_queue = input_queue
         self.output_queue = output_queue
+        self.should_listen = should_listen
 
     def run(self) -> None:
         # Pre-generate a static dither buffer (±1 LSB, -96 dB) to keep the
@@ -42,9 +45,12 @@ class LocalAudioStreamer:
             else:
                 try:
                     audio_chunk = self.output_queue.get_nowait()
-                    # Validate audio chunk is numpy array
                     if isinstance(audio_chunk, np.ndarray):
                         outdata[:] = audio_chunk[:, np.newaxis]
+                    elif audio_chunk == AUDIO_RESPONSE_DONE:
+                        self.should_listen.set()
+                        logger.debug("Response complete, listening re-enabled")
+                        outdata[:] = 0 * outdata
                     else:
                         outdata[:] = 0 * outdata
                 except Exception:

@@ -208,6 +208,3 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 if len(chunk) < self.blocksize:
                     chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
                 yield chunk
-
-        if not runtime_config:
-            self.should_listen.set()

@@ -82,8 +82,6 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     logger.info("TTS generation cancelled (interruption)")
                     return
                 if gen[0] is None or len(gen[0]) == 0:
-                    if not runtime_config:
-                        self.should_listen.set()
                     return
                 audio_chunk = librosa.resample(gen[0], orig_sr=24000, target_sr=16000)
                 audio_chunk = (audio_chunk * 32768).astype(np.int16)[0]
@@ -94,8 +92,6 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
         else:
             wavs = wavs_gen
             if len(wavs[0]) == 0:
-                if not runtime_config:
-                    self.should_listen.set()
                 return
             audio_chunk = librosa.resample(wavs[0], orig_sr=24000, target_sr=16000)
             audio_chunk = (audio_chunk * 32768).astype(np.int16)
@@ -104,5 +100,3 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     audio_chunk[i : i + self.chunk_size],
                     (0, self.chunk_size - len(audio_chunk[i : i + self.chunk_size])),
                 )
-        if not runtime_config:
-            self.should_listen.set()

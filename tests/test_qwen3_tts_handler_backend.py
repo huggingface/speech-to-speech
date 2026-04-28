@@ -268,7 +268,8 @@ def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     assert end_outputs == [AUDIO_RESPONSE_DONE]
 
 
-def test_process_reenables_listening_when_generation_fails_outside_realtime(monkeypatch):
+def test_process_does_not_set_should_listen_when_generation_fails(monkeypatch):
+    """TTS no longer manages should_listen; the I/O streamer does via AUDIO_RESPONSE_DONE."""
     handler = object.__new__(Qwen3TTSHandler)
     handler.should_listen = Event()
     handler.cancel_scope = None
@@ -292,7 +293,7 @@ def test_process_reenables_listening_when_generation_fails_outside_realtime(monk
     outputs = list(handler.process(TTSInput(text="Hello there.")))
 
     assert outputs == []
-    assert handler.should_listen.is_set() is True
+    assert handler.should_listen.is_set() is False
 
 
 def test_process_voice_clone_passes_non_streaming_mode_to_faster_backend(monkeypatch):

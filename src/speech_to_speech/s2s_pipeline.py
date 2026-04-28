@@ -308,7 +308,9 @@ def build_pipeline(
         from speech_to_speech.connections.local_audio_streamer import LocalAudioStreamer
 
         local_audio_streamer = LocalAudioStreamer(
-            input_queue=recv_audio_chunks_queue, output_queue=send_audio_chunks_queue
+            input_queue=recv_audio_chunks_queue,
+            output_queue=send_audio_chunks_queue,
+            should_listen=should_listen,
         )
         comms_handlers = [local_audio_streamer]
         should_listen.set()

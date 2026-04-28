@@ -635,9 +635,6 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         except Exception as e:
             logger.error(f"Error during Qwen3-TTS generation: {e}", exc_info=True)
 
-        if not runtime_config:
-            self.should_listen.set()
-
     def _mlx_streaming_interval(self) -> float:
         return max(1, self.streaming_chunk_size) / MLX_STREAMING_TOKENS_PER_SECOND
 
