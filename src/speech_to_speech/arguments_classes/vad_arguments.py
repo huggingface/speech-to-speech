@@ -55,3 +55,9 @@ class VADHandlerArguments:
             "help": "Interval (in seconds) for releasing progressive audio chunks during speech. Default is 0.2s."
         },
     )
+    speculative_reopen_ms: int = field(
+        default=1200,
+        metadata={
+            "help": "In realtime mode, keep a soft-ended turn reopenable for this many milliseconds unless a response commits it."
+        },
+    )

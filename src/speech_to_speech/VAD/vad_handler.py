@@ -16,6 +16,7 @@ from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEv
 from speech_to_speech.pipeline.handler_types import VADIn, VADOut
 from speech_to_speech.pipeline.messages import VADAudio
 from speech_to_speech.pipeline.queue_types import TextEventItem
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.utils import int2float
 from speech_to_speech.VAD.vad_iterator import VADIterator
 
@@ -52,6 +53,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         enable_realtime_transcription: bool = False,
         realtime_processing_pause: float = 0.25,
         text_output_queue: Queue[TextEventItem] | None = None,
+        speculative_turns: SpeculativeTurnTracker | None = None,
+        speculative_reopen_ms: int = 1200,
     ) -> None:
         self.should_listen = should_listen
         self.sample_rate = sample_rate
@@ -61,6 +64,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.enable_realtime_transcription = enable_realtime_transcription
         self.realtime_processing_pause = realtime_processing_pause
         self.text_output_queue = text_output_queue
+        self.speculative_turns = speculative_turns
+        self.speculative_reopen_ms = speculative_reopen_ms
         self._last_turn_detection: dict | None = None
         self.model, _ = torch.hub.load(
             "snakers4/silero-vad",
@@ -98,6 +103,12 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._log_speech_ends = 0
         self._log_progressive_yields = 0
         self._speech_started_emitted = False
+        self._turn_counter = 0
+        self._current_turn_id: str | None = None
+        self._current_turn_revision: int | None = None
+        self._speculative_segments: list[np.ndarray] = []
+        self._last_final_wall_time: float | None = None
+        self._last_final_audio_ms: int | None = None
 
     @property
     def _audio_ms(self) -> int:
@@ -135,6 +146,62 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             self.iterator.min_silence_samples = self.sample_rate * td["silence_duration_ms"] / 1000
             logger.info(f"VAD silence duration updated to {td['silence_duration_ms']}ms")
 
+    def _start_new_turn(self) -> tuple[str, int]:
+        self._turn_counter += 1
+        self._current_turn_id = f"turn_{self._turn_counter}"
+        self._current_turn_revision = 0
+        self._speculative_segments = []
+        self._last_final_wall_time = None
+        self._last_final_audio_ms = None
+        if self.speculative_turns:
+            self.speculative_turns.observe(self._current_turn_id, self._current_turn_revision)
+        return self._current_turn_id, self._current_turn_revision
+
+    def _should_reopen_current_turn(self) -> bool:
+        if not self.enable_realtime_transcription:
+            return False
+        if self._current_turn_id is None or self._current_turn_revision is None or self._last_final_wall_time is None:
+            return False
+        elapsed_ms = (time.time() - self._last_final_wall_time) * 1000
+        if elapsed_ms > self.speculative_reopen_ms:
+            return False
+        if self.speculative_turns and self.speculative_turns.is_committed(
+            self._current_turn_id,
+            self._current_turn_revision,
+        ):
+            return False
+        return True
+
+    def _ensure_turn_for_speech_start(self) -> tuple[str, int, bool]:
+        if (
+            self._speech_started_emitted
+            and self._current_turn_id is not None
+            and self._current_turn_revision is not None
+        ):
+            return self._current_turn_id, self._current_turn_revision, False
+
+        reopened = self._should_reopen_current_turn()
+        if reopened and self._current_turn_id is not None and self._current_turn_revision is not None:
+            self._current_turn_revision += 1
+            logger.info(
+                "VAD: reopened speculative turn %s revision %d", self._current_turn_id, self._current_turn_revision
+            )
+        else:
+            self._start_new_turn()
+
+        assert self._current_turn_id is not None and self._current_turn_revision is not None
+        if self.speculative_turns:
+            self.speculative_turns.observe(self._current_turn_id, self._current_turn_revision)
+        return self._current_turn_id, self._current_turn_revision, reopened
+
+    def _current_turn_metadata(self) -> tuple[str | None, int | None]:
+        return self._current_turn_id, self._current_turn_revision
+
+    def _combined_turn_audio(self, current_segment: np.ndarray) -> np.ndarray:
+        if not self._speculative_segments:
+            return current_segment
+        return np.concatenate([*self._speculative_segments, current_segment])
+
     def process(self, audio_chunk: VADIn) -> Iterator[VADOut]:
         runtime_config = None
         if isinstance(audio_chunk, tuple):
@@ -158,12 +225,25 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             buffer_samples = sum(len(t) for t in self.iterator.buffer)
             buffer_duration_ms = buffer_samples / self.sample_rate * 1000
             if buffer_duration_ms >= self.min_speech_ms:
+                turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start()
                 self._speech_started_emitted = True
                 self._log_speech_starts += 1
                 start_ms = max(0, self._audio_ms - int(buffer_duration_ms))
-                logger.info("Speech started (confirmed, %.0fms buffered)", buffer_duration_ms)
+                logger.info(
+                    "Speech started (confirmed, %.0fms buffered, turn=%s rev=%s)",
+                    buffer_duration_ms,
+                    turn_id,
+                    turn_revision,
+                )
                 if self.text_output_queue:
-                    self.text_output_queue.put(SpeechStartedEvent(audio_start_ms=start_ms))
+                    self.text_output_queue.put(
+                        SpeechStartedEvent(
+                            audio_start_ms=start_ms,
+                            turn_id=turn_id,
+                            turn_revision=turn_revision,
+                            reopened=reopened,
+                        )
+                    )
 
         # Log a summary once per second instead of every chunk
         now = time.time()
@@ -200,7 +280,13 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 if duration_ms >= self.min_speech_ms:
                     self._log_progressive_yields += 1
                     logger.debug(f"VAD: yielding progressive audio ({duration_ms:.0f}ms)")
-                    yield VADAudio(audio=array, mode="progressive")
+                    turn_id, turn_revision = self._current_turn_metadata()
+                    yield VADAudio(
+                        audio=self._combined_turn_audio(array),
+                        mode="progressive",
+                        turn_id=turn_id,
+                        turn_revision=turn_revision,
+                    )
                     self.last_process_time = current_time
 
         # Handle end of speech
@@ -208,7 +294,14 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             if len(vad_output) == 0:
                 logger.info("VAD: phantom trigger (empty buffer), closing speech pair")
                 if self._speech_started_emitted and self.text_output_queue:
-                    self.text_output_queue.put(SpeechStoppedEvent(audio_end_ms=self._audio_ms))
+                    turn_id, turn_revision = self._current_turn_metadata()
+                    self.text_output_queue.put(
+                        SpeechStoppedEvent(
+                            audio_end_ms=self._audio_ms,
+                            turn_id=turn_id,
+                            turn_revision=turn_revision,
+                        )
+                    )
                 self._speech_started_emitted = False
                 return
 
@@ -220,20 +313,49 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     f"VAD: discarding {duration_ms:.0f}ms segment (bounds: {self.min_speech_ms}-{self.max_speech_ms}ms)"
                 )
                 if self._speech_started_emitted and self.text_output_queue:
-                    self.text_output_queue.put(SpeechStoppedEvent(audio_end_ms=self._audio_ms))
+                    turn_id, turn_revision = self._current_turn_metadata()
+                    self.text_output_queue.put(
+                        SpeechStoppedEvent(
+                            audio_end_ms=self._audio_ms,
+                            turn_id=turn_id,
+                            turn_revision=turn_revision,
+                        )
+                    )
                 self._speech_started_emitted = False
             else:
                 end_ms = self._audio_ms
-                if not self._speech_started_emitted and self.text_output_queue:
-                    self.text_output_queue.put(SpeechStartedEvent(audio_start_ms=max(0, end_ms - int(duration_ms))))
+                if not self._speech_started_emitted:
+                    turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start()
+                    if self.text_output_queue:
+                        self.text_output_queue.put(
+                            SpeechStartedEvent(
+                                audio_start_ms=max(0, end_ms - int(duration_ms)),
+                                turn_id=turn_id,
+                                turn_revision=turn_revision,
+                                reopened=reopened,
+                            )
+                        )
+                else:
+                    turn_id, turn_revision = self._current_turn_metadata()
                 self._log_speech_ends += 1
-                self.should_listen.clear()
-                logger.info(f"Speech ended ({duration_ms:.0f}ms), stop listening")
-                if self.text_output_queue:
-                    self.text_output_queue.put(SpeechStoppedEvent(duration_s=duration_ms / 1000.0, audio_end_ms=end_ms))
+                logger.info("Speech soft-ended (%.0fms, turn=%s rev=%s)", duration_ms, turn_id, turn_revision)
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
-                yield VADAudio(audio=array, mode="final")
+                output_array = self._combined_turn_audio(array)
+                combined_duration_s = len(output_array) / self.sample_rate
+                if self.text_output_queue:
+                    self.text_output_queue.put(
+                        SpeechStoppedEvent(
+                            duration_s=combined_duration_s,
+                            audio_end_ms=end_ms,
+                            turn_id=turn_id,
+                            turn_revision=turn_revision,
+                        )
+                    )
+                self._speculative_segments.append(array)
+                yield VADAudio(audio=output_array, mode="final", turn_id=turn_id, turn_revision=turn_revision)
+                self._last_final_wall_time = time.time()
+                self._last_final_audio_ms = end_ms
                 self.last_process_time = 0.0
                 self._speech_started_emitted = False
 
@@ -300,6 +422,14 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.last_process_time = 0.0
         self._total_samples = 0
         self._speech_started_emitted = False
+        self._turn_counter = 0
+        self._current_turn_id = None
+        self._current_turn_revision = None
+        self._speculative_segments = []
+        self._last_final_wall_time = None
+        self._last_final_audio_ms = None
+        if self.speculative_turns:
+            self.speculative_turns.reset()
         self.should_listen.set()
         logger.debug("VAD session state reset")
 

@@ -49,7 +49,11 @@ class FasterWhisperSTTHandler(BaseHandler[STTIn, STTOut]):
         if pred_text:
             console.print(f"[yellow]USER: {pred_text}")
 
-            yield Transcription(text=pred_text)
+            yield Transcription(
+                text=pred_text,
+                turn_id=vad_audio.turn_id,
+                turn_revision=vad_audio.turn_revision,
+            )
         else:
             logger.debug("no text detected. skipping...")
 

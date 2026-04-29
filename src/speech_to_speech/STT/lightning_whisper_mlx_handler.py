@@ -94,4 +94,9 @@ class LightningWhisperSTTHandler(BaseHandler[STTIn, STTOut]):
         if self.start_language == "auto":
             language_code += "-auto"
 
-        yield Transcription(text=pred_text, language_code=language_code)
+        yield Transcription(
+            text=pred_text,
+            language_code=language_code,
+            turn_id=vad_audio.turn_id,
+            turn_revision=vad_audio.turn_revision,
+        )

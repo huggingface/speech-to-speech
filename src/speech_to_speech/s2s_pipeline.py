@@ -59,6 +59,7 @@ from speech_to_speech.pipeline.queue_types import (
     TTSInItem,
     VADOutItem,
 )
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.utils.thread_manager import ThreadManager
 from speech_to_speech.VAD.vad_handler import VADHandler
@@ -316,6 +317,7 @@ def initialize_queues_and_events() -> dict[str, Any]:
         "should_listen": Event(),
         "response_playing": Event(),
         "cancel_scope": CancelScope(),
+        "speculative_turns": SpeculativeTurnTracker(),
         "recv_audio_chunks_queue": Queue[AudioInItem](),
         "send_audio_chunks_queue": Queue[AudioOutItem](),
         "spoken_prompt_queue": Queue[VADOutItem](),
@@ -351,6 +353,7 @@ def build_pipeline(
     should_listen = queues_and_events["should_listen"]
     response_playing = queues_and_events["response_playing"]
     cancel_scope = queues_and_events["cancel_scope"]
+    speculative_turns = queues_and_events["speculative_turns"]
     recv_audio_chunks_queue = queues_and_events["recv_audio_chunks_queue"]
     send_audio_chunks_queue = queues_and_events["send_audio_chunks_queue"]
     spoken_prompt_queue = queues_and_events["spoken_prompt_queue"]
@@ -393,6 +396,7 @@ def build_pipeline(
         text_output_queue = queues_and_events["text_output_queue"]
 
         vars(vad_handler_kwargs)["text_output_queue"] = text_output_queue
+        vars(vad_handler_kwargs)["speculative_turns"] = speculative_turns
 
         for kw in (
             language_model_handler_kwargs,
@@ -404,6 +408,7 @@ def build_pipeline(
             facebook_mms_tts_handler_kwargs,
         ):
             vars(kw)["cancel_scope"] = cancel_scope
+            vars(kw)["speculative_turns"] = speculative_turns
 
         if module_kwargs.llm_backend == "responses-api":
             chat_size = vars(responses_api_language_model_handler_kwargs).get("chat_size", 10)
@@ -419,6 +424,7 @@ def build_pipeline(
             cancel_scope=cancel_scope,
             text_output_queue=text_output_queue,
             text_prompt_queue=text_prompt_queue,
+            speculative_turns=speculative_turns,
             host=websocket_streamer_kwargs.ws_host,
             port=websocket_streamer_kwargs.ws_port,
             chat_size=chat_size,
@@ -518,7 +524,7 @@ def build_pipeline(
         stop_event,
         queue_in=lm_response_queue,
         queue_out=lm_processed_queue,
-        setup_kwargs={"text_output_queue": text_output_queue},
+        setup_kwargs={"text_output_queue": text_output_queue, "speculative_turns": speculative_turns},
     )
 
     tts = get_tts_handler(

@@ -41,6 +41,8 @@ class VADAudio(PipelineMessage):
     tag: Literal["vad_audio"] = "vad_audio"
     audio: np.ndarray
     mode: Literal["progressive", "final"] | None = None
+    turn_id: str | None = None
+    turn_revision: int | None = None
 
 
 # ── STT → TranscriptionNotifier → LLM ────────────────────────────────
@@ -51,6 +53,8 @@ class PartialTranscription(PipelineMessage):
 
     tag: Literal["partial_transcription"] = "partial_transcription"
     text: str
+    turn_id: str | None = None
+    turn_revision: int | None = None
 
 
 class Transcription(PipelineMessage):
@@ -59,6 +63,8 @@ class Transcription(PipelineMessage):
     tag: Literal["transcription"] = "transcription"
     text: str
     language_code: Optional[str] = None
+    turn_id: str | None = None
+    turn_revision: int | None = None
 
 
 # ── LLM → LMOutputProcessor ──────────────────────────────────────────
@@ -73,6 +79,8 @@ class LLMResponseChunk(PipelineMessage):
     tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
     runtime_config: RuntimeConfig | None = None
     response: RealtimeResponseCreateParams | None = None
+    turn_id: str | None = None
+    turn_revision: int | None = None
 
 
 class TokenUsage(PipelineMessage):
@@ -81,12 +89,16 @@ class TokenUsage(PipelineMessage):
     tag: Literal["token_usage"] = "token_usage"
     input_tokens: int
     output_tokens: int
+    turn_id: str | None = None
+    turn_revision: int | None = None
 
 
 class EndOfResponse(PipelineMessage):
     """Sentinel marking the end of a response."""
 
     tag: Literal["end_of_response"] = "end_of_response"
+    turn_id: str | None = None
+    turn_revision: int | None = None
 
 
 # ── LMOutputProcessor → TTS ──────────────────────────────────────────
@@ -100,6 +112,8 @@ class TTSInput(PipelineMessage):
     language_code: Optional[str] = None
     runtime_config: RuntimeConfig | None = None
     response: RealtimeResponseCreateParams | None = None
+    turn_id: str | None = None
+    turn_revision: int | None = None
 
 
 # ── Realtime service → LLM ────────────────────────────────────────────
@@ -120,6 +134,8 @@ class GenerateResponseRequest(PipelineMessage):
     runtime_config: RuntimeConfig
     response: RealtimeResponseCreateParams | None = None
     language_code: Optional[str] = None
+    turn_id: str | None = None
+    turn_revision: int | None = None
 
 
 # ── Binary sentinels (audio/output queue) ─────────────────────────────

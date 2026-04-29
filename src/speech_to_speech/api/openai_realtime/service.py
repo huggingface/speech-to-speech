@@ -47,6 +47,7 @@ from speech_to_speech.pipeline.events import (
 )
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
 from speech_to_speech.pipeline.queue_types import TextPromptItem
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
@@ -154,6 +155,13 @@ class ConnState(BaseModel):
     last_item_id: Optional[str] = None
     current_response_params: RealtimeResponseCreateParams | None = None
     response_usage: UsageMetrics = Field(default_factory=UsageMetrics)
+    speculative_turn_id: Optional[str] = None
+    speculative_turn_revision: Optional[int] = None
+    speculative_user_turn_id: Optional[str] = None
+    speculative_user_turn_revision: Optional[int] = None
+    speculative_user_item_id: Optional[str] = None
+    speculative_input_item_id: Optional[str] = None
+    speculative_audio_duration_s: float = 0.0
 
 
 class RealtimeService:
@@ -169,10 +177,12 @@ class RealtimeService:
         text_prompt_queue: Queue[TextPromptItem] | None = None,
         should_listen: ThreadingEvent | None = None,
         chat_size: int = 10,
+        speculative_turns: SpeculativeTurnTracker | None = None,
     ) -> None:
         self.text_prompt_queue = text_prompt_queue
         self.should_listen = should_listen
         self._chat_size = chat_size
+        self.speculative_turns = speculative_turns
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
 
@@ -194,6 +204,8 @@ class RealtimeService:
 
     def register(self) -> str:
         """Register a new connection and return its session_id."""
+        if self.speculative_turns:
+            self.speculative_turns.reset()
         state = ConnState(runtime_config=RuntimeConfig(chat=Chat(self._chat_size)))
         self._conns[state.session_id] = state
         self.total_usage.connections += 1
@@ -276,23 +288,71 @@ class RealtimeService:
 
     def dispatch_pipeline_event(self, conn_id: str, event: PipelineEvent) -> list[ServerEvent]:
         """Route a pipeline text_output_queue event to the appropriate handler."""
+        if self._is_stale_turn_event(event):
+            logger.info(
+                "Ignoring stale %s for turn=%s rev=%s",
+                event.type,
+                getattr(event, "turn_id", None),
+                getattr(event, "turn_revision", None),
+            )
+            return []
+
+        self._observe_turn_event(event)
         handler = self._pipeline_dispatch.get(type(event))
         if handler is None:
             logger.debug("Unhandled pipeline event type: %s", type(event).__name__)
             return []
         return handler(conn_id, event)
 
+    def _is_stale_turn_event(self, event: PipelineEvent) -> bool:
+        if self.speculative_turns is None:
+            return False
+        if not isinstance(
+            event,
+            (PartialTranscriptionEvent, TranscriptionCompletedEvent, AssistantTextEvent, TokenUsageEvent),
+        ):
+            return False
+        return not self.speculative_turns.is_latest(
+            getattr(event, "turn_id", None),
+            getattr(event, "turn_revision", None),
+        )
+
+    def _observe_turn_event(self, event: PipelineEvent) -> None:
+        if self.speculative_turns is None:
+            return
+        self.speculative_turns.observe(
+            getattr(event, "turn_id", None),
+            getattr(event, "turn_revision", None),
+        )
+
     # ── STT → LM bridge ────────────────────────────
 
     def _on_transcription_completed(self, conn_id: str, event: TranscriptionCompletedEvent) -> list[ServerEvent]:
         """Handle a final STT transcription: emit protocol event, append to chat, trigger LM."""
-        events = self.conversation.on_transcription_completed(conn_id, event)
-
         st = self._state(conn_id)
+        if event.turn_id is not None and event.turn_id == st.speculative_user_turn_id:
+            st.response_usage.audio_duration_s -= st.speculative_audio_duration_s
+        else:
+            st.speculative_audio_duration_s = 0.0
+
+        events = self.conversation.on_transcription_completed(conn_id, event)
+        if event.turn_id is not None:
+            st.speculative_audio_duration_s = st.input_audio_duration_s
+
         cfg = st.runtime_config
         transcript = event.transcript
         if transcript:
-            cfg.chat.add_item(make_user_message(transcript))
+            same_speculative_turn = event.turn_id is not None and event.turn_id == st.speculative_user_turn_id
+            if same_speculative_turn and st.speculative_user_item_id:
+                replaced = cfg.chat.replace_user_message_text(st.speculative_user_item_id, transcript)
+                if not replaced:
+                    item = cfg.chat.add_item(make_user_message(transcript))
+                    st.speculative_user_item_id = item.id
+            else:
+                item = cfg.chat.add_item(make_user_message(transcript))
+                st.speculative_user_item_id = item.id
+            st.speculative_user_turn_id = event.turn_id
+            st.speculative_user_turn_revision = event.turn_revision
 
         queue = self.text_prompt_queue
         if queue and transcript:
@@ -300,6 +360,8 @@ class RealtimeService:
                 GenerateResponseRequest(
                     runtime_config=cfg,
                     language_code=event.language_code,
+                    turn_id=event.turn_id,
+                    turn_revision=event.turn_revision,
                 )
             )
 

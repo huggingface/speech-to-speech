@@ -257,7 +257,11 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
                     try:
                         progressive_text = self._show_progressive_transcription(audio_input)
                         if progressive_text:
-                            yield PartialTranscription(text=progressive_text)
+                            yield PartialTranscription(
+                                text=progressive_text,
+                                turn_id=vad_audio.turn_id,
+                                turn_revision=vad_audio.turn_revision,
+                            )
                             return
                     except Exception as e:
                         logger.debug(f"Progressive transcription failed: {e}")
@@ -307,7 +311,12 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
             if self.streaming_handler is not None:
                 self.streaming_handler.reset()
 
-        yield Transcription(text=pred_text, language_code=language_code)
+        yield Transcription(
+            text=pred_text,
+            language_code=language_code,
+            turn_id=vad_audio.turn_id,
+            turn_revision=vad_audio.turn_revision,
+        )
 
     @property
     def timing_log_level(self) -> int:

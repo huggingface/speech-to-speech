@@ -30,6 +30,7 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, is_control_message
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 
 logger = logging.getLogger(__name__)
@@ -87,8 +88,10 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         blocksize: int = 512,
         gen_kwargs: dict[str, Any] | None = None,
         cancel_scope: CancelScope | None = None,
+        speculative_turns: SpeculativeTurnTracker | None = None,
     ) -> None:
         self.cancel_scope = cancel_scope
+        self.speculative_turns = speculative_turns
         self.should_listen = should_listen
         self.requested_device = device
         self.ref_audio = ref_audio
@@ -616,6 +619,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                     break
                 if not isinstance(next_item, TTSInput):
                     break
+                if current_input.turn_id != next_item.turn_id or current_input.turn_revision != next_item.turn_revision:
+                    break
                 if (
                     language_code is not None
                     and next_item.language_code is not None
@@ -635,6 +640,14 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         if isinstance(tts_input, EndOfResponse):
             yield AUDIO_RESPONSE_DONE
+            return
+
+        speculative_turns = getattr(self, "speculative_turns", None)
+        if speculative_turns and not speculative_turns.is_latest(
+            tts_input.turn_id,
+            tts_input.turn_revision,
+        ):
+            logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
             return
 
         runtime_config = tts_input.runtime_config

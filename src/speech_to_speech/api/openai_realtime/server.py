@@ -10,6 +10,7 @@ from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.queue_types import AudioInItem, AudioOutItem, TextEventItem, TextPromptItem
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class RealtimeServer:
         cancel_scope: CancelScope | None = None,
         text_output_queue: Queue[TextEventItem] | None = None,
         text_prompt_queue: Queue[TextPromptItem] | None = None,
+        speculative_turns: SpeculativeTurnTracker | None = None,
         host: str = "0.0.0.0",
         port: int = 8765,
         chat_size: int = 10,
@@ -41,6 +43,7 @@ class RealtimeServer:
         self.output_queue = output_queue
         self.text_output_queue = text_output_queue
         self.text_prompt_queue = text_prompt_queue
+        self.speculative_turns = speculative_turns
         self.should_listen = should_listen
         self.response_playing = response_playing
         self.cancel_scope = cancel_scope
@@ -54,6 +57,7 @@ class RealtimeServer:
             text_prompt_queue=self.text_prompt_queue,
             should_listen=self.should_listen,
             chat_size=self.chat_size,
+            speculative_turns=self.speculative_turns,
         )
         app = create_app(
             service=service,

@@ -252,13 +252,17 @@ def create_app(
                                     if events:
                                         await _send_events(ws, events)
 
-                        if is_speech_start and was_in_response:
+                        if is_speech_start and (was_in_response or getattr(text_msg, "reopened", False)):
                             active_cfg = (
                                 service._state(app.state.active_session).runtime_config
                                 if app.state.active_session
                                 else None
                             )
-                            if active_cfg is None or active_cfg.interrupt_response_enabled:
+                            if (
+                                active_cfg is None
+                                or active_cfg.interrupt_response_enabled
+                                or getattr(text_msg, "reopened", False)
+                            ):
                                 if cancel_scope:
                                     cancel_scope.cancel()
                                 _flush_queue(output_queue, preserve=_keep_audio_sentinel)

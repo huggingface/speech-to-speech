@@ -181,6 +181,22 @@ class Chat:
 
         return item
 
+    def replace_user_message_text(self, item_id: str, text: str) -> bool:
+        """Replace the text content of an existing user message.
+
+        Used by speculative turn revisions: the conversation turn remains the
+        same, but the STT transcript is superseded by a transcription of a
+        longer raw-audio buffer.
+        """
+
+        for item in self.buffer:
+            if not isinstance(item, RealtimeConversationItemUserMessage) or item.id != item_id:
+                continue
+            item.content = [UserContent(type="input_text", text=text)]
+            logger.debug("Replaced speculative user message %s", item_id)
+            return True
+        return False
+
     def to_responses_api_chat(self) -> ResponseInputParam:
         """Serialize the full chat (system prompt + buffer) for the OpenAI Responses API."""
         result: list[ResponseInputItemParam] = []

@@ -14,6 +14,7 @@ from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.DEBUG)
 
@@ -73,10 +74,12 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
         stream: bool = True,
         chunk_size: int = 512,
         cancel_scope: CancelScope | None = None,
+        speculative_turns: SpeculativeTurnTracker | None = None,
         **kwargs: Any,
     ) -> None:
         self.should_listen = should_listen
         self.cancel_scope = cancel_scope
+        self.speculative_turns = speculative_turns
         self.device = device
         self.torch_dtype = getattr(torch, torch_dtype)
         self.stream = stream
@@ -136,6 +139,14 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         if isinstance(tts_input, EndOfResponse):
             yield AUDIO_RESPONSE_DONE
+            return
+
+        speculative_turns = getattr(self, "speculative_turns", None)
+        if speculative_turns and not speculative_turns.is_latest(
+            tts_input.turn_id,
+            tts_input.turn_revision,
+        ):
+            logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
             return
 
         gen = self.cancel_scope.generation if self.cancel_scope else None

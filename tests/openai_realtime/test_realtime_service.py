@@ -6,6 +6,7 @@ validated for correct type, attributes, and state transitions.
 
 import base64
 import json
+from queue import Queue
 
 import pytest
 from openai.types.realtime import (
@@ -31,6 +32,7 @@ from openai.types.realtime import (
 
 from speech_to_speech.api.openai_realtime.service import (
     CHUNK_SIZE_BYTES,
+    RealtimeService,
 )
 from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
@@ -41,6 +43,7 @@ from speech_to_speech.pipeline.events import (
     TranscriptionCompletedEvent,
 )
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -822,6 +825,76 @@ class TestDispatchPipelineEvent:
         assert evt.usage.seconds == 1.1
         assert text_prompt_queue.empty()
         assert runtime_config.chat.buffer == []
+
+    def test_revised_transcription_replaces_speculative_user_message(self, runtime_config, should_listen):
+        text_prompt_queue = Queue()
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(
+            text_prompt_queue=text_prompt_queue,
+            should_listen=should_listen,
+            speculative_turns=tracker,
+        )
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=1.0, turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="hello", turn_id="turn_1", turn_revision=0),
+        )
+
+        tracker.observe("turn_1", 1)
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=2.0, turn_id="turn_1", turn_revision=1),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="hello again", turn_id="turn_1", turn_revision=1),
+        )
+
+        user_items = [item for item in runtime_config.chat.buffer if getattr(item, "role", None) == "user"]
+        assert len(user_items) == 1
+        assert user_items[0].content[0].text == "hello again"
+        first_req = text_prompt_queue.get_nowait()
+        second_req = text_prompt_queue.get_nowait()
+        assert first_req.turn_revision == 0
+        assert second_req.turn_revision == 1
+        assert service._state(conn_id).response_usage.audio_duration_s == 2.0
+        service.unregister(conn_id)
+
+    def test_stale_transcription_revision_is_ignored(self, runtime_config, should_listen):
+        text_prompt_queue = Queue()
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(
+            text_prompt_queue=text_prompt_queue,
+            should_listen=should_listen,
+            speculative_turns=tracker,
+        )
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+        tracker.observe("turn_1", 1)
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="stale", turn_id="turn_1", turn_revision=0),
+        )
+
+        assert events == []
+        assert runtime_config.chat.buffer == []
+        assert text_prompt_queue.empty()
+        service.unregister(conn_id)
 
     # -- unknown --
 

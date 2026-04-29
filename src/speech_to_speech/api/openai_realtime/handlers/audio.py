@@ -86,9 +86,19 @@ class AudioHandler(RealtimeBaseHandler):
         st = self._state(conn_id)
         if st.in_response and st.runtime_config.interrupt_response_enabled:
             events.extend(response.finish_audio_response(conn_id, status="cancelled", reason="turn_detected"))
-        input_item_id = response._start_item(conn_id)
+        is_reopen = bool(event.reopened and event.turn_id is not None and event.turn_id == st.speculative_turn_id)
+        if is_reopen:
+            input_item_id = st.speculative_input_item_id or response._current_item_id(conn_id)
+            st.current_item_id = input_item_id
+            st.content_index = 0
+            st.input_audio_duration_s = 0.0
+        else:
+            input_item_id = response._start_item(conn_id)
+            st.speculative_input_item_id = input_item_id
+            st.response_usage.turns += 1
+        st.speculative_turn_id = event.turn_id
+        st.speculative_turn_revision = event.turn_revision
         st.last_item_id = input_item_id
-        st.response_usage.turns += 1
         events.append(
             InputAudioBufferSpeechStartedEvent(
                 type="input_audio_buffer.speech_started",
