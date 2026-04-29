@@ -6,13 +6,16 @@ from openai import Stream
 from openai.types.responses import (
     Response,
     ResponseOutputItemDoneEvent,
+    ResponseOutputMessage,
     ResponseTextDeltaEvent,
 )
+from openai.types.responses.response_output_text import ResponseOutputText
 
-from speech_to_speech.LLM.chat import Chat
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.LLM.openai_api_language_model import OpenApiModelHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk, Transcription
+from speech_to_speech.pipeline.messages import EndOfResponse, GenerateResponseRequest, LLMResponseChunk
 
 
 def _make_text_delta_event(text):
@@ -52,6 +55,21 @@ def _make_response(output, usage=None):
     return resp
 
 
+def _make_runtime_config(chat_size=2, instructions="You are a helpful AI assistant."):
+    from openai.types.realtime import RealtimeSessionCreateRequest
+
+    return RuntimeConfig(
+        chat=Chat(chat_size),
+        session=RealtimeSessionCreateRequest(type="realtime", instructions=instructions),
+    )
+
+
+def _make_request(text="Hi", chat_size=2):
+    cfg = _make_runtime_config(chat_size=chat_size)
+    cfg.chat.add_item(make_user_message(text))
+    return GenerateResponseRequest(runtime_config=cfg)
+
+
 def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler = object.__new__(OpenApiModelHandler)
     handler.model_name = "test-model"
@@ -63,7 +81,6 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler.disable_thinking = disable_thinking
     handler._extra_body = {"chat_template_kwargs": {"enable_thinking": False}} if disable_thinking else None
     handler.user_role = "user"
-    handler.chat = Chat(1)
     handler.cancel_scope = cancel_scope
     handler.tools = None
     handler.tools_choice = None
@@ -85,7 +102,7 @@ def test_process_streams_text_from_response_events():
         )
     )
 
-    outputs = list(handler.process(Transcription(text="Hi")))
+    outputs = list(handler.process(_make_request("Hi")))
 
     assert len(outputs) == 3
     assert isinstance(outputs[0], LLMResponseChunk) and outputs[0].text == "Hello."
@@ -103,7 +120,7 @@ def test_process_handles_cancellation():
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
 
-    outputs = list(handler.process(Transcription(text="Hi")))
+    outputs = list(handler.process(_make_request("Hi")))
 
     assert len(outputs) == 1
     assert isinstance(outputs[0], EndOfResponse)
@@ -119,7 +136,7 @@ def test_process_read_timeout_ends_response_cleanly():
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: make_timeout_stream()))
 
-    outputs = list(handler.process(Transcription(text="Hi")))
+    outputs = list(handler.process(_make_request("Hi")))
 
     assert len(outputs) == 2
     assert (
@@ -144,7 +161,7 @@ def test_disable_thinking_passes_extra_body():
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
 
-    list(handler.process(Transcription(text="Hi")))
+    list(handler.process(_make_request("Hi")))
 
     assert captured["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
 
@@ -164,7 +181,7 @@ def test_no_disable_thinking_omits_extra_body():
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
 
-    list(handler.process(Transcription(text="Hi")))
+    list(handler.process(_make_request("Hi")))
 
     assert captured.get("extra_body") is None
 
@@ -172,13 +189,16 @@ def test_no_disable_thinking_omits_extra_body():
 def test_second_turn_flattens_assistant_history_for_responses():
     handler = _make_handler(stream=False)
     captured = {}
+    cfg = _make_runtime_config(chat_size=2)
 
     first_response = _make_response(
         output=[
-            SimpleNamespace(
+            ResponseOutputMessage(
+                id="msg_1",
                 type="message",
                 role="assistant",
-                content=[SimpleNamespace(type="output_text", text="Hello.")],
+                status="completed",
+                content=[ResponseOutputText(type="output_text", text="Hello.", annotations=[])],
             )
         ],
     )
@@ -195,14 +215,17 @@ def test_second_turn_flattens_assistant_history_for_responses():
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
 
-    list(handler.process(Transcription(text="Hi")))
-    list(handler.process(Transcription(text="Again")))
+    cfg.chat.add_item(make_user_message("Hi"))
+    list(handler.process(GenerateResponseRequest(runtime_config=cfg)))
+    cfg.chat.add_item(make_user_message("Again"))
+    list(handler.process(GenerateResponseRequest(runtime_config=cfg)))
 
     assistant_items = [item for item in captured["input"] if item.get("role") == "assistant"]
-    assert assistant_items == [
-        {
-            "type": "message",
-            "role": "assistant",
-            "content": [SimpleNamespace(type="output_text", text="Hello.")],
-        }
-    ]
+    assert len(assistant_items) == 1
+    ai = assistant_items[0]
+    assert ai["role"] == "assistant"
+    assert ai["type"] == "message"
+    assert ai["status"] == "completed"
+    assert len(ai["content"]) == 1
+    assert ai["content"][0]["type"] == "output_text"
+    assert ai["content"][0]["text"] == "Hello."

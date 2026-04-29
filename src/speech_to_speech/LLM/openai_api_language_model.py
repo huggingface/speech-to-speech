@@ -8,6 +8,13 @@ from typing import Any, Optional
 import httpx
 from nltk import sent_tokenize
 from openai import OpenAI, Stream
+from openai.types.realtime.conversation_item import (
+    RealtimeConversationItemAssistantMessage,
+    RealtimeConversationItemFunctionCall,
+)
+from openai.types.realtime.realtime_conversation_item_assistant_message import (
+    Content as AssistantContent,
+)
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
@@ -19,18 +26,17 @@ from openai.types.responses import (
 )
 
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.LLM.chat import Chat
+from speech_to_speech.LLM.chat import Chat, make_system_message, make_user_message
 from speech_to_speech.LLM.utils import remove_unspeechable, resolve_auto_language
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
 from speech_to_speech.pipeline.messages import (
     EndOfResponse,
-    GenerateResponseRequest,
     LLMResponseChunk,
     TokenUsage,
-    Transcription,
 )
+from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
 
@@ -49,13 +55,11 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         api_key: Optional[str] = None,
         stream: bool = False,
         user_role: str = "user",
-        chat_size: int = 1,
-        init_chat_role: str = "system",
-        init_chat_prompt: str = "You are a helpful AI assistant.",
         cancel_scope: CancelScope | None = None,
         disable_thinking: bool = True,
         request_timeout_s: float = 20.0,
         stream_batch_sentences: int = 3,
+        **_kwargs: Any,
     ) -> None:
         self.cancel_scope = cancel_scope
         self.model_name = model_name
@@ -68,14 +72,6 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
             connect=min(10.0, self.request_timeout_s),
         )
 
-        # TODO: chat is not used in the realtime pipeline, but still need to be kept for backward compatibility. Remove it in the future.
-        self.chat = Chat(chat_size)
-        if init_chat_role:
-            if not init_chat_prompt:
-                raise ValueError("An initial promt needs to be specified when setting init_chat_role.")
-            full_prompt = build_voice_system_prompt(init_chat_prompt)
-            self.chat.init_chat({"role": init_chat_role, "content": full_prompt})
-
         self.user_role = user_role
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self._extra_body = (
@@ -84,21 +80,6 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
             else None
         )
         self.warmup()
-
-    def _prepare_chat_messages(self, chat: Chat) -> list[dict[str, Any]]:
-        """Convert chat messages to OpenAI Responses API input format.
-
-        Regular messages are wrapped with ``type: "message"``.
-        Tool-related items (``function_call``, ``function_call_output``)
-        are passed through as top-level input items per the Responses API spec.
-        """
-        result: list[dict[str, Any]] = []
-        for msg in chat.to_list():
-            if msg.get("type") in ("function_call", "function_call_output"):
-                result.append(msg)
-            else:
-                result.append({"type": "message", "role": msg["role"], "content": msg["content"]})
-        return result
 
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
@@ -125,50 +106,35 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
     ) -> None:
         if instructions:
             full_instructions = build_voice_system_prompt(instructions)
-            chat.init_chat({"role": "system", "content": [{"type": "input_text", "text": full_instructions}]})
+            chat.add_item(make_system_message(full_instructions))
 
     def process(self, request: LLMIn) -> Iterator[LLMOut]:
-        language_code = None
-        runtime_config = None
-        response = None
-        req_tools = None
-        req_tool_choice = None
+        """
+        Process a language model request and yield LLMResponseChunks.
 
-        if isinstance(request, GenerateResponseRequest):
-            req = request
-            runtime_config = req.runtime_config
-            response = req.response
-            original_chat = runtime_config.chat
-            active_chat = original_chat.copy()
-            language_code = req.language_code
-            instructions = (
-                response.instructions if response and response.instructions else runtime_config.session.instructions
-            )
-            req_tools = response.tools if response and response.tools else runtime_config.session.tools
-            req_tool_choice = (
-                response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
-            )
-            self._apply_config(active_chat, instructions)
-            language_code, lang_name = resolve_auto_language(language_code)
-            if lang_name:
-                active_chat.append(
-                    {
-                        "role": self.user_role,
-                        "content": [{"type": "input_text", "text": f"Please reply to my message in {lang_name}."}],
-                    }
-                )
-        elif isinstance(request, Transcription):
-            original_chat = self.chat
-            active_chat = original_chat
-            logger.debug("call api language model...")
-            language_code = request.language_code
-            prompt_text = request.text
-            language_code, lang_name = resolve_auto_language(language_code)
-            if lang_name:
-                prompt_text = f"Please reply to my message in {lang_name}. " + prompt_text
-            active_chat.append({"role": self.user_role, "content": [{"type": "input_text", "text": prompt_text}]})
-        else:
-            raise TypeError(f"Unexpected request type: {type(request)}")
+        Args:
+            request: The LLMIn request containing runtime configuration and response parameters.
+
+        Yields:
+            LLMResponseChunk: Chunks of text and tools from the language model response.
+        """
+
+        runtime_config = request.runtime_config
+        response = request.response
+        original_chat = runtime_config.chat
+        active_chat = original_chat.copy()
+        language_code = request.language_code
+        instructions = (
+            response.instructions if response and response.instructions else runtime_config.session.instructions
+        ) or ""
+        req_tools = response.tools if response and response.tools else runtime_config.session.tools
+        req_tool_choice = (
+            response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
+        )
+        self._apply_config(active_chat, instructions)
+        language_code, lang_name = resolve_auto_language(language_code)
+        if lang_name:
+            active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
 
         optional_kwargs: dict[str, Any] = {}
         if req_tools is not None:
@@ -183,14 +149,14 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         # end (IPC and lifecycle cost).
         gen = self.cancel_scope.generation if self.cancel_scope else None
         api_response: Response | Stream[ResponseStreamEvent] | None = None
-        tools: list[dict[str, str]] = []
+        tools: list[ResponseFunctionToolCall] = []
         clean_text = ""
         input_tokens = 0
         output_tokens = 0
         try:
             api_response = self.client.responses.create(
                 model=self.model_name,
-                input=self._prepare_chat_messages(active_chat),  # type: ignore[arg-type]
+                input=active_chat.to_response_api_chat(),
                 stream=self.stream,
                 extra_body=self._extra_body,
                 timeout=self.request_timeout,
@@ -224,13 +190,31 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                             printable_text = sentences[-1]
                     elif isinstance(raw_event, ResponseOutputItemDoneEvent):
                         if isinstance(raw_event.item, ResponseFunctionToolCall):
-                            tools.append(raw_event.item.model_dump())
+                            raw_event.item.call_id = _generate_id("call")
+                            raw_event.item.id = _generate_id("fc")
+                            tools.append(raw_event.item)
+                            original_chat.add_item(
+                                RealtimeConversationItemFunctionCall(
+                                    type="function_call",
+                                    name=raw_event.item.name,
+                                    arguments=raw_event.item.arguments,
+                                    call_id=raw_event.item.call_id,
+                                    id=raw_event.item.id,
+                                    status=raw_event.item.status,
+                                )
+                            )
                         elif isinstance(raw_event.item, ResponseOutputMessage):
-                            original_chat.append(
-                                {
-                                    "role": raw_event.item.role,
-                                    "content": raw_event.item.content,
-                                }
+                            content = [
+                                AssistantContent(
+                                    type="output_text",
+                                    text=c.text if c.type == "output_text" else c.refusal,
+                                )
+                                for c in raw_event.item.content
+                            ]
+                            original_chat.add_item(
+                                RealtimeConversationItemAssistantMessage(
+                                    type="message", role="assistant", content=content
+                                )
                             )
                     elif isinstance(raw_event, ResponseCompletedEvent):
                         usage = getattr(raw_event.response, "usage", None)
@@ -238,8 +222,6 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                             input_tokens = usage.input_tokens or 0
                             output_tokens = usage.output_tokens or 0
                 if not cancelled:
-                    for tool in tools:
-                        original_chat.append(tool)
                     if printable_text.strip():
                         sentence_batch.append(printable_text.strip())
                     remaining = " ".join(sentence_batch)
@@ -262,22 +244,37 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                         input_tokens = usage.input_tokens or 0
                         output_tokens = usage.output_tokens or 0
                     for message in api_response.output:
-                        if message.type == "function_call":
-                            tools.append(message.model_dump())
-                        elif message.type == "message":
-                            original_chat.append(
-                                {
-                                    "role": message.role,
-                                    "content": message.content,
-                                }
+                        if isinstance(message, ResponseFunctionToolCall):
+                            item = original_chat.add_item(
+                                RealtimeConversationItemFunctionCall(
+                                    type="function_call",
+                                    name=message.name,
+                                    arguments=message.arguments,
+                                    status="in_progress",
+                                )
+                            )
+                            assert (hasattr(item, "call_id") and item.call_id is not None) and item.id is not None
+                            message.call_id = item.call_id
+                            message.id = item.id
+                            tools.append(message)
+                        elif isinstance(message, ResponseOutputMessage):
+                            content = [
+                                AssistantContent(
+                                    type="output_text",
+                                    text=c.text if c.type == "output_text" else c.refusal,
+                                )
+                                for c in message.content
+                            ]
+                            original_chat.add_item(
+                                RealtimeConversationItemAssistantMessage(
+                                    type="message", role="assistant", content=content
+                                )
                             )
                             for chunk in message.content:
                                 if chunk.type == "output_text":
                                     clean_text += remove_unspeechable(chunk.text)
                         else:
                             logger.warning(f"Not supported message type: {message.type}")
-                    for tool in tools:
-                        original_chat.append(tool)
                     logger.debug(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
                     if clean_text.strip() or tools:

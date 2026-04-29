@@ -1,21 +1,18 @@
 from __future__ import annotations
 
 import logging
-import uuid
 from queue import Queue
 from threading import Event as ThreadingEvent
 from typing import TYPE_CHECKING
 
 from openai.types.realtime import RealtimeErrorEvent
 
+from speech_to_speech.utils.utils import _generate_id
+
 if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import ConnState, RealtimeService
 
 logger = logging.getLogger(__name__)
-
-
-def _generate_id(prefix: str) -> str:
-    return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
 class RealtimeBaseHandler:

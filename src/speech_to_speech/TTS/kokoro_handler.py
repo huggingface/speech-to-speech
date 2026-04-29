@@ -259,9 +259,6 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         else:
             yield from self._process_kokoro(text, language_code)
 
-        if not runtime_config:
-            self.should_listen.set()
-
     def _process_mlx(self, llm_sentence: str, language_code: Optional[str] = None) -> Iterator[np.ndarray]:
         """Process using MLX backend with Apple Silicon optimizations."""
         from scipy.signal import resample_poly

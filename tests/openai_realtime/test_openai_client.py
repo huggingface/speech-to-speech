@@ -438,9 +438,10 @@ class TestSDKToolCalling:
                     text="Checking weather",
                     tools=[
                         {
+                            "type": "function_call",
                             "call_id": "call_xyz",
                             "name": "get_weather",
-                            "arguments": {"city": "Tokyo"},
+                            "arguments": '{"city": "Tokyo"}',
                         }
                     ],
                 )
@@ -467,8 +468,8 @@ class TestSDKToolCalling:
                 AssistantTextEvent(
                     text="",
                     tools=[
-                        {"call_id": "c1", "name": "tool_a", "arguments": {}},
-                        {"call_id": "c2", "name": "tool_b", "arguments": {"x": 1}},
+                        {"type": "function_call", "call_id": "c1", "name": "tool_a", "arguments": "{}"},
+                        {"type": "function_call", "call_id": "c2", "name": "tool_b", "arguments": '{"x": 1}'},
                     ],
                 )
             )
@@ -498,7 +499,7 @@ class TestSDKTextInput:
                 {
                     "type": "conversation.item.create",
                     "item": {
-                        "id": "item_sdk_1",
+                        "id": "msg_sdk_1",
                         "type": "message",
                         "role": "user",
                         "content": [{"type": "input_text", "text": "Hello from SDK"}],
@@ -523,7 +524,7 @@ class TestSDKTextInput:
                 {
                     "type": "conversation.item.create",
                     "item": {
-                        "id": "item_a",
+                        "id": "msg_a",
                         "type": "message",
                         "role": "user",
                         "content": [{"type": "input_text", "text": "first"}],
@@ -537,7 +538,7 @@ class TestSDKTextInput:
                 {
                     "type": "conversation.item.create",
                     "item": {
-                        "id": "item_b",
+                        "id": "msg_b",
                         "type": "message",
                         "role": "user",
                         "content": [{"type": "input_text", "text": "second"}],
@@ -545,7 +546,7 @@ class TestSDKTextInput:
                 }
             )
             e2 = await _recv(conn)
-            assert e2.previous_item_id == "item_a"
+            assert e2.previous_item_id == e1.item.id
 
 
 # ===================================================================

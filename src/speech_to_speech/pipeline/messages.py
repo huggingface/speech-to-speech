@@ -12,6 +12,7 @@ from typing import Final, Literal, Optional, TypeAlias
 
 import numpy as np
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from pydantic import BaseModel, ConfigDict, Field
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
@@ -69,7 +70,7 @@ class LLMResponseChunk(PipelineMessage):
     tag: Literal["llm_response_chunk"] = "llm_response_chunk"
     text: str
     language_code: Optional[str] = None
-    tools: list = Field(default_factory=list)
+    tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
     runtime_config: RuntimeConfig | None = None
     response: RealtimeResponseCreateParams | None = None
 

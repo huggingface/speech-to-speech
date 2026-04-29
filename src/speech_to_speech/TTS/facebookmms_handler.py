@@ -140,7 +140,6 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
         language_code = tts_input.language_code
-        runtime_config = tts_input.runtime_config
         text = tts_input.text
 
         console.print(f"[green]ASSISTANT: {text}")
@@ -161,8 +160,6 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         if audio_output is None or audio_output.numel() == 0:
             logger.warning("No audio output generated")
-            if not runtime_config:
-                self.should_listen.set()
             return
 
         audio_numpy = audio_output.cpu().numpy().squeeze()
@@ -190,9 +187,6 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     audio_int16[i : i + self.chunk_size],
                     (0, self.chunk_size - len(audio_int16[i : i + self.chunk_size])),
                 )
-
-        if not runtime_config:
-            self.should_listen.set()
 
     def on_session_end(self) -> None:
         if self.language != self._initial_language:

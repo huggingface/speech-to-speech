@@ -1,8 +1,14 @@
+import uuid
+
 import numpy as np
 
 
 def next_power_of_2(x: int) -> int:
     return 1 if x == 0 else 2 ** (x - 1).bit_length()
+
+
+def _generate_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex}"
 
 
 def int2float(sound: np.ndarray) -> np.ndarray:

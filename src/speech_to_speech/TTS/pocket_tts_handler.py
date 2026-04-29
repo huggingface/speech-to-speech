@@ -99,7 +99,6 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
         language_code = tts_input.language_code
-        runtime_config = tts_input.runtime_config
         text = tts_input.text
         logger.debug(f"Received language code: {language_code}")
 
@@ -208,6 +207,3 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 if len(chunk) < self.blocksize:
                     chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
                 yield chunk
-
-        if not runtime_config:
-            self.should_listen.set()

@@ -10,7 +10,7 @@ from websockets.asyncio.server import ServerConnection
 
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import PipelineEvent
-from speech_to_speech.pipeline.messages import PIPELINE_END
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 from speech_to_speech.pipeline.queue_types import AudioInItem, AudioOutItem, TextEventItem
 
 logger = logging.getLogger(__name__)
@@ -169,6 +169,17 @@ class WebSocketStreamer:
                                 return_exceptions=True,
                             )
                         break
+                    if isinstance(audio_chunk, bytes) and audio_chunk == AUDIO_RESPONSE_DONE:
+                        if audio_buffer and self.clients:
+                            data = bytes(audio_buffer)
+                            audio_buffer.clear()
+                            await asyncio.gather(
+                                *[client.send(data) for client in self.clients],
+                                return_exceptions=True,
+                            )
+                        self.should_listen.set()
+                        logger.debug("Response complete, listening re-enabled")
+                        continue
                     if is_control_message(audio_chunk, SESSION_END.kind):
                         audio_buffer.clear()
                         continue
