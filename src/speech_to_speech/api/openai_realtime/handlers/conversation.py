@@ -73,6 +73,12 @@ class ConversationHandler(RealtimeBaseHandler):
         Raises :class:`ChatItemError` on validation failure or unsupported type.
         """
         chat = self._state(conn_id).runtime_config.chat
+
+        if isinstance(item, RealtimeConversationItemFunctionCall) and (
+            item.call_id is None or not item.call_id.startswith("call_")
+        ):
+            raise ChatItemError("function_call item is missing a call_id. The call_id should start with 'call_'.")
+
         if isinstance(
             item,
             (

@@ -52,6 +52,8 @@ def _system(text: str) -> RealtimeConversationItemSystemMessage:
 
 
 def _fc(call_id: str = "call_1", name: str = "my_func", arguments: str = "{}") -> RealtimeConversationItemFunctionCall:
+    if not call_id.startswith("call_"):
+        call_id = f"call_{call_id}"
     return RealtimeConversationItemFunctionCall(
         type="function_call",
         id=f"fc_{call_id}",
@@ -64,6 +66,8 @@ def _fc(call_id: str = "call_1", name: str = "my_func", arguments: str = "{}") -
 def _fco(
     call_id: str = "call_1", output: str = '{"ok": true}', status=None
 ) -> RealtimeConversationItemFunctionCallOutput:
+    if not call_id.startswith("call_"):
+        call_id = f"call_{call_id}"
     return RealtimeConversationItemFunctionCallOutput(
         type="function_call_output",
         call_id=call_id,
@@ -193,10 +197,10 @@ class TestAddItemEviction:
         chat = Chat(size=5)
         fc = _fc("cid_1")
         chat.add_item(fc)
-        assert "cid_1" in chat._pending_tool_calls
-        assert chat._pending_tool_calls["cid_1"] is fc
+        assert "call_cid_1" in chat._pending_tool_calls
+        assert chat._pending_tool_calls["call_cid_1"] is fc
 
-    def test_add_function_call_none_call_id_raises(self):
+    def test_add_function_call_none_call_id_auto_generates(self):
         chat = Chat(size=5)
         fc = RealtimeConversationItemFunctionCall(
             type="function_call",
@@ -204,8 +208,9 @@ class TestAddItemEviction:
             name="f",
             arguments="{}",
         )
-        with pytest.raises(ChatItemError, match="missing a call_id"):
-            chat.add_item(fc)
+        chat.add_item(fc)
+        assert fc.call_id is not None
+        assert fc.call_id.startswith("call_")
 
     def test_eviction_when_exceeding_size(self):
         chat = Chat(size=1)
@@ -265,9 +270,9 @@ class TestAppendToolOutput:
         chat = Chat(size=5)
         chat.add_item(_fc("c1"))
         fco = _fco("c1")
-        chat.append_tool_output("c1", fco)
+        chat.append_tool_output("call_c1", fco)
 
-        assert "c1" not in chat._pending_tool_calls
+        assert "call_c1" not in chat._pending_tool_calls
         assert chat.buffer[-1] is fco
 
     def test_marks_function_call_completed_on_none_status(self):
@@ -275,7 +280,7 @@ class TestAppendToolOutput:
         fc = _fc("c1")
         chat.add_item(fc)
         fco = _fco("c1", status=None)
-        chat.append_tool_output("c1", fco)
+        chat.append_tool_output("call_c1", fco)
 
         assert fc.status == "completed"
 
@@ -284,7 +289,7 @@ class TestAppendToolOutput:
         fc = _fc("c1")
         chat.add_item(fc)
         fco = _fco("c1", status="incomplete")
-        chat.append_tool_output("c1", fco)
+        chat.append_tool_output("call_c1", fco)
 
         assert fc.status == "incomplete"
 
@@ -293,13 +298,15 @@ class TestAppendToolOutput:
         chat.add_item(_user("u1"))
         chat.add_item(_fc("cx"))
         chat.add_item(_user("u2"))
-        assert not chat._has_call_id_in_buffer("cx")
-        assert "cx" in chat._pending_tool_calls
+        assert not chat._has_call_id_in_buffer("call_cx")
+        assert "call_cx" in chat._pending_tool_calls
 
-        chat.append_tool_output("cx", _fco("cx"))
-        assert chat._has_call_id_in_buffer("cx")
-        assert any(isinstance(e, RealtimeConversationItemFunctionCall) and e.call_id == "cx" for e in chat.buffer)
-        assert any(isinstance(e, RealtimeConversationItemFunctionCallOutput) and e.call_id == "cx" for e in chat.buffer)
+        chat.append_tool_output("call_cx", _fco("cx"))
+        assert chat._has_call_id_in_buffer("call_cx")
+        assert any(isinstance(e, RealtimeConversationItemFunctionCall) and e.call_id == "call_cx" for e in chat.buffer)
+        assert any(
+            isinstance(e, RealtimeConversationItemFunctionCallOutput) and e.call_id == "call_cx" for e in chat.buffer
+        )
 
     def test_reinjection_sets_status(self):
         chat = Chat(size=1)
@@ -309,9 +316,9 @@ class TestAppendToolOutput:
         chat.add_item(_user("u2"))
 
         fco = _fco("cx", status="incomplete")
-        chat.append_tool_output("cx", fco)
+        chat.append_tool_output("call_cx", fco)
         reinjected = next(
-            e for e in chat.buffer if isinstance(e, RealtimeConversationItemFunctionCall) and e.call_id == "cx"
+            e for e in chat.buffer if isinstance(e, RealtimeConversationItemFunctionCall) and e.call_id == "call_cx"
         )
         assert reinjected.status == "incomplete"
 
@@ -412,9 +419,9 @@ class TestAddItem:
         fc = _fc("c1", "do_stuff")
         chat.add_item(fc)
         assert len(chat.buffer) == 1
-        assert chat.buffer[0].call_id == "c1"
+        assert chat.buffer[0].call_id == "call_c1"
 
-    def test_function_call_missing_call_id_raises(self):
+    def test_function_call_missing_call_id_auto_generates(self):
         chat = Chat(size=5)
         fc = RealtimeConversationItemFunctionCall(
             type="function_call",
@@ -422,10 +429,11 @@ class TestAddItem:
             name="f",
             arguments="{}",
         )
-        with pytest.raises(ChatItemError, match="missing a call_id"):
-            chat.add_item(fc)
+        chat.add_item(fc)
+        assert fc.call_id is not None
+        assert fc.call_id.startswith("call_")
 
-    def test_function_call_empty_call_id_raises(self):
+    def test_function_call_empty_call_id_auto_generates(self):
         chat = Chat(size=5)
         fc = RealtimeConversationItemFunctionCall(
             type="function_call",
@@ -433,8 +441,9 @@ class TestAddItem:
             name="f",
             arguments="{}",
         )
-        with pytest.raises(ChatItemError, match="missing a call_id"):
-            chat.add_item(fc)
+        chat.add_item(fc)
+        assert fc.call_id is not None
+        assert fc.call_id.startswith("call_")
 
     # -- Function call output --
 
@@ -529,7 +538,7 @@ class TestToResponseApiChat:
         assert len(result) == 1
         entry = result[0]
         assert entry["type"] == "function_call"
-        assert entry["call_id"] == "c1"
+        assert entry["call_id"] == "call_c1"
         assert entry["name"] == "search"
         assert entry["arguments"] == '{"q": "test"}'
         assert entry["id"] == fc.id
@@ -541,7 +550,7 @@ class TestToResponseApiChat:
         chat.add_item(fc)
         result = chat.to_response_api_chat()
         entry = result[0]
-        assert entry["call_id"] == "c2"
+        assert entry["call_id"] == "call_c2"
         assert entry["id"] == fc.id
         assert "status" not in entry
 
@@ -554,7 +563,7 @@ class TestToResponseApiChat:
         result = chat.to_response_api_chat()
         entry = result[-1]
         assert entry["type"] == "function_call_output"
-        assert entry["call_id"] == "c1"
+        assert entry["call_id"] == "call_c1"
         assert entry["output"] == '{"result": 42}'
         assert entry["id"] == fco.id
         assert entry["status"] == "completed"
@@ -651,7 +660,7 @@ class TestToTransformersChat:
         assert len(entry["tool_calls"]) == 1
         tc = entry["tool_calls"][0]
         assert tc["type"] == "function"
-        assert tc["id"] == "c1"
+        assert tc["id"] == "call_c1"
         assert tc["function"]["name"] == "search"
         assert tc["function"]["arguments"] == {"query": "test"}
 
@@ -675,7 +684,7 @@ class TestToTransformersChat:
         result = chat.to_transformers_chat()
         tool_entry = result[1]
         assert tool_entry["role"] == "tool"
-        assert tool_entry["tool_call_id"] == "c1"
+        assert tool_entry["tool_call_id"] == "call_c1"
         assert tool_entry["name"] == "lookup"
         assert tool_entry["content"] == "result_data"
 
@@ -731,9 +740,9 @@ class TestCopyAndReset:
         chat = Chat(size=5)
         chat.add_item(_fc("c1"))
         clone = chat.copy()
-        assert "c1" in clone._pending_tool_calls
-        clone._pending_tool_calls.pop("c1")
-        assert "c1" in chat._pending_tool_calls
+        assert "call_c1" in clone._pending_tool_calls
+        clone._pending_tool_calls.pop("call_c1")
+        assert "call_c1" in chat._pending_tool_calls
 
     def test_copy_preserves_size(self):
         chat = Chat(size=7)
@@ -812,21 +821,21 @@ class TestMarkCallCompleted:
         chat = Chat(size=5)
         fc = _fc("c1")
         chat.add_item(fc)
-        chat._mark_call_completed("c1", status=None)
+        chat._mark_call_completed("call_c1", status=None)
         assert fc.status == "completed"
 
     def test_explicit_status_used(self):
         chat = Chat(size=5)
         fc = _fc("c1")
         chat.add_item(fc)
-        chat._mark_call_completed("c1", status="incomplete")
+        chat._mark_call_completed("call_c1", status="incomplete")
         assert fc.status == "incomplete"
 
     def test_in_progress_status(self):
         chat = Chat(size=5)
         fc = _fc("c1")
         chat.add_item(fc)
-        chat._mark_call_completed("c1", status="in_progress")
+        chat._mark_call_completed("call_c1", status="in_progress")
         assert fc.status == "in_progress"
 
     def test_no_match_is_noop(self):
@@ -839,6 +848,6 @@ class TestMarkCallCompleted:
         chat = Chat(size=5)
         chat.add_item(_user("hi"))
         chat.add_item(_fc("c1"))
-        chat._mark_call_completed("c1")
+        chat._mark_call_completed("call_c1")
         fc = next(e for e in chat.buffer if isinstance(e, RealtimeConversationItemFunctionCall))
         assert fc.status == "completed"

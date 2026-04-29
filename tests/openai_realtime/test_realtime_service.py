@@ -1296,6 +1296,8 @@ class TestChatToolCallTracking:
             RealtimeConversationItemFunctionCall,
         )
 
+        if not call_id.startswith("call_"):
+            call_id = f"call_{call_id}"
         return RealtimeConversationItemFunctionCall(type="function_call", call_id=call_id, name=name, arguments="{}")
 
     def _fco(self, call_id="call_1"):
@@ -1303,6 +1305,8 @@ class TestChatToolCallTracking:
             RealtimeConversationItemFunctionCallOutput,
         )
 
+        if not call_id.startswith("call_"):
+            call_id = f"call_{call_id}"
         return RealtimeConversationItemFunctionCallOutput(
             type="function_call_output", call_id=call_id, output='{"ok": true}'
         )
@@ -1393,7 +1397,7 @@ class TestChatToolCallTracking:
         user_msgs = [e for e in chat.buffer if isinstance(e, RealtimeConversationItemUserMessage)]
         assert len(user_msgs) == 1
         assert user_msgs[0].content[0].text == "turn 2"
-        assert not any(getattr(e, "call_id", None) == "c1" and e.type == "function_call" for e in chat.buffer)
+        assert not any(getattr(e, "call_id", None) == "call_c1" and e.type == "function_call" for e in chat.buffer)
 
     def test_eviction_preserves_size_user_turns(self):
         from openai.types.realtime.realtime_conversation_item_user_message import (

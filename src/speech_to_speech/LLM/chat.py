@@ -129,12 +129,14 @@ class Chat:
         """
 
         if isinstance(item, RealtimeConversationItemSystemMessage):
-            item.id = _generate_id("sys")
+            if item.id is None or not item.id.startswith("sys_"):
+                item.id = _generate_id("sys")
             self.init_chat(item)
             logger.debug("Set system message via conversation item")
 
         elif isinstance(item, RealtimeConversationItemUserMessage):
-            item.id = _generate_id("msg")
+            if item.id is None or not item.id.startswith("msg_"):
+                item.id = _generate_id("msg")
             item.content = [
                 p
                 for p in item.content
@@ -147,7 +149,8 @@ class Chat:
             logger.debug("Added user message to chat (%d parts)", len(item.content))
 
         elif isinstance(item, RealtimeConversationItemAssistantMessage):
-            item.id = _generate_id("msg")
+            if item.id is None or not item.id.startswith("msg_"):
+                item.id = _generate_id("msg")
             item.content = [p for p in item.content if p.type == "output_text" and p.text]
             if not item.content:
                 raise ChatItemError("Assistant message has no text content.")
@@ -155,14 +158,17 @@ class Chat:
             logger.debug("Added assistant message to chat (%d parts)", len(item.content))
 
         elif isinstance(item, RealtimeConversationItemFunctionCall):
-            if not item.call_id:
-                raise ChatItemError("function_call item is missing a call_id.")
+            if item.id is None or not item.id.startswith("fc_"):
+                item.id = _generate_id("fc")
+            if item.call_id is None or not item.call_id.startswith("call_"):
+                item.call_id = _generate_id("call")
             self.buffer.append(item)
             self._pending_tool_calls[item.call_id] = item
             logger.debug("Added function_call to chat (call_id=%s)", item.call_id)
 
         elif isinstance(item, RealtimeConversationItemFunctionCallOutput):
-            item.id = _generate_id("fco")
+            if item.id is None or not item.id.startswith("fco_"):
+                item.id = _generate_id("fco")
             self.append_tool_output(item.call_id, item)
             logger.debug("Added function_call_output to chat (call_id=%s)", item.call_id)
 

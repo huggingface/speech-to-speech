@@ -245,19 +245,18 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                         output_tokens = usage.output_tokens or 0
                     for message in api_response.output:
                         if isinstance(message, ResponseFunctionToolCall):
-                            message.call_id = _generate_id("call")
-                            message.id = _generate_id("fc")
-                            tools.append(message)
-                            original_chat.add_item(
+                            item = original_chat.add_item(
                                 RealtimeConversationItemFunctionCall(
                                     type="function_call",
-                                    call_id=message.call_id,
-                                    id=message.id,
                                     name=message.name,
                                     arguments=message.arguments,
                                     status="in_progress",
                                 )
                             )
+                            assert (hasattr(item, "call_id") and item.call_id is not None) and item.id is not None
+                            message.call_id = item.call_id
+                            message.id = item.id
+                            tools.append(message)
                         elif isinstance(message, ResponseOutputMessage):
                             content = [
                                 AssistantContent(
