@@ -180,7 +180,7 @@ The pipeline currently supports English, French, Spanish, Chinese, Japanese, and
 Two use cases are considered:
 
 - **Single-language conversation**: Enforce the language setting using the `--language` flag, specifying the target language code (default is 'en').
-- **Language switching**: Set `--language` to 'auto'. In this case, Whisper detects the language for each spoken prompt, and the LLM is prompted with "`Please reply to my message in ...`" to ensure the response is in the detected language.
+- **Language switching**: Set `--language` to 'auto'. The STT detects the language of each spoken prompt and forwards it to the LLM. Optionally, opt in with `--lm_enable_lang_prompt` (or `--open_api_enable_lang_prompt` for the OpenAI-compatible backend) to also append a "`Please reply to my message in ...`" instruction so the LLM replies in the detected language. Both flags default to `False` — large LLMs usually pick up the language from context on their own, but the explicit instruction can help smaller models stay in the right language.
 
 Please note that you must use STT and LLM checkpoints compatible with the target language(s). For multilingual TTS, use Melo (English, French, Spanish, Chinese, Japanese, and Korean) or Chat-TTS.
 

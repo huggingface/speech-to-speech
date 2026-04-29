@@ -78,7 +78,7 @@ When STT is set to language auto-detection (`--language auto`), LLM handlers can
 
 - `Please reply to my message in <language>.`
 
-This helps the assistant respond in the detected language.
+This helps the assistant respond in the detected language. The behavior is opt-in via `--lm_enable_lang_prompt` (local LLM handlers) or `--open_api_enable_lang_prompt` (OpenAI-compatible backend); both default to `False`.
 
 ## Setup
 

@@ -70,3 +70,10 @@ class LanguageModelHandlerArguments:
             "Set to 1 for sentence-by-sentence streaming. Default is 3."
         },
     )
+    lm_enable_lang_prompt: bool = field(
+        default=False,
+        metadata={
+            "help": "When True, append a user message instructing the model to reply in the detected/selected "
+            "language (e.g. 'Please reply to my message in French.'). Default is False."
+        },
+    )
