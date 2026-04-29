@@ -396,21 +396,21 @@ class TestAddItem:
         assert len(chat.buffer[0].content) == 1
         assert chat.buffer[0].content[0].type == "output_text"
 
-    def test_assistant_message_empty_after_filter_raises(self):
+    def test_assistant_message_empty_after_filter_skipped(self):
         chat = Chat(size=5)
         msg = _assistant_msg_with_parts(("audio", "only audio"))
-        with pytest.raises(ChatItemError, match="no text content"):
-            chat.add_item(msg)
+        chat.add_item(msg)
+        assert len(chat.buffer) == 0
 
-    def test_assistant_message_empty_text_raises(self):
+    def test_assistant_message_empty_text_skipped(self):
         chat = Chat(size=5)
         msg = RealtimeConversationItemAssistantMessage(
             type="message",
             role="assistant",
             content=[AssistantContent(type="output_text", text="")],
         )
-        with pytest.raises(ChatItemError, match="no text content"):
-            chat.add_item(msg)
+        chat.add_item(msg)
+        assert len(chat.buffer) == 0
 
     # -- Function call --
 

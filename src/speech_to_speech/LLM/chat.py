@@ -158,7 +158,7 @@ class Chat:
             item.id = _ensure_id(item.id, "msg")
             item.content = [p for p in item.content if p.type == "output_text" and p.text]
             if not item.content:
-                raise ChatItemError("Assistant message has no text content.")
+                return item
             self.buffer.append(item)
             logger.debug("Added assistant message to chat (%d parts)", len(item.content))
 
