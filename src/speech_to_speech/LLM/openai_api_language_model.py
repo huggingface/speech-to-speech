@@ -59,12 +59,14 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         disable_thinking: bool = True,
         request_timeout_s: float = 20.0,
         stream_batch_sentences: int = 3,
+        enable_lang_prompt: bool = False,
         **_kwargs: Any,
     ) -> None:
         self.cancel_scope = cancel_scope
         self.model_name = model_name
         self.stream = stream
         self.stream_batch_sentences = max(1, stream_batch_sentences)
+        self.enable_lang_prompt = enable_lang_prompt
         self.gen_kwargs = dict(gen_kwargs)
         self.request_timeout_s = float(request_timeout_s)
         self.request_timeout = httpx.Timeout(
@@ -133,7 +135,7 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         )
         self._apply_config(active_chat, instructions)
         language_code, lang_name = resolve_auto_language(language_code)
-        if lang_name:
+        if lang_name and self.enable_lang_prompt:
             active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
 
         optional_kwargs: dict[str, Any] = {}

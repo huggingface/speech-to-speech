@@ -150,6 +150,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         backend: Literal["transformers", "mlx"] = "transformers",
         enable_thinking: bool = False,
         stream_batch_sentences: int = 3,
+        enable_lang_prompt: bool = False,
         **_kwargs: Any,
     ) -> None:
         self.backend = backend
@@ -158,6 +159,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.model_name = model_name
         self.enable_thinking = enable_thinking
         self.stream_batch_sentences = max(1, stream_batch_sentences)
+        self.enable_lang_prompt = enable_lang_prompt
 
         self._load_model(model_name, device, torch_dtype, gen_kwargs)
 
@@ -396,7 +398,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         tool_choice = response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
         self._apply_instructions(active_chat, instructions, tools, str(tool_choice) if tool_choice else None, ctx)
         language_code, lang_name = resolve_auto_language(language_code)
-        if lang_name:
+        if lang_name and self.enable_lang_prompt:
             active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
