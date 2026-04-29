@@ -7,7 +7,7 @@ import numpy as np
 from rich.console import Console
 
 from speech_to_speech.pipeline.control import PipelineControlMessage
-from speech_to_speech.pipeline.messages import PIPELINE_END
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 from speech_to_speech.pipeline.queue_types import AudioOutItem
 
 logger = logging.getLogger(__name__)
@@ -24,11 +24,13 @@ class SocketSender:
         self,
         stop_event: Event,
         queue_in: Queue[AudioOutItem],
+        should_listen: Event,
         host: str = "0.0.0.0",
         port: int = 12346,
     ) -> None:
         self.stop_event = stop_event
         self.queue_in = queue_in
+        self.should_listen = should_listen
         self.host = host
         self.port = port
 
@@ -47,6 +49,9 @@ class SocketSender:
             except Empty:
                 continue
             if isinstance(audio_chunk, PipelineControlMessage):
+                continue
+            if isinstance(audio_chunk, bytes) and audio_chunk == AUDIO_RESPONSE_DONE:
+                self.should_listen.set()
                 continue
             payload: bytes
             if isinstance(audio_chunk, bytes):

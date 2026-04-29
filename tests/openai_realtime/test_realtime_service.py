@@ -259,7 +259,7 @@ class TestHandleSessionUpdate:
 
 
 class TestHandleConversationItemCreate:
-    def _text_event(self, text: str = "hello", item_id: str = "item_abc") -> ConversationItemCreateEvent:
+    def _text_event(self, text: str = "hello", item_id: str = "msg_abc") -> ConversationItemCreateEvent:
         return ConversationItemCreateEvent(
             type="conversation.item.create",
             item={  # type: ignore[arg-type]
@@ -290,8 +290,8 @@ class TestHandleConversationItemCreate:
         assert last.content[0].text == "hi"
 
     def test_text_input_previous_item_id_chain(self, service, conn_id):
-        e1 = service.handle_conversation_item_create(conn_id, self._text_event("a", "item_1"))
-        e2 = service.handle_conversation_item_create(conn_id, self._text_event("b", "item_2"))
+        e1 = service.handle_conversation_item_create(conn_id, self._text_event("a", "msg_1"))
+        e2 = service.handle_conversation_item_create(conn_id, self._text_event("b", "msg_2"))
         assert e1[0].previous_item_id is None
         assert e2[0].previous_item_id == e1[0].item.id
 
@@ -846,7 +846,7 @@ class TestIdAndStateManagement:
         evt = ConversationItemCreateEvent(
             type="conversation.item.create",
             item={
-                "id": "item_manual",
+                "id": "msg_manual",
                 "type": "message",
                 "role": "user",
                 "content": [{"type": "input_text", "text": "x"}],

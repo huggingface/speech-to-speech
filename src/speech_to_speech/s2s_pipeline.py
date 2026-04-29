@@ -383,6 +383,7 @@ def build_pipeline(
             SocketSender(
                 stop_event,
                 send_audio_chunks_queue,
+                should_listen,
                 host=socket_sender_kwargs.send_host,
                 port=socket_sender_kwargs.send_port,
             ),
@@ -405,14 +406,24 @@ def build_pipeline(
         "text_output_queue": text_output_queue,
     }
     if module_kwargs.mode != "realtime":
-        _lm_vars = vars(language_model_handler_kwargs)
-        transcription_notifier_kwargs["runtime_config"] = RuntimeConfig(
-            chat=Chat(_lm_vars.get("chat_size", 30)),
-            session=RealtimeSessionCreateRequest(
-                type="realtime",
-                instructions=_lm_vars.get("init_chat_prompt"),
-            ),
-        )
+        if module_kwargs.llm == "open_api":
+            _lm_vars = vars(open_api_language_model_handler_kwargs)
+            transcription_notifier_kwargs["runtime_config"] = RuntimeConfig(
+                chat=Chat(_lm_vars.get("open_api_chat_size", 30)),
+                session=RealtimeSessionCreateRequest(
+                    type="realtime",
+                    instructions=_lm_vars.get("open_api_init_chat_prompt"),
+                ),
+            )
+        else:
+            _lm_vars = vars(language_model_handler_kwargs)
+            transcription_notifier_kwargs["runtime_config"] = RuntimeConfig(
+                chat=Chat(_lm_vars.get("chat_size", 30)),
+                session=RealtimeSessionCreateRequest(
+                    type="realtime",
+                    instructions=_lm_vars.get("init_chat_prompt"),
+                ),
+            )
 
     transcription_notifier = TranscriptionNotifier(
         stop_event,

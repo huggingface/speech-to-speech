@@ -499,7 +499,7 @@ class TestSDKTextInput:
                 {
                     "type": "conversation.item.create",
                     "item": {
-                        "id": "item_sdk_1",
+                        "id": "msg_sdk_1",
                         "type": "message",
                         "role": "user",
                         "content": [{"type": "input_text", "text": "Hello from SDK"}],
@@ -524,7 +524,7 @@ class TestSDKTextInput:
                 {
                     "type": "conversation.item.create",
                     "item": {
-                        "id": "item_a",
+                        "id": "msg_a",
                         "type": "message",
                         "role": "user",
                         "content": [{"type": "input_text", "text": "first"}],
@@ -538,7 +538,7 @@ class TestSDKTextInput:
                 {
                     "type": "conversation.item.create",
                     "item": {
-                        "id": "item_b",
+                        "id": "msg_b",
                         "type": "message",
                         "role": "user",
                         "content": [{"type": "input_text", "text": "second"}],

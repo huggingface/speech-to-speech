@@ -433,7 +433,19 @@ class TestAddItem:
         assert fc.call_id is not None
         assert fc.call_id.startswith("call_")
 
-    def test_function_call_empty_call_id_auto_generates(self):
+    def test_function_call_none_call_id_auto_generates(self):
+        chat = Chat(size=5)
+        fc = RealtimeConversationItemFunctionCall(
+            type="function_call",
+            call_id=None,
+            name="f",
+            arguments="{}",
+        )
+        chat.add_item(fc)
+        assert fc.call_id is not None
+        assert fc.call_id.startswith("call_")
+
+    def test_function_call_bad_call_id_prefix_raises(self):
         chat = Chat(size=5)
         fc = RealtimeConversationItemFunctionCall(
             type="function_call",
@@ -441,9 +453,8 @@ class TestAddItem:
             name="f",
             arguments="{}",
         )
-        chat.add_item(fc)
-        assert fc.call_id is not None
-        assert fc.call_id.startswith("call_")
+        with pytest.raises(ChatItemError, match="call_"):
+            chat.add_item(fc)
 
     # -- Function call output --
 

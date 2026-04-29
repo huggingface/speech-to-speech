@@ -74,6 +74,8 @@ class ConversationHandler(RealtimeBaseHandler):
         """
         chat = self._state(conn_id).runtime_config.chat
 
+        # call_id on function_call items must be client-supplied: it is referenced later by
+        # function_call_output items, so we cannot silently generate one here.
         if isinstance(item, RealtimeConversationItemFunctionCall) and (
             item.call_id is None or not item.call_id.startswith("call_")
         ):

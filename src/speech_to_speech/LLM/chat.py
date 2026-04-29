@@ -43,6 +43,14 @@ class ChatItemError(Exception):
     """Raised when a conversation item fails validation in :meth:`Chat.add_item`."""
 
 
+def _ensure_id(value: str | None, prefix: str) -> str:
+    if value is None:
+        return _generate_id(prefix)
+    if not value.startswith(f"{prefix}_"):
+        raise ChatItemError(f"ID must start with '{prefix}_', got {value!r}")
+    return value
+
+
 SupportedItem = Union[
     RealtimeConversationItemSystemMessage,
     RealtimeConversationItemUserMessage,
@@ -129,14 +137,12 @@ class Chat:
         """
 
         if isinstance(item, RealtimeConversationItemSystemMessage):
-            if item.id is None or not item.id.startswith("sys_"):
-                item.id = _generate_id("sys")
+            item.id = _ensure_id(item.id, "sys")
             self.init_chat(item)
             logger.debug("Set system message via conversation item")
 
         elif isinstance(item, RealtimeConversationItemUserMessage):
-            if item.id is None or not item.id.startswith("msg_"):
-                item.id = _generate_id("msg")
+            item.id = _ensure_id(item.id, "msg")
             item.content = [
                 p
                 for p in item.content
@@ -149,8 +155,7 @@ class Chat:
             logger.debug("Added user message to chat (%d parts)", len(item.content))
 
         elif isinstance(item, RealtimeConversationItemAssistantMessage):
-            if item.id is None or not item.id.startswith("msg_"):
-                item.id = _generate_id("msg")
+            item.id = _ensure_id(item.id, "msg")
             item.content = [p for p in item.content if p.type == "output_text" and p.text]
             if not item.content:
                 raise ChatItemError("Assistant message has no text content.")
@@ -158,17 +163,14 @@ class Chat:
             logger.debug("Added assistant message to chat (%d parts)", len(item.content))
 
         elif isinstance(item, RealtimeConversationItemFunctionCall):
-            if item.id is None or not item.id.startswith("fc_"):
-                item.id = _generate_id("fc")
-            if item.call_id is None or not item.call_id.startswith("call_"):
-                item.call_id = _generate_id("call")
+            item.id = _ensure_id(item.id, "fc")
+            item.call_id = _ensure_id(item.call_id, "call")
             self.buffer.append(item)
             self._pending_tool_calls[item.call_id] = item
             logger.debug("Added function_call to chat (call_id=%s)", item.call_id)
 
         elif isinstance(item, RealtimeConversationItemFunctionCallOutput):
-            if item.id is None or not item.id.startswith("fco_"):
-                item.id = _generate_id("fco")
+            item.id = _ensure_id(item.id, "fco")
             self.append_tool_output(item.call_id, item)
             logger.debug("Added function_call_output to chat (call_id=%s)", item.call_id)
 
