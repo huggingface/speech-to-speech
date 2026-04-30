@@ -93,7 +93,6 @@ class SmartProgressiveStreamingHandler:
         """
         # Skip if not enough new audio
         current_length = len(audio)
-
         if current_length < self.sample_rate * 0.5:  # Need at least 500ms
             return PartialTranscription(
                 fixed_text=" ".join(self.fixed_sentences),
