@@ -71,6 +71,23 @@ Common options:
 - `--open_api_chat_size`
 - `--open_api_init_chat_prompt`
 - `--open_api_user_role`
+- `--open_api_reasoning_effort`
+- `--open_api_service_tier`
+- `--open_api_max_output_tokens`
+
+Low-latency OpenAI Responses API example:
+
+```bash
+python s2s_pipeline.py \
+  --mode realtime \
+  --llm open_api \
+  --open_api_model_name gpt-5.4 \
+  --open_api_stream true \
+  --open_api_stream_batch_sentences 1 \
+  --open_api_reasoning_effort none \
+  --open_api_service_tier priority \
+  --open_api_max_output_tokens 64
+```
 
 ## LLM Behavior
 

@@ -81,6 +81,10 @@ class TokenUsage(PipelineMessage):
     tag: Literal["token_usage"] = "token_usage"
     input_tokens: int
     output_tokens: int
+    cached_tokens: Optional[int] = None
+    reasoning_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
+    service_tier: Optional[str] = None
 
 
 class EndOfResponse(PipelineMessage):

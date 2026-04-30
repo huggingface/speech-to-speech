@@ -53,6 +53,23 @@ class OpenApiLanguageModelHandlerArguments:
             "For Together Qwen3.5 models this sends chat_template_kwargs.enable_thinking=false."
         },
     )
+    open_api_service_tier: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Optional Responses API service_tier value, for example 'priority'. Default is None."
+        },
+    )
+    open_api_reasoning_effort: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Optional Responses API reasoning effort. GPT-5.4 documented values include: "
+            "'none', 'low', 'medium', 'high', 'xhigh'. Default is None."
+        },
+    )
+    open_api_max_output_tokens: Optional[int] = field(
+        default=None,
+        metadata={"help": "Optional Responses API max_output_tokens limit. Default is None."},
+    )
     open_api_stream_batch_sentences: int = field(
         default=3,
         metadata={

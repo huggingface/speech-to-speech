@@ -5,6 +5,7 @@ import httpx
 from openai import Stream
 from openai.types.responses import (
     Response,
+    ResponseCompletedEvent,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
     ResponseTextDeltaEvent,
@@ -15,7 +16,7 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.LLM.openai_api_language_model import OpenApiModelHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.messages import EndOfResponse, GenerateResponseRequest, LLMResponseChunk
+from speech_to_speech.pipeline.messages import EndOfResponse, GenerateResponseRequest, LLMResponseChunk, TokenUsage
 
 
 def _make_text_delta_event(text):
@@ -48,10 +49,11 @@ def _make_stream(events):
     return stream
 
 
-def _make_response(output, usage=None):
+def _make_response(output, usage=None, service_tier=None):
     resp = MagicMock(spec=Response)
     resp.usage = usage
     resp.output = output
+    resp.service_tier = service_tier
     return resp
 
 
@@ -70,12 +72,28 @@ def _make_request(text="Hi", chat_size=2):
     return GenerateResponseRequest(runtime_config=cfg)
 
 
-def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
+def _make_handler(
+    *,
+    disable_thinking=False,
+    stream=True,
+    cancel_scope=None,
+    service_tier=None,
+    reasoning_effort=None,
+    max_output_tokens=None,
+):
     handler = object.__new__(OpenApiModelHandler)
     handler.model_name = "test-model"
     handler.stream = stream
     handler.stream_batch_sentences = 1
     handler.gen_kwargs = {}
+    handler.service_tier = service_tier
+    handler.reasoning_effort = reasoning_effort
+    handler.max_output_tokens = max_output_tokens
+    handler._request_kwargs = OpenApiModelHandler._build_response_request_kwargs(
+        service_tier=service_tier,
+        reasoning_effort=reasoning_effort,
+        max_output_tokens=max_output_tokens,
+    )
     handler.request_timeout_s = 20.0
     handler.request_timeout = 20.0
     handler.disable_thinking = disable_thinking
@@ -85,6 +103,18 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler.tools = None
     handler.tools_choice = None
     return handler
+
+
+def _capture_create_kwargs(handler):
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _make_response(output=[])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+    list(handler.process(_make_request("Hi")))
+    return captured
 
 
 def test_process_streams_text_from_response_events():
@@ -184,6 +214,87 @@ def test_no_disable_thinking_omits_extra_body():
     list(handler.process(_make_request("Hi")))
 
     assert captured.get("extra_body") is None
+
+
+def test_service_tier_is_passed_when_set():
+    handler = _make_handler(stream=False, service_tier="priority")
+
+    captured = _capture_create_kwargs(handler)
+
+    assert captured["service_tier"] == "priority"
+
+
+def test_reasoning_effort_is_passed_when_set_to_none_string():
+    handler = _make_handler(stream=False, reasoning_effort="none")
+
+    captured = _capture_create_kwargs(handler)
+
+    assert captured["reasoning"] == {"effort": "none"}
+
+
+def test_max_output_tokens_is_passed_when_set():
+    handler = _make_handler(stream=False, max_output_tokens=64)
+
+    captured = _capture_create_kwargs(handler)
+
+    assert captured["max_output_tokens"] == 64
+
+
+def test_optional_openai_response_fields_are_omitted_by_default():
+    handler = _make_handler(stream=False)
+
+    captured = _capture_create_kwargs(handler)
+
+    assert "service_tier" not in captured
+    assert "reasoning" not in captured
+    assert "max_output_tokens" not in captured
+
+
+def test_nonstream_usage_tracks_cached_reasoning_total_and_service_tier():
+    handler = _make_handler(stream=False)
+    usage = SimpleNamespace(
+        input_tokens=12,
+        input_tokens_details=SimpleNamespace(cached_tokens=4),
+        output_tokens=6,
+        output_tokens_details=SimpleNamespace(reasoning_tokens=2),
+        total_tokens=18,
+    )
+    response = _make_response(output=[], usage=usage, service_tier="priority")
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: response))
+
+    outputs = list(handler.process(_make_request("Hi")))
+
+    token_usage = next(output for output in outputs if isinstance(output, TokenUsage))
+    assert token_usage.input_tokens == 12
+    assert token_usage.cached_tokens == 4
+    assert token_usage.output_tokens == 6
+    assert token_usage.reasoning_tokens == 2
+    assert token_usage.total_tokens == 18
+    assert token_usage.service_tier == "priority"
+
+
+def test_stream_usage_tracks_cached_reasoning_total_and_service_tier():
+    handler = _make_handler(stream=True)
+    usage = SimpleNamespace(
+        input_tokens=12,
+        input_tokens_details=SimpleNamespace(cached_tokens=4),
+        output_tokens=6,
+        output_tokens_details=SimpleNamespace(reasoning_tokens=2),
+        total_tokens=18,
+    )
+    completed = MagicMock(spec=ResponseCompletedEvent)
+    completed.response = SimpleNamespace(usage=usage, service_tier="priority")
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: _make_stream([completed])))
+
+    outputs = list(handler.process(_make_request("Hi")))
+
+    token_usage = next(output for output in outputs if isinstance(output, TokenUsage))
+    assert token_usage.input_tokens == 12
+    assert token_usage.cached_tokens == 4
+    assert token_usage.output_tokens == 6
+    assert token_usage.reasoning_tokens == 2
+    assert token_usage.total_tokens == 18
+    assert token_usage.service_tier == "priority"
 
 
 def test_second_turn_flattens_assistant_history_for_responses():

@@ -52,6 +52,10 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                     TokenUsageEvent(
                         input_tokens=lm_output.input_tokens or 0,
                         output_tokens=lm_output.output_tokens or 0,
+                        cached_tokens=lm_output.cached_tokens,
+                        reasoning_tokens=lm_output.reasoning_tokens,
+                        total_tokens=lm_output.total_tokens,
+                        service_tier=lm_output.service_tier,
                     )
                 )
             return

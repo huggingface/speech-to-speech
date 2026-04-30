@@ -65,3 +65,7 @@ class TokenUsageEvent(PipelineEvent):
     type: Literal["token_usage"] = "token_usage"
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_tokens: Optional[int] = None
+    reasoning_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
+    service_tier: Optional[str] = None

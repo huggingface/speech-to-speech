@@ -57,6 +57,9 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         user_role: str = "user",
         cancel_scope: CancelScope | None = None,
         disable_thinking: bool = True,
+        service_tier: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
+        max_output_tokens: Optional[int] = None,
         request_timeout_s: float = 20.0,
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
@@ -68,6 +71,14 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         self.stream_batch_sentences = max(1, stream_batch_sentences)
         self.enable_lang_prompt = enable_lang_prompt
         self.gen_kwargs = dict(gen_kwargs)
+        self.service_tier = service_tier
+        self.reasoning_effort = reasoning_effort
+        self.max_output_tokens = max_output_tokens
+        self._request_kwargs = self._build_response_request_kwargs(
+            service_tier=service_tier,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
+        )
         self.request_timeout_s = float(request_timeout_s)
         self.request_timeout = httpx.Timeout(
             self.request_timeout_s,
@@ -83,6 +94,22 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         )
         self.warmup()
 
+    @staticmethod
+    def _build_response_request_kwargs(
+        *,
+        service_tier: Optional[str],
+        reasoning_effort: Optional[str],
+        max_output_tokens: Optional[int],
+    ) -> dict[str, Any]:
+        request_kwargs: dict[str, Any] = {}
+        if service_tier is not None:
+            request_kwargs["service_tier"] = service_tier
+        if reasoning_effort is not None:
+            request_kwargs["reasoning"] = {"effort": reasoning_effort}
+        if max_output_tokens is not None:
+            request_kwargs["max_output_tokens"] = max_output_tokens
+        return request_kwargs
+
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
         start = time.time()
@@ -97,9 +124,53 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                 {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]},
             ],
             timeout=self.request_timeout,
+            **self._request_kwargs,
         )
         end = time.time()
         logger.info(f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s")
+
+    @staticmethod
+    def _get_optional_value(value: Any, key: str) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            return value.get(key)
+        return getattr(value, key, None)
+
+    @classmethod
+    def _get_nested_optional_value(cls, value: Any, *keys: str) -> Any:
+        for key in keys:
+            value = cls._get_optional_value(value, key)
+            if value is None:
+                return None
+        return value
+
+    @classmethod
+    def _extract_response_usage(cls, response: Any) -> dict[str, Any] | None:
+        usage = cls._get_optional_value(response, "usage")
+        service_tier = cls._get_optional_value(response, "service_tier")
+        if usage is None and service_tier is None:
+            return None
+        return {
+            "input_tokens": cls._get_optional_value(usage, "input_tokens") or 0,
+            "cached_tokens": cls._get_nested_optional_value(usage, "input_tokens_details", "cached_tokens"),
+            "output_tokens": cls._get_optional_value(usage, "output_tokens") or 0,
+            "reasoning_tokens": cls._get_nested_optional_value(usage, "output_tokens_details", "reasoning_tokens"),
+            "total_tokens": cls._get_optional_value(usage, "total_tokens"),
+            "service_tier": service_tier,
+        }
+
+    @staticmethod
+    def _log_response_usage(usage: dict[str, Any]) -> None:
+        logger.info(
+            "OpenAI usage: input=%s, cached=%s, output=%s, reasoning=%s, total=%s, service_tier=%s",
+            usage["input_tokens"],
+            usage["cached_tokens"],
+            usage["output_tokens"],
+            usage["reasoning_tokens"],
+            usage["total_tokens"],
+            usage["service_tier"],
+        )
 
     def _apply_config(
         self,
@@ -155,6 +226,7 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         clean_text = ""
         input_tokens = 0
         output_tokens = 0
+        usage_stats: dict[str, Any] | None = None
         try:
             api_response = self.client.responses.create(
                 model=self.model_name,
@@ -162,6 +234,7 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                 stream=self.stream,
                 extra_body=self._extra_body,
                 timeout=self.request_timeout,
+                **self._request_kwargs,
                 **optional_kwargs,
             )
             if isinstance(api_response, Stream):
@@ -219,10 +292,10 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                                 )
                             )
                     elif isinstance(raw_event, ResponseCompletedEvent):
-                        usage = getattr(raw_event.response, "usage", None)
-                        if usage:
-                            input_tokens = usage.input_tokens or 0
-                            output_tokens = usage.output_tokens or 0
+                        usage_stats = self._extract_response_usage(raw_event.response)
+                        if usage_stats:
+                            input_tokens = usage_stats["input_tokens"]
+                            output_tokens = usage_stats["output_tokens"]
                 if not cancelled:
                     if printable_text.strip():
                         sentence_batch.append(printable_text.strip())
@@ -241,10 +314,10 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                 if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
                     logger.info("LLM generation cancelled (interruption)")
                 else:
-                    usage = api_response.usage
-                    if usage:
-                        input_tokens = usage.input_tokens or 0
-                        output_tokens = usage.output_tokens or 0
+                    usage_stats = self._extract_response_usage(api_response)
+                    if usage_stats:
+                        input_tokens = usage_stats["input_tokens"]
+                        output_tokens = usage_stats["output_tokens"]
                     for message in api_response.output:
                         if isinstance(message, ResponseFunctionToolCall):
                             item = original_chat.add_item(
@@ -305,8 +378,16 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     pass
 
         original_chat.strip_images()
-        if input_tokens or output_tokens:
-            yield TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens)
+        if usage_stats is not None:
+            self._log_response_usage(usage_stats)
+            yield TokenUsage(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_tokens=usage_stats["cached_tokens"],
+                reasoning_tokens=usage_stats["reasoning_tokens"],
+                total_tokens=usage_stats["total_tokens"],
+                service_tier=usage_stats["service_tier"],
+            )
         yield EndOfResponse()
 
     def on_session_end(self) -> None:
