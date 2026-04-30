@@ -292,11 +292,12 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
             if language_code:
                 console.print(f"[dim]Language: {language_code}[/dim]")
 
-        yield Transcription(text=pred_text, language_code=language_code)
-
-        # Reset processing_final flag for next utterance
         if self.enable_live_transcription:
             self.processing_final = False
+            if self.streaming_handler is not None:
+                self.streaming_handler.reset()
+
+        yield Transcription(text=pred_text, language_code=language_code)
 
     def _detect_language_from_text(self, text: str) -> Optional[str]:
         """
