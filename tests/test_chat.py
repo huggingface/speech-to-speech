@@ -248,7 +248,7 @@ class TestAddItemEviction:
         chat.add_item(_assistant("a"))
         chat.add_item(_fc("c1"))
         chat.add_item(_assistant("b"))
-        assert len(chat.buffer) == 3
+        assert len(chat.buffer) == 2  # fc is staged in _pending_tool_calls, not buffer
 
     def test_multiple_evictions(self):
         chat = Chat(size=2)
@@ -414,12 +414,13 @@ class TestAddItem:
 
     # -- Function call --
 
-    def test_function_call_appended(self):
+    def test_function_call_staged_in_pending(self):
         chat = Chat(size=5)
         fc = _fc("c1", "do_stuff")
         chat.add_item(fc)
-        assert len(chat.buffer) == 1
-        assert chat.buffer[0].call_id == "call_c1"
+        assert len(chat.buffer) == 0
+        assert "call_c1" in chat._pending_tool_calls
+        assert chat._pending_tool_calls["call_c1"] is fc
 
     def test_function_call_missing_call_id_auto_generates(self):
         chat = Chat(size=5)
@@ -543,10 +544,10 @@ class TestToResponseApiChat:
     def test_function_call_with_id_and_status(self):
         chat = Chat(size=5)
         fc = _fc("c1", "search", '{"q": "test"}')
-        fc.status = "completed"
         chat.add_item(fc)
+        fco = _fco("c1", '{"result": 1}', status="completed")
+        chat.add_item(fco)
         result = chat.to_response_api_chat()
-        assert len(result) == 1
         entry = result[0]
         assert entry["type"] == "function_call"
         assert entry["call_id"] == "call_c1"
@@ -559,11 +560,12 @@ class TestToResponseApiChat:
         chat = Chat(size=5)
         fc = _fc("c2", "noop")
         chat.add_item(fc)
+        fco = _fco("c2")
+        chat.add_item(fco)
         result = chat.to_response_api_chat()
         entry = result[0]
         assert entry["call_id"] == "call_c2"
         assert entry["id"] == fc.id
-        assert "status" not in entry
 
     def test_function_call_output_with_id_and_status(self):
         chat = Chat(size=5)
@@ -665,6 +667,7 @@ class TestToTransformersChat:
     def test_function_call_valid_json_args(self):
         chat = Chat(size=5)
         chat.add_item(_fc("c1", "search", '{"query": "test"}'))
+        chat.add_item(_fco("c1", "ok"))
         result = chat.to_transformers_chat()
         entry = result[0]
         assert entry["role"] == "assistant"
@@ -678,6 +681,7 @@ class TestToTransformersChat:
     def test_function_call_invalid_json_falls_back(self):
         chat = Chat(size=5)
         chat.add_item(_fc("c1", "broken", "not valid json"))
+        chat.add_item(_fco("c1", "ok"))
         result = chat.to_transformers_chat()
         assert result[0]["tool_calls"][0]["function"]["arguments"] == {}
 
@@ -685,6 +689,7 @@ class TestToTransformersChat:
         chat = Chat(size=5)
         fc = _fc("c1", "f", "")
         chat.add_item(fc)
+        chat.add_item(_fco("c1", "ok"))
         result = chat.to_transformers_chat()
         assert result[0]["tool_calls"][0]["function"]["arguments"] == {}
 
@@ -812,7 +817,7 @@ class TestStripImages:
         chat.add_item(_assistant("solo"))
         chat.add_item(_fc("c1"))
         chat.strip_images()
-        assert len(chat.buffer) == 2
+        assert len(chat.buffer) == 1  # fc is staged in _pending_tool_calls, not buffer
 
     def test_text_only_messages_unchanged(self):
         chat = Chat(size=10)
@@ -831,34 +836,36 @@ class TestMarkCallCompleted:
     def test_none_status_sets_completed(self):
         chat = Chat(size=5)
         fc = _fc("c1")
-        chat.add_item(fc)
+        chat.buffer.append(fc)
         chat._mark_call_completed("call_c1", status=None)
         assert fc.status == "completed"
 
     def test_explicit_status_used(self):
         chat = Chat(size=5)
         fc = _fc("c1")
-        chat.add_item(fc)
+        chat.buffer.append(fc)
         chat._mark_call_completed("call_c1", status="incomplete")
         assert fc.status == "incomplete"
 
     def test_in_progress_status(self):
         chat = Chat(size=5)
         fc = _fc("c1")
-        chat.add_item(fc)
+        chat.buffer.append(fc)
         chat._mark_call_completed("call_c1", status="in_progress")
         assert fc.status == "in_progress"
 
     def test_no_match_is_noop(self):
         chat = Chat(size=5)
-        chat.add_item(_fc("c1"))
+        fc = _fc("c1")
+        chat.buffer.append(fc)
         chat._mark_call_completed("nonexistent", status=None)
-        assert chat.buffer[0].status is None
+        assert fc.status is None
 
     def test_only_function_calls_checked(self):
         chat = Chat(size=5)
         chat.add_item(_user("hi"))
-        chat.add_item(_fc("c1"))
+        fc = _fc("c1")
+        chat.buffer.append(fc)
         chat._mark_call_completed("call_c1")
-        fc = next(e for e in chat.buffer if isinstance(e, RealtimeConversationItemFunctionCall))
-        assert fc.status == "completed"
+        matched = next(e for e in chat.buffer if isinstance(e, RealtimeConversationItemFunctionCall))
+        assert matched.status == "completed"
