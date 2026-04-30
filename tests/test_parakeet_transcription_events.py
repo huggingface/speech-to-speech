@@ -115,6 +115,28 @@ def test_progressive_stream_resets_stale_fixed_end_before_decoding():
     assert handler.fixed_end_time == 0.0
 
 
+def test_progressive_stream_keeps_fixed_text_at_exact_boundary():
+    class Model:
+        def __init__(self):
+            self.lengths = []
+
+        def transcribe(self, audio, timestamps=True):
+            self.lengths.append(len(audio))
+            return SimpleNamespace(text="active", timestamp={"segment": []})
+
+    model = Model()
+    handler = SmartProgressiveStreamingHandler(model)
+    handler.fixed_sentences = ["kept fixed"]
+    handler.fixed_end_time = 1.0
+
+    result = handler.transcribe_incremental(np.zeros(16000, dtype=np.float32))
+
+    assert model.lengths == []
+    assert result.fixed_text == "kept fixed"
+    assert result.active_text == ""
+    assert handler.fixed_end_time == 1.0
+
+
 def test_on_session_end_resets_streaming_state():
     handler = object.__new__(ParakeetTDTSTTHandler)
     handler.start_language = "en"
