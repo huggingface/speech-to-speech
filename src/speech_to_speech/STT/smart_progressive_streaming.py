@@ -97,14 +97,6 @@ class SmartProgressiveStreamingHandler:
         # Skip if not enough new audio
         current_length = len(audio)
         window_start_samples = int(self.fixed_end_time * self.sample_rate)
-        if window_start_samples > current_length and (self.fixed_end_time > 0 or self.fixed_sentences):
-            logger.debug(
-                "Resetting progressive stream state because fixed_end_time %.3fs exceeds current audio %.3fs",
-                self.fixed_end_time,
-                current_length / self.sample_rate,
-            )
-            self.reset()
-            window_start_samples = 0
 
         if current_length < self.sample_rate * 0.5:  # Need at least 500ms
             return PartialTranscription(
@@ -123,7 +115,12 @@ class SmartProgressiveStreamingHandler:
                 is_final=False,
             )
 
-        if window_start_samples == current_length:
+        if window_start_samples >= current_length:
+            logger.debug(
+                "Skipping progressive decode because fixed_end_time %.3fs covers current audio %.3fs",
+                self.fixed_end_time,
+                current_length / self.sample_rate,
+            )
             self.last_transcribed_length = current_length
             return PartialTranscription(
                 fixed_text=" ".join(self.fixed_sentences),

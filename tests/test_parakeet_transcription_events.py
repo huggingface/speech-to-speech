@@ -93,7 +93,7 @@ def test_final_transcription_resets_live_streaming_state(monkeypatch):
     assert reset_calls == [True]
 
 
-def test_progressive_stream_resets_stale_fixed_end_before_decoding():
+def test_progressive_stream_preserves_fixed_text_when_fixed_end_exceeds_audio():
     class Model:
         def __init__(self):
             self.lengths = []
@@ -109,10 +109,10 @@ def test_progressive_stream_resets_stale_fixed_end_before_decoding():
 
     result = handler.transcribe_incremental(np.zeros(16000, dtype=np.float32))
 
-    assert model.lengths == [16000]
-    assert result.fixed_text == ""
-    assert result.active_text == "fresh partial"
-    assert handler.fixed_end_time == 0.0
+    assert model.lengths == []
+    assert result.fixed_text == "stale text"
+    assert result.active_text == ""
+    assert handler.fixed_end_time == 10.0
 
 
 def test_progressive_stream_keeps_fixed_text_at_exact_boundary():
