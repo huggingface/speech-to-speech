@@ -292,6 +292,9 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
             if language_code:
                 console.print(f"[dim]Language: {language_code}[/dim]")
 
+        # Reset per-utterance live transcription state only after final STT
+        # completes. The streaming handler carries fixed sentence timing within
+        # an utterance, and stale timing must not leak into the next turn.
         if self.enable_live_transcription:
             self.processing_final = False
             if self.streaming_handler is not None:
