@@ -8,14 +8,11 @@ Provides frequent partial transcriptions (every 250ms) with:
 - Fixed sentences + active transcription
 """
 
-import logging
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Generator
 
 import numpy as np
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -96,7 +93,6 @@ class SmartProgressiveStreamingHandler:
         """
         # Skip if not enough new audio
         current_length = len(audio)
-        window_start_samples = int(self.fixed_end_time * self.sample_rate)
 
         if current_length < self.sample_rate * 0.5:  # Need at least 500ms
             return PartialTranscription(
@@ -115,23 +111,10 @@ class SmartProgressiveStreamingHandler:
                 is_final=False,
             )
 
-        if window_start_samples >= current_length:
-            logger.debug(
-                "Skipping progressive decode because fixed_end_time %.3fs covers current audio %.3fs",
-                self.fixed_end_time,
-                current_length / self.sample_rate,
-            )
-            self.last_transcribed_length = current_length
-            return PartialTranscription(
-                fixed_text=" ".join(self.fixed_sentences),
-                active_text="",
-                timestamp=current_length / self.sample_rate,
-                is_final=False,
-            )
-
         self.last_transcribed_length = current_length
 
         # Extract window for transcription (from last fixed sentence to end)
+        window_start_samples = int(self.fixed_end_time * self.sample_rate)
         audio_window = audio[window_start_samples:]
 
         # Transcribe current window

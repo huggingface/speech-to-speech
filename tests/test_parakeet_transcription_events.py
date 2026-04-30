@@ -6,7 +6,6 @@ import numpy as np
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, VADAudio
 from speech_to_speech.STT import parakeet_tdt_handler
 from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
-from speech_to_speech.STT.smart_progressive_streaming import SmartProgressiveStreamingHandler
 
 
 def test_show_progressive_transcription_returns_combined_text(monkeypatch):
@@ -91,50 +90,6 @@ def test_final_transcription_resets_live_streaming_state(monkeypatch):
     assert isinstance(result[0], Transcription)
     assert handler.processing_final is False
     assert reset_calls == [True]
-
-
-def test_progressive_stream_preserves_fixed_text_when_fixed_end_exceeds_audio():
-    class Model:
-        def __init__(self):
-            self.lengths = []
-
-        def transcribe(self, audio, timestamps=True):
-            self.lengths.append(len(audio))
-            return SimpleNamespace(text="fresh partial", timestamp={"segment": []})
-
-    model = Model()
-    handler = SmartProgressiveStreamingHandler(model)
-    handler.fixed_sentences = ["stale text"]
-    handler.fixed_end_time = 10.0
-
-    result = handler.transcribe_incremental(np.zeros(16000, dtype=np.float32))
-
-    assert model.lengths == []
-    assert result.fixed_text == "stale text"
-    assert result.active_text == ""
-    assert handler.fixed_end_time == 10.0
-
-
-def test_progressive_stream_keeps_fixed_text_at_exact_boundary():
-    class Model:
-        def __init__(self):
-            self.lengths = []
-
-        def transcribe(self, audio, timestamps=True):
-            self.lengths.append(len(audio))
-            return SimpleNamespace(text="active", timestamp={"segment": []})
-
-    model = Model()
-    handler = SmartProgressiveStreamingHandler(model)
-    handler.fixed_sentences = ["kept fixed"]
-    handler.fixed_end_time = 1.0
-
-    result = handler.transcribe_incremental(np.zeros(16000, dtype=np.float32))
-
-    assert model.lengths == []
-    assert result.fixed_text == "kept fixed"
-    assert result.active_text == ""
-    assert handler.fixed_end_time == 1.0
 
 
 def test_on_session_end_resets_streaming_state():
