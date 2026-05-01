@@ -404,6 +404,7 @@ def build_pipeline(
 
     transcription_notifier_kwargs: dict[str, Any] = {
         "text_output_queue": text_output_queue,
+        "should_listen": should_listen,
     }
     if module_kwargs.mode != "realtime":
         if module_kwargs.llm == "open_api":
