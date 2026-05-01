@@ -76,7 +76,14 @@ if LINGUA_AVAILABLE:
         for code in SUPPORTED_LANGUAGES
         if _LINGUA_CODE_MAP.get(code, code) in _lingua_iso_to_code
     ]
-    _lingua_detector = LanguageDetectorBuilder.from_languages(*_lingua_languages).build()
+
+    def _build_lingua_detector():
+        # Preloading can take multiple seconds on some hardware, including the
+        # deployed server. Pay that cost at startup instead of on the first user
+        # request, where it would look like slow STT.
+        return LanguageDetectorBuilder.from_languages(*_lingua_languages).with_preloaded_language_models().build()
+
+    _lingua_detector = _build_lingua_detector()
 
 
 class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
