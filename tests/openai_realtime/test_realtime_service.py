@@ -798,6 +798,31 @@ class TestDispatchPipelineEvent:
         assert evt.usage.seconds == 3.2
         assert evt.usage.type == "duration"
 
+    def test_empty_transcription_completed_emits_event_without_response(
+        self,
+        service,
+        conn_id,
+        runtime_config,
+        text_prompt_queue,
+    ):
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=1.1),
+        )
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="", language_code="en"),
+        )
+
+        assert len(events) == 1
+        evt = events[0]
+        assert isinstance(evt, ConversationItemInputAudioTranscriptionCompletedEvent)
+        assert evt.transcript == ""
+        assert evt.usage.seconds == 1.1
+        assert text_prompt_queue.empty()
+        assert runtime_config.chat.buffer == []
+
     # -- unknown --
 
     def test_unknown_type_returns_empty(self, service, conn_id):
