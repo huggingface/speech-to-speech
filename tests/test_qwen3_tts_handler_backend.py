@@ -123,6 +123,33 @@ def test_setup_preserves_faster_backend_off_darwin(monkeypatch):
     }
 
 
+def test_setup_defaults_to_custom_voice_profile_off_darwin(monkeypatch):
+    recorded = {}
+
+    def _setup_mlx(self, *args, **kwargs):
+        raise AssertionError("Non-Darwin setup should not use the mlx backend")
+
+    def _setup_faster(self, model_name, dtype, attn_implementation):
+        recorded["model_name"] = model_name
+        recorded["dtype"] = dtype
+        recorded["attn_implementation"] = attn_implementation
+
+    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_faster", _setup_faster)
+    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.setup(Event())
+
+    assert handler.backend == "faster_qwen3_tts"
+    assert recorded["model_name"] == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    assert handler.ref_audio is None
+    assert handler.speaker == "Aiden"
+    assert handler.language == "auto"
+    assert handler.non_streaming_mode is True
+
+
 def test_setup_preserves_explicit_chunk_size_on_darwin(monkeypatch):
     def _setup_mlx(self, model_name):
         return None
@@ -142,7 +169,7 @@ def test_setup_preserves_explicit_chunk_size_on_darwin(monkeypatch):
     assert handler.streaming_chunk_size == 4
 
 
-def test_setup_warns_when_non_streaming_mode_set_on_darwin(monkeypatch, caplog):
+def test_setup_logs_when_non_streaming_mode_set_on_darwin(monkeypatch, caplog):
     def _setup_mlx(self, model_name):
         return None
 
@@ -152,7 +179,7 @@ def test_setup_warns_when_non_streaming_mode_set_on_darwin(monkeypatch, caplog):
 
     handler = object.__new__(Qwen3TTSHandler)
 
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("DEBUG"):
         handler.setup(
             Event(),
             model_name="Qwen/Qwen3-TTS-12Hz-0.6B-Base",

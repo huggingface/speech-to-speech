@@ -61,7 +61,7 @@ Common options:
 ```bash
 python s2s_pipeline.py \
   --llm open_api \
-  --open_api_model_name deepseek-chat \
+  --open_api_model_name gpt-5.4-mini \
   --open_api_api_key YOUR_API_KEY \
   --open_api_base_url https://api.example.com/v1 \
   --open_api_stream true
@@ -132,6 +132,6 @@ python s2s_pipeline.py \
 ```bash
 python s2s_pipeline.py \
   --llm open_api \
-  --open_api_model_name deepseek-chat \
+  --open_api_model_name gpt-5.4-mini \
   --open_api_api_key YOUR_API_KEY
 ```

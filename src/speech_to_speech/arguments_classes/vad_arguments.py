@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 @dataclass
 class VADHandlerArguments:
     thresh: float = field(
-        default=0.3,
+        default=0.6,
         metadata={
             "help": "The threshold value for voice activity detection (VAD). Values typically range from 0 to 1, with higher values requiring higher confidence in speech detection."
         },

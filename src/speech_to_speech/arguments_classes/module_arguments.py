@@ -9,9 +9,9 @@ class ModuleArguments:
         metadata={"help": "If specified, overrides the device for all handlers."},
     )
     mode: Optional[str] = field(
-        default="socket",
+        default="realtime",
         metadata={
-            "help": "The mode to run the pipeline in. Either 'local', 'socket', 'websocket', or 'realtime'. Default is 'socket'."
+            "help": "The mode to run the pipeline in. Either 'local', 'socket', 'websocket', or 'realtime'. Default is 'realtime'."
         },
     )
     local_mac_optimal_settings: bool = field(
@@ -21,19 +21,19 @@ class ModuleArguments:
         },
     )
     stt: Optional[str] = field(
-        default="whisper",
+        default="parakeet-tdt",
         metadata={
-            "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', 'parakeet-tdt', or 'paraformer'. Default is 'whisper'."
+            "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', 'parakeet-tdt', or 'paraformer'. Default is 'parakeet-tdt'."
         },
     )
     llm: Optional[str] = field(
-        default="transformers",
-        metadata={"help": "The LLM to use. Either 'transformers' or 'mlx-lm'. Default is 'transformers'"},
+        default="open_api",
+        metadata={"help": "The LLM to use. Either 'transformers', 'mlx-lm', or 'open_api'. Default is 'open_api'"},
     )
     tts: Optional[str] = field(
-        default=None,
+        default="qwen3",
         metadata={
-            "help": "The TTS to use. Either 'melo', 'chatTTS', 'facebookMMS', 'pocket', 'kokoro', or 'qwen3'. Default is 'qwen3'."
+            "help": "The TTS to use. Either 'chatTTS', 'facebookMMS', 'pocket', 'kokoro', or 'qwen3'. Default is 'qwen3'."
         },
     )
     log_level: str = field(
@@ -41,9 +41,9 @@ class ModuleArguments:
         metadata={"help": "Provide logging level. Example --log_level debug, default=info."},
     )
     enable_live_transcription: bool = field(
-        default=False,
+        default=True,
         metadata={
-            "help": "Enable live transcription display while user is speaking (only works with parakeet-tdt on MLX/MPS)"
+            "help": "Enable live transcription display while user is speaking (works with parakeet-tdt). Default is true."
         },
     )
     live_transcription_update_interval: float = field(

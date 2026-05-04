@@ -6,8 +6,8 @@ from typing import Optional
 class OpenApiLanguageModelHandlerArguments:
     open_api_model_name: str = field(
         # default="HuggingFaceTB/SmolLM-360M-Instruct",
-        default="deepseek-chat",
-        metadata={"help": "The pretrained language model to use. Default is 'deepseek-chat'."},
+        default="gpt-5.4-mini",
+        metadata={"help": "The OpenAI-compatible language model to use. Default is 'gpt-5.4-mini'."},
     )
     open_api_user_role: str = field(
         default="user",
@@ -26,7 +26,7 @@ class OpenApiLanguageModelHandlerArguments:
     )
 
     open_api_chat_size: int = field(
-        default=5,
+        default=30,
         metadata={"help": "Number of interactions assitant-user to keep for the chat. None for no limitations."},
     )
     open_api_api_key: Optional[str] = field(
@@ -40,10 +40,10 @@ class OpenApiLanguageModelHandlerArguments:
         },
     )
     open_api_stream: bool = field(
-        default=False,
+        default=True,
         metadata={
             "help": "The stream parameter typically indicates whether data should be transmitted in a continuous flow rather"
-            " than in a single, complete response, often used for handling large or real-time data.Default is False"
+            " than in a single, complete response, often used for handling large or real-time data.Default is True"
         },
     )
     open_api_disable_thinking: bool = field(
