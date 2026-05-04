@@ -51,13 +51,33 @@ def _validate_package_defaults() -> None:
     assert module_args.enable_live_transcription is True
     assert open_api_args.open_api_model_name == "gpt-5.4-mini"
     assert open_api_args.open_api_stream is True
+    assert qwen3_args.qwen3_tts_model_name == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    assert qwen3_args.qwen3_tts_speaker == "Aiden"
+    assert qwen3_args.qwen3_tts_language == "auto"
+    assert qwen3_args.qwen3_tts_non_streaming_mode is True
+    assert qwen3_args.qwen3_tts_ref_audio is None
     assert qwen3_args.qwen3_tts_mlx_quantization == "6bit"
     assert vad_args.thresh == 0.6
 
     package_root = Path(speech_to_speech.__file__).resolve().parent
-    ref_audio = package_root / qwen3_args.qwen3_tts_ref_audio
+    ref_audio = package_root / "TTS" / "ref_audio.wav"
     if not ref_audio.exists():
         raise RuntimeError(f"Packaged Qwen3-TTS reference audio is missing: {ref_audio}")
+
+
+def _validate_empty_qwen_ref_audio_arg() -> None:
+    from speech_to_speech.s2s_pipeline import parse_arguments
+
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = ["speech-to-speech", "--qwen3_tts_ref_audio="]
+        *_, qwen3_args = parse_arguments()
+    finally:
+        sys.argv = original_argv
+
+    assert qwen3_args.qwen3_tts_ref_audio == ""
+    assert qwen3_args.qwen3_tts_model_name == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    assert qwen3_args.qwen3_tts_speaker == "Aiden"
 
 
 def _validate_pipeline_startup_primitives() -> None:
@@ -89,6 +109,7 @@ def main() -> None:
     _require_modules(required_modules)
     _run_installed_cli_help()
     _validate_package_defaults()
+    _validate_empty_qwen_ref_audio_arg()
     _validate_pipeline_startup_primitives()
     print("speech-to-speech installed package smoke test passed")
 

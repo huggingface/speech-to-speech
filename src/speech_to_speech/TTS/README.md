@@ -78,9 +78,11 @@ Primary args prefix: `--qwen3_tts_*`
 ```bash
 python s2s_pipeline.py \
   --tts qwen3 \
-  --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-0.6B-Base \
+  --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
   --qwen3_tts_device cuda \
-  --qwen3_tts_ref_audio TTS/ref_audio.wav
+  --qwen3_tts_speaker Aiden \
+  --qwen3_tts_language auto \
+  --qwen3_tts_non_streaming_mode True
 ```
 
 Behavior:
@@ -88,14 +90,15 @@ Behavior:
 - Uses `mlx-audio` on Apple Silicon and auto-maps `Qwen/...` model IDs to `mlx-community/...`, defaulting to the `6bit` MLX variant unless the model name already pins a suffix.
 - Supports MLX quantization overrides on Apple Silicon via `--qwen3_tts_mlx_quantization bf16|4bit|6bit|8bit`.
 - Keeps the existing voice-clone/custom-voice/voice-design handler flow intact.
+- Defaults to the CustomVoice model with speaker `Aiden`, so no reference audio is required. Voice-clone/base models can still use `--qwen3_tts_ref_audio`.
 
 Example for Apple Silicon using the default 6-bit MLX variant:
 
 ```bash
 python s2s_pipeline.py \
   --tts qwen3 \
-  --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-0.6B-Base \
-  --qwen3_tts_ref_audio TTS/ref_audio.wav
+  --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+  --qwen3_tts_speaker Aiden
 ```
 
 You can override the default and select `bf16`, `4bit`, or `8bit` explicitly:
@@ -103,9 +106,9 @@ You can override the default and select `bf16`, `4bit`, or `8bit` explicitly:
 ```bash
 python s2s_pipeline.py \
   --tts qwen3 \
-  --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-0.6B-Base \
+  --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
   --qwen3_tts_mlx_quantization 4bit \
-  --qwen3_tts_ref_audio TTS/ref_audio.wav
+  --qwen3_tts_speaker Aiden
 ```
 
 To benchmark the Apple Silicon MLX variants side by side:
@@ -117,7 +120,7 @@ To benchmark the Apple Silicon MLX variants side by side:
   --qwen3_mlx_quantizations bf16 4bit 6bit 8bit
 ```
 
-This will run separate benchmark entries for `qwen3[bf16]`, `qwen3[4bit]`, `qwen3[6bit]`, and `qwen3[8bit]` using the same reference audio and text.
+This will run separate benchmark entries for `qwen3[bf16]`, `qwen3[4bit]`, `qwen3[6bit]`, and `qwen3[8bit]`.
 
 ## Setup
 

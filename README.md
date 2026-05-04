@@ -52,7 +52,7 @@ The pipeline provides a fully open and modular approach, with a focus on leverag
 - [ChatTTS](https://github.com/2noise/ChatTTS?tab=readme-ov-file)
 - [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) - Streaming TTS with voice cloning from Kyutai Labs
 - [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) - Fast and high-quality TTS optimized for Apple Silicon
-- [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base)
+- [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice)
 
 ## Setup
 
@@ -126,6 +126,10 @@ speech-to-speech \
     --stt parakeet-tdt \
     --llm open_api \
     --tts qwen3 \
+    --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+    --qwen3_tts_speaker Aiden \
+    --qwen3_tts_language auto \
+    --qwen3_tts_non_streaming_mode True \
     --qwen3_tts_mlx_quantization 6bit \
     --open_api_model_name gpt-5.4-mini \
     --open_api_chat_size 30 \
