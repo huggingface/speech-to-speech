@@ -73,7 +73,7 @@ def _validate_empty_qwen_ref_audio_arg() -> None:
     original_argv = sys.argv[:]
     try:
         sys.argv = ["speech-to-speech", "--qwen3_tts_ref_audio="]
-        *_, qwen3_args = parse_arguments()
+        qwen3_args = parse_arguments().qwen3_tts_handler_kwargs
     finally:
         sys.argv = original_argv
 

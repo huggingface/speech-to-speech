@@ -5,12 +5,13 @@ import os
 import signal
 import sys
 from copy import copy
+from dataclasses import dataclass
 from pathlib import Path
 from queue import Queue
 from sys import platform
 from threading import Event
 from types import FrameType
-from typing import Any, Optional, cast
+from typing import Any, Optional
 
 import nltk
 import torch
@@ -80,6 +81,27 @@ logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.WARNING)  # quiet down numba logs
 
 
+@dataclass
+class ParsedArguments:
+    module_kwargs: ModuleArguments
+    socket_receiver_kwargs: SocketReceiverArguments
+    socket_sender_kwargs: SocketSenderArguments
+    websocket_streamer_kwargs: WebSocketStreamerArguments
+    vad_handler_kwargs: VADHandlerArguments
+    whisper_stt_handler_kwargs: WhisperSTTHandlerArguments
+    paraformer_stt_handler_kwargs: ParaformerSTTHandlerArguments
+    faster_whisper_stt_handler_kwargs: FasterWhisperSTTHandlerArguments
+    mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments
+    parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments
+    language_model_handler_kwargs: LanguageModelHandlerArguments
+    open_api_language_model_handler_kwargs: OpenApiLanguageModelHandlerArguments
+    chat_tts_handler_kwargs: ChatTTSHandlerArguments
+    facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments
+    pocket_tts_handler_kwargs: PocketTTSHandlerArguments
+    kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments
+    qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments
+
+
 def rename_args(args: Any, prefix: str) -> None:
     """
     Rename arguments by removing the prefix and prepares the gen_kwargs.
@@ -97,7 +119,7 @@ def rename_args(args: Any, prefix: str) -> None:
     args.__dict__["gen_kwargs"] = gen_kwargs
 
 
-def parse_arguments() -> tuple[Any, ...]:
+def parse_arguments() -> ParsedArguments:
     # Pre-parse to determine which LM backend is selected, so only one of the two
     # mutually exclusive LM argument classes is registered with HfArgumentParser
     # (avoids duplicate field names from the shared LanguageModelBaseArguments base).
@@ -111,6 +133,7 @@ def parse_arguments() -> tuple[Any, ...]:
         _use_openai_api = _pre.parse_known_args()[0].llm_backend == "openai-api"
 
     _lm_class = OpenApiLanguageModelHandlerArguments if _use_openai_api else LanguageModelHandlerArguments
+    logger.debug("LLM backend pre-parse: use_openai_api=%s, registering %s", _use_openai_api, _lm_class.__name__)
 
     parser = HfArgumentParser(
         (  # type: ignore[arg-type]
@@ -134,18 +157,35 @@ def parse_arguments() -> tuple[Any, ...]:
     )
 
     if _is_json:
-        parsed = list(parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]), allow_extra_keys=True))
+        parsed = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]), allow_extra_keys=True)
     else:
-        parsed = list(parser.parse_args_into_dataclasses())
+        parsed = parser.parse_args_into_dataclasses()
 
-    # Always return (lm_kwargs, open_api_kwargs) at positions 10 and 11; fill the
-    # unused slot with a default instance so downstream code stays index-stable.
-    if _use_openai_api:
-        parsed.insert(10, cast(Any, LanguageModelHandlerArguments()))
-    else:
-        parsed.insert(11, cast(Any, OpenApiLanguageModelHandlerArguments()))
+    # Build a {type: instance} lookup so field assignment is order-independent.
+    by_type: dict[type, Any] = {type(obj): obj for obj in parsed}
+    logger.debug("Parsed %d argument classes: %s", len(by_type), [t.__name__ for t in by_type])
 
-    return tuple(parsed)
+    return ParsedArguments(
+        module_kwargs=by_type[ModuleArguments],
+        socket_receiver_kwargs=by_type[SocketReceiverArguments],
+        socket_sender_kwargs=by_type[SocketSenderArguments],
+        websocket_streamer_kwargs=by_type[WebSocketStreamerArguments],
+        vad_handler_kwargs=by_type[VADHandlerArguments],
+        whisper_stt_handler_kwargs=by_type[WhisperSTTHandlerArguments],
+        paraformer_stt_handler_kwargs=by_type[ParaformerSTTHandlerArguments],
+        faster_whisper_stt_handler_kwargs=by_type[FasterWhisperSTTHandlerArguments],
+        mlx_audio_whisper_stt_handler_kwargs=by_type[MLXAudioWhisperSTTHandlerArguments],
+        parakeet_tdt_stt_handler_kwargs=by_type[ParakeetTDTSTTHandlerArguments],
+        language_model_handler_kwargs=by_type.get(LanguageModelHandlerArguments, LanguageModelHandlerArguments()),
+        open_api_language_model_handler_kwargs=by_type.get(
+            OpenApiLanguageModelHandlerArguments, OpenApiLanguageModelHandlerArguments()
+        ),
+        chat_tts_handler_kwargs=by_type[ChatTTSHandlerArguments],
+        facebook_mms_tts_handler_kwargs=by_type[FacebookMMSTTSHandlerArguments],
+        pocket_tts_handler_kwargs=by_type[PocketTTSHandlerArguments],
+        kokoro_tts_handler_kwargs=by_type[KokoroTTSHandlerArguments],
+        qwen3_tts_handler_kwargs=by_type[Qwen3TTSHandlerArguments],
+    )
 
 
 def setup_logger(log_level: str) -> None:
@@ -701,64 +741,46 @@ def get_tts_handler(
 
 
 def main() -> None:
-    (
-        module_kwargs,
-        socket_receiver_kwargs,
-        socket_sender_kwargs,
-        websocket_streamer_kwargs,
-        vad_handler_kwargs,
-        whisper_stt_handler_kwargs,
-        paraformer_stt_handler_kwargs,
-        faster_whisper_stt_handler_kwargs,
-        mlx_audio_whisper_stt_handler_kwargs,
-        parakeet_tdt_stt_handler_kwargs,
-        language_model_handler_kwargs,
-        open_api_language_model_handler_kwargs,
-        chat_tts_handler_kwargs,
-        facebook_mms_tts_handler_kwargs,
-        pocket_tts_handler_kwargs,
-        kokoro_tts_handler_kwargs,
-        qwen3_tts_handler_kwargs,
-    ) = parse_arguments()
+    args = parse_arguments()
 
-    setup_logger(module_kwargs.log_level)
+    setup_logger(args.module_kwargs.log_level)
 
     prepare_all_args(
-        module_kwargs,
-        whisper_stt_handler_kwargs,
-        paraformer_stt_handler_kwargs,
-        faster_whisper_stt_handler_kwargs,
-        mlx_audio_whisper_stt_handler_kwargs,
-        parakeet_tdt_stt_handler_kwargs,
-        language_model_handler_kwargs,
-        open_api_language_model_handler_kwargs,
-        chat_tts_handler_kwargs,
-        facebook_mms_tts_handler_kwargs,
-        pocket_tts_handler_kwargs,
-        kokoro_tts_handler_kwargs,
-        qwen3_tts_handler_kwargs,
+        args.module_kwargs,
+        args.whisper_stt_handler_kwargs,
+        args.paraformer_stt_handler_kwargs,
+        args.faster_whisper_stt_handler_kwargs,
+        args.mlx_audio_whisper_stt_handler_kwargs,
+        args.parakeet_tdt_stt_handler_kwargs,
+        args.language_model_handler_kwargs,
+        args.open_api_language_model_handler_kwargs,
+        args.chat_tts_handler_kwargs,
+        args.facebook_mms_tts_handler_kwargs,
+        args.pocket_tts_handler_kwargs,
+        args.kokoro_tts_handler_kwargs,
+        args.qwen3_tts_handler_kwargs,
     )
 
     queues_and_events = initialize_queues_and_events()
 
     pipeline_manager = build_pipeline(
-        module_kwargs,
-        socket_receiver_kwargs,
-        socket_sender_kwargs,
-        websocket_streamer_kwargs,
-        vad_handler_kwargs,
-        whisper_stt_handler_kwargs,
-        faster_whisper_stt_handler_kwargs,
-        paraformer_stt_handler_kwargs,
-        mlx_audio_whisper_stt_handler_kwargs,
-        parakeet_tdt_stt_handler_kwargs,
-        language_model_handler_kwargs,
-        open_api_language_model_handler_kwargs,
-        chat_tts_handler_kwargs,
-        facebook_mms_tts_handler_kwargs,
-        pocket_tts_handler_kwargs,
-        kokoro_tts_handler_kwargs,
-        qwen3_tts_handler_kwargs,
+        args.module_kwargs,
+        args.socket_receiver_kwargs,
+        args.socket_sender_kwargs,
+        args.websocket_streamer_kwargs,
+        args.vad_handler_kwargs,
+        args.whisper_stt_handler_kwargs,
+        args.faster_whisper_stt_handler_kwargs,
+        args.paraformer_stt_handler_kwargs,
+        args.mlx_audio_whisper_stt_handler_kwargs,
+        args.parakeet_tdt_stt_handler_kwargs,
+        args.language_model_handler_kwargs,
+        args.open_api_language_model_handler_kwargs,
+        args.chat_tts_handler_kwargs,
+        args.facebook_mms_tts_handler_kwargs,
+        args.pocket_tts_handler_kwargs,
+        args.kokoro_tts_handler_kwargs,
+        args.qwen3_tts_handler_kwargs,
         queues_and_events,
     )
 
