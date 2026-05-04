@@ -20,7 +20,9 @@ class ModuleArguments:
             "help": "If specified, sets the optimal settings for Mac OS. Sets Parakeet TDT for STT, MLX LM for language model, and Qwen3-TTS for TTS, with MPS device and local mode."
         },
     )
-    stt: Optional[Literal["whisper", "whisper-mlx", "mlx-audio-whisper", "faster-whisper", "parakeet-tdt", "paraformer"]] = field(
+    stt: Optional[
+        Literal["whisper", "whisper-mlx", "mlx-audio-whisper", "faster-whisper", "parakeet-tdt", "paraformer"]
+    ] = field(
         default="parakeet-tdt",
         metadata={
             "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', 'parakeet-tdt', or 'paraformer'. Default is 'parakeet-tdt'."
@@ -28,7 +30,9 @@ class ModuleArguments:
     )
     llm_backend: Optional[Literal["transformers", "mlx-lm", "openai-api"]] = field(
         default="openai-api",
-        metadata={"help": "The LLM backend to use. Either 'transformers', 'mlx-lm', or 'openai-api'. Default is 'openai-api'."},
+        metadata={
+            "help": "The LLM backend to use. Either 'transformers', 'mlx-lm', or 'openai-api'. Default is 'openai-api'."
+        },
     )
     tts: Optional[Literal["melo", "chatTTS", "facebookMMS", "pocket", "kokoro", "qwen3"]] = field(
         default="qwen3",

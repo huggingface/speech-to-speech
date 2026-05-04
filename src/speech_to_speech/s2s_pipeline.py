@@ -10,7 +10,7 @@ from queue import Queue
 from sys import platform
 from threading import Event
 from types import FrameType
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import nltk
 import torch
@@ -141,9 +141,9 @@ def parse_arguments() -> tuple[Any, ...]:
     # Always return (lm_kwargs, open_api_kwargs) at positions 10 and 11; fill the
     # unused slot with a default instance so downstream code stays index-stable.
     if _use_openai_api:
-        parsed.insert(10, LanguageModelHandlerArguments())
+        parsed.insert(10, cast(Any, LanguageModelHandlerArguments()))
     else:
-        parsed.insert(11, OpenApiLanguageModelHandlerArguments())
+        parsed.insert(11, cast(Any, OpenApiLanguageModelHandlerArguments()))
 
     return tuple(parsed)
 
