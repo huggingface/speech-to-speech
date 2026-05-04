@@ -9,6 +9,7 @@ def test_voice_prompt_makes_speech_the_default():
     assert "Speech is the default." in prompt
     assert "Do not use tools for ordinary conversational behavior" in prompt
     assert "acknowledgments, greetings, agreement, listening" in prompt
+    assert "include one brief spoken sentence in the same response" in prompt
     assert "call at most one tool" in prompt
     assert "Prefer a spoken response without tools when uncertain." in prompt
 
