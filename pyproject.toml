@@ -30,6 +30,7 @@ dependencies = [
     "nltk==3.9.1",
     "numpy>=1.26.0",
     "openai==2.28.0",
+    "pillow>=10.0.0",
     "pydantic>=2.0",
     "rich>=13.0",
     "scipy>=1.10.0",

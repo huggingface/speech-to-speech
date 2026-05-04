@@ -112,7 +112,17 @@ def _validate_default_handler_imports() -> None:
 
 
 def main() -> None:
-    required_modules = ["fastapi", "openai", "scipy", "sounddevice", "torch", "torchaudio", "transformers", "uvicorn"]
+    required_modules = [
+        "fastapi",
+        "openai",
+        "PIL",
+        "scipy",
+        "sounddevice",
+        "torch",
+        "torchaudio",
+        "transformers",
+        "uvicorn",
+    ]
     if sys.platform == "darwin":
         required_modules.extend(["mlx_audio", "misaki", "soundfile", "spacy"])
     else:
