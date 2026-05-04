@@ -1,3 +1,5 @@
+import argparse
+import json
 import logging
 import os
 import signal
@@ -97,6 +99,20 @@ def rename_args(args: Any, prefix: str) -> None:
 
 
 def parse_arguments() -> tuple[Any, ...]:
+    # Pre-parse to determine which LM backend is selected, so only one of the two
+    # mutually exclusive LM argument classes is registered with HfArgumentParser
+    # (avoids duplicate field names from the shared LanguageModelBaseArguments base).
+    _is_json = len(sys.argv) == 2 and sys.argv[1].endswith(".json")
+    if _is_json:
+        with open(sys.argv[1]) as _f:
+            _use_openai_api = json.load(_f).get("llm_backend") == "openai-api"
+    else:
+        _pre = argparse.ArgumentParser(add_help=False)
+        _pre.add_argument("--llm_backend", default="transformers")
+        _use_openai_api = _pre.parse_known_args()[0].llm_backend == "openai-api"
+
+    _lm_class = OpenApiLanguageModelHandlerArguments if _use_openai_api else LanguageModelHandlerArguments
+
     parser = HfArgumentParser(
         (  # type: ignore[arg-type]
             ModuleArguments,
@@ -109,8 +125,7 @@ def parse_arguments() -> tuple[Any, ...]:
             FasterWhisperSTTHandlerArguments,
             MLXAudioWhisperSTTHandlerArguments,
             ParakeetTDTSTTHandlerArguments,
-            LanguageModelHandlerArguments,
-            OpenApiLanguageModelHandlerArguments,
+            _lm_class,
             MeloTTSHandlerArguments,
             ChatTTSHandlerArguments,
             FacebookMMSTTSHandlerArguments,
@@ -120,12 +135,19 @@ def parse_arguments() -> tuple[Any, ...]:
         )
     )
 
-    if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
-        # Parse configurations from a JSON file if specified
-        return parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+    if _is_json:
+        parsed = list(parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]), allow_extra_keys=True))
     else:
-        # Parse arguments from command line if no JSON file is provided
-        return parser.parse_args_into_dataclasses()
+        parsed = list(parser.parse_args_into_dataclasses())
+
+    # Always return (lm_kwargs, open_api_kwargs) at positions 10 and 11; fill the
+    # unused slot with a default instance so downstream code stays index-stable.
+    if _use_openai_api:
+        parsed.insert(10, LanguageModelHandlerArguments())
+    else:
+        parsed.insert(11, OpenApiLanguageModelHandlerArguments())
+
+    return tuple(parsed)
 
 
 def setup_logger(log_level: str) -> None:
@@ -154,20 +176,20 @@ def optimal_mac_settings(mac_optimal_settings: bool, *handler_kwargs: Any) -> No
                 kwargs.mode = "local"
             if hasattr(kwargs, "stt"):
                 kwargs.stt = "parakeet-tdt"
-            if hasattr(kwargs, "llm"):
-                kwargs.llm = "mlx-lm"
+            if hasattr(kwargs, "llm_backend"):
+                kwargs.llm_backend = "mlx-lm"
             if hasattr(kwargs, "tts"):
                 kwargs.tts = "qwen3"
-            if hasattr(kwargs, "lm_model_name"):
-                if kwargs.lm_model_name == TRANSFORMERS_DEFAULT_LM_MODEL:
-                    kwargs.lm_model_name = MLX_DEFAULT_LM_MODEL
+            if hasattr(kwargs, "model_name"):
+                if kwargs.model_name == TRANSFORMERS_DEFAULT_LM_MODEL:
+                    kwargs.model_name = MLX_DEFAULT_LM_MODEL
 
 
 def check_mac_settings(module_kwargs: ModuleArguments) -> None:
     if platform == "darwin":
         if module_kwargs.device == "cuda":
             raise ValueError("Cannot use CUDA on macOS. Please set the device to 'cpu' or 'mps'.")
-        if module_kwargs.llm != "mlx-lm":
+        if module_kwargs.llm_backend != "mlx-lm":
             logger.warning(
                 "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm mlx-lm."
             )
@@ -180,8 +202,8 @@ def check_mac_settings(module_kwargs: ModuleArguments) -> None:
 def overwrite_device_argument(common_device: Optional[str], *handler_kwargs: Any) -> None:
     if common_device:
         for kwargs in handler_kwargs:
-            if hasattr(kwargs, "lm_device"):
-                kwargs.lm_device = common_device
+            if hasattr(kwargs, "llm_device"):
+                kwargs.llm_device = common_device
             if hasattr(kwargs, "tts_device"):
                 kwargs.tts_device = common_device
             if hasattr(kwargs, "stt_device"):
@@ -241,7 +263,7 @@ def prepare_all_args(
     rename_args(paraformer_stt_handler_kwargs, "paraformer_stt")
     rename_args(mlx_audio_whisper_stt_handler_kwargs, "mlx_audio_whisper")
     rename_args(parakeet_tdt_stt_handler_kwargs, "parakeet_tdt")
-    rename_args(language_model_handler_kwargs, "lm")
+    rename_args(language_model_handler_kwargs, "llm")
     rename_args(open_api_language_model_handler_kwargs, "open_api")
     rename_args(melo_tts_handler_kwargs, "melo")
     rename_args(chat_tts_handler_kwargs, "chat_tts")
@@ -348,7 +370,7 @@ def build_pipeline(
         ):
             vars(kw)["cancel_scope"] = cancel_scope
 
-        if module_kwargs.llm == "open_api":
+        if module_kwargs.llm_backend == "openai-api":
             chat_size = vars(open_api_language_model_handler_kwargs).get("chat_size", 10)
         else:
             chat_size = vars(language_model_handler_kwargs).get("chat_size", 10)
@@ -406,13 +428,13 @@ def build_pipeline(
         "text_output_queue": text_output_queue,
     }
     if module_kwargs.mode != "realtime":
-        if module_kwargs.llm == "open_api":
+        if module_kwargs.llm_backend == "openai-api":
             _lm_vars = vars(open_api_language_model_handler_kwargs)
             transcription_notifier_kwargs["runtime_config"] = RuntimeConfig(
-                chat=Chat(_lm_vars.get("open_api_chat_size", 30)),
+                chat=Chat(_lm_vars.get("chat_size", 30)),
                 session=RealtimeSessionCreateRequest(
                     type="realtime",
-                    instructions=_lm_vars.get("open_api_init_chat_prompt"),
+                    instructions=_lm_vars.get("init_chat_prompt"),
                 ),
             )
         else:
@@ -571,7 +593,7 @@ def get_llm_handler(
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     open_api_language_model_handler_kwargs: OpenApiLanguageModelHandlerArguments,
 ) -> BaseHandler[LLMIn, LLMOut]:
-    if module_kwargs.llm == "open_api":
+    if module_kwargs.llm_backend == "openai-api":
         from speech_to_speech.LLM.openai_api_language_model import OpenApiModelHandler
 
         return OpenApiModelHandler(
@@ -581,10 +603,10 @@ def get_llm_handler(
             setup_kwargs=vars(open_api_language_model_handler_kwargs),
         )
 
-    if module_kwargs.llm in ("transformers", "mlx-lm"):
+    if module_kwargs.llm_backend in ("transformers", "mlx-lm"):
         lm_kwargs = vars(language_model_handler_kwargs)
         is_vlm = lm_kwargs.pop("is_vlm", False)
-        if module_kwargs.llm == "mlx-lm":
+        if module_kwargs.llm_backend == "mlx-lm":
             lm_kwargs["backend"] = "mlx"
 
         if is_vlm:

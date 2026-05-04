@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Literal, Optional
 
 
 @dataclass
@@ -8,10 +8,10 @@ class ModuleArguments:
         default=None,
         metadata={"help": "If specified, overrides the device for all handlers."},
     )
-    mode: Optional[str] = field(
-        default="socket",
+    mode: Optional[Literal["local", "socket", "websocket", "realtime"]] = field(
+        default="local",
         metadata={
-            "help": "The mode to run the pipeline in. Either 'local', 'socket', 'websocket', or 'realtime'. Default is 'socket'."
+            "help": "The mode to run the pipeline in. Either 'local', 'socket', 'websocket', or 'realtime'. Default is 'local'."
         },
     )
     local_mac_optimal_settings: bool = field(
@@ -20,17 +20,17 @@ class ModuleArguments:
             "help": "If specified, sets the optimal settings for Mac OS. Sets Parakeet TDT for STT, MLX LM for language model, and Qwen3-TTS for TTS, with MPS device and local mode."
         },
     )
-    stt: Optional[str] = field(
+    stt: Optional[Literal["whisper", "whisper-mlx", "mlx-audio-whisper", "faster-whisper", "parakeet-tdt", "paraformer"]] = field(
         default="whisper",
         metadata={
             "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', 'parakeet-tdt', or 'paraformer'. Default is 'whisper'."
         },
     )
-    llm: Optional[str] = field(
+    llm_backend: Optional[Literal["transformers", "mlx-lm", "openai-api"]] = field(
         default="transformers",
-        metadata={"help": "The LLM to use. Either 'transformers' or 'mlx-lm'. Default is 'transformers'"},
+        metadata={"help": "The LLM backend to use. Either 'transformers', 'mlx-lm', or 'openai-api'. Default is 'transformers'."},
     )
-    tts: Optional[str] = field(
+    tts: Optional[Literal["melo", "chatTTS", "facebookMMS", "pocket", "kokoro", "qwen3"]] = field(
         default=None,
         metadata={
             "help": "The TTS to use. Either 'melo', 'chatTTS', 'facebookMMS', 'pocket', 'kokoro', or 'qwen3'. Default is 'qwen3'."
