@@ -1,6 +1,6 @@
 <div align="center">
   <div>&nbsp;</div>
-  <img src="logo.png" width="600"/> 
+  <img src="https://raw.githubusercontent.com/huggingface/speech-to-speech/main/logo.png" width="600"/>
 </div>
 
 # Speech To Speech: Build local voice agents with open-source models
@@ -11,9 +11,11 @@
   - [Modularity](#modularity)
 * [Setup](#setup)
 * [Usage](#usage)
-  - [Docker Server approach](#docker-server)
+  - [Realtime approach](#realtime-approach)
   - [Server/Client approach](#serverclient-approach)
+  - [WebSocket approach](#websocket-approach)
   - [Local approach](#local-approach-running-on-mac)
+  - [Docker Server approach](#docker-server)
 * [Command-line usage](#command-line-usage)
   - [Model parameters](#model-parameters)
   - [Generation parameters](#generation-parameters)
@@ -47,56 +49,90 @@ The pipeline provides a fully open and modular approach, with a focus on leverag
 - [OpenAI API](https://platform.openai.com/docs/quickstart)
 
 **TTS**
-- [MeloTTS](https://github.com/myshell-ai/MeloTTS)
 - [ChatTTS](https://github.com/2noise/ChatTTS?tab=readme-ov-file)
 - [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) - Streaming TTS with voice cloning from Kyutai Labs
 - [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) - Fast and high-quality TTS optimized for Apple Silicon
+- [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base)
 
 ## Setup
 
-Clone the repository:
+Install the default package from PyPI:
+```bash
+pip install speech-to-speech
+```
+
+The default install is scoped to the standard realtime voice-agent path:
+- Parakeet TDT for STT
+- OpenAI-compatible API for the language model
+- Qwen3-TTS for speech output
+- local audio and realtime server modes
+
+Optional backends are installed with extras:
+```bash
+pip install "speech-to-speech[kokoro]"
+pip install "speech-to-speech[pocket]"
+pip install "speech-to-speech[faster-whisper]"
+pip install "speech-to-speech[paraformer]"
+pip install "speech-to-speech[mlx-lm]"
+pip install "speech-to-speech[websocket]"
+```
+
+Deprecated model implementations, including MeloTTS, live in [`archive/`](./archive) and are no longer wired into the CLI.
+
+For development from source:
 ```bash
 git clone https://github.com/huggingface/speech-to-speech.git
 cd speech-to-speech
-```
-
-Install dependencies with [uv](https://github.com/astral-sh/uv):
-```bash
 uv sync
 ```
 
 This installs the `speech_to_speech` package in editable mode and makes the `speech-to-speech` CLI command available. The project uses a single `pyproject.toml` with platform markers, so macOS and non-macOS dependencies are resolved automatically from one file.
 
-If you use Melo TTS, run this once after install:
-```bash
-uv run python -m unidic download
-```
-
-Apple Silicon MeloTTS note:
-- If MeloTTS fails on MPS with `Output channels > 65536 not supported at the MPS device`, update macOS first.
-- We reproduced this on an older macOS release and verified that the same environment worked after updating to macOS `26.3.1`.
-
-**Note on DeepFilterNet:** DeepFilterNet (used for optional audio enhancement in VAD) is currently incompatible with Pocket TTS due to numpy version constraints. DeepFilterNet requires `numpy<2`, while Pocket TTS requires `numpy>=2`.
-
-If you want a DeepFilterNet-focused setup with `pyproject.toml`:
-1. Edit [`pyproject.toml`](./pyproject.toml): remove the `pocket-tts` dependency line.
-2. Add `deepfilternet>=0.5.6` and `numpy<2` to `project.dependencies`.
-3. Re-sync the environment:
-   ```bash
-   uv sync --refresh
-   ```
-
-To switch back to Pocket TTS, revert those `pyproject.toml` changes and run `uv sync --refresh` again.
+**Note on DeepFilterNet:** DeepFilterNet (used for optional audio enhancement in VAD) requires `numpy<2` and conflicts with Pocket TTS, which requires `numpy>=2`. Install DeepFilterNet manually only in environments where you are not using Pocket TTS.
 
 
 ## Usage
 
-The pipeline can be run in three ways:
+The default CLI is equivalent to a realtime Parakeet + OpenAI-compatible LLM + Qwen3-TTS setup. It uses `OPENAI_API_KEY` from the environment unless `--open_api_api_key` is provided:
+```bash
+speech-to-speech
+```
+
+The pipeline can be run in four ways:
+- **Realtime approach**: Models run locally or on a server, and an OpenAI Realtime-compatible WebSocket API is exposed for another app.
 - **Server/Client approach**: Models run on a server, and audio input/output are streamed from a client using TCP sockets.
 - **WebSocket approach**: Models run on a server, and audio input/output are streamed from a client using WebSockets.
 - **Local approach**: Runs locally.
 
 ### Recommended setup 
+
+### Realtime Approach
+
+The default realtime setup uses `--llm open_api`, so it needs an OpenAI API key. Export `OPENAI_API_KEY` before launching, or pass `--open_api_api_key` explicitly. For a deployed OpenAI-compatible LLM, also set `--open_api_base_url`.
+
+```bash
+export OPENAI_API_KEY=...
+```
+
+The default mode starts the OpenAI Realtime-compatible server:
+```bash
+speech-to-speech
+```
+
+This is equivalent to:
+```bash
+speech-to-speech \
+    --thresh 0.6 \
+    --stt parakeet-tdt \
+    --llm open_api \
+    --tts qwen3 \
+    --qwen3_tts_mlx_quantization 6bit \
+    --open_api_model_name gpt-5.4-mini \
+    --open_api_chat_size 30 \
+    --open_api_stream \
+    --enable_live_transcription \
+    --mode realtime
+```
 
 ### Server/Client Approach
 
@@ -140,7 +176,7 @@ This setting:
    - Sets [Parakeet TDT](https://huggingface.co/nvidia/parakeet-tdt-1.1b) for STT (fast streaming ASR on Apple Silicon)
    - Sets MLX LM for the language model (uses `--lm_model_name` to specify the model)
    - Sets Qwen3-TTS for TTS
-   - `--tts melo`, `--tts pocket`, and `--tts kokoro` are also valid TTS options on macOS.
+   - `--tts pocket` and `--tts kokoro` are also valid TTS options on macOS.
    - Qwen3 on Apple Silicon uses `mlx-audio` and defaults to the `6bit` MLX variant unless you explicitly select a different quantization or model suffix.
    - To compare the MLX variants locally, run:
      ```bash
@@ -182,7 +218,7 @@ Two use cases are considered:
 - **Single-language conversation**: Enforce the language setting using the `--language` flag, specifying the target language code (default is 'en').
 - **Language switching**: Set `--language` to 'auto'. The STT detects the language of each spoken prompt and forwards it to the LLM. Optionally, opt in with `--lm_enable_lang_prompt` (or `--open_api_enable_lang_prompt` for the OpenAI-compatible backend) to also append a "`Please reply to my message in ...`" instruction so the LLM replies in the detected language. Both flags default to `False` — large LLMs usually pick up the language from context on their own, but the explicit instruction can help smaller models stay in the right language.
 
-Please note that you must use STT and LLM checkpoints compatible with the target language(s). For multilingual TTS, use Melo (English, French, Spanish, Chinese, Japanese, and Korean) or Chat-TTS.
+Please note that you must use STT and LLM checkpoints compatible with the target language(s). For multilingual TTS, use ChatTTS or another backend that supports the target language.
 
 #### With the server version:
 

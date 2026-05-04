@@ -9,7 +9,6 @@ from typing import TypeAlias
 
 import numpy as np
 import torch
-import torchaudio
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
@@ -43,7 +42,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
     def setup(
         self,
         should_listen: Event,
-        thresh: float = 0.3,
+        thresh: float = 0.6,
         sample_rate: int = 16000,
         min_silence_ms: int = 1000,
         min_speech_ms: int = 500,
@@ -273,6 +272,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
     def _apply_audio_enhancement(self, array: np.ndarray) -> np.ndarray:
         """Apply audio enhancement if enabled."""
+        import torchaudio
+
         if self.sample_rate != self.df_state.sr():
             audio_float32 = torchaudio.functional.resample(
                 torch.from_numpy(array),

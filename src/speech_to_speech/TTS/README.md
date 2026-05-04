@@ -4,34 +4,17 @@
 
 Runtime-supported values in `s2s_pipeline.py`:
 
-- `melo` → `melo_handler.py`
 - `chatTTS` → `chatTTS_handler.py`
 - `facebookMMS` → `facebookmms_handler.py`
 - `pocket` → `pocket_tts_handler.py`
 - `kokoro` → `kokoro_handler.py`
 - `qwen3` → `qwen3_tts_handler.py`
 
+Deprecated TTS implementations, including MeloTTS, live in [`../../../archive/TTS`](../../../archive/TTS) and are no longer wired into `s2s_pipeline.py`.
+
 ## Usage
 
-### 1) MeloTTS (`--tts melo`)
-
-Primary args prefix: `--melo_*`
-
-```bash
-python s2s_pipeline.py \
-  --tts melo \
-  --melo_language en \
-  --melo_device auto \
-  --melo_speaker_to_id en
-```
-
-Language switching can occur automatically when STT emits `(text, language_code)` tuples.
-
-Apple Silicon MPS note:
-- If MeloTTS fails with `Output channels > 65536 not supported at the MPS device`, update macOS first.
-- We reproduced this on an older macOS release and verified that the same MeloTTS code worked after updating to macOS `26.3.1`, without rebuilding the environment.
-
-### 2) ChatTTS (`--tts chatTTS`)
+### 1) ChatTTS (`--tts chatTTS`)
 
 Primary args prefix: `--chat_tts_*`
 
@@ -43,7 +26,7 @@ python s2s_pipeline.py \
   --chat_tts_chunk_size 512
 ```
 
-### 3) Facebook MMS (`--tts facebookMMS`)
+### 2) Facebook MMS (`--tts facebookMMS`)
 
 Primary args prefix: `--facebook_mms_*` plus `--tts_language`
 
@@ -56,7 +39,7 @@ python s2s_pipeline.py \
 
 This handler maps STT language codes (e.g. `en`, `fr`, `es`) to MMS model suffixes (e.g. `eng`, `fra`, `spa`) and reloads the model on language changes.
 
-### 4) Pocket TTS (`--tts pocket`)
+### 3) Pocket TTS (`--tts pocket`)
 
 Primary args prefix: `--pocket_tts_*`
 
@@ -71,7 +54,7 @@ python s2s_pipeline.py \
 Available preset voices include:
 `alba`, `marius`, `javert`, `jean`, `fantine`, `cosette`, `eponine`, `azelma`.
 
-### 5) Kokoro (`--tts kokoro`)
+### 4) Kokoro (`--tts kokoro`)
 
 Primary args prefix: `--kokoro_*`
 
@@ -88,7 +71,7 @@ Behavior:
 - Uses native kokoro pipeline otherwise (`hexgrad/Kokoro-82M`)
 - Can auto-switch voice/language based on STT language code mapping
 
-### 6) Qwen3-TTS (`--tts qwen3`)
+### 5) Qwen3-TTS (`--tts qwen3`)
 
 Primary args prefix: `--qwen3_tts_*`
 
@@ -153,4 +136,4 @@ python s2s_pipeline.py \
   --local_mac_optimal_settings
 ```
 
-`--tts melo`, `--tts pocket`, and `--tts kokoro` are also valid options on macOS.
+`--tts pocket` and `--tts kokoro` are also valid options on macOS.

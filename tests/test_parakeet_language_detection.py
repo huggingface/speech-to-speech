@@ -5,6 +5,9 @@ from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
 
 
 def test_build_lingua_detector_preloads_language_models(monkeypatch):
+    if not parakeet_tdt_handler.LINGUA_AVAILABLE:
+        pytest.skip("lingua-language-detector is not installed")
+
     calls = []
     detector = object()
 
@@ -37,7 +40,7 @@ def test_detect_language_from_short_text_returns_none_without_querying_detector(
             raise AssertionError("short text should not invoke lingua")
 
     monkeypatch.setattr(parakeet_tdt_handler, "LINGUA_AVAILABLE", True)
-    monkeypatch.setattr(parakeet_tdt_handler, "_lingua_detector", ExplodingDetector())
+    monkeypatch.setattr(parakeet_tdt_handler, "_lingua_detector", ExplodingDetector(), raising=False)
 
     assert handler._detect_language_from_text("Okay.") is None
 

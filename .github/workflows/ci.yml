@@ -42,3 +42,58 @@ jobs:
         run: uv run python -c "import nltk; nltk.download('punkt_tab')"
       - name: Pytest
         run: uv run pytest tests/ -x -q
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+      - name: Build distributions
+        run: uv build
+      - name: Check package metadata
+        run: uvx twine check --strict dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+  install-smoke:
+    name: Install smoke (${{ matrix.label }})
+    needs: package
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux
+            os: ubuntu-latest
+          - label: macos-arm64
+            os: macos-14
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Install wheel with pip
+        shell: bash
+        run: |
+          python -m venv .venv-smoke
+          source .venv-smoke/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install dist/speech_to_speech-*.whl
+          python -m pip check
+      - name: Run installed CLI smoke test
+        shell: bash
+        run: |
+          source .venv-smoke/bin/activate
+          unset OPENAI_API_KEY
+          # Validate the installed entry point without loading models or calling OpenAI.
+          speech-to-speech --help >/tmp/speech-to-speech-help.txt
+          grep -q -- "--smoke_test" /tmp/speech-to-speech-help.txt
+          speech-to-speech --smoke_test --llm transformers

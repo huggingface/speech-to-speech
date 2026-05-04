@@ -48,12 +48,12 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
 
     def setup(
         self,
-        model_name: str = "deepseek-chat",
+        model_name: str = "gpt-5.4-mini",
         device: str = "cuda",
         gen_kwargs: dict[str, Any] = {},
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
-        stream: bool = False,
+        stream: bool = True,
         user_role: str = "user",
         cancel_scope: CancelScope | None = None,
         disable_thinking: bool = True,

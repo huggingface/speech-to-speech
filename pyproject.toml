@@ -1,41 +1,92 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "speech-to-speech"
 version = "0.1.0"
 description = "Low-latency speech-to-speech pipeline"
+readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Hugging Face" },
+]
+keywords = ["speech-to-speech", "voice-agents", "speech-recognition", "text-to-speech", "openai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
-    "lingua-language-detector>=2.0.2",
+    "fastapi>=0.115.0",
+    "httpx>=0.28.0",
     "nltk==3.9.1",
-    "melotts @ git+https://github.com/andimarafioti/MeloTTS.git",
-    "torch==2.11.0; platform_system == 'Darwin'",
-    "torchaudio==2.11.0; platform_system == 'Darwin'",
-    "torch>=2.4.0; platform_system != 'Darwin'",
-    "torchvision>=0.26.0",
-    "sounddevice>=0.5.0",
-    "websockets>=12.0",
-    "ChatTTS>=0.1.1",
-    "funasr>=1.1.6",
-    "faster-whisper>=1.0.3",
-    "modelscope>=1.17.1",
-    "onnxruntime<1.24; python_version < '3.11'",
+    "numpy>=1.26.0",
     "openai==2.28.0",
-    "pocket-tts>=0.1.0",
-    "lightning-whisper-mlx>=0.0.10; platform_system == 'Darwin'",
-    "mlx-lm>=0.14.0; platform_system == 'Darwin'",
-    "mlx-vlm==0.4.1; platform_system == 'Darwin'",
+    "pydantic>=2.0",
+    "rich>=13.0",
+    "scipy>=1.10.0",
+    "sounddevice>=0.5.0",
+    "soundfile>=0.13.0; platform_system == 'Darwin'",
+    "torch==2.11.0; platform_system == 'Darwin'",
+    "torch>=2.4.0; platform_system != 'Darwin'",
+    "transformers>=4.57.0",
+    "uvicorn>=0.30.0",
+    "nano-parakeet>=0.2.0; platform_system != 'Darwin'",
+    "faster-qwen3-tts>=0.2.6; platform_system != 'Darwin'",
     "mlx-audio>=0.4.0,<0.5.0; platform_system == 'Darwin'",
     "misaki>=0.9.4; platform_system == 'Darwin'",
     "espeakng-loader>=0.2.4; platform_system == 'Darwin'",
     "spacy>=3.8.4; platform_system == 'Darwin'",
     "phonemizer-fork>=3.3.2; platform_system == 'Darwin'",
-    "nano-parakeet>=0.2.0; platform_system != 'Darwin'",
-    "kokoro>=0.9.2; platform_system != 'Darwin'",
-    "faster-qwen3-tts>=0.2.6; platform_system != 'Darwin'",
 ]
+
+[project.optional-dependencies]
+chattts = [
+    "ChatTTS>=0.1.1",
+]
+facebook-mms = [
+    "transformers>=4.57.0",
+]
+faster-whisper = [
+    "faster-whisper>=1.0.3",
+]
+kokoro = [
+    "kokoro>=0.9.2; platform_system != 'Darwin'",
+]
+language-detection = [
+    "lingua-language-detector>=2.0.2",
+]
+mlx-lm = [
+    "mlx-lm>=0.14.0; platform_system == 'Darwin'",
+    "mlx-vlm==0.4.1; platform_system == 'Darwin'",
+]
+paraformer = [
+    "funasr>=1.1.6",
+    "modelscope>=1.17.1",
+    "onnxruntime<1.24; python_version < '3.11'",
+]
+pocket = [
+    "pocket-tts>=0.1.0",
+]
+websocket = [
+    "websockets>=12.0",
+]
+whisper-mlx = [
+    "lightning-whisper-mlx>=0.0.10; platform_system == 'Darwin'",
+]
+
+[project.urls]
+Homepage = "https://github.com/huggingface/speech-to-speech"
+Repository = "https://github.com/huggingface/speech-to-speech"
+Issues = "https://github.com/huggingface/speech-to-speech/issues"
 
 [project.scripts]
 speech-to-speech = "speech_to_speech.s2s_pipeline:main"
@@ -46,6 +97,7 @@ dev = [
     "mypy",
     "pytest",
     "pytest-asyncio",
+    "websockets>=12.0",
 ]
 
 [tool.pytest.ini_options]
@@ -59,6 +111,9 @@ prerelease = "allow"
 where = ["src"]
 include = ["speech_to_speech*"]
 exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+speech_to_speech = ["TTS/*.wav"]
 
 [tool.ruff]
 src = ["src"]

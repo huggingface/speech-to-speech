@@ -3,6 +3,7 @@ import os
 import signal
 import sys
 from copy import copy
+from importlib.util import find_spec
 from pathlib import Path
 from queue import Queue
 from sys import platform
@@ -24,7 +25,6 @@ from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import (
 )
 from speech_to_speech.arguments_classes.kokoro_tts_arguments import KokoroTTSHandlerArguments
 from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
-from speech_to_speech.arguments_classes.melo_tts_arguments import MeloTTSHandlerArguments
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
     MLXAudioWhisperSTTHandlerArguments,
 )
@@ -111,7 +111,6 @@ def parse_arguments() -> tuple[Any, ...]:
             ParakeetTDTSTTHandlerArguments,
             LanguageModelHandlerArguments,
             OpenApiLanguageModelHandlerArguments,
-            MeloTTSHandlerArguments,
             ChatTTSHandlerArguments,
             FacebookMMSTTSHandlerArguments,
             PocketTTSHandlerArguments,
@@ -171,9 +170,9 @@ def check_mac_settings(module_kwargs: ModuleArguments) -> None:
             logger.warning(
                 "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm mlx-lm."
             )
-        if module_kwargs.tts not in ("melo", "pocket", "kokoro", "qwen3"):
+        if module_kwargs.tts not in ("pocket", "kokoro", "qwen3"):
             logger.warning(
-                "For macOS users, it is recommended to use qwen3 for TTS (melo, pocket, and kokoro are also valid options)."
+                "For macOS users, it is recommended to use qwen3 for TTS (pocket and kokoro are also valid options)."
             )
 
 
@@ -212,7 +211,6 @@ def prepare_all_args(
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     open_api_language_model_handler_kwargs: OpenApiLanguageModelHandlerArguments,
-    melo_tts_handler_kwargs: MeloTTSHandlerArguments,
     chat_tts_handler_kwargs: ChatTTSHandlerArguments,
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
@@ -228,7 +226,6 @@ def prepare_all_args(
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
-        melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,
         pocket_tts_handler_kwargs,
@@ -243,7 +240,6 @@ def prepare_all_args(
     rename_args(parakeet_tdt_stt_handler_kwargs, "parakeet_tdt")
     rename_args(language_model_handler_kwargs, "lm")
     rename_args(open_api_language_model_handler_kwargs, "open_api")
-    rename_args(melo_tts_handler_kwargs, "melo")
     rename_args(chat_tts_handler_kwargs, "chat_tts")
     rename_args(facebook_mms_tts_handler_kwargs, "facebook_mms")
     rename_args(pocket_tts_handler_kwargs, "pocket_tts")
@@ -268,6 +264,55 @@ def initialize_queues_and_events() -> dict[str, Any]:
     }
 
 
+def _validate_smoke_test_ref_audio(qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments) -> None:
+    ref_audio = getattr(qwen3_tts_handler_kwargs, "ref_audio", None)
+    if not ref_audio:
+        return
+
+    candidate = Path(ref_audio).expanduser()
+    search_paths = [candidate] if candidate.is_absolute() else [Path.cwd() / candidate, CURRENT_DIR / candidate]
+    if not any(path.exists() for path in search_paths):
+        paths = ", ".join(str(path) for path in search_paths)
+        raise FileNotFoundError(f"Qwen3-TTS reference audio was not found. Checked: {paths}")
+
+
+def _validate_smoke_test_imports() -> None:
+    required_modules = [
+        "fastapi",
+        "openai",
+        "sounddevice",
+        "torch",
+        "transformers",
+        "uvicorn",
+    ]
+    if platform == "darwin":
+        required_modules.extend(["mlx_audio", "misaki", "spacy"])
+    else:
+        required_modules.extend(["faster_qwen3_tts", "nano_parakeet"])
+
+    missing_modules = [module for module in required_modules if find_spec(module) is None]
+    if missing_modules:
+        raise ImportError(f"Missing expected install-time modules: {', '.join(missing_modules)}")
+
+
+def run_install_smoke_test(
+    module_kwargs: ModuleArguments,
+    qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
+) -> None:
+    _validate_smoke_test_ref_audio(qwen3_tts_handler_kwargs)
+    _validate_smoke_test_imports()
+    queues_and_events = initialize_queues_and_events()
+    expected_queues = {"recv_audio_chunks_queue", "send_audio_chunks_queue", "spoken_prompt_queue"}
+    missing_queues = expected_queues.difference(queues_and_events)
+    if missing_queues:
+        raise RuntimeError(f"Smoke test queue initialization failed. Missing: {', '.join(sorted(missing_queues))}")
+
+    console.print(
+        "[green]speech-to-speech install smoke test passed[/green] "
+        f"(mode={module_kwargs.mode}, stt={module_kwargs.stt}, llm={module_kwargs.llm}, tts={module_kwargs.tts})"
+    )
+
+
 def build_pipeline(
     module_kwargs: ModuleArguments,
     socket_receiver_kwargs: SocketReceiverArguments,
@@ -281,7 +326,6 @@ def build_pipeline(
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     open_api_language_model_handler_kwargs: OpenApiLanguageModelHandlerArguments,
-    melo_tts_handler_kwargs: MeloTTSHandlerArguments,
     chat_tts_handler_kwargs: ChatTTSHandlerArguments,
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
@@ -342,7 +386,6 @@ def build_pipeline(
             kokoro_tts_handler_kwargs,
             qwen3_tts_handler_kwargs,
             pocket_tts_handler_kwargs,
-            melo_tts_handler_kwargs,
             chat_tts_handler_kwargs,
             facebook_mms_tts_handler_kwargs,
         ):
@@ -470,7 +513,6 @@ def build_pipeline(
         lm_processed_queue,
         send_audio_chunks_queue,
         should_listen,
-        melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,
         pocket_tts_handler_kwargs,
@@ -615,33 +657,17 @@ def get_tts_handler(
     lm_response_queue: Queue[TTSInItem],
     send_audio_chunks_queue: Queue[AudioOutItem],
     should_listen: Event,
-    melo_tts_handler_kwargs: MeloTTSHandlerArguments,
     chat_tts_handler_kwargs: ChatTTSHandlerArguments,
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
     kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
 ) -> BaseHandler[TTSIn, TTSOut]:
-    if module_kwargs.tts == "melo":
-        try:
-            from speech_to_speech.TTS.melo_handler import MeloTTSHandler
-        except Exception as e:
-            logger.error(
-                "Error importing MeloTTSHandler. For uv environments, run `uv run python -m unidic download`. On macOS, `--tts pocket`, `--tts kokoro`, and `--tts qwen3` are also valid options."
-            )
-            raise e
-        return MeloTTSHandler(
-            stop_event,
-            queue_in=lm_response_queue,
-            queue_out=send_audio_chunks_queue,
-            setup_args=(should_listen,),
-            setup_kwargs=vars(melo_tts_handler_kwargs),
-        )
-    elif module_kwargs.tts == "chatTTS":
+    if module_kwargs.tts == "chatTTS":
         try:
             from speech_to_speech.TTS.chatTTS_handler import ChatTTSHandler
-        except RuntimeError as e:
-            logger.error("Error importing ChatTTSHandler")
+        except (ImportError, RuntimeError) as e:
+            logger.error('Error importing ChatTTSHandler. Install it with `pip install "speech-to-speech[chattts]"`.')
             raise e
         return ChatTTSHandler(
             stop_event,
@@ -661,7 +687,12 @@ def get_tts_handler(
             setup_kwargs=vars(facebook_mms_tts_handler_kwargs),
         )
     elif module_kwargs.tts == "pocket":
-        from speech_to_speech.TTS.pocket_tts_handler import PocketTTSHandler
+        try:
+            from speech_to_speech.TTS.pocket_tts_handler import PocketTTSHandler
+        except ImportError as e:
+            raise ImportError(
+                'Pocket TTS is optional. Install it with `pip install "speech-to-speech[pocket]"`.'
+            ) from e
 
         return PocketTTSHandler(
             stop_event,
@@ -671,7 +702,10 @@ def get_tts_handler(
             setup_kwargs=vars(pocket_tts_handler_kwargs),
         )
     elif module_kwargs.tts == "kokoro":
-        from speech_to_speech.TTS.kokoro_handler import KokoroTTSHandler
+        try:
+            from speech_to_speech.TTS.kokoro_handler import KokoroTTSHandler
+        except ImportError as e:
+            raise ImportError('Kokoro is optional. Install it with `pip install "speech-to-speech[kokoro]"`.') from e
 
         return KokoroTTSHandler(
             stop_event,
@@ -691,7 +725,7 @@ def get_tts_handler(
             setup_kwargs=vars(qwen3_tts_handler_kwargs),
         )
     else:
-        raise ValueError("The TTS should be either melo, chatTTS, facebookMMS, pocket, kokoro, or qwen3")
+        raise ValueError("The TTS should be either chatTTS, facebookMMS, pocket, kokoro, or qwen3")
 
 
 def main() -> None:
@@ -708,7 +742,6 @@ def main() -> None:
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
-        melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,
         pocket_tts_handler_kwargs,
@@ -727,13 +760,16 @@ def main() -> None:
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
-        melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,
         pocket_tts_handler_kwargs,
         kokoro_tts_handler_kwargs,
         qwen3_tts_handler_kwargs,
     )
+
+    if module_kwargs.smoke_test:
+        run_install_smoke_test(module_kwargs, qwen3_tts_handler_kwargs)
+        return
 
     queues_and_events = initialize_queues_and_events()
 
@@ -750,7 +786,6 @@ def main() -> None:
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         open_api_language_model_handler_kwargs,
-        melo_tts_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,
         pocket_tts_handler_kwargs,
