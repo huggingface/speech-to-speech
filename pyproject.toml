@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "speech-to-speech"
-version = "0.2.1"
+version = "0.2.2"
 description = "Low-latency speech-to-speech pipeline"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,6 +30,7 @@ dependencies = [
     "nltk==3.9.1",
     "numpy>=1.26.0",
     "openai==2.28.0",
+    "pillow>=10.0.0",
     "pydantic>=2.0",
     "rich>=13.0",
     "scipy>=1.10.0",

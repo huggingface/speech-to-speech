@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import os
 import subprocess
@@ -99,8 +100,29 @@ def _validate_pipeline_startup_primitives() -> None:
         raise RuntimeError(f"Pipeline startup primitives are missing: {', '.join(sorted(missing_keys))}")
 
 
+def _validate_default_handler_imports() -> None:
+    default_handler_modules = [
+        "speech_to_speech.LLM.openai_api_language_model",
+        "speech_to_speech.STT.parakeet_tdt_handler",
+        "speech_to_speech.TTS.qwen3_tts_handler",
+        "speech_to_speech.VAD.vad_handler",
+    ]
+    for module_name in default_handler_modules:
+        importlib.import_module(module_name)
+
+
 def main() -> None:
-    required_modules = ["fastapi", "openai", "scipy", "sounddevice", "torch", "torchaudio", "transformers", "uvicorn"]
+    required_modules = [
+        "fastapi",
+        "openai",
+        "PIL",
+        "scipy",
+        "sounddevice",
+        "torch",
+        "torchaudio",
+        "transformers",
+        "uvicorn",
+    ]
     if sys.platform == "darwin":
         required_modules.extend(["mlx_audio", "misaki", "soundfile", "spacy"])
     else:
@@ -111,6 +133,7 @@ def main() -> None:
     _validate_package_defaults()
     _validate_empty_qwen_ref_audio_arg()
     _validate_pipeline_startup_primitives()
+    _validate_default_handler_imports()
     print("speech-to-speech installed package smoke test passed")
 
 
