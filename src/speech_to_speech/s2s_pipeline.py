@@ -3,7 +3,6 @@ import os
 import signal
 import sys
 from copy import copy
-from importlib.util import find_spec
 from pathlib import Path
 from queue import Queue
 from sys import platform
@@ -262,55 +261,6 @@ def initialize_queues_and_events() -> dict[str, Any]:
         "lm_processed_queue": Queue[TTSInItem](),  # NEW: LLM -> LM processor -> TTS
         "text_output_queue": Queue[TextEventItem](),  # NEW: for text messages to WebSocket
     }
-
-
-def _validate_smoke_test_ref_audio(qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments) -> None:
-    ref_audio = getattr(qwen3_tts_handler_kwargs, "ref_audio", None)
-    if not ref_audio:
-        return
-
-    candidate = Path(ref_audio).expanduser()
-    search_paths = [candidate] if candidate.is_absolute() else [Path.cwd() / candidate, CURRENT_DIR / candidate]
-    if not any(path.exists() for path in search_paths):
-        paths = ", ".join(str(path) for path in search_paths)
-        raise FileNotFoundError(f"Qwen3-TTS reference audio was not found. Checked: {paths}")
-
-
-def _validate_smoke_test_imports() -> None:
-    required_modules = [
-        "fastapi",
-        "openai",
-        "sounddevice",
-        "torch",
-        "transformers",
-        "uvicorn",
-    ]
-    if platform == "darwin":
-        required_modules.extend(["mlx_audio", "misaki", "spacy"])
-    else:
-        required_modules.extend(["faster_qwen3_tts", "nano_parakeet"])
-
-    missing_modules = [module for module in required_modules if find_spec(module) is None]
-    if missing_modules:
-        raise ImportError(f"Missing expected install-time modules: {', '.join(missing_modules)}")
-
-
-def run_install_smoke_test(
-    module_kwargs: ModuleArguments,
-    qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
-) -> None:
-    _validate_smoke_test_ref_audio(qwen3_tts_handler_kwargs)
-    _validate_smoke_test_imports()
-    queues_and_events = initialize_queues_and_events()
-    expected_queues = {"recv_audio_chunks_queue", "send_audio_chunks_queue", "spoken_prompt_queue"}
-    missing_queues = expected_queues.difference(queues_and_events)
-    if missing_queues:
-        raise RuntimeError(f"Smoke test queue initialization failed. Missing: {', '.join(sorted(missing_queues))}")
-
-    console.print(
-        "[green]speech-to-speech install smoke test passed[/green] "
-        f"(mode={module_kwargs.mode}, stt={module_kwargs.stt}, llm={module_kwargs.llm}, tts={module_kwargs.tts})"
-    )
 
 
 def build_pipeline(
@@ -766,10 +716,6 @@ def main() -> None:
         kokoro_tts_handler_kwargs,
         qwen3_tts_handler_kwargs,
     )
-
-    if module_kwargs.smoke_test:
-        run_install_smoke_test(module_kwargs, qwen3_tts_handler_kwargs)
-        return
 
     queues_and_events = initialize_queues_and_events()
 

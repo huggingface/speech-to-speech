@@ -16,7 +16,6 @@ def test_release_defaults_match_openapi_parakeet_qwen3_realtime_profile():
     assert module_args.tts == "qwen3"
     assert module_args.log_level == "info"
     assert module_args.enable_live_transcription is True
-    assert module_args.smoke_test is False
 
     assert vad_args.thresh == 0.6
     assert open_api_args.open_api_model_name == "gpt-5.4-mini"

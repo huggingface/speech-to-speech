@@ -20,12 +20,6 @@ class ModuleArguments:
             "help": "If specified, sets the optimal settings for Mac OS. Sets Parakeet TDT for STT, MLX LM for language model, and Qwen3-TTS for TTS, with MPS device and local mode."
         },
     )
-    smoke_test: bool = field(
-        default=False,
-        metadata={
-            "help": "Validate the installed CLI, package data, and default backend imports without loading models or starting the pipeline."
-        },
-    )
     stt: Optional[str] = field(
         default="parakeet-tdt",
         metadata={

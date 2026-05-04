@@ -73,6 +73,7 @@ jobs:
           - label: macos-arm64
             os: macos-14
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -94,6 +95,4 @@ jobs:
           source .venv-smoke/bin/activate
           unset OPENAI_API_KEY
           # Validate the installed entry point without loading models or calling OpenAI.
-          speech-to-speech --help >/tmp/speech-to-speech-help.txt
-          grep -q -- "--smoke_test" /tmp/speech-to-speech-help.txt
-          speech-to-speech --smoke_test --llm transformers
+          python tests/install_smoke.py
