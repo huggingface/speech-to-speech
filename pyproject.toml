@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "speech-to-speech"
-version = "0.2.3"
+version = "0.2.4"
 description = "Low-latency speech-to-speech pipeline"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -45,6 +45,7 @@ dependencies = [
     "transformers==5.6.2; platform_system == 'Darwin'",
     "transformers>=4.57.0; platform_system != 'Darwin'",
     "uvicorn>=0.30.0",
+    "websockets>=12.0",
     "nano-parakeet>=0.2.0; platform_system != 'Darwin'",
     "faster-qwen3-tts>=0.2.6; platform_system != 'Darwin'",
     "miniaudio==1.61; platform_system == 'Darwin'",
