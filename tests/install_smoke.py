@@ -112,6 +112,10 @@ def _validate_default_handler_imports() -> None:
         importlib.import_module(module_name)
 
 
+def _validate_realtime_websocket_support() -> None:
+    importlib.import_module("uvicorn.protocols.websockets.websockets_impl")
+
+
 def _validate_darwin_dependency_pins() -> None:
     expected_versions = {
         "miniaudio": "1.61",
@@ -148,6 +152,7 @@ def main() -> None:
         "torchaudio",
         "transformers",
         "uvicorn",
+        "websockets",
     ]
     if sys.platform == "darwin":
         required_modules.extend(["miniaudio", "mlx", "mlx_audio", "mlx_lm", "misaki", "soundfile", "spacy"])
@@ -162,6 +167,7 @@ def main() -> None:
     _validate_empty_qwen_ref_audio_arg()
     _validate_pipeline_startup_primitives()
     _validate_default_handler_imports()
+    _validate_realtime_websocket_support()
     print("speech-to-speech installed package smoke test passed")
 
 
