@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+from collections.abc import Callable
 from typing import Any, Literal, Union
 
 from openai.types.realtime.conversation_item import (
@@ -43,6 +45,13 @@ class ChatItemError(Exception):
     """Raised when a conversation item fails validation in :meth:`Chat.add_item`."""
 
 
+class CompactionResult(BaseModel):
+    """Output of a :data:`CompactFn` summarization run."""
+
+    user_summary: str
+    assistant_summary: str
+
+
 def _ensure_id(value: str | None, prefix: str) -> str:
     if value is None:
         return _generate_id(prefix)
@@ -60,12 +69,25 @@ SupportedItem = Union[
 ]
 
 
+CompactFn = Callable[[ResponseInputParam], CompactionResult]
+
+
 class Chat:
     """Manages conversation history with bounded size to avoid OOM issues.
 
     The buffer stores ``ConversationItem`` objects (user messages, assistant
     messages, function calls, function call outputs).  System messages are
     stored separately in ``init_chat_message`` and never placed in the buffer.
+
+    History bounding is decided per ``add_item`` call via the ``compactor``
+    argument:
+
+    - ``compactor=None``: when the user-turn count exceeds ``size`` the oldest
+      complete turn is evicted in place. Synchronous, lossy, no LLM involvement.
+    - ``compactor=<fn>``: when ``size`` is exceeded, ``fn`` is invoked in a
+      background thread to summarize older turns into a single user/assistant
+      pair (with pending function calls preserved). Single-flight: while a
+      compaction is running, additional triggers are silently bypassed.
     """
 
     def __init__(self, size: int) -> None:
@@ -73,10 +95,25 @@ class Chat:
         self.init_chat_message: RealtimeConversationItemSystemMessage | None = None
         # ``size`` is the number of user turns to keep.  When exceeded the
         # oldest complete turn (everything up to the next user message)
-        # is evicted.
+        # is evicted -- or, with a compactor, summarized in the background.
         self.buffer: list[SupportedItem] = []
         self._pending_tool_calls: dict[str, RealtimeConversationItemFunctionCall] = {}
         self._user_turn_count: int = 0
+
+        # All state mutations and serializations go through _lock. Public methods
+        # acquire it once; internal callers that already hold it use the
+        # ``_locked`` helpers, so no reentry is needed (regular Lock is safe).
+        self._lock = threading.Lock()
+        # Single-flight gate. Held by the compaction worker for its entire
+        # lifecycle; non-blocking acquire from add_item bypasses if held.
+        self._compact_lock = threading.Lock()
+        self._compact_thread: threading.Thread | None = None
+        # close() sets _shutdown; reset() bumps _gen_counter. The worker
+        # checks both before mutating state in phase 3.
+        self._shutdown = threading.Event()
+        self._gen_counter = 0
+
+    # ── Internal mutators (caller holds _lock) ─────────────────
 
     def _evict_oldest_turn(self) -> None:
         """Remove items from the front until the next user message boundary."""
@@ -111,6 +148,16 @@ class Chat:
 
         Raises :class:`ChatItemError` if *call_id* is unknown.
         """
+        with self._lock:
+            self._append_tool_output_locked(call_id, output_item)
+
+    def _append_tool_output_locked(self, call_id: str, output_item: RealtimeConversationItemFunctionCallOutput) -> None:
+        """Body of :meth:`append_tool_output`. Caller must hold ``_lock``."""
+        if not self._lock.locked():
+            raise RuntimeError(
+                "_append_tool_output_locked called without holding _lock; "
+                "use append_tool_output() or add_item() to add a function_call_output."
+            )
         if self._has_call_id_in_buffer(call_id):
             self._pending_tool_calls.pop(call_id, None)
             self._mark_call_completed(call_id, output_item.status)
@@ -128,62 +175,96 @@ class Chat:
         raise ChatItemError(f"No function_call with call_id '{call_id}' found in conversation history.")
 
     def init_chat(self, message: RealtimeConversationItemSystemMessage) -> None:
-        self.init_chat_message = message
+        with self._lock:
+            self.init_chat_message = message
 
     def add_item(self, item: SupportedItem) -> SupportedItem:
-        """Validate and route a conversation item into the chat.
+        """Validate and route a conversation item into the chat buffer.
+
+        Does not enforce the size limit — call :meth:`trim_if_needed` explicitly
+        after each successful generation to evict or compact old turns.
 
         Raises :class:`ChatItemError` if the item fails validation.
         """
+        with self._lock:
+            if isinstance(item, RealtimeConversationItemSystemMessage):
+                item.id = _ensure_id(item.id, "sys")
+                self.init_chat_message = item
+                logger.debug("Set system message via conversation item")
 
-        if isinstance(item, RealtimeConversationItemSystemMessage):
-            item.id = _ensure_id(item.id, "sys")
-            self.init_chat(item)
-            logger.debug("Set system message via conversation item")
+            elif isinstance(item, RealtimeConversationItemUserMessage):
+                item.id = _ensure_id(item.id, "msg")
+                item.content = [
+                    p
+                    for p in item.content
+                    if (p.type == "input_text" and p.text) or (p.type == "input_image" and p.image_url)
+                ]
+                if not item.content:
+                    raise ChatItemError(
+                        "Message has no supported content. Supported modalities: input_text, input_image."
+                    )
+                self.buffer.append(item)
+                self._user_turn_count += 1
+                logger.debug("Added user message to chat (%d parts)", len(item.content))
 
-        elif isinstance(item, RealtimeConversationItemUserMessage):
-            item.id = _ensure_id(item.id, "msg")
-            item.content = [
-                p
-                for p in item.content
-                if (p.type == "input_text" and p.text) or (p.type == "input_image" and p.image_url)
-            ]
-            if not item.content:
-                raise ChatItemError("Message has no supported content. Supported modalities: input_text, input_image.")
-            self.buffer.append(item)
-            self._user_turn_count += 1
-            logger.debug("Added user message to chat (%d parts)", len(item.content))
+            elif isinstance(item, RealtimeConversationItemAssistantMessage):
+                item.id = _ensure_id(item.id, "msg")
+                item.content = [p for p in item.content if p.type == "output_text" and p.text]
+                if not item.content:
+                    return item
+                self.buffer.append(item)
+                logger.debug("Added assistant message to chat (%d parts)", len(item.content))
 
-        elif isinstance(item, RealtimeConversationItemAssistantMessage):
-            item.id = _ensure_id(item.id, "msg")
-            item.content = [p for p in item.content if p.type == "output_text" and p.text]
-            if not item.content:
-                return item
-            self.buffer.append(item)
-            logger.debug("Added assistant message to chat (%d parts)", len(item.content))
+            elif isinstance(item, RealtimeConversationItemFunctionCall):
+                item.id = _ensure_id(item.id, "fc")
+                item.call_id = _ensure_id(item.call_id, "call")
+                self.buffer.append(item)
+                self._pending_tool_calls[item.call_id] = item
+                logger.debug("Added function_call to chat (call_id=%s)", item.call_id)
 
-        elif isinstance(item, RealtimeConversationItemFunctionCall):
-            item.id = _ensure_id(item.id, "fc")
-            item.call_id = _ensure_id(item.call_id, "call")
-            self.buffer.append(item)
-            self._pending_tool_calls[item.call_id] = item
-            logger.debug("Added function_call to chat (call_id=%s)", item.call_id)
+            elif isinstance(item, RealtimeConversationItemFunctionCallOutput):
+                item.id = _ensure_id(item.id, "fco")
+                self._append_tool_output_locked(item.call_id, item)
+                logger.debug("Added function_call_output to chat (call_id=%s)", item.call_id)
 
-        elif isinstance(item, RealtimeConversationItemFunctionCallOutput):
-            item.id = _ensure_id(item.id, "fco")
-            self.append_tool_output(item.call_id, item)
-            logger.debug("Added function_call_output to chat (call_id=%s)", item.call_id)
+            else:
+                raise ChatItemError(f"Unsupported item type: {getattr(item, 'type', None)}")
 
-        else:
-            raise ChatItemError(f"Unsupported item type: {getattr(item, 'type', None)}")
+            return item
 
-        while self._user_turn_count > self.size:
-            self._evict_oldest_turn()
+    def trim_if_needed(self, compactor: CompactFn | None = None) -> None:
+        """Enforce the size limit after a generation completes.
 
-        return item
+        - ``compactor=None``: synchronous eviction of the oldest complete turn.
+        - ``compactor=<fn>``: launch a background compaction (single-flight).
 
-    def to_response_api_chat(self) -> ResponseInputParam:
-        """Serialize the full chat (system prompt + buffer) for the OpenAI Responses API."""
+        Call once after each successful generation, not inside :meth:`add_item`.
+        """
+        with self._lock:
+            if self._user_turn_count <= self.size:
+                return
+            if compactor is not None:
+                self._maybe_trigger_compaction(compactor)
+            else:
+                while self._user_turn_count > self.size:
+                    self._evict_oldest_turn()
+
+    def to_response_api_chat(self, items: list[SupportedItem] | None = None) -> ResponseInputParam:
+        """Serialize the chat (system prompt + buffer) for the OpenAI Responses API.
+
+        If *items* is provided, serialize that slice instead of the live buffer
+        (used by the compaction snapshot).
+        """
+        with self._lock:
+            return self._to_response_api_chat_locked(items if items is not None else self.buffer)
+
+    def _to_response_api_chat_locked(self, items: list[SupportedItem]) -> ResponseInputParam:
+        """Body of :meth:`to_response_api_chat`. Caller must hold ``_lock``."""
+        if not self._lock.locked():
+            raise RuntimeError(
+                "_to_response_api_chat_locked called without holding _lock; use to_response_api_chat() instead."
+            )
+        buffer_items = list(items)
         result: list[ResponseInputItemParam] = []
         if self.init_chat_message:
             result.append(
@@ -196,7 +277,7 @@ class Chat:
                     type="message",
                 )
             )
-        for item in self.buffer:
+        for item in buffer_items:
             assert item.id is not None and item.id != "", f"item.id is {item.id}"
             if isinstance(item, RealtimeConversationItemUserMessage):
                 content: ResponseInputMessageContentListParam = []
@@ -261,73 +342,90 @@ class Chat:
         User messages containing images keep ``content`` as a list of dicts so
         VLM pipelines can process them.
         """
-        messages: list[TransformersChatMessage] = []
-        if self.init_chat_message:
-            text = " ".join(p.text for p in self.init_chat_message.content if p.text)
-            messages.append(TransformersSystemMessage(content=text))
-        for item in self.buffer:
-            if isinstance(item, RealtimeConversationItemUserMessage):
-                has_images = any(p.type == "input_image" for p in item.content)
-                if has_images:
+        with self._lock:
+            messages: list[TransformersChatMessage] = []
+            if self.init_chat_message:
+                text = " ".join(p.text for p in self.init_chat_message.content if p.text)
+                messages.append(TransformersSystemMessage(content=text))
+            for item in self.buffer:
+                if isinstance(item, RealtimeConversationItemUserMessage):
+                    has_images = any(p.type == "input_image" for p in item.content)
+                    if has_images:
+                        messages.append(
+                            TransformersUserMessage(content=[p.model_dump(exclude_none=True) for p in item.content])
+                        )
+                    else:
+                        text = " ".join(p.text for p in item.content if p.type == "input_text" and p.text)
+                        messages.append(TransformersUserMessage(content=text))
+                elif isinstance(item, RealtimeConversationItemAssistantMessage):
+                    text = " ".join(p.text for p in item.content if p.text)
+                    messages.append(TransformersAssistantMessage(content=text))
+                elif isinstance(item, RealtimeConversationItemFunctionCall):
+                    assert item.call_id is not None and item.call_id != ""
+                    args: Any = item.arguments
+                    try:
+                        args = json.loads(args) if isinstance(args, str) else args
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
                     messages.append(
-                        TransformersUserMessage(content=[p.model_dump(exclude_none=True) for p in item.content])
+                        TransformersFunctionCallMessage(
+                            tool_calls=[
+                                TransformersToolCall(
+                                    id=item.call_id,
+                                    function=TransformersToolCallFunction(name=item.name, arguments=args),
+                                )
+                            ]
+                        )
                     )
-                else:
-                    text = " ".join(p.text for p in item.content if p.type == "input_text" and p.text)
-                    messages.append(TransformersUserMessage(content=text))
-            elif isinstance(item, RealtimeConversationItemAssistantMessage):
-                text = " ".join(p.text for p in item.content if p.text)
-                messages.append(TransformersAssistantMessage(content=text))
-            elif isinstance(item, RealtimeConversationItemFunctionCall):
-                assert item.call_id is not None and item.call_id != ""
-                args: Any = item.arguments
-                try:
-                    args = json.loads(args) if isinstance(args, str) else args
-                except (json.JSONDecodeError, TypeError):
-                    args = {}
-                messages.append(
-                    TransformersFunctionCallMessage(
-                        tool_calls=[
-                            TransformersToolCall(
-                                id=item.call_id,
-                                function=TransformersToolCallFunction(name=item.name, arguments=args),
-                            )
-                        ]
-                    )
-                )
-            elif isinstance(item, RealtimeConversationItemFunctionCallOutput):
-                name = ""
-                for prev in reversed(messages):
-                    if isinstance(prev, TransformersFunctionCallMessage):
-                        for tc in prev.tool_calls:
-                            if tc.id == item.call_id:
-                                name = tc.function.name
+                elif isinstance(item, RealtimeConversationItemFunctionCallOutput):
+                    name = ""
+                    for prev in reversed(messages):
+                        if isinstance(prev, TransformersFunctionCallMessage):
+                            for tc in prev.tool_calls:
+                                if tc.id == item.call_id:
+                                    name = tc.function.name
+                                    break
+                            if name:
                                 break
-                        if name:
-                            break
-                messages.append(
-                    TransformersToolMessage(
-                        tool_call_id=item.call_id,
-                        name=name,
-                        content=item.output,
+                    messages.append(
+                        TransformersToolMessage(
+                            tool_call_id=item.call_id,
+                            name=name,
+                            content=item.output,
+                        )
                     )
-                )
-        return [m.model_dump() for m in messages]
+            return [m.model_dump() for m in messages]
 
     def copy(self) -> Chat:
         """Return a shallow snapshot safe for concurrent read access."""
-        clone = Chat(self.size)
-        clone.init_chat_message = self.init_chat_message
-        clone.buffer = list(self.buffer)
-        clone._pending_tool_calls = dict(self._pending_tool_calls)
-        clone._user_turn_count = self._user_turn_count
-        return clone
+        with self._lock:
+            clone = Chat(self.size)
+            clone.init_chat_message = self.init_chat_message
+            clone.buffer = list(self.buffer)
+            clone._pending_tool_calls = dict(self._pending_tool_calls)
+            clone._user_turn_count = self._user_turn_count
+            return clone
 
     def reset(self) -> None:
-        self.buffer = []
-        self.init_chat_message = None
-        self._pending_tool_calls = {}
-        self._user_turn_count = 0
+        """Clear all conversation state. Cancels any in-flight compaction splice."""
+        with self._lock:
+            # Bumping the generation counter causes any in-flight compaction
+            # worker to skip its phase-3 splice when it eventually wakes up.
+            self._gen_counter += 1
+            self.buffer = []
+            self.init_chat_message = None
+            self._pending_tool_calls = {}
+            self._user_turn_count = 0
+
+    def close(self) -> None:
+        """Permanently shut down the chat. In-flight compaction splice is suppressed.
+
+        The compaction worker (a daemon thread) is not joined: it may be blocked
+        in an LLM call. Process exit reaps it.
+        """
+        self._shutdown.set()
+        with self._lock:
+            self._gen_counter += 1
 
     def strip_images(self) -> None:
         """Remove all image content parts from user messages in the buffer.
@@ -335,9 +433,137 @@ class Chat:
         Called after appending the assistant response so images don't persist
         across turns.
         """
-        for item in self.buffer:
-            if isinstance(item, RealtimeConversationItemUserMessage):
-                item.content = [p for p in item.content if p.type != "input_image"]
+        with self._lock:
+            for item in self.buffer:
+                if isinstance(item, RealtimeConversationItemUserMessage):
+                    item.content = [p for p in item.content if p.type != "input_image"]
+
+    # ── Compaction internals ──────────────────────────────────
+
+    def _snapshot_for_compaction(
+        self,
+    ) -> tuple[ResponseInputParam, set[str], int]:
+        """Compute the snapshot of items eligible for compaction.
+
+        Caller must hold ``_lock``. Returns
+        ``(serialized_snapshot, marker_ids, n_turns)``. ``marker_ids``
+        identifies the buffer items that may be removed when the splice runs.
+        Always leaves the most recent user turn untouched (it may be in-flight).
+        Returns an empty result if there are fewer than 2 compactable turns.
+        """
+        n_turns = max(0, self._user_turn_count - 1)
+        if n_turns < 2:
+            return [], set(), n_turns
+
+        # Slice up to (but not including) the (n_turns + 1)-th user message.
+        user_seen = 0
+        end_idx = len(self.buffer)
+        for i, entry in enumerate(self.buffer):
+            if isinstance(entry, RealtimeConversationItemUserMessage):
+                user_seen += 1
+                if user_seen == n_turns + 1:
+                    end_idx = i
+                    break
+
+        items_to_compact = self.buffer[:end_idx]
+        marker_ids = {entry.id for entry in items_to_compact if entry.id is not None}
+        snapshot = self._to_response_api_chat_locked(items=items_to_compact)
+        # Strip image parts so the summarizer doesn't have to handle them.
+        for raw in snapshot:
+            if not isinstance(raw, dict) or raw.get("role") != "user":
+                continue
+            msg: dict[str, Any] = raw  # type: ignore[assignment]
+            content = msg.get("content")
+            if isinstance(content, list):
+                msg["content"] = [c for c in content if not (isinstance(c, dict) and c.get("type") == "input_image")]
+        return snapshot, marker_ids, n_turns
+
+    def _maybe_trigger_compaction(self, compactor: CompactFn) -> None:
+        """Try to start a background compaction worker. Bypass silently if one is running."""
+        if self._shutdown.is_set():
+            return
+        if not self._compact_lock.acquire(blocking=False):
+            return  # one already running
+        started = False
+        try:
+            snapshot, marker_ids, n_turns = self._snapshot_for_compaction()
+            if n_turns < 2 or not marker_ids:
+                return
+            gen = self._gen_counter
+            thread = threading.Thread(
+                target=self._compact_worker,
+                args=(compactor, snapshot, marker_ids, gen),
+                daemon=True,
+                name="chat-compact",
+            )
+            thread.start()
+            self._compact_thread = thread
+            started = True
+        finally:
+            if not started:
+                self._compact_lock.release()
+
+    def _compact_worker(
+        self,
+        compactor: CompactFn,
+        snapshot: ResponseInputParam,
+        marker_ids: set[str],
+        gen: int,
+    ) -> None:
+        """Worker thread entry point. Holds ``_compact_lock`` throughout."""
+        try:
+            if self._shutdown.is_set() or self._gen_counter != gen:
+                return
+            try:
+                result = compactor(snapshot)
+            except Exception:
+                logger.exception("Chat compaction failed; chat unchanged")
+                return
+            if not isinstance(result, CompactionResult):
+                logger.error("Compactor must return a CompactionResult, got %r", type(result).__name__)
+                return
+            if self._shutdown.is_set() or self._gen_counter != gen:
+                return
+            self._apply_compaction(result, marker_ids, gen)
+        finally:
+            self._compact_lock.release()
+
+    def _apply_compaction(
+        self,
+        result: CompactionResult,
+        marker_ids: set[str],
+        gen: int,
+    ) -> None:
+        """Splice the summary in front of items not consumed by compaction."""
+        with self._lock:
+            if self._shutdown.is_set() or self._gen_counter != gen:
+                return
+            # Keep FCs whose paired FCO is NOT also being dropped -- this
+            # covers both pending FCs (no FCO yet) and FCs whose FCO landed
+            # after the snapshot was taken. Otherwise the FCO in remaining
+            # would be orphaned.
+            fco_call_ids_in_range = {
+                x.call_id
+                for x in self.buffer
+                if x.id in marker_ids and isinstance(x, RealtimeConversationItemFunctionCallOutput)
+            }
+            fc_ids_to_keep = {
+                x.id
+                for x in self.buffer
+                if x.id in marker_ids
+                and isinstance(x, RealtimeConversationItemFunctionCall)
+                and x.call_id not in fco_call_ids_in_range
+            }
+            drop_ids = marker_ids - fc_ids_to_keep
+            remaining = [x for x in self.buffer if x.id not in drop_ids]
+
+            user_msg = make_user_message(result.user_summary)
+            user_msg.id = _generate_id("msg")
+            asst_msg = make_assistant_message(result.assistant_summary)
+            asst_msg.id = _generate_id("msg")
+
+            self.buffer = [user_msg, asst_msg, *remaining]
+            self._user_turn_count = sum(1 for x in self.buffer if isinstance(x, RealtimeConversationItemUserMessage))
 
 
 # ---------------------------------------------------------------------------

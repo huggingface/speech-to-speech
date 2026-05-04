@@ -8,6 +8,8 @@ functions (make_user_message, make_assistant_message, make_system_message).
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
@@ -29,6 +31,7 @@ from openai.types.realtime.realtime_conversation_item_user_message import (
 from speech_to_speech.LLM.chat import (
     Chat,
     ChatItemError,
+    CompactionResult,
     make_assistant_message,
     make_system_message,
     make_user_message,
@@ -219,6 +222,7 @@ class TestAddItemEviction:
         assert chat._user_turn_count == 1
 
         chat.add_item(_user("t2"))
+        chat.trim_if_needed()
         assert chat._user_turn_count == 1
         assert chat.buffer[0].content[0].text == "t2"
 
@@ -232,6 +236,7 @@ class TestAddItemEviction:
         assert len(chat.buffer) == 5
 
         chat.add_item(_user("t2"))
+        chat.trim_if_needed()
         assert chat._user_turn_count == 1
         remaining_types = [e.type for e in chat.buffer]
         assert "message" in remaining_types
@@ -240,6 +245,7 @@ class TestAddItemEviction:
     def test_size_zero_evicts_every_user_message(self):
         chat = Chat(size=0)
         chat.add_item(_user("a"))
+        chat.trim_if_needed()
         assert chat._user_turn_count == 0
         assert len(chat.buffer) == 0
 
@@ -255,6 +261,7 @@ class TestAddItemEviction:
         for i in range(5):
             chat.add_item(_user(f"u{i}"))
             chat.add_item(_assistant(f"a{i}"))
+            chat.trim_if_needed()
         assert chat._user_turn_count == 2
         user_texts = [e.content[0].text for e in chat.buffer if isinstance(e, RealtimeConversationItemUserMessage)]
         assert user_texts == ["u3", "u4"]
@@ -298,6 +305,7 @@ class TestAppendToolOutput:
         chat.add_item(_user("u1"))
         chat.add_item(_fc("cx"))
         chat.add_item(_user("u2"))
+        chat.trim_if_needed()
         assert not chat._has_call_id_in_buffer("call_cx")
         assert "call_cx" in chat._pending_tool_calls
 
@@ -314,6 +322,7 @@ class TestAppendToolOutput:
         fc = _fc("cx")
         chat.add_item(fc)
         chat.add_item(_user("u2"))
+        chat.trim_if_needed()
 
         fco = _fco("cx", status="incomplete")
         chat.append_tool_output("call_cx", fco)
@@ -862,3 +871,315 @@ class TestMarkCallCompleted:
         chat._mark_call_completed("call_c1")
         fc = next(e for e in chat.buffer if isinstance(e, RealtimeConversationItemFunctionCall))
         assert fc.status == "completed"
+
+
+# ===================================================================
+# 12. TestCompaction
+# ===================================================================
+
+
+def _wait_thread(chat: Chat, timeout: float = 2.0) -> None:
+    """Block until the latest compaction worker (if any) finishes."""
+    t = chat._compact_thread
+    if t is not None:
+        t.join(timeout)
+        assert not t.is_alive(), "compaction thread did not finish in time"
+
+
+def _make_stub_compactor(
+    user_text: str = "USER_SUMMARY",
+    assistant_text: str = "ASSISTANT_SUMMARY",
+    *,
+    gate: threading.Event | None = None,
+    started: threading.Event | None = None,
+    captured: list | None = None,
+):
+    """Build a stub :data:`CompactFn` that records its input and optionally blocks.
+
+    - ``gate``: if provided, the compactor waits on it before returning, so
+      tests can interleave concurrent operations during phase 2.
+    - ``started``: set immediately on entry, so tests can wait until the worker
+      is mid-flight before continuing.
+    - ``captured``: appended to with the snapshot received -- lets tests assert
+      on what the compactor saw.
+    """
+
+    def stub(snapshot):
+        if started is not None:
+            started.set()
+        if captured is not None:
+            captured.append(snapshot)
+        if gate is not None:
+            gate.wait(timeout=2.0)
+        return CompactionResult(user_summary=user_text, assistant_summary=assistant_text)
+
+    return stub
+
+
+class TestCompaction:
+    def test_compaction_replaces_old_turns(self):
+        chat = Chat(size=3)
+        compactor = _make_stub_compactor("U", "A")
+        # 3 complete turns are within size; the 4th user (u3) triggers compaction.
+        for i in range(3):
+            chat.add_item(_user(f"u{i}"))
+            chat.add_item(_assistant(f"a{i}"))
+        chat.add_item(_user("u3"))
+        chat.trim_if_needed(compactor)
+
+        _wait_thread(chat)
+        # Buffer should be: [user_summary, assistant_summary, u3] (3 items)
+        assert len(chat.buffer) == 3
+        assert isinstance(chat.buffer[0], RealtimeConversationItemUserMessage)
+        assert chat.buffer[0].content[0].text == "U"
+        assert isinstance(chat.buffer[1], RealtimeConversationItemAssistantMessage)
+        assert chat.buffer[1].content[0].text == "A"
+        assert chat.buffer[2].content[0].text == "u3"
+        assert chat._user_turn_count == 2
+
+    def test_compaction_preserves_pending_function_calls(self):
+        chat = Chat(size=2)
+        compactor = _make_stub_compactor()
+        chat.add_item(_user("u0"))
+        chat.add_item(_assistant("a0"))
+        chat.add_item(_fc("c1"))  # pending FC
+        chat.add_item(_user("u1"))
+        chat.add_item(_assistant("a1"))
+        chat.add_item(_user("u2"))
+        chat.trim_if_needed(compactor)
+
+        _wait_thread(chat)
+        # Pending FC should appear after the summary, before u2.
+        types = [type(x).__name__ for x in chat.buffer]
+        fc_idx = next(i for i, x in enumerate(chat.buffer) if isinstance(x, RealtimeConversationItemFunctionCall))
+        u2_idx = next(
+            i
+            for i, x in enumerate(chat.buffer)
+            if isinstance(x, RealtimeConversationItemUserMessage) and x.content[0].text == "u2"
+        )
+        assert fc_idx == 2  # right after summary user/assistant
+        assert fc_idx < u2_idx
+        assert "RealtimeConversationItemFunctionCall" in types
+
+    def test_compaction_preserves_appends_during_compaction(self):
+        chat = Chat(size=3)
+        gate = threading.Event()
+        started = threading.Event()
+        compactor = _make_stub_compactor(gate=gate, started=started)
+
+        # 3 complete turns are within size; the 4th user (u3) triggers.
+        for i in range(3):
+            chat.add_item(_user(f"u{i}"))
+            chat.add_item(_assistant(f"a{i}"))
+        chat.add_item(_user("u3"))
+        chat.trim_if_needed(compactor)
+        assert started.wait(timeout=2.0), "compactor never ran"
+
+        # Append a brand-new user message during phase 2.
+        chat.add_item(_user("u_new"))
+        chat.trim_if_needed(compactor)  # single-flight bypass while compaction running
+
+        gate.set()
+        _wait_thread(chat)
+        # After splice: [summary_u, summary_a, u3, u_new]
+        user_texts = [x.content[0].text for x in chat.buffer if isinstance(x, RealtimeConversationItemUserMessage)]
+        assert user_texts == ["USER_SUMMARY", "u3", "u_new"]
+
+    def test_single_flight_bypassed(self):
+        chat = Chat(size=2)
+        gate = threading.Event()
+        started = threading.Event()
+        compactor = _make_stub_compactor(gate=gate, started=started)
+
+        for i in range(3):
+            chat.add_item(_user(f"u{i}"))
+            chat.add_item(_assistant(f"a{i}"))
+        chat.add_item(_user("u3"))
+        chat.trim_if_needed(compactor)  # triggers
+        assert started.wait(timeout=2.0)
+        first_thread = chat._compact_thread
+
+        # Try to trigger another compaction while the first is mid-flight.
+        chat.add_item(_user("u4"))
+        chat.trim_if_needed(compactor)  # single-flight bypass
+        assert chat._compact_thread is first_thread
+
+        gate.set()
+        _wait_thread(chat)
+
+    def test_no_compaction_when_below_threshold(self):
+        chat = Chat(size=2)
+        compactor = _make_stub_compactor()
+        chat.add_item(_user("u0"))
+        chat.add_item(_assistant("a0"))
+        chat.add_item(_user("u1"))
+        chat.trim_if_needed(compactor)
+        # _user_turn_count = 2, equal to size, no compaction triggered
+        assert chat._compact_thread is None
+        # Third user pushes count to 3 > 2, triggers compaction
+        chat.add_item(_assistant("a1"))
+        chat.add_item(_user("u2"))
+        chat.trim_if_needed(compactor)
+        _wait_thread(chat)
+
+    def test_compactor_none_falls_back_to_eviction(self):
+        chat = Chat(size=1)
+        chat.add_item(_user("u1"))
+        chat.add_item(_assistant("a1"))
+        chat.add_item(_user("u2"))
+        chat.trim_if_needed()  # no compactor → eviction
+        assert chat._user_turn_count == 1
+        assert chat._compact_thread is None
+        assert chat.buffer[0].content[0].text == "u2"
+
+    def test_drops_paired_fc_fco_in_range(self):
+        chat = Chat(size=2)
+        compactor = _make_stub_compactor()
+        chat.add_item(_user("u0"))
+        chat.add_item(_fc("c1"))
+        chat.add_item(_fco("c1"))
+        chat.add_item(_assistant("a0"))
+        chat.add_item(_user("u1"))
+        chat.add_item(_assistant("a1"))
+        chat.add_item(_user("u2"))
+        chat.trim_if_needed(compactor)
+
+        _wait_thread(chat)
+        # Both fc and fco should be gone.
+        assert not any(isinstance(x, RealtimeConversationItemFunctionCall) for x in chat.buffer)
+        assert not any(isinstance(x, RealtimeConversationItemFunctionCallOutput) for x in chat.buffer)
+
+    def test_keeps_fc_when_fco_arrives_during_compaction(self):
+        chat = Chat(size=2)
+        gate = threading.Event()
+        started = threading.Event()
+        compactor = _make_stub_compactor(gate=gate, started=started)
+        chat.add_item(_user("u0"))
+        chat.add_item(_fc("c1"))  # pending in compacted range
+        chat.add_item(_assistant("a0"))
+        chat.add_item(_user("u1"))
+        chat.add_item(_assistant("a1"))
+        chat.add_item(_user("u2"))
+        chat.trim_if_needed(compactor)
+        assert started.wait(timeout=2.0)
+
+        # FCO arrives while compactor is running.
+        chat.add_item(_fco("c1"))
+        gate.set()
+        _wait_thread(chat)
+
+        # FC should be preserved (FCO outside the compacted range), and FCO
+        # should still be in the buffer.
+        fcs = [x for x in chat.buffer if isinstance(x, RealtimeConversationItemFunctionCall)]
+        fcos = [x for x in chat.buffer if isinstance(x, RealtimeConversationItemFunctionCallOutput)]
+        assert len(fcs) == 1
+        assert fcs[0].call_id == "call_c1"
+        assert len(fcos) == 1
+        assert fcos[0].call_id == "call_c1"
+
+    def test_reset_cancels_inflight_compaction(self):
+        chat = Chat(size=2)
+        gate = threading.Event()
+        started = threading.Event()
+        compactor = _make_stub_compactor(gate=gate, started=started)
+        for i in range(3):
+            chat.add_item(_user(f"u{i}"))
+            chat.add_item(_assistant(f"a{i}"))
+        chat.add_item(_user("u3"))
+        chat.trim_if_needed(compactor)
+        assert started.wait(timeout=2.0)
+
+        chat.reset()
+        gate.set()
+        _wait_thread(chat)
+
+        # Splice should have been suppressed by gen counter bump.
+        assert chat.buffer == []
+        assert chat._user_turn_count == 0
+
+    def test_close_suppresses_splice(self):
+        chat = Chat(size=2)
+        gate = threading.Event()
+        started = threading.Event()
+        compactor = _make_stub_compactor(gate=gate, started=started)
+        for i in range(3):
+            chat.add_item(_user(f"u{i}"))
+            chat.add_item(_assistant(f"a{i}"))
+        chat.add_item(_user("u3"))
+        chat.trim_if_needed(compactor)
+        assert started.wait(timeout=2.0)
+
+        before = list(chat.buffer)
+        chat.close()
+        gate.set()
+        _wait_thread(chat)
+
+        # Buffer was not spliced.
+        assert chat.buffer == before
+
+    def test_compactor_exception_leaves_buffer_unchanged(self):
+        chat = Chat(size=2)
+
+        def bad(snapshot):
+            raise RuntimeError("boom")
+
+        for i in range(3):
+            chat.add_item(_user(f"u{i}"))
+            chat.add_item(_assistant(f"a{i}"))
+        chat.add_item(_user("u3"))
+        chat.trim_if_needed(bad)
+        _wait_thread(chat)
+
+        # All originals still present.
+        user_texts = [x.content[0].text for x in chat.buffer if isinstance(x, RealtimeConversationItemUserMessage)]
+        assert user_texts == ["u0", "u1", "u2", "u3"]
+
+    def test_compactor_wrong_return_type_logged(self):
+        chat = Chat(size=2)
+
+        def wrong(snapshot):
+            return ("u", "a")  # not a CompactionResult
+
+        for i in range(3):
+            chat.add_item(_user(f"u{i}"))
+            chat.add_item(_assistant(f"a{i}"))
+        chat.add_item(_user("u3"))
+        chat.trim_if_needed(wrong)
+        _wait_thread(chat)
+
+        # No splice happened.
+        user_texts = [x.content[0].text for x in chat.buffer if isinstance(x, RealtimeConversationItemUserMessage)]
+        assert user_texts == ["u0", "u1", "u2", "u3"]
+
+    def test_init_message_unchanged_after_compaction(self):
+        chat = Chat(size=2)
+        sys_msg = _system("system prompt")
+        chat.init_chat(sys_msg)
+        compactor = _make_stub_compactor()
+        for i in range(3):
+            chat.add_item(_user(f"u{i}"))
+            chat.add_item(_assistant(f"a{i}"))
+        chat.add_item(_user("u3"))
+        chat.trim_if_needed(compactor)
+        _wait_thread(chat)
+
+        assert chat.init_chat_message is sys_msg
+
+    def test_snapshot_strips_images(self):
+        chat = Chat(size=2)
+        captured: list = []
+        compactor = _make_stub_compactor(captured=captured)
+        chat.add_item(_user_msg_with_parts(("text", "look"), ("image", "http://img.png")))
+        chat.add_item(_assistant("a0"))
+        chat.add_item(_user("u1"))
+        chat.add_item(_assistant("a1"))
+        chat.add_item(_user("u2"))
+        chat.trim_if_needed(compactor)
+        _wait_thread(chat)
+
+        assert len(captured) == 1
+        snapshot = captured[0]
+        for msg in snapshot:
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                for c in msg.get("content", []):
+                    assert c.get("type") != "input_image"
