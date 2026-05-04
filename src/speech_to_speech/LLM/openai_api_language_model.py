@@ -76,6 +76,7 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
 
         self.user_role = user_role
         self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self._use_openai_tool_call_limits = base_url is None
         self._extra_body = (
             {"chat_template_kwargs": {"enable_thinking": False}}
             if disable_thinking and base_url is not None  # Only for other than OpenAI Official Server
@@ -141,6 +142,9 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         optional_kwargs: dict[str, Any] = {}
         if req_tools is not None:
             optional_kwargs["tools"] = req_tools
+            if req_tool_choice != "none" and getattr(self, "_use_openai_tool_call_limits", True):
+                optional_kwargs["parallel_tool_calls"] = False
+                optional_kwargs["max_tool_calls"] = 1
         if req_tool_choice is not None:
             optional_kwargs["tool_choice"] = req_tool_choice
 

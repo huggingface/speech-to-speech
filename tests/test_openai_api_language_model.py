@@ -186,6 +186,62 @@ def test_no_disable_thinking_omits_extra_body():
     assert captured.get("extra_body") is None
 
 
+def test_tools_disable_parallel_tool_calls_and_limit_count():
+    handler = _make_handler()
+    captured = {}
+    cfg = _make_runtime_config()
+    cfg.session.tools = [
+        {
+            "type": "function",
+            "name": "test_tool",
+            "description": "Test tool",
+            "parameters": {"type": "object", "properties": {}},
+        }
+    ]
+    cfg.session.tool_choice = "auto"
+    cfg.chat.add_item(make_user_message("Hi"))
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _make_stream([_make_text_delta_event("Ok")])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+
+    list(handler.process(GenerateResponseRequest(runtime_config=cfg)))
+
+    assert captured["tools"] == cfg.session.tools
+    assert captured["tool_choice"] == "auto"
+    assert captured["parallel_tool_calls"] is False
+    assert captured["max_tool_calls"] == 1
+
+
+def test_tool_call_limits_omitted_for_custom_base_url_compatibility():
+    handler = _make_handler()
+    handler._use_openai_tool_call_limits = False
+    captured = {}
+    cfg = _make_runtime_config()
+    cfg.session.tools = [
+        {
+            "type": "function",
+            "name": "test_tool",
+            "description": "Test tool",
+            "parameters": {"type": "object", "properties": {}},
+        }
+    ]
+    cfg.chat.add_item(make_user_message("Hi"))
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _make_stream([_make_text_delta_event("Ok")])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+
+    list(handler.process(GenerateResponseRequest(runtime_config=cfg)))
+
+    assert "parallel_tool_calls" not in captured
+    assert "max_tool_calls" not in captured
+
+
 def test_second_turn_flattens_assistant_history_for_responses():
     handler = _make_handler(stream=False)
     captured = {}
