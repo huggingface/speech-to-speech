@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "speech-to-speech"
-version = "0.2.2"
+version = "0.2.3"
 description = "Low-latency speech-to-speech pipeline"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,23 +28,30 @@ dependencies = [
     "fastapi>=0.115.0",
     "httpx>=0.28.0",
     "nltk==3.9.1",
-    "numpy>=1.26.0",
+    "numpy>=1.26.0,<2.4.4; platform_system == 'Darwin'",
+    "numpy>=1.26.0; platform_system != 'Darwin'",
     "openai==2.28.0",
     "pillow>=10.0.0",
     "pydantic>=2.0",
     "rich>=13.0",
     "scipy>=1.10.0",
-    "sounddevice>=0.5.0",
+    "sounddevice==0.5.3; platform_system == 'Darwin'",
+    "sounddevice>=0.5.0; platform_system != 'Darwin'",
     "soundfile>=0.13.0; platform_system == 'Darwin'",
     "torch==2.11.0; platform_system == 'Darwin'",
     "torch>=2.4.0; platform_system != 'Darwin'",
     "torchaudio==2.11.0; platform_system == 'Darwin'",
     "torchaudio>=2.4.0; platform_system != 'Darwin'",
-    "transformers>=4.57.0",
+    "transformers==5.6.2; platform_system == 'Darwin'",
+    "transformers>=4.57.0; platform_system != 'Darwin'",
     "uvicorn>=0.30.0",
     "nano-parakeet>=0.2.0; platform_system != 'Darwin'",
     "faster-qwen3-tts>=0.2.6; platform_system != 'Darwin'",
-    "mlx-audio>=0.4.0,<0.5.0; platform_system == 'Darwin'",
+    "miniaudio==1.61; platform_system == 'Darwin'",
+    "mlx==0.31.1; platform_system == 'Darwin'",
+    "mlx-audio==0.4.2; platform_system == 'Darwin'",
+    "mlx-lm==0.31.1; platform_system == 'Darwin'",
+    "mlx-metal==0.31.1; platform_system == 'Darwin'",
     "misaki>=0.9.4; platform_system == 'Darwin'",
     "espeakng-loader>=0.2.4; platform_system == 'Darwin'",
     "spacy>=3.8.4; platform_system == 'Darwin'",
@@ -68,7 +75,7 @@ language-detection = [
     "lingua-language-detector>=2.0.2",
 ]
 mlx-lm = [
-    "mlx-lm>=0.14.0; platform_system == 'Darwin'",
+    "mlx-lm==0.31.1; platform_system == 'Darwin'",
     "mlx-vlm==0.4.1; platform_system == 'Darwin'",
 ]
 paraformer = [
