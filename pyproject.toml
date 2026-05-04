@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "speech-to-speech"
-version = "0.2.4"
+version = "0.2.5"
 description = "Low-latency speech-to-speech pipeline"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,7 +27,7 @@ classifiers = [
 dependencies = [
     "fastapi>=0.115.0",
     "httpx>=0.28.0",
-    "nltk==3.9.1",
+    "nltk==3.9.4",
     "numpy>=1.26.0,<2.4.4; platform_system == 'Darwin'",
     "numpy>=1.26.0; platform_system != 'Darwin'",
     "openai==2.28.0",
