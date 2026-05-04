@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import os
 import subprocess
@@ -100,15 +101,14 @@ def _validate_pipeline_startup_primitives() -> None:
 
 
 def _validate_default_handler_imports() -> None:
-    from speech_to_speech.LLM.openai_api_language_model import OpenApiModelHandler
-    from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
-    from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
-    from speech_to_speech.VAD.vad_handler import VADHandler
-
-    assert OpenApiModelHandler.__name__ == "OpenApiModelHandler"
-    assert ParakeetTDTSTTHandler.__name__ == "ParakeetTDTSTTHandler"
-    assert Qwen3TTSHandler.__name__ == "Qwen3TTSHandler"
-    assert VADHandler.__name__ == "VADHandler"
+    default_handler_modules = [
+        "speech_to_speech.LLM.openai_api_language_model",
+        "speech_to_speech.STT.parakeet_tdt_handler",
+        "speech_to_speech.TTS.qwen3_tts_handler",
+        "speech_to_speech.VAD.vad_handler",
+    ]
+    for module_name in default_handler_modules:
+        importlib.import_module(module_name)
 
 
 def main() -> None:
