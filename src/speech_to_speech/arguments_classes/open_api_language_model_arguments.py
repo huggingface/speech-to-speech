@@ -7,8 +7,8 @@ from speech_to_speech.arguments_classes.language_model_base_arguments import Lan
 @dataclass
 class OpenApiLanguageModelHandlerArguments(LanguageModelBaseArguments):
     model_name: str = field(
-        default="deepseek-chat",
-        metadata={"help": "The model to use with the OpenAI-compatible API. Default is 'deepseek-chat'."},
+        default="gpt-5.4-mini",
+        metadata={"help": "The model to use with the OpenAI-compatible API. Default is 'gpt-5.4-mini'."},
     )
     open_api_api_key: Optional[str] = field(
         default=None,
@@ -19,8 +19,11 @@ class OpenApiLanguageModelHandlerArguments(LanguageModelBaseArguments):
         metadata={"help": "Base URL for the OpenAI-compatible API endpoint. Default is None (uses OpenAI)."},
     )
     open_api_stream: bool = field(
-        default=False,
-        metadata={"help": "Whether to stream responses from the API. Default is False."},
+        default=True,
+        metadata={
+            "help": "The stream parameter typically indicates whether data should be transmitted in a continuous flow rather"
+            " than in a single, complete response, often used for handling large or real-time data.Default is True"
+        },
     )
     open_api_disable_thinking: bool = field(
         default=True,

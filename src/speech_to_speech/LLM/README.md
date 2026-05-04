@@ -1,76 +1,78 @@
 # LLM Summary
 
-## Available LLM modes (`--llm`)
+## Available LLM backends (`--llm_backend`)
 
 Runtime-supported values in `s2s_pipeline.py`:
 
 - `transformers` → `language_model.py` (Transformers backend)
 - `mlx-lm` → `language_model.py` (MLX backend)
-- `open_api` → `openai_api_language_model.py`
+- `openai-api` → `openai_api_language_model.py`
 
 ## Usage
 
-### 1) Transformers (`--llm transformers`)
+### 1) Transformers (`--llm_backend transformers`)
 
 - Handler: `LanguageModelHandler`
 - Typical use: local GPU/CPU inference using Hugging Face Transformers
-- Primary args prefix: `--lm_*`
+- Backend-specific args prefix: `--llm_*`
+- Shared args (from base): `--model_name`, `--chat_size`, `--init_chat_prompt`, `--enable_lang_prompt`
 
 ```bash
 python s2s_pipeline.py \
-  --llm transformers \
-  --lm_model_name Qwen/Qwen3-4B-Instruct-2507 \
-  --lm_device cuda \
-  --lm_torch_dtype float16 \
-  --lm_gen_max_new_tokens 128
+  --llm_backend transformers \
+  --model_name Qwen/Qwen3-4B-Instruct-2507 \
+  --llm_device cuda \
+  --llm_torch_dtype float16 \
+  --llm_gen_max_new_tokens 128
 ```
 
 Common options:
-- `--lm_gen_min_new_tokens`
-- `--lm_gen_temperature`
-- `--lm_gen_do_sample`
-- `--lm_chat_size`
+- `--llm_gen_min_new_tokens`
+- `--llm_gen_temperature`
+- `--llm_gen_do_sample`
+- `--chat_size`
 - `--init_chat_prompt`
 
-### 2) MLX-LM (`--llm mlx-lm`)
+### 2) MLX-LM (`--llm_backend mlx-lm`)
 
 - Handler: `LanguageModelHandler`
 - Typical use: Apple Silicon local inference
-- Primary args prefix: same as Transformers (`--lm_*`)
+- Backend-specific args prefix: same as Transformers (`--llm_*`)
 
 ```bash
 python s2s_pipeline.py \
-  --llm mlx-lm \
-  --lm_model_name mlx-community/Qwen3-4B-Instruct-2507-bf16 \
-  --lm_device mps \
-  --lm_gen_max_new_tokens 128
+  --llm_backend mlx-lm \
+  --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16 \
+  --llm_device mps \
+  --llm_gen_max_new_tokens 128
 ```
 
 Common options:
-- `--lm_gen_temperature`
-- `--lm_gen_do_sample`
-- `--lm_chat_size`
-- `--lm_init_chat_prompt`
+- `--llm_gen_temperature`
+- `--llm_gen_do_sample`
+- `--chat_size`
+- `--init_chat_prompt`
 
-### 3) OpenAI-compatible API (`--llm open_api`)
+### 3) OpenAI-compatible API (`--llm_backend openai-api`)
 
 - Handler: `OpenApiModelHandler`
 - Typical use: remote model serving via OpenAI-compatible endpoints
-- Primary args prefix: `--open_api_*`
+- Backend-specific args prefix: `--open_api_*`
+- Shared args (from base): `--model_name`, `--chat_size`, `--init_chat_prompt`, `--enable_lang_prompt`
 
 ```bash
 python s2s_pipeline.py \
-  --llm open_api \
-  --open_api_model_name deepseek-chat \
+  --llm_backend openai-api \
+  --model_name gpt-5.4-mini \
   --open_api_api_key YOUR_API_KEY \
   --open_api_base_url https://api.example.com/v1 \
   --open_api_stream true
 ```
 
 Common options:
-- `--open_api_chat_size`
-- `--open_api_init_chat_prompt`
-- `--open_api_user_role`
+- `--chat_size`
+- `--init_chat_prompt`
+- `--user_role`
 
 ## LLM Behavior
 
@@ -78,7 +80,7 @@ When STT is set to language auto-detection (`--language auto`), LLM handlers can
 
 - `Please reply to my message in <language>.`
 
-This helps the assistant respond in the detected language. The behavior is opt-in via `--lm_enable_lang_prompt` (local LLM handlers) or `--open_api_enable_lang_prompt` (OpenAI-compatible backend); both default to `False`.
+This helps the assistant respond in the detected language. The behavior is opt-in via `--enable_lang_prompt` (shared across all backends); it defaults to `False`.
 
 ## Setup
 
@@ -86,8 +88,8 @@ This helps the assistant respond in the detected language. The behavior is opt-i
 
 ```bash
 python s2s_pipeline.py \
-  --llm transformers \
-  --lm_model_name microsoft/Phi-3-mini-4k-instruct
+  --llm_backend transformers \
+  --model_name microsoft/Phi-3-mini-4k-instruct
 ```
 
 ### Local Mac setup
@@ -95,10 +97,10 @@ python s2s_pipeline.py \
 ```bash
 python s2s_pipeline.py \
   --local_mac_optimal_settings \
-  --lm_model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+  --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
 ```
 
-`--local_mac_optimal_settings` already sets `--llm mlx-lm` and will default the model to `mlx-community/Qwen3-4B-Instruct-2507-bf16` if not overridden.
+`--local_mac_optimal_settings` already sets `--llm_backend mlx-lm` and will default the model to `mlx-community/Qwen3-4B-Instruct-2507-bf16` if not overridden.
 
 ### Realtime (OpenAI-compatible) setup
 
@@ -108,8 +110,8 @@ Run the server in realtime mode, then connect with the realtime client:
 # 1. Start the pipeline in realtime mode
 python s2s_pipeline.py \
   --mode realtime \
-  --llm mlx-lm \
-  --lm_model_name mlx-community/Qwen3-4B-Instruct-2507-bf16 \
+  --llm_backend mlx-lm \
+  --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16 \
   --ws_host 0.0.0.0 \
   --ws_port 8765
 
@@ -131,7 +133,7 @@ python s2s_pipeline.py \
 
 ```bash
 python s2s_pipeline.py \
-  --llm open_api \
-  --open_api_model_name deepseek-chat \
+  --llm_backend openai-api \
+  --model_name gpt-5.4-mini \
   --open_api_api_key YOUR_API_KEY
 ```

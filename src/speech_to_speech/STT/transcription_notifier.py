@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from queue import Queue
+from threading import Event
 from typing import Iterator, Union
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
@@ -32,9 +33,11 @@ class TranscriptionNotifier(BaseHandler[STTOut, Union[STTOut, LLMIn]]):
         self,
         text_output_queue: Queue[TextEventItem] | None = None,
         runtime_config: RuntimeConfig | None = None,
+        should_listen: Event | None = None,
     ) -> None:
         self.text_output_queue = text_output_queue
         self.runtime_config = runtime_config
+        self.should_listen = should_listen
 
     def process(self, transcription: STTOut) -> Iterator[Union[STTOut, LLMIn]]:
         if isinstance(transcription, PartialTranscription):
@@ -50,11 +53,23 @@ class TranscriptionNotifier(BaseHandler[STTOut, Union[STTOut, LLMIn]]):
             text = transcription
             language_code = None
 
-        if self.text_output_queue and text:
-            self.text_output_queue.put(TranscriptionCompletedEvent(transcript=str(text), language_code=language_code))
-            logger.debug("Transcription completed: %s", str(text)[:80])
+        transcript = str(text)
+        # Always close the client-visible transcription item. Empty final STT
+        # results should not trigger the LLM, but clients may already have
+        # received partial deltas and still need a completed event.
+        if self.text_output_queue is not None:
+            self.text_output_queue.put(TranscriptionCompletedEvent(transcript=transcript, language_code=language_code))
 
-        if self.runtime_config is not None and text:
+        if not transcript:
+            logger.debug("Transcription completed with empty transcript")
+            if self.should_listen is not None:
+                self.should_listen.set()
+                logger.debug("Empty transcription completed; listening re-enabled")
+            return
+
+        logger.debug("Transcription completed: %s", transcript[:80])
+
+        if self.runtime_config is not None:
             self.runtime_config.chat.add_item(make_user_message(str(text)))
             yield GenerateResponseRequest(
                 runtime_config=self.runtime_config,
