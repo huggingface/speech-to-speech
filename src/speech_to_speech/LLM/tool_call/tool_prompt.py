@@ -39,7 +39,6 @@ When you need to use a tool, output the function call between \
 
 {{ enter_code }}
 function_name(arg_name_1=value1, arg_name_2='string_value')
-another_function(arg_name_1='hello')
 {{ end_code }}
 
 RULES:
@@ -50,7 +49,7 @@ Do NOT write "Here is the call", "I will use", "Let me call", \
 in your response without any surrounding explanation.
 - Arguments MUST always be named: func(x=1, y=2). Positional arguments like func(1, 2) are NOT allowed.
 - String arguments must be quoted: func(name='hello').
-- Multiple tool calls can live in the same {{ enter_code }}…{{ end_code }} block.\
+- Only one tool call may appear in a response. Do not include more than one function call between the tags.\
 """,
     keep_trailing_newline=True,
 )
