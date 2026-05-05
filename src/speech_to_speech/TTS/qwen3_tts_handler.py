@@ -374,6 +374,21 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             return
 
         if model_type == "custom_voice":
+            supported_speakers = self._supported_speakers()
+            if supported_speakers is not None:
+                speakers_by_lower = {speaker.lower(): speaker for speaker in supported_speakers}
+                speaker = speakers_by_lower.get(session_voice.lower())
+                if speaker is None:
+                    supported_text = ", ".join(sorted(supported_speakers, key=str.lower)) or "unknown"
+                    logger.warning(
+                        "Ignoring Qwen3-TTS session voice override %r because it is not a supported "
+                        "CustomVoice speaker. Supported speakers: %s",
+                        session_voice,
+                        supported_text,
+                    )
+                    return
+                session_voice = speaker
+
             self.speaker = session_voice
             self.ref_audio = None
             return
@@ -413,6 +428,20 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         inner = getattr(getattr(self.model, "model", None), "model", None)
         return getattr(inner, "tts_model_type", None) or self._infer_model_type_from_name()
+
+    def _supported_speakers(self) -> list[str] | None:
+        for candidate in (
+            self.model,
+            getattr(self.model, "model", None),
+            getattr(getattr(self.model, "model", None), "model", None),
+        ):
+            get_speakers = getattr(candidate, "get_supported_speakers", None)
+            if callable(get_speakers):
+                speakers = get_speakers()
+                if speakers is None:
+                    return None
+                return [str(speaker) for speaker in speakers if speaker]
+        return None
 
     def _resolve_speaker(self) -> Optional[str]:
         if self.speaker:

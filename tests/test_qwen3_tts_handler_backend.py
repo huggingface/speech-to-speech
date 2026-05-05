@@ -269,6 +269,35 @@ def test_apply_session_voice_override_warns_for_non_file_for_base_model(caplog):
     assert "Ignoring Qwen3-TTS session voice override" in caplog.text
 
 
+def test_apply_session_voice_override_ignores_unsupported_custom_voice_speaker(caplog):
+    handler = object.__new__(Qwen3TTSHandler)
+    fake_cfg = SimpleNamespace(session=SimpleNamespace(audio=SimpleNamespace(output=SimpleNamespace(voice="cedar"))))
+    handler.ref_audio = None
+    handler.speaker = "Aiden"
+    handler.model = SimpleNamespace(model=SimpleNamespace(get_supported_speakers=lambda: ["aiden", "vivian"]))
+
+    with caplog.at_level("WARNING"):
+        handler._apply_session_voice_override("custom_voice", runtime_config=fake_cfg)
+
+    assert handler.ref_audio is None
+    assert handler.speaker == "Aiden"
+    assert "not a supported CustomVoice speaker" in caplog.text
+    assert "cedar" in caplog.text
+
+
+def test_apply_session_voice_override_accepts_supported_custom_voice_speaker():
+    handler = object.__new__(Qwen3TTSHandler)
+    fake_cfg = SimpleNamespace(session=SimpleNamespace(audio=SimpleNamespace(output=SimpleNamespace(voice="Vivian"))))
+    handler.ref_audio = "TTS/ref_audio.wav"
+    handler.speaker = "Aiden"
+    handler.model = SimpleNamespace(model=SimpleNamespace(get_supported_speakers=lambda: ["aiden", "vivian"]))
+
+    handler._apply_session_voice_override("custom_voice", runtime_config=fake_cfg)
+
+    assert handler.ref_audio is None
+    assert handler.speaker == "vivian"
+
+
 def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     handler = object.__new__(Qwen3TTSHandler)
     handler.should_listen = Event()
