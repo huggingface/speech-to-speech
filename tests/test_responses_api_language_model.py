@@ -13,7 +13,7 @@ from openai.types.responses.response_output_text import ResponseOutputText
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
-from speech_to_speech.LLM.openai_api_language_model import OpenApiModelHandler
+from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.messages import EndOfResponse, GenerateResponseRequest, LLMResponseChunk
 
@@ -71,7 +71,7 @@ def _make_request(text="Hi", chat_size=2):
 
 
 def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
-    handler = object.__new__(OpenApiModelHandler)
+    handler = object.__new__(ResponsesApiModelHandler)
     handler.model_name = "test-model"
     handler.stream = stream
     handler.stream_batch_sentences = 1

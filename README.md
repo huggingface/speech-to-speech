@@ -95,7 +95,7 @@ This installs the `speech_to_speech` package in editable mode and makes the `spe
 
 ## Usage
 
-The default CLI is equivalent to a realtime Parakeet + OpenAI-compatible LLM + Qwen3-TTS setup. It uses `OPENAI_API_KEY` from the environment unless `--open_api_api_key` is provided:
+The default CLI is equivalent to a realtime Parakeet + OpenAI-compatible LLM + Qwen3-TTS setup. It uses `OPENAI_API_KEY` from the environment unless `--responses_api_api_key` is provided:
 ```bash
 speech-to-speech
 ```
@@ -110,7 +110,7 @@ The pipeline can be run in four ways:
 
 ### Realtime Approach
 
-The default realtime setup uses `--llm_backend openai-api`, so it needs an OpenAI API key. Export `OPENAI_API_KEY` before launching, or pass `--open_api_api_key` explicitly. For a deployed OpenAI-compatible LLM, also set `--open_api_base_url`.
+The default realtime setup uses `--llm_backend responses-api`, which works with any provider supporting the OpenAI Responses API protocol. Export `OPENAI_API_KEY` with your provider's key before launching, or pass it explicitly with `--responses_api_api_key`. For a non-OpenAI provider, also set `--responses_api_base_url`.
 
 ```bash
 export OPENAI_API_KEY=...
@@ -126,7 +126,7 @@ This is equivalent to:
 speech-to-speech \
     --thresh 0.6 \
     --stt parakeet-tdt \
-    --llm_backend openai-api \
+    --llm_backend responses-api \
     --tts qwen3 \
     --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
     --qwen3_tts_speaker Aiden \
@@ -135,7 +135,7 @@ speech-to-speech \
     --qwen3_tts_mlx_quantization 6bit \
     --model_name gpt-5.4-mini \
     --chat_size 30 \
-    --open_api_stream \
+    --responses_api_stream \
     --enable_live_transcription \
     --mode realtime
 ```
@@ -254,18 +254,18 @@ For the full architecture and design details, see the [Realtime Engine README](.
 The LLM is the most compute-intensive and highest-latency component in the pipeline. A single forward pass through a large model can easily dominate the end-to-end response time, so choosing the right backend for your hardware and latency budget matters. To give users the most flexibility, we support the full spectrum of inference solutions:
 
 - **Local inference** — `transformers` (CUDA / CPU) and `mlx-lm` (Apple Silicon) run the model entirely on your machine with no external dependency.
-- **Self-hosted servers** — `--llm_backend openai-api` can point at a local [vLLM](https://github.com/vllm-project/vllm) or [llama.cpp](https://github.com/ggerganov/llama.cpp) server, giving you control over quantization, batching, and hardware while keeping traffic on-premise.
-- **Cloud APIs** — the same `openai-api` backend works with OpenAI, [HuggingFace Inference Providers](https://huggingface.co/inference-providers), [OpenRouter](https://openrouter.ai), and any other provider that implements the OpenAI Chat Completions API.
+- **Self-hosted servers** — `--llm_backend responses-api` can point at a local [vLLM](https://github.com/vllm-project/vllm) or [llama.cpp](https://github.com/ggerganov/llama.cpp) server, giving you control over quantization, batching, and hardware while keeping traffic on-premise.
+- **Provider APIs** — the same `responses-api` backend works with OpenAI, [HuggingFace Inference Providers](https://huggingface.co/inference-providers), [OpenRouter](https://openrouter.ai), and any other provider that implements the OpenAI Responses API.
 
-Select a backend with `--llm_backend` (`openai-api` by default) and pair it with `--model_name`. Backend-specific options (`--open_api_base_url`, `--open_api_api_key`, `--open_api_stream`, etc.) are only needed for the `openai-api` backend.
+Select a backend with `--llm_backend` (`responses-api` by default) and pair it with `--model_name`. Backend-specific options (`--responses_api_base_url`, `--responses_api_api_key`, `--responses_api_stream`, etc.) are only needed for the `responses-api` backend.
 
 > The examples below pair Parakeet TDT (local STT) and Qwen3-TTS (local TTS) with different LLM backends.
 
-#### OpenAI-compatible backends (`--llm_backend openai-api`)
+#### OpenAI-compatible backends (`--llm_backend responses-api`)
 
-`--llm_backend openai-api` works with any server that implements the OpenAI Chat Completions API — point `--open_api_base_url` at the right endpoint and set `--model_name` accordingly:
+`--llm_backend responses-api` works with any server that implements the OpenAI Chat Completions API — point `--responses_api_base_url` at the right endpoint and set `--model_name` accordingly:
 
-| Backend | `--open_api_base_url` | `--open_api_api_key` |
+| Backend | `--responses_api_base_url` | `--responses_api_api_key` |
 |---|---|---|
 | OpenAI | *(omit, uses OpenAI default)* | `$OPENAI_API_KEY` |
 | HF Inference Providers | `https://router.huggingface.co/v1` | `$HF_TOKEN` |
@@ -278,12 +278,12 @@ Select a backend with `--llm_backend` (`openai-api` by default) and pair it with
 speech-to-speech \
     --mode local \
     --stt parakeet-tdt \
-    --llm_backend openai-api \
+    --llm_backend responses-api \
     --tts qwen3 \
     --qwen3_tts_mlx_quantization 6bit \
     --model_name "gpt-4o-mini" \
-    --open_api_api_key "$OPENAI_API_KEY" \
-    --open_api_stream \
+    --responses_api_api_key "$OPENAI_API_KEY" \
+    --responses_api_stream \
     --enable_live_transcription
 ```
 
@@ -292,13 +292,13 @@ speech-to-speech \
 speech-to-speech \
     --mode local \
     --stt parakeet-tdt \
-    --llm_backend openai-api \
+    --llm_backend responses-api \
     --tts qwen3 \
     --qwen3_tts_mlx_quantization 6bit \
     --model_name "Qwen/Qwen3.5-9B:together" \
-    --open_api_base_url "https://router.huggingface.co/v1" \
-    --open_api_api_key "$HF_TOKEN" \
-    --open_api_stream \
+    --responses_api_base_url "https://router.huggingface.co/v1" \
+    --responses_api_api_key "$HF_TOKEN" \
+    --responses_api_stream \
     --enable_live_transcription
 ```
 
@@ -306,13 +306,13 @@ speech-to-speech \
 # HF Inference Providers — GPT-oss-20B via Groq
 speech-to-speech \
     --stt parakeet-tdt \
-    --llm_backend openai-api \
+    --llm_backend responses-api \
     --tts qwen3 \
     --qwen3_tts_mlx_quantization 6bit \
     --model_name "openai/gpt-oss-20b:groq" \
-    --open_api_base_url "https://router.huggingface.co/v1" \
-    --open_api_api_key "$HF_TOKEN" \
-    --open_api_stream \
+    --responses_api_base_url "https://router.huggingface.co/v1" \
+    --responses_api_api_key "$HF_TOKEN" \
+    --responses_api_stream \
     --enable_live_transcription
 ```
 
@@ -443,7 +443,7 @@ See [ModuleArguments](./src/speech_to_speech/arguments_classes/module_arguments.
 - a common `--device` (if one wants each part to run on the same device)
 - `--mode`: `realtime` (default), `local`, `socket`, or `websocket`
 - chosen STT implementation (`--stt`)
-- chosen LLM backend (`--llm_backend`: `transformers`, `mlx-lm`, or `openai-api`)
+- chosen LLM backend (`--llm_backend`: `transformers`, `mlx-lm`, or `responses-api`)
 - chosen TTS implementation (`--tts`)
 - logging level
 
@@ -456,7 +456,7 @@ See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments
 
 ### STT, LLM and TTS parameters
 
-`model_name`, `torch_dtype`, and `device` are exposed for each implementation of the Speech to Text, Language Model, and Text to Speech. STT and TTS parameters use the handler prefix (e.g. `--stt_model_name`, `--llm_device`). LLM model selection and chat settings are shared across backends via unprefixed flags (e.g. `--model_name`, `--chat_size`); backend-specific flags use the `open_api_` prefix for the `openai-api` backend and `llm_` prefix for local backends. See the [arguments classes](./src/speech_to_speech/arguments_classes) for the full list.
+`model_name`, `torch_dtype`, and `device` are exposed for each implementation of the Speech to Text, Language Model, and Text to Speech. STT and TTS parameters use the handler prefix (e.g. `--stt_model_name`, `--llm_device`). LLM model selection and chat settings are shared across backends via unprefixed flags (e.g. `--model_name`, `--chat_size`); backend-specific flags use the `responses_api_` prefix for the `responses-api` backend and `llm_` prefix for local backends. See the [arguments classes](./src/speech_to_speech/arguments_classes) for the full list.
 
 For example:
 ```bash
@@ -464,7 +464,7 @@ For example:
 --model_name google/gemma-2b-it
 
 # OpenAI-compatible backend
---llm_backend openai-api --model_name deepseek-chat --open_api_base_url https://api.deepseek.com
+--llm_backend responses-api --model_name deepseek-chat --responses_api_base_url https://api.deepseek.com
 ```
 
 ### Generation parameters

@@ -90,7 +90,7 @@ def create_app(
     def clean_session(preserve: Callable[[Any], bool] | None = None) -> None:
         # Invalidate in-flight LLM/TTS work (cooperative cancel via is_stale), then
         # flush queues. reset() clears discarding only; generation stays bumped.
-        # Blocking HTTP reads are not interrupted here; see OpenApiModelHandler.process.
+        # Blocking HTTP reads are not interrupted here; see ResponsesApiModelHandler.process.
         if cancel_scope:
             cancel_scope.cancel()
         _flush_queue(output_queue, preserve=preserve)

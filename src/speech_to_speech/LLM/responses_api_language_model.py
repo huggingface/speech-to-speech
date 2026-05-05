@@ -41,7 +41,7 @@ from speech_to_speech.utils.utils import _generate_id
 logger = logging.getLogger(__name__)
 
 
-class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
+class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
     """
     Handles the language model part.
     """
@@ -158,7 +158,7 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         try:
             api_response = self.client.responses.create(
                 model=self.model_name,
-                input=active_chat.to_response_api_chat(),
+                input=active_chat.to_responses_api_chat(),
                 stream=self.stream,
                 extra_body=self._extra_body,
                 timeout=self.request_timeout,

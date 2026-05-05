@@ -6,7 +6,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 
 - `transformers` → `language_model.py` (Transformers backend)
 - `mlx-lm` → `language_model.py` (MLX backend)
-- `openai-api` → `openai_api_language_model.py`
+- `responses-api` → `responses_api_language_model.py`
 
 ## Usage
 
@@ -53,20 +53,20 @@ Common options:
 - `--chat_size`
 - `--init_chat_prompt`
 
-### 3) OpenAI-compatible API (`--llm_backend openai-api`)
+### 3) OpenAI-compatible API (`--llm_backend responses-api`)
 
-- Handler: `OpenApiModelHandler`
+- Handler: `ResponsesApiModelHandler`
 - Typical use: remote model serving via OpenAI-compatible endpoints
-- Backend-specific args prefix: `--open_api_*`
+- Backend-specific args prefix: `--responses_api_*`
 - Shared args (from base): `--model_name`, `--chat_size`, `--init_chat_prompt`, `--enable_lang_prompt`
 
 ```bash
 python s2s_pipeline.py \
-  --llm_backend openai-api \
+  --llm_backend responses-api \
   --model_name gpt-5.4-mini \
-  --open_api_api_key YOUR_API_KEY \
-  --open_api_base_url https://api.example.com/v1 \
-  --open_api_stream true
+  --responses_api_api_key YOUR_API_KEY \
+  --responses_api_base_url https://api.example.com/v1 \
+  --responses_api_stream true
 ```
 
 Common options:
@@ -133,7 +133,7 @@ python s2s_pipeline.py \
 
 ```bash
 python s2s_pipeline.py \
-  --llm_backend openai-api \
+  --llm_backend responses-api \
   --model_name gpt-5.4-mini \
-  --open_api_api_key YOUR_API_KEY
+  --responses_api_api_key YOUR_API_KEY
 ```

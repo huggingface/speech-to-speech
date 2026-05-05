@@ -28,10 +28,10 @@ class ModuleArguments:
             "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', 'parakeet-tdt', or 'paraformer'. Default is 'parakeet-tdt'."
         },
     )
-    llm_backend: Optional[Literal["transformers", "mlx-lm", "openai-api"]] = field(
-        default="openai-api",
+    llm_backend: Optional[Literal["transformers", "mlx-lm", "responses-api"]] = field(
+        default="responses-api",
         metadata={
-            "help": "The LLM backend to use. Either 'transformers', 'mlx-lm', or 'openai-api'. Default is 'openai-api'."
+            "help": "The LLM backend to use. Either 'transformers', 'mlx-lm', or 'responses-api'. Default is 'responses-api'."
         },
     )
     tts: Optional[Literal["melo", "chatTTS", "facebookMMS", "pocket", "kokoro", "qwen3"]] = field(

@@ -181,7 +181,7 @@ class Chat:
 
         return item
 
-    def to_response_api_chat(self) -> ResponseInputParam:
+    def to_responses_api_chat(self) -> ResponseInputParam:
         """Serialize the full chat (system prompt + buffer) for the OpenAI Responses API."""
         result: list[ResponseInputItemParam] = []
         if self.init_chat_message:

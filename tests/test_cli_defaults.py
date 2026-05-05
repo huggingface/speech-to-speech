@@ -8,11 +8,13 @@ from speech_to_speech.arguments_classes.kokoro_tts_arguments import KokoroTTSHan
 from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import MLXAudioWhisperSTTHandlerArguments
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
-from speech_to_speech.arguments_classes.open_api_language_model_arguments import OpenApiLanguageModelHandlerArguments
 from speech_to_speech.arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
 from speech_to_speech.arguments_classes.parakeet_tdt_arguments import ParakeetTDTSTTHandlerArguments
 from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
+from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
+    ResponsesApiLanguageModelHandlerArguments,
+)
 from speech_to_speech.arguments_classes.socket_receiver_arguments import SocketReceiverArguments
 from speech_to_speech.arguments_classes.socket_sender_arguments import SocketSenderArguments
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
@@ -21,23 +23,23 @@ from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTH
 from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments
 
 
-def test_release_defaults_match_openapi_parakeet_qwen3_realtime_profile():
+def test_release_defaults_match_responses_api_parakeet_qwen3_realtime_profile():
     module_args = ModuleArguments()
     vad_args = VADHandlerArguments()
-    open_api_args = OpenApiLanguageModelHandlerArguments()
+    responses_api_args = ResponsesApiLanguageModelHandlerArguments()
     qwen3_args = Qwen3TTSHandlerArguments()
 
     assert module_args.mode == "realtime"
     assert module_args.stt == "parakeet-tdt"
-    assert module_args.llm_backend == "openai-api"
+    assert module_args.llm_backend == "responses-api"
     assert module_args.tts == "qwen3"
     assert module_args.log_level == "info"
     assert module_args.enable_live_transcription is True
 
     assert vad_args.thresh == 0.6
-    assert open_api_args.model_name == "gpt-5.4-mini"
-    assert open_api_args.chat_size == 30
-    assert open_api_args.open_api_stream is True
+    assert responses_api_args.model_name == "gpt-5.4-mini"
+    assert responses_api_args.chat_size == 30
+    assert responses_api_args.responses_api_stream is True
     assert qwen3_args.qwen3_tts_model_name == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     assert qwen3_args.qwen3_tts_speaker == "Aiden"
     assert qwen3_args.qwen3_tts_language == "auto"
@@ -60,7 +62,7 @@ EXPECTED_FIELD_TYPES = {
     "mlx_audio_whisper_stt_handler_kwargs": MLXAudioWhisperSTTHandlerArguments,
     "parakeet_tdt_stt_handler_kwargs": ParakeetTDTSTTHandlerArguments,
     "language_model_handler_kwargs": LanguageModelHandlerArguments,
-    "open_api_language_model_handler_kwargs": OpenApiLanguageModelHandlerArguments,
+    "responses_api_language_model_handler_kwargs": ResponsesApiLanguageModelHandlerArguments,
     "chat_tts_handler_kwargs": ChatTTSHandlerArguments,
     "facebook_mms_tts_handler_kwargs": FacebookMMSTTSHandlerArguments,
     "pocket_tts_handler_kwargs": PocketTTSHandlerArguments,
@@ -91,10 +93,10 @@ def test_parse_arguments_default_backend_returns_openai_api():
 
     assert isinstance(args, ParsedArguments)
     assert isinstance(args.module_kwargs, ModuleArguments)
-    assert isinstance(args.open_api_language_model_handler_kwargs, OpenApiLanguageModelHandlerArguments)
+    assert isinstance(args.responses_api_language_model_handler_kwargs, ResponsesApiLanguageModelHandlerArguments)
     assert isinstance(args.language_model_handler_kwargs, LanguageModelHandlerArguments)
-    assert args.open_api_language_model_handler_kwargs.model_name == "gpt-5.4-mini"
-    assert args.module_kwargs.llm_backend == "openai-api"
+    assert args.responses_api_language_model_handler_kwargs.model_name == "gpt-5.4-mini"
+    assert args.module_kwargs.llm_backend == "responses-api"
 
 
 def test_parse_arguments_transformers_backend():
@@ -107,10 +109,10 @@ def test_parse_arguments_transformers_backend():
 
     assert isinstance(args, ParsedArguments)
     assert isinstance(args.language_model_handler_kwargs, LanguageModelHandlerArguments)
-    assert isinstance(args.open_api_language_model_handler_kwargs, OpenApiLanguageModelHandlerArguments)
+    assert isinstance(args.responses_api_language_model_handler_kwargs, ResponsesApiLanguageModelHandlerArguments)
     assert args.language_model_handler_kwargs.model_name == "Qwen/Qwen3-4B-Instruct-2507"
     # unused slot gets a default instance
-    assert args.open_api_language_model_handler_kwargs.model_name == "gpt-5.4-mini"
+    assert args.responses_api_language_model_handler_kwargs.model_name == "gpt-5.4-mini"
 
 
 def test_parse_arguments_all_fields_populated():

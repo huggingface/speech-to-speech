@@ -480,12 +480,12 @@ class TestAddItem:
 class TestToResponseApiChat:
     def test_empty_chat(self):
         chat = Chat(size=5)
-        assert chat.to_response_api_chat() == []
+        assert chat.to_responses_api_chat() == []
 
     def test_system_message_serialized(self):
         chat = Chat(size=5)
         chat.init_chat(_system("Be brief."))
-        result = chat.to_response_api_chat()
+        result = chat.to_responses_api_chat()
         assert len(result) == 1
         assert result[0]["role"] == "system"
         assert result[0]["type"] == "message"
@@ -500,13 +500,13 @@ class TestToResponseApiChat:
             content=[SystemContent(type="input_text", text="")],
         )
         chat.init_chat(sys_msg)
-        result = chat.to_response_api_chat()
+        result = chat.to_responses_api_chat()
         assert result[0]["content"][0]["text"] == "A helpful AI assistant."
 
     def test_user_text_message(self):
         chat = Chat(size=5)
         chat.add_item(_user("What is 2+2?"))
-        result = chat.to_response_api_chat()
+        result = chat.to_responses_api_chat()
         assert len(result) == 1
         assert result[0]["role"] == "user"
         assert result[0]["content"][0]["text"] == "What is 2+2?"
@@ -515,7 +515,7 @@ class TestToResponseApiChat:
         chat = Chat(size=5)
         msg = _user_msg_with_parts(("text", "Describe"), ("image", "http://img.png"))
         chat.add_item(msg)
-        result = chat.to_response_api_chat()
+        result = chat.to_responses_api_chat()
         content = result[0]["content"]
         assert len(content) == 2
         assert content[0]["type"] == "input_text"
@@ -527,7 +527,7 @@ class TestToResponseApiChat:
         msg = make_assistant_message("Hello there.")
         msg.status = "completed"
         chat.add_item(msg)
-        result = chat.to_response_api_chat()
+        result = chat.to_responses_api_chat()
         assert len(result) == 1
         assert result[0]["role"] == "assistant"
         assert result[0]["id"] == msg.id
@@ -538,7 +538,7 @@ class TestToResponseApiChat:
         chat = Chat(size=5)
         msg = make_assistant_message("hi")
         chat.add_item(msg)
-        result = chat.to_response_api_chat()
+        result = chat.to_responses_api_chat()
         assert result[0]["status"] == "completed"
 
     def test_function_call_with_id_and_status(self):
@@ -547,7 +547,7 @@ class TestToResponseApiChat:
         chat.add_item(fc)
         fco = _fco("c1", '{"result": 1}', status="completed")
         chat.add_item(fco)
-        result = chat.to_response_api_chat()
+        result = chat.to_responses_api_chat()
         entry = result[0]
         assert entry["type"] == "function_call"
         assert entry["call_id"] == "call_c1"
@@ -562,7 +562,7 @@ class TestToResponseApiChat:
         chat.add_item(fc)
         fco = _fco("c2")
         chat.add_item(fco)
-        result = chat.to_response_api_chat()
+        result = chat.to_responses_api_chat()
         entry = result[0]
         assert entry["call_id"] == "call_c2"
         assert entry["id"] == fc.id
@@ -573,7 +573,7 @@ class TestToResponseApiChat:
         fco = _fco("c1", '{"result": 42}')
         fco.status = "completed"
         chat.add_item(fco)
-        result = chat.to_response_api_chat()
+        result = chat.to_responses_api_chat()
         entry = result[-1]
         assert entry["type"] == "function_call_output"
         assert entry["call_id"] == "call_c1"
@@ -586,7 +586,7 @@ class TestToResponseApiChat:
         chat.add_item(_fc("c1"))
         fco = _fco("c1")
         chat.add_item(fco)
-        result = chat.to_response_api_chat()
+        result = chat.to_responses_api_chat()
         entry = result[-1]
         assert entry["id"] == fco.id
         assert "status" not in entry
@@ -600,7 +600,7 @@ class TestToResponseApiChat:
         chat.add_item(fco)
         chat.add_item(_assistant("Done."))
 
-        result = chat.to_response_api_chat()
+        result = chat.to_responses_api_chat()
         assert len(result) == 5
         assert result[0]["role"] == "system"
         assert result[1]["role"] == "user"
