@@ -78,7 +78,9 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self._extra_body = (
             {"chat_template_kwargs": {"enable_thinking": False}}
-            if disable_thinking and base_url is not None  # Only for other than OpenAI Official Server
+            if disable_thinking
+            and base_url is not None
+            and base_url != "https://api.openai.com/v1"  # Only for other than OpenAI Official Server
             else None
         )
         self.warmup()
