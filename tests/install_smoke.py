@@ -25,7 +25,7 @@ def _run_installed_cli_help() -> None:
         stderr=subprocess.STDOUT,
         text=True,
     )
-    expected_flags = ("--mode", "--stt", "--llm", "--tts")
+    expected_flags = ("--mode", "--stt", "--llm_backend", "--tts")
     missing_flags = [flag for flag in expected_flags if flag not in result.stdout]
     if missing_flags:
         raise RuntimeError(f"Installed CLI help is missing expected flags: {', '.join(missing_flags)}")
@@ -47,11 +47,11 @@ def _validate_package_defaults() -> None:
 
     assert module_args.mode == "realtime"
     assert module_args.stt == "parakeet-tdt"
-    assert module_args.llm == "open_api"
+    assert module_args.llm_backend == "openai-api"
     assert module_args.tts == "qwen3"
     assert module_args.log_level == "info"
     assert module_args.enable_live_transcription is True
-    assert open_api_args.open_api_model_name == "gpt-5.4-mini"
+    assert open_api_args.model_name == "gpt-5.4-mini"
     assert open_api_args.open_api_stream is True
     assert qwen3_args.qwen3_tts_model_name == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     assert qwen3_args.qwen3_tts_speaker == "Aiden"
@@ -73,7 +73,7 @@ def _validate_empty_qwen_ref_audio_arg() -> None:
     original_argv = sys.argv[:]
     try:
         sys.argv = ["speech-to-speech", "--qwen3_tts_ref_audio="]
-        *_, qwen3_args = parse_arguments()
+        qwen3_args = parse_arguments().qwen3_tts_handler_kwargs
     finally:
         sys.argv = original_argv
 

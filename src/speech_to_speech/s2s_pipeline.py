@@ -1,8 +1,11 @@
+import argparse
+import json
 import logging
 import os
 import signal
 import sys
 from copy import copy
+from dataclasses import dataclass
 from pathlib import Path
 from queue import Queue
 from sys import platform
@@ -78,6 +81,27 @@ logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.WARNING)  # quiet down numba logs
 
 
+@dataclass
+class ParsedArguments:
+    module_kwargs: ModuleArguments
+    socket_receiver_kwargs: SocketReceiverArguments
+    socket_sender_kwargs: SocketSenderArguments
+    websocket_streamer_kwargs: WebSocketStreamerArguments
+    vad_handler_kwargs: VADHandlerArguments
+    whisper_stt_handler_kwargs: WhisperSTTHandlerArguments
+    paraformer_stt_handler_kwargs: ParaformerSTTHandlerArguments
+    faster_whisper_stt_handler_kwargs: FasterWhisperSTTHandlerArguments
+    mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments
+    parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments
+    language_model_handler_kwargs: LanguageModelHandlerArguments
+    open_api_language_model_handler_kwargs: OpenApiLanguageModelHandlerArguments
+    chat_tts_handler_kwargs: ChatTTSHandlerArguments
+    facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments
+    pocket_tts_handler_kwargs: PocketTTSHandlerArguments
+    kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments
+    qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments
+
+
 def rename_args(args: Any, prefix: str) -> None:
     """
     Rename arguments by removing the prefix and prepares the gen_kwargs.
@@ -95,7 +119,22 @@ def rename_args(args: Any, prefix: str) -> None:
     args.__dict__["gen_kwargs"] = gen_kwargs
 
 
-def parse_arguments() -> tuple[Any, ...]:
+def parse_arguments() -> ParsedArguments:
+    # Pre-parse to determine which LM backend is selected, so only one of the two
+    # mutually exclusive LM argument classes is registered with HfArgumentParser
+    # (avoids duplicate field names from the shared LanguageModelBaseArguments base).
+    _is_json = len(sys.argv) == 2 and sys.argv[1].endswith(".json")
+    if _is_json:
+        with open(sys.argv[1]) as _f:
+            _use_openai_api = json.load(_f).get("llm_backend") == "openai-api"
+    else:
+        _pre = argparse.ArgumentParser(add_help=False)
+        _pre.add_argument("--llm_backend", default="openai-api")
+        _use_openai_api = _pre.parse_known_args()[0].llm_backend == "openai-api"
+
+    _lm_class = OpenApiLanguageModelHandlerArguments if _use_openai_api else LanguageModelHandlerArguments
+    logger.debug("LLM backend pre-parse: use_openai_api=%s, registering %s", _use_openai_api, _lm_class.__name__)
+
     parser = HfArgumentParser(
         (  # type: ignore[arg-type]
             ModuleArguments,
@@ -108,8 +147,7 @@ def parse_arguments() -> tuple[Any, ...]:
             FasterWhisperSTTHandlerArguments,
             MLXAudioWhisperSTTHandlerArguments,
             ParakeetTDTSTTHandlerArguments,
-            LanguageModelHandlerArguments,
-            OpenApiLanguageModelHandlerArguments,
+            _lm_class,
             ChatTTSHandlerArguments,
             FacebookMMSTTSHandlerArguments,
             PocketTTSHandlerArguments,
@@ -118,12 +156,36 @@ def parse_arguments() -> tuple[Any, ...]:
         )
     )
 
-    if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
-        # Parse configurations from a JSON file if specified
-        return parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+    if _is_json:
+        parsed = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]), allow_extra_keys=True)
     else:
-        # Parse arguments from command line if no JSON file is provided
-        return parser.parse_args_into_dataclasses()
+        parsed = parser.parse_args_into_dataclasses()
+
+    # Build a {type: instance} lookup so field assignment is order-independent.
+    by_type: dict[type, Any] = {type(obj): obj for obj in parsed}
+    logger.debug("Parsed %d argument classes: %s", len(by_type), [t.__name__ for t in by_type])
+
+    return ParsedArguments(
+        module_kwargs=by_type[ModuleArguments],
+        socket_receiver_kwargs=by_type[SocketReceiverArguments],
+        socket_sender_kwargs=by_type[SocketSenderArguments],
+        websocket_streamer_kwargs=by_type[WebSocketStreamerArguments],
+        vad_handler_kwargs=by_type[VADHandlerArguments],
+        whisper_stt_handler_kwargs=by_type[WhisperSTTHandlerArguments],
+        paraformer_stt_handler_kwargs=by_type[ParaformerSTTHandlerArguments],
+        faster_whisper_stt_handler_kwargs=by_type[FasterWhisperSTTHandlerArguments],
+        mlx_audio_whisper_stt_handler_kwargs=by_type[MLXAudioWhisperSTTHandlerArguments],
+        parakeet_tdt_stt_handler_kwargs=by_type[ParakeetTDTSTTHandlerArguments],
+        language_model_handler_kwargs=by_type.get(LanguageModelHandlerArguments, LanguageModelHandlerArguments()),
+        open_api_language_model_handler_kwargs=by_type.get(
+            OpenApiLanguageModelHandlerArguments, OpenApiLanguageModelHandlerArguments()
+        ),
+        chat_tts_handler_kwargs=by_type[ChatTTSHandlerArguments],
+        facebook_mms_tts_handler_kwargs=by_type[FacebookMMSTTSHandlerArguments],
+        pocket_tts_handler_kwargs=by_type[PocketTTSHandlerArguments],
+        kokoro_tts_handler_kwargs=by_type[KokoroTTSHandlerArguments],
+        qwen3_tts_handler_kwargs=by_type[Qwen3TTSHandlerArguments],
+    )
 
 
 def setup_logger(log_level: str) -> None:
@@ -152,22 +214,22 @@ def optimal_mac_settings(mac_optimal_settings: bool, *handler_kwargs: Any) -> No
                 kwargs.mode = "local"
             if hasattr(kwargs, "stt"):
                 kwargs.stt = "parakeet-tdt"
-            if hasattr(kwargs, "llm"):
-                kwargs.llm = "mlx-lm"
+            if hasattr(kwargs, "llm_backend"):
+                kwargs.llm_backend = "mlx-lm"
             if hasattr(kwargs, "tts"):
                 kwargs.tts = "qwen3"
-            if hasattr(kwargs, "lm_model_name"):
-                if kwargs.lm_model_name == TRANSFORMERS_DEFAULT_LM_MODEL:
-                    kwargs.lm_model_name = MLX_DEFAULT_LM_MODEL
+            if hasattr(kwargs, "model_name"):
+                if kwargs.model_name == TRANSFORMERS_DEFAULT_LM_MODEL:
+                    kwargs.model_name = MLX_DEFAULT_LM_MODEL
 
 
 def check_mac_settings(module_kwargs: ModuleArguments) -> None:
     if platform == "darwin":
         if module_kwargs.device == "cuda":
             raise ValueError("Cannot use CUDA on macOS. Please set the device to 'cpu' or 'mps'.")
-        if module_kwargs.llm != "mlx-lm":
+        if module_kwargs.llm_backend != "mlx-lm":
             logger.warning(
-                "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm mlx-lm."
+                "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm_backend mlx-lm."
             )
         if module_kwargs.tts not in ("pocket", "kokoro", "qwen3"):
             logger.warning(
@@ -178,8 +240,8 @@ def check_mac_settings(module_kwargs: ModuleArguments) -> None:
 def overwrite_device_argument(common_device: Optional[str], *handler_kwargs: Any) -> None:
     if common_device:
         for kwargs in handler_kwargs:
-            if hasattr(kwargs, "lm_device"):
-                kwargs.lm_device = common_device
+            if hasattr(kwargs, "llm_device"):
+                kwargs.llm_device = common_device
             if hasattr(kwargs, "tts_device"):
                 kwargs.tts_device = common_device
             if hasattr(kwargs, "stt_device"):
@@ -237,7 +299,7 @@ def prepare_all_args(
     rename_args(paraformer_stt_handler_kwargs, "paraformer_stt")
     rename_args(mlx_audio_whisper_stt_handler_kwargs, "mlx_audio_whisper")
     rename_args(parakeet_tdt_stt_handler_kwargs, "parakeet_tdt")
-    rename_args(language_model_handler_kwargs, "lm")
+    rename_args(language_model_handler_kwargs, "llm")
     rename_args(open_api_language_model_handler_kwargs, "open_api")
     rename_args(chat_tts_handler_kwargs, "chat_tts")
     rename_args(facebook_mms_tts_handler_kwargs, "facebook_mms")
@@ -341,7 +403,7 @@ def build_pipeline(
         ):
             vars(kw)["cancel_scope"] = cancel_scope
 
-        if module_kwargs.llm == "open_api":
+        if module_kwargs.llm_backend == "openai-api":
             chat_size = vars(open_api_language_model_handler_kwargs).get("chat_size", 10)
         else:
             chat_size = vars(language_model_handler_kwargs).get("chat_size", 10)
@@ -400,13 +462,13 @@ def build_pipeline(
         "should_listen": should_listen,
     }
     if module_kwargs.mode != "realtime":
-        if module_kwargs.llm == "open_api":
+        if module_kwargs.llm_backend == "openai-api":
             _lm_vars = vars(open_api_language_model_handler_kwargs)
             transcription_notifier_kwargs["runtime_config"] = RuntimeConfig(
-                chat=Chat(_lm_vars.get("open_api_chat_size", 30)),
+                chat=Chat(_lm_vars.get("chat_size", 30)),
                 session=RealtimeSessionCreateRequest(
                     type="realtime",
-                    instructions=_lm_vars.get("open_api_init_chat_prompt"),
+                    instructions=_lm_vars.get("init_chat_prompt"),
                 ),
             )
         else:
@@ -564,7 +626,7 @@ def get_llm_handler(
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     open_api_language_model_handler_kwargs: OpenApiLanguageModelHandlerArguments,
 ) -> BaseHandler[LLMIn, LLMOut]:
-    if module_kwargs.llm == "open_api":
+    if module_kwargs.llm_backend == "openai-api":
         from speech_to_speech.LLM.openai_api_language_model import OpenApiModelHandler
 
         return OpenApiModelHandler(
@@ -574,10 +636,10 @@ def get_llm_handler(
             setup_kwargs=vars(open_api_language_model_handler_kwargs),
         )
 
-    if module_kwargs.llm in ("transformers", "mlx-lm"):
+    if module_kwargs.llm_backend in ("transformers", "mlx-lm"):
         lm_kwargs = vars(language_model_handler_kwargs)
         is_vlm = lm_kwargs.pop("is_vlm", False)
-        if module_kwargs.llm == "mlx-lm":
+        if module_kwargs.llm_backend == "mlx-lm":
             lm_kwargs["backend"] = "mlx"
 
         if is_vlm:
@@ -679,64 +741,46 @@ def get_tts_handler(
 
 
 def main() -> None:
-    (
-        module_kwargs,
-        socket_receiver_kwargs,
-        socket_sender_kwargs,
-        websocket_streamer_kwargs,
-        vad_handler_kwargs,
-        whisper_stt_handler_kwargs,
-        paraformer_stt_handler_kwargs,
-        faster_whisper_stt_handler_kwargs,
-        mlx_audio_whisper_stt_handler_kwargs,
-        parakeet_tdt_stt_handler_kwargs,
-        language_model_handler_kwargs,
-        open_api_language_model_handler_kwargs,
-        chat_tts_handler_kwargs,
-        facebook_mms_tts_handler_kwargs,
-        pocket_tts_handler_kwargs,
-        kokoro_tts_handler_kwargs,
-        qwen3_tts_handler_kwargs,
-    ) = parse_arguments()
+    args = parse_arguments()
 
-    setup_logger(module_kwargs.log_level)
+    setup_logger(args.module_kwargs.log_level)
 
     prepare_all_args(
-        module_kwargs,
-        whisper_stt_handler_kwargs,
-        paraformer_stt_handler_kwargs,
-        faster_whisper_stt_handler_kwargs,
-        mlx_audio_whisper_stt_handler_kwargs,
-        parakeet_tdt_stt_handler_kwargs,
-        language_model_handler_kwargs,
-        open_api_language_model_handler_kwargs,
-        chat_tts_handler_kwargs,
-        facebook_mms_tts_handler_kwargs,
-        pocket_tts_handler_kwargs,
-        kokoro_tts_handler_kwargs,
-        qwen3_tts_handler_kwargs,
+        args.module_kwargs,
+        args.whisper_stt_handler_kwargs,
+        args.paraformer_stt_handler_kwargs,
+        args.faster_whisper_stt_handler_kwargs,
+        args.mlx_audio_whisper_stt_handler_kwargs,
+        args.parakeet_tdt_stt_handler_kwargs,
+        args.language_model_handler_kwargs,
+        args.open_api_language_model_handler_kwargs,
+        args.chat_tts_handler_kwargs,
+        args.facebook_mms_tts_handler_kwargs,
+        args.pocket_tts_handler_kwargs,
+        args.kokoro_tts_handler_kwargs,
+        args.qwen3_tts_handler_kwargs,
     )
 
     queues_and_events = initialize_queues_and_events()
 
     pipeline_manager = build_pipeline(
-        module_kwargs,
-        socket_receiver_kwargs,
-        socket_sender_kwargs,
-        websocket_streamer_kwargs,
-        vad_handler_kwargs,
-        whisper_stt_handler_kwargs,
-        faster_whisper_stt_handler_kwargs,
-        paraformer_stt_handler_kwargs,
-        mlx_audio_whisper_stt_handler_kwargs,
-        parakeet_tdt_stt_handler_kwargs,
-        language_model_handler_kwargs,
-        open_api_language_model_handler_kwargs,
-        chat_tts_handler_kwargs,
-        facebook_mms_tts_handler_kwargs,
-        pocket_tts_handler_kwargs,
-        kokoro_tts_handler_kwargs,
-        qwen3_tts_handler_kwargs,
+        args.module_kwargs,
+        args.socket_receiver_kwargs,
+        args.socket_sender_kwargs,
+        args.websocket_streamer_kwargs,
+        args.vad_handler_kwargs,
+        args.whisper_stt_handler_kwargs,
+        args.faster_whisper_stt_handler_kwargs,
+        args.paraformer_stt_handler_kwargs,
+        args.mlx_audio_whisper_stt_handler_kwargs,
+        args.parakeet_tdt_stt_handler_kwargs,
+        args.language_model_handler_kwargs,
+        args.open_api_language_model_handler_kwargs,
+        args.chat_tts_handler_kwargs,
+        args.facebook_mms_tts_handler_kwargs,
+        args.pocket_tts_handler_kwargs,
+        args.kokoro_tts_handler_kwargs,
+        args.qwen3_tts_handler_kwargs,
         queues_and_events,
     )
 

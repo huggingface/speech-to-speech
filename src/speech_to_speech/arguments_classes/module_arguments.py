@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Literal, Optional
 
 
 @dataclass
@@ -8,7 +8,7 @@ class ModuleArguments:
         default=None,
         metadata={"help": "If specified, overrides the device for all handlers."},
     )
-    mode: Optional[str] = field(
+    mode: Optional[Literal["local", "socket", "websocket", "realtime"]] = field(
         default="realtime",
         metadata={
             "help": "The mode to run the pipeline in. Either 'local', 'socket', 'websocket', or 'realtime'. Default is 'realtime'."
@@ -20,17 +20,21 @@ class ModuleArguments:
             "help": "If specified, sets the optimal settings for Mac OS. Sets Parakeet TDT for STT, MLX LM for language model, and Qwen3-TTS for TTS, with MPS device and local mode."
         },
     )
-    stt: Optional[str] = field(
+    stt: Optional[
+        Literal["whisper", "whisper-mlx", "mlx-audio-whisper", "faster-whisper", "parakeet-tdt", "paraformer"]
+    ] = field(
         default="parakeet-tdt",
         metadata={
             "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', 'parakeet-tdt', or 'paraformer'. Default is 'parakeet-tdt'."
         },
     )
-    llm: Optional[str] = field(
-        default="open_api",
-        metadata={"help": "The LLM to use. Either 'transformers', 'mlx-lm', or 'open_api'. Default is 'open_api'"},
+    llm_backend: Optional[Literal["transformers", "mlx-lm", "openai-api"]] = field(
+        default="openai-api",
+        metadata={
+            "help": "The LLM backend to use. Either 'transformers', 'mlx-lm', or 'openai-api'. Default is 'openai-api'."
+        },
     )
-    tts: Optional[str] = field(
+    tts: Optional[Literal["melo", "chatTTS", "facebookMMS", "pocket", "kokoro", "qwen3"]] = field(
         default="qwen3",
         metadata={
             "help": "The TTS to use. Either 'chatTTS', 'facebookMMS', 'pocket', 'kokoro', or 'qwen3'. Default is 'qwen3'."
