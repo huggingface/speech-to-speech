@@ -144,6 +144,7 @@ def _validate_darwin_dependency_pins() -> None:
 def main() -> None:
     required_modules = [
         "fastapi",
+        "lingua",
         "openai",
         "PIL",
         "scipy",
