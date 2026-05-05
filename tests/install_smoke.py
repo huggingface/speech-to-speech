@@ -34,25 +34,25 @@ def _run_installed_cli_help() -> None:
 def _validate_package_defaults() -> None:
     import speech_to_speech
     from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
-    from speech_to_speech.arguments_classes.open_api_language_model_arguments import (
-        OpenApiLanguageModelHandlerArguments,
-    )
     from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
+    from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
+        ResponsesApiLanguageModelHandlerArguments,
+    )
     from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 
     module_args = ModuleArguments()
-    open_api_args = OpenApiLanguageModelHandlerArguments()
+    responses_api_args = ResponsesApiLanguageModelHandlerArguments()
     qwen3_args = Qwen3TTSHandlerArguments()
     vad_args = VADHandlerArguments()
 
     assert module_args.mode == "realtime"
     assert module_args.stt == "parakeet-tdt"
-    assert module_args.llm_backend == "openai-api"
+    assert module_args.llm_backend == "responses-api"
     assert module_args.tts == "qwen3"
     assert module_args.log_level == "info"
     assert module_args.enable_live_transcription is True
-    assert open_api_args.model_name == "gpt-5.4-mini"
-    assert open_api_args.open_api_stream is True
+    assert responses_api_args.model_name == "gpt-5.4-mini"
+    assert responses_api_args.responses_api_stream is True
     assert qwen3_args.qwen3_tts_model_name == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     assert qwen3_args.qwen3_tts_speaker == "Aiden"
     assert qwen3_args.qwen3_tts_language == "auto"
@@ -103,7 +103,7 @@ def _validate_pipeline_startup_primitives() -> None:
 
 def _validate_default_handler_imports() -> None:
     default_handler_modules = [
-        "speech_to_speech.LLM.openai_api_language_model",
+        "speech_to_speech.LLM.responses_api_language_model",
         "speech_to_speech.STT.parakeet_tdt_handler",
         "speech_to_speech.TTS.qwen3_tts_handler",
         "speech_to_speech.VAD.vad_handler",
