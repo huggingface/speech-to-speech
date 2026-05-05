@@ -197,6 +197,18 @@ class Chat:
             return True
         return False
 
+    def remove_user_message(self, item_id: str) -> bool:
+        """Remove an existing user message from the bounded chat buffer."""
+
+        for index, item in enumerate(self.buffer):
+            if not isinstance(item, RealtimeConversationItemUserMessage) or item.id != item_id:
+                continue
+            del self.buffer[index]
+            self._user_turn_count -= 1
+            logger.debug("Removed speculative user message %s", item_id)
+            return True
+        return False
+
     def to_responses_api_chat(self) -> ResponseInputParam:
         """Serialize the full chat (system prompt + buffer) for the OpenAI Responses API."""
         result: list[ResponseInputItemParam] = []

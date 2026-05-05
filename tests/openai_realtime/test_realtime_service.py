@@ -874,6 +874,99 @@ class TestDispatchPipelineEvent:
         assert service._state(conn_id).response_usage.audio_duration_s == 2.0
         service.unregister(conn_id)
 
+    def test_empty_revised_transcription_removes_speculative_user_message(self, runtime_config, should_listen):
+        text_prompt_queue = Queue()
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(
+            text_prompt_queue=text_prompt_queue,
+            should_listen=should_listen,
+            speculative_turns=tracker,
+        )
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=1.0, turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="hello", turn_id="turn_1", turn_revision=0),
+        )
+
+        tracker.observe("turn_1", 1)
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=2.0, turn_id="turn_1", turn_revision=1),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="", turn_id="turn_1", turn_revision=1),
+        )
+
+        user_items = [item for item in runtime_config.chat.buffer if getattr(item, "role", None) == "user"]
+        assert user_items == []
+        first_req = text_prompt_queue.get_nowait()
+        assert first_req.turn_revision == 0
+        assert text_prompt_queue.empty()
+        assert service._state(conn_id).response_usage.audio_duration_s == 2.0
+        service.unregister(conn_id)
+
+    def test_empty_first_revision_tracks_audio_for_later_nonempty_reopen(self, runtime_config, should_listen):
+        text_prompt_queue = Queue()
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(
+            text_prompt_queue=text_prompt_queue,
+            should_listen=should_listen,
+            speculative_turns=tracker,
+        )
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=1.0, turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="", turn_id="turn_1", turn_revision=0),
+        )
+
+        tracker.observe("turn_1", 1)
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=2.0, turn_id="turn_1", turn_revision=1),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="hello again", turn_id="turn_1", turn_revision=1),
+        )
+
+        user_items = [item for item in runtime_config.chat.buffer if getattr(item, "role", None) == "user"]
+        assert len(user_items) == 1
+        assert user_items[0].content[0].text == "hello again"
+        req = text_prompt_queue.get_nowait()
+        assert req.turn_revision == 1
+        assert text_prompt_queue.empty()
+        assert service._state(conn_id).response_usage.audio_duration_s == 2.0
+        service.unregister(conn_id)
+
     def test_stale_transcription_revision_is_ignored(self, runtime_config, should_listen):
         text_prompt_queue = Queue()
         tracker = SpeculativeTurnTracker()

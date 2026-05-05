@@ -330,7 +330,8 @@ class RealtimeService:
     def _on_transcription_completed(self, conn_id: str, event: TranscriptionCompletedEvent) -> list[ServerEvent]:
         """Handle a final STT transcription: emit protocol event, append to chat, trigger LM."""
         st = self._state(conn_id)
-        if event.turn_id is not None and event.turn_id == st.speculative_user_turn_id:
+        same_speculative_turn = event.turn_id is not None and event.turn_id == st.speculative_user_turn_id
+        if same_speculative_turn:
             st.response_usage.audio_duration_s -= st.speculative_audio_duration_s
         else:
             st.speculative_audio_duration_s = 0.0
@@ -342,7 +343,6 @@ class RealtimeService:
         cfg = st.runtime_config
         transcript = event.transcript
         if transcript:
-            same_speculative_turn = event.turn_id is not None and event.turn_id == st.speculative_user_turn_id
             if same_speculative_turn and st.speculative_user_item_id:
                 replaced = cfg.chat.replace_user_message_text(st.speculative_user_item_id, transcript)
                 if not replaced:
@@ -351,6 +351,13 @@ class RealtimeService:
             else:
                 item = cfg.chat.add_item(make_user_message(transcript))
                 st.speculative_user_item_id = item.id
+        elif same_speculative_turn and st.speculative_user_item_id:
+            cfg.chat.remove_user_message(st.speculative_user_item_id)
+            st.speculative_user_item_id = None
+        elif event.turn_id is not None and event.turn_id != st.speculative_user_turn_id:
+            st.speculative_user_item_id = None
+
+        if event.turn_id is not None:
             st.speculative_user_turn_id = event.turn_id
             st.speculative_user_turn_revision = event.turn_revision
 

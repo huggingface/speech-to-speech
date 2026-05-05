@@ -74,6 +74,17 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
             return
 
         if isinstance(lm_output, EndOfResponse):
+            speculative_turns = getattr(self, "speculative_turns", None)
+            if speculative_turns and not speculative_turns.is_latest(
+                lm_output.turn_id,
+                lm_output.turn_revision,
+            ):
+                logger.debug(
+                    "Dropping stale end-of-response for turn=%s rev=%s",
+                    lm_output.turn_id,
+                    lm_output.turn_revision,
+                )
+                return
             yield EndOfResponse(turn_id=lm_output.turn_id, turn_revision=lm_output.turn_revision)
             return
 

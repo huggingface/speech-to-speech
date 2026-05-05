@@ -14,10 +14,15 @@ import pytest
 from starlette.testclient import TestClient
 
 from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService
-from speech_to_speech.api.openai_realtime.websocket_router import create_app
+from speech_to_speech.api.openai_realtime.websocket_router import _keep_user_text_event, create_app
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, is_control_message
-from speech_to_speech.pipeline.events import AssistantTextEvent, SpeechStartedEvent
+from speech_to_speech.pipeline.events import (
+    AssistantTextEvent,
+    PartialTranscriptionEvent,
+    SpeechStartedEvent,
+    TranscriptionCompletedEvent,
+)
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 
 # ---------------------------------------------------------------------------
@@ -244,6 +249,11 @@ class TestClientEventDispatch:
 
 
 class TestSendLoop:
+    def test_cancel_flush_preserves_pending_user_transcription_events(self):
+        assert _keep_user_text_event(TranscriptionCompletedEvent(transcript="hello"))
+        assert _keep_user_text_event(PartialTranscriptionEvent(delta="hel"))
+        assert not _keep_user_text_event(AssistantTextEvent(text="stale"))
+
     def test_audio_output_ignores_session_end_control_message(self, setup):
         app, _, _, output_queue, *_ = setup
         with TestClient(app) as client:

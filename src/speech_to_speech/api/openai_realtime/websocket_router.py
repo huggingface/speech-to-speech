@@ -22,10 +22,12 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
+    PartialTranscriptionEvent,
     PipelineEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TokenUsageEvent,
+    TranscriptionCompletedEvent,
 )
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 from speech_to_speech.pipeline.queue_types import AudioInItem, AudioOutItem, TextEventItem
@@ -52,7 +54,10 @@ def _keep_audio_sentinel(item: Any) -> bool:
 
 
 def _keep_user_text_event(item: Any) -> bool:
-    return isinstance(item, (SpeechStoppedEvent, TokenUsageEvent))
+    return isinstance(
+        item,
+        (SpeechStoppedEvent, PartialTranscriptionEvent, TranscriptionCompletedEvent, TokenUsageEvent),
+    )
 
 
 def create_app(
@@ -100,6 +105,15 @@ def create_app(
         if cancel_scope:
             cancel_scope.reset()
         should_listen.set()
+
+    def _is_latest_turn_event(item: Any) -> bool:
+        if service.speculative_turns is None or not isinstance(item, PipelineEvent):
+            return False
+        turn_id = getattr(item, "turn_id", None)
+        turn_revision = getattr(item, "turn_revision", None)
+        if turn_id is None or turn_revision is None:
+            return False
+        return service.speculative_turns.is_latest(turn_id, turn_revision)
 
     def _to_audio_bytes(chunk: AudioOutItem) -> bytes:
         if isinstance(chunk, PipelineControlMessage):
@@ -242,9 +256,14 @@ def create_app(
                         if is_speech_start and app.state.active_session:
                             was_in_response = service._state(app.state.active_session).in_response
 
+                        drop_text_msg = False
                         if cancel_scope and cancel_scope.discarding and isinstance(text_msg, AssistantTextEvent):
-                            pass
-                        else:
+                            if _is_latest_turn_event(text_msg):
+                                cancel_scope.response_done()
+                            else:
+                                drop_text_msg = True
+
+                        if not drop_text_msg:
                             for cid in service.connection_ids:
                                 ws = app.state.websockets.get(cid)
                                 if ws and isinstance(text_msg, PipelineEvent):
