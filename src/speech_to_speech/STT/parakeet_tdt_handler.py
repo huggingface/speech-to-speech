@@ -309,6 +309,13 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
 
         yield Transcription(text=pred_text, language_code=language_code)
 
+    @property
+    def timing_log_level(self) -> int:
+        return logging.INFO
+
+    def should_log_timing(self, output: STTOut) -> bool:
+        return isinstance(output, Transcription) and self.last_time > self.min_time_to_debug
+
     def _detect_language_from_text(self, text: str) -> Optional[str]:
         """
         Detect language from transcribed text using lingua-py.

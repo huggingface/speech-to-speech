@@ -1,3 +1,4 @@
+import logging
 from queue import Queue
 from threading import Event
 
@@ -56,6 +57,16 @@ def test_non_empty_final_transcription_still_triggers_legacy_generation():
     assert result[0].runtime_config is runtime_config
     assert result[0].language_code == "en"
     assert not should_listen.is_set()
+
+
+def test_non_empty_final_transcription_logs_full_text_at_info(caplog):
+    notifier = _notifier()
+    transcript = "hello " * 30
+
+    with caplog.at_level(logging.INFO, logger="speech_to_speech.STT.transcription_notifier"):
+        assert list(notifier.process(Transcription(text=transcript, language_code="en"))) == []
+
+    assert "Transcription completed (language=en): " + transcript in caplog.text
 
 
 def test_empty_final_transcription_reenables_listening_without_runtime_config():

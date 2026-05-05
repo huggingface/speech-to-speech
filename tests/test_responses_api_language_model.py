@@ -1,3 +1,4 @@
+import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -15,7 +16,7 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.messages import EndOfResponse, GenerateResponseRequest, LLMResponseChunk
+from speech_to_speech.pipeline.messages import EndOfResponse, GenerateResponseRequest, LLMResponseChunk, TokenUsage
 
 
 def _make_text_delta_event(text):
@@ -124,6 +125,16 @@ def test_process_handles_cancellation():
 
     assert len(outputs) == 1
     assert isinstance(outputs[0], EndOfResponse)
+
+
+def test_responses_api_timing_logs_only_text_chunks():
+    handler = object.__new__(ResponsesApiModelHandler)
+    handler._times = [0.01]
+
+    assert handler.timing_log_level == logging.INFO
+    assert handler.should_log_timing(LLMResponseChunk(text="Hello."))
+    assert not handler.should_log_timing(TokenUsage(input_tokens=1, output_tokens=1))
+    assert not handler.should_log_timing(EndOfResponse())
 
 
 def test_process_read_timeout_ends_response_cleanly():
