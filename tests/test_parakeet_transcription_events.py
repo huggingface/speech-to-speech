@@ -1,3 +1,4 @@
+import logging
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -65,6 +66,15 @@ def test_process_yields_final_transcript(monkeypatch):
     assert isinstance(result[0], Transcription)
     assert result[0].text == "I am here."
     assert result[0].language_code == "en"
+
+
+def test_parakeet_timing_logs_only_final_transcriptions():
+    handler = object.__new__(ParakeetTDTSTTHandler)
+    handler._times = [0.01]
+
+    assert handler.timing_log_level == logging.INFO
+    assert handler.should_log_timing(Transcription(text="I am here.", language_code="en"))
+    assert not handler.should_log_timing(PartialTranscription(text="I am"))
 
 
 def test_final_transcription_resets_live_streaming_state(monkeypatch):

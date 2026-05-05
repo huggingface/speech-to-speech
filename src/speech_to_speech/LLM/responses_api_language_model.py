@@ -313,3 +313,10 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
 
     def on_session_end(self) -> None:
         logger.debug("OpenAI API language model session state reset")
+
+    @property
+    def timing_log_level(self) -> int:
+        return logging.INFO
+
+    def should_log_timing(self, output: LLMOut) -> bool:
+        return isinstance(output, LLMResponseChunk) and self.last_time > self.min_time_to_debug

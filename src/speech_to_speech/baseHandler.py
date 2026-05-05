@@ -81,8 +81,8 @@ class BaseHandler(Generic[InT, OutT]):
             try:
                 for output in self.process(cast(InT, item)):
                     self._times.append(perf_counter() - start_time)
-                    if self.last_time > self.min_time_to_debug:
-                        logger.debug(f"{self.__class__.__name__}: {self.last_time: .3f} s")
+                    if self.should_log_timing(output):
+                        logger.log(self.timing_log_level, "%s: %.3f s", self.__class__.__name__, self.last_time)
                     self.queue_out.put(output)
                     start_time = perf_counter()
             except Exception as e:
@@ -98,6 +98,13 @@ class BaseHandler(Generic[InT, OutT]):
     @property
     def min_time_to_debug(self) -> float:
         return 0.001
+
+    @property
+    def timing_log_level(self) -> int:
+        return logging.DEBUG
+
+    def should_log_timing(self, output: OutT) -> bool:
+        return self.last_time > self.min_time_to_debug
 
     def cleanup(self) -> None:
         pass

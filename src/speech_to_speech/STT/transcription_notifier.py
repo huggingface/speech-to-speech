@@ -67,7 +67,10 @@ class TranscriptionNotifier(BaseHandler[STTOut, Union[STTOut, LLMIn]]):
                 logger.debug("Empty transcription completed; listening re-enabled")
             return
 
-        logger.debug("Transcription completed: %s", transcript[:80])
+        if language_code:
+            logger.info("Transcription completed (language=%s): %s", language_code, transcript)
+        else:
+            logger.info("Transcription completed: %s", transcript)
 
         if self.runtime_config is not None:
             self.runtime_config.chat.add_item(make_user_message(str(text)))
