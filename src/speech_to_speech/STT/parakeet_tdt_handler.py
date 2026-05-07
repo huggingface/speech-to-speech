@@ -171,6 +171,7 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
             self.processing_final = False  # Track if we're processing final audio
             logger.info(f"Live transcription enabled for Parakeet TDT ({self.backend})")
         self._live_transcription_active = False
+        self._live_turn_key: tuple[str | None, int | None] | None = None
 
         self.warmup()
 
@@ -246,6 +247,8 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
         else:
             audio_input = audio_input.astype(np.float32)
 
+        self._prepare_live_transcription_turn(vad_audio.turn_id, vad_audio.turn_revision)
+
         # Handle progressive updates: yield tagged partial for TranscriptionNotifier
         if self.enable_live_transcription and is_progressive:
             # Ignore progressive updates if we're already processing final audio
@@ -311,8 +314,7 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
         # an utterance, and stale timing must not leak into the next turn.
         if self.enable_live_transcription:
             self.processing_final = False
-            if self.streaming_handler is not None:
-                self.streaming_handler.reset()
+            self._reset_live_transcription_state(clear_turn=True)
 
         yield Transcription(
             text=pred_text,
@@ -411,6 +413,23 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
         console.print("\r\033[2K", end="")
         self._live_transcription_active = False
 
+    def _prepare_live_transcription_turn(self, turn_id: str | None, turn_revision: int | None) -> None:
+        if not self.enable_live_transcription:
+            return
+        turn_key = (turn_id, turn_revision)
+        if getattr(self, "_live_turn_key", None) == turn_key:
+            return
+        self._reset_live_transcription_state(clear_turn=False)
+        self._live_turn_key = turn_key
+
+    def _reset_live_transcription_state(self, clear_turn: bool) -> None:
+        self._clear_live_transcription_line()
+        streaming_handler = getattr(self, "streaming_handler", None)
+        if streaming_handler is not None:
+            streaming_handler.reset()
+        if clear_turn:
+            self._live_turn_key = None
+
     def _build_progressive_text(self, result: ProgressiveStreamPartial) -> str:
         parts = []
         if result.fixed_text:
@@ -436,6 +455,14 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
             fixed_end_time = self.streaming_handler.fixed_end_time
             sample_rate = 16000
             fixed_end_sample = int(fixed_end_time * sample_rate)
+            if fixed_end_sample > len(audio_input):
+                logger.warning(
+                    "Ignoring stale progressive fixed text: fixed_end_sample=%d exceeds final audio samples=%d",
+                    fixed_end_sample,
+                    len(audio_input),
+                )
+                pred_text, language_code = self._process_mlx(audio_input)
+                return pred_text, language_code
 
             # Only transcribe the part after fixed sentences
             if fixed_end_sample < len(audio_input):
@@ -531,9 +558,7 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
 
     def on_session_end(self) -> None:
         self.last_language = self.start_language if self.start_language else "en"
-        self._clear_live_transcription_line()
         if self.enable_live_transcription:
             self.processing_final = False
-            if self.streaming_handler is not None:
-                self.streaming_handler.reset()
+            self._reset_live_transcription_state(clear_turn=True)
         logger.debug("Parakeet TDT session state reset")
