@@ -19,6 +19,7 @@ from openai.types.realtime import (
     RealtimeErrorEvent,
     ResponseAudioDeltaEvent,
     ResponseAudioDoneEvent,
+    ResponseAudioTranscriptDeltaEvent,
     ResponseAudioTranscriptDoneEvent,
     ResponseCancelEvent,
     ResponseCreatedEvent,
@@ -719,12 +720,14 @@ class TestDispatchPipelineEvent:
             conn_id,
             AssistantTextEvent(text="Hello there"),
         )
-        assert len(events) == 1
-        evt = events[0]
-        assert isinstance(evt, ResponseAudioTranscriptDoneEvent)
+        # Implicit path: response.created is emitted first, then transcript delta
+        assert len(events) == 2
+        assert isinstance(events[0], ResponseCreatedEvent)
+        evt = events[1]
+        assert isinstance(evt, ResponseAudioTranscriptDeltaEvent)
         assert evt.content_index == 0
         assert evt.output_index == 0
-        assert evt.transcript == "Hello there"
+        assert evt.delta == "Hello there"
 
     def test_assistant_text_with_tools(self, service, conn_id):
         events = service.dispatch_pipeline_event(
@@ -737,16 +740,19 @@ class TestDispatchPipelineEvent:
                 ],
             ),
         )
-        assert len(events) == 3
-        assert isinstance(events[0], ResponseAudioTranscriptDoneEvent)
-        assert events[0].output_index == 0
-        assert isinstance(events[1], ResponseFunctionCallArgumentsDoneEvent)
-        assert events[1].output_index == 1
-        assert events[1].name == "get_weather"
-        assert events[1].call_id == "c1"
-        assert json.loads(events[1].arguments) == {"city": "Paris"}
+        # Implicit path: response.created + transcript delta + 2 tool calls
+        assert len(events) == 4
+        assert isinstance(events[0], ResponseCreatedEvent)
+        assert isinstance(events[1], ResponseAudioTranscriptDeltaEvent)
+        assert events[1].output_index == 0
+        assert events[1].delta == "Let me check"
         assert isinstance(events[2], ResponseFunctionCallArgumentsDoneEvent)
-        assert events[2].output_index == 2
+        assert events[2].output_index == 1
+        assert events[2].name == "get_weather"
+        assert events[2].call_id == "c1"
+        assert json.loads(events[2].arguments) == {"city": "Paris"}
+        assert isinstance(events[3], ResponseFunctionCallArgumentsDoneEvent)
+        assert events[3].output_index == 2
 
     def test_assistant_text_tools_only(self, service, conn_id):
         events = service.dispatch_pipeline_event(
@@ -756,9 +762,11 @@ class TestDispatchPipelineEvent:
                 tools=[{"type": "function_call", "call_id": "c1", "name": "f1", "arguments": "{}"}],
             ),
         )
-        assert len(events) == 1
-        assert isinstance(events[0], ResponseFunctionCallArgumentsDoneEvent)
-        assert events[0].output_index == 0
+        # Implicit path: response.created emitted first, then the tool call
+        assert len(events) == 2
+        assert isinstance(events[0], ResponseCreatedEvent)
+        assert isinstance(events[1], ResponseFunctionCallArgumentsDoneEvent)
+        assert events[1].output_index == 0
 
     # -- partial_transcription --
 

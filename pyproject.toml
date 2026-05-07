@@ -88,6 +88,9 @@ paraformer = [
 pocket = [
     "pocket-tts>=0.1.0",
 ]
+webrtc = [
+    "aiortc>=1.9.0",
+]
 websocket = [
     "websockets>=12.0",
 ]
