@@ -18,6 +18,7 @@ from typing import Any, Iterator, Optional
 
 import numpy as np
 from rich.console import Console
+from rich.text import Text
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
@@ -169,6 +170,7 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
             )
             self.processing_final = False  # Track if we're processing final audio
             logger.info(f"Live transcription enabled for Parakeet TDT ({self.backend})")
+        self._live_transcription_active = False
 
         self.warmup()
 
@@ -298,6 +300,7 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
             language_code = self.last_language
 
         logger.debug("Finished Parakeet TDT inference")
+        self._clear_live_transcription_line()
         if pred_text.strip():
             console.print(f"[yellow]USER: {pred_text.strip()}")
             if language_code:
@@ -367,8 +370,6 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
 
     def _show_progressive_transcription(self, audio_input: np.ndarray) -> str:
         """Run progressive transcription, print to console, and return the text."""
-        from rich.text import Text
-
         result = self.streaming_handler.transcribe_incremental(audio_input)
         rich_text = Text()
         if result.fixed_text:
@@ -384,12 +385,31 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
 
         progressive_text = self._build_progressive_text(result)
         if progressive_text:
+            self._print_live_transcription(rich_text, progressive_text)
+
+        return progressive_text
+
+    def _print_live_transcription(self, rich_text: Text, progressive_text: str) -> None:
+        is_terminal = bool(getattr(console, "is_terminal", False))
+        if is_terminal:
+            console.print("\r\033[2K", end="")
             if rich_text:
                 console.print(rich_text, end="\r")
             else:
                 console.print(f"[dim]Live: [/dim]{progressive_text}", end="\r")
+            self._live_transcription_active = True
+            return
 
-        return progressive_text
+        if rich_text:
+            console.print(rich_text)
+        else:
+            console.print(f"[dim]Live: [/dim]{progressive_text}")
+
+    def _clear_live_transcription_line(self) -> None:
+        if not getattr(self, "_live_transcription_active", False):
+            return
+        console.print("\r\033[2K", end="")
+        self._live_transcription_active = False
 
     def _build_progressive_text(self, result: ProgressiveStreamPartial) -> str:
         parts = []
@@ -407,8 +427,7 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
             and hasattr(self.streaming_handler, "fixed_sentences")
             and self.streaming_handler.fixed_sentences
         ):
-            # Clear the live transcription line
-            console.print(" " * 100, end="\r")
+            self._clear_live_transcription_line()
 
             # Get fixed text from previous progressive updates
             fixed_text = " ".join(self.streaming_handler.fixed_sentences).strip()
@@ -512,6 +531,7 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
 
     def on_session_end(self) -> None:
         self.last_language = self.start_language if self.start_language else "en"
+        self._clear_live_transcription_line()
         if self.enable_live_transcription:
             self.processing_final = False
             if self.streaming_handler is not None:

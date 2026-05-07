@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 import numpy as np
+from rich.text import Text
 
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, VADAudio
 from speech_to_speech.STT import parakeet_tdt_handler
@@ -23,6 +24,50 @@ def test_show_progressive_transcription_returns_combined_text(monkeypatch):
     result = handler._show_progressive_transcription(np.zeros(16000, dtype=np.float32))
 
     assert result == "I just wanted to check in"
+
+
+def test_live_transcription_clears_terminal_line_before_each_update(monkeypatch):
+    calls = []
+
+    class FakeConsole:
+        is_terminal = True
+
+        def print(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    handler = object.__new__(ParakeetTDTSTTHandler)
+    handler._live_transcription_active = False
+    monkeypatch.setattr(parakeet_tdt_handler, "console", FakeConsole())
+
+    handler._print_live_transcription(Text("Live: first"), "first")
+    handler._print_live_transcription(Text("Live: second"), "second")
+    handler._clear_live_transcription_line()
+
+    assert calls[0] == (("\r\x1b[2K",), {"end": ""})
+    assert calls[1] == ((Text("Live: first"),), {"end": "\r"})
+    assert calls[2] == (("\r\x1b[2K",), {"end": ""})
+    assert calls[3] == ((Text("Live: second"),), {"end": "\r"})
+    assert calls[4] == (("\r\x1b[2K",), {"end": ""})
+    assert handler._live_transcription_active is False
+
+
+def test_live_transcription_uses_lines_for_non_terminal_logs(monkeypatch):
+    calls = []
+
+    class FakeConsole:
+        is_terminal = False
+
+        def print(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    handler = object.__new__(ParakeetTDTSTTHandler)
+    handler._live_transcription_active = False
+    monkeypatch.setattr(parakeet_tdt_handler, "console", FakeConsole())
+
+    handler._print_live_transcription(Text("Live: first"), "first")
+
+    assert calls == [((Text("Live: first"),), {})]
+    assert handler._live_transcription_active is False
 
 
 def test_process_yields_partial_tagged_tuple(monkeypatch):
