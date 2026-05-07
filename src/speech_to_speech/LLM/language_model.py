@@ -174,6 +174,13 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         speculative_turns = getattr(self, "speculative_turns", None)
         return speculative_turns is None or speculative_turns.is_latest(turn_id, turn_revision)
 
+    def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
+        speculative_turns = getattr(self, "speculative_turns", None)
+        if speculative_turns is None:
+            return True
+        speculative_turns.wait_for_pending_reopen(turn_id, turn_revision)
+        return speculative_turns.is_latest(turn_id, turn_revision)
+
     @abstractmethod
     def _load_model(
         self,
@@ -379,12 +386,20 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 runtime_config,
                 response,
             )
+            if chunks and not self._turn_output_allowed(ctx.turn_id, ctx.turn_revision):
+                ctx.cancelled = True
+                logger.info("LLM generation cancelled (stale speculative turn)")
+                break
             yield from chunks
 
         if ctx.sentence_batch and not ctx.interrupted:
             if ctx.printable_text.strip():
                 ctx.sentence_batch.append(ctx.printable_text.strip())
                 ctx.printable_text = ""
+            if not self._turn_output_allowed(ctx.turn_id, ctx.turn_revision):
+                ctx.cancelled = True
+                logger.info("LLM generation cancelled (stale speculative turn)")
+                return
             yield LLMResponseChunk(
                 text=" ".join(ctx.sentence_batch),
                 language_code=language_code,
@@ -434,9 +449,10 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         if ctx.stopped:
             return
 
-        if not ctx.cancelled and self._turn_is_latest(ctx.turn_id, ctx.turn_revision):
+        turn_output_allowed = not ctx.cancelled and self._turn_output_allowed(ctx.turn_id, ctx.turn_revision)
+        if turn_output_allowed:
             original_chat.add_item(make_assistant_message(ctx.generated_text))
-        if not ctx.cancelled and self._turn_is_latest(ctx.turn_id, ctx.turn_revision) and ctx.tools:
+        if turn_output_allowed and ctx.tools:
             for t in ctx.tools:
                 original_chat.add_item(
                     RealtimeConversationItemFunctionCall(
@@ -448,12 +464,12 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         status=t.status,
                     )
                 )
-        if self._turn_is_latest(ctx.turn_id, ctx.turn_revision):
+        if turn_output_allowed:
             original_chat.strip_images()
         logger.debug("Clean text: %s", ctx.generated_text)
         logger.info(f"Tools: {ctx.tools}")
 
-        if not ctx.cancelled and (ctx.printable_text.strip() or ctx.tools):
+        if turn_output_allowed and (ctx.printable_text.strip() or ctx.tools):
             yield LLMResponseChunk(
                 text=ctx.printable_text.strip(),
                 language_code=language_code,
@@ -465,7 +481,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             )
 
         output_tokens = len(self.tokenizer.encode(ctx.raw_generated_text)) if ctx.raw_generated_text else 0
-        if self._turn_is_latest(ctx.turn_id, ctx.turn_revision) and (ctx.input_tokens or output_tokens):
+        if turn_output_allowed and (ctx.input_tokens or output_tokens):
             yield TokenUsage(
                 input_tokens=ctx.input_tokens,
                 output_tokens=output_tokens,

@@ -45,6 +45,13 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
         self.text_output_queue = text_output_queue
         self.speculative_turns = speculative_turns
 
+    def _turn_is_latest_after_pending_reopen(self, turn_id: str | None, turn_revision: int | None) -> bool:
+        speculative_turns = getattr(self, "speculative_turns", None)
+        if speculative_turns is None:
+            return True
+        speculative_turns.wait_for_pending_reopen(turn_id, turn_revision)
+        return speculative_turns.is_latest(turn_id, turn_revision)
+
     def process(self, lm_output: LLMOut) -> Iterator[TTSIn]:
         """
         Process LLM output: send text/tools to WebSocket, forward clean text to TTS.
@@ -53,8 +60,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
             :class:`TTSInput` or :class:`EndOfResponse` for TTS
         """
         if isinstance(lm_output, TokenUsage):
-            speculative_turns = getattr(self, "speculative_turns", None)
-            if speculative_turns and not speculative_turns.is_latest(
+            if not self._turn_is_latest_after_pending_reopen(
                 lm_output.turn_id,
                 lm_output.turn_revision,
             ):
@@ -74,8 +80,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
             return
 
         if isinstance(lm_output, EndOfResponse):
-            speculative_turns = getattr(self, "speculative_turns", None)
-            if speculative_turns and not speculative_turns.is_latest(
+            if not self._turn_is_latest_after_pending_reopen(
                 lm_output.turn_id,
                 lm_output.turn_revision,
             ):
@@ -92,8 +97,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
             logger.warning("LMOutputProcessor received unexpected type: %s", type(lm_output))
             return
 
-        speculative_turns = getattr(self, "speculative_turns", None)
-        if speculative_turns and not speculative_turns.is_latest(
+        if not self._turn_is_latest_after_pending_reopen(
             lm_output.turn_id,
             lm_output.turn_revision,
         ):

@@ -92,6 +92,13 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         speculative_turns = getattr(self, "speculative_turns", None)
         return speculative_turns is None or speculative_turns.is_latest(turn_id, turn_revision)
 
+    def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
+        speculative_turns = getattr(self, "speculative_turns", None)
+        if speculative_turns is None:
+            return True
+        speculative_turns.wait_for_pending_reopen(turn_id, turn_revision)
+        return speculative_turns.is_latest(turn_id, turn_revision)
+
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
         start = time.time()
@@ -201,6 +208,10 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                             for s in sentences[:-1]:
                                 sentence_batch.append(s)
                                 if len(sentence_batch) >= self.stream_batch_sentences:
+                                    if not self._turn_output_allowed(turn_id, turn_revision):
+                                        logger.info("LLM generation cancelled (stale speculative turn)")
+                                        cancelled = True
+                                        break
                                     yield LLMResponseChunk(
                                         text=" ".join(sentence_batch),
                                         language_code=language_code,
@@ -210,6 +221,8 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                                         turn_revision=turn_revision,
                                     )
                                     sentence_batch = []
+                            if cancelled:
+                                break
                             printable_text = sentences[-1]
                     elif isinstance(raw_event, ResponseOutputItemDoneEvent):
                         if isinstance(raw_event.item, ResponseFunctionToolCall):
@@ -249,17 +262,20 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                         sentence_batch.append(printable_text.strip())
                     remaining = " ".join(sentence_batch)
                     if remaining or tools:
-                        logger.debug(f"Clean text: {clean_text}")
-                        logger.info(f"Tools: {tools}")
-                        yield LLMResponseChunk(
-                            text=remaining,
-                            language_code=language_code,
-                            tools=tools,
-                            runtime_config=runtime_config,
-                            response=response,
-                            turn_id=turn_id,
-                            turn_revision=turn_revision,
-                        )
+                        if not self._turn_output_allowed(turn_id, turn_revision):
+                            logger.info("LLM generation cancelled (stale speculative turn)")
+                        else:
+                            logger.debug(f"Clean text: {clean_text}")
+                            logger.info(f"Tools: {tools}")
+                            yield LLMResponseChunk(
+                                text=remaining,
+                                language_code=language_code,
+                                tools=tools,
+                                runtime_config=runtime_config,
+                                response=response,
+                                turn_id=turn_id,
+                                turn_revision=turn_revision,
+                            )
             elif isinstance(api_response, Response):
                 if (
                     gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen)
@@ -306,21 +322,24 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     logger.debug(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
                     if clean_text.strip() or tools:
-                        yield LLMResponseChunk(
-                            text=clean_text.strip(),
-                            language_code=language_code,
-                            tools=tools,
-                            runtime_config=runtime_config,
-                            response=response,
-                            turn_id=turn_id,
-                            turn_revision=turn_revision,
-                        )
+                        if not self._turn_output_allowed(turn_id, turn_revision):
+                            logger.info("LLM generation cancelled (stale speculative turn)")
+                        else:
+                            yield LLMResponseChunk(
+                                text=clean_text.strip(),
+                                language_code=language_code,
+                                tools=tools,
+                                runtime_config=runtime_config,
+                                response=response,
+                                turn_id=turn_id,
+                                turn_revision=turn_revision,
+                            )
         except httpx.ReadTimeout:
             logger.warning(
                 "OpenAI API read timed out after %.1fs; ending the current response",
                 self.request_timeout_s,
             )
-            if self._turn_is_latest(turn_id, turn_revision):
+            if self._turn_output_allowed(turn_id, turn_revision):
                 yield LLMResponseChunk(
                     text="Wow I'm a bit slow today, could you repeat that?",
                     runtime_config=runtime_config,
@@ -335,7 +354,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                 except Exception:
                     pass
 
-        if self._turn_is_latest(turn_id, turn_revision):
+        if self._turn_output_allowed(turn_id, turn_revision):
             for item in pending_chat_items:
                 original_chat.add_item(item)
             original_chat.strip_images()
