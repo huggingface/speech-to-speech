@@ -47,6 +47,12 @@ class BaseHandler(Generic[InT, OutT]):
     def process(self, input: InT) -> Iterator[OutT]:
         raise NotImplementedError
 
+    def should_process_input(self, item: InT) -> bool:
+        return True
+
+    def should_emit_output(self, output: OutT) -> bool:
+        return True
+
     def run(self) -> None:
         logger.debug(f"{self.__class__.__name__}: Handler thread started")
         while not self.stop_event.is_set():
@@ -77,9 +83,16 @@ class BaseHandler(Generic[InT, OutT]):
                 logger.warning("%s: unexpected control message kind: %s", self.__class__.__name__, item.kind)
                 continue
 
+            typed_item = cast(InT, item)
+            if not self.should_process_input(typed_item):
+                continue
+
             start_time = perf_counter()
             try:
-                for output in self.process(cast(InT, item)):
+                for output in self.process(typed_item):
+                    if not self.should_emit_output(output):
+                        start_time = perf_counter()
+                        continue
                     self._times.append(perf_counter() - start_time)
                     if self.should_log_timing(output):
                         logger.log(self.timing_log_level, "%s: %.3f s", self.__class__.__name__, self.last_time)

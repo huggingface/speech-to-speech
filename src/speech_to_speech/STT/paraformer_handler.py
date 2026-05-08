@@ -8,9 +8,9 @@ import torch
 from funasr import AutoModel
 from rich.console import Console
 
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import Transcription
+from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-class ParaformerSTTHandler(BaseHandler[STTIn, STTOut]):
+class ParaformerSTTHandler(BaseSTTHandler):
     """
     Handles the Speech To Text generation using a Paraformer model.
     The default for this model is set to Chinese.

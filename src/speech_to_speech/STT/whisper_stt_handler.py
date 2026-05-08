@@ -9,9 +9,9 @@ import torch
 from rich.console import Console
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import Transcription
+from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -32,7 +32,7 @@ SUPPORTED_LANGUAGES = [
 ]
 
 
-class WhisperSTTHandler(BaseHandler[STTIn, STTOut]):
+class WhisperSTTHandler(BaseSTTHandler):
     """
     Handles the Speech To Text generation using a Whisper model.
     """

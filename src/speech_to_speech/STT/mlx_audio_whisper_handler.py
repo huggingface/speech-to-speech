@@ -6,9 +6,9 @@ from typing import Any, Iterator, Optional
 import numpy as np
 from rich.console import Console
 
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import Transcription
+from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ SUPPORTED_LANGUAGES = [
 ]
 
 
-class MLXAudioWhisperSTTHandler(BaseHandler[STTIn, STTOut]):
+class MLXAudioWhisperSTTHandler(BaseSTTHandler):
     """
     Handles the Speech To Text generation using MLX Audio's Whisper implementation.
     Optimized for Apple Silicon using the MLX framework.

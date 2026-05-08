@@ -20,9 +20,9 @@ import numpy as np
 from rich.console import Console
 from rich.text import Text
 
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
+from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.STT.smart_progressive_streaming import PartialTranscription as ProgressiveStreamPartial
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 
@@ -87,7 +87,7 @@ if LINGUA_AVAILABLE:
     _lingua_detector = _build_lingua_detector()
 
 
-class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
+class ParakeetTDTSTTHandler(BaseSTTHandler):
     """
     Handles Speech-to-Text using NVIDIA Parakeet TDT model.
 

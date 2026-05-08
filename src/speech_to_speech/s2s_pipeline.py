@@ -60,6 +60,7 @@ from speech_to_speech.pipeline.queue_types import (
     VADOutItem,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.utils.thread_manager import ThreadManager
 from speech_to_speech.VAD.vad_handler import VADHandler
@@ -501,6 +502,7 @@ def build_pipeline(
         stop_event,
         spoken_prompt_queue,
         stt_output_queue,
+        speculative_turns,
         whisper_stt_handler_kwargs,
         faster_whisper_stt_handler_kwargs,
         paraformer_stt_handler_kwargs,
@@ -551,58 +553,73 @@ def get_stt_handler(
     stop_event: Event,
     spoken_prompt_queue: Queue[VADOutItem],
     text_prompt_queue: Queue[STTOutItem],
+    speculative_turns: SpeculativeTurnTracker | None,
     whisper_stt_handler_kwargs: WhisperSTTHandlerArguments,
     faster_whisper_stt_handler_kwargs: FasterWhisperSTTHandlerArguments,
     paraformer_stt_handler_kwargs: ParaformerSTTHandlerArguments,
     mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments,
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
 ) -> BaseHandler[STTIn, STTOut]:
+    def with_speculative_turns(handler: BaseSTTHandler) -> BaseSTTHandler:
+        handler.speculative_turns = speculative_turns
+        return handler
+
     if module_kwargs.stt == "whisper":
         from speech_to_speech.STT.whisper_stt_handler import WhisperSTTHandler
 
-        return WhisperSTTHandler(
-            stop_event,
-            queue_in=spoken_prompt_queue,
-            queue_out=text_prompt_queue,
-            setup_kwargs=vars(whisper_stt_handler_kwargs),
+        return with_speculative_turns(
+            WhisperSTTHandler(
+                stop_event,
+                queue_in=spoken_prompt_queue,
+                queue_out=text_prompt_queue,
+                setup_kwargs=vars(whisper_stt_handler_kwargs),
+            )
         )
     elif module_kwargs.stt == "whisper-mlx":
         from speech_to_speech.STT.lightning_whisper_mlx_handler import LightningWhisperSTTHandler
 
-        return LightningWhisperSTTHandler(
-            stop_event,
-            queue_in=spoken_prompt_queue,
-            queue_out=text_prompt_queue,
-            setup_kwargs=vars(whisper_stt_handler_kwargs),
+        return with_speculative_turns(
+            LightningWhisperSTTHandler(
+                stop_event,
+                queue_in=spoken_prompt_queue,
+                queue_out=text_prompt_queue,
+                setup_kwargs=vars(whisper_stt_handler_kwargs),
+            )
         )
     elif module_kwargs.stt == "mlx-audio-whisper":
         from speech_to_speech.STT.mlx_audio_whisper_handler import MLXAudioWhisperSTTHandler
 
         # Merge MLX Audio Whisper kwargs with shared language parameter from Whisper kwargs
         setup_kwargs = {**vars(mlx_audio_whisper_stt_handler_kwargs), "language": whisper_stt_handler_kwargs.language}
-        return MLXAudioWhisperSTTHandler(
-            stop_event,
-            queue_in=spoken_prompt_queue,
-            queue_out=text_prompt_queue,
-            setup_kwargs=setup_kwargs,
+        return with_speculative_turns(
+            MLXAudioWhisperSTTHandler(
+                stop_event,
+                queue_in=spoken_prompt_queue,
+                queue_out=text_prompt_queue,
+                setup_kwargs=setup_kwargs,
+            )
         )
     elif module_kwargs.stt == "paraformer":
         from speech_to_speech.STT.paraformer_handler import ParaformerSTTHandler
 
-        return ParaformerSTTHandler(
-            stop_event,
-            queue_in=spoken_prompt_queue,
-            queue_out=text_prompt_queue,
-            setup_kwargs=vars(paraformer_stt_handler_kwargs),
+        return with_speculative_turns(
+            ParaformerSTTHandler(
+                stop_event,
+                queue_in=spoken_prompt_queue,
+                queue_out=text_prompt_queue,
+                setup_kwargs=vars(paraformer_stt_handler_kwargs),
+            )
         )
     elif module_kwargs.stt == "faster-whisper":
         from speech_to_speech.STT.faster_whisper_handler import FasterWhisperSTTHandler
 
-        return FasterWhisperSTTHandler(
-            stop_event,
-            queue_in=spoken_prompt_queue,
-            queue_out=text_prompt_queue,
-            setup_kwargs=vars(faster_whisper_stt_handler_kwargs),
+        return with_speculative_turns(
+            FasterWhisperSTTHandler(
+                stop_event,
+                queue_in=spoken_prompt_queue,
+                queue_out=text_prompt_queue,
+                setup_kwargs=vars(faster_whisper_stt_handler_kwargs),
+            )
         )
     elif module_kwargs.stt == "parakeet-tdt":
         from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
@@ -614,11 +631,13 @@ def get_stt_handler(
             "live_transcription_update_interval": module_kwargs.live_transcription_update_interval,
         }
 
-        return ParakeetTDTSTTHandler(
-            stop_event,
-            queue_in=spoken_prompt_queue,
-            queue_out=text_prompt_queue,
-            setup_kwargs=setup_kwargs,
+        return with_speculative_turns(
+            ParakeetTDTSTTHandler(
+                stop_event,
+                queue_in=spoken_prompt_queue,
+                queue_out=text_prompt_queue,
+                setup_kwargs=setup_kwargs,
+            )
         )
     else:
         raise ValueError(
