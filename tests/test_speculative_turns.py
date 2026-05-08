@@ -1,8 +1,10 @@
 import time
+from queue import Queue
 from threading import Thread
 
 import numpy as np
 
+from speech_to_speech.pipeline.messages import VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.VAD.vad_handler import VADHandler
 
@@ -159,3 +161,62 @@ def test_vad_keeps_single_speculative_audio_prefix():
     assert first_output is first_segment
     np.testing.assert_array_equal(second_output, np.array([1.0, 2.0, 3.0], dtype=np.float32))
     np.testing.assert_array_equal(third_output, np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
+
+
+def _vad_audio(turn_id: str = "turn_1", revision: int = 0, mode: str | None = "progressive") -> VADAudio:
+    return VADAudio(audio=np.zeros(512, dtype=np.float32), mode=mode, turn_id=turn_id, turn_revision=revision)
+
+
+def test_vad_drops_superseded_progressive_audio_from_output_queue():
+    handler = object.__new__(VADHandler)
+    handler.queue_out = Queue()
+    handler.speculative_turns = None
+    first_progressive = _vad_audio()
+    final_audio = _vad_audio(mode="final")
+    second_progressive = _vad_audio()
+    other_turn_progressive = _vad_audio(turn_id="turn_2")
+
+    handler.queue_out.put(first_progressive)
+    handler.queue_out.put(final_audio)
+    handler.queue_out.put(second_progressive)
+    handler.queue_out.put(other_turn_progressive)
+
+    dropped = handler._drop_superseded_vad_audio(_vad_audio())
+
+    assert dropped == 2
+    queued_items = list(handler.queue_out.queue)
+    assert queued_items == [final_audio, other_turn_progressive]
+
+
+def test_vad_drops_stale_progressive_revisions_from_output_queue():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 1)
+    handler = object.__new__(VADHandler)
+    handler.queue_out = Queue()
+    handler.speculative_turns = tracker
+    stale_progressive = _vad_audio(revision=0)
+    current_progressive = _vad_audio(revision=1)
+
+    handler.queue_out.put(stale_progressive)
+    handler.queue_out.put(current_progressive)
+
+    handler.before_emit_output(_vad_audio(revision=1))
+
+    assert handler.queue_out.empty()
+
+
+def test_vad_final_audio_replaces_queued_progressive_audio_for_same_revision():
+    handler = object.__new__(VADHandler)
+    handler.queue_out = Queue()
+    handler.speculative_turns = None
+    progressive_audio = _vad_audio()
+    final_audio = _vad_audio(mode="final")
+    other_turn_progressive = _vad_audio(turn_id="turn_2")
+
+    handler.queue_out.put(progressive_audio)
+    handler.queue_out.put(other_turn_progressive)
+
+    handler.before_emit_output(final_audio)
+
+    queued_items = list(handler.queue_out.queue)
+    assert queued_items == [other_turn_progressive]

@@ -53,6 +53,9 @@ class BaseHandler(Generic[InT, OutT]):
     def should_emit_output(self, output: OutT) -> bool:
         return True
 
+    def before_emit_output(self, output: OutT) -> None:
+        pass
+
     def run(self) -> None:
         logger.debug(f"{self.__class__.__name__}: Handler thread started")
         while not self.stop_event.is_set():
@@ -96,6 +99,7 @@ class BaseHandler(Generic[InT, OutT]):
                     self._times.append(perf_counter() - start_time)
                     if self.should_log_timing(output):
                         logger.log(self.timing_log_level, "%s: %.3f s", self.__class__.__name__, self.last_time)
+                    self.before_emit_output(output)
                     self.queue_out.put(output)
                     start_time = perf_counter()
             except Exception as e:

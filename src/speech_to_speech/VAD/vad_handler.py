@@ -5,7 +5,7 @@ import time
 from collections.abc import Iterator
 from queue import Queue
 from threading import Event
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 import numpy as np
 import torch
@@ -281,6 +281,54 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         if self._speculative_audio_prefix is None:
             return current_segment
         return np.concatenate((self._speculative_audio_prefix, current_segment))
+
+    def before_emit_output(self, output: VADOut) -> None:
+        if isinstance(output, VADAudio):
+            self._drop_superseded_vad_audio(output)
+
+    def _drop_superseded_vad_audio(self, latest: VADAudio) -> int:
+        if not hasattr(self.queue_out, "mutex") or not hasattr(self.queue_out, "queue"):
+            return 0
+
+        dropped = 0
+        with self.queue_out.mutex:
+            kept: list[Any] = []
+            while self.queue_out.queue:
+                queued_item = self.queue_out.queue.popleft()
+                if isinstance(queued_item, VADAudio) and self._vad_audio_is_superseded(
+                    queued_item,
+                    latest,
+                ):
+                    dropped += 1
+                else:
+                    kept.append(queued_item)
+            self.queue_out.queue.extend(kept)
+            if dropped:
+                self.queue_out.not_full.notify_all()
+
+        if dropped:
+            logger.debug(
+                "VAD: dropped %d superseded audio chunk(s) before enqueueing turn=%s rev=%s mode=%s",
+                dropped,
+                latest.turn_id,
+                latest.turn_revision,
+                latest.mode,
+            )
+        return dropped
+
+    def _vad_audio_is_superseded(self, queued_item: VADAudio, latest: VADAudio) -> bool:
+        if queued_item.turn_id is None or queued_item.turn_revision is None:
+            return False
+        if self.speculative_turns is not None and not self.speculative_turns.is_latest(
+            queued_item.turn_id,
+            queued_item.turn_revision,
+        ):
+            return True
+        return (
+            queued_item.mode == "progressive"
+            and queued_item.turn_id == latest.turn_id
+            and queued_item.turn_revision == latest.turn_revision
+        )
 
     def process(self, audio_chunk: VADIn) -> Iterator[VADOut]:
         runtime_config = None
