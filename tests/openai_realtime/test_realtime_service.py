@@ -8,6 +8,7 @@ import base64
 import json
 from queue import Queue
 from threading import Event, Thread
+from time import sleep
 
 import pytest
 from openai.types.realtime import (
@@ -880,6 +881,30 @@ class TestDispatchPipelineEvent:
         assert service._state(conn_id).current_response_id is None
 
         tracker.cancel_reopen_candidate("turn_1", candidate_revision)
+        events = service.try_dispatch_pipeline_event(conn_id, event)
+
+        assert events is not None
+        assert len(events) == 1
+        assert isinstance(events[0], ResponseAudioTranscriptDoneEvent)
+        assert events[0].transcript == "latest"
+        assert tracker.is_committed("turn_1", 0)
+        service.unregister(conn_id)
+
+    def test_try_dispatch_assistant_text_defers_reopen_grace(self, runtime_config, should_listen):
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+        tracker.observe("turn_1", 0)
+        tracker.start_reopen_grace("turn_1", 0, grace_s=0.05)
+
+        event = AssistantTextEvent(text="latest", turn_id="turn_1", turn_revision=0)
+
+        assert service.should_defer_pipeline_event(event)
+        assert service.try_dispatch_pipeline_event(conn_id, event) is None
+        assert service._state(conn_id).current_response_id is None
+
+        sleep(0.06)
         events = service.try_dispatch_pipeline_event(conn_id, event)
 
         assert events is not None

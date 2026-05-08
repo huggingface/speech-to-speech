@@ -108,6 +108,42 @@ def test_try_is_latest_after_pending_reopen_reports_pending_without_blocking():
     assert tracker.is_committed("turn_1", 0)
 
 
+def test_try_is_latest_after_reopen_grace_reports_pending_without_blocking():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    tracker.start_reopen_grace("turn_1", 0, grace_s=0.05)
+
+    assert tracker.try_is_latest_after_reopen_grace("turn_1", 0) is None
+    assert tracker.try_commit_if_latest_after_reopen_grace("turn_1", 0) is None
+
+    time.sleep(0.06)
+
+    assert tracker.try_is_latest_after_reopen_grace("turn_1", 0) is True
+    assert tracker.try_commit_if_latest_after_reopen_grace("turn_1", 0) is True
+    assert tracker.is_committed("turn_1", 0)
+
+
+def test_reopen_grace_wait_drops_confirmed_reopen():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    tracker.start_reopen_grace("turn_1", 0, grace_s=0.2)
+    result: dict[str, bool] = {}
+
+    def wait_for_grace():
+        result["is_latest"] = tracker.is_latest_after_reopen_grace("turn_1", 0)
+
+    thread = Thread(target=wait_for_grace)
+    thread.start()
+
+    time.sleep(0.02)
+    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert result == {"is_latest": False}
+
+
 def test_is_latest_after_stability_window_catches_reopen_started_during_wait():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)

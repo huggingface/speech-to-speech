@@ -227,12 +227,12 @@ class ResponseHandler(RealtimeBaseHandler):
         if self._service.speculative_turns:
             commit_result: bool | None
             if wait_for_pending_reopen:
-                commit_result = self._service.speculative_turns.commit_if_latest_after_pending_reopen(
+                commit_result = self._service.speculative_turns.commit_if_latest_after_reopen_grace(
                     event.turn_id,
                     event.turn_revision,
                 )
             else:
-                commit_result = self._service.speculative_turns.try_commit_if_latest_after_pending_reopen(
+                commit_result = self._service.speculative_turns.try_commit_if_latest_after_reopen_grace(
                     event.turn_id,
                     event.turn_revision,
                 )

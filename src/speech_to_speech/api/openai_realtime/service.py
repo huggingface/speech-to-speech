@@ -301,7 +301,7 @@ class RealtimeService:
     def should_defer_pipeline_event(self, event: PipelineEvent) -> bool:
         if self.speculative_turns is None or not isinstance(event, (AssistantTextEvent, TokenUsageEvent)):
             return False
-        return self.speculative_turns.has_pending_reopen(
+        return self.speculative_turns.has_pending_reopen_or_grace(
             getattr(event, "turn_id", None),
             getattr(event, "turn_revision", None),
         )
@@ -351,9 +351,9 @@ class RealtimeService:
         if isinstance(event, (AssistantTextEvent, TokenUsageEvent)):
             is_latest: bool | None
             if wait_for_pending_reopen:
-                is_latest = self.speculative_turns.is_latest_after_pending_reopen(turn_id, turn_revision)
+                is_latest = self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
             else:
-                is_latest = self.speculative_turns.try_is_latest_after_pending_reopen(turn_id, turn_revision)
+                is_latest = self.speculative_turns.try_is_latest_after_reopen_grace(turn_id, turn_revision)
             if is_latest is None:
                 return None
             return not is_latest

@@ -68,6 +68,39 @@ def test_pending_reopen_holds_assistant_chunk_until_cancelled():
     assert event.text == "hello"
 
 
+def test_reopen_grace_holds_assistant_chunk_until_elapsed():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    tracker.start_reopen_grace("turn_1", 0, grace_s=0.08)
+    processor = _processor(tracker)
+    done = Event()
+    outputs = []
+
+    def run_processor():
+        outputs.extend(
+            processor.process(
+                LLMResponseChunk(
+                    text="hello",
+                    turn_id="turn_1",
+                    turn_revision=0,
+                )
+            )
+        )
+        done.set()
+
+    thread = Thread(target=run_processor)
+    thread.start()
+
+    assert not done.wait(0.02)
+    assert done.wait(1.0)
+    thread.join(timeout=1.0)
+
+    assert len(outputs) == 1
+    assert outputs[0].text == "hello"
+    event = processor.text_output_queue.get_nowait()
+    assert event.text == "hello"
+
+
 def test_confirmed_reopen_drops_held_assistant_chunk():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)

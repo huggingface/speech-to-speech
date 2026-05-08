@@ -488,9 +488,15 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         )
                     )
                 self._speculative_audio_prefix = output_array
-                yield VADAudio(audio=output_array, mode="final", turn_id=turn_id, turn_revision=turn_revision)
                 self._last_final_wall_time = time.time()
                 self._last_final_audio_ms = end_ms
+                if self.speculative_turns:
+                    self.speculative_turns.start_reopen_grace(
+                        turn_id,
+                        turn_revision,
+                        self.speculative_reopen_ms / 1000.0,
+                    )
+                yield VADAudio(audio=output_array, mode="final", turn_id=turn_id, turn_revision=turn_revision)
                 self.last_process_time = 0.0
                 self._speech_started_emitted = False
 

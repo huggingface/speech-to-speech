@@ -45,10 +45,10 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
         self.text_output_queue = text_output_queue
         self.speculative_turns = speculative_turns
 
-    def _turn_is_latest_after_pending_reopen(self, turn_id: str | None, turn_revision: int | None) -> bool:
+    def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
         if self.speculative_turns is None:
             return True
-        return self.speculative_turns.is_latest_after_pending_reopen(turn_id, turn_revision)
+        return self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
 
     def process(self, lm_output: LLMOut) -> Iterator[TTSIn]:
         """
@@ -58,7 +58,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
             :class:`TTSInput` or :class:`EndOfResponse` for TTS
         """
         if isinstance(lm_output, TokenUsage):
-            if not self._turn_is_latest_after_pending_reopen(
+            if not self._turn_output_allowed(
                 lm_output.turn_id,
                 lm_output.turn_revision,
             ):
@@ -78,7 +78,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
             return
 
         if isinstance(lm_output, EndOfResponse):
-            if not self._turn_is_latest_after_pending_reopen(
+            if not self._turn_output_allowed(
                 lm_output.turn_id,
                 lm_output.turn_revision,
             ):
@@ -95,7 +95,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
             logger.warning("LMOutputProcessor received unexpected type: %s", type(lm_output))
             return
 
-        if not self._turn_is_latest_after_pending_reopen(
+        if not self._turn_output_allowed(
             lm_output.turn_id,
             lm_output.turn_revision,
         ):

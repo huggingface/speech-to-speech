@@ -176,7 +176,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
     def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
         if self.speculative_turns is None:
             return True
-        return self.speculative_turns.is_latest_after_pending_reopen(turn_id, turn_revision)
+        return self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
 
     @abstractmethod
     def _load_model(
