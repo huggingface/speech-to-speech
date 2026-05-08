@@ -106,7 +106,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._turn_counter = 0
         self._current_turn_id: str | None = None
         self._current_turn_revision: int | None = None
-        self._speculative_segments: list[np.ndarray] = []
+        self._speculative_audio_prefix: np.ndarray | None = None
         self._last_final_wall_time: float | None = None
         self._last_final_audio_ms: int | None = None
         self._pending_reopen_candidate: tuple[str, int, int] | None = None
@@ -152,7 +152,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._turn_counter += 1
         self._current_turn_id = f"turn_{self._turn_counter}"
         self._current_turn_revision = 0
-        self._speculative_segments = []
+        self._speculative_audio_prefix = None
         self._last_final_wall_time = None
         self._last_final_audio_ms = None
         if self.speculative_turns:
@@ -226,6 +226,28 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         logger.info("VAD: reopened speculative turn %s revision %d", turn_id, candidate_revision)
         return turn_id, candidate_revision, True
 
+    def _reopen_current_turn(self) -> tuple[str, int, bool] | None:
+        if self._current_turn_id is None or self._current_turn_revision is None:
+            return None
+
+        turn_id = self._current_turn_id
+        base_revision = self._current_turn_revision
+        if self.speculative_turns is not None:
+            candidate_revision = self.speculative_turns.begin_reopen_candidate(turn_id, base_revision)
+            if candidate_revision is None or not self.speculative_turns.confirm_reopen_candidate(
+                turn_id,
+                base_revision,
+                candidate_revision,
+            ):
+                return None
+        else:
+            candidate_revision = base_revision + 1
+
+        self._current_turn_id = turn_id
+        self._current_turn_revision = candidate_revision
+        logger.info("VAD: reopened speculative turn %s revision %d", turn_id, candidate_revision)
+        return turn_id, candidate_revision, True
+
     def _ensure_turn_for_speech_start(self, audio_start_ms: int) -> tuple[str, int, bool]:
         if (
             self._speech_started_emitted
@@ -238,16 +260,16 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         if confirmed_reopen is not None:
             return confirmed_reopen
 
-        reopened = self._should_reopen_current_turn(audio_start_ms)
-        if reopened and self._current_turn_id is not None and self._current_turn_revision is not None:
-            self._current_turn_revision += 1
-            logger.info(
-                "VAD: reopened speculative turn %s revision %d", self._current_turn_id, self._current_turn_revision
-            )
-        else:
-            self._start_new_turn()
+        reopened = False
+        if self._should_reopen_current_turn(audio_start_ms):
+            reopened_turn = self._reopen_current_turn()
+            if reopened_turn is not None:
+                return reopened_turn
 
-        assert self._current_turn_id is not None and self._current_turn_revision is not None
+        self._start_new_turn()
+
+        if self._current_turn_id is None or self._current_turn_revision is None:
+            raise RuntimeError("VAD failed to allocate turn metadata")
         if self.speculative_turns:
             self.speculative_turns.observe(self._current_turn_id, self._current_turn_revision)
         return self._current_turn_id, self._current_turn_revision, reopened
@@ -256,9 +278,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         return self._current_turn_id, self._current_turn_revision
 
     def _combined_turn_audio(self, current_segment: np.ndarray) -> np.ndarray:
-        if not self._speculative_segments:
+        if self._speculative_audio_prefix is None:
             return current_segment
-        return np.concatenate([*self._speculative_segments, current_segment])
+        return np.concatenate((self._speculative_audio_prefix, current_segment))
 
     def process(self, audio_chunk: VADIn) -> Iterator[VADOut]:
         runtime_config = None
@@ -417,7 +439,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                             turn_revision=turn_revision,
                         )
                     )
-                self._speculative_segments.append(array)
+                self._speculative_audio_prefix = output_array
                 yield VADAudio(audio=output_array, mode="final", turn_id=turn_id, turn_revision=turn_revision)
                 self._last_final_wall_time = time.time()
                 self._last_final_audio_ms = end_ms
@@ -490,7 +512,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._turn_counter = 0
         self._current_turn_id = None
         self._current_turn_revision = None
-        self._speculative_segments = []
+        self._speculative_audio_prefix = None
         self._last_final_wall_time = None
         self._last_final_audio_ms = None
         self._pending_reopen_candidate = None

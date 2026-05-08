@@ -83,6 +83,7 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler._extra_body = {"chat_template_kwargs": {"enable_thinking": False}} if disable_thinking else None
     handler.user_role = "user"
     handler.cancel_scope = cancel_scope
+    handler.speculative_turns = None
     handler.tools = None
     handler.tools_choice = None
     return handler

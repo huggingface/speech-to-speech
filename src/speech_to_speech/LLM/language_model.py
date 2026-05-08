@@ -171,15 +171,13 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.user_role = user_role
 
     def _turn_is_latest(self, turn_id: str | None, turn_revision: int | None) -> bool:
-        speculative_turns = getattr(self, "speculative_turns", None)
-        return speculative_turns is None or speculative_turns.is_latest(turn_id, turn_revision)
+        return self.speculative_turns is None or self.speculative_turns.is_latest(turn_id, turn_revision)
 
     def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
-        speculative_turns = getattr(self, "speculative_turns", None)
-        if speculative_turns is None:
+        if self.speculative_turns is None:
             return True
-        speculative_turns.wait_for_pending_reopen(turn_id, turn_revision)
-        return speculative_turns.is_latest(turn_id, turn_revision)
+        self.speculative_turns.wait_for_pending_reopen(turn_id, turn_revision)
+        return self.speculative_turns.is_latest(turn_id, turn_revision)
 
     @abstractmethod
     def _load_model(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from threading import Condition
 
@@ -18,10 +19,12 @@ class SpeculativeTurnTracker:
     """Thread-safe revision tracker for raw-audio speculative turns."""
 
     _PENDING_REOPEN_WAIT_TIMEOUT_S = 2.0
+    _MAX_TRACKED_TURNS = 2048
 
-    def __init__(self) -> None:
+    def __init__(self, max_tracked_turns: int = _MAX_TRACKED_TURNS) -> None:
         self._condition = Condition()
-        self._latest_revision: dict[str, int] = {}
+        self._max_tracked_turns = max_tracked_turns
+        self._latest_revision: OrderedDict[str, int] = OrderedDict()
         self._committed_revision: dict[str, int] = {}
         self._pending_reopen: dict[str, _PendingReopen] = {}
 
@@ -32,6 +35,8 @@ class SpeculativeTurnTracker:
             current = self._latest_revision.get(turn_id, -1)
             if revision > current:
                 self._latest_revision[turn_id] = revision
+                self._latest_revision.move_to_end(turn_id)
+                self._prune_tracked_turns()
                 logger.debug("Observed speculative turn %s revision %d", turn_id, revision)
                 self._condition.notify_all()
 
@@ -113,15 +118,19 @@ class SpeculativeTurnTracker:
                 return False
             if self._committed_revision.get(turn_id, -1) >= base_revision:
                 del self._pending_reopen[turn_id]
+                self._prune_tracked_turns()
                 self._condition.notify_all()
                 return False
             if self._latest_revision.get(turn_id, base_revision) != base_revision:
                 del self._pending_reopen[turn_id]
+                self._prune_tracked_turns()
                 self._condition.notify_all()
                 return False
 
             self._latest_revision[turn_id] = candidate_revision
+            self._latest_revision.move_to_end(turn_id)
             del self._pending_reopen[turn_id]
+            self._prune_tracked_turns()
             logger.debug(
                 "Confirmed speculative reopen candidate for turn %s revision %d",
                 turn_id,
@@ -140,6 +149,7 @@ class SpeculativeTurnTracker:
             if candidate_revision is not None and pending.candidate_revision != candidate_revision:
                 return
             del self._pending_reopen[turn_id]
+            self._prune_tracked_turns()
             logger.debug("Cancelled speculative reopen candidate for turn %s", turn_id)
             self._condition.notify_all()
 
@@ -161,9 +171,23 @@ class SpeculativeTurnTracker:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     logger.warning("Timed out waiting for pending speculative reopen turn=%s rev=%s", turn_id, revision)
+                    if self._pending_reopen.get(turn_id) == pending:
+                        del self._pending_reopen[turn_id]
+                        self._prune_tracked_turns()
+                        self._condition.notify_all()
                     return
                 self._condition.wait(remaining)
                 pending = self._pending_reopen.get(turn_id)
+
+    def _prune_tracked_turns(self) -> None:
+        if self._max_tracked_turns <= 0:
+            return
+
+        prunable_turn_ids = [turn_id for turn_id in self._latest_revision if turn_id not in self._pending_reopen]
+        while len(prunable_turn_ids) > self._max_tracked_turns:
+            turn_id = prunable_turn_ids.pop(0)
+            self._latest_revision.pop(turn_id, None)
+            self._committed_revision.pop(turn_id, None)
 
     def reset(self) -> None:
         with self._condition:
