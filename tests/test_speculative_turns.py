@@ -1,3 +1,6 @@
+import time
+from threading import Thread
+
 import numpy as np
 
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -101,6 +104,22 @@ def test_try_is_latest_after_pending_reopen_reports_pending_without_blocking():
     assert tracker.try_is_latest_after_pending_reopen("turn_1", 0) is True
     assert tracker.try_commit_if_latest_after_pending_reopen("turn_1", 0) is True
     assert tracker.is_committed("turn_1", 0)
+
+
+def test_is_latest_after_stability_window_catches_reopen_started_during_wait():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+
+    def reopen_turn():
+        time.sleep(0.02)
+        candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+        assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+
+    thread = Thread(target=reopen_turn)
+    thread.start()
+
+    assert not tracker.is_latest_after_stability_window("turn_1", 0, settle_s=0.2)
+    thread.join(timeout=1.0)
 
 
 def test_vad_direct_reopen_path_uses_tracker_candidate_protocol():

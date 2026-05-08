@@ -9,6 +9,7 @@ a global lock that all MLX handlers should acquire before using their models.
 import logging
 import types
 from threading import RLock
+from time import perf_counter
 from typing import Literal
 
 logger = logging.getLogger(__name__)
@@ -30,10 +31,15 @@ def acquire_mlx_lock(timeout: float | None = None, handler_name: str = "Unknown"
         True if lock was acquired, False if timeout occurred
     """
     logger.debug(f"{handler_name}: Attempting to acquire MLX lock")
+    start = perf_counter()
     acquired = _mlx_lock.acquire(timeout=timeout) if timeout else _mlx_lock.acquire(blocking=True)
+    wait_s = perf_counter() - start
 
     if acquired:
-        logger.debug(f"{handler_name}: MLX lock acquired")
+        if wait_s >= 0.25:
+            logger.info("%s: MLX lock acquired after %.2fs", handler_name, wait_s)
+        else:
+            logger.debug("%s: MLX lock acquired after %.3fs", handler_name, wait_s)
     else:
         logger.warning(f"{handler_name}: Failed to acquire MLX lock (timeout)")
 

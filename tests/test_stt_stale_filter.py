@@ -17,9 +17,11 @@ class RecordingSTTHandler(BaseSTTHandler):
         self,
         speculative_turns: SpeculativeTurnTracker | None = None,
         mark_stale_during_process: bool = False,
+        final_revision_settle_s: float = 0.0,
     ) -> None:
         self.speculative_turns = speculative_turns
         self.mark_stale_during_process = mark_stale_during_process
+        self.final_revision_settle_s = final_revision_settle_s
         self.processed: list[tuple[str | None, int | None]] = []
 
     def process(self, vad_audio: VADAudio) -> Iterator[Transcription]:
@@ -33,8 +35,8 @@ class RecordingSTTHandler(BaseSTTHandler):
         )
 
 
-def _vad_audio(turn_id: str = "turn_1", revision: int = 0) -> VADAudio:
-    return VADAudio(audio=np.zeros(512, dtype=np.float32), turn_id=turn_id, turn_revision=revision)
+def _vad_audio(turn_id: str = "turn_1", revision: int = 0, mode: str | None = None) -> VADAudio:
+    return VADAudio(audio=np.zeros(512, dtype=np.float32), mode=mode, turn_id=turn_id, turn_revision=revision)
 
 
 def _handler(
@@ -43,6 +45,7 @@ def _handler(
     queue_out: Queue,
     *,
     mark_stale_during_process: bool = False,
+    final_revision_settle_s: float = 0.0,
 ) -> RecordingSTTHandler:
     return RecordingSTTHandler(
         Event(),
@@ -51,6 +54,7 @@ def _handler(
         setup_kwargs={
             "speculative_turns": tracker,
             "mark_stale_during_process": mark_stale_during_process,
+            "final_revision_settle_s": final_revision_settle_s,
         },
     )
 
@@ -71,6 +75,27 @@ def test_stt_handler_drops_stale_queued_audio_without_processing():
     assert queue_out.get_nowait() == PIPELINE_END
 
 
+def test_stt_handler_bulk_drops_stale_queued_audio():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 1)
+    queue_in = Queue()
+    queue_out = Queue()
+    handler = _handler(tracker, queue_in, queue_out)
+
+    for _ in range(5):
+        queue_in.put(_vad_audio(revision=0))
+    queue_in.put(_vad_audio(revision=1))
+    queue_in.put(PIPELINE_END)
+
+    handler.run()
+
+    assert handler.processed == [("turn_1", 1)]
+    output = queue_out.get_nowait()
+    assert isinstance(output, Transcription)
+    assert output.turn_revision == 1
+    assert queue_out.get_nowait() == PIPELINE_END
+
+
 def test_stt_handler_waits_for_pending_reopen_before_processing():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
@@ -88,6 +113,28 @@ def test_stt_handler_waits_for_pending_reopen_before_processing():
     assert handler.processed == []
     assert queue_out.empty()
 
+    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert handler.processed == []
+    assert queue_out.get_nowait() == PIPELINE_END
+
+
+def test_stt_handler_waits_for_final_revision_stability_window():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    queue_in = Queue()
+    queue_out = Queue()
+    handler = _handler(tracker, queue_in, queue_out, final_revision_settle_s=0.2)
+
+    queue_in.put(_vad_audio(revision=0, mode="final"))
+    queue_in.put(PIPELINE_END)
+    thread = Thread(target=handler.run)
+    thread.start()
+
+    sleep(0.05)
+    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
     assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
     thread.join(timeout=1.0)
 
