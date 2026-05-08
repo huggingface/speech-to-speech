@@ -866,6 +866,48 @@ class TestDispatchPipelineEvent:
         assert service._state(conn_id).response_usage.output_tokens == 0
         service.unregister(conn_id)
 
+    def test_try_dispatch_assistant_text_defers_pending_reopen(self, runtime_config, should_listen):
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+        tracker.observe("turn_1", 0)
+        candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+
+        event = AssistantTextEvent(text="latest", turn_id="turn_1", turn_revision=0)
+
+        assert service.try_dispatch_pipeline_event(conn_id, event) is None
+        assert service._state(conn_id).current_response_id is None
+
+        tracker.cancel_reopen_candidate("turn_1", candidate_revision)
+        events = service.try_dispatch_pipeline_event(conn_id, event)
+
+        assert events is not None
+        assert len(events) == 1
+        assert isinstance(events[0], ResponseAudioTranscriptDoneEvent)
+        assert events[0].transcript == "latest"
+        assert tracker.is_committed("turn_1", 0)
+        service.unregister(conn_id)
+
+    def test_try_dispatch_token_usage_defers_pending_reopen(self, runtime_config, should_listen):
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+        tracker.observe("turn_1", 0)
+        candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+
+        event = TokenUsageEvent(input_tokens=10, output_tokens=5, turn_id="turn_1", turn_revision=0)
+
+        assert service.try_dispatch_pipeline_event(conn_id, event) is None
+        assert service._state(conn_id).response_usage.input_tokens == 0
+
+        assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+        assert service.try_dispatch_pipeline_event(conn_id, event) == []
+        assert service._state(conn_id).response_usage.input_tokens == 0
+        assert service._state(conn_id).response_usage.output_tokens == 0
+        service.unregister(conn_id)
+
     # -- partial_transcription --
 
     def test_partial_transcription_emits_delta(self, service, conn_id):

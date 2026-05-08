@@ -87,6 +87,22 @@ def test_commit_if_latest_commits_after_pending_reopen_is_cancelled():
     assert tracker.is_committed("turn_1", 0)
 
 
+def test_try_is_latest_after_pending_reopen_reports_pending_without_blocking():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+
+    assert tracker.has_pending_reopen("turn_1", 0)
+    assert tracker.try_is_latest_after_pending_reopen("turn_1", 0) is None
+    assert tracker.try_commit_if_latest_after_pending_reopen("turn_1", 0) is None
+
+    tracker.cancel_reopen_candidate("turn_1", candidate_revision)
+
+    assert tracker.try_is_latest_after_pending_reopen("turn_1", 0) is True
+    assert tracker.try_commit_if_latest_after_pending_reopen("turn_1", 0) is True
+    assert tracker.is_committed("turn_1", 0)
+
+
 def test_vad_direct_reopen_path_uses_tracker_candidate_protocol():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)

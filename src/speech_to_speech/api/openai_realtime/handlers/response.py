@@ -216,17 +216,30 @@ class ResponseHandler(RealtimeBaseHandler):
 
     # ── Pipeline event handlers ───────────────────
 
-    def on_assistant_text(self, conn_id: str, event: AssistantTextEvent) -> list[ServerEvent]:
+    def on_assistant_text(
+        self,
+        conn_id: str,
+        event: AssistantTextEvent,
+        *,
+        wait_for_pending_reopen: bool = True,
+    ) -> list[ServerEvent] | None:
         """Handle assistant_text: emit transcript and/or tool-call events."""
-        if (
-            self._service.speculative_turns
-            and not self._service.speculative_turns.commit_if_latest_after_pending_reopen(
-                event.turn_id,
-                event.turn_revision,
-            )
-        ):
-            logger.debug("Dropping stale assistant text for turn=%s rev=%s", event.turn_id, event.turn_revision)
-            return []
+        if self._service.speculative_turns:
+            if wait_for_pending_reopen:
+                commit_result = self._service.speculative_turns.commit_if_latest_after_pending_reopen(
+                    event.turn_id,
+                    event.turn_revision,
+                )
+            else:
+                commit_result = self._service.speculative_turns.try_commit_if_latest_after_pending_reopen(
+                    event.turn_id,
+                    event.turn_revision,
+                )
+            if commit_result is None:
+                return None
+            if not commit_result:
+                logger.debug("Dropping stale assistant text for turn=%s rev=%s", event.turn_id, event.turn_revision)
+                return []
         st = self._state(conn_id)
         events: list[ServerEvent] = []
         resp_id, item_id = self._ensure_response(conn_id)

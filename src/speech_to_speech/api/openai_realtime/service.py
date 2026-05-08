@@ -194,7 +194,6 @@ class RealtimeService:
         self._pipeline_dispatch: dict[type[PipelineEvent], Callable[..., list[ServerEvent]]] = {
             SpeechStartedEvent: self.audio.on_speech_started,
             SpeechStoppedEvent: self.audio.on_speech_stopped,
-            AssistantTextEvent: self.response.on_assistant_text,
             TokenUsageEvent: self._on_token_usage,
             PartialTranscriptionEvent: self.conversation.on_partial_transcription,
             TranscriptionCompletedEvent: self._on_transcription_completed,
@@ -288,7 +287,36 @@ class RealtimeService:
 
     def dispatch_pipeline_event(self, conn_id: str, event: PipelineEvent) -> list[ServerEvent]:
         """Route a pipeline text_output_queue event to the appropriate handler."""
-        if self._is_stale_turn_event(event):
+        events = self._dispatch_pipeline_event(conn_id, event, wait_for_pending_reopen=True)
+        return [] if events is None else events
+
+    def try_dispatch_pipeline_event(self, conn_id: str, event: PipelineEvent) -> list[ServerEvent] | None:
+        """Non-blocking dispatch.
+
+        Returns ``None`` when dispatch must be retried after a speculative
+        reopen candidate resolves.
+        """
+        return self._dispatch_pipeline_event(conn_id, event, wait_for_pending_reopen=False)
+
+    def should_defer_pipeline_event(self, event: PipelineEvent) -> bool:
+        if self.speculative_turns is None or not isinstance(event, (AssistantTextEvent, TokenUsageEvent)):
+            return False
+        return self.speculative_turns.has_pending_reopen(
+            getattr(event, "turn_id", None),
+            getattr(event, "turn_revision", None),
+        )
+
+    def _dispatch_pipeline_event(
+        self,
+        conn_id: str,
+        event: PipelineEvent,
+        *,
+        wait_for_pending_reopen: bool,
+    ) -> list[ServerEvent] | None:
+        is_stale = self._is_stale_turn_event(event, wait_for_pending_reopen=wait_for_pending_reopen)
+        if is_stale is None:
+            return None
+        if is_stale:
             logger.info(
                 "Ignoring stale %s for turn=%s rev=%s",
                 event.type,
@@ -298,13 +326,19 @@ class RealtimeService:
             return []
 
         self._observe_turn_event(event)
+        if isinstance(event, AssistantTextEvent):
+            return self.response.on_assistant_text(
+                conn_id,
+                event,
+                wait_for_pending_reopen=wait_for_pending_reopen,
+            )
         handler = self._pipeline_dispatch.get(type(event))
         if handler is None:
             logger.debug("Unhandled pipeline event type: %s", type(event).__name__)
             return []
         return handler(conn_id, event)
 
-    def _is_stale_turn_event(self, event: PipelineEvent) -> bool:
+    def _is_stale_turn_event(self, event: PipelineEvent, *, wait_for_pending_reopen: bool = True) -> bool | None:
         if self.speculative_turns is None:
             return False
         if not isinstance(
@@ -315,7 +349,13 @@ class RealtimeService:
         turn_id = getattr(event, "turn_id", None)
         turn_revision = getattr(event, "turn_revision", None)
         if isinstance(event, (AssistantTextEvent, TokenUsageEvent)):
-            return not self.speculative_turns.is_latest_after_pending_reopen(turn_id, turn_revision)
+            if wait_for_pending_reopen:
+                is_latest = self.speculative_turns.is_latest_after_pending_reopen(turn_id, turn_revision)
+            else:
+                is_latest = self.speculative_turns.try_is_latest_after_pending_reopen(turn_id, turn_revision)
+            if is_latest is None:
+                return None
+            return not is_latest
         return not self.speculative_turns.is_latest(turn_id, turn_revision)
 
     def _observe_turn_event(self, event: PipelineEvent) -> None:
@@ -379,7 +419,7 @@ class RealtimeService:
 
     def _on_token_usage(self, conn_id: str, event: TokenUsageEvent) -> list[ServerEvent]:
         """Accumulate input/output token counts on the connection's usage metrics."""
-        if self.speculative_turns and not self.speculative_turns.is_latest_after_pending_reopen(
+        if self.speculative_turns and not self.speculative_turns.is_latest(
             event.turn_id,
             event.turn_revision,
         ):

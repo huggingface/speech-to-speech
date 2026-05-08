@@ -53,6 +53,19 @@ class SpeculativeTurnTracker:
             self._wait_for_pending_reopen_locked(turn_id, revision, self._PENDING_REOPEN_WAIT_TIMEOUT_S)
             return self._latest_revision.get(turn_id, revision) == revision
 
+    def try_is_latest_after_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool | None:
+        """Non-blocking variant of ``is_latest_after_pending_reopen``.
+
+        Returns ``None`` when a matching reopen candidate is still pending and
+        the caller should retry after it resolves.
+        """
+        if turn_id is None or revision is None:
+            return True
+        with self._condition:
+            if self._has_pending_reopen_locked(turn_id, revision):
+                return None
+            return self._latest_revision.get(turn_id, revision) == revision
+
     def commit_if_latest_after_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool:
         if turn_id is None or revision is None:
             return True
@@ -65,6 +78,31 @@ class SpeculativeTurnTracker:
             logger.debug("Committed speculative turn %s revision %d", turn_id, revision)
             self._condition.notify_all()
             return True
+
+    def try_commit_if_latest_after_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool | None:
+        """Non-blocking variant of ``commit_if_latest_after_pending_reopen``.
+
+        Returns ``None`` when a matching reopen candidate is still pending and
+        the caller should retry after it resolves.
+        """
+        if turn_id is None or revision is None:
+            return True
+        with self._condition:
+            if self._has_pending_reopen_locked(turn_id, revision):
+                return None
+            latest = self._latest_revision.get(turn_id, revision)
+            if revision != latest:
+                return False
+            self._committed_revision[turn_id] = revision
+            logger.debug("Committed speculative turn %s revision %d", turn_id, revision)
+            self._condition.notify_all()
+            return True
+
+    def has_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool:
+        if turn_id is None or revision is None:
+            return False
+        with self._condition:
+            return self._has_pending_reopen_locked(turn_id, revision)
 
     def commit(self, turn_id: str | None, revision: int | None) -> None:
         if turn_id is None or revision is None:
@@ -183,6 +221,10 @@ class SpeculativeTurnTracker:
             return
         with self._condition:
             self._wait_for_pending_reopen_locked(turn_id, revision, timeout_s)
+
+    def _has_pending_reopen_locked(self, turn_id: str, revision: int) -> bool:
+        pending = self._pending_reopen.get(turn_id)
+        return pending is not None and pending.base_revision == revision
 
     def _wait_for_pending_reopen_locked(self, turn_id: str, revision: int, timeout_s: float) -> None:
         deadline = time.monotonic() + timeout_s

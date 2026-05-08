@@ -244,12 +244,23 @@ def create_app(
     async def _send_loop() -> None:
         """Poll pipeline output queues and send to each connected client."""
         pending_output_item = None
+        pending_text_item: PipelineEvent | None = None
         while not stop_event.is_set():
             try:
                 # Process text events first (speech_started cancels active response)
-                if text_output_queue:
+                if text_output_queue or pending_text_item is not None:
                     try:
-                        text_msg = text_output_queue.get_nowait()
+                        if pending_text_item is not None:
+                            text_msg = pending_text_item
+                            pending_text_item = None
+                        else:
+                            text_msg = text_output_queue.get_nowait()
+
+                        defer_text_msg = False
+                        if isinstance(text_msg, PipelineEvent) and service.should_defer_pipeline_event(text_msg):
+                            pending_text_item = text_msg
+                            defer_text_msg = True
+
                         is_speech_start = isinstance(text_msg, SpeechStartedEvent)
 
                         was_in_response = False
@@ -257,21 +268,34 @@ def create_app(
                             was_in_response = service._state(app.state.active_session).in_response
 
                         drop_text_msg = False
-                        if cancel_scope and cancel_scope.discarding and isinstance(text_msg, AssistantTextEvent):
+                        complete_discard_after_dispatch = False
+                        if (
+                            not defer_text_msg
+                            and cancel_scope
+                            and cancel_scope.discarding
+                            and isinstance(text_msg, AssistantTextEvent)
+                        ):
                             if _is_latest_turn_event(text_msg):
-                                cancel_scope.response_done()
+                                complete_discard_after_dispatch = True
                             else:
                                 drop_text_msg = True
 
-                        if not drop_text_msg:
+                        if not drop_text_msg and not defer_text_msg:
                             for cid in service.connection_ids:
                                 ws = app.state.websockets.get(cid)
                                 if ws and isinstance(text_msg, PipelineEvent):
-                                    events = service.dispatch_pipeline_event(cid, text_msg)
+                                    events = service.try_dispatch_pipeline_event(cid, text_msg)
+                                    if events is None:
+                                        defer_text_msg = True
+                                        break
                                     if events:
                                         await _send_events(ws, events)
 
-                        if is_speech_start and (was_in_response or getattr(text_msg, "reopened", False)):
+                        if defer_text_msg:
+                            pending_text_item = text_msg
+                        elif complete_discard_after_dispatch and cancel_scope:
+                            cancel_scope.response_done()
+                        elif is_speech_start and (was_in_response or getattr(text_msg, "reopened", False)):
                             active_cfg = (
                                 service._state(app.state.active_session).runtime_config
                                 if app.state.active_session

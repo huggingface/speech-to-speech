@@ -24,6 +24,7 @@ from speech_to_speech.pipeline.events import (
     TranscriptionCompletedEvent,
 )
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -327,6 +328,27 @@ class TestSendLoop:
                 msg = ws.receive_json()
                 assert msg["type"] == "input_audio_buffer.speech_started"
                 assert msg["audio_start_ms"] == 0
+
+    def test_pending_reopen_text_does_not_block_audio_send_loop(self, setup):
+        app, service, _, output_queue, text_output_queue, *_ = setup
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                tracker.observe("turn_1", 0)
+                candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+                text_output_queue.put(AssistantTextEvent(text="deferred", turn_id="turn_1", turn_revision=0))
+                output_queue.put(_pcm_bytes(256))
+
+                started_at = time.monotonic()
+                msg = ws.receive_json()
+                elapsed_s = time.monotonic() - started_at
+
+                assert elapsed_s < 0.5
+                assert msg["type"] == "response.created"
+                assert ws.receive_json()["type"] == "response.output_audio.delta"
+                assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
 
     def test_barge_in_discard_clears_after_response_done(self, setup):
         """After barge-in sets discarding=True, __RESPONSE_DONE__ must clear it back to False."""
