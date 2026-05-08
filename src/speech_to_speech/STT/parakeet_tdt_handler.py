@@ -107,7 +107,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         language: Optional[str] = None,
         gen_kwargs: dict[str, Any] = {},
         enable_live_transcription: bool = False,
-        live_transcription_update_interval: float = 0.25,
+        live_transcription_update_interval: float = 0.5,
     ) -> None:
         """
         Initialize the Parakeet TDT model.

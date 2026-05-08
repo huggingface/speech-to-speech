@@ -51,7 +51,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         speech_pad_ms: int = 30,
         audio_enhancement: bool = False,
         enable_realtime_transcription: bool = False,
-        realtime_processing_pause: float = 0.25,
+        realtime_processing_pause: float = 0.5,
         text_output_queue: Queue[TextEventItem] | None = None,
         speculative_turns: SpeculativeTurnTracker | None = None,
         speculative_reopen_ms: int = 1000,

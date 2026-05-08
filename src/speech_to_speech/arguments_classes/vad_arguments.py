@@ -50,9 +50,9 @@ class VADHandlerArguments:
         metadata={"help": "Enable progressive audio release for live transcription during speech. Default is False."},
     )
     realtime_processing_pause: float = field(
-        default=0.2,
+        default=0.5,
         metadata={
-            "help": "Interval (in seconds) for releasing progressive audio chunks during speech. Default is 0.2s."
+            "help": "Interval (in seconds) for releasing progressive audio chunks during speech. Default is 0.5s."
         },
     )
     speculative_reopen_ms: int = field(

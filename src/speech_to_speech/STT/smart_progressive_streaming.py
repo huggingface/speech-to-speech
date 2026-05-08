@@ -2,7 +2,7 @@
 """
 Smart Progressive Streaming Handler
 
-Provides frequent partial transcriptions (every 250ms) with:
+Provides frequent partial transcriptions (every 500ms) with:
 - Growing window up to 15s for accuracy
 - Sentence-boundary-aware window sliding for audio > 15s
 - Fixed sentences + active transcription
@@ -30,7 +30,7 @@ class SmartProgressiveStreamingHandler:
     Smart progressive streaming with sentence-aware window management.
 
     Strategy:
-    1. Emit partial transcriptions every 250ms
+    1. Emit partial transcriptions every 500ms
     2. Use growing window (up to 15s) for better accuracy
     3. When audio > 15s, slide window using sentence boundaries:
        - Keep completed sentences as "fixed"
@@ -40,14 +40,14 @@ class SmartProgressiveStreamingHandler:
     def __init__(
         self,
         model: Any,
-        emission_interval: float = 0.25,
+        emission_interval: float = 0.5,
         max_window_size: float = 15.0,
         sentence_buffer: float = 2.0,
     ) -> None:
         """
         Args:
             model: Parakeet model with sentence alignment
-            emission_interval: Emit partial transcription every N seconds (default 250ms)
+            emission_interval: Emit partial transcription every N seconds (default 500ms)
             max_window_size: Maximum window size before sliding (default 15s)
             sentence_buffer: Keep last N seconds of sentences in active window (default 2s)
         """
@@ -251,7 +251,7 @@ def demo_smart_progressive() -> None:
     print("SMART PROGRESSIVE STREAMING DEMO")
     print("=" * 80)
     print("\nFeatures:")
-    print("  • Partial updates every 250ms")
+    print("  • Partial updates every 500ms")
     print("  • Growing window up to 15s")
     print("  • Sentence-aware window sliding for long audio")
     print()
@@ -286,7 +286,7 @@ def demo_smart_progressive() -> None:
 
         handler = SmartProgressiveStreamingHandler(
             model,
-            emission_interval=0.25,  # 250ms updates
+            emission_interval=0.5,  # 500ms updates
             max_window_size=15.0,  # Max 15s window
             sentence_buffer=2.0,  # Keep 2s of sentences in active window
         )
@@ -300,8 +300,8 @@ def demo_smart_progressive() -> None:
         for result in handler.transcribe_progressive(test_audio):
             update_count += 1
 
-            # Show every 4th update (every 1s) to keep output manageable
-            if update_count % 4 == 0 or result.is_final:
+            # Show every other update (every 1s) to keep output manageable
+            if update_count % 2 == 0 or result.is_final:
                 elapsed = time.perf_counter() - start_time
                 marker = "FINAL" if result.is_final else f"Update {update_count}"
 
@@ -320,7 +320,7 @@ def demo_smart_progressive() -> None:
     print("KEY INSIGHTS")
     print("=" * 80)
     print("""
-1. Frequent updates (250ms):
+1. Frequent updates (500ms):
    - User sees transcription building in real-time
    - Low latency feel
 

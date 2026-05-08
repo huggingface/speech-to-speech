@@ -51,6 +51,7 @@ def _validate_package_defaults() -> None:
     assert module_args.tts == "qwen3"
     assert module_args.log_level == "info"
     assert module_args.enable_live_transcription is True
+    assert module_args.live_transcription_update_interval == 0.5
     assert responses_api_args.model_name == "gpt-5.4-mini"
     assert responses_api_args.responses_api_stream is True
     assert qwen3_args.qwen3_tts_model_name == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
@@ -60,6 +61,7 @@ def _validate_package_defaults() -> None:
     assert qwen3_args.qwen3_tts_ref_audio is None
     assert qwen3_args.qwen3_tts_mlx_quantization == "6bit"
     assert vad_args.thresh == 0.6
+    assert vad_args.realtime_processing_pause == 0.5
 
     package_root = Path(speech_to_speech.__file__).resolve().parent
     ref_audio = package_root / "TTS" / "ref_audio.wav"

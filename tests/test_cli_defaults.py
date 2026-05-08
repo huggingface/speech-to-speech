@@ -35,8 +35,10 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_realtime_profile():
     assert module_args.tts == "qwen3"
     assert module_args.log_level == "info"
     assert module_args.enable_live_transcription is True
+    assert module_args.live_transcription_update_interval == 0.5
 
     assert vad_args.thresh == 0.6
+    assert vad_args.realtime_processing_pause == 0.5
     assert responses_api_args.model_name == "gpt-5.4-mini"
     assert responses_api_args.chat_size == 30
     assert responses_api_args.responses_api_stream is True
