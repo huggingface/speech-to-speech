@@ -47,7 +47,9 @@ class SpeculativeTurnTracker:
         with self._condition:
             pending = self._pending_reopen.get(turn_id)
             if pending is not None and pending.base_revision == revision:
-                logger.debug("Deferring speculative turn %s revision %d commit while reopen is pending", turn_id, revision)
+                logger.debug(
+                    "Deferring speculative turn %s revision %d commit while reopen is pending", turn_id, revision
+                )
                 return
             latest = self._latest_revision.get(turn_id, revision)
             if revision == latest:
