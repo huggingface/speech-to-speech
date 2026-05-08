@@ -1,3 +1,4 @@
+import io
 import logging
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -31,6 +32,38 @@ def test_live_transcription_clears_terminal_line_before_each_update(monkeypatch)
 
     class FakeConsole:
         is_terminal = True
+        width = 80
+
+        def __init__(self):
+            self.file = io.StringIO()
+
+        def print(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    handler = object.__new__(ParakeetTDTSTTHandler)
+    handler._live_transcription_active = False
+    fake_console = FakeConsole()
+    monkeypatch.setattr(parakeet_tdt_handler, "console", fake_console)
+
+    handler._print_live_transcription(Text("Live: first"), "first")
+    handler._print_live_transcription(Text("Live: second"), "second")
+    handler._clear_live_transcription_line()
+
+    assert [args[0].plain for args, _ in calls] == ["Live: first", "Live: second"]
+    assert [kwargs for _, kwargs in calls] == [{"end": ""}, {"end": ""}]
+    assert fake_console.file.getvalue() == "\r\x1b[2K\r\r\x1b[2K\r\r\x1b[2K"
+    assert handler._live_transcription_active is False
+
+
+def test_live_transcription_truncates_terminal_updates(monkeypatch):
+    calls = []
+
+    class FakeConsole:
+        is_terminal = True
+        width = 14
+
+        def __init__(self):
+            self.file = io.StringIO()
 
         def print(self, *args, **kwargs):
             calls.append((args, kwargs))
@@ -39,16 +72,11 @@ def test_live_transcription_clears_terminal_line_before_each_update(monkeypatch)
     handler._live_transcription_active = False
     monkeypatch.setattr(parakeet_tdt_handler, "console", FakeConsole())
 
-    handler._print_live_transcription(Text("Live: first"), "first")
-    handler._print_live_transcription(Text("Live: second"), "second")
-    handler._clear_live_transcription_line()
+    handler._print_live_transcription(Text("Live: abcdefghijklmnopqrstuvwxyz"), "abcdefghijklmnopqrstuvwxyz")
 
-    assert calls[0] == (("\r\x1b[2K",), {"end": ""})
-    assert calls[1] == ((Text("Live: first"),), {"end": "\r"})
-    assert calls[2] == (("\r\x1b[2K",), {"end": ""})
-    assert calls[3] == ((Text("Live: second"),), {"end": "\r"})
-    assert calls[4] == (("\r\x1b[2K",), {"end": ""})
-    assert handler._live_transcription_active is False
+    printed_text = calls[0][0][0]
+    assert printed_text.plain == "Live: abcdef\u2026"
+    assert len(printed_text.plain) == 13
 
 
 def test_live_transcription_uses_lines_for_non_terminal_logs(monkeypatch):

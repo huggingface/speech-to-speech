@@ -394,11 +394,14 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
     def _print_live_transcription(self, rich_text: Text, progressive_text: str) -> None:
         is_terminal = bool(getattr(console, "is_terminal", False))
         if is_terminal:
-            console.print("\r\033[2K", end="")
+            self._write_live_control("\r\x1b[2K")
             if rich_text:
-                console.print(rich_text, end="\r")
+                console.print(self._truncate_live_transcription(rich_text), end="")
             else:
-                console.print(f"[dim]Live: [/dim]{progressive_text}", end="\r")
+                fallback = Text("Live: ", style="dim")
+                fallback.append(progressive_text, style="cyan dim")
+                console.print(self._truncate_live_transcription(fallback), end="")
+            self._write_live_control("\r")
             self._live_transcription_active = True
             return
 
@@ -410,8 +413,25 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
     def _clear_live_transcription_line(self) -> None:
         if not getattr(self, "_live_transcription_active", False):
             return
-        console.print("\r\033[2K", end="")
+        self._write_live_control("\r\x1b[2K")
         self._live_transcription_active = False
+
+    def _write_live_control(self, sequence: str) -> None:
+        file = getattr(console, "file", None)
+        if file is None:
+            return
+        file.write(sequence)
+        file.flush()
+
+    def _truncate_live_transcription(self, text: Text) -> Text:
+        text = text.copy()
+        width = getattr(console, "width", 80)
+        try:
+            max_width = max(1, int(width) - 1)
+        except (TypeError, ValueError):
+            max_width = 79
+        text.truncate(max_width, overflow="ellipsis")
+        return text
 
     def _prepare_live_transcription_turn(self, turn_id: str | None, turn_revision: int | None) -> None:
         if not self.enable_live_transcription:
