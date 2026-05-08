@@ -29,6 +29,9 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             queued_drops = self._drop_stale_queued_inputs()
             self._log_stale_turn_item(item, "input-after-final", queued_drops=queued_drops)
             return False
+        if mode == "progressive" and self._has_queued_final_for_revision(item):
+            self._log_stale_turn_item(item, "progressive-before-final")
+            return False
 
         wait_for_stability = mode == "final"
         gate_start = perf_counter()
@@ -108,6 +111,10 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
                 queued_item = self.queue_in.queue.popleft()
                 if isinstance(queued_item, VADAudio) and (
                     self._is_completed_final_revision(queued_item)
+                    or (
+                        queued_item.mode == "progressive"
+                        and self._has_queued_final_for_revision_locked(queued_item)
+                    )
                     or not self._is_latest_turn_item(
                         queued_item,
                         wait_for_pending_reopen=False,
@@ -161,6 +168,23 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             return self.queue_in.qsize()
         except NotImplementedError:
             return "unknown"
+
+    def _has_queued_final_for_revision(self, item: object) -> bool:
+        if not hasattr(self.queue_in, "mutex") or not hasattr(self.queue_in, "queue"):
+            return False
+        with self.queue_in.mutex:
+            return self._has_queued_final_for_revision_locked(item)
+
+    def _has_queued_final_for_revision_locked(self, item: object) -> bool:
+        key = self._revision_key(item)
+        if key is None:
+            return False
+        return any(
+            isinstance(queued_item, VADAudio)
+            and queued_item.mode == "final"
+            and self._revision_key(queued_item) == key
+            for queued_item in self.queue_in.queue
+        )
 
     def _revision_key(self, item: object) -> tuple[str, int] | None:
         turn_id = getattr(item, "turn_id", None)
