@@ -312,10 +312,11 @@ class RealtimeService:
             (PartialTranscriptionEvent, TranscriptionCompletedEvent, AssistantTextEvent, TokenUsageEvent),
         ):
             return False
-        return not self.speculative_turns.is_latest(
-            getattr(event, "turn_id", None),
-            getattr(event, "turn_revision", None),
-        )
+        turn_id = getattr(event, "turn_id", None)
+        turn_revision = getattr(event, "turn_revision", None)
+        if isinstance(event, (AssistantTextEvent, TokenUsageEvent)):
+            return not self.speculative_turns.is_latest_after_pending_reopen(turn_id, turn_revision)
+        return not self.speculative_turns.is_latest(turn_id, turn_revision)
 
     def _observe_turn_event(self, event: PipelineEvent) -> None:
         if self.speculative_turns is None:
@@ -378,6 +379,12 @@ class RealtimeService:
 
     def _on_token_usage(self, conn_id: str, event: TokenUsageEvent) -> list[ServerEvent]:
         """Accumulate input/output token counts on the connection's usage metrics."""
+        if self.speculative_turns and not self.speculative_turns.is_latest_after_pending_reopen(
+            event.turn_id,
+            event.turn_revision,
+        ):
+            logger.debug("Dropping stale token usage for turn=%s rev=%s", event.turn_id, event.turn_revision)
+            return []
         st = self._state(conn_id)
         st.response_usage.input_tokens += event.input_tokens
         st.response_usage.output_tokens += event.output_tokens

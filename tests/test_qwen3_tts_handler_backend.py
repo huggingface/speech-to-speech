@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 from queue import Queue
-from threading import Event
+from threading import Event, Thread
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,6 +10,7 @@ import pytest
 import speech_to_speech.TTS.qwen3_tts_handler as qwen3_tts_module
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 
 
@@ -322,6 +323,62 @@ def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     end_outputs = list(handler.process(EndOfResponse()))
 
     assert end_outputs == [AUDIO_RESPONSE_DONE]
+
+
+def test_process_waits_for_pending_reopen_and_drops_stale_tts_input():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.speculative_turns = tracker
+    done = Event()
+    outputs = []
+
+    def run_process():
+        outputs.extend(
+            handler.process(
+                TTSInput(
+                    text="stale",
+                    turn_id="turn_1",
+                    turn_revision=0,
+                )
+            )
+        )
+        done.set()
+
+    thread = Thread(target=run_process)
+    thread.start()
+
+    assert not done.wait(0.05)
+    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+    assert done.wait(1.0)
+    thread.join(timeout=1.0)
+
+    assert outputs == []
+
+
+def test_process_waits_for_pending_reopen_and_drops_stale_end_of_response():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.speculative_turns = tracker
+    done = Event()
+    outputs = []
+
+    def run_process():
+        outputs.extend(handler.process(EndOfResponse(turn_id="turn_1", turn_revision=0)))
+        done.set()
+
+    thread = Thread(target=run_process)
+    thread.start()
+
+    assert not done.wait(0.05)
+    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+    assert done.wait(1.0)
+    thread.join(timeout=1.0)
+
+    assert outputs == []
 
 
 def test_process_does_not_set_should_listen_when_generation_fails(monkeypatch):

@@ -638,12 +638,17 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         return combined_text, language_code, saw_end_of_response
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
+        speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
+            if speculative_turns and not speculative_turns.is_latest_after_pending_reopen(
+                tts_input.turn_id,
+                tts_input.turn_revision,
+            ):
+                return
             yield AUDIO_RESPONSE_DONE
             return
 
-        speculative_turns = getattr(self, "speculative_turns", None)
-        if speculative_turns and not speculative_turns.is_latest(
+        if speculative_turns and not speculative_turns.is_latest_after_pending_reopen(
             tts_input.turn_id,
             tts_input.turn_revision,
         ):

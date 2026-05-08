@@ -94,8 +94,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
     def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
         if self.speculative_turns is None:
             return True
-        self.speculative_turns.wait_for_pending_reopen(turn_id, turn_revision)
-        return self.speculative_turns.is_latest(turn_id, turn_revision)
+        return self.speculative_turns.is_latest_after_pending_reopen(turn_id, turn_revision)
 
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")

@@ -218,8 +218,15 @@ class ResponseHandler(RealtimeBaseHandler):
 
     def on_assistant_text(self, conn_id: str, event: AssistantTextEvent) -> list[ServerEvent]:
         """Handle assistant_text: emit transcript and/or tool-call events."""
-        if self._service.speculative_turns:
-            self._service.speculative_turns.commit(event.turn_id, event.turn_revision)
+        if (
+            self._service.speculative_turns
+            and not self._service.speculative_turns.commit_if_latest_after_pending_reopen(
+                event.turn_id,
+                event.turn_revision,
+            )
+        ):
+            logger.debug("Dropping stale assistant text for turn=%s rev=%s", event.turn_id, event.turn_revision)
+            return []
         st = self._state(conn_id)
         events: list[ServerEvent] = []
         resp_id, item_id = self._ensure_response(conn_id)

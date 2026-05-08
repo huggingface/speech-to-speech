@@ -46,6 +46,26 @@ class SpeculativeTurnTracker:
         with self._condition:
             return self._latest_revision.get(turn_id, revision) == revision
 
+    def is_latest_after_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool:
+        if turn_id is None or revision is None:
+            return True
+        with self._condition:
+            self._wait_for_pending_reopen_locked(turn_id, revision, self._PENDING_REOPEN_WAIT_TIMEOUT_S)
+            return self._latest_revision.get(turn_id, revision) == revision
+
+    def commit_if_latest_after_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool:
+        if turn_id is None or revision is None:
+            return True
+        with self._condition:
+            self._wait_for_pending_reopen_locked(turn_id, revision, self._PENDING_REOPEN_WAIT_TIMEOUT_S)
+            latest = self._latest_revision.get(turn_id, revision)
+            if revision != latest:
+                return False
+            self._committed_revision[turn_id] = revision
+            logger.debug("Committed speculative turn %s revision %d", turn_id, revision)
+            self._condition.notify_all()
+            return True
+
     def commit(self, turn_id: str | None, revision: int | None) -> None:
         if turn_id is None or revision is None:
             return
@@ -161,23 +181,26 @@ class SpeculativeTurnTracker:
     ) -> None:
         if turn_id is None or revision is None:
             return
-        deadline = time.monotonic() + timeout_s
         with self._condition:
-            pending = self._pending_reopen.get(turn_id)
-            if pending is None or pending.base_revision != revision:
+            self._wait_for_pending_reopen_locked(turn_id, revision, timeout_s)
+
+    def _wait_for_pending_reopen_locked(self, turn_id: str, revision: int, timeout_s: float) -> None:
+        deadline = time.monotonic() + timeout_s
+        pending = self._pending_reopen.get(turn_id)
+        if pending is None or pending.base_revision != revision:
+            return
+        logger.debug("Waiting for pending speculative reopen turn=%s rev=%s", turn_id, revision)
+        while pending is not None and pending.base_revision == revision:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning("Timed out waiting for pending speculative reopen turn=%s rev=%s", turn_id, revision)
+                if self._pending_reopen.get(turn_id) == pending:
+                    del self._pending_reopen[turn_id]
+                    self._prune_tracked_turns()
+                    self._condition.notify_all()
                 return
-            logger.debug("Waiting for pending speculative reopen turn=%s rev=%s", turn_id, revision)
-            while pending is not None and pending.base_revision == revision:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    logger.warning("Timed out waiting for pending speculative reopen turn=%s rev=%s", turn_id, revision)
-                    if self._pending_reopen.get(turn_id) == pending:
-                        del self._pending_reopen[turn_id]
-                        self._prune_tracked_turns()
-                        self._condition.notify_all()
-                    return
-                self._condition.wait(remaining)
-                pending = self._pending_reopen.get(turn_id)
+            self._condition.wait(remaining)
+            pending = self._pending_reopen.get(turn_id)
 
     def _prune_tracked_turns(self) -> None:
         if self._max_tracked_turns <= 0:
