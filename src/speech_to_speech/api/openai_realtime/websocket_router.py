@@ -251,7 +251,7 @@ def create_app(
                 if text_output_queue or pending_text_item is not None:
                     try:
                         if pending_text_item is not None:
-                            text_msg = pending_text_item
+                            text_msg: TextEventItem = pending_text_item
                             pending_text_item = None
                         else:
                             text_msg = text_output_queue.get_nowait()
@@ -291,7 +291,7 @@ def create_app(
                                     if events:
                                         await _send_events(ws, events)
 
-                        if defer_text_msg:
+                        if defer_text_msg and isinstance(text_msg, PipelineEvent):
                             pending_text_item = text_msg
                         elif complete_discard_after_dispatch and cancel_scope:
                             cancel_scope.response_done()

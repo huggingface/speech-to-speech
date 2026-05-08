@@ -349,6 +349,7 @@ class RealtimeService:
         turn_id = getattr(event, "turn_id", None)
         turn_revision = getattr(event, "turn_revision", None)
         if isinstance(event, (AssistantTextEvent, TokenUsageEvent)):
+            is_latest: bool | None
             if wait_for_pending_reopen:
                 is_latest = self.speculative_turns.is_latest_after_pending_reopen(turn_id, turn_revision)
             else:

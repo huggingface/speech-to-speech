@@ -225,6 +225,7 @@ class ResponseHandler(RealtimeBaseHandler):
     ) -> list[ServerEvent] | None:
         """Handle assistant_text: emit transcript and/or tool-call events."""
         if self._service.speculative_turns:
+            commit_result: bool | None
             if wait_for_pending_reopen:
                 commit_result = self._service.speculative_turns.commit_if_latest_after_pending_reopen(
                     event.turn_id,
