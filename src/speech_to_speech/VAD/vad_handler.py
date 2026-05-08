@@ -401,15 +401,21 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         # Check if we're currently in a speech segment
         if hasattr(self.iterator, "buffer") and len(self.iterator.buffer) > 0:
             current_time = time.time()
+            duration_ms = self._speech_buffer_duration_ms()
+            progressive_pause = self._progressive_processing_pause(duration_ms)
 
             # Yield accumulated audio periodically while speaking
-            if (current_time - self.last_process_time) >= self.realtime_processing_pause:
+            if (current_time - self.last_process_time) >= progressive_pause:
                 array = torch.cat(self.iterator.speech_buffer()).cpu().numpy()
                 duration_ms = len(array) / self.sample_rate * 1000
 
                 if duration_ms >= self.min_speech_ms:
                     self._log_progressive_yields += 1
-                    logger.debug(f"VAD: yielding progressive audio ({duration_ms:.0f}ms)")
+                    logger.debug(
+                        "VAD: yielding progressive audio (%.0fms, interval=%.2fs)",
+                        duration_ms,
+                        progressive_pause,
+                    )
                     turn_id, turn_revision = self._current_turn_metadata()
                     yield VADAudio(
                         audio=self._combined_turn_audio(array),
@@ -499,6 +505,19 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 yield VADAudio(audio=output_array, mode="final", turn_id=turn_id, turn_revision=turn_revision)
                 self.last_process_time = 0.0
                 self._speech_started_emitted = False
+
+    def _progressive_processing_pause(self, duration_ms: float) -> float:
+        base_pause = max(0.0, self.realtime_processing_pause)
+        duration_s = duration_ms / 1000.0
+        if duration_s < 8.0:
+            multiplier = 1.0
+        elif duration_s < 15.0:
+            multiplier = 2.0
+        elif duration_s < 30.0:
+            multiplier = 4.0
+        else:
+            multiplier = 6.0
+        return min(base_pause * multiplier, 2.0)
 
     def _process_normal(self, vad_output: list[torch.Tensor] | None) -> Iterator[VADOut]:
         """Original processing: yield only when speech ends."""

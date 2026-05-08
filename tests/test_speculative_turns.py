@@ -1,6 +1,7 @@
 import time
 from queue import Queue
 from threading import Thread
+from typing import Literal
 
 import numpy as np
 
@@ -199,7 +200,11 @@ def test_vad_keeps_single_speculative_audio_prefix():
     np.testing.assert_array_equal(third_output, np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
 
 
-def _vad_audio(turn_id: str = "turn_1", revision: int = 0, mode: str | None = "progressive") -> VADAudio:
+def _vad_audio(
+    turn_id: str = "turn_1",
+    revision: int = 0,
+    mode: Literal["progressive", "final"] | None = "progressive",
+) -> VADAudio:
     return VADAudio(audio=np.zeros(512, dtype=np.float32), mode=mode, turn_id=turn_id, turn_revision=revision)
 
 
@@ -256,3 +261,20 @@ def test_vad_final_audio_replaces_queued_progressive_audio_for_same_revision():
 
     queued_items = list(handler.queue_out.queue)
     assert queued_items == [other_turn_progressive]
+
+
+def test_vad_progressive_processing_pause_increases_with_speech_duration():
+    handler = object.__new__(VADHandler)
+    handler.realtime_processing_pause = 0.25
+
+    assert handler._progressive_processing_pause(7_999) == 0.25
+    assert handler._progressive_processing_pause(8_000) == 0.5
+    assert handler._progressive_processing_pause(15_000) == 1.0
+    assert handler._progressive_processing_pause(30_000) == 1.5
+
+
+def test_vad_progressive_processing_pause_is_capped():
+    handler = object.__new__(VADHandler)
+    handler.realtime_processing_pause = 0.5
+
+    assert handler._progressive_processing_pause(30_000) == 2.0
