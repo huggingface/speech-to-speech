@@ -165,8 +165,11 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         buffer_samples = sum(len(t) for t in self.iterator.speech_buffer())
         return buffer_samples / self.sample_rate * 1000
 
+    def _uses_realtime_turn_handling(self) -> bool:
+        return self.enable_realtime_transcription or self.speculative_turns is not None
+
     def _should_reopen_current_turn(self, audio_start_ms: int) -> bool:
-        if not self.enable_realtime_transcription:
+        if not self._uses_realtime_turn_handling():
             return False
         if self._current_turn_id is None or self._current_turn_revision is None or self._last_final_audio_ms is None:
             return False
@@ -389,8 +392,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             self._log_progressive_yields = 0
             self._last_log_time = now
 
-        if self.enable_realtime_transcription:
-            # Progressive mode: yield audio chunks while speaking
+        if self._uses_realtime_turn_handling():
+            # Realtime mode keeps turns reopenable; live transcription additionally
+            # emits progressive audio chunks while speaking.
             yield from self._process_realtime(vad_output)
         else:
             # Original mode: yield only when speech ends
@@ -398,8 +402,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
     def _process_realtime(self, vad_output: list[torch.Tensor] | None) -> Iterator[VADOut]:
         """Process with real-time progressive audio release."""
-        # Check if we're currently in a speech segment
-        if hasattr(self.iterator, "buffer") and len(self.iterator.buffer) > 0:
+        # Check if we're currently in a speech segment.
+        if self.enable_realtime_transcription and hasattr(self.iterator, "buffer") and len(self.iterator.buffer) > 0:
             current_time = time.time()
             duration_ms = self._speech_buffer_duration_ms()
             progressive_pause = self._progressive_processing_pause(duration_ms)

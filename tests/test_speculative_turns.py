@@ -182,6 +182,37 @@ def test_vad_direct_reopen_path_uses_tracker_candidate_protocol():
     assert tracker._pending_reopen == {}
 
 
+def test_vad_reopens_speculative_turn_when_live_transcription_disabled():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    handler = object.__new__(VADHandler)
+    handler.enable_realtime_transcription = False
+    handler._speech_started_emitted = False
+    handler._current_turn_id = "turn_1"
+    handler._current_turn_revision = 0
+    handler._last_final_audio_ms = 1000
+    handler.speculative_reopen_ms = 1200
+    handler.speculative_turns = tracker
+    handler._pending_reopen_candidate = None
+
+    turn_id, revision, reopened = handler._ensure_turn_for_speech_start(1100)
+
+    assert (turn_id, revision, reopened) == ("turn_1", 1, True)
+    assert not tracker.is_latest("turn_1", 0)
+    assert tracker.is_latest("turn_1", 1)
+
+
+def test_vad_realtime_path_does_not_emit_progressive_when_live_transcription_disabled():
+    class FakeIterator:
+        buffer = [object()]
+
+    handler = object.__new__(VADHandler)
+    handler.enable_realtime_transcription = False
+    handler.iterator = FakeIterator()
+
+    assert list(handler._process_realtime(None)) == []
+
+
 def test_vad_keeps_single_speculative_audio_prefix():
     handler = object.__new__(VADHandler)
     handler._speculative_audio_prefix = None
