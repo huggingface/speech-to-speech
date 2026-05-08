@@ -8,6 +8,7 @@ constants.
 
 from __future__ import annotations
 
+from time import perf_counter
 from typing import Final, Literal, Optional, TypeAlias
 
 import numpy as np
@@ -43,6 +44,7 @@ class VADAudio(PipelineMessage):
     mode: Literal["progressive", "final"] | None = None
     turn_id: str | None = None
     turn_revision: int | None = None
+    created_at_s: float = Field(default_factory=perf_counter)
 
 
 # ── STT → TranscriptionNotifier → LLM ────────────────────────────────
