@@ -54,7 +54,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         realtime_processing_pause: float = 0.25,
         text_output_queue: Queue[TextEventItem] | None = None,
         speculative_turns: SpeculativeTurnTracker | None = None,
-        speculative_reopen_ms: int = 1200,
+        speculative_reopen_ms: int = 1000,
     ) -> None:
         self.should_listen = should_listen
         self.sample_rate = sample_rate

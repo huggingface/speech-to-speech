@@ -56,7 +56,7 @@ class VADHandlerArguments:
         },
     )
     speculative_reopen_ms: int = field(
-        default=1200,
+        default=1000,
         metadata={
             "help": "In realtime mode, keep a soft-ended turn reopenable for this many milliseconds unless a response commits it."
         },
