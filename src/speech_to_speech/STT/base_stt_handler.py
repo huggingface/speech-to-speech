@@ -111,10 +111,7 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
                 queued_item = self.queue_in.queue.popleft()
                 if isinstance(queued_item, VADAudio) and (
                     self._is_completed_final_revision(queued_item)
-                    or (
-                        queued_item.mode == "progressive"
-                        and self._has_queued_final_for_revision_locked(queued_item)
-                    )
+                    or (queued_item.mode == "progressive" and self._has_queued_final_for_revision_locked(queued_item))
                     or not self._is_latest_turn_item(
                         queued_item,
                         wait_for_pending_reopen=False,
@@ -180,9 +177,7 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
         if key is None:
             return False
         return any(
-            isinstance(queued_item, VADAudio)
-            and queued_item.mode == "final"
-            and self._revision_key(queued_item) == key
+            isinstance(queued_item, VADAudio) and queued_item.mode == "final" and self._revision_key(queued_item) == key
             for queued_item in self.queue_in.queue
         )
 
