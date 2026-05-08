@@ -639,6 +639,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
             del self.model
 
     def on_session_end(self) -> None:
+        super().on_session_end()
         self.last_language = self.start_language if self.start_language else "en"
         if self.enable_live_transcription:
             self.processing_final = False

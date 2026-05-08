@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import logging
-from collections import Counter
+from collections import Counter, OrderedDict
 from time import perf_counter
 from typing import Any
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
-from speech_to_speech.pipeline.messages import VADAudio
+from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 logger = logging.getLogger(__name__)
@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
     """Base STT handler with speculative-turn stale input filtering."""
 
+    _MAX_COMPLETED_FINAL_REVISIONS = 2048
+
     speculative_turns: SpeculativeTurnTracker | None = None
     final_revision_settle_s: float = 0.0
 
@@ -23,6 +25,11 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
         mode = getattr(item, "mode", None)
         turn_id = getattr(item, "turn_id", None)
         turn_revision = getattr(item, "turn_revision", None)
+        if self._is_completed_final_revision(item):
+            queued_drops = self._drop_stale_queued_inputs()
+            self._log_stale_turn_item(item, "input-after-final", queued_drops=queued_drops)
+            return False
+
         wait_for_stability = mode == "final"
         gate_start = perf_counter()
         is_latest = self._is_latest_turn_item(
@@ -51,10 +58,18 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
         return True
 
     def should_emit_output(self, output: STTOut) -> bool:
+        if isinstance(output, PartialTranscription) and self._is_completed_final_revision(output):
+            self._log_stale_turn_item(output, "output-after-final")
+            return False
+
         if not self._is_latest_turn_item(output, wait_for_pending_reopen=True, wait_for_stability=False):
             self._log_stale_turn_item(output, "output")
             return False
         return True
+
+    def before_emit_output(self, output: STTOut) -> None:
+        if isinstance(output, Transcription):
+            self._mark_completed_final_revision(output)
 
     def _is_latest_turn_item(
         self,
@@ -91,10 +106,13 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             kept: list[Any] = []
             while self.queue_in.queue:
                 queued_item = self.queue_in.queue.popleft()
-                if isinstance(queued_item, VADAudio) and not self._is_latest_turn_item(
-                    queued_item,
-                    wait_for_pending_reopen=False,
-                    wait_for_stability=False,
+                if isinstance(queued_item, VADAudio) and (
+                    self._is_completed_final_revision(queued_item)
+                    or not self._is_latest_turn_item(
+                        queued_item,
+                        wait_for_pending_reopen=False,
+                        wait_for_stability=False,
+                    )
                 ):
                     dropped += 1
                 else:
@@ -143,3 +161,33 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             return self.queue_in.qsize()
         except NotImplementedError:
             return "unknown"
+
+    def _revision_key(self, item: object) -> tuple[str, int] | None:
+        turn_id = getattr(item, "turn_id", None)
+        turn_revision = getattr(item, "turn_revision", None)
+        if not isinstance(turn_id, str) or not isinstance(turn_revision, int):
+            return None
+        return (turn_id, turn_revision)
+
+    def _completed_final_revisions(self) -> OrderedDict[tuple[str, int], None]:
+        if not hasattr(self, "_completed_final_revision_keys"):
+            self._completed_final_revision_keys: OrderedDict[tuple[str, int], None] = OrderedDict()
+        return self._completed_final_revision_keys
+
+    def _is_completed_final_revision(self, item: object) -> bool:
+        key = self._revision_key(item)
+        return key is not None and key in self._completed_final_revisions()
+
+    def _mark_completed_final_revision(self, output: Transcription) -> None:
+        key = self._revision_key(output)
+        if key is None:
+            return
+        completed = self._completed_final_revisions()
+        completed[key] = None
+        completed.move_to_end(key)
+        while len(completed) > self._MAX_COMPLETED_FINAL_REVISIONS:
+            completed.popitem(last=False)
+
+    def on_session_end(self) -> None:
+        if hasattr(self, "_completed_final_revision_keys"):
+            self._completed_final_revision_keys.clear()

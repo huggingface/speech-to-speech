@@ -3,11 +3,11 @@ from __future__ import annotations
 from queue import Empty, Queue
 from threading import Event, Thread
 from time import sleep
-from typing import Iterator
+from typing import Iterator, Literal
 
 import numpy as np
 
-from speech_to_speech.pipeline.messages import PIPELINE_END, Transcription, VADAudio
+from speech_to_speech.pipeline.messages import PIPELINE_END, PartialTranscription, Transcription, VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 
@@ -27,6 +27,7 @@ class RecordingSTTHandler(BaseSTTHandler):
     def process(self, vad_audio: VADAudio) -> Iterator[Transcription]:
         self.processed.append((vad_audio.turn_id, vad_audio.turn_revision))
         if self.mark_stale_during_process and vad_audio.turn_id is not None and vad_audio.turn_revision is not None:
+            assert self.speculative_turns is not None
             self.speculative_turns.observe(vad_audio.turn_id, vad_audio.turn_revision + 1)
         yield Transcription(
             text="hello",
@@ -35,7 +36,11 @@ class RecordingSTTHandler(BaseSTTHandler):
         )
 
 
-def _vad_audio(turn_id: str = "turn_1", revision: int = 0, mode: str | None = None) -> VADAudio:
+def _vad_audio(
+    turn_id: str = "turn_1",
+    revision: int = 0,
+    mode: Literal["progressive", "final"] | None = None,
+) -> VADAudio:
     return VADAudio(audio=np.zeros(512, dtype=np.float32), mode=mode, turn_id=turn_id, turn_revision=revision)
 
 
@@ -163,3 +168,47 @@ def test_stt_handler_drops_output_that_became_stale_during_processing():
         pass
     else:
         raise AssertionError("stale transcription output was emitted")
+
+
+def test_stt_handler_drops_progressive_input_after_final_emit():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    queue_in = Queue()
+    queue_out = Queue()
+    handler = _handler(tracker, queue_in, queue_out)
+
+    handler.before_emit_output(Transcription(text="done", turn_id="turn_1", turn_revision=0))
+
+    assert not handler.should_process_input(_vad_audio(revision=0, mode="progressive"))
+
+
+def test_stt_handler_drops_partial_output_after_final_emit():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    queue_in = Queue()
+    queue_out = Queue()
+    handler = _handler(tracker, queue_in, queue_out)
+
+    handler.before_emit_output(Transcription(text="done", turn_id="turn_1", turn_revision=0))
+
+    assert not handler.should_emit_output(PartialTranscription(text="partial", turn_id="turn_1", turn_revision=0))
+
+
+def test_stt_handler_bulk_drops_queued_progressives_after_final_emit():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    queue_in = Queue()
+    queue_out = Queue()
+    handler = _handler(tracker, queue_in, queue_out)
+
+    handler.before_emit_output(Transcription(text="done", turn_id="turn_1", turn_revision=0))
+    for _ in range(3):
+        queue_in.put(_vad_audio(revision=0, mode="progressive"))
+    queue_in.put(_vad_audio(turn_id="turn_2", revision=0, mode="progressive"))
+
+    assert not handler.should_process_input(_vad_audio(revision=0, mode="progressive"))
+    remaining = queue_in.get_nowait()
+
+    assert isinstance(remaining, VADAudio)
+    assert remaining.turn_id == "turn_2"
+    assert queue_in.empty()
