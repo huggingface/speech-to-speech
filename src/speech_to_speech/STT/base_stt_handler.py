@@ -17,7 +17,7 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
     """Base STT handler with speculative-turn stale input filtering."""
 
     speculative_turns: SpeculativeTurnTracker | None = None
-    final_revision_settle_s: float = 0.6
+    final_revision_settle_s: float = 0.0
 
     def should_process_input(self, item: STTIn) -> bool:
         mode = getattr(item, "mode", None)
