@@ -158,11 +158,13 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         input_tokens = 0
         output_tokens = 0
         try:
+            print(self._extra_body)
             api_response = self.client.responses.create(
                 model=self.model_name,
                 input=active_chat.to_responses_api_chat(),
                 stream=self.stream,
-                extra_body=self._extra_body,
+                # extra_body=self._extra_body,
+                # extra_body={"enable_thinking": False},
                 timeout=self.request_timeout,
                 **optional_kwargs,
             )
@@ -193,6 +195,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                                     sentence_batch = []
                             printable_text = sentences[-1]
                     elif isinstance(raw_event, ResponseOutputItemDoneEvent):
+                        logger.info(f"Raw event: {raw_event.model_dump_json(indent=2)}")
                         if isinstance(raw_event.item, ResponseFunctionToolCall):
                             raw_event.item.call_id = _generate_id("call")
                             raw_event.item.id = _generate_id("fc")
