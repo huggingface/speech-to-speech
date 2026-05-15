@@ -270,6 +270,8 @@ Select a backend with `--llm_backend` (`responses-api` by default) and pair it w
 | OpenAI | *(omit, uses OpenAI default)* | `$OPENAI_API_KEY` |
 | HF Inference Providers | `https://router.huggingface.co/v1` | `$HF_TOKEN` |
 | OpenRouter | `https://openrouter.ai/api/v1` | `$OPENROUTER_API_KEY` |
+| Astraflow (global) | `https://api-us-ca.umodelverse.ai/v1` | `$ASTRAFLOW_API_KEY` |
+| Astraflow (China) | `https://api.modelverse.cn/v1` | `$ASTRAFLOW_CN_API_KEY` |
 | vLLM (local) | `http://localhost:8000/v1` | *(omit or any string)* |
 | llama.cpp (local) | `http://localhost:8080/v1` | *(omit or any string)* |
 
@@ -312,6 +314,38 @@ speech-to-speech \
     --model_name "openai/gpt-oss-20b:groq" \
     --responses_api_base_url "https://router.huggingface.co/v1" \
     --responses_api_api_key "$HF_TOKEN" \
+    --responses_api_stream \
+    --enable_live_transcription
+```
+
+```bash
+# Astraflow (global) — OpenAI-compatible platform supporting 200+ models
+# Sign up at https://astraflow.ucloud-global.com
+speech-to-speech \
+    --mode local \
+    --stt parakeet-tdt \
+    --llm_backend responses-api \
+    --tts qwen3 \
+    --qwen3_tts_mlx_quantization 6bit \
+    --model_name "<model-name>" \
+    --responses_api_base_url "https://api-us-ca.umodelverse.ai/v1" \
+    --responses_api_api_key "$ASTRAFLOW_API_KEY" \
+    --responses_api_stream \
+    --enable_live_transcription
+```
+
+```bash
+# Astraflow (China) — OpenAI-compatible platform supporting 200+ models
+# Sign up at https://astraflow.ucloud.cn
+speech-to-speech \
+    --mode local \
+    --stt parakeet-tdt \
+    --llm_backend responses-api \
+    --tts qwen3 \
+    --qwen3_tts_mlx_quantization 6bit \
+    --model_name "<model-name>" \
+    --responses_api_base_url "https://api.modelverse.cn/v1" \
+    --responses_api_api_key "$ASTRAFLOW_CN_API_KEY" \
     --responses_api_stream \
     --enable_live_transcription
 ```
