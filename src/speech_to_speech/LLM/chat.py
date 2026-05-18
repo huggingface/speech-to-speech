@@ -248,20 +248,20 @@ class Chat:
                 while self._user_turn_count > self.size:
                     self._evict_oldest_turn()
 
-    def to_response_api_chat(self, items: list[SupportedItem] | None = None) -> ResponseInputParam:
+    def to_responses_api_chat(self, items: list[SupportedItem] | None = None) -> ResponseInputParam:
         """Serialize the chat (system prompt + buffer) for the OpenAI Responses API.
 
         If *items* is provided, serialize that slice instead of the live buffer
         (used by the compaction snapshot).
         """
         with self._lock:
-            return self._to_response_api_chat_locked(items if items is not None else self.buffer)
+            return self._to_responses_api_chat_locked(items if items is not None else self.buffer)
 
-    def _to_response_api_chat_locked(self, items: list[SupportedItem]) -> ResponseInputParam:
-        """Body of :meth:`to_response_api_chat`. Caller must hold ``_lock``."""
+    def _to_responses_api_chat_locked(self, items: list[SupportedItem]) -> ResponseInputParam:
+        """Body of :meth:`to_responses_api_chat`. Caller must hold ``_lock``."""
         if not self._lock.locked():
             raise RuntimeError(
-                "_to_response_api_chat_locked called without holding _lock; use to_response_api_chat() instead."
+                "_to_responses_api_chat_locked called without holding _lock; use to_responses_api_chat() instead."
             )
         buffer_items = list(items)
         result: list[ResponseInputItemParam] = []
@@ -466,7 +466,7 @@ class Chat:
 
         items_to_compact = self.buffer[:end_idx]
         marker_ids = {entry.id for entry in items_to_compact if entry.id is not None}
-        snapshot = self._to_response_api_chat_locked(items=items_to_compact)
+        snapshot = self._to_responses_api_chat_locked(items=items_to_compact)
         # Strip image parts so the summarizer doesn't have to handle them.
         for raw in snapshot:
             if not isinstance(raw, dict) or raw.get("role") != "user":
@@ -556,12 +556,19 @@ class Chat:
             drop_ids = marker_ids - fc_ids_to_keep
             remaining = [x for x in self.buffer if x.id not in drop_ids]
 
+            # Pending FCs (no FCO yet) live only in _pending_tool_calls. Splice
+            # them in after the summary so they survive compaction in the
+            # buffer; their FCO will append at the end when it arrives.
+            in_buffer_call_ids = {x.call_id for x in remaining if isinstance(x, RealtimeConversationItemFunctionCall)}
+            pending_call_ids = [cid for cid in self._pending_tool_calls if cid not in in_buffer_call_ids]
+            pending_fcs = [self._pending_tool_calls.pop(cid) for cid in pending_call_ids]
+
             user_msg = make_user_message(result.user_summary)
             user_msg.id = _generate_id("msg")
             asst_msg = make_assistant_message(result.assistant_summary)
             asst_msg.id = _generate_id("msg")
 
-            self.buffer = [user_msg, asst_msg, *remaining]
+            self.buffer = [user_msg, asst_msg, *pending_fcs, *remaining]
             self._user_turn_count = sum(1 for x in self.buffer if isinstance(x, RealtimeConversationItemUserMessage))
 
 

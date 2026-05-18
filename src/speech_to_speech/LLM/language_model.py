@@ -569,7 +569,9 @@ class LanguageModelHandler(BaseLanguageModelHandler):
         else:
             pipe = self.pipe
             tokenizer = self.tokenizer
-            gen_kwargs = {k: v for k, v in self.gen_kwargs.items() if k not in ("streamer", "stopping_criteria", "max_new_tokens")}
+            gen_kwargs = {
+                k: v for k, v in self.gen_kwargs.items() if k not in ("streamer", "stopping_criteria", "max_new_tokens")
+            }
             max_new_tokens = 1024
 
             def generate_transformers(system: str, user: str) -> str:
