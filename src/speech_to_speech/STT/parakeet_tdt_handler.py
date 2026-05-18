@@ -76,7 +76,14 @@ if LINGUA_AVAILABLE:
         for code in SUPPORTED_LANGUAGES
         if _LINGUA_CODE_MAP.get(code, code) in _lingua_iso_to_code
     ]
-    _lingua_detector = LanguageDetectorBuilder.from_languages(*_lingua_languages).build()
+
+    def _build_lingua_detector():
+        # Preloading can take multiple seconds on some hardware, including the
+        # deployed server. Pay that cost at startup instead of on the first user
+        # request, where it would look like slow STT.
+        return LanguageDetectorBuilder.from_languages(*_lingua_languages).with_preloaded_language_models().build()
+
+    _lingua_detector = _build_lingua_detector()
 
 
 class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
@@ -292,11 +299,22 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
             if language_code:
                 console.print(f"[dim]Language: {language_code}[/dim]")
 
-        yield Transcription(text=pred_text, language_code=language_code)
-
-        # Reset processing_final flag for next utterance
+        # Reset per-utterance live transcription state only after final STT
+        # completes. The streaming handler carries fixed sentence timing within
+        # an utterance, and stale timing must not leak into the next turn.
         if self.enable_live_transcription:
             self.processing_final = False
+            if self.streaming_handler is not None:
+                self.streaming_handler.reset()
+
+        yield Transcription(text=pred_text, language_code=language_code)
+
+    @property
+    def timing_log_level(self) -> int:
+        return logging.INFO
+
+    def should_log_timing(self, output: STTOut) -> bool:
+        return isinstance(output, Transcription) and self.last_time > self.min_time_to_debug
 
     def _detect_language_from_text(self, text: str) -> Optional[str]:
         """

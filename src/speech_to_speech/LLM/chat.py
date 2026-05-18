@@ -218,7 +218,6 @@ class Chat:
             elif isinstance(item, RealtimeConversationItemFunctionCall):
                 item.id = _ensure_id(item.id, "fc")
                 item.call_id = _ensure_id(item.call_id, "call")
-                self.buffer.append(item)
                 self._pending_tool_calls[item.call_id] = item
                 logger.debug("Added function_call to chat (call_id=%s)", item.call_id)
 

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Literal, Optional
 
 
 @dataclass
@@ -8,10 +8,10 @@ class ModuleArguments:
         default=None,
         metadata={"help": "If specified, overrides the device for all handlers."},
     )
-    mode: Optional[str] = field(
-        default="socket",
+    mode: Optional[Literal["local", "socket", "websocket", "realtime"]] = field(
+        default="realtime",
         metadata={
-            "help": "The mode to run the pipeline in. Either 'local', 'socket', 'websocket', or 'realtime'. Default is 'socket'."
+            "help": "The mode to run the pipeline in. Either 'local', 'socket', 'websocket', or 'realtime'. Default is 'realtime'."
         },
     )
     local_mac_optimal_settings: bool = field(
@@ -20,20 +20,24 @@ class ModuleArguments:
             "help": "If specified, sets the optimal settings for Mac OS. Sets Parakeet TDT for STT, MLX LM for language model, and Qwen3-TTS for TTS, with MPS device and local mode."
         },
     )
-    stt: Optional[str] = field(
-        default="whisper",
+    stt: Optional[
+        Literal["whisper", "whisper-mlx", "mlx-audio-whisper", "faster-whisper", "parakeet-tdt", "paraformer"]
+    ] = field(
+        default="parakeet-tdt",
         metadata={
-            "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', 'parakeet-tdt', or 'paraformer'. Default is 'whisper'."
+            "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', 'parakeet-tdt', or 'paraformer'. Default is 'parakeet-tdt'."
         },
     )
-    llm: Optional[str] = field(
-        default="transformers",
-        metadata={"help": "The LLM to use. Either 'transformers' or 'mlx-lm'. Default is 'transformers'"},
-    )
-    tts: Optional[str] = field(
-        default=None,
+    llm_backend: Optional[Literal["transformers", "mlx-lm", "responses-api"]] = field(
+        default="responses-api",
         metadata={
-            "help": "The TTS to use. Either 'melo', 'chatTTS', 'facebookMMS', 'pocket', 'kokoro', or 'qwen3'. Default is 'qwen3'."
+            "help": "The LLM backend to use. Either 'transformers', 'mlx-lm', or 'responses-api'. Default is 'responses-api'."
+        },
+    )
+    tts: Optional[Literal["melo", "chatTTS", "facebookMMS", "pocket", "kokoro", "qwen3"]] = field(
+        default="qwen3",
+        metadata={
+            "help": "The TTS to use. Either 'chatTTS', 'facebookMMS', 'pocket', 'kokoro', or 'qwen3'. Default is 'qwen3'."
         },
     )
     log_level: str = field(
@@ -41,9 +45,9 @@ class ModuleArguments:
         metadata={"help": "Provide logging level. Example --log_level debug, default=info."},
     )
     enable_live_transcription: bool = field(
-        default=False,
+        default=True,
         metadata={
-            "help": "Enable live transcription display while user is speaking (only works with parakeet-tdt on MLX/MPS)"
+            "help": "Enable live transcription display while user is speaking (works with parakeet-tdt). Default is true."
         },
     )
     live_transcription_update_interval: float = field(

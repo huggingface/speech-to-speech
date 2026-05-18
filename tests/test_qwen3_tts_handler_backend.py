@@ -123,6 +123,33 @@ def test_setup_preserves_faster_backend_off_darwin(monkeypatch):
     }
 
 
+def test_setup_defaults_to_custom_voice_profile_off_darwin(monkeypatch):
+    recorded = {}
+
+    def _setup_mlx(self, *args, **kwargs):
+        raise AssertionError("Non-Darwin setup should not use the mlx backend")
+
+    def _setup_faster(self, model_name, dtype, attn_implementation):
+        recorded["model_name"] = model_name
+        recorded["dtype"] = dtype
+        recorded["attn_implementation"] = attn_implementation
+
+    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_faster", _setup_faster)
+    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.setup(Event())
+
+    assert handler.backend == "faster_qwen3_tts"
+    assert recorded["model_name"] == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    assert handler.ref_audio is None
+    assert handler.speaker == "Aiden"
+    assert handler.language == "auto"
+    assert handler.non_streaming_mode is True
+
+
 def test_setup_preserves_explicit_chunk_size_on_darwin(monkeypatch):
     def _setup_mlx(self, model_name):
         return None
@@ -142,7 +169,7 @@ def test_setup_preserves_explicit_chunk_size_on_darwin(monkeypatch):
     assert handler.streaming_chunk_size == 4
 
 
-def test_setup_warns_when_non_streaming_mode_set_on_darwin(monkeypatch, caplog):
+def test_setup_logs_when_non_streaming_mode_set_on_darwin(monkeypatch, caplog):
     def _setup_mlx(self, model_name):
         return None
 
@@ -152,7 +179,7 @@ def test_setup_warns_when_non_streaming_mode_set_on_darwin(monkeypatch, caplog):
 
     handler = object.__new__(Qwen3TTSHandler)
 
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("DEBUG"):
         handler.setup(
             Event(),
             model_name="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
@@ -240,6 +267,35 @@ def test_apply_session_voice_override_warns_for_non_file_for_base_model(caplog):
     assert handler.ref_audio == "TTS/ref_audio.wav"
     assert handler.speaker is None
     assert "Ignoring Qwen3-TTS session voice override" in caplog.text
+
+
+def test_apply_session_voice_override_ignores_unsupported_custom_voice_speaker(caplog):
+    handler = object.__new__(Qwen3TTSHandler)
+    fake_cfg = SimpleNamespace(session=SimpleNamespace(audio=SimpleNamespace(output=SimpleNamespace(voice="cedar"))))
+    handler.ref_audio = None
+    handler.speaker = "Aiden"
+    handler.model = SimpleNamespace(model=SimpleNamespace(get_supported_speakers=lambda: ["aiden", "vivian"]))
+
+    with caplog.at_level("WARNING"):
+        handler._apply_session_voice_override("custom_voice", runtime_config=fake_cfg)
+
+    assert handler.ref_audio is None
+    assert handler.speaker == "Aiden"
+    assert "not a supported CustomVoice speaker" in caplog.text
+    assert "cedar" in caplog.text
+
+
+def test_apply_session_voice_override_accepts_supported_custom_voice_speaker():
+    handler = object.__new__(Qwen3TTSHandler)
+    fake_cfg = SimpleNamespace(session=SimpleNamespace(audio=SimpleNamespace(output=SimpleNamespace(voice="Vivian"))))
+    handler.ref_audio = "TTS/ref_audio.wav"
+    handler.speaker = "Aiden"
+    handler.model = SimpleNamespace(model=SimpleNamespace(get_supported_speakers=lambda: ["aiden", "vivian"]))
+
+    handler._apply_session_voice_override("custom_voice", runtime_config=fake_cfg)
+
+    assert handler.ref_audio is None
+    assert handler.speaker == "vivian"
 
 
 def test_process_only_reenables_listening_after_end_of_response(monkeypatch):

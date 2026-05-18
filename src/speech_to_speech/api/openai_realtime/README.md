@@ -101,7 +101,7 @@ function_name(arg_name_1=value1, arg_name_2='string_value')
 
 After generation, `_extract_tools` uses a regex to find `<code>` blocks, then `extract_function_calls_from_text` parses each `name(kwargs)` call and validates it against registered tools. Valid calls become `ResponseFunctionToolCall` dicts with generated `call_id`s.
 
-### OpenAI API path (`OpenApiModelHandler`)
+### OpenAI API path (`ResponsesApiModelHandler`)
 
 Tools are passed natively as the `tools=` parameter to `client.responses.create`. The API returns structured `function_call` items directly -- no prompt engineering or regex parsing needed. Per-response `tool_choice` overrides from `response.create` are supported.
 
@@ -175,11 +175,11 @@ sequenceDiagram
 .venv/bin/python s2s_pipeline.py \
   --mode realtime \
   --stt parakeet-tdt \
-  --llm transformers \
+  --llm_backend transformers \
   --tts kokoro \
-  --lm_model_name "Qwen/Qwen3-4B-Instruct-2507" \
-  --lm_device mps \
-  --lm_torch_dtype float16 \
+  --model_name "Qwen/Qwen3-4B-Instruct-2507" \
+  --llm_device mps \
+  --llm_torch_dtype float16 \
   --enable_live_transcription
 ```
 
@@ -189,11 +189,11 @@ sequenceDiagram
 .venv/bin/python s2s_pipeline.py \
   --mode realtime \
   --stt parakeet-tdt \
-  --llm mlx-lm \
+  --llm_backend mlx-lm \
   --tts kokoro \
-  --lm_model_name "mlx-community/Qwen3-4B-Instruct-2507-bf16" \
-  --lm_device mps \
-  --lm_torch_dtype float16 \
+  --model_name "mlx-community/Qwen3-4B-Instruct-2507-bf16" \
+  --llm_device mps \
+  --llm_torch_dtype float16 \
   --enable_live_transcription
 ```
 
@@ -203,11 +203,11 @@ sequenceDiagram
 .venv/bin/python s2s_pipeline.py \
   --mode realtime \
   --stt parakeet-tdt \
-  --llm open_api \
+  --llm_backend responses-api \
   --tts kokoro \
-  --open_api_model_name "openai/gpt-oss-20b:groq" \
-  --open_api_base_url "https://router.huggingface.co/v1" \
-  --open_api_api_key "$HF_TOKEN" \
-  --open_api_stream \
+  --model_name "openai/gpt-oss-20b:groq" \
+  --responses_api_base_url "https://router.huggingface.co/v1" \
+  --responses_api_api_key "$HF_TOKEN" \
+  --responses_api_stream \
   --enable_live_transcription
 ```

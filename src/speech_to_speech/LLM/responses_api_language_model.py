@@ -42,19 +42,19 @@ from speech_to_speech.utils.utils import _generate_id
 logger = logging.getLogger(__name__)
 
 
-class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
+class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
     """
     Handles the language model part.
     """
 
     def setup(
         self,
-        model_name: str = "deepseek-chat",
+        model_name: str = "gpt-5.4-mini",
         device: str = "cuda",
         gen_kwargs: dict[str, Any] = {},
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
-        stream: bool = False,
+        stream: bool = True,
         user_role: str = "user",
         cancel_scope: CancelScope | None = None,
         disable_thinking: bool = True,
@@ -80,7 +80,9 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self._extra_body = (
             {"chat_template_kwargs": {"enable_thinking": False}}
-            if disable_thinking and base_url is not None  # Only for other than OpenAI Official Server
+            if disable_thinking
+            and base_url is not None
+            and base_url != "https://api.openai.com/v1"  # Only for other than OpenAI Official Server
             else None
         )
         self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
@@ -158,7 +160,7 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         try:
             api_response = self.client.responses.create(
                 model=self.model_name,
-                input=active_chat.to_response_api_chat(),
+                input=active_chat.to_responses_api_chat(),
                 stream=self.stream,
                 extra_body=self._extra_body,
                 timeout=self.request_timeout,
@@ -356,3 +358,10 @@ class OpenApiModelHandler(BaseHandler[LLMIn, LLMOut]):
 
     def on_session_end(self) -> None:
         logger.debug("OpenAI API language model session state reset")
+
+    @property
+    def timing_log_level(self) -> int:
+        return logging.INFO
+
+    def should_log_timing(self, output: LLMOut) -> bool:
+        return isinstance(output, LLMResponseChunk) and self.last_time > self.min_time_to_debug

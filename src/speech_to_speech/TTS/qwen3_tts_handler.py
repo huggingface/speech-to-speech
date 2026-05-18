@@ -35,8 +35,8 @@ from speech_to_speech.utils.mlx_lock import MLXLockContext
 logger = logging.getLogger(__name__)
 console = Console()
 
-DEFAULT_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
-DEFAULT_MLX_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit"
+DEFAULT_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+DEFAULT_MLX_MODEL = "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit"
 DEFAULT_REF_TEXT = "I'm confused why some people have super short timelines, yet at the same time are bullish on scaling up reinforcement learning atop LLMs. If we're actually close to a human-like learner, then this whole approach of training on verifiable outcomes."
 DEFAULT_FASTER_STREAMING_CHUNK_SIZE = 8
 DEFAULT_MLX_STREAMING_CHUNK_SIZE = 4
@@ -75,12 +75,12 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         attn_implementation: str = "eager",
         ref_audio: str | Path | None = None,
         ref_text: str = DEFAULT_REF_TEXT,
-        language: str = "English",
-        speaker: Optional[str] = None,
+        language: str = "auto",
+        speaker: Optional[str] = "Aiden",
         instruct: Optional[str] = None,
         xvec_only: bool = False,
         parity_mode: bool = False,
-        non_streaming_mode: bool | None = None,
+        non_streaming_mode: bool | None = True,
         mlx_quantization: Optional[str] = None,
         streaming_chunk_size: int | None = None,
         max_new_tokens: int = DEFAULT_QWEN3_TTS_MAX_NEW_TOKENS,
@@ -115,7 +115,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             self.model_name = self._resolve_mlx_model_name(model_name)
             logger.info(f"Loading Qwen3-TTS model: {self.model_name} via mlx-audio on Apple Silicon")
             if self.non_streaming_mode is not None:
-                logger.warning(
+                logger.debug(
                     "qwen3_tts_non_streaming_mode=%s is ignored on Apple Silicon because "
                     "mlx-audio does not expose non_streaming_mode yet.",
                     self.non_streaming_mode,
@@ -374,6 +374,21 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             return
 
         if model_type == "custom_voice":
+            supported_speakers = self._supported_speakers()
+            if supported_speakers is not None:
+                speakers_by_lower = {speaker.lower(): speaker for speaker in supported_speakers}
+                speaker = speakers_by_lower.get(session_voice.lower())
+                if speaker is None:
+                    supported_text = ", ".join(sorted(supported_speakers, key=str.lower)) or "unknown"
+                    logger.warning(
+                        "Ignoring Qwen3-TTS session voice override %r because it is not a supported "
+                        "CustomVoice speaker. Supported speakers: %s",
+                        session_voice,
+                        supported_text,
+                    )
+                    return
+                session_voice = speaker
+
             self.speaker = session_voice
             self.ref_audio = None
             return
@@ -413,6 +428,20 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         inner = getattr(getattr(self.model, "model", None), "model", None)
         return getattr(inner, "tts_model_type", None) or self._infer_model_type_from_name()
+
+    def _supported_speakers(self) -> list[str] | None:
+        for candidate in (
+            self.model,
+            getattr(self.model, "model", None),
+            getattr(getattr(self.model, "model", None), "model", None),
+        ):
+            get_speakers = getattr(candidate, "get_supported_speakers", None)
+            if callable(get_speakers):
+                speakers = get_speakers()
+                if speakers is None:
+                    return None
+                return [str(speaker) for speaker in speakers if speaker]
+        return None
 
     def _resolve_speaker(self) -> Optional[str]:
         if self.speaker:
