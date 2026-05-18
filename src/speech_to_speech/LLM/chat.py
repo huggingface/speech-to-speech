@@ -104,12 +104,8 @@ class Chat:
         # acquire it once; internal callers that already hold it use the
         # ``_locked`` helpers, so no reentry is needed (regular Lock is safe).
         self._lock = threading.Lock()
-        # Single-flight gate. Held by the compaction worker for its entire
-        # lifecycle; non-blocking acquire from add_item bypasses if held.
-        self._compact_lock = threading.Lock()
+        self._compact_in_flight: bool = False
         self._compact_thread: threading.Thread | None = None
-        # close() sets _shutdown; reset() bumps _gen_counter. The worker
-        # checks both before mutating state in phase 3.
         self._shutdown = threading.Event()
         self._gen_counter = 0
 
@@ -153,11 +149,6 @@ class Chat:
 
     def _append_tool_output_locked(self, call_id: str, output_item: RealtimeConversationItemFunctionCallOutput) -> None:
         """Body of :meth:`append_tool_output`. Caller must hold ``_lock``."""
-        if not self._lock.locked():
-            raise RuntimeError(
-                "_append_tool_output_locked called without holding _lock; "
-                "use append_tool_output() or add_item() to add a function_call_output."
-            )
         if self._has_call_id_in_buffer(call_id):
             self._pending_tool_calls.pop(call_id, None)
             self._mark_call_completed(call_id, output_item.status)
@@ -234,16 +225,19 @@ class Chat:
     def trim_if_needed(self, compactor: CompactFn | None = None) -> None:
         """Enforce the size limit after a generation completes.
 
-        - ``compactor=None``: synchronous eviction of the oldest complete turn.
-        - ``compactor=<fn>``: launch a background compaction (single-flight).
+        - ``compactor=None``: synchronous eviction of the oldest complete turn,
+          fired when ``user_turn_count > size``.
+        - ``compactor=<fn>``: launch a background compaction (single-flight),
+          fired when ``user_turn_count > size + 1``. The extra slack absorbs
+          user turns that arrive while a worker is in flight, so the worker
+          doesn't immediately retrigger another compaction on return.
 
         Call once after each successful generation, not inside :meth:`add_item`.
         """
         with self._lock:
-            if self._user_turn_count <= self.size:
-                return
             if compactor is not None:
-                self._maybe_trigger_compaction(compactor)
+                if self._user_turn_count > self.size + 1:
+                    self._maybe_trigger_compaction(compactor)
             else:
                 while self._user_turn_count > self.size:
                     self._evict_oldest_turn()
@@ -259,10 +253,6 @@ class Chat:
 
     def _to_responses_api_chat_locked(self, items: list[SupportedItem]) -> ResponseInputParam:
         """Body of :meth:`to_responses_api_chat`. Caller must hold ``_lock``."""
-        if not self._lock.locked():
-            raise RuntimeError(
-                "_to_responses_api_chat_locked called without holding _lock; use to_responses_api_chat() instead."
-            )
         buffer_items = list(items)
         result: list[ResponseInputItemParam] = []
         if self.init_chat_message:
@@ -408,9 +398,8 @@ class Chat:
     def reset(self) -> None:
         """Clear all conversation state. Cancels any in-flight compaction splice."""
         with self._lock:
-            # Bumping the generation counter causes any in-flight compaction
-            # worker to skip its phase-3 splice when it eventually wakes up.
             self._gen_counter += 1
+            self._compact_in_flight = False
             self.buffer = []
             self.init_chat_message = None
             self._pending_tool_calls = {}
@@ -425,6 +414,7 @@ class Chat:
         self._shutdown.set()
         with self._lock:
             self._gen_counter += 1
+            self._compact_in_flight = False
 
     def strip_images(self) -> None:
         """Remove all image content parts from user messages in the buffer.
@@ -478,29 +468,25 @@ class Chat:
         return snapshot, marker_ids, n_turns
 
     def _maybe_trigger_compaction(self, compactor: CompactFn) -> None:
-        """Try to start a background compaction worker. Bypass silently if one is running."""
-        if self._shutdown.is_set():
+        """Start a background compaction worker. Bypass silently if one is running.
+
+        Caller must hold ``_lock``.
+        """
+        if self._shutdown.is_set() or self._compact_in_flight:
             return
-        if not self._compact_lock.acquire(blocking=False):
-            return  # one already running
-        started = False
-        try:
-            snapshot, marker_ids, n_turns = self._snapshot_for_compaction()
-            if n_turns < 2 or not marker_ids:
-                return
-            gen = self._gen_counter
-            thread = threading.Thread(
-                target=self._compact_worker,
-                args=(compactor, snapshot, marker_ids, gen),
-                daemon=True,
-                name="chat-compact",
-            )
-            thread.start()
-            self._compact_thread = thread
-            started = True
-        finally:
-            if not started:
-                self._compact_lock.release()
+        snapshot, marker_ids, n_turns = self._snapshot_for_compaction()
+        if n_turns < 2 or not marker_ids:
+            return
+        gen = self._gen_counter
+        self._compact_in_flight = True
+        thread = threading.Thread(
+            target=self._compact_worker,
+            args=(compactor, snapshot, marker_ids, gen),
+            daemon=True,
+            name="chat-compact",
+        )
+        self._compact_thread = thread
+        thread.start()
 
     def _compact_worker(
         self,
@@ -509,7 +495,7 @@ class Chat:
         marker_ids: set[str],
         gen: int,
     ) -> None:
-        """Worker thread entry point. Holds ``_compact_lock`` throughout."""
+        """Worker thread entry point."""
         try:
             if self._shutdown.is_set() or self._gen_counter != gen:
                 return
@@ -525,7 +511,10 @@ class Chat:
                 return
             self._apply_compaction(result, marker_ids, gen)
         finally:
-            self._compact_lock.release()
+            # Don't clobber the flag if reset/close has advanced the gen.
+            with self._lock:
+                if self._gen_counter == gen:
+                    self._compact_in_flight = False
 
     def _apply_compaction(
         self,
@@ -533,14 +522,18 @@ class Chat:
         marker_ids: set[str],
         gen: int,
     ) -> None:
-        """Splice the summary in front of items not consumed by compaction."""
+        """Splice the summary in front of items not consumed by compaction.
+
+        FC/FCO pairing is left entirely to :meth:`add_item` / :meth:`append_tool_output`.
+        Compaction only drops items; it never inserts an FC into the buffer.
+        Pending FCs (no FCO yet) stay in ``_pending_tool_calls`` and will be
+        appended adjacent to their FCO when it arrives.
+        """
         with self._lock:
             if self._shutdown.is_set() or self._gen_counter != gen:
                 return
-            # Keep FCs whose paired FCO is NOT also being dropped -- this
-            # covers both pending FCs (no FCO yet) and FCs whose FCO landed
-            # after the snapshot was taken. Otherwise the FCO in remaining
-            # would be orphaned.
+            # Keep FC if its FCO is outside the compacted range -- otherwise
+            # the FCO in `remaining` would be orphaned.
             fco_call_ids_in_range = {
                 x.call_id
                 for x in self.buffer
@@ -556,19 +549,12 @@ class Chat:
             drop_ids = marker_ids - fc_ids_to_keep
             remaining = [x for x in self.buffer if x.id not in drop_ids]
 
-            # Pending FCs (no FCO yet) live only in _pending_tool_calls. Splice
-            # them in after the summary so they survive compaction in the
-            # buffer; their FCO will append at the end when it arrives.
-            in_buffer_call_ids = {x.call_id for x in remaining if isinstance(x, RealtimeConversationItemFunctionCall)}
-            pending_call_ids = [cid for cid in self._pending_tool_calls if cid not in in_buffer_call_ids]
-            pending_fcs = [self._pending_tool_calls.pop(cid) for cid in pending_call_ids]
-
             user_msg = make_user_message(result.user_summary)
             user_msg.id = _generate_id("msg")
             asst_msg = make_assistant_message(result.assistant_summary)
             asst_msg.id = _generate_id("msg")
 
-            self.buffer = [user_msg, asst_msg, *pending_fcs, *remaining]
+            self.buffer = [user_msg, asst_msg, *remaining]
             self._user_turn_count = sum(1 for x in self.buffer if isinstance(x, RealtimeConversationItemUserMessage))
 
 

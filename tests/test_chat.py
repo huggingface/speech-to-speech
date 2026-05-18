@@ -925,9 +925,8 @@ def _make_stub_compactor(
 
 class TestCompaction:
     def test_compaction_replaces_old_turns(self):
-        chat = Chat(size=3)
+        chat = Chat(size=2)
         compactor = _make_stub_compactor("U", "A")
-        # 3 complete turns are within size; the 4th user (u3) triggers compaction.
         for i in range(3):
             chat.add_item(_user(f"u{i}"))
             chat.add_item(_assistant(f"a{i}"))
@@ -944,37 +943,38 @@ class TestCompaction:
         assert chat.buffer[2].content[0].text == "u3"
         assert chat._user_turn_count == 2
 
-    def test_compaction_preserves_pending_function_calls(self):
+    def test_compaction_leaves_pending_fc_in_pending_map(self):
+        """Pending FCs stay in _pending_tool_calls; only FCO arrival moves the pair into the buffer."""
         chat = Chat(size=2)
         compactor = _make_stub_compactor()
         chat.add_item(_user("u0"))
         chat.add_item(_assistant("a0"))
-        chat.add_item(_fc("c1"))  # pending FC
+        chat.add_item(_fc("c1"))
         chat.add_item(_user("u1"))
         chat.add_item(_assistant("a1"))
         chat.add_item(_user("u2"))
+        chat.add_item(_assistant("a2"))
+        chat.add_item(_user("u3"))
         chat.trim_if_needed(compactor)
 
         _wait_thread(chat)
-        # Pending FC should appear after the summary, before u2.
-        types = [type(x).__name__ for x in chat.buffer]
-        fc_idx = next(i for i, x in enumerate(chat.buffer) if isinstance(x, RealtimeConversationItemFunctionCall))
-        u2_idx = next(
-            i
-            for i, x in enumerate(chat.buffer)
-            if isinstance(x, RealtimeConversationItemUserMessage) and x.content[0].text == "u2"
-        )
-        assert fc_idx == 2  # right after summary user/assistant
-        assert fc_idx < u2_idx
-        assert "RealtimeConversationItemFunctionCall" in types
+        assert not any(isinstance(x, RealtimeConversationItemFunctionCall) for x in chat.buffer)
+        assert "call_c1" in chat._pending_tool_calls
+
+        chat.add_item(_fco("c1"))
+        buffer = chat.buffer
+        fc_indices = [i for i, x in enumerate(buffer) if isinstance(x, RealtimeConversationItemFunctionCall)]
+        fco_indices = [i for i, x in enumerate(buffer) if isinstance(x, RealtimeConversationItemFunctionCallOutput)]
+        assert len(fc_indices) == 1 and len(fco_indices) == 1
+        assert fco_indices[0] == fc_indices[0] + 1
+        assert "call_c1" not in chat._pending_tool_calls
 
     def test_compaction_preserves_appends_during_compaction(self):
-        chat = Chat(size=3)
+        chat = Chat(size=2)
         gate = threading.Event()
         started = threading.Event()
         compactor = _make_stub_compactor(gate=gate, started=started)
 
-        # 3 complete turns are within size; the 4th user (u3) triggers.
         for i in range(3):
             chat.add_item(_user(f"u{i}"))
             chat.add_item(_assistant(f"a{i}"))
@@ -1017,17 +1017,20 @@ class TestCompaction:
     def test_no_compaction_when_below_threshold(self):
         chat = Chat(size=2)
         compactor = _make_stub_compactor()
+        # count == size+1: still inside anti-thrash slack, no trigger.
         chat.add_item(_user("u0"))
         chat.add_item(_assistant("a0"))
         chat.add_item(_user("u1"))
-        chat.trim_if_needed(compactor)
-        # _user_turn_count = 2, equal to size, no compaction triggered
-        assert chat._compact_thread is None
-        # Third user pushes count to 3 > 2, triggers compaction
         chat.add_item(_assistant("a1"))
         chat.add_item(_user("u2"))
         chat.trim_if_needed(compactor)
+        assert chat._compact_thread is None
+
+        chat.add_item(_assistant("a2"))
+        chat.add_item(_user("u3"))
+        chat.trim_if_needed(compactor)
         _wait_thread(chat)
+        assert chat._compact_thread is not None
 
     def test_compactor_none_falls_back_to_eviction(self):
         chat = Chat(size=1)
@@ -1049,6 +1052,8 @@ class TestCompaction:
         chat.add_item(_user("u1"))
         chat.add_item(_assistant("a1"))
         chat.add_item(_user("u2"))
+        chat.add_item(_assistant("a2"))
+        chat.add_item(_user("u3"))
         chat.trim_if_needed(compactor)
 
         _wait_thread(chat)
@@ -1062,27 +1067,28 @@ class TestCompaction:
         started = threading.Event()
         compactor = _make_stub_compactor(gate=gate, started=started)
         chat.add_item(_user("u0"))
-        chat.add_item(_fc("c1"))  # pending in compacted range
+        chat.add_item(_fc("c1"))
         chat.add_item(_assistant("a0"))
         chat.add_item(_user("u1"))
         chat.add_item(_assistant("a1"))
         chat.add_item(_user("u2"))
+        chat.add_item(_assistant("a2"))
+        chat.add_item(_user("u3"))
         chat.trim_if_needed(compactor)
         assert started.wait(timeout=2.0)
 
-        # FCO arrives while compactor is running.
         chat.add_item(_fco("c1"))
         gate.set()
         _wait_thread(chat)
 
-        # FC should be preserved (FCO outside the compacted range), and FCO
-        # should still be in the buffer.
-        fcs = [x for x in chat.buffer if isinstance(x, RealtimeConversationItemFunctionCall)]
-        fcos = [x for x in chat.buffer if isinstance(x, RealtimeConversationItemFunctionCallOutput)]
-        assert len(fcs) == 1
-        assert fcs[0].call_id == "call_c1"
-        assert len(fcos) == 1
-        assert fcos[0].call_id == "call_c1"
+        fc_indices = [i for i, x in enumerate(chat.buffer) if isinstance(x, RealtimeConversationItemFunctionCall)]
+        fco_indices = [
+            i for i, x in enumerate(chat.buffer) if isinstance(x, RealtimeConversationItemFunctionCallOutput)
+        ]
+        assert len(fc_indices) == 1 and len(fco_indices) == 1
+        assert fco_indices[0] == fc_indices[0] + 1
+        assert chat.buffer[fc_indices[0]].call_id == "call_c1"
+        assert chat.buffer[fco_indices[0]].call_id == "call_c1"
 
     def test_reset_cancels_inflight_compaction(self):
         chat = Chat(size=2)
@@ -1181,6 +1187,8 @@ class TestCompaction:
         chat.add_item(_user("u1"))
         chat.add_item(_assistant("a1"))
         chat.add_item(_user("u2"))
+        chat.add_item(_assistant("a2"))
+        chat.add_item(_user("u3"))
         chat.trim_if_needed(compactor)
         _wait_thread(chat)
 

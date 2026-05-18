@@ -92,6 +92,8 @@ class ConversationHandler(RealtimeBaseHandler):
             ),
         ):
             chat.add_item(item)
+            # conversation.item.create may never reach the LM handler, so trim here.
+            chat.trim_if_needed()
             return
 
         raise ChatItemError(f"Unsupported item type: {getattr(item, 'type', None)}")
