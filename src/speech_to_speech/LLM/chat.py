@@ -223,21 +223,19 @@ class Chat:
             return item
 
     def trim_if_needed(self, compactor: CompactFn | None = None) -> None:
-        """Enforce the size limit after a generation completes.
+        """Enforce the size limit after a generation completes. Fires when
+        ``user_turn_count > size``.
 
-        - ``compactor=None``: synchronous eviction of the oldest complete turn,
-          fired when ``user_turn_count > size``.
-        - ``compactor=<fn>``: launch a background compaction (single-flight),
-          fired when ``user_turn_count > size + 1``. The extra slack absorbs
-          user turns that arrive while a worker is in flight, so the worker
-          doesn't immediately retrigger another compaction on return.
+        - ``compactor=None``: synchronous eviction of the oldest complete turn.
+        - ``compactor=<fn>``: launch a background compaction (single-flight).
 
         Call once after each successful generation, not inside :meth:`add_item`.
         """
         with self._lock:
+            if self._user_turn_count <= self.size:
+                return
             if compactor is not None:
-                if self._user_turn_count > self.size + 1:
-                    self._maybe_trigger_compaction(compactor)
+                self._maybe_trigger_compaction(compactor)
             else:
                 while self._user_turn_count > self.size:
                     self._evict_oldest_turn()
@@ -486,6 +484,12 @@ class Chat:
             name="chat-compact",
         )
         self._compact_thread = thread
+        logger.info(
+            "Chat compaction triggered: compacting %d turn(s) (%d item(s)), buffer size=%d",
+            n_turns,
+            len(marker_ids),
+            len(self.buffer),
+        )
         thread.start()
 
     def _compact_worker(
@@ -556,6 +560,11 @@ class Chat:
 
             self.buffer = [user_msg, asst_msg, *remaining]
             self._user_turn_count = sum(1 for x in self.buffer if isinstance(x, RealtimeConversationItemUserMessage))
+            logger.info(
+                "Chat compaction applied: buffer now %d item(s), %d user turn(s)",
+                len(self.buffer),
+                self._user_turn_count,
+            )
 
 
 # ---------------------------------------------------------------------------

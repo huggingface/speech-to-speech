@@ -1017,19 +1017,18 @@ class TestCompaction:
     def test_no_compaction_when_below_threshold(self):
         chat = Chat(size=2)
         compactor = _make_stub_compactor()
-        # count == size+1: still inside anti-thrash slack, no trigger.
         chat.add_item(_user("u0"))
         chat.add_item(_assistant("a0"))
         chat.add_item(_user("u1"))
+        chat.trim_if_needed(compactor)
+        # count == size, no trigger
+        assert chat._compact_thread is None
+
         chat.add_item(_assistant("a1"))
         chat.add_item(_user("u2"))
         chat.trim_if_needed(compactor)
-        assert chat._compact_thread is None
-
-        chat.add_item(_assistant("a2"))
-        chat.add_item(_user("u3"))
-        chat.trim_if_needed(compactor)
         _wait_thread(chat)
+        # count > size, triggers
         assert chat._compact_thread is not None
 
     def test_compactor_none_falls_back_to_eviction(self):
