@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from queue import Empty, Queue
@@ -20,7 +21,6 @@ from openai.types.realtime import (
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit, SessionState
 from speech_to_speech.api.openai_realtime.service import ServerEvent, build_error_event
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
-from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
     PipelineEvent,
@@ -28,6 +28,7 @@ from speech_to_speech.pipeline.events import (
     SpeechStoppedEvent,
     TokenUsageEvent,
 )
+from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 
 logger = logging.getLogger(__name__)
@@ -107,25 +108,32 @@ def _to_audio_bytes(chunk: Any) -> bytes:
     return chunk
 
 
-async def _release_unit_after_drain(
-    unit: PipelineUnit, session: Any, session_id: str
-) -> None:
-    """Wait for SESSION_END to propagate (or timeout) then release the unit.
+async def _release_unit_after_drain(unit: PipelineUnit, session: Any, session_id: str) -> None:
+    """Wait indefinitely for SESSION_END to propagate, then release the unit.
 
     Runs in its own asyncio task so the route handler's finally block can return
-    immediately. Until this task clears `unit.session`, `_claim_unit` cannot
-    re-allocate this unit — guaranteeing no new client claims it while handler
-    threads may still emit stale events for the previous session.
+    immediately. The unit stays unavailable for new claims (unit.session != None)
+    until SESSION_END travels all the way through the handler chain back to
+    output_queue — observed by the send loop, which sets session.drained.
+
+    Intentionally has no timeout-fallback release. If a handler (e.g. an LM HTTP
+    call) is still busy past SESSION_END_DRAIN_TIMEOUT_S, releasing the unit
+    would let a new client claim it while stale output from the previous session
+    is still in flight — that output would be dispatched under the new session.
+    We accept reduced pool capacity over a cross-session leak; operators can see
+    stuck units in `/v1/pool` (long `released_at` age).
     """
     elapsed = 0.0
-    while not session.drained.is_set() and elapsed < SESSION_END_DRAIN_TIMEOUT_S:
+    warned = False
+    while not session.drained.is_set():
         await asyncio.sleep(0.05)
         elapsed += 0.05
-    if not session.drained.is_set():
-        logger.warning(
-            f"Pipeline {unit.index}: SESSION_END drain timed out after "
-            f"{SESSION_END_DRAIN_TIMEOUT_S}s; releasing anyway (handler may have leaked state)"
-        )
+        if not warned and elapsed >= SESSION_END_DRAIN_TIMEOUT_S:
+            logger.warning(
+                f"Pipeline {unit.index}: SESSION_END not drained after {elapsed:.1f}s — "
+                f"unit will remain unavailable until handlers finish (session {session_id})"
+            )
+            warned = True
     unit.service.unregister(session_id)
     unit.session = None
     logger.info(f"Pipeline {unit.index} released (session {session_id} ended)")
@@ -187,6 +195,8 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
 
         pipeline_log_ctx.set(unit.index)
         session_id = unit.service.register()
+        # _claim_unit guarantees unit.session is not None for the returned unit.
+        assert unit.session is not None
         unit.session.session_id = session_id
         logger.info(f"Client connected to pipeline {unit.index} (session {session_id})")
 
@@ -255,24 +265,22 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
         except WebSocketDisconnect:
             logger.info(f"Client {session_id} disconnected from pipeline {unit.index}")
         except Exception as e:
-            logger.error(
-                f"Client {session_id} on pipeline {unit.index} error: {type(e).__name__}: {e}", exc_info=True
-            )
+            logger.error(f"Client {session_id} on pipeline {unit.index} error: {type(e).__name__}: {e}", exc_info=True)
         finally:
             # Hold the session reference: the send loop's snapshot will still resolve
             # to this object until we clear unit.session, so any handler output that
             # arrives during the drain window is sent to the now-closed ws (silently
             # dropped) instead of leaking to whichever client claims this unit next.
             old_session = unit.session
+            if old_session is not None:
+                old_session.released_at = time.monotonic()
             _clean_unit(unit)
             unit.input_queue.put(SESSION_END)
             # Spawn the drain-and-release as a separate task so the route handler's
             # finally returns immediately. Awaiting here is unreliable: after
             # WebSocketDisconnect propagates, subsequent awaits in the same task
             # can be skipped/cancelled by Starlette's runner and never resume.
-            asyncio.create_task(
-                _release_unit_after_drain(unit, old_session, session_id)
-            )
+            asyncio.create_task(_release_unit_after_drain(unit, old_session, session_id))
 
     @app.get("/v1/usage")
     async def usage_endpoint() -> dict[str, Any]:
@@ -297,17 +305,28 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
 
     @app.get("/v1/pool")
     async def pool_endpoint() -> dict[str, Any]:
+        now = time.monotonic()
+
+        def _state(u: PipelineUnit) -> dict[str, Any]:
+            s = u.session
+            if s is None:
+                return {"index": u.index, "state": "idle", "session_id": None}
+            if s.released_at is None:
+                return {"index": u.index, "state": "active", "session_id": s.session_id}
+            # released by client but SESSION_END hasn't drained yet → unit
+            # is still occupied; surface elapsed time so operators can spot
+            # stuck handlers.
+            return {
+                "index": u.index,
+                "state": "draining",
+                "session_id": s.session_id,
+                "draining_for_s": round(now - s.released_at, 2),
+            }
+
         return {
             "size": len(pool),
             "in_use": sum(1 for u in pool if u.session is not None),
-            "units": [
-                {
-                    "index": u.index,
-                    "in_use": u.session is not None,
-                    "session_id": u.session.session_id if u.session else None,
-                }
-                for u in pool
-            ],
+            "units": [_state(u) for u in pool],
         }
 
     async def _send_loop_for(unit: PipelineUnit) -> None:
@@ -345,22 +364,17 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                             await _send_events(ws, events)
 
                     if is_speech_start and was_in_response:
-                        active_cfg = (
-                            unit.service._state(session_id).runtime_config if session_id else None
-                        )
+                        active_cfg = unit.service._state(session_id).runtime_config if session_id else None
                         if active_cfg is None or active_cfg.interrupt_response_enabled:
                             unit.cancel_scope.cancel()
                             _flush_queue(unit.output_queue, preserve=_keep_audio_sentinel)
                             _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
                             if unit.response_playing.is_set():
                                 unit.response_playing.clear()
-                            logger.info(
-                                f"Pipeline {unit.index}: speech during response: cancelled, queue flushed"
-                            )
+                            logger.info(f"Pipeline {unit.index}: speech during response: cancelled, queue flushed")
                         else:
                             logger.info(
-                                f"Pipeline {unit.index}: speech during response: "
-                                f"interrupt_response disabled, ignoring"
+                                f"Pipeline {unit.index}: speech during response: interrupt_response disabled, ignoring"
                             )
                 except Empty:
                     pass
@@ -430,9 +444,7 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                         unit.should_listen.set()
 
                     if ws is not None and session_id:
-                        await _send_events(
-                            ws, unit.service.encode_audio_chunk(session_id, bytes(audio_batch))
-                        )
+                        await _send_events(ws, unit.service.encode_audio_chunk(session_id, bytes(audio_batch)))
                 except Empty:
                     pass
 

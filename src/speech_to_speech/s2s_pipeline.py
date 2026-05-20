@@ -19,6 +19,7 @@ from openai.types.realtime import RealtimeSessionCreateRequest
 from rich.console import Console
 from transformers import HfArgumentParser
 
+from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.arguments_classes.chat_tts_arguments import ChatTTSHandlerArguments
 from speech_to_speech.arguments_classes.facebookmms_tts_arguments import FacebookMMSTTSHandlerArguments
@@ -382,7 +383,7 @@ def _build_pipeline_handlers(
     transcription_notifier = TranscriptionNotifier(
         stop_event,
         queue_in=stt_output_queue,
-        queue_out=text_prompt_queue,
+        queue_out=text_prompt_queue,  # type: ignore[arg-type]
         setup_kwargs=transcription_notifier_setup,
     )
 
@@ -455,7 +456,6 @@ def _build_realtime_pipeline_unit(
     are returned in `unit.handlers`; the caller threads them via ThreadManager. No uvicorn
     is created here — the single server is owned by RealtimeServer.
     """
-    from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
     from speech_to_speech.api.openai_realtime.service import RealtimeService
 
     # Per-unit deep copies so mutations (cancel_scope, text_output_queue) don't bleed across pipelines.
@@ -581,8 +581,6 @@ def build_pipeline(
 ) -> ThreadManager:
     stop_event = queues_and_events["stop_event"]
     should_listen = queues_and_events["should_listen"]
-    response_playing = queues_and_events["response_playing"]
-    cancel_scope = queues_and_events["cancel_scope"]
     recv_audio_chunks_queue = queues_and_events["recv_audio_chunks_queue"]
     send_audio_chunks_queue = queues_and_events["send_audio_chunks_queue"]
     spoken_prompt_queue = queues_and_events["spoken_prompt_queue"]
@@ -950,11 +948,7 @@ def main() -> None:
     # a flood of warnings without affecting final transcripts. With a pool, pre-emptively turn
     # it off so logs stay readable; the final STT path is unaffected. Non-darwin platforms
     # don't share this lock, so leave their live transcription alone.
-    if (
-        args.module_kwargs.num_servers > 1
-        and platform == "darwin"
-        and args.module_kwargs.enable_live_transcription
-    ):
+    if args.module_kwargs.num_servers > 1 and platform == "darwin" and args.module_kwargs.enable_live_transcription:
         logger.info(
             "MLX contention: --num_servers=%d > 1 on Apple Silicon → disabling live transcription "
             "(progressive STT contends on the global MLX lock)",

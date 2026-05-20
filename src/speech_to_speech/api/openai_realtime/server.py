@@ -38,8 +38,7 @@ class RealtimeServer:
         app = create_app(pool=self.pool, stop_event=self.stop_event)
 
         logger.info(
-            f"OpenAI Realtime API starting on ws://{self.host}:{self.port}/v1/realtime "
-            f"(pool size {len(self.pool)})"
+            f"OpenAI Realtime API starting on ws://{self.host}:{self.port}/v1/realtime (pool size {len(self.pool)})"
         )
 
         config = uvicorn.Config(

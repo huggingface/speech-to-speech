@@ -8,13 +8,12 @@ records with an empty prefix.
 Works for both threading (handler threads) and asyncio (websocket route, send loops)
 because contextvars are per-thread and per-task.
 """
+
 import contextvars
 import logging
 from typing import Optional
 
-pipeline_log_ctx: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar(
-    "pipeline_index", default=None
-)
+pipeline_log_ctx: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar("pipeline_index", default=None)
 
 
 class PipelineLogFilter(logging.Filter):

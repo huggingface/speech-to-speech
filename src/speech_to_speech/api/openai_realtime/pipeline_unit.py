@@ -29,6 +29,10 @@ class SessionState(BaseModel):
     session_id: str = ""
     pending_output_item: Any = None
     drained: asyncio.Event = Field(default_factory=asyncio.Event)
+    # Wall-clock time when the ws disconnected (route handler released its claim).
+    # `None` while the client is still active. Used by /v1/pool to surface stuck
+    # units (handlers haven't finished propagating SESSION_END).
+    released_at: Optional[float] = None
 
 
 class PipelineUnit(BaseModel):

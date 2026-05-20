@@ -8,7 +8,7 @@ old tests) so there is no cross-test state.
 
 import base64
 import time
-from queue import Queue
+from queue import Empty, Queue
 from threading import Event as ThreadingEvent
 
 import pytest
@@ -19,7 +19,7 @@ from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.control import SESSION_END, is_control_message
+from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import AssistantTextEvent, SpeechStartedEvent
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 
@@ -30,11 +30,11 @@ from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 
 @pytest.fixture(autouse=True)
 def short_drain_timeout(monkeypatch):
-    """Shorten the SESSION_END drain wait so tests don't pay the 5s timeout.
+    """Shorten the SESSION_END drain warning threshold so tests don't wait 10s.
 
-    The real handler chain forwards SESSION_END through every handler; here
-    there are no handlers, so the route handler will always hit the timeout
-    on release. Cap it at 0.1s.
+    The constant only controls when the release task logs a warning about a
+    slow-draining unit — there is no longer a release-anyway timeout, so the
+    unit stays unavailable until SESSION_END actually drains.
     """
     monkeypatch.setattr(router_module, "SESSION_END_DRAIN_TIMEOUT_S", 0.1)
 
@@ -43,6 +43,12 @@ def short_drain_timeout(monkeypatch):
 def setup():
     """Return (app, service, input_queue, output_queue, text_output_queue,
     should_listen, stop_event, response_playing, cancel_scope) for a pool of one.
+
+    There is no real handler chain in this fixture, so SESSION_END enqueued by
+    the route handler on disconnect never reaches output_queue. Tests that need
+    the release task to complete (verifying unit.session is cleared and the
+    service unregistered) must drain SESSION_END themselves — see
+    `_simulate_session_end_drain` below.
     """
     text_prompt_queue: Queue = Queue()
     should_listen = ThreadingEvent()
@@ -81,6 +87,24 @@ def setup():
         response_playing,
         cancel_scope,
     )
+
+
+def _simulate_session_end_drain(input_queue: Queue, output_queue: Queue, timeout: float = 1.0) -> None:
+    """Wait for SESSION_END to land in input_queue (from the route handler's
+    release path) and forward it to output_queue — simulating the handler chain.
+    The send loop will then observe SESSION_END and set `session.drained`,
+    letting the release task complete (unregister + clear `unit.session`).
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            item = input_queue.get(timeout=0.05)
+        except Empty:
+            continue
+        if isinstance(item, PipelineControlMessage) and is_control_message(item, SESSION_END.kind):
+            output_queue.put(item)
+            return
+    raise AssertionError("SESSION_END did not appear on input_queue within timeout")
 
 
 def _pcm_bytes(n_samples: int) -> bytes:
@@ -422,15 +446,16 @@ class TestCleanup:
         assert cancel_scope.generation == 2
 
     def test_disconnect_unregisters(self, setup):
-        app, service, input_queue, *_ = setup
+        app, service, input_queue, output_queue, *_ = setup
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
                 assert len(service._conns) == 1
+            # Simulate the handler chain consuming SESSION_END so the release
+            # task can complete and unregister the session.
+            _simulate_session_end_drain(input_queue, output_queue)
             time.sleep(0.3)
             assert len(service._conns) == 0
-            end = input_queue.get(timeout=1)
-            assert is_control_message(end, SESSION_END.kind)
 
     def test_last_disconnect_cancels_and_clears_response_state(self, setup):
         app, service, input_queue, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
@@ -442,15 +467,13 @@ class TestCleanup:
                 response_playing.set()
                 output_queue.put(_pcm_bytes(256))
                 text_output_queue.put(AssistantTextEvent(text="stale"))
+            _simulate_session_end_drain(input_queue, output_queue)
             time.sleep(0.3)
 
         assert not cancel_scope.discarding
         assert cancel_scope.generation == 2
         assert not response_playing.is_set()
-        assert output_queue.empty()
         assert text_output_queue.empty()
-        end = input_queue.get(timeout=1)
-        assert is_control_message(end, SESSION_END.kind)
 
 
 # ===================================================================
