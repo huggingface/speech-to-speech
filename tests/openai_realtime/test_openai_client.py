@@ -144,6 +144,7 @@ RESPONSE_CREATED = "response.created"
 RESPONSE_DONE = "response.done"
 AUDIO_DELTA = "response.output_audio.delta"
 AUDIO_DONE = "response.output_audio.done"
+TRANSCRIPT_DELTA = "response.output_audio_transcript.delta"
 TRANSCRIPT_DONE = "response.output_audio_transcript.done"
 FUNCTION_CALL_DONE = "response.function_call_arguments.done"
 ERROR = "error"
@@ -270,12 +271,16 @@ class TestSDKVoiceTurn:
 
             server_env.text_output_queue.put(AssistantTextEvent(text="Hi there!"))
             event = await _recv(conn)
-            assert event.type == TRANSCRIPT_DONE
-            assert event.transcript == "Hi there!"
+            assert event.type == TRANSCRIPT_DELTA
+            assert event.delta == "Hi there!"
 
             server_env.output_queue.put(PIPELINE_END)
             event = await _recv(conn)
             assert event.type == AUDIO_DONE
+
+            event = await _recv(conn)
+            assert event.type == TRANSCRIPT_DONE
+            assert event.transcript == "Hi there!"
 
             event = await _recv(conn)
             assert event.type == RESPONSE_DONE
@@ -448,8 +453,11 @@ class TestSDKToolCalling:
             )
 
             event = await _recv(conn)
-            assert event.type == TRANSCRIPT_DONE
-            assert event.transcript == "Checking weather"
+            assert event.type == RESPONSE_CREATED  # implicit path: response.created before first delta
+
+            event = await _recv(conn)
+            assert event.type == TRANSCRIPT_DELTA
+            assert event.delta == "Checking weather"
 
             event = await _recv(conn)
             assert event.type == FUNCTION_CALL_DONE
@@ -473,6 +481,9 @@ class TestSDKToolCalling:
                     ],
                 )
             )
+
+            event = await _recv(conn)
+            assert event.type == RESPONSE_CREATED  # implicit path emits response.created
 
             e1 = await _recv(conn)
             e2 = await _recv(conn)

@@ -7,7 +7,7 @@ from threading import Event as ThreadingEvent
 from typing import Any, Callable, Optional, TypeVar
 
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from openai.types.realtime import (
     ConversationItemCreateEvent,
     InputAudioBufferAppendEvent,
@@ -111,6 +111,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.websockets = {}
+        app.state.webrtc_sessions: dict[str, Any] = {}
         app.state.active_session: Optional[str] = None  # type: ignore[misc]
         app.state.send_task = asyncio.create_task(_send_loop())
         yield
@@ -124,6 +125,11 @@ def create_app(
                 await ws.close()
             except Exception:
                 pass
+        for session in list(app.state.webrtc_sessions.values()):
+            try:
+                await session.close()
+            except Exception:
+                pass
 
     app = FastAPI(lifespan=lifespan)
 
@@ -131,7 +137,7 @@ def create_app(
     async def realtime_endpoint(ws: WebSocket) -> None:
         await ws.accept()
 
-        if app.state.websockets:
+        if app.state.websockets or app.state.webrtc_sessions:
             logger.warning("Rejected connection: a session is already active")
             await _send_event(
                 ws,
@@ -246,11 +252,17 @@ def create_app(
                             pass
                         else:
                             for cid in service.connection_ids:
+                                if not isinstance(text_msg, PipelineEvent):
+                                    continue
+                                events = service.dispatch_pipeline_event(cid, text_msg)
+                                if not events:
+                                    continue
                                 ws = app.state.websockets.get(cid)
-                                if ws and isinstance(text_msg, PipelineEvent):
-                                    events = service.dispatch_pipeline_event(cid, text_msg)
-                                    if events:
-                                        await _send_events(ws, events)
+                                if ws:
+                                    await _send_events(ws, events)
+                                rtc = app.state.webrtc_sessions.get(cid)
+                                if rtc:
+                                    await rtc.send_events(events)
 
                         if is_speech_start and was_in_response:
                             active_cfg = (
@@ -271,70 +283,72 @@ def create_app(
                     except Empty:
                         pass
 
-                try:
-                    if pending_output_item is not None:
-                        audio_chunk = pending_output_item
-                        pending_output_item = None
-                    else:
-                        audio_chunk = output_queue.get_nowait()
+                # In WebRTC mode PipelineAudioTrack.recv() owns output_queue exclusively.
+                if not app.state.webrtc_sessions:
+                    try:
+                        if pending_output_item is not None:
+                            audio_chunk = pending_output_item
+                            pending_output_item = None
+                        else:
+                            audio_chunk = output_queue.get_nowait()
 
-                    if isinstance(audio_chunk, bytes) and audio_chunk == PIPELINE_END:
+                        if isinstance(audio_chunk, bytes) and audio_chunk == PIPELINE_END:
+                            for cid in service.connection_ids:
+                                ws = app.state.websockets.get(cid)
+                                if ws:
+                                    await _send_events(ws, service.finish_audio_response(cid))
+                            break
+
+                        if isinstance(audio_chunk, bytes) and audio_chunk == AUDIO_RESPONSE_DONE:
+                            for cid in service.connection_ids:
+                                ws = app.state.websockets.get(cid)
+                                if ws:
+                                    await _send_events(ws, service.finish_audio_response(cid))
+                            if response_playing:
+                                response_playing.clear()
+                            if cancel_scope:
+                                cancel_scope.response_done()
+                            should_listen.set()
+                            logger.info("Response complete, listening re-enabled")
+                            continue
+
+                        if is_control_message(audio_chunk):
+                            continue
+
+                        if cancel_scope and cancel_scope.discarding:
+                            continue
+
+                        audio_chunk = _to_audio_bytes(audio_chunk)
+
+                        audio_batch = bytearray(audio_chunk)
+                        while len(audio_batch) < MAX_AUDIO_BATCH_BYTES:
+                            try:
+                                next_chunk = output_queue.get_nowait()
+                            except Empty:
+                                break
+
+                            if (
+                                isinstance(next_chunk, bytes) and next_chunk in {PIPELINE_END, AUDIO_RESPONSE_DONE}
+                            ) or is_control_message(next_chunk, SESSION_END.kind):
+                                pending_output_item = next_chunk
+                                break
+
+                            next_audio = _to_audio_bytes(next_chunk)
+                            if len(audio_batch) + len(next_audio) > MAX_AUDIO_BATCH_BYTES:
+                                pending_output_item = next_chunk
+                                break
+                            audio_batch.extend(next_audio)
+
+                        if response_playing and not response_playing.is_set():
+                            response_playing.set()
+                            should_listen.set()
+
                         for cid in service.connection_ids:
                             ws = app.state.websockets.get(cid)
                             if ws:
-                                await _send_events(ws, service.finish_audio_response(cid))
-                        break
-
-                    if isinstance(audio_chunk, bytes) and audio_chunk == AUDIO_RESPONSE_DONE:
-                        for cid in service.connection_ids:
-                            ws = app.state.websockets.get(cid)
-                            if ws:
-                                await _send_events(ws, service.finish_audio_response(cid))
-                        if response_playing:
-                            response_playing.clear()
-                        if cancel_scope:
-                            cancel_scope.response_done()
-                        should_listen.set()
-                        logger.info("Response complete, listening re-enabled")
-                        continue
-
-                    if is_control_message(audio_chunk):
-                        continue
-
-                    if cancel_scope and cancel_scope.discarding:
-                        continue
-
-                    audio_chunk = _to_audio_bytes(audio_chunk)
-
-                    audio_batch = bytearray(audio_chunk)
-                    while len(audio_batch) < MAX_AUDIO_BATCH_BYTES:
-                        try:
-                            next_chunk = output_queue.get_nowait()
-                        except Empty:
-                            break
-
-                        if (
-                            isinstance(next_chunk, bytes) and next_chunk in {PIPELINE_END, AUDIO_RESPONSE_DONE}
-                        ) or is_control_message(next_chunk, SESSION_END.kind):
-                            pending_output_item = next_chunk
-                            break
-
-                        next_audio = _to_audio_bytes(next_chunk)
-                        if len(audio_batch) + len(next_audio) > MAX_AUDIO_BATCH_BYTES:
-                            pending_output_item = next_chunk
-                            break
-                        audio_batch.extend(next_audio)
-
-                    if response_playing and not response_playing.is_set():
-                        response_playing.set()
-                        should_listen.set()
-
-                    for cid in service.connection_ids:
-                        ws = app.state.websockets.get(cid)
-                        if ws:
-                            await _send_events(ws, service.encode_audio_chunk(cid, bytes(audio_batch)))
-                except Empty:
-                    pass
+                                await _send_events(ws, service.encode_audio_chunk(cid, bytes(audio_batch)))
+                    except Empty:
+                        pass
 
                 await asyncio.sleep(0.01)
 
@@ -342,5 +356,99 @@ def create_app(
                 break
             except Exception as e:
                 logger.error(f"Send loop error: {e}")
+
+    @app.post("/v1/realtime")
+    async def webrtc_offer(request: Request) -> Response:
+        """
+        WebRTC SDP handshake endpoint (OpenAI Realtime WebRTC protocol).
+
+        Client POSTs an SDP offer with Content-Type: application/sdp and receives
+        an SDP answer. Audio flows over WebRTC media tracks; events flow over the
+        'oai-events' data channel using the same JSON protocol as WebSocket mode.
+        """
+        if app.state.websockets or app.state.webrtc_sessions:
+            return Response(
+                content="Only one concurrent session is supported. Disconnect the existing client first.",
+                status_code=503,
+                media_type="text/plain",
+            )
+
+        try:
+            from aiortc import RTCPeerConnection, RTCSessionDescription
+
+            from speech_to_speech.api.openai_realtime.webrtc_session import WebRTCSession
+        except ImportError:
+            return Response(
+                content="WebRTC support requires the 'webrtc' extra: pip install 'speech-to-speech[webrtc]'",
+                status_code=501,
+                media_type="text/plain",
+            )
+
+        if "application/sdp" not in request.headers.get("content-type", ""):
+            return Response(content="Content-Type must be application/sdp", status_code=415, media_type="text/plain")
+
+        offer_sdp = (await request.body()).decode("utf-8")
+        session_id = service.register()
+        app.state.active_session = session_id
+
+        pc = RTCPeerConnection()
+
+        def _on_closed(sid: str) -> None:
+            clean_session()
+            service.unregister(sid)
+            app.state.webrtc_sessions.pop(sid, None)
+            if not service._conns:
+                input_queue.put(SESSION_END)
+                logger.info("[WebRTC] Last client disconnected, sent SESSION_END")
+            app.state.active_session = None
+            logger.info("[WebRTC] Session %s removed", sid)
+
+        def _on_cancel_response() -> None:
+            if cancel_scope:
+                cancel_scope.cancel()
+            _flush_queue(output_queue, preserve=_keep_audio_sentinel)
+            _flush_queue(text_output_queue, preserve=_keep_user_text_event)
+            if response_playing:
+                response_playing.clear()
+
+        session = WebRTCSession(
+            session_id=session_id,
+            pc=pc,
+            service=service,
+            input_queue=input_queue,
+            output_queue=output_queue,
+            on_closed=_on_closed,
+            on_cancel_response=_on_cancel_response,
+            cancel_scope=cancel_scope,
+            response_playing=response_playing,
+            should_listen=should_listen,
+        )
+        session.setup_handlers()
+        session.add_outbound_track()
+
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=offer_sdp, type="offer"))
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+
+        # Wait for ICE gathering — aiortc gathers host candidates synchronously,
+        # but may still be in "gathering" state briefly.
+        if pc.iceGatheringState != "complete":
+            done = asyncio.Event()
+
+            @pc.on("icegatheringstatechange")
+            def _on_ice_change() -> None:
+                if pc.iceGatheringState == "complete":
+                    done.set()
+
+            try:
+                await asyncio.wait_for(done.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("[WebRTC] ICE gathering timed out, returning partial SDP (session %s)", session_id)
+
+        clean_session()
+        app.state.webrtc_sessions[session_id] = session
+        logger.info("[WebRTC] SDP answer returned (session %s)", session_id)
+
+        return Response(content=pc.localDescription.sdp, status_code=201, media_type="application/sdp")
 
     return app

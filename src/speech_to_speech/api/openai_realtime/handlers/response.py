@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Optional
 from openai.types.realtime import (
     RealtimeResponse,
     ResponseAudioDoneEvent,
+    ResponseAudioTranscriptDeltaEvent,
     ResponseAudioTranscriptDoneEvent,
     ResponseCreatedEvent,
     ResponseCreateEvent,
@@ -66,6 +67,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.content_index = 0
         st.in_response = False
         st.current_response_params = None
+        st.assistant_transcript = ""
 
     def _start_item(self, conn_id: str) -> str:
         """Generate a new item ID, reset content index, and store it."""
@@ -204,6 +206,18 @@ class ResponseHandler(RealtimeBaseHandler):
                     response_id=resp_id,
                 )
             )
+            if st.assistant_transcript:
+                events.append(
+                    ResponseAudioTranscriptDoneEvent(
+                        type="response.output_audio_transcript.done",
+                        event_id=self._next_event_id(),
+                        content_index=0,
+                        item_id=item_id,
+                        output_index=0,
+                        response_id=resp_id,
+                        transcript=st.assistant_transcript,
+                    )
+                )
             events.append(
                 ResponseDoneEvent(
                     type="response.done",
@@ -217,22 +231,42 @@ class ResponseHandler(RealtimeBaseHandler):
     # ── Pipeline event handlers ───────────────────
 
     def on_assistant_text(self, conn_id: str, event: AssistantTextEvent) -> list[ServerEvent]:
-        """Handle assistant_text: emit transcript and/or tool-call events."""
+        """Handle assistant_text: emit transcript delta and/or tool-call events.
+
+        Also emits response.created for the implicit VAD-triggered path (no prior
+        response.create client event), so both WebSocket and WebRTC clients learn
+        that a response is in progress before the first audio chunk arrives.
+        """
         st = self._state(conn_id)
         events: list[ServerEvent] = []
+
+        # Emit response.created for the implicit path (VAD → STT → LLM → TTS)
+        # where handle_response_create() was never called. Once current_response_id
+        # is set by _ensure_response(), encode_audio_chunk() will skip the duplicate.
+        need_created = st.current_response_id is None
         resp_id, item_id = self._ensure_response(conn_id)
+        if need_created:
+            events.append(
+                ResponseCreatedEvent(
+                    type="response.created",
+                    event_id=self._next_event_id(),
+                    response=self._build_response(conn_id, "in_progress"),
+                )
+            )
+
         st.last_item_id = item_id
         output_idx = 0
         if event.text:
+            st.assistant_transcript += event.text
             events.append(
-                ResponseAudioTranscriptDoneEvent(
-                    type="response.output_audio_transcript.done",
+                ResponseAudioTranscriptDeltaEvent(
+                    type="response.output_audio_transcript.delta",
                     event_id=self._next_event_id(),
                     content_index=0,
                     item_id=item_id,
                     output_index=output_idx,
                     response_id=resp_id,
-                    transcript=event.text,
+                    delta=event.text,
                 )
             )
             output_idx += 1
