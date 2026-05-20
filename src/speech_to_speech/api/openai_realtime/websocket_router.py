@@ -32,6 +32,11 @@ from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 
 logger = logging.getLogger(__name__)
 MAX_AUDIO_BATCH_BYTES = 6400
+# How long the release path waits for SESSION_END to propagate through the
+# handler chain back to output_queue before clearing unit.session. Tests
+# monkeypatch this to a small value since their fixtures usually skip the
+# real handler chain.
+SESSION_END_DRAIN_TIMEOUT_S = 10.0
 QItem = TypeVar("QItem")
 
 
@@ -100,6 +105,30 @@ def _to_audio_bytes(chunk: Any) -> bytes:
     if isinstance(chunk, np.ndarray) or hasattr(chunk, "tobytes"):
         return chunk.tobytes()
     return chunk
+
+
+async def _release_unit_after_drain(
+    unit: PipelineUnit, session: Any, session_id: str
+) -> None:
+    """Wait for SESSION_END to propagate (or timeout) then release the unit.
+
+    Runs in its own asyncio task so the route handler's finally block can return
+    immediately. Until this task clears `unit.session`, `_claim_unit` cannot
+    re-allocate this unit — guaranteeing no new client claims it while handler
+    threads may still emit stale events for the previous session.
+    """
+    elapsed = 0.0
+    while not session.drained.is_set() and elapsed < SESSION_END_DRAIN_TIMEOUT_S:
+        await asyncio.sleep(0.05)
+        elapsed += 0.05
+    if not session.drained.is_set():
+        logger.warning(
+            f"Pipeline {unit.index}: SESSION_END drain timed out after "
+            f"{SESSION_END_DRAIN_TIMEOUT_S}s; releasing anyway (handler may have leaked state)"
+        )
+    unit.service.unregister(session_id)
+    unit.session = None
+    logger.info(f"Pipeline {unit.index} released (session {session_id} ended)")
 
 
 def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
@@ -230,25 +259,40 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                 f"Client {session_id} on pipeline {unit.index} error: {type(e).__name__}: {e}", exc_info=True
             )
         finally:
+            # Hold the session reference: the send loop's snapshot will still resolve
+            # to this object until we clear unit.session, so any handler output that
+            # arrives during the drain window is sent to the now-closed ws (silently
+            # dropped) instead of leaking to whichever client claims this unit next.
+            old_session = unit.session
             _clean_unit(unit)
-            unit.service.unregister(session_id)
             unit.input_queue.put(SESSION_END)
-            # Drop the SessionState last — once None, the send loop treats this
-            # unit as idle and _claim_unit can hand it to the next client.
-            unit.session = None
-            logger.info(f"Pipeline {unit.index} released (session {session_id} ended)")
+            # Spawn the drain-and-release as a separate task so the route handler's
+            # finally returns immediately. Awaiting here is unreliable: after
+            # WebSocketDisconnect propagates, subsequent awaits in the same task
+            # can be skipped/cancelled by Starlette's runner and never resume.
+            asyncio.create_task(
+                _release_unit_after_drain(unit, old_session, session_id)
+            )
 
     @app.get("/v1/usage")
     async def usage_endpoint() -> dict[str, Any]:
-        # Aggregate usage across the pool.
+        # Aggregate usage across the pool. Numeric fields sum; dict fields (e.g.
+        # errors_by_type) merge with numeric leaves summed too, so per-unit error
+        # counts don't get dropped by the first-unit's value.
+        def _merge(into: dict[str, Any], src: dict[str, Any]) -> None:
+            for k, v in src.items():
+                if isinstance(v, (int, float)):
+                    into[k] = into.get(k, 0) + v
+                elif isinstance(v, dict):
+                    sub = into.setdefault(k, {})
+                    if isinstance(sub, dict):
+                        _merge(sub, v)
+                else:
+                    into.setdefault(k, v)
+
         total: dict[str, Any] = {}
         for unit in pool:
-            usage = unit.service.get_usage()
-            for k, v in usage.items():
-                if isinstance(v, (int, float)):
-                    total[k] = total.get(k, 0) + v
-                else:
-                    total.setdefault(k, v)
+            _merge(total, unit.service.get_usage())
         return total
 
     @app.get("/v1/pool")
@@ -340,6 +384,15 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                         unit.cancel_scope.response_done()
                         unit.should_listen.set()
                         logger.info(f"Pipeline {unit.index}: response complete, listening re-enabled")
+                        continue
+
+                    # SESSION_END travels from input_queue through every handler to
+                    # output_queue. Observing it here means the chain has fully reset;
+                    # signal the release path so it can clear unit.session.
+                    if is_control_message(audio_chunk, SESSION_END.kind):
+                        if session is not None:
+                            session.drained.set()
+                            logger.debug(f"Pipeline {unit.index}: SESSION_END drained")
                         continue
 
                     if is_control_message(audio_chunk):

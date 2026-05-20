@@ -1,8 +1,9 @@
+import asyncio
 from queue import Queue
 from threading import Event
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.pipeline.cancel_scope import CancelScope
@@ -15,6 +16,11 @@ class SessionState(BaseModel):
     when the websocket disconnects. Holding the websocket reference, the service
     session id, and any send-loop scratch (pending_output_item) here ensures these
     fields share one lifecycle — a stale value can't outlive its session.
+
+    `drained` is set by the send loop when SESSION_END travels through the handler
+    chain back to the output queue; the route handler awaits it before clearing
+    `PipelineUnit.session`, so a new client cannot claim the unit until in-flight
+    work from this session has fully reset.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -22,6 +28,7 @@ class SessionState(BaseModel):
     websocket: Any
     session_id: str = ""
     pending_output_item: Any = None
+    drained: asyncio.Event = Field(default_factory=asyncio.Event)
 
 
 class PipelineUnit(BaseModel):

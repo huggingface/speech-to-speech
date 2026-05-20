@@ -1,8 +1,9 @@
 """Integration tests for api.openai_realtime.websocket_router.
 
 Uses Starlette's synchronous TestClient with WebSocket support to exercise
-the full FastAPI app produced by ``create_app``.  Each test gets a fresh
-app, service, and set of queues so there is no cross-test state.
+the full FastAPI app produced by ``create_app``. Each test gets a fresh
+PipelineUnit pool (size 1, matching the single-session semantics of the
+old tests) so there is no cross-test state.
 """
 
 import base64
@@ -13,6 +14,8 @@ from threading import Event as ThreadingEvent
 import pytest
 from starlette.testclient import TestClient
 
+import speech_to_speech.api.openai_realtime.websocket_router as router_module
+from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.pipeline.cancel_scope import CancelScope
@@ -25,25 +28,48 @@ from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def short_drain_timeout(monkeypatch):
+    """Shorten the SESSION_END drain wait so tests don't pay the 5s timeout.
+
+    The real handler chain forwards SESSION_END through every handler; here
+    there are no handlers, so the route handler will always hit the timeout
+    on release. Cap it at 0.1s.
+    """
+    monkeypatch.setattr(router_module, "SESSION_END_DRAIN_TIMEOUT_S", 0.1)
+
+
 @pytest.fixture
 def setup():
-    """Return (app, service, input_queue, output_queue, text_output_queue, should_listen, stop_event, response_playing, cancel_scope)."""
-    text_prompt_queue = Queue()
+    """Return (app, service, input_queue, output_queue, text_output_queue,
+    should_listen, stop_event, response_playing, cancel_scope) for a pool of one.
+    """
+    text_prompt_queue: Queue = Queue()
     should_listen = ThreadingEvent()
     should_listen.set()
     service = RealtimeService(
         text_prompt_queue=text_prompt_queue,
         should_listen=should_listen,
     )
-    input_queue = Queue()
-    output_queue = Queue()
-    text_output_queue = Queue()
+    input_queue: Queue = Queue()
+    output_queue: Queue = Queue()
+    text_output_queue: Queue = Queue()
     stop_event = ThreadingEvent()
     response_playing = ThreadingEvent()
     cancel_scope = CancelScope()
-    app = create_app(
-        service, input_queue, output_queue, text_output_queue, should_listen, response_playing, cancel_scope, stop_event
+    unit = PipelineUnit(
+        index=0,
+        service=service,
+        cancel_scope=cancel_scope,
+        should_listen=should_listen,
+        response_playing=response_playing,
+        input_queue=input_queue,
+        output_queue=output_queue,
+        text_output_queue=text_output_queue,
+        text_prompt_queue=text_prompt_queue,
+        handlers=[],
     )
+    app = create_app(pool=[unit], stop_event=stop_event)
     return (
         app,
         service,
@@ -84,6 +110,9 @@ class TestConnection:
                 with client.websocket_connect("/v1/realtime") as ws2:
                     msg = ws2.receive_json()
                     assert msg["type"] == "error"
+                    # Rejection uses the stateless build_error_event helper —
+                    # the error type identifies pool exhaustion specifically.
+                    assert msg["error"]["type"] == "session_limit_reached"
 
 
 # ===================================================================
@@ -369,7 +398,7 @@ class TestSendLoop:
 
 class TestCleanup:
     def test_new_connection_resets_discard_after_invalidating_generation(self, setup):
-        """connect-time clean_session cancels+resets: stale work is invalidated, discarding cleared."""
+        """connect-time _clean_unit cancels+resets: stale work is invalidated, discarding cleared."""
         app, _, *_rest, cancel_scope = setup
         cancel_scope.cancel()
         assert cancel_scope.discarding
@@ -381,14 +410,15 @@ class TestCleanup:
                 assert cancel_scope.generation == 2
 
     def test_disconnect_bumps_cancel_scope_generation(self, setup):
-        """clean_session() calls cancel() so in-flight pipeline generations go stale."""
+        """_clean_unit() on disconnect calls cancel() so in-flight generations go stale."""
         app, _, _, _, _, _, _, _, cancel_scope = setup
         assert cancel_scope.generation == 0
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
                 assert cancel_scope.generation == 1
-            time.sleep(0.2)
+            # disconnect triggers _clean_unit again + drain (short timeout in tests)
+            time.sleep(0.3)
         assert cancel_scope.generation == 2
 
     def test_disconnect_unregisters(self, setup):
@@ -397,7 +427,7 @@ class TestCleanup:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
                 assert len(service._conns) == 1
-            time.sleep(0.2)
+            time.sleep(0.3)
             assert len(service._conns) == 0
             end = input_queue.get(timeout=1)
             assert is_control_message(end, SESSION_END.kind)
@@ -412,7 +442,7 @@ class TestCleanup:
                 response_playing.set()
                 output_queue.put(_pcm_bytes(256))
                 text_output_queue.put(AssistantTextEvent(text="stale"))
-            time.sleep(0.2)
+            time.sleep(0.3)
 
         assert not cancel_scope.discarding
         assert cancel_scope.generation == 2
@@ -421,3 +451,66 @@ class TestCleanup:
         assert text_output_queue.empty()
         end = input_queue.get(timeout=1)
         assert is_control_message(end, SESSION_END.kind)
+
+
+# ===================================================================
+# Pool semantics (new in pool refactor)
+# ===================================================================
+
+
+def _make_unit(index: int) -> PipelineUnit:
+    text_prompt_queue: Queue = Queue()
+    should_listen = ThreadingEvent()
+    should_listen.set()
+    return PipelineUnit(
+        index=index,
+        service=RealtimeService(text_prompt_queue=text_prompt_queue, should_listen=should_listen),
+        cancel_scope=CancelScope(),
+        should_listen=should_listen,
+        response_playing=ThreadingEvent(),
+        input_queue=Queue(),
+        output_queue=Queue(),
+        text_output_queue=Queue(),
+        text_prompt_queue=text_prompt_queue,
+        handlers=[],
+    )
+
+
+class TestPool:
+    def test_pool_endpoint_reports_idle_state(self):
+        pool = [_make_unit(0), _make_unit(1)]
+        app = create_app(pool=pool, stop_event=ThreadingEvent())
+        with TestClient(app) as client:
+            r = client.get("/v1/pool")
+            assert r.status_code == 200
+            data = r.json()
+            assert data["size"] == 2
+            assert data["in_use"] == 0
+            assert [u["session_id"] for u in data["units"]] == [None, None]
+
+    def test_two_clients_claim_two_slots_third_rejected(self):
+        pool = [_make_unit(0), _make_unit(1)]
+        app = create_app(pool=pool, stop_event=ThreadingEvent())
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws1:
+                ws1.receive_json()  # session.created
+                with client.websocket_connect("/v1/realtime") as ws2:
+                    ws2.receive_json()  # session.created (different unit)
+                    with client.websocket_connect("/v1/realtime") as ws3:
+                        msg = ws3.receive_json()
+                        assert msg["type"] == "error"
+                        assert msg["error"]["type"] == "session_limit_reached"
+                    # Pool now reports 2 in_use
+                    r = client.get("/v1/pool")
+                    assert r.json()["in_use"] == 2
+
+    def test_usage_aggregates_errors_by_type_across_units(self):
+        pool = [_make_unit(0), _make_unit(1)]
+        pool[0].service.total_usage.record_error("foo")
+        pool[0].service.total_usage.record_error("foo")
+        pool[1].service.total_usage.record_error("bar")
+        app = create_app(pool=pool, stop_event=ThreadingEvent())
+        with TestClient(app) as client:
+            data = client.get("/v1/usage").json()
+            assert data["errors_by_type"] == {"foo": 2, "bar": 1}
+            assert data["total_errors"] == 3
