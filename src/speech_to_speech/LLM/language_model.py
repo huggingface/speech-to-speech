@@ -4,7 +4,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Sized
 from queue import Empty
-from threading import Thread
+from threading import Lock, Thread
 from typing import Any, Literal, Optional, Protocol, runtime_checkable
 
 import torch
@@ -32,6 +32,7 @@ from transformers import (
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import Chat, make_assistant_message, make_system_message, make_user_message
+from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
 from speech_to_speech.LLM.tool_call.function_call import extract_function_calls_from_text
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
@@ -151,6 +152,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         enable_thinking: bool = False,
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
+        compact_history: bool = False,
         **_kwargs: Any,
     ) -> None:
         self.backend = backend
@@ -164,6 +166,11 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self._load_model(model_name, device, torch_dtype, gen_kwargs)
 
         self.user_role = user_role
+        # Serializes transformers pipe/model.generate calls between the speech
+        # response path and the background compaction worker. MLX paths use
+        # MLXLockContext instead.
+        self._transformers_lock = Lock()
+        self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
 
     @abstractmethod
     def _load_model(
@@ -174,6 +181,16 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         gen_kwargs: dict[str, Any],
     ) -> None:
         """Load the model, tokenizer, and any backend-specific resources."""
+
+    def _build_compaction_generate_fn(self) -> CompactGenerateFn:
+        """Return a ``(system, user) -> text`` callable for compaction.
+
+        Subclasses must override this when ``compact_history=True`` is used.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement _build_compaction_generate_fn. "
+            "Override it or pass compact_history=False."
+        )
 
     @abstractmethod
     def _generate(
@@ -422,6 +439,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     )
                 )
         original_chat.strip_images()
+        original_chat.trim_if_needed(self.compactor)
         logger.debug("Clean text: %s", ctx.generated_text)
         logger.info(f"Tools: {ctx.tools}")
 
@@ -530,12 +548,55 @@ class LanguageModelHandler(BaseLanguageModelHandler):
             torch.mps.empty_cache()
         else:
             self._cancel_criteria.reset()
-            thread = Thread(target=self.pipe, args=(chat_prompt,), kwargs=self.gen_kwargs)
+            lock = self._transformers_lock
+
+            def _locked_pipe() -> None:
+                with lock:
+                    self.pipe(chat_prompt, **self.gen_kwargs)
+
+            thread = Thread(target=_locked_pipe)
             thread.start()
             yield from self._stream_tokens(self.streamer, gen, language_code, ctx, runtime_config, response)
             self._finish_transformers_generation(thread)
             if self.device == "mps":
                 torch.mps.empty_cache()
+
+    def _build_compaction_generate_fn(self) -> CompactGenerateFn:
+        if self.backend == "mlx":
+            model = self.model
+            tokenizer = self.tokenizer
+            max_tokens = 1024
+
+            def generate_mlx(system: str, user: str) -> str:
+                messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+                prompt = tokenizer.apply_chat_template(  # type: ignore[union-attr]
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+                with MLXLockContext(handler_name="MLX-compact", timeout=10.0):
+                    return mlx_generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens, verbose=False)  # type: ignore[arg-type]
+
+            return generate_mlx
+        else:
+            pipe = self.pipe
+            tokenizer = self.tokenizer
+            gen_kwargs = {
+                k: v
+                for k, v in self.gen_kwargs.items()
+                if k not in ("streamer", "stopping_criteria", "max_new_tokens", "return_full_text")
+            }
+            max_new_tokens = 1024
+            lock = self._transformers_lock
+
+            def generate_transformers(system: str, user: str) -> str:
+                messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+                prompt = tokenizer.apply_chat_template(  # type: ignore[union-attr]
+                    messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+                )
+                with lock:
+                    result = pipe(prompt, return_full_text=False, max_new_tokens=max_new_tokens, **gen_kwargs)
+                return result[0]["generated_text"]  # type: ignore[index]
+
+            return generate_transformers
 
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
@@ -669,12 +730,58 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                 "streamer": self.streamer,
                 "stopping_criteria": StoppingCriteriaList([self._cancel_criteria]),
             }
-            thread = Thread(target=self.model.generate, kwargs=generate_kwargs)  # type: ignore[arg-type]
+            lock = self._transformers_lock
+
+            def _locked_generate() -> None:
+                with lock:
+                    self.model.generate(**generate_kwargs)  # type: ignore[union-attr,operator]
+
+            thread = Thread(target=_locked_generate)
             thread.start()
             yield from self._stream_tokens(self.streamer, gen, language_code, ctx, runtime_config, response)
             self._finish_transformers_generation(thread)
             if self.device == "mps":
                 torch.mps.empty_cache()
+
+    def _build_compaction_generate_fn(self) -> CompactGenerateFn:
+        if self.backend == "mlx":
+            model = self.model
+            processor = self.processor
+            tokenizer = self.tokenizer
+            max_tokens = 1024
+
+            def generate_mlx(system: str, user: str) -> str:
+                messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+                formatted_prompt = processor.apply_chat_template(  # type: ignore[union-attr]
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+                with MLXLockContext(handler_name="MLX-VLM-compact", timeout=10.0):
+                    token_iter = mlx_vlm_stream_generate(  # type: ignore[arg-type]
+                        model, processor, formatted_prompt, None, max_tokens=max_tokens
+                    )
+                    return "".join(t.text if hasattr(t, "text") else str(t) for t in token_iter)
+
+            return generate_mlx
+        else:
+            model = self.model
+            processor = self.processor
+            tokenizer = self.tokenizer
+            device = self.device
+            max_new_tokens = 1024
+            lock = self._transformers_lock
+
+            def generate_transformers(system: str, user: str) -> str:
+                messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+                prompt = processor.apply_chat_template(  # type: ignore[union-attr]
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+                inputs = processor(text=[prompt], return_tensors="pt", padding=True).to(device)  # type: ignore[operator]
+                input_len = inputs["input_ids"].shape[1]
+                with lock:
+                    output_ids = model.generate(**inputs, max_new_tokens=max_new_tokens)  # type: ignore[union-attr,operator]
+                return str(tokenizer.decode(output_ids[0][input_len:], skip_special_tokens=True))  # type: ignore[union-attr]
+
+            return generate_transformers
 
     def _prepare_vlm_inputs(self, chat_messages: list[dict[str, Any]]) -> tuple[Any, int]:
         """Build processor inputs for transformers VLM generation.
