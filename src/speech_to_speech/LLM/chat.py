@@ -172,8 +172,11 @@ class Chat:
     def add_item(self, item: SupportedItem) -> SupportedItem:
         """Validate and route a conversation item into the chat buffer.
 
-        Does not enforce the size limit — call :meth:`trim_if_needed` explicitly
-        after each successful generation to evict or compact old turns.
+        Does not enforce the soft size limit — call :meth:`trim_if_needed`
+        explicitly after each successful generation to evict or compact old
+        turns. A hard upper bound at ``2 * size`` is enforced inline as a
+        runaway-client safety net: if the user-turn count exceeds it, the
+        oldest complete turn is evicted (lossy, no compaction).
 
         Raises :class:`ChatItemError` if the item fails validation.
         """
@@ -219,6 +222,15 @@ class Chat:
 
             else:
                 raise ChatItemError(f"Unsupported item type: {getattr(item, 'type', None)}")
+
+            if self.size > 0 and self._user_turn_count > 2 * self.size:
+                logger.warning(
+                    "Chat buffer exceeded hard cap (%d > 2 * size=%d); evicting oldest turn",
+                    self._user_turn_count,
+                    self.size,
+                )
+                while self._user_turn_count > 2 * self.size:
+                    self._evict_oldest_turn()
 
             return item
 
