@@ -85,6 +85,8 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler.cancel_scope = cancel_scope
     handler.tools = None
     handler.tools_choice = None
+    handler.enable_lang_prompt = False
+    handler.compactor = None
     return handler
 
 

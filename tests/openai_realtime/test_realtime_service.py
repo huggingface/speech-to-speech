@@ -1367,6 +1367,7 @@ class TestChatToolCallTracking:
         chat.add_item(self._fc("call_x"))
         chat.add_item(self._assistant("ok"))
         chat.add_item(self._user("more"))
+        chat.trim_if_needed()
         assert not any(getattr(e, "call_id", None) == "call_x" for e in chat.buffer)
         assert "call_x" in chat._pending_tool_calls
 
@@ -1415,6 +1416,7 @@ class TestChatToolCallTracking:
         assert len(chat.buffer) == 5
 
         chat.add_item(self._user("turn 2"))
+        chat.trim_if_needed()
         from openai.types.realtime.realtime_conversation_item_user_message import (
             RealtimeConversationItemUserMessage,
         )
@@ -1440,6 +1442,7 @@ class TestChatToolCallTracking:
         assert chat._user_turn_count == 2
 
         chat.add_item(self._user("t3"))
+        chat.trim_if_needed()
         assert chat._user_turn_count == 2
         user_texts = [e.content[0].text for e in chat.buffer if isinstance(e, RealtimeConversationItemUserMessage)]
         assert user_texts == ["t2", "t3"]

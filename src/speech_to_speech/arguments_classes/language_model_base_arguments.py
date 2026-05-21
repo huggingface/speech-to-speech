@@ -37,3 +37,10 @@ class LanguageModelBaseArguments:
             "language (e.g. 'Please reply to my message in French.'). Default is False."
         },
     )
+    compact_history: bool = field(
+        default=True,
+        metadata={
+            "help": "When True, summarize older turns in the background once the chat exceeds chat_size, "
+            "instead of synchronously evicting them. Adds an extra LLM call per compaction. Default is True."
+        },
+    )

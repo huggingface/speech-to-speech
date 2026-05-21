@@ -27,6 +27,7 @@ from openai.types.responses import (
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import Chat, make_system_message, make_user_message
+from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
 from speech_to_speech.LLM.utils import remove_unspeechable, resolve_auto_language
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
@@ -60,6 +61,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         request_timeout_s: float = 20.0,
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
+        compact_history: bool = False,
         **_kwargs: Any,
     ) -> None:
         self.cancel_scope = cancel_scope
@@ -83,6 +85,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
             and base_url != "https://api.openai.com/v1"  # Only for other than OpenAI Official Server
             else None
         )
+        self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
         self.warmup()
 
     def warmup(self) -> None:
@@ -103,6 +106,33 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         end = time.time()
         logger.info(f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s")
 
+    def _build_compaction_generate_fn(self) -> CompactGenerateFn:
+        """Return a generate fn that calls the Responses API for compaction."""
+        client = self.client
+        model_name = self.model_name
+        timeout = self.request_timeout
+
+        def generate(system: str, user: str) -> str:
+            response = client.responses.create(
+                model=model_name,
+                input=[
+                    {
+                        "type": "message",
+                        "role": "system",
+                        "content": [{"type": "input_text", "text": system}],
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": user}],
+                    },
+                ],
+                timeout=timeout,
+            )
+            return response.output_text
+
+        return generate
+
     def _apply_config(
         self,
         chat: Chat,
@@ -112,46 +142,16 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
             full_instructions = build_voice_system_prompt(instructions)
             chat.add_item(make_system_message(full_instructions))
 
-    def process(self, request: LLMIn) -> Iterator[LLMOut]:
-        """
-        Process a language model request and yield LLMResponseChunks.
-
-        Args:
-            request: The LLMIn request containing runtime configuration and response parameters.
-
-        Yields:
-            LLMResponseChunk: Chunks of text and tools from the language model response.
-        """
-
-        runtime_config = request.runtime_config
-        response = request.response
-        original_chat = runtime_config.chat
-        active_chat = original_chat.copy()
-        language_code = request.language_code
-        instructions = (
-            response.instructions if response and response.instructions else runtime_config.session.instructions
-        ) or ""
-        req_tools = response.tools if response and response.tools else runtime_config.session.tools
-        req_tool_choice = (
-            response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
-        )
-        self._apply_config(active_chat, instructions)
-        language_code, lang_name = resolve_auto_language(language_code)
-        if lang_name and self.enable_lang_prompt:
-            active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
-
-        optional_kwargs: dict[str, Any] = {}
-        if req_tools is not None:
-            optional_kwargs["tools"] = req_tools
-        if req_tool_choice is not None:
-            optional_kwargs["tool_choice"] = req_tool_choice
-
-        # CancelScope.is_stale(gen) is checked when the stream iterator advances; a
-        # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from
-        # the websocket router. Mitigations: request_timeout_s / ReadTimeout. A future
-        # option is to run this API call in a child process and terminate() on session
-        # end (IPC and lifecycle cost).
-        gen = self.cancel_scope.generation if self.cancel_scope else None
+    def _generate(
+        self,
+        active_chat: Chat,
+        original_chat: Chat,
+        language_code: Optional[str],
+        gen: int | None,
+        runtime_config: Any,
+        response: Any,
+        optional_kwargs: dict[str, Any],
+    ) -> Iterator[LLMOut]:
         api_response: Response | Stream[ResponseStreamEvent] | None = None
         tools: list[ResponseFunctionToolCall] = []
         clean_text = ""
@@ -307,9 +307,54 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     pass
 
         original_chat.strip_images()
+        original_chat.trim_if_needed(self.compactor)
         if input_tokens or output_tokens:
             yield TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens)
         yield EndOfResponse()
+
+    def process(self, request: LLMIn) -> Iterator[LLMOut]:
+        """
+        Process a language model request and yield LLMResponseChunks.
+
+        Args:
+            request: The LLMIn request containing runtime configuration and response parameters.
+
+        Yields:
+            LLMResponseChunk: Chunks of text and tools from the language model response.
+        """
+        runtime_config = request.runtime_config
+        response = request.response
+        original_chat = runtime_config.chat
+        active_chat = original_chat.copy()
+        language_code = request.language_code
+        instructions = (
+            response.instructions if response and response.instructions else runtime_config.session.instructions
+        ) or ""
+        req_tools = response.tools if response and response.tools else runtime_config.session.tools
+        req_tool_choice = (
+            response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
+        )
+        self._apply_config(active_chat, instructions)
+        language_code, lang_name = resolve_auto_language(language_code)
+        if lang_name and self.enable_lang_prompt:
+            active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
+
+        optional_kwargs: dict[str, Any] = {}
+        if req_tools is not None:
+            optional_kwargs["tools"] = req_tools
+        if req_tool_choice is not None:
+            optional_kwargs["tool_choice"] = req_tool_choice
+
+        # CancelScope.is_stale(gen) is checked when the stream iterator advances; a
+        # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from
+        # the websocket router. Mitigations: request_timeout_s / ReadTimeout. A future
+        # option is to run this API call in a child process and terminate() on session
+        # end (IPC and lifecycle cost).
+        gen = self.cancel_scope.generation if self.cancel_scope else None
+
+        yield from self._generate(
+            active_chat, original_chat, language_code, gen, runtime_config, response, optional_kwargs
+        )
 
     def on_session_end(self) -> None:
         logger.debug("OpenAI API language model session state reset")
