@@ -23,6 +23,15 @@ This single script subsumes two earlier ones:
 * Both at once (soak the pool):
     python scripts/synthetic_conversation_realtime_client.py --clients 2 --turns 60
 
+* Soak a Hugging Face Inference Endpoint via its load balancer (10 min, 2 clients):
+    export HF_TOKEN=hf_...
+    python scripts/synthetic_conversation_realtime_client.py \
+        --lb-url https://<your-lb>.us-east-1.aws.endpoints.huggingface.cloud \
+        --clients 2 \
+        --turns 60 \
+        --interval 10 \
+        --log-dir /tmp/hf_endpoint_soak
+
 Each client uses a per-client prompt offset (coprime shift) so concurrent
 clients send distinct prompts at each turn — making cross-session leaks
 trivially detectable in the per-client transcript logs.
