@@ -60,12 +60,12 @@ class ModuleArguments:
             "help": "Minimum silence duration (ms) before ending speech when live transcription is enabled (default: 500ms)"
         },
     )
-    num_servers: int = field(
+    num_pipelines: int = field(
         default=1,
         metadata={
             "help": "Number of isolated realtime pipelines in the pool. One uvicorn server listens on "
             "--ws_port and routes each incoming websocket to the next free pipeline (each has its own "
             "VAD/STT/LM/TTS handlers and conversation state). Max concurrent websocket sessions equals "
-            "num_servers; further connections are rejected. Only valid for --mode realtime. Default is 1."
+            "num_pipelines; further connections are rejected. Only valid for --mode realtime. Default is 1."
         },
     )

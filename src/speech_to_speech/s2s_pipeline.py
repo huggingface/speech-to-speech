@@ -620,7 +620,7 @@ def build_pipeline(
     elif module_kwargs.mode == "realtime":
         from speech_to_speech.api.openai_realtime.server import RealtimeServer
 
-        pool_size = max(1, module_kwargs.num_servers)
+        pool_size = max(1, module_kwargs.num_pipelines)
         pool = [
             _build_realtime_pipeline_unit(
                 index=i,
@@ -935,12 +935,12 @@ def main() -> None:
 
     setup_logger(args.module_kwargs.log_level)
 
-    if args.module_kwargs.num_servers < 1:
-        raise ValueError(f"--num_servers must be >= 1, got {args.module_kwargs.num_servers}")
-    if args.module_kwargs.num_servers > 1 and args.module_kwargs.mode != "realtime":
+    if args.module_kwargs.num_pipelines < 1:
+        raise ValueError(f"--num_pipelines must be >= 1, got {args.module_kwargs.num_pipelines}")
+    if args.module_kwargs.num_pipelines > 1 and args.module_kwargs.mode != "realtime":
         raise ValueError(
-            f"--num_servers > 1 is only supported with --mode realtime "
-            f"(got mode={args.module_kwargs.mode!r}, num_servers={args.module_kwargs.num_servers})"
+            f"--num_pipelines > 1 is only supported with --mode realtime "
+            f"(got mode={args.module_kwargs.mode!r}, num_pipelines={args.module_kwargs.num_pipelines})"
         )
 
     # On Apple Silicon, all MLX inference serializes through a global lock (utils/mlx_lock.py).
@@ -948,11 +948,11 @@ def main() -> None:
     # a flood of warnings without affecting final transcripts. With a pool, pre-emptively turn
     # it off so logs stay readable; the final STT path is unaffected. Non-darwin platforms
     # don't share this lock, so leave their live transcription alone.
-    if args.module_kwargs.num_servers > 1 and platform == "darwin" and args.module_kwargs.enable_live_transcription:
+    if args.module_kwargs.num_pipelines > 1 and platform == "darwin" and args.module_kwargs.enable_live_transcription:
         logger.info(
-            "MLX contention: --num_servers=%d > 1 on Apple Silicon → disabling live transcription "
+            "MLX contention: --num_pipelines=%d > 1 on Apple Silicon → disabling live transcription "
             "(progressive STT contends on the global MLX lock)",
-            args.module_kwargs.num_servers,
+            args.module_kwargs.num_pipelines,
         )
         args.module_kwargs.enable_live_transcription = False
 
