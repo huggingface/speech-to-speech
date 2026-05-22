@@ -54,7 +54,6 @@ import sys
 import time
 import wave
 from pathlib import Path
-from typing import Optional
 
 import httpx
 import numpy as np
@@ -207,50 +206,11 @@ async def consume_until_response_done(
     ws,
     response_audio_out: bytearray,
     response_timeout_s: float,
-    turn_start: float,
 ) -> dict:
-    """Read server events until response.done (or timeout). Returns turn summary.
-
-    Captures stage-boundary timestamps (seconds since *turn_start*) so the
-    caller can compute per-stage durations (VAD / STT / LLM / TTS). The
-    boundary events emitted by the service (see
-    src/speech_to_speech/api/openai_realtime/service.py) are:
-
-      * ``input_audio_buffer.speech_started`` → VAD detected start
-      * ``input_audio_buffer.speech_stopped`` → VAD detected end
-      * ``conversation.item.input_audio_transcription.completed`` → STT done
-      * ``response.output_audio_transcript.done`` → LM finished a sentence
-        batch (may fire multiple times per response)
-      * first ``response.output_audio.delta`` after each transcript.done →
-        TTS started rendering that batch
-      * ``response.output_audio.done`` → TTS finished streaming
-
-    Stages derived in the caller:
-      VAD = speech_stopped - speech_started
-      STT = stt_done - speech_stopped
-      LLM = last_tx_done - stt_done  (last transcript.done before response.done
-                                       — captures the full LM generation
-                                       window across all sentence batches)
-      TTS = sum over (first audio.delta after each transcript.done) - that
-            transcript.done. Accumulates per-sentence TTS render time across
-            all batches in the response.
-    """
+    """Read server events until response.done (or timeout). Returns turn summary."""
     info: dict = {
         "transcript_in": "",
         "transcript_out": "",
-        "audio_bytes_in": 0,
-        "speech_started_at": None,
-        "speech_stopped_at": None,
-        "stt_done_at": None,
-        "first_audio_at": None,
-        "audio_done_at": None,
-        # Updated on every transcript.done event so that, by the time
-        # response.done arrives, it holds the timestamp of the last one.
-        "last_tx_done_at": None,
-        "tts_total_s": 0.0,
-        # Internal: timestamp of the latest transcript.done that hasn't yet
-        # been matched to a subsequent audio.delta.
-        "_pending_tx_done_at": None,
         "error": None,
     }
     deadline = time.monotonic() + response_timeout_s
@@ -262,44 +222,16 @@ async def consume_until_response_done(
             return info
         event = json.loads(raw)
         t = event.get("type", "")
-        now_rel = time.monotonic() - turn_start
 
-        if t == "input_audio_buffer.speech_started":
-            if info["speech_started_at"] is None:
-                info["speech_started_at"] = now_rel
-        elif t == "input_audio_buffer.speech_stopped":
-            if info["speech_stopped_at"] is None:
-                info["speech_stopped_at"] = now_rel
-        elif t == "conversation.item.input_audio_transcription.completed":
-            if info["stt_done_at"] is None:
-                info["stt_done_at"] = now_rel
+        if t == "conversation.item.input_audio_transcription.completed":
             info["transcript_in"] += event.get("transcript", "")
         elif t in ("response.audio.delta", "response.output_audio.delta"):
             delta = event.get("delta", "")
             if delta:
-                if info["first_audio_at"] is None:
-                    info["first_audio_at"] = now_rel
-                # Close the most recent transcript.done → audio.delta gap and
-                # add it to the cumulative TTS render time.
-                if info["_pending_tx_done_at"] is not None:
-                    info["tts_total_s"] += now_rel - info["_pending_tx_done_at"]
-                    info["_pending_tx_done_at"] = None
-                chunk = base64.b64decode(delta)
-                response_audio_out.extend(chunk)
-                info["audio_bytes_in"] += len(chunk)
-        elif t in ("response.audio.done", "response.output_audio.done"):
-            if info["audio_done_at"] is None:
-                info["audio_done_at"] = now_rel
+                response_audio_out.extend(base64.b64decode(delta))
         elif t in ("response.audio_transcript.delta", "response.output_audio_transcript.delta"):
             info["transcript_out"] += event.get("delta", "")
         elif t in ("response.audio_transcript.done", "response.output_audio_transcript.done"):
-            # Open a new TTS-render window. Multiple .done events can fire per
-            # response if the LM streams sentence batches; each is paired with
-            # the next audio.delta for the TTS-time accumulation.
-            info["_pending_tx_done_at"] = now_rel
-            # Also track the timestamp of the last transcript.done seen — the
-            # LLM stage spans from STT done to this point.
-            info["last_tx_done_at"] = now_rel
             transcript = event.get("transcript")
             if transcript:
                 info["transcript_out"] = transcript
@@ -317,35 +249,6 @@ def _truncate_transcript(s: str, max_len: int = 20) -> str:
     if len(s) <= max_len:
         return repr(s)
     return f"{(s[:max_len] + '...')!r} ({len(s)} chars)"
-
-
-def _fmt_stages(info: dict) -> str:
-    """Render VAD/STT/LLM/TTS durations as `VAD=… STT=… LLM=… TTS=…`.
-
-    VAD / STT / LLM are simple two-event spans. TTS is the cumulative sum of
-    every (transcript.done → next audio.delta) gap across the response, so
-    multi-sentence responses correctly accumulate per-batch TTS render time.
-    """
-    parts: list[str] = []
-
-    def _delta(a: str, b: str) -> Optional[float]:
-        x, y = info.get(a), info.get(b)
-        if x is None or y is None:
-            return None
-        return y - x
-
-    spans = [
-        ("VAD", "speech_started_at", "speech_stopped_at"),
-        ("STT", "speech_stopped_at", "stt_done_at"),
-        ("LLM", "stt_done_at", "last_tx_done_at"),
-    ]
-    for label, start_key, end_key in spans:
-        d = _delta(start_key, end_key)
-        parts.append(f"{label}={int(d * 1000)}ms" if d is not None else f"{label}=n/a")
-
-    tts_total = info.get("tts_total_s") or 0.0
-    parts.append(f"TTS={int(tts_total * 1000)}ms" if tts_total > 0 else "TTS=n/a")
-    return " ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +286,6 @@ async def run_client(
     ws_url: str,
     extra_headers: list[tuple[str, str]],
     audio_files: list[tuple[str, Path]],
-    started_at_global: float,
 ) -> dict:
     """Run one client's multi-turn conversation. Returns per-client summary.
 
@@ -398,7 +300,6 @@ async def run_client(
         "rejected": False,
         "completed": 0,
         "errors": 0,
-        "total_s": 0.0,
         "error_msg": None,
     }
 
@@ -408,7 +309,6 @@ async def run_client(
     response_audio = bytearray()
 
     prefix = f"[c{client_id}]"
-    client_started_at = time.monotonic()
     auth_headers = {k: v for k, v in extra_headers}
     lb_session_id: str | None = None
     lb_session_token: str | None = None
@@ -421,7 +321,6 @@ async def run_client(
             except Exception as e:  # noqa: BLE001 — diagnostic path
                 summary["error_msg"] = f"LB /session failed: {type(e).__name__}: {e}"
                 logger.info(f"{prefix} {summary['error_msg']}")
-                summary["total_s"] = time.monotonic() - client_started_at
                 return summary
             connect_url = alloc["connect_url"]
             lb_session_id = alloc["session_id"]
@@ -474,11 +373,10 @@ async def run_client(
                             text, wav_path = audio_files[prompt_idx]
 
                             turn_start = time.monotonic()
-                            elapsed_total = turn_start - started_at_global
                             turn_audio = load_pcm16_mono_16k(wav_path)
 
                             logger.info(f"{prefix} turn {turn_idx + 1}/{args.turns} USER: {text!r}")
-                            log_f.write(f"[turn {turn_idx + 1}/{args.turns}] t={elapsed_total:.1f}s USER: {text}\n")
+                            log_f.write(f"[turn {turn_idx + 1}/{args.turns}] USER: {text}\n")
 
                             try:
                                 await stream_prompt(ws, turn_audio)
@@ -492,15 +390,13 @@ async def run_client(
                                 break
 
                             info = await consume_until_response_done(
-                                ws, response_audio, args.response_timeout, turn_start
+                                ws, response_audio, args.response_timeout
                             )
                             turn_elapsed = time.monotonic() - turn_start
-                            stages = _fmt_stages(info)
 
                             if info["error"]:
                                 logger.info(
-                                    f"{prefix} turn {turn_idx + 1}/{args.turns} ERROR after "
-                                    f"{turn_elapsed:.1f}s: {info['error']}"
+                                    f"{prefix} turn {turn_idx + 1}/{args.turns} ERROR: {info['error']}"
                                 )
                                 log_f.write(f"[turn {turn_idx + 1}/{args.turns}] ERROR: {info['error']}\n\n")
                                 summary["errors"] += 1
@@ -508,26 +404,17 @@ async def run_client(
                                 summary["completed"] += 1
                                 logger.info(
                                     f"{prefix} turn {turn_idx + 1}/{args.turns} "
-                                    f"ASSISTANT: {_truncate_transcript(info['transcript_out'])} {stages}"
+                                    f"ASSISTANT: {_truncate_transcript(info['transcript_out'])}"
                                 )
                                 log_f.write(f"[turn {turn_idx + 1}/{args.turns}] STT: {info['transcript_in']}\n")
                                 log_f.write(
-                                    f"[turn {turn_idx + 1}/{args.turns}] ASSISTANT: {info['transcript_out']}\n"
-                                )
-                                log_f.write(
-                                    f"[turn {turn_idx + 1}/{args.turns}] took={turn_elapsed:.2f}s "
-                                    f"{stages} audio_in={info['audio_bytes_in']}B\n\n"
+                                    f"[turn {turn_idx + 1}/{args.turns}] ASSISTANT: {info['transcript_out']}\n\n"
                                 )
                             log_f.flush()
 
                             remaining = args.interval - turn_elapsed
                             if remaining > 0:
                                 await asyncio.sleep(remaining)
-                            elif args.turns > 1:
-                                logger.info(
-                                    f"{prefix} turn {turn_idx + 1}/{args.turns} over interval by "
-                                    f"{-remaining:.1f}s — starting next turn immediately"
-                                )
 
         except Exception as e:  # noqa: BLE001 — diagnostic path
             summary["error_msg"] = f"{type(e).__name__}: {e}"
@@ -542,8 +429,6 @@ async def run_client(
                     logger.info(f"{prefix} LB notified: disconnected")
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"{prefix} LB 'disconnected' callback failed: {e}")
-
-    summary["total_s"] = time.monotonic() - client_started_at
 
     if response_audio:
         wav_out = log_dir / "conversation.wav"
@@ -589,7 +474,6 @@ async def run_all(args: argparse.Namespace) -> None:
         f"{args.turns} turns each @ {args.interval:.1f}s interval"
     )
 
-    started_at = time.monotonic()
     summaries = await asyncio.gather(
         *(
             run_client(
@@ -598,19 +482,17 @@ async def run_all(args: argparse.Namespace) -> None:
                 ws_url=ws_url,
                 extra_headers=extra_headers,
                 audio_files=audio_files,
-                started_at_global=started_at,
             )
             for i in range(args.clients)
         )
     )
-    total = time.monotonic() - started_at
 
     logger.info("\n=== summary ===")
     for s in summaries:
         status = "rejected" if s["rejected"] else ("error" if s["error_msg"] else "ok")
         logger.info(
             f"  c{s['client_id']}: {status:8s} completed={s['completed']}/{args.turns} "
-            f"errors={s['errors']} elapsed={s['total_s']:.1f}s err={s['error_msg']}"
+            f"errors={s['errors']} err={s['error_msg']}"
         )
     n_ok = sum(1 for s in summaries if s["connected"] and not s["rejected"] and not s["error_msg"])
     n_rej = sum(1 for s in summaries if s["rejected"])
@@ -618,7 +500,6 @@ async def run_all(args: argparse.Namespace) -> None:
     total_turns = sum(s["completed"] for s in summaries)
     logger.info(f"=> {n_ok} successful clients, {n_rej} rejected, {n_err} errored")
     logger.info(f"=> {total_turns} total turns completed across pool")
-    logger.info(f"=> {total / 60:.2f} minutes wall-clock")
 
 
 def main() -> None:
