@@ -391,17 +391,17 @@ async def run_client(
                             elapsed_total = turn_start - started_at_global
                             turn_audio = load_pcm16_mono_16k(wav_path)
 
-                            logger.info(
-                                f"{prefix} turn {turn_idx + 1}/{args.turns} t={elapsed_total:.1f}s "
-                                f"USER: {text!r}"
-                            )
-                            log_f.write(f"[turn {turn_idx + 1}] t={elapsed_total:.1f}s USER: {text}\n")
+                            logger.info(f"{prefix} turn {turn_idx + 1}/{args.turns} USER: {text!r}")
+                            log_f.write(f"[turn {turn_idx + 1}/{args.turns}] t={elapsed_total:.1f}s USER: {text}\n")
 
                             try:
                                 await stream_prompt(ws, turn_audio)
                             except websockets.exceptions.ConnectionClosed as e:
-                                logger.info(f"{prefix} turn {turn_idx + 1} connection closed during send: {e}")
-                                log_f.write(f"[turn {turn_idx + 1}] CONNECTION_CLOSED: {e}\n")
+                                logger.info(
+                                    f"{prefix} turn {turn_idx + 1}/{args.turns} "
+                                    f"connection closed during send: {e}"
+                                )
+                                log_f.write(f"[turn {turn_idx + 1}/{args.turns}] CONNECTION_CLOSED: {e}\n")
                                 summary["error_msg"] = f"connection_closed: {e}"
                                 break
 
@@ -414,21 +414,23 @@ async def run_client(
 
                             if info["error"]:
                                 logger.info(
-                                    f"{prefix} turn {turn_idx + 1} ERROR after "
+                                    f"{prefix} turn {turn_idx + 1}/{args.turns} ERROR after "
                                     f"{turn_elapsed:.1f}s: {info['error']}"
                                 )
-                                log_f.write(f"[turn {turn_idx + 1}] ERROR: {info['error']}\n\n")
+                                log_f.write(f"[turn {turn_idx + 1}/{args.turns}] ERROR: {info['error']}\n\n")
                                 summary["errors"] += 1
                             else:
                                 summary["completed"] += 1
                                 logger.info(
-                                    f"{prefix} turn {turn_idx + 1} "
-                                    f"audio_done@{audio_done_str} ASSISTANT: {info['transcript_out']!r}"
+                                    f"{prefix} turn {turn_idx + 1}/{args.turns} "
+                                    f"ASSISTANT: {info['transcript_out']!r} audio_done@{audio_done_str}"
                                 )
-                                log_f.write(f"[turn {turn_idx + 1}] STT: {info['transcript_in']}\n")
-                                log_f.write(f"[turn {turn_idx + 1}] ASSISTANT: {info['transcript_out']}\n")
+                                log_f.write(f"[turn {turn_idx + 1}/{args.turns}] STT: {info['transcript_in']}\n")
                                 log_f.write(
-                                    f"[turn {turn_idx + 1}] took={turn_elapsed:.2f}s "
+                                    f"[turn {turn_idx + 1}/{args.turns}] ASSISTANT: {info['transcript_out']}\n"
+                                )
+                                log_f.write(
+                                    f"[turn {turn_idx + 1}/{args.turns}] took={turn_elapsed:.2f}s "
                                     f"audio_done@{audio_done_str} "
                                     f"audio_in={info['audio_bytes_in']}B\n\n"
                                 )
@@ -439,7 +441,7 @@ async def run_client(
                                 await asyncio.sleep(remaining)
                             elif args.turns > 1:
                                 logger.info(
-                                    f"{prefix} turn {turn_idx + 1} over interval by "
+                                    f"{prefix} turn {turn_idx + 1}/{args.turns} over interval by "
                                     f"{-remaining:.1f}s — starting next turn immediately"
                                 )
 
