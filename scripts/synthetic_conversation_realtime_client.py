@@ -202,12 +202,20 @@ async def consume_until_response_done(
     ws,
     response_audio_out: bytearray,
     response_timeout_s: float,
+    turn_start: float,
 ) -> dict:
-    """Read server events until response.done (or timeout). Returns turn summary."""
+    """Read server events until response.done (or timeout). Returns turn summary.
+
+    `audio_done_elapsed` is the time (seconds since *turn_start*) when the
+    assistant signalled it finished sending audio — i.e. the event
+    ``response.output_audio.done``. This is the user-perceived "time until
+    assistant comes back" latency. ``None`` if the event never arrived.
+    """
     info: dict = {
         "transcript_in": "",
         "transcript_out": "",
         "audio_bytes_in": 0,
+        "audio_done_elapsed": None,
         "error": None,
     }
     deadline = time.monotonic() + response_timeout_s
@@ -225,6 +233,11 @@ async def consume_until_response_done(
                 chunk = base64.b64decode(delta)
                 response_audio_out.extend(chunk)
                 info["audio_bytes_in"] += len(chunk)
+        elif t in ("response.audio.done", "response.output_audio.done"):
+            # Assistant has finished sending audio for this turn. Capture the
+            # latency now (response.done usually arrives shortly after).
+            if info["audio_done_elapsed"] is None:
+                info["audio_done_elapsed"] = time.monotonic() - turn_start
         elif t in ("response.audio_transcript.delta", "response.output_audio_transcript.delta"):
             info["transcript_out"] += event.get("delta", "")
         elif t in ("response.audio_transcript.done", "response.output_audio_transcript.done"):
@@ -389,9 +402,11 @@ async def run_client(
                                 break
 
                             info = await consume_until_response_done(
-                                ws, response_audio, args.response_timeout
+                                ws, response_audio, args.response_timeout, turn_start
                             )
                             turn_elapsed = time.monotonic() - turn_start
+                            audio_done = info["audio_done_elapsed"]
+                            audio_done_str = f"{audio_done:.2f}s" if audio_done is not None else "n/a"
 
                             if info["error"]:
                                 print(
@@ -402,11 +417,15 @@ async def run_client(
                                 summary["errors"] += 1
                             else:
                                 summary["completed"] += 1
-                                print(f"{prefix} turn {turn_idx + 1} ASSISTANT: {info['transcript_out']!r}")
+                                print(
+                                    f"{prefix} turn {turn_idx + 1} "
+                                    f"audio_done@{audio_done_str} ASSISTANT: {info['transcript_out']!r}"
+                                )
                                 log_f.write(f"[turn {turn_idx + 1}] STT: {info['transcript_in']}\n")
                                 log_f.write(f"[turn {turn_idx + 1}] ASSISTANT: {info['transcript_out']}\n")
                                 log_f.write(
                                     f"[turn {turn_idx + 1}] took={turn_elapsed:.2f}s "
+                                    f"audio_done@{audio_done_str} "
                                     f"audio_in={info['audio_bytes_in']}B\n\n"
                                 )
                             log_f.flush()

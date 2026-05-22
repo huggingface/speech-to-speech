@@ -17,6 +17,7 @@ from openai.types.realtime import (
     ResponseCreateEvent,
     SessionUpdateEvent,
 )
+from starlette.websockets import WebSocketState
 
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit, SessionState
 from speech_to_speech.api.openai_realtime.service import ServerEvent, build_error_event
@@ -42,9 +43,25 @@ QItem = TypeVar("QItem")
 
 
 async def _send_event(ws: WebSocket, event: ServerEvent) -> None:
+    # Skip cleanly when the ws is already closing/closed — happens during Ctrl-C
+    # shutdown, where the lifespan starts closing sockets while the route handler
+    # or send loop is still in flight pushing events.
+    if ws.application_state != WebSocketState.CONNECTED:
+        return
     try:
         await ws.send_json(event.model_dump())
-    except Exception as e:
+    except WebSocketDisconnect:
+        logger.debug("Skipped event: ws disconnected mid-send")
+    except RuntimeError as e:
+        # Race: ws closed between the state check above and the send. Starlette
+        # raises a plain RuntimeError("Unexpected ASGI message 'websocket.send'
+        # after sending 'websocket.close' ...") — harmless during shutdown.
+        msg = str(e)
+        if "websocket.close" in msg or "websocket.disconnect" in msg or "response already completed" in msg:
+            logger.debug(f"Skipped event: ws already closed ({msg})")
+        else:
+            logger.error(f"Failed to send event to client: {e}")
+    except Exception as e:  # noqa: BLE001
         logger.error(f"Failed to send event to client: {e}")
 
 
