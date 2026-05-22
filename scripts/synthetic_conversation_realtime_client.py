@@ -46,9 +46,11 @@ import argparse
 import asyncio
 import base64
 import json
+import logging
 import os
 import shutil
 import subprocess
+import sys
 import time
 import wave
 from pathlib import Path
@@ -58,6 +60,8 @@ import numpy as np
 import soundfile as sf
 import websockets
 from scipy.signal import resample_poly
+
+logger = logging.getLogger("synthetic_client")
 
 SAMPLE_RATE_HZ = 16000
 CHUNK_MS = 20
@@ -330,13 +334,13 @@ async def run_client(
                 alloc = await _lb_allocate_session(args.lb_url, auth_headers, http)
             except Exception as e:  # noqa: BLE001 — diagnostic path
                 summary["error_msg"] = f"LB /session failed: {type(e).__name__}: {e}"
-                print(f"{prefix} {summary['error_msg']}")
+                logger.info(f"{prefix} {summary['error_msg']}")
                 summary["total_s"] = time.monotonic() - client_started_at
                 return summary
             connect_url = alloc["connect_url"]
             lb_session_id = alloc["session_id"]
             lb_session_token = alloc["session_token"]
-            print(
+            logger.info(
                 f"{prefix} LB allocated session_id={lb_session_id} "
                 f"ws_url={alloc.get('websocket_url', '?')}"
             )
@@ -358,20 +362,20 @@ async def run_client(
                     try:
                         await _lb_send_event(args.lb_url, lb_session_id, lb_session_token, "connected", http)
                     except Exception as e:  # noqa: BLE001
-                        print(f"{prefix} WARN: LB 'connected' callback failed: {e}")
+                        logger.warning(f"{prefix} LB 'connected' callback failed: {e}")
 
                 first = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
                 if first.get("type") == "error" and "session_limit_reached" in str(first):
                     summary["rejected"] = True
                     summary["error_msg"] = first.get("error", {}).get("message", "limit reached")
-                    print(f"{prefix} REJECTED: {summary['error_msg']}")
+                    logger.warning(f"{prefix} REJECTED: {summary['error_msg']}")
                 elif first.get("type") != "session.created":
                     summary["error_msg"] = f"unexpected first event: {first.get('type')}"
-                    print(f"{prefix} ERROR: {summary['error_msg']}")
+                    logger.error(f"{prefix} ERROR: {summary['error_msg']}")
                 else:
                     sess = first.get("session") or {}
                     session_id = sess.get("id") or first.get("event_id") or "?"
-                    print(f"{prefix} connected, session={session_id}")
+                    logger.info(f"{prefix} connected, session={session_id}")
 
                     with transcript_log.open("w") as log_f:
                         log_f.write(f"# Synthetic conversation, client={client_id}, session={session_id}\n")
@@ -387,7 +391,7 @@ async def run_client(
                             elapsed_total = turn_start - started_at_global
                             turn_audio = load_pcm16_mono_16k(wav_path)
 
-                            print(
+                            logger.info(
                                 f"{prefix} turn {turn_idx + 1}/{args.turns} t={elapsed_total:.1f}s "
                                 f"USER: {text!r}"
                             )
@@ -396,7 +400,7 @@ async def run_client(
                             try:
                                 await stream_prompt(ws, turn_audio)
                             except websockets.exceptions.ConnectionClosed as e:
-                                print(f"{prefix} turn {turn_idx + 1} connection closed during send: {e}")
+                                logger.info(f"{prefix} turn {turn_idx + 1} connection closed during send: {e}")
                                 log_f.write(f"[turn {turn_idx + 1}] CONNECTION_CLOSED: {e}\n")
                                 summary["error_msg"] = f"connection_closed: {e}"
                                 break
@@ -409,7 +413,7 @@ async def run_client(
                             audio_done_str = f"{audio_done:.2f}s" if audio_done is not None else "n/a"
 
                             if info["error"]:
-                                print(
+                                logger.info(
                                     f"{prefix} turn {turn_idx + 1} ERROR after "
                                     f"{turn_elapsed:.1f}s: {info['error']}"
                                 )
@@ -417,7 +421,7 @@ async def run_client(
                                 summary["errors"] += 1
                             else:
                                 summary["completed"] += 1
-                                print(
+                                logger.info(
                                     f"{prefix} turn {turn_idx + 1} "
                                     f"audio_done@{audio_done_str} ASSISTANT: {info['transcript_out']!r}"
                                 )
@@ -434,14 +438,14 @@ async def run_client(
                             if remaining > 0:
                                 await asyncio.sleep(remaining)
                             elif args.turns > 1:
-                                print(
+                                logger.info(
                                     f"{prefix} turn {turn_idx + 1} over interval by "
                                     f"{-remaining:.1f}s — starting next turn immediately"
                                 )
 
         except Exception as e:  # noqa: BLE001 — diagnostic path
             summary["error_msg"] = f"{type(e).__name__}: {e}"
-            print(f"{prefix} EXCEPTION: {summary['error_msg']}")
+            logger.error(f"{prefix} EXCEPTION: {summary['error_msg']}")
         finally:
             # Step 5: release the LB slot, regardless of how the ws session ended.
             if lb_session_id and lb_session_token:
@@ -449,16 +453,16 @@ async def run_client(
                     await _lb_send_event(
                         args.lb_url, lb_session_id, lb_session_token, "disconnected", http
                     )
-                    print(f"{prefix} LB notified: disconnected")
+                    logger.info(f"{prefix} LB notified: disconnected")
                 except Exception as e:  # noqa: BLE001
-                    print(f"{prefix} WARN: LB 'disconnected' callback failed: {e}")
+                    logger.warning(f"{prefix} LB 'disconnected' callback failed: {e}")
 
     summary["total_s"] = time.monotonic() - client_started_at
 
     if response_audio:
         wav_out = log_dir / "conversation.wav"
         write_wav(wav_out, bytes(response_audio))
-        print(f"{prefix} wrote {len(response_audio)} bytes -> {wav_out}")
+        logger.info(f"{prefix} wrote {len(response_audio)} bytes -> {wav_out}")
     return summary
 
 
@@ -473,7 +477,7 @@ async def run_all(args: argparse.Namespace) -> None:
     prompts_dir = log_dir / "prompts"
     prompts_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Synthesizing {len(PROMPTS)} prompts with `say` (cached in {prompts_dir})...")
+    logger.info(f"Synthesizing {len(PROMPTS)} prompts with `say` (cached in {prompts_dir})...")
     audio_files: list[tuple[str, Path]] = []
     for i, text in enumerate(PROMPTS):
         wav_path = prompts_dir / f"prompt_{i:03d}.wav"
@@ -489,12 +493,12 @@ async def run_all(args: argparse.Namespace) -> None:
             "(e.g. `export HF_TOKEN=hf_...`)."
         )
     extra_headers: list[tuple[str, str]] = [("Authorization", f"Bearer {token}")]
-    print("Auth: Bearer token attached from HF_TOKEN env")
+    logger.info("Auth: Bearer token attached from HF_TOKEN env")
     if args.lb_url:
         target = f"LB {args.lb_url}"
     else:
         target = ws_url
-    print(
+    logger.info(
         f"Spawning {args.clients} client(s) against {target}, "
         f"{args.turns} turns each @ {args.interval:.1f}s interval"
     )
@@ -515,10 +519,10 @@ async def run_all(args: argparse.Namespace) -> None:
     )
     total = time.monotonic() - started_at
 
-    print("\n=== summary ===")
+    logger.info("\n=== summary ===")
     for s in summaries:
         status = "rejected" if s["rejected"] else ("error" if s["error_msg"] else "ok")
-        print(
+        logger.info(
             f"  c{s['client_id']}: {status:8s} completed={s['completed']}/{args.turns} "
             f"errors={s['errors']} elapsed={s['total_s']:.1f}s err={s['error_msg']}"
         )
@@ -526,12 +530,19 @@ async def run_all(args: argparse.Namespace) -> None:
     n_rej = sum(1 for s in summaries if s["rejected"])
     n_err = sum(1 for s in summaries if s["error_msg"] and not s["rejected"])
     total_turns = sum(s["completed"] for s in summaries)
-    print(f"=> {n_ok} successful clients, {n_rej} rejected, {n_err} errored")
-    print(f"=> {total_turns} total turns completed across pool")
-    print(f"=> {total / 60:.2f} minutes wall-clock")
+    logger.info(f"=> {n_ok} successful clients, {n_rej} rejected, {n_err} errored")
+    logger.info(f"=> {total_turns} total turns completed across pool")
+    logger.info(f"=> {total / 60:.2f} minutes wall-clock")
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stdout,
+    )
+
     if not shutil.which("say"):
         raise SystemExit("This script requires macOS `say` (not found in PATH).")
 
