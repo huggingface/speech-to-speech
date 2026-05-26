@@ -2,7 +2,7 @@ import logging
 from collections.abc import Mapping
 from queue import Queue
 from threading import Event as ThreadingEvent
-from typing import Any, Callable, Literal, Optional, Self, Union
+from typing import Any, Callable, Literal, Optional, Union
 
 from openai.types.realtime import (
     ConversationItemCreatedEvent,
@@ -109,7 +109,7 @@ class UsageMetrics(BaseModel):
     tool_calls: int = 0
     turns: int = 0
 
-    def __iadd__(self, other: "UsageMetrics") -> Self:
+    def __iadd__(self, other: "UsageMetrics") -> "UsageMetrics":
         for field in UsageMetrics.model_fields:
             setattr(self, field, getattr(self, field) + getattr(other, field))
         return self
