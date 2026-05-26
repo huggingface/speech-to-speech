@@ -119,12 +119,12 @@ def _validate_realtime_websocket_support() -> None:
 def _validate_darwin_dependency_pins() -> None:
     expected_versions = {
         "miniaudio": "1.61",
-        "mlx": "0.31.1",
-        "mlx-audio": "0.4.2",
-        "mlx-lm": "0.31.1",
-        "mlx-metal": "0.31.1",
+        "mlx": "0.31.2",
+        "mlx-audio": "0.4.3",
+        "mlx-lm": "0.31.3",
+        "mlx-metal": "0.31.2",
         "sounddevice": "0.5.3",
-        "transformers": "5.6.2",
+        "transformers": "5.9.0",
     }
     mismatches = []
     for package_name, expected_version in expected_versions.items():
