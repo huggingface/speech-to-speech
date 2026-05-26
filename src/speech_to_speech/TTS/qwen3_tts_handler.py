@@ -462,6 +462,19 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
     def _to_int16(self, audio: np.ndarray) -> np.ndarray:
         return np.clip(audio * 32768, -32768, 32767).astype(np.int16)
 
+    def _audio_energy_stats(self, audio: np.ndarray) -> tuple[float, float, float, int, float]:
+        if audio.size == 0:
+            return 0.0, 0.0, 0.0, 0, 0.0
+
+        normalized = audio.astype(np.float32) / 32768.0
+        abs_audio = np.abs(normalized)
+        rms = float(np.sqrt(np.mean(np.square(normalized))))
+        peak = float(np.max(abs_audio))
+        active_samples = int(np.count_nonzero(abs_audio > 0.01))
+        active_ratio = active_samples / audio.size
+        square_sum = float(np.sum(np.square(normalized)))
+        return rms, peak, active_ratio, active_samples, square_sum
+
     def _estimate_max_new_tokens(self, text: Optional[str]) -> int:
         text = (text or "").strip()
         chunk_size = max(1, int(getattr(self, "streaming_chunk_size", 1)))
@@ -545,6 +558,11 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         first_chunk = True
         found_speech = False
         leftover = np.array([], dtype=np.int16)
+        source_chunk_idx = 0
+        energy_samples = 0
+        energy_square_sum = 0.0
+        energy_peak = 0.0
+        energy_active_samples = 0
 
         for item in gen:
             if cancel_gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(cancel_gen):
@@ -568,10 +586,39 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 threshold = int(32768 * 0.01)
                 above = np.abs(audio_chunk) > threshold
                 if not np.any(above):
+                    if logger.isEnabledFor(logging.DEBUG):
+                        rms, peak, active_ratio, _active_samples, _square_sum = self._audio_energy_stats(audio_chunk)
+                        logger.debug(
+                            "Qwen3-TTS audio energy chunk=%d skipped_initial_silence duration=%.2fs rms=%.5f peak=%.5f active=%.1f%% (%s)",
+                            source_chunk_idx,
+                            len(audio_chunk) / PIPELINE_SR,
+                            rms,
+                            peak,
+                            active_ratio * 100,
+                            label,
+                        )
+                    source_chunk_idx += 1
                     continue
                 start_idx = max(0, int(np.argmax(above)) - int(PIPELINE_SR * 0.040))
                 audio_chunk = audio_chunk[start_idx:]
                 found_speech = True
+
+            rms, peak, active_ratio, active_samples, square_sum = self._audio_energy_stats(audio_chunk)
+            energy_samples += audio_chunk.size
+            energy_square_sum += square_sum
+            energy_peak = max(energy_peak, peak)
+            energy_active_samples += active_samples
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Qwen3-TTS audio energy chunk=%d duration=%.2fs rms=%.5f peak=%.5f active=%.1f%% (%s)",
+                    source_chunk_idx,
+                    len(audio_chunk) / PIPELINE_SR,
+                    rms,
+                    peak,
+                    active_ratio * 100,
+                    label,
+                )
+            source_chunk_idx += 1
 
             audio_chunk = np.concatenate([leftover, audio_chunk])
 
@@ -589,8 +636,17 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         generation_time = perf_counter() - start
         audio_duration = total_samples / PIPELINE_SR
         rtf = audio_duration / generation_time if generation_time > 0 else 0
+        energy_rms = math.sqrt(energy_square_sum / energy_samples) if energy_samples else 0.0
+        energy_active_ratio = energy_active_samples / energy_samples if energy_samples else 0.0
         logger.info(
-            f"Qwen3-TTS generated {audio_duration:.2f}s audio in {generation_time:.2f}s (RTF: {rtf:.2f}, {label})"
+            "Qwen3-TTS generated %.2fs audio in %.2fs (RTF: %.2f, %s, rms=%.5f, peak=%.5f, active=%.1f%%)",
+            audio_duration,
+            generation_time,
+            rtf,
+            label,
+            energy_rms,
+            energy_peak,
+            energy_active_ratio * 100,
         )
 
     def _coalesce_pending_tts_input(self, current_input: TTSInput) -> tuple[str, Optional[str], bool]:

@@ -324,6 +324,19 @@ def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     assert end_outputs == [AUDIO_RESPONSE_DONE]
 
 
+def test_audio_energy_stats_reports_signal_energy():
+    handler = object.__new__(Qwen3TTSHandler)
+    audio = np.array([0, 3277, -32768], dtype=np.int16)
+
+    rms, peak, active_ratio, active_samples, square_sum = handler._audio_energy_stats(audio)
+
+    assert peak == pytest.approx(1.0)
+    assert active_samples == 2
+    assert active_ratio == pytest.approx(2 / 3)
+    assert rms > 0
+    assert square_sum > 0
+
+
 def test_process_does_not_set_should_listen_when_generation_fails(monkeypatch):
     """TTS no longer manages should_listen; the I/O streamer does via AUDIO_RESPONSE_DONE."""
     handler = object.__new__(Qwen3TTSHandler)
