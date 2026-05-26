@@ -103,13 +103,16 @@ def _flush_queue(q: Queue[QItem], *, preserve: Callable[[QItem], bool] | None = 
 def _clean_unit(unit: PipelineUnit, preserve: Callable[[Any], bool] | None = None) -> None:
     """Cancel in-flight work and flush queues for a single pipeline unit.
 
-    The input queue is also drained so pending audio from a released session
-    cannot be processed by the handlers (and thus reach the next session that
-    claims this unit). SESSION_END is enqueued by the route handler *after*
-    this returns to serve as the soft reset signal for stateful handlers.
+    All four pipeline queues are drained — input audio, transcript-to-LM,
+    LM-to-TTS output, and the text-event side channel — so pending work from
+    a released session cannot be picked up by handlers and leak into the next
+    session that claims this unit. SESSION_END is enqueued by the route
+    handler *after* this returns to serve as the soft reset signal for
+    stateful handlers.
     """
     unit.cancel_scope.cancel()
     _flush_queue(unit.input_queue)
+    _flush_queue(unit.text_prompt_queue)
     _flush_queue(unit.output_queue, preserve=preserve)
     _flush_queue(unit.text_output_queue, preserve=preserve)
     unit.response_playing.clear()

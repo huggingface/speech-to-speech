@@ -937,6 +937,26 @@ def main() -> None:
 
     if args.module_kwargs.num_pipelines < 1:
         raise ValueError(f"--num_pipelines must be >= 1, got {args.module_kwargs.num_pipelines}")
+
+    prepare_all_args(
+        args.module_kwargs,
+        args.whisper_stt_handler_kwargs,
+        args.paraformer_stt_handler_kwargs,
+        args.faster_whisper_stt_handler_kwargs,
+        args.mlx_audio_whisper_stt_handler_kwargs,
+        args.parakeet_tdt_stt_handler_kwargs,
+        args.language_model_handler_kwargs,
+        args.responses_api_language_model_handler_kwargs,
+        args.chat_tts_handler_kwargs,
+        args.facebook_mms_tts_handler_kwargs,
+        args.pocket_tts_handler_kwargs,
+        args.kokoro_tts_handler_kwargs,
+        args.qwen3_tts_handler_kwargs,
+    )
+
+    # Validate after prepare_all_args(): --local_mac_optimal_settings mutates
+    # module_kwargs.mode to "local", so checking before would let
+    # --local_mac_optimal_settings --num_pipelines 2 sneak past this guard.
     if args.module_kwargs.num_pipelines > 1 and args.module_kwargs.mode != "realtime":
         raise ValueError(
             f"--num_pipelines > 1 is only supported with --mode realtime "
@@ -955,22 +975,6 @@ def main() -> None:
             args.module_kwargs.num_pipelines,
         )
         args.module_kwargs.enable_live_transcription = False
-
-    prepare_all_args(
-        args.module_kwargs,
-        args.whisper_stt_handler_kwargs,
-        args.paraformer_stt_handler_kwargs,
-        args.faster_whisper_stt_handler_kwargs,
-        args.mlx_audio_whisper_stt_handler_kwargs,
-        args.parakeet_tdt_stt_handler_kwargs,
-        args.language_model_handler_kwargs,
-        args.responses_api_language_model_handler_kwargs,
-        args.chat_tts_handler_kwargs,
-        args.facebook_mms_tts_handler_kwargs,
-        args.pocket_tts_handler_kwargs,
-        args.kokoro_tts_handler_kwargs,
-        args.qwen3_tts_handler_kwargs,
-    )
 
     queues_and_events = initialize_queues_and_events()
 
