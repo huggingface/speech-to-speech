@@ -45,7 +45,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         should_listen: Event,
         thresh: float = 0.6,
         sample_rate: int = 16000,
-        min_silence_ms: int = 1000,
+        min_silence_ms: int = 300,
         min_speech_ms: int = 500,
         max_speech_ms: float = float("inf"),
         speech_pad_ms: int = 30,
@@ -165,13 +165,13 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         buffer_samples = sum(len(t) for t in self.iterator.speech_buffer())
         return buffer_samples / self.sample_rate * 1000
 
-    def _current_voiced_duration_ms(self) -> float:
-        voiced_samples = getattr(self.iterator, "voiced_samples", 0)
-        return voiced_samples / self.sample_rate * 1000
+    def _current_active_speech_duration_ms(self) -> float:
+        active_speech_samples = getattr(self.iterator, "active_speech_samples", 0)
+        return active_speech_samples / self.sample_rate * 1000
 
-    def _last_utterance_voiced_duration_ms(self) -> float:
-        voiced_samples = getattr(self.iterator, "last_utterance_voiced_samples", 0)
-        return voiced_samples / self.sample_rate * 1000
+    def _last_utterance_active_speech_duration_ms(self) -> float:
+        active_speech_samples = getattr(self.iterator, "last_utterance_active_speech_samples", 0)
+        return active_speech_samples / self.sample_rate * 1000
 
     def _uses_realtime_turn_handling(self) -> bool:
         return self.enable_realtime_transcription or self.speculative_turns is not None
@@ -358,13 +358,13 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
         vad_output = self.iterator(torch.from_numpy(audio_float32))
 
-        # Deferred speech_started: only emit once voiced audio reaches the valid speech threshold.
+        # Deferred speech_started: only emit once active VAD speech reaches the valid speech threshold.
         is_triggered_now = self.iterator.triggered
         if is_triggered_now and not self._speech_started_emitted:
             segment_samples = sum(len(t) for t in self.iterator.buffer)
             segment_duration_ms = segment_samples / self.sample_rate * 1000
-            voiced_duration_ms = self._current_voiced_duration_ms()
-            if voiced_duration_ms >= self.min_speech_ms:
+            active_speech_duration_ms = self._current_active_speech_duration_ms()
+            if active_speech_duration_ms >= self.min_speech_ms:
                 speech_buffer_duration_ms = self._speech_buffer_duration_ms()
                 start_ms = max(0, self._audio_ms - int(speech_buffer_duration_ms))
                 self._begin_pending_reopen_if_needed(start_ms)
@@ -372,8 +372,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 self._speech_started_emitted = True
                 self._log_speech_starts += 1
                 logger.info(
-                    "Speech started (confirmed, voiced=%.0fms, segment=%.0fms, turn=%s rev=%s)",
-                    voiced_duration_ms,
+                    "Speech started (confirmed, active=%.0fms, segment=%.0fms, turn=%s rev=%s)",
+                    active_speech_duration_ms,
                     segment_duration_ms,
                     turn_id,
                     turn_revision,
@@ -459,13 +459,13 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
             array = torch.cat(vad_output).cpu().numpy()
             duration_ms = len(array) / self.sample_rate * 1000
-            voiced_duration_ms = self._last_utterance_voiced_duration_ms()
+            active_speech_duration_ms = self._last_utterance_active_speech_duration_ms()
 
             if duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
                 logger.info(
-                    "VAD: discarding segment=%.0fms voiced=%.0fms (bounds: %s-%sms)",
+                    "VAD: discarding segment=%.0fms active=%.0fms (bounds: %s-%sms)",
                     duration_ms,
-                    voiced_duration_ms,
+                    active_speech_duration_ms,
                     self.min_speech_ms,
                     self.max_speech_ms,
                 )
@@ -500,9 +500,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     turn_id, turn_revision = self._current_turn_metadata()
                 self._log_speech_ends += 1
                 logger.info(
-                    "Speech soft-ended (segment=%.0fms, voiced=%.0fms, turn=%s rev=%s)",
+                    "Speech soft-ended (segment=%.0fms, active=%.0fms, turn=%s rev=%s)",
                     duration_ms,
-                    voiced_duration_ms,
+                    active_speech_duration_ms,
                     turn_id,
                     turn_revision,
                 )

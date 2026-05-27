@@ -223,15 +223,15 @@ class _StaticVADIterator:
         vad_output: list[torch.Tensor] | None,
         buffer_chunks: list[torch.Tensor] | None = None,
         speech_chunks: list[torch.Tensor] | None = None,
-        voiced_samples: int = 0,
-        last_utterance_voiced_samples: int = 0,
+        active_speech_samples: int = 0,
+        last_utterance_active_speech_samples: int = 0,
     ) -> None:
         self.triggered = triggered
         self._vad_output = vad_output
         self.buffer = buffer_chunks or []
         self._speech_chunks = speech_chunks or self.buffer
-        self.voiced_samples = voiced_samples
-        self.last_utterance_voiced_samples = last_utterance_voiced_samples
+        self.active_speech_samples = active_speech_samples
+        self.last_utterance_active_speech_samples = last_utterance_active_speech_samples
 
     def __call__(self, _chunk: torch.Tensor) -> list[torch.Tensor] | None:
         return self._vad_output
@@ -278,14 +278,14 @@ def _audio_bytes(samples: int = 512) -> bytes:
     return np.zeros(samples, dtype=np.int16).tobytes()
 
 
-def test_vad_interruption_uses_voiced_duration_not_padded_segment():
+def test_vad_interruption_uses_active_speech_duration_not_padded_segment():
     chunks = [torch.zeros(512) for _ in range(20)]
     iterator = _StaticVADIterator(
         triggered=True,
         vad_output=None,
         buffer_chunks=chunks,
         speech_chunks=chunks,
-        voiced_samples=10 * 512,
+        active_speech_samples=10 * 512,
     )
     handler = _vad_handler_for_iterator(iterator)
 
@@ -295,14 +295,14 @@ def test_vad_interruption_uses_voiced_duration_not_padded_segment():
     assert handler._speech_started_emitted is False
 
 
-def test_vad_interruption_emits_after_voiced_threshold():
+def test_vad_interruption_emits_after_active_speech_threshold():
     chunks = [torch.zeros(512) for _ in range(20)]
     iterator = _StaticVADIterator(
         triggered=True,
         vad_output=None,
         buffer_chunks=chunks,
         speech_chunks=chunks,
-        voiced_samples=16 * 512,
+        active_speech_samples=16 * 512,
     )
     handler = _vad_handler_for_iterator(iterator)
 
@@ -319,7 +319,7 @@ def test_vad_final_synthetic_start_does_not_interrupt_response():
     iterator = _StaticVADIterator(
         triggered=False,
         vad_output=final_chunks,
-        last_utterance_voiced_samples=2 * 512,
+        last_utterance_active_speech_samples=2 * 512,
     )
     handler = _vad_handler_for_iterator(iterator)
 

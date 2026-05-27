@@ -9,7 +9,7 @@ class VADIterator:
         model,
         threshold: float = 0.5,
         sampling_rate: int = 16000,
-        min_silence_duration_ms: int = 100,
+        min_silence_duration_ms: int = 300,
         speech_pad_ms: int = 30,
     ) -> None:
         """
@@ -27,7 +27,7 @@ class VADIterator:
         sampling_rate: int (default - 16000)
             Currently silero VAD models support 8000 and 16000 sample rates
 
-        min_silence_duration_ms: int (default - 100 milliseconds)
+        min_silence_duration_ms: int (default - 300 milliseconds)
             In the end of each speech chunk wait for min_silence_duration_ms before separating it
 
         speech_pad_ms: int (default - 30 milliseconds)
@@ -41,8 +41,8 @@ class VADIterator:
         self.is_speaking = False
         self.buffer: list[torch.Tensor] = []
         self.prefix_buffer: list[torch.Tensor] = []
-        self.voiced_samples = 0
-        self.last_utterance_voiced_samples = 0
+        self.active_speech_samples = 0
+        self.last_utterance_active_speech_samples = 0
         self._pre_speech_buffer: deque[torch.Tensor] = deque()
         self._pre_speech_samples = 0
 
@@ -60,8 +60,8 @@ class VADIterator:
         self.current_sample = 0
         self.buffer = []
         self.prefix_buffer = []
-        self.voiced_samples = 0
-        self.last_utterance_voiced_samples = 0
+        self.active_speech_samples = 0
+        self.last_utterance_active_speech_samples = 0
         self._pre_speech_buffer.clear()
         self._pre_speech_samples = 0
 
@@ -134,8 +134,8 @@ class VADIterator:
             self._pre_speech_buffer.clear()
             self._pre_speech_samples = 0
             self.buffer.append(x)
-            self.voiced_samples = window_size_samples
-            self.last_utterance_voiced_samples = 0
+            self.active_speech_samples = window_size_samples
+            self.last_utterance_active_speech_samples = 0
             return None
 
         if not self.triggered:
@@ -144,8 +144,8 @@ class VADIterator:
 
         if self.triggered:
             self.buffer.append(x)
-            if speech_prob >= self.threshold:
-                self.voiced_samples += window_size_samples
+            if speech_prob >= self.threshold - 0.15:
+                self.active_speech_samples += window_size_samples
                 if self.temp_end:
                     self.temp_end = 0
                     return None
@@ -161,8 +161,8 @@ class VADIterator:
                 self.temp_end = 0
                 self.triggered = False
                 spoken_utterance = self.speech_buffer()
-                self.last_utterance_voiced_samples = self.voiced_samples
-                self.voiced_samples = 0
+                self.last_utterance_active_speech_samples = self.active_speech_samples
+                self.active_speech_samples = 0
                 self.buffer = []
                 self.prefix_buffer = []
                 return spoken_utterance
