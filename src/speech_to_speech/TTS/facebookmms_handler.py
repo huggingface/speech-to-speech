@@ -153,6 +153,8 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
         ):
             logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
             return
+        if speculative_turns:
+            speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
         language_code = tts_input.language_code

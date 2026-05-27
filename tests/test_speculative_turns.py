@@ -204,6 +204,28 @@ def test_vad_reopens_speculative_turn_when_live_transcription_disabled():
     assert tracker.is_latest("turn_1", 1)
 
 
+def test_vad_starts_new_turn_after_committed_turn_would_have_reopened():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    tracker.commit("turn_1", 0)
+    handler = object.__new__(VADHandler)
+    handler.enable_realtime_transcription = False
+    handler._speech_started_emitted = False
+    handler._current_turn_id = "turn_1"
+    handler._current_turn_revision = 0
+    handler._turn_counter = 1
+    handler._last_final_audio_ms = 1000
+    handler.speculative_reopen_ms = 1200
+    handler.speculative_turns = tracker
+    handler._pending_reopen_candidate = None
+
+    turn_id, revision, reopened = handler._ensure_turn_for_speech_start(1100)
+
+    assert (turn_id, revision, reopened) == ("turn_2", 0, False)
+    assert tracker.is_committed("turn_1", 0)
+    assert tracker.is_latest("turn_2", 0)
+
+
 def test_vad_realtime_path_does_not_emit_progressive_when_live_transcription_disabled():
     class FakeIterator:
         buffer = [object()]

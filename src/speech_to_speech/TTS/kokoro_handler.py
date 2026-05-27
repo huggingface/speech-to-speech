@@ -254,6 +254,8 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         ):
             logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
             return
+        if speculative_turns:
+            speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         runtime_config = tts_input.runtime_config
         response = tts_input.response
