@@ -23,7 +23,7 @@ from speech_to_speech.pipeline.events import (
     SpeechStartedEvent,
     TranscriptionCompletedEvent,
 )
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 # ---------------------------------------------------------------------------
@@ -369,6 +369,42 @@ class TestSendLoop:
                 output_queue.put(AUDIO_RESPONSE_DONE)
                 time.sleep(0.15)
                 assert not cancel_scope.discarding
+
+    def test_stale_tagged_audio_is_dropped_after_interruption(self, setup):
+        app, _, _, output_queue, _, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                stale_generation = cancel_scope.generation
+                cancel_scope.cancel()
+                current_generation = cancel_scope.generation
+                output_queue.put(AudioOutput(audio=_pcm_bytes(64), cancel_generation=stale_generation))
+                output_queue.put(AudioOutput(audio=_pcm_bytes(512), cancel_generation=current_generation))
+
+                assert ws.receive_json()["type"] == "response.created"
+                delta = ws.receive_json()
+
+                assert delta["type"] == "response.output_audio.delta"
+                assert len(base64.b64decode(delta["delta"])) == len(_pcm_bytes(512))
+
+    def test_stale_tagged_response_done_does_not_finish_current_response(self, setup):
+        app, service, _, output_queue, _, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                stale_generation = cancel_scope.generation
+                service.response._ensure_response(conn_id)
+                service.finish_audio_response(conn_id, status="cancelled")
+                cancel_scope.cancel()
+                current_response_id, _ = service.response._ensure_response(conn_id)
+
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=stale_generation))
+                time.sleep(0.15)
+
+                state = service._state(conn_id)
+                assert state.in_response
+                assert state.current_response_id == current_response_id
 
     def test_speech_started_does_not_cancel_when_interrupt_disabled(self, setup):
         """With interrupt_response=False, speech during playback should NOT cancel or flush."""

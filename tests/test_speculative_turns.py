@@ -318,6 +318,31 @@ def test_vad_interruption_uses_active_speech_duration_not_padded_segment():
     assert handler._speech_started_emitted is False
 
 
+def test_vad_pending_reopen_starts_before_active_speech_threshold():
+    chunks = [torch.zeros(512) for _ in range(12)]
+    iterator = _StaticVADIterator(
+        triggered=True,
+        vad_output=None,
+        buffer_chunks=chunks,
+        speech_chunks=chunks,
+        active_speech_samples=8 * 512,
+    )
+    handler = _vad_handler_for_iterator(iterator)
+    tracker = handler.speculative_turns
+    tracker.observe("turn_1", 0)
+    handler._current_turn_id = "turn_1"
+    handler._current_turn_revision = 0
+    handler._last_final_audio_ms = 0
+
+    assert list(handler.process(_audio_bytes())) == []
+
+    assert tracker.has_pending_reopen("turn_1", 0)
+    tracker.commit("turn_1", 0)
+    assert not tracker.is_committed("turn_1", 0)
+    assert handler.text_output_queue.empty()
+    assert handler._speech_started_emitted is False
+
+
 def test_vad_interruption_emits_after_active_speech_threshold():
     chunks = [torch.zeros(512) for _ in range(20)]
     iterator = _StaticVADIterator(
@@ -335,6 +360,23 @@ def test_vad_interruption_emits_after_active_speech_threshold():
     assert isinstance(event, SpeechStartedEvent)
     assert event.interrupt_response is True
     assert handler._speech_started_emitted is True
+
+
+def test_vad_live_transcription_without_speculative_turns_stops_listening_on_final():
+    final_chunks = [torch.zeros(512) for _ in range(31)]
+    iterator = _StaticVADIterator(
+        triggered=False,
+        vad_output=final_chunks,
+        last_utterance_active_speech_samples=12 * 512,
+    )
+    handler = _vad_handler_for_iterator(iterator)
+    handler.enable_realtime_transcription = True
+    handler.speculative_turns = None
+
+    outputs = list(handler.process(_audio_bytes()))
+
+    assert len(outputs) == 1
+    assert not handler.should_listen.is_set()
 
 
 def test_vad_discards_final_segment_when_active_speech_is_short():

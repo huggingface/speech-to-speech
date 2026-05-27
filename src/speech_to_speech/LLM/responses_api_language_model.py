@@ -213,6 +213,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                                         turn_id=turn_id,
                                         turn_revision=turn_revision,
                                         speech_stopped_at_s=speech_stopped_at_s,
+                                        cancel_generation=gen,
                                     )
                                     sentence_batch = []
                             if cancelled:
@@ -270,6 +271,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                                 turn_id=turn_id,
                                 turn_revision=turn_revision,
                                 speech_stopped_at_s=speech_stopped_at_s,
+                                cancel_generation=gen,
                             )
             elif isinstance(api_response, Response):
                 if (
@@ -329,6 +331,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                                 turn_id=turn_id,
                                 turn_revision=turn_revision,
                                 speech_stopped_at_s=speech_stopped_at_s,
+                                cancel_generation=gen,
                             )
         except httpx.ReadTimeout:
             logger.warning(
@@ -343,6 +346,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     turn_id=turn_id,
                     turn_revision=turn_revision,
                     speech_stopped_at_s=speech_stopped_at_s,
+                    cancel_generation=gen,
                 )
         finally:
             if api_response is not None and hasattr(api_response, "close"):
@@ -363,7 +367,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     turn_id=turn_id,
                     turn_revision=turn_revision,
                 )
-        yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision)
+        yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision, cancel_generation=gen)
 
     def process(self, request: LLMIn) -> Iterator[LLMOut]:
         """

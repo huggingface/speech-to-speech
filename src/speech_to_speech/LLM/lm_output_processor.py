@@ -88,7 +88,11 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                     lm_output.turn_revision,
                 )
                 return
-            yield EndOfResponse(turn_id=lm_output.turn_id, turn_revision=lm_output.turn_revision)
+            yield EndOfResponse(
+                turn_id=lm_output.turn_id,
+                turn_revision=lm_output.turn_revision,
+                cancel_generation=lm_output.cancel_generation,
+            )
             return
 
         if not isinstance(lm_output, LLMResponseChunk):
@@ -127,4 +131,5 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                 turn_id=lm_output.turn_id,
                 turn_revision=lm_output.turn_revision,
                 speech_stopped_at_s=lm_output.speech_stopped_at_s,
+                cancel_generation=lm_output.cancel_generation,
             )

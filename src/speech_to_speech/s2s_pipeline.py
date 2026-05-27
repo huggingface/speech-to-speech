@@ -382,6 +382,7 @@ def build_pipeline(
     response_playing = queues_and_events["response_playing"]
     cancel_scope = queues_and_events["cancel_scope"]
     speculative_turns = queues_and_events["speculative_turns"]
+    active_speculative_turns = speculative_turns if module_kwargs.mode == "realtime" else None
     recv_audio_chunks_queue = queues_and_events["recv_audio_chunks_queue"]
     send_audio_chunks_queue = queues_and_events["send_audio_chunks_queue"]
     spoken_prompt_queue = queues_and_events["spoken_prompt_queue"]
@@ -393,18 +394,19 @@ def build_pipeline(
         None  # Only set for websocket/realtime modes; kept None otherwise to avoid unbounded queue growth
     )
 
-    _wire_speculative_turn_dependencies(
-        cancel_scope,
-        speculative_turns,
-        vad_handler_kwargs,
-        language_model_handler_kwargs,
-        responses_api_language_model_handler_kwargs,
-        chat_tts_handler_kwargs,
-        facebook_mms_tts_handler_kwargs,
-        pocket_tts_handler_kwargs,
-        kokoro_tts_handler_kwargs,
-        qwen3_tts_handler_kwargs,
-    )
+    if active_speculative_turns is not None:
+        _wire_speculative_turn_dependencies(
+            cancel_scope,
+            active_speculative_turns,
+            vad_handler_kwargs,
+            language_model_handler_kwargs,
+            responses_api_language_model_handler_kwargs,
+            chat_tts_handler_kwargs,
+            facebook_mms_tts_handler_kwargs,
+            pocket_tts_handler_kwargs,
+            kokoro_tts_handler_kwargs,
+            qwen3_tts_handler_kwargs,
+        )
 
     comms_handlers: list[Any] = []
     if module_kwargs.mode == "local":
@@ -529,7 +531,7 @@ def build_pipeline(
         stop_event,
         spoken_prompt_queue,
         stt_output_queue,
-        speculative_turns,
+        active_speculative_turns,
         whisper_stt_handler_kwargs,
         faster_whisper_stt_handler_kwargs,
         paraformer_stt_handler_kwargs,
@@ -553,7 +555,7 @@ def build_pipeline(
         stop_event,
         queue_in=lm_response_queue,
         queue_out=lm_processed_queue,
-        setup_kwargs={"text_output_queue": text_output_queue, "speculative_turns": speculative_turns},
+        setup_kwargs={"text_output_queue": text_output_queue, "speculative_turns": active_speculative_turns},
     )
 
     tts = get_tts_handler(

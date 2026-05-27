@@ -29,7 +29,7 @@ from speech_to_speech.pipeline.events import (
     TokenUsageEvent,
     TranscriptionCompletedEvent,
 )
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
 from speech_to_speech.pipeline.queue_types import AudioInItem, AudioOutItem, TextEventItem
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,7 @@ async def _send_events(ws: WebSocket, events: list[ServerEvent]) -> None:
 
 
 def _keep_audio_sentinel(item: Any) -> bool:
-    return isinstance(item, bytes) and item == AUDIO_RESPONSE_DONE
+    return _audio_payload(item) == AUDIO_RESPONSE_DONE
 
 
 def _keep_user_text_event(item: Any) -> bool:
@@ -58,6 +58,14 @@ def _keep_user_text_event(item: Any) -> bool:
         item,
         (SpeechStoppedEvent, PartialTranscriptionEvent, TranscriptionCompletedEvent, TokenUsageEvent),
     )
+
+
+def _audio_payload(item: Any) -> Any:
+    return item.audio if isinstance(item, AudioOutput) else item
+
+
+def _audio_generation(item: Any) -> int | None:
+    return item.cancel_generation if isinstance(item, AudioOutput) else None
 
 
 def create_app(
@@ -116,11 +124,28 @@ def create_app(
         return service.speculative_turns.is_latest(turn_id, turn_revision)
 
     def _to_audio_bytes(chunk: AudioOutItem) -> bytes:
+        chunk = _audio_payload(chunk)
         if isinstance(chunk, PipelineControlMessage):
             raise TypeError(f"unexpected control message on audio output queue: {chunk!r}")
         if isinstance(chunk, np.ndarray) or hasattr(chunk, "tobytes"):
             return chunk.tobytes()
         return chunk
+
+    def _is_audio_done(item: Any) -> bool:
+        return _audio_payload(item) == AUDIO_RESPONSE_DONE
+
+    def _is_pipeline_end(item: Any) -> bool:
+        return isinstance(item, bytes) and item == PIPELINE_END
+
+    def _should_discard_audio(item: Any) -> bool:
+        if cancel_scope is None:
+            return False
+        generation = _audio_generation(item)
+        if generation is not None and cancel_scope.is_stale(generation):
+            return True
+        if cancel_scope.discarding and generation != cancel_scope.generation:
+            return True
+        return False
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -326,14 +351,20 @@ def create_app(
                     else:
                         audio_chunk = output_queue.get_nowait()
 
-                    if isinstance(audio_chunk, bytes) and audio_chunk == PIPELINE_END:
+                    if _is_pipeline_end(audio_chunk):
                         for cid in service.connection_ids:
                             ws = app.state.websockets.get(cid)
                             if ws:
                                 await _send_events(ws, service.finish_audio_response(cid))
                         break
 
-                    if isinstance(audio_chunk, bytes) and audio_chunk == AUDIO_RESPONSE_DONE:
+                    if _is_audio_done(audio_chunk):
+                        audio_generation = _audio_generation(audio_chunk)
+                        if cancel_scope and audio_generation is not None and cancel_scope.is_stale(audio_generation):
+                            cancel_scope.response_done(audio_generation)
+                            should_listen.set()
+                            logger.info("Stale response complete, listening re-enabled")
+                            continue
                         for cid in service.connection_ids:
                             ws = app.state.websockets.get(cid)
                             if ws:
@@ -341,7 +372,7 @@ def create_app(
                         if response_playing:
                             response_playing.clear()
                         if cancel_scope:
-                            cancel_scope.response_done()
+                            cancel_scope.response_done(audio_generation)
                         should_listen.set()
                         logger.info("Response complete, listening re-enabled")
                         continue
@@ -349,7 +380,7 @@ def create_app(
                     if is_control_message(audio_chunk):
                         continue
 
-                    if cancel_scope and cancel_scope.discarding:
+                    if _should_discard_audio(audio_chunk):
                         continue
 
                     audio_chunk = _to_audio_bytes(audio_chunk)
@@ -361,11 +392,14 @@ def create_app(
                         except Empty:
                             break
 
-                        if (
-                            isinstance(next_chunk, bytes) and next_chunk in {PIPELINE_END, AUDIO_RESPONSE_DONE}
-                        ) or is_control_message(next_chunk, SESSION_END.kind):
+                        if _is_pipeline_end(next_chunk) or _is_audio_done(next_chunk) or is_control_message(
+                            next_chunk, SESSION_END.kind
+                        ):
                             pending_output_item = next_chunk
                             break
+
+                        if _should_discard_audio(next_chunk):
+                            continue
 
                         next_audio = _to_audio_bytes(next_chunk)
                         if len(audio_batch) + len(next_audio) > MAX_AUDIO_BATCH_BYTES:

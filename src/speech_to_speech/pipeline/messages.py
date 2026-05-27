@@ -85,6 +85,7 @@ class LLMResponseChunk(PipelineMessage):
     turn_id: str | None = None
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
+    cancel_generation: int | None = None
 
 
 class TokenUsage(PipelineMessage):
@@ -103,6 +104,7 @@ class EndOfResponse(PipelineMessage):
     tag: Literal["end_of_response"] = "end_of_response"
     turn_id: str | None = None
     turn_revision: int | None = None
+    cancel_generation: int | None = None
 
 
 # ── LMOutputProcessor → TTS ──────────────────────────────────────────
@@ -119,6 +121,15 @@ class TTSInput(PipelineMessage):
     turn_id: str | None = None
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
+    cancel_generation: int | None = None
+
+
+class AudioOutput(PipelineMessage):
+    """Audio queue item tagged with the response generation that produced it."""
+
+    tag: Literal["audio_output"] = "audio_output"
+    audio: bytes | np.ndarray
+    cancel_generation: int | None = None
 
 
 # ── Realtime service → LLM ────────────────────────────────────────────

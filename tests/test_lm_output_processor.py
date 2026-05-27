@@ -34,6 +34,26 @@ def test_latest_end_of_response_is_forwarded_to_tts():
     assert outputs[0].turn_revision == 1
 
 
+def test_cancel_generation_is_forwarded_to_tts():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    processor = _processor(tracker)
+
+    outputs = list(
+        processor.process(
+            LLMResponseChunk(
+                text="hello",
+                turn_id="turn_1",
+                turn_revision=0,
+                cancel_generation=7,
+            )
+        )
+    )
+
+    assert len(outputs) == 1
+    assert outputs[0].cancel_generation == 7
+
+
 def test_pending_reopen_holds_assistant_chunk_until_cancelled():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)

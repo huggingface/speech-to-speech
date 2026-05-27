@@ -364,10 +364,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             segment_samples = sum(len(t) for t in self.iterator.buffer)
             segment_duration_ms = segment_samples / self.sample_rate * 1000
             active_speech_duration_ms = self._current_active_speech_duration_ms()
+            speech_buffer_duration_ms = self._speech_buffer_duration_ms()
+            start_ms = max(0, self._audio_ms - int(speech_buffer_duration_ms))
+            self._begin_pending_reopen_if_needed(start_ms)
             if active_speech_duration_ms >= self.min_speech_ms:
-                speech_buffer_duration_ms = self._speech_buffer_duration_ms()
-                start_ms = max(0, self._audio_ms - int(speech_buffer_duration_ms))
-                self._begin_pending_reopen_if_needed(start_ms)
                 turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start(start_ms)
                 self._speech_started_emitted = True
                 self._log_speech_starts += 1
@@ -530,6 +530,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         turn_revision,
                         self.speculative_reopen_ms / 1000.0,
                     )
+                else:
+                    self.should_listen.clear()
                 yield VADAudio(audio=output_array, mode="final", turn_id=turn_id, turn_revision=turn_revision)
                 self.last_process_time = 0.0
                 self._speech_started_emitted = False

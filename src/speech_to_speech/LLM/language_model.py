@@ -125,6 +125,7 @@ class StreamContext(BaseModel):
     turn_id: str | None = None
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
+    cancel_generation: int | None = None
 
     @property
     def interrupted(self) -> bool:
@@ -323,6 +324,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                                 turn_id=ctx.turn_id,
                                 turn_revision=ctx.turn_revision,
                                 speech_stopped_at_s=ctx.speech_stopped_at_s,
+                                cancel_generation=ctx.cancel_generation,
                             )
                         )
                         ctx.sentence_batch = []
@@ -344,6 +346,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                                 turn_id=ctx.turn_id,
                                 turn_revision=ctx.turn_revision,
                                 speech_stopped_at_s=ctx.speech_stopped_at_s,
+                                cancel_generation=ctx.cancel_generation,
                             )
                         )
                         ctx.sentence_batch = []
@@ -425,6 +428,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 turn_id=ctx.turn_id,
                 turn_revision=ctx.turn_revision,
                 speech_stopped_at_s=ctx.speech_stopped_at_s,
+                cancel_generation=ctx.cancel_generation,
             )
             ctx.sentence_batch = []
 
@@ -462,6 +466,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
+        ctx.cancel_generation = gen
 
         yield from self._generate(active_chat, language_code, gen, ctx, runtime_config, response)
 
@@ -499,6 +504,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 turn_id=ctx.turn_id,
                 turn_revision=ctx.turn_revision,
                 speech_stopped_at_s=ctx.speech_stopped_at_s,
+                cancel_generation=ctx.cancel_generation,
             )
 
         output_tokens = len(self.tokenizer.encode(ctx.raw_generated_text)) if ctx.raw_generated_text else 0
@@ -509,7 +515,11 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 turn_id=ctx.turn_id,
                 turn_revision=ctx.turn_revision,
             )
-        yield EndOfResponse(turn_id=ctx.turn_id, turn_revision=ctx.turn_revision)
+        yield EndOfResponse(
+            turn_id=ctx.turn_id,
+            turn_revision=ctx.turn_revision,
+            cancel_generation=ctx.cancel_generation,
+        )
 
     def on_session_end(self) -> None:
         logger.debug("Language model session state reset")
