@@ -33,6 +33,7 @@ class SpeechStartedEvent(PipelineEvent):
     turn_id: str | None = None
     turn_revision: int | None = None
     reopened: bool = False
+    interrupt_response: bool = Field(default=True, exclude=True)
 
 
 class SpeechStoppedEvent(PipelineEvent):

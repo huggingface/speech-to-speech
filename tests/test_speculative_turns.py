@@ -1,10 +1,12 @@
 import time
 from queue import Queue
-from threading import Thread
+from threading import Event, Thread
 from typing import Literal
 
 import numpy as np
+import torch
 
+from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
 from speech_to_speech.pipeline.messages import VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.VAD.vad_handler import VADHandler
@@ -211,6 +213,124 @@ def test_vad_realtime_path_does_not_emit_progressive_when_live_transcription_dis
     handler.iterator = FakeIterator()
 
     assert list(handler._process_realtime(None)) == []
+
+
+class _StaticVADIterator:
+    def __init__(
+        self,
+        *,
+        triggered: bool,
+        vad_output: list[torch.Tensor] | None,
+        buffer_chunks: list[torch.Tensor] | None = None,
+        speech_chunks: list[torch.Tensor] | None = None,
+        voiced_samples: int = 0,
+        last_utterance_voiced_samples: int = 0,
+    ) -> None:
+        self.triggered = triggered
+        self._vad_output = vad_output
+        self.buffer = buffer_chunks or []
+        self._speech_chunks = speech_chunks or self.buffer
+        self.voiced_samples = voiced_samples
+        self.last_utterance_voiced_samples = last_utterance_voiced_samples
+
+    def __call__(self, _chunk: torch.Tensor) -> list[torch.Tensor] | None:
+        return self._vad_output
+
+    def speech_buffer(self) -> list[torch.Tensor]:
+        return self._speech_chunks
+
+
+def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
+    handler = object.__new__(VADHandler)
+    handler.should_listen = Event()
+    handler.should_listen.set()
+    handler.sample_rate = 16000
+    handler.min_silence_ms = 300
+    handler.min_speech_ms = 500
+    handler.max_speech_ms = float("inf")
+    handler.enable_realtime_transcription = False
+    handler.realtime_processing_pause = 0.5
+    handler.text_output_queue = Queue()
+    handler.speculative_turns = SpeculativeTurnTracker()
+    handler.speculative_reopen_ms = 1000
+    handler._last_turn_detection = None
+    handler.iterator = iterator
+    handler.audio_enhancement = False
+    handler.last_process_time = 0.0
+    handler._total_samples = 0
+    handler._last_log_time = time.time()
+    handler._log_chunks = 0
+    handler._log_speech_starts = 0
+    handler._log_speech_ends = 0
+    handler._log_progressive_yields = 0
+    handler._speech_started_emitted = False
+    handler._turn_counter = 0
+    handler._current_turn_id = None
+    handler._current_turn_revision = None
+    handler._speculative_audio_prefix = None
+    handler._last_final_wall_time = None
+    handler._last_final_audio_ms = None
+    handler._pending_reopen_candidate = None
+    return handler
+
+
+def _audio_bytes(samples: int = 512) -> bytes:
+    return np.zeros(samples, dtype=np.int16).tobytes()
+
+
+def test_vad_interruption_uses_voiced_duration_not_padded_segment():
+    chunks = [torch.zeros(512) for _ in range(20)]
+    iterator = _StaticVADIterator(
+        triggered=True,
+        vad_output=None,
+        buffer_chunks=chunks,
+        speech_chunks=chunks,
+        voiced_samples=10 * 512,
+    )
+    handler = _vad_handler_for_iterator(iterator)
+
+    assert list(handler.process(_audio_bytes())) == []
+
+    assert handler.text_output_queue.empty()
+    assert handler._speech_started_emitted is False
+
+
+def test_vad_interruption_emits_after_voiced_threshold():
+    chunks = [torch.zeros(512) for _ in range(20)]
+    iterator = _StaticVADIterator(
+        triggered=True,
+        vad_output=None,
+        buffer_chunks=chunks,
+        speech_chunks=chunks,
+        voiced_samples=16 * 512,
+    )
+    handler = _vad_handler_for_iterator(iterator)
+
+    assert list(handler.process(_audio_bytes())) == []
+
+    event = handler.text_output_queue.get_nowait()
+    assert isinstance(event, SpeechStartedEvent)
+    assert event.interrupt_response is True
+    assert handler._speech_started_emitted is True
+
+
+def test_vad_final_synthetic_start_does_not_interrupt_response():
+    final_chunks = [torch.zeros(512) for _ in range(31)]
+    iterator = _StaticVADIterator(
+        triggered=False,
+        vad_output=final_chunks,
+        last_utterance_voiced_samples=2 * 512,
+    )
+    handler = _vad_handler_for_iterator(iterator)
+
+    outputs = list(handler.process(_audio_bytes()))
+
+    assert len(outputs) == 1
+    started = handler.text_output_queue.get_nowait()
+    stopped = handler.text_output_queue.get_nowait()
+    assert isinstance(started, SpeechStartedEvent)
+    assert started.interrupt_response is False
+    assert isinstance(stopped, SpeechStoppedEvent)
 
 
 def test_vad_keeps_single_speculative_audio_prefix():

@@ -41,6 +41,8 @@ class VADIterator:
         self.is_speaking = False
         self.buffer: list[torch.Tensor] = []
         self.prefix_buffer: list[torch.Tensor] = []
+        self.voiced_samples = 0
+        self.last_utterance_voiced_samples = 0
         self._pre_speech_buffer: deque[torch.Tensor] = deque()
         self._pre_speech_samples = 0
 
@@ -58,6 +60,8 @@ class VADIterator:
         self.current_sample = 0
         self.buffer = []
         self.prefix_buffer = []
+        self.voiced_samples = 0
+        self.last_utterance_voiced_samples = 0
         self._pre_speech_buffer.clear()
         self._pre_speech_samples = 0
 
@@ -130,6 +134,8 @@ class VADIterator:
             self._pre_speech_buffer.clear()
             self._pre_speech_samples = 0
             self.buffer.append(x)
+            self.voiced_samples = window_size_samples
+            self.last_utterance_voiced_samples = 0
             return None
 
         if not self.triggered:
@@ -138,9 +144,11 @@ class VADIterator:
 
         if self.triggered:
             self.buffer.append(x)
-            if (speech_prob >= self.threshold) and self.temp_end:
-                self.temp_end = 0
-                return None
+            if speech_prob >= self.threshold:
+                self.voiced_samples += window_size_samples
+                if self.temp_end:
+                    self.temp_end = 0
+                    return None
 
             if speech_prob < self.threshold - 0.15:
                 if not self.temp_end:
@@ -153,6 +161,8 @@ class VADIterator:
                 self.temp_end = 0
                 self.triggered = False
                 spoken_utterance = self.speech_buffer()
+                self.last_utterance_voiced_samples = self.voiced_samples
+                self.voiced_samples = 0
                 self.buffer = []
                 self.prefix_buffer = []
                 return spoken_utterance

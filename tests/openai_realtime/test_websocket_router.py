@@ -393,6 +393,24 @@ class TestSendLoop:
                 assert not cancel_scope.discarding, "cancel_scope should not be discarding"
                 assert service._state(conn_id).in_response, "response should still be active"
 
+    def test_speech_started_internal_non_interrupt_does_not_cancel_or_flush(self, setup):
+        app, service, _, _, text_output_queue, _, _, response_playing, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                service.response._ensure_response(conn_id)
+                response_playing.set()
+                text_output_queue.put(SpeechStartedEvent(interrupt_response=False))
+
+                msg = ws.receive_json()
+
+                assert msg["type"] == "input_audio_buffer.speech_started"
+                time.sleep(0.15)
+                assert response_playing.is_set(), "response_playing should remain set"
+                assert not cancel_scope.discarding, "cancel_scope should not be discarding"
+                assert service._state(conn_id).in_response, "response should still be active"
+
 
 # ===================================================================
 # Cleanup

@@ -660,6 +660,17 @@ class TestDispatchPipelineEvent:
         assert isinstance(events[0], InputAudioBufferSpeechStartedEvent)
         assert service._state(conn_id).in_response is True
 
+    def test_speech_started_internal_non_interrupt_does_not_cancel(self, service, conn_id):
+        service.response._ensure_response(conn_id)
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(interrupt_response=False),
+        )
+
+        assert len(events) == 1
+        assert isinstance(events[0], InputAudioBufferSpeechStartedEvent)
+        assert service._state(conn_id).in_response is True
+
     def test_consecutive_speech_cycles_get_distinct_item_ids(self, service, conn_id):
         """Each speech_started/stopped cycle generates a new unique item_id."""
         started_1 = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())

@@ -262,6 +262,7 @@ def create_app(
                             defer_text_msg = True
 
                         is_speech_start = isinstance(text_msg, SpeechStartedEvent)
+                        speech_can_interrupt = is_speech_start and getattr(text_msg, "interrupt_response", True)
 
                         was_in_response = False
                         if is_speech_start and app.state.active_session:
@@ -295,7 +296,7 @@ def create_app(
                             pending_text_item = text_msg
                         elif complete_discard_after_dispatch and cancel_scope:
                             cancel_scope.response_done()
-                        elif is_speech_start and (was_in_response or getattr(text_msg, "reopened", False)):
+                        elif speech_can_interrupt and (was_in_response or getattr(text_msg, "reopened", False)):
                             active_cfg = (
                                 service._state(app.state.active_session).runtime_config
                                 if app.state.active_session
