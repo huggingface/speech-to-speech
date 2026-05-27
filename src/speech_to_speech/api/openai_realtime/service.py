@@ -337,8 +337,17 @@ class RealtimeService:
 
     def make_error(self, message: str, _type: str) -> RealtimeErrorEvent:
         self.total_usage.record_error(_type)
-        return RealtimeErrorEvent(
-            type="error",
-            error=RealtimeError(message=message, type=_type),
-            event_id=self._next_event_id(),
-        )
+        return build_error_event(message, _type)
+
+
+def build_error_event(message: str, error_type: str) -> RealtimeErrorEvent:
+    """Construct a RealtimeErrorEvent without touching any service-instance state.
+
+    Used by the websocket route handler on pool rejection, where no unit's
+    service should be charged with the error in its usage metrics.
+    """
+    return RealtimeErrorEvent(
+        type="error",
+        error=RealtimeError(message=message, type=error_type),
+        event_id=_generate_id("event"),
+    )
