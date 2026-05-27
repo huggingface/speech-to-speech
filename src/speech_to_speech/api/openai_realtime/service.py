@@ -411,6 +411,7 @@ class RealtimeService:
                     language_code=event.language_code,
                     turn_id=event.turn_id,
                     turn_revision=event.turn_revision,
+                    speech_stopped_at_s=event.speech_stopped_at_s,
                 )
             )
 

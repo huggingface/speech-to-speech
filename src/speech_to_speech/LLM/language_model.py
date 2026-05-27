@@ -123,6 +123,7 @@ class StreamContext(BaseModel):
     sentence_batch: list[str] = Field(default_factory=list)
     turn_id: str | None = None
     turn_revision: int | None = None
+    speech_stopped_at_s: float | None = None
 
     @property
     def interrupted(self) -> bool:
@@ -304,6 +305,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                                 response=response,
                                 turn_id=ctx.turn_id,
                                 turn_revision=ctx.turn_revision,
+                                speech_stopped_at_s=ctx.speech_stopped_at_s,
                             )
                         )
                         ctx.sentence_batch = []
@@ -324,6 +326,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                                 response=response,
                                 turn_id=ctx.turn_id,
                                 turn_revision=ctx.turn_revision,
+                                speech_stopped_at_s=ctx.speech_stopped_at_s,
                             )
                         )
                         ctx.sentence_batch = []
@@ -404,6 +407,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 response=response,
                 turn_id=ctx.turn_id,
                 turn_revision=ctx.turn_revision,
+                speech_stopped_at_s=ctx.speech_stopped_at_s,
             )
             ctx.sentence_batch = []
 
@@ -419,6 +423,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         ctx.turn_id = request.turn_id
         ctx.turn_revision = request.turn_revision
+        ctx.speech_stopped_at_s = request.speech_stopped_at_s
         if not self._turn_is_latest(ctx.turn_id, ctx.turn_revision):
             logger.info("Skipping stale LLM request for turn=%s rev=%s", ctx.turn_id, ctx.turn_revision)
             yield EndOfResponse(turn_id=ctx.turn_id, turn_revision=ctx.turn_revision)
@@ -475,6 +480,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 response=response,
                 turn_id=ctx.turn_id,
                 turn_revision=ctx.turn_revision,
+                speech_stopped_at_s=ctx.speech_stopped_at_s,
             )
 
         output_tokens = len(self.tokenizer.encode(ctx.raw_generated_text)) if ctx.raw_generated_text else 0

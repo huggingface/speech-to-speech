@@ -67,6 +67,7 @@ class Transcription(PipelineMessage):
     language_code: Optional[str] = None
     turn_id: str | None = None
     turn_revision: int | None = None
+    speech_stopped_at_s: float | None = None
 
 
 # ── LLM → LMOutputProcessor ──────────────────────────────────────────
@@ -83,6 +84,7 @@ class LLMResponseChunk(PipelineMessage):
     response: RealtimeResponseCreateParams | None = None
     turn_id: str | None = None
     turn_revision: int | None = None
+    speech_stopped_at_s: float | None = None
 
 
 class TokenUsage(PipelineMessage):
@@ -116,6 +118,7 @@ class TTSInput(PipelineMessage):
     response: RealtimeResponseCreateParams | None = None
     turn_id: str | None = None
     turn_revision: int | None = None
+    speech_stopped_at_s: float | None = None
 
 
 # ── Realtime service → LLM ────────────────────────────────────────────
@@ -138,6 +141,7 @@ class GenerateResponseRequest(PipelineMessage):
     language_code: Optional[str] = None
     turn_id: str | None = None
     turn_revision: int | None = None
+    speech_stopped_at_s: float | None = None
 
 
 # ── Binary sentinels (audio/output queue) ─────────────────────────────

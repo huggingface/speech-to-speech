@@ -671,18 +671,37 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         try:
             if self.ref_audio:
-                yield from self._process_voice_clone(text)
+                audio_iter = self._process_voice_clone(text)
             elif model_type == "custom_voice":
-                yield from self._process_custom_voice(text)
+                audio_iter = self._process_custom_voice(text)
             elif model_type == "voice_design":
-                yield from self._process_voice_design(text)
+                audio_iter = self._process_voice_design(text)
             else:
                 raise ValueError(
                     "Qwen3-TTS Base model requires ref_audio for voice cloning. "
                     "Provide qwen3_tts_ref_audio or use a CustomVoice/VoiceDesign model."
                 )
+            first_audio = True
+            for audio_chunk in audio_iter:
+                if first_audio:
+                    self._log_first_audio_latency(tts_input)
+                    first_audio = False
+                yield audio_chunk
         except Exception as e:
             logger.error(f"Error during Qwen3-TTS generation: {e}", exc_info=True)
+
+    def _log_first_audio_latency(self, tts_input: TTSInput) -> None:
+        if tts_input.speech_stopped_at_s is None:
+            return
+        latency_s = perf_counter() - tts_input.speech_stopped_at_s
+        if latency_s < 0:
+            return
+        logger.info(
+            "Last speech detected to first speech out: %.3fs (turn=%s rev=%s)",
+            latency_s,
+            tts_input.turn_id,
+            tts_input.turn_revision,
+        )
 
     def _mlx_streaming_interval(self) -> float:
         return max(1, self.streaming_chunk_size) / MLX_STREAMING_TOKENS_PER_SECOND

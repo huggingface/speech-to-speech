@@ -60,6 +60,7 @@ class TranscriptionCompletedEvent(PipelineEvent):
     language_code: Optional[str] = None
     turn_id: str | None = None
     turn_revision: int | None = None
+    speech_stopped_at_s: float | None = Field(default=None, exclude=True)
 
 
 # ── LLM output events (LMOutputProcessor) ────────────────────────────

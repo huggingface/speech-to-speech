@@ -62,4 +62,5 @@ class ParaformerSTTHandler(BaseSTTHandler):
             text=pred_text,
             turn_id=vad_audio.turn_id,
             turn_revision=vad_audio.turn_revision,
+            speech_stopped_at_s=vad_audio.created_at_s,
         )

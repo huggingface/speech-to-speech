@@ -126,4 +126,5 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                 response=lm_output.response,
                 turn_id=lm_output.turn_id,
                 turn_revision=lm_output.turn_revision,
+                speech_stopped_at_s=lm_output.speech_stopped_at_s,
             )

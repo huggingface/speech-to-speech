@@ -1,3 +1,4 @@
+import logging
 import sys
 from pathlib import Path
 from queue import Queue
@@ -439,7 +440,7 @@ def test_process_waits_for_reopen_grace_and_drops_stale_end_of_response():
     assert outputs == []
 
 
-def test_process_commits_turn_before_generating_audio(monkeypatch):
+def test_process_commits_turn_before_generating_audio(monkeypatch, caplog):
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
     handler = object.__new__(Qwen3TTSHandler)
@@ -463,18 +464,21 @@ def test_process_commits_turn_before_generating_audio(monkeypatch):
 
     monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
 
-    outputs = list(
-        handler.process(
-            TTSInput(
-                text="Hello there.",
-                turn_id="turn_1",
-                turn_revision=0,
+    with caplog.at_level(logging.INFO, logger="speech_to_speech.TTS.qwen3_tts_handler"):
+        outputs = list(
+            handler.process(
+                TTSInput(
+                    text="Hello there.",
+                    turn_id="turn_1",
+                    turn_revision=0,
+                    speech_stopped_at_s=qwen3_tts_module.perf_counter() - 1.0,
+                )
             )
         )
-    )
 
     assert len(outputs) == 1
     assert tracker.is_committed("turn_1", 0)
+    assert "Last speech detected to first speech out:" in caplog.text
 
 
 def test_process_does_not_set_should_listen_when_generation_fails(monkeypatch):

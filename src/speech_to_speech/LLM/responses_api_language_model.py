@@ -138,6 +138,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         response = request.response
         turn_id = request.turn_id
         turn_revision = request.turn_revision
+        speech_stopped_at_s = request.speech_stopped_at_s
         if not self._turn_is_latest(turn_id, turn_revision):
             logger.info("Skipping stale LLM request for turn=%s rev=%s", turn_id, turn_revision)
             yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision)
@@ -216,6 +217,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                                         response=response,
                                         turn_id=turn_id,
                                         turn_revision=turn_revision,
+                                        speech_stopped_at_s=speech_stopped_at_s,
                                     )
                                     sentence_batch = []
                             if cancelled:
@@ -272,6 +274,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                                 response=response,
                                 turn_id=turn_id,
                                 turn_revision=turn_revision,
+                                speech_stopped_at_s=speech_stopped_at_s,
                             )
             elif isinstance(api_response, Response):
                 if (
@@ -330,6 +333,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                                 response=response,
                                 turn_id=turn_id,
                                 turn_revision=turn_revision,
+                                speech_stopped_at_s=speech_stopped_at_s,
                             )
         except httpx.ReadTimeout:
             logger.warning(
@@ -343,6 +347,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     response=response,
                     turn_id=turn_id,
                     turn_revision=turn_revision,
+                    speech_stopped_at_s=speech_stopped_at_s,
                 )
         finally:
             if api_response is not None and hasattr(api_response, "close"):
