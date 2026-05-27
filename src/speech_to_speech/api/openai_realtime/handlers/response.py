@@ -165,6 +165,9 @@ class ResponseHandler(RealtimeBaseHandler):
                 GenerateResponseRequest(
                     runtime_config=cfg,
                     response=event.response,
+                    turn_id=st.speculative_user_turn_id,
+                    turn_revision=st.speculative_user_turn_revision,
+                    speech_stopped_at_s=st.speculative_user_speech_stopped_at_s,
                 )
             )
         logger.debug("response.create received, LLM generation triggered")

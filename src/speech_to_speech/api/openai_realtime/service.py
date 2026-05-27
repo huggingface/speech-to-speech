@@ -162,6 +162,7 @@ class ConnState(BaseModel):
     speculative_turn_revision: Optional[int] = None
     speculative_user_turn_id: Optional[str] = None
     speculative_user_turn_revision: Optional[int] = None
+    speculative_user_speech_stopped_at_s: Optional[float] = None
     speculative_user_item_id: Optional[str] = None
     speculative_input_item_id: Optional[str] = None
     speculative_audio_duration_s: float = 0.0
@@ -409,6 +410,7 @@ class RealtimeService:
         if event.turn_id is not None:
             st.speculative_user_turn_id = event.turn_id
             st.speculative_user_turn_revision = event.turn_revision
+            st.speculative_user_speech_stopped_at_s = event.speech_stopped_at_s
 
         queue = self.text_prompt_queue
         if queue and transcript:

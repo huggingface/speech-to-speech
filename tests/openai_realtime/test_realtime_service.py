@@ -434,6 +434,32 @@ class TestHandleResponseCreate:
         assert req.response.tool_choice == "auto"
         assert req.runtime_config is runtime_config
 
+    def test_response_create_preserves_latest_user_turn_timing(self, service, conn_id, text_prompt_queue):
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(
+                transcript="hello",
+                language_code="en",
+                turn_id="turn_1",
+                turn_revision=2,
+                speech_stopped_at_s=123.0,
+            ),
+        )
+        initial_req = text_prompt_queue.get()
+        assert isinstance(initial_req, GenerateResponseRequest)
+        assert initial_req.turn_id == "turn_1"
+        assert initial_req.turn_revision == 2
+        assert initial_req.speech_stopped_at_s == 123.0
+
+        result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
+
+        assert isinstance(result, ResponseCreatedEvent)
+        followup_req = text_prompt_queue.get()
+        assert isinstance(followup_req, GenerateResponseRequest)
+        assert followup_req.turn_id == "turn_1"
+        assert followup_req.turn_revision == 2
+        assert followup_req.speech_stopped_at_s == 123.0
+
     def test_response_create_rejects_complex_tool_choice(self, service, conn_id, runtime_config):
         evt = ResponseCreateEvent(
             type="response.create",
