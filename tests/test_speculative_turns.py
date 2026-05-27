@@ -288,6 +288,7 @@ def test_vad_interruption_uses_active_speech_duration_not_padded_segment():
         active_speech_samples=10 * 512,
     )
     handler = _vad_handler_for_iterator(iterator)
+    handler.enable_realtime_transcription = True
 
     assert list(handler.process(_audio_bytes())) == []
 
@@ -314,12 +315,27 @@ def test_vad_interruption_emits_after_active_speech_threshold():
     assert handler._speech_started_emitted is True
 
 
+def test_vad_discards_final_segment_when_active_speech_is_short():
+    final_chunks = [torch.zeros(512) for _ in range(31)]
+    iterator = _StaticVADIterator(
+        triggered=False,
+        vad_output=final_chunks,
+        last_utterance_active_speech_samples=15 * 512,
+    )
+    handler = _vad_handler_for_iterator(iterator)
+
+    outputs = list(handler.process(_audio_bytes()))
+
+    assert outputs == []
+    assert handler.text_output_queue.empty()
+
+
 def test_vad_final_synthetic_start_does_not_interrupt_response():
     final_chunks = [torch.zeros(512) for _ in range(31)]
     iterator = _StaticVADIterator(
         triggered=False,
         vad_output=final_chunks,
-        last_utterance_active_speech_samples=2 * 512,
+        last_utterance_active_speech_samples=16 * 512,
     )
     handler = _vad_handler_for_iterator(iterator)
 

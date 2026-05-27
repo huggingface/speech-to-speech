@@ -422,12 +422,14 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             if (current_time - self.last_process_time) >= progressive_pause:
                 array = torch.cat(self.iterator.speech_buffer()).cpu().numpy()
                 duration_ms = len(array) / self.sample_rate * 1000
+                active_speech_duration_ms = self._current_active_speech_duration_ms()
 
-                if duration_ms >= self.min_speech_ms:
+                if active_speech_duration_ms >= self.min_speech_ms:
                     self._log_progressive_yields += 1
                     logger.debug(
-                        "VAD: yielding progressive audio (%.0fms, interval=%.2fs)",
+                        "VAD: yielding progressive audio (segment=%.0fms, active=%.0fms, interval=%.2fs)",
                         duration_ms,
+                        active_speech_duration_ms,
                         progressive_pause,
                     )
                     turn_id, turn_revision = self._current_turn_metadata()
@@ -461,9 +463,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             duration_ms = len(array) / self.sample_rate * 1000
             active_speech_duration_ms = self._last_utterance_active_speech_duration_ms()
 
-            if duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
+            if active_speech_duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
                 logger.info(
-                    "VAD: discarding segment=%.0fms active=%.0fms (bounds: %s-%sms)",
+                    "VAD: discarding segment=%.0fms active=%.0fms (active_min=%sms, segment_max=%sms)",
                     duration_ms,
                     active_speech_duration_ms,
                     self.min_speech_ms,
@@ -557,9 +559,14 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
             array = torch.cat(vad_output).cpu().numpy()
             duration_ms = len(array) / self.sample_rate * 1000
-            if duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
+            active_speech_duration_ms = self._last_utterance_active_speech_duration_ms()
+            if active_speech_duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
                 logger.info(
-                    f"VAD: discarding {duration_ms:.0f}ms segment (bounds: {self.min_speech_ms}-{self.max_speech_ms}ms)"
+                    "VAD: discarding segment=%.0fms active=%.0fms (active_min=%sms, segment_max=%sms)",
+                    duration_ms,
+                    active_speech_duration_ms,
+                    self.min_speech_ms,
+                    self.max_speech_ms,
                 )
                 if self._speech_started_emitted and self.text_output_queue:
                     self.text_output_queue.put(SpeechStoppedEvent(audio_end_ms=self._audio_ms))
