@@ -330,6 +330,33 @@ def initialize_queues_and_events() -> dict[str, Any]:
     }
 
 
+def _wire_speculative_turn_dependencies(
+    cancel_scope: CancelScope,
+    speculative_turns: SpeculativeTurnTracker,
+    vad_handler_kwargs: VADHandlerArguments,
+    language_model_handler_kwargs: LanguageModelHandlerArguments,
+    responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
+    chat_tts_handler_kwargs: ChatTTSHandlerArguments,
+    facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
+    pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
+    kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
+    qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
+) -> None:
+    vars(vad_handler_kwargs)["speculative_turns"] = speculative_turns
+
+    for kw in (
+        language_model_handler_kwargs,
+        responses_api_language_model_handler_kwargs,
+        kokoro_tts_handler_kwargs,
+        qwen3_tts_handler_kwargs,
+        pocket_tts_handler_kwargs,
+        chat_tts_handler_kwargs,
+        facebook_mms_tts_handler_kwargs,
+    ):
+        vars(kw)["cancel_scope"] = cancel_scope
+        vars(kw)["speculative_turns"] = speculative_turns
+
+
 def build_pipeline(
     module_kwargs: ModuleArguments,
     socket_receiver_kwargs: SocketReceiverArguments,
@@ -366,6 +393,19 @@ def build_pipeline(
         None  # Only set for websocket/realtime modes; kept None otherwise to avoid unbounded queue growth
     )
 
+    _wire_speculative_turn_dependencies(
+        cancel_scope,
+        speculative_turns,
+        vad_handler_kwargs,
+        language_model_handler_kwargs,
+        responses_api_language_model_handler_kwargs,
+        chat_tts_handler_kwargs,
+        facebook_mms_tts_handler_kwargs,
+        pocket_tts_handler_kwargs,
+        kokoro_tts_handler_kwargs,
+        qwen3_tts_handler_kwargs,
+    )
+
     comms_handlers: list[Any] = []
     if module_kwargs.mode == "local":
         from speech_to_speech.connections.local_audio_streamer import LocalAudioStreamer
@@ -397,19 +437,6 @@ def build_pipeline(
         text_output_queue = queues_and_events["text_output_queue"]
 
         vars(vad_handler_kwargs)["text_output_queue"] = text_output_queue
-        vars(vad_handler_kwargs)["speculative_turns"] = speculative_turns
-
-        for kw in (
-            language_model_handler_kwargs,
-            responses_api_language_model_handler_kwargs,
-            kokoro_tts_handler_kwargs,
-            qwen3_tts_handler_kwargs,
-            pocket_tts_handler_kwargs,
-            chat_tts_handler_kwargs,
-            facebook_mms_tts_handler_kwargs,
-        ):
-            vars(kw)["cancel_scope"] = cancel_scope
-            vars(kw)["speculative_turns"] = speculative_turns
 
         if module_kwargs.llm_backend == "responses-api":
             chat_size = vars(responses_api_language_model_handler_kwargs).get("chat_size", 10)

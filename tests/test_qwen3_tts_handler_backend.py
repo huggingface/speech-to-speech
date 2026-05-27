@@ -381,6 +381,64 @@ def test_process_waits_for_pending_reopen_and_drops_stale_end_of_response():
     assert outputs == []
 
 
+def test_process_waits_for_reopen_grace_and_drops_stale_tts_input():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    tracker.start_reopen_grace("turn_1", 0, grace_s=0.5)
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.speculative_turns = tracker
+    done = Event()
+    outputs = []
+
+    def run_process():
+        outputs.extend(
+            handler.process(
+                TTSInput(
+                    text="stale",
+                    turn_id="turn_1",
+                    turn_revision=0,
+                )
+            )
+        )
+        done.set()
+
+    thread = Thread(target=run_process)
+    thread.start()
+
+    assert not done.wait(0.05)
+    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+    assert done.wait(1.0)
+    thread.join(timeout=1.0)
+
+    assert outputs == []
+
+
+def test_process_waits_for_reopen_grace_and_drops_stale_end_of_response():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    tracker.start_reopen_grace("turn_1", 0, grace_s=0.5)
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.speculative_turns = tracker
+    done = Event()
+    outputs = []
+
+    def run_process():
+        outputs.extend(handler.process(EndOfResponse(turn_id="turn_1", turn_revision=0)))
+        done.set()
+
+    thread = Thread(target=run_process)
+    thread.start()
+
+    assert not done.wait(0.05)
+    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+    assert done.wait(1.0)
+    thread.join(timeout=1.0)
+
+    assert outputs == []
+
+
 def test_process_does_not_set_should_listen_when_generation_fails(monkeypatch):
     """TTS no longer manages should_listen; the I/O streamer does via AUDIO_RESPONSE_DONE."""
     handler = object.__new__(Qwen3TTSHandler)

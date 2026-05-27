@@ -57,7 +57,7 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
-            if speculative_turns and not speculative_turns.is_latest_after_pending_reopen(
+            if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
                 tts_input.turn_id,
                 tts_input.turn_revision,
             ):
@@ -65,7 +65,7 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
             yield AUDIO_RESPONSE_DONE
             return
 
-        if speculative_turns and not speculative_turns.is_latest_after_pending_reopen(
+        if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
             tts_input.turn_id,
             tts_input.turn_revision,
         ):
