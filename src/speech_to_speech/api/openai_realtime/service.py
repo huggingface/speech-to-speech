@@ -2,7 +2,7 @@ import logging
 from collections.abc import Mapping
 from queue import Queue
 from threading import Event as ThreadingEvent
-from typing import Any, Callable, Literal, Optional, Self, Union
+from typing import Any, Callable, Literal, Optional, TypeVar, Union
 
 from openai.types.realtime import (
     ConversationItemCreatedEvent,
@@ -95,6 +95,9 @@ ServerEvent = Union[
 RealtimeEvent = Union[ClientEvent, ServerEvent]
 
 
+_UsageMetricsT = TypeVar("_UsageMetricsT", bound="UsageMetrics")
+
+
 class UsageMetrics(BaseModel):
     """Per-response usage counters.
 
@@ -110,7 +113,7 @@ class UsageMetrics(BaseModel):
     tool_calls: int = 0
     turns: int = 0
 
-    def __iadd__(self, other: "UsageMetrics") -> Self:
+    def __iadd__(self: _UsageMetricsT, other: "UsageMetrics") -> _UsageMetricsT:
         for field in UsageMetrics.model_fields:
             setattr(self, field, getattr(self, field) + getattr(other, field))
         return self
@@ -213,6 +216,10 @@ class RealtimeService:
     def unregister(self, conn_id: str) -> None:
         st = self._conns.pop(conn_id, None)
         if st is not None:
+            # Suppress any in-flight compaction splice so a daemon worker can't
+            # mutate a Chat tied to a closed session, and don't make further
+            # billable LLM calls on its behalf once the splice is suppressed.
+            st.runtime_config.chat.close()
             self.total_usage += st.response_usage
             logger.info(
                 "Session %s unregistered — cumulative: input_tokens=%d, output_tokens=%d, audio=%.2fs",
