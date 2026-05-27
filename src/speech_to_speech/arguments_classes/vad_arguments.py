@@ -22,9 +22,9 @@ class VADHandlerArguments:
         },
     )
     min_speech_ms: int = field(
-        default=500,
+        default=384,
         metadata={
-            "help": "Minimum length of speech segments to be considered valid speech. Measured in milliseconds. Default is 500 ms."
+            "help": "Minimum length of speech segments to be considered valid speech. Measured in milliseconds. Default is 384 ms."
         },
     )
     max_speech_ms: float = field(

@@ -268,7 +268,7 @@ def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
     handler.should_listen.set()
     handler.sample_rate = 16000
     handler.min_silence_ms = 300
-    handler.min_speech_ms = 500
+    handler.min_speech_ms = 384
     handler.max_speech_ms = float("inf")
     handler.enable_realtime_transcription = False
     handler.realtime_processing_pause = 0.5
@@ -325,7 +325,7 @@ def test_vad_interruption_emits_after_active_speech_threshold():
         vad_output=None,
         buffer_chunks=chunks,
         speech_chunks=chunks,
-        active_speech_samples=16 * 512,
+        active_speech_samples=12 * 512,
     )
     handler = _vad_handler_for_iterator(iterator)
 
@@ -342,7 +342,7 @@ def test_vad_discards_final_segment_when_active_speech_is_short():
     iterator = _StaticVADIterator(
         triggered=False,
         vad_output=final_chunks,
-        last_utterance_active_speech_samples=15 * 512,
+        last_utterance_active_speech_samples=11 * 512,
     )
     handler = _vad_handler_for_iterator(iterator)
 
@@ -357,7 +357,7 @@ def test_vad_final_synthetic_start_does_not_interrupt_response():
     iterator = _StaticVADIterator(
         triggered=False,
         vad_output=final_chunks,
-        last_utterance_active_speech_samples=16 * 512,
+        last_utterance_active_speech_samples=12 * 512,
     )
     handler = _vad_handler_for_iterator(iterator)
 
