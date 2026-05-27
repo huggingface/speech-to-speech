@@ -1,16 +1,11 @@
 import logging
 import threading
-from queue import Queue
 from threading import Event
-from typing import cast
 
 import uvicorn
 
-from speech_to_speech.api.openai_realtime.service import RealtimeService
+from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
-from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.queue_types import AudioInItem, AudioOutItem, TextEventItem, TextPromptItem
-from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 logger = logging.getLogger(__name__)
 
@@ -19,58 +14,32 @@ class RealtimeServer:
     """
     Pipeline handler for the OpenAI Realtime API mode.
 
-    Owns pipeline queues, exposes run() for ThreadManager, and bridges
-    between FastAPI/uvicorn and the internal audio + text queues.
+    Owns a pool of isolated PipelineUnits and a single uvicorn server.
+    The websocket route claims the next free unit on each accept and releases
+    it on disconnect; once all units are in use, further connections are rejected.
     """
 
     def __init__(
         self,
         stop_event: Event,
-        input_queue: Queue[AudioInItem],
-        output_queue: Queue[AudioOutItem],
-        should_listen: Event,
-        response_playing: Event | None = None,
-        cancel_scope: CancelScope | None = None,
-        text_output_queue: Queue[TextEventItem] | None = None,
-        text_prompt_queue: Queue[TextPromptItem] | None = None,
-        speculative_turns: SpeculativeTurnTracker | None = None,
+        pool: list[PipelineUnit],
         host: str = "0.0.0.0",
         port: int = 8765,
-        chat_size: int = 10,
     ) -> None:
+        if not pool:
+            raise ValueError("RealtimeServer requires at least one PipelineUnit in the pool")
         self.stop_event = stop_event
-        self.input_queue = input_queue
-        self.output_queue = output_queue
-        self.text_output_queue = text_output_queue
-        self.text_prompt_queue = text_prompt_queue
-        self.speculative_turns = speculative_turns
-        self.should_listen = should_listen
-        self.response_playing = response_playing
-        self.cancel_scope = cancel_scope
+        self.pool = pool
         self.host = host
         self.port = port
-        self.chat_size = chat_size
 
     def run(self) -> None:
         """Start the FastAPI/uvicorn server (called from a ThreadManager thread)."""
-        service = RealtimeService(
-            text_prompt_queue=self.text_prompt_queue,
-            should_listen=self.should_listen,
-            chat_size=self.chat_size,
-            speculative_turns=self.speculative_turns,
-        )
-        app = create_app(
-            service=service,
-            input_queue=self.input_queue,
-            output_queue=self.output_queue,
-            text_output_queue=cast(Queue[TextEventItem], self.text_output_queue),
-            should_listen=self.should_listen,
-            response_playing=self.response_playing,
-            cancel_scope=self.cancel_scope,
-            stop_event=self.stop_event,
-        )
+        app = create_app(pool=self.pool, stop_event=self.stop_event)
 
-        logger.info(f"OpenAI Realtime API server starting on ws://{self.host}:{self.port}/v1/realtime")
+        logger.info(
+            f"OpenAI Realtime API starting on ws://{self.host}:{self.port}/v1/realtime (pool size {len(self.pool)})"
+        )
 
         config = uvicorn.Config(
             app,

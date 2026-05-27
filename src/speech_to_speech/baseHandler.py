@@ -9,6 +9,7 @@ from time import perf_counter
 from typing import Any, Generic, Iterator, TypeVar, cast
 
 from speech_to_speech.pipeline.control import PipelineControlMessage, is_control_message, SESSION_END
+from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import PIPELINE_END, AudioOutput, EndOfResponse
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ class BaseHandler(Generic[InT, OutT]):
         self.stop_event = stop_event
         self.queue_in = queue_in
         self.queue_out = queue_out
+        self.pipeline_index: int | None = None
         self.setup(*setup_args, **setup_kwargs)
         self._times: list[float] = []
 
@@ -77,6 +79,8 @@ class BaseHandler(Generic[InT, OutT]):
         return output
 
     def run(self) -> None:
+        if self.pipeline_index is not None:
+            pipeline_log_ctx.set(self.pipeline_index)
         logger.debug(f"{self.__class__.__name__}: Handler thread started")
         while not self.stop_event.is_set():
             try:

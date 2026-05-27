@@ -20,9 +20,7 @@ from speech_to_speech.arguments_classes.socket_sender_arguments import SocketSen
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 from speech_to_speech.arguments_classes.websocket_streamer_arguments import WebSocketStreamerArguments
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
-from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.s2s_pipeline import ParsedArguments, _wire_speculative_turn_dependencies, parse_arguments
+from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments
 
 
 def test_release_defaults_match_responses_api_parakeet_qwen3_realtime_profile():
@@ -52,46 +50,6 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_realtime_profile():
     assert qwen3_args.qwen3_tts_non_streaming_mode is True
     assert qwen3_args.qwen3_tts_ref_audio is None
     assert qwen3_args.qwen3_tts_mlx_quantization == "6bit"
-
-
-def test_speculative_turn_state_is_wired_to_all_turn_generating_handlers():
-    cancel_scope = CancelScope()
-    speculative_turns = SpeculativeTurnTracker()
-    vad_args = VADHandlerArguments()
-    language_model_args = LanguageModelHandlerArguments()
-    responses_api_args = ResponsesApiLanguageModelHandlerArguments()
-    chat_tts_args = ChatTTSHandlerArguments()
-    facebook_mms_args = FacebookMMSTTSHandlerArguments()
-    pocket_tts_args = PocketTTSHandlerArguments()
-    kokoro_args = KokoroTTSHandlerArguments()
-    qwen3_args = Qwen3TTSHandlerArguments()
-
-    _wire_speculative_turn_dependencies(
-        cancel_scope,
-        speculative_turns,
-        vad_args,
-        language_model_args,
-        responses_api_args,
-        chat_tts_args,
-        facebook_mms_args,
-        pocket_tts_args,
-        kokoro_args,
-        qwen3_args,
-    )
-
-    assert vars(vad_args)["speculative_turns"] is speculative_turns
-
-    for args in (
-        language_model_args,
-        responses_api_args,
-        chat_tts_args,
-        facebook_mms_args,
-        pocket_tts_args,
-        kokoro_args,
-        qwen3_args,
-    ):
-        assert vars(args)["cancel_scope"] is cancel_scope
-        assert vars(args)["speculative_turns"] is speculative_turns
 
 
 # -- ParsedArguments dataclass tests ------------------------------------------

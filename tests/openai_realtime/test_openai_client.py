@@ -27,6 +27,7 @@ import pytest
 import uvicorn
 from openai import AsyncOpenAI
 
+from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.pipeline.cancel_scope import CancelScope
@@ -71,16 +72,19 @@ class _ServerEnv:
         self.stop_event = ThreadingEvent()
         self.response_playing = ThreadingEvent()
         self.cancel_scope = CancelScope()
-        self.app = create_app(
-            self.service,
-            self.input_queue,
-            self.output_queue,
-            self.text_output_queue,
-            self.should_listen,
-            self.response_playing,
-            self.cancel_scope,
-            self.stop_event,
+        self.unit = PipelineUnit(
+            index=0,
+            service=self.service,
+            cancel_scope=self.cancel_scope,
+            should_listen=self.should_listen,
+            response_playing=self.response_playing,
+            input_queue=self.input_queue,
+            output_queue=self.output_queue,
+            text_output_queue=self.text_output_queue,
+            text_prompt_queue=self.text_prompt_queue,
+            handlers=[],
         )
+        self.app = create_app(pool=[self.unit], stop_event=self.stop_event)
         self.port = _free_port()
         self._server_thread: threading.Thread | None = None
 
