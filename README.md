@@ -243,7 +243,6 @@ with client.beta.realtime.connect(model="model_name") as conn:
 | `response.created` | Emitted on the first outbound audio chunk (response is `in_progress`). |
 | `response.output_audio.delta` | Base64 PCM audio chunk from TTS. |
 | `response.output_audio.done` | Audio stream complete for the current output item. |
-| `output_audio_buffer.cleared` | Server-side VAD interruption cleared already-buffered assistant audio. |
 | `response.output_audio_transcript.done` | Full assistant text transcript for the turn. |
 | `response.function_call_arguments.done` | Tool call with `call_id`, `name`, and JSON `arguments`. |
 | `response.done` | Response finished (`completed`, `cancelled` with reason `turn_detected` or `client_cancelled`). |

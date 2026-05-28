@@ -31,7 +31,6 @@ from openai.types.realtime import (
     SessionCreatedEvent,
     SessionUpdateEvent,
 )
-from openai.types.realtime.realtime_server_event import OutputAudioBufferCleared
 
 from speech_to_speech.api.openai_realtime.service import (
     CHUNK_SIZE_BYTES,
@@ -609,9 +608,7 @@ class TestFinishAudioResponse:
     def test_finish_with_cancel_status(self, service, conn_id):
         service.response._ensure_response(conn_id)
         events = service.finish_audio_response(conn_id, status="cancelled", reason="turn_detected")
-        assert len(events) == 3
-        assert isinstance(events[1], OutputAudioBufferCleared)
-        done = events[2]
+        done = events[1]
         assert done.response.status == "cancelled"
         assert done.response.status_details.reason == "turn_detected"
 
@@ -657,7 +654,6 @@ class TestDispatchPipelineEvent:
         )
         cancel_events = [e for e in events if isinstance(e, (ResponseAudioDoneEvent, ResponseDoneEvent))]
         assert len(cancel_events) == 2
-        assert any(isinstance(e, OutputAudioBufferCleared) for e in events)
         done = [e for e in cancel_events if isinstance(e, ResponseDoneEvent)][0]
         assert done.response.status == "cancelled"
         assert done.response.status_details.reason == "turn_detected"

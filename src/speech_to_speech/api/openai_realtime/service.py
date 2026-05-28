@@ -26,7 +26,6 @@ from openai.types.realtime import (
     SessionUpdateEvent,
 )
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
-from openai.types.realtime.realtime_server_event import OutputAudioBufferCleared
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from speech_to_speech.api.openai_realtime.handlers import (
@@ -89,7 +88,6 @@ ServerEvent = Union[
     ResponseDoneEvent,
     ResponseAudioDeltaEvent,
     ResponseAudioDoneEvent,
-    OutputAudioBufferCleared,
     ResponseAudioTranscriptDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
 ]
