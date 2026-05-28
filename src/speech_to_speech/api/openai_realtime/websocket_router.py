@@ -483,8 +483,10 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                         except Empty:
                             break
 
-                        if _is_pipeline_end(next_chunk) or _is_audio_done(next_chunk) or is_control_message(
-                            next_chunk, SESSION_END.kind
+                        if (
+                            _is_pipeline_end(next_chunk)
+                            or _is_audio_done(next_chunk)
+                            or is_control_message(next_chunk, SESSION_END.kind)
                         ):
                             # Only stash if we still have a session; otherwise drop it.
                             if session is not None:

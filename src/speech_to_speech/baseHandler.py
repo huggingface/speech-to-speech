@@ -8,6 +8,8 @@ from threading import Event
 from time import perf_counter
 from typing import Any, Generic, Iterator, TypeVar, cast
 
+import numpy as np
+
 from speech_to_speech.pipeline.control import PipelineControlMessage, is_control_message, SESSION_END
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import PIPELINE_END, AudioOutput, EndOfResponse
@@ -75,7 +77,8 @@ class BaseHandler(Generic[InT, OutT]):
     def output_for_queue(self, output: OutT, source_input: InT) -> OutT | AudioOutput:
         cancel_generation = getattr(source_input, "cancel_generation", None)
         if cancel_generation is not None and (isinstance(output, bytes) or hasattr(output, "tobytes")):
-            return AudioOutput(audio=output, cancel_generation=cancel_generation)
+            audio = cast(bytes | np.ndarray, output)
+            return AudioOutput(audio=audio, cancel_generation=cancel_generation)
         return output
 
     def run(self) -> None:
@@ -124,7 +127,11 @@ class BaseHandler(Generic[InT, OutT]):
                     if self.should_log_timing(output):
                         logger.log(self.timing_log_level, "%s: %.3f s", self.__class__.__name__, self.last_time)
                     self.before_emit_output(output)
-                    self.queue_out.put(self.output_for_queue(output, typed_item))
+                    queued_output = cast(
+                        OutT | PipelineControlMessage | bytes,
+                        self.output_for_queue(output, typed_item),
+                    )
+                    self.queue_out.put(queued_output)
                     start_time = perf_counter()
             except Exception as e:
                 logger.error(f"{self.__class__.__name__}: Error in process(): {type(e).__name__}: {e}", exc_info=True)

@@ -748,7 +748,9 @@ def get_stt_handler(
     mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments,
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
 ) -> BaseHandler[STTIn, STTOut]:
-    def with_speculative_turns(handler: BaseHandler[STTIn, STTOut]) -> BaseHandler[STTIn, STTOut]:
+    from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+
+    def with_speculative_turns(handler: BaseSTTHandler) -> BaseSTTHandler:
         if speculative_turns is not None:
             handler.speculative_turns = speculative_turns
         return handler
