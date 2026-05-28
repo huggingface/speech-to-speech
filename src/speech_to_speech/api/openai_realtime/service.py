@@ -149,6 +149,7 @@ class ConnState(BaseModel):
     conversation_id: str = Field(default_factory=lambda: _generate_id("conv"))
     runtime_config: RuntimeConfig = Field(default_factory=RuntimeConfig)
     in_response: bool = False
+    response_pending: bool = False
     audio_buffer_has_data: bool = False
     audio_remainder: bytes = b""
     current_response_id: Optional[str] = None
@@ -414,6 +415,7 @@ class RealtimeService:
 
         queue = self.text_prompt_queue
         if queue and transcript:
+            st.response_pending = True
             queue.put(
                 GenerateResponseRequest(
                     runtime_config=cfg,

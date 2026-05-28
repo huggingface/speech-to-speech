@@ -391,6 +391,46 @@ class TestSendLoop:
                 time.sleep(0.15)
                 assert not cancel_scope.discarding
 
+    def test_speech_started_cancels_pending_implicit_response(self, setup):
+        app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                stale_generation = cancel_scope.generation
+                service._state(conn_id).response_pending = True
+
+                text_output_queue.put(SpeechStartedEvent())
+                msg = ws.receive_json()
+
+                assert msg["type"] == "input_audio_buffer.speech_started"
+                time.sleep(0.15)
+                assert cancel_scope.discarding
+                assert cancel_scope.generation == stale_generation + 1
+                assert service._state(conn_id).response_pending is False
+                assert service._state(conn_id).in_response is False
+                assert not response_playing.is_set()
+
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=stale_generation))
+                time.sleep(0.15)
+                assert not cancel_scope.discarding
+
+    def test_speech_started_does_not_cancel_pending_when_internal_non_interrupt(self, setup):
+        app, service, _, _, text_output_queue, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                service._state(conn_id).response_pending = True
+
+                text_output_queue.put(SpeechStartedEvent(interrupt_response=False))
+                msg = ws.receive_json()
+
+                assert msg["type"] == "input_audio_buffer.speech_started"
+                time.sleep(0.15)
+                assert not cancel_scope.discarding
+                assert service._state(conn_id).response_pending is True
+
     def test_stale_tagged_audio_is_dropped_after_interruption(self, setup):
         app, _, _, output_queue, _, _, _, _, cancel_scope = setup
         with TestClient(app) as client:

@@ -1007,6 +1007,7 @@ class TestDispatchPipelineEvent:
         assert evt.transcript == "hello world"
         assert evt.usage.seconds == 3.2
         assert evt.usage.type == "duration"
+        assert service._state(conn_id).response_pending is True
 
     def test_empty_transcription_completed_emits_event_without_response(
         self,
@@ -1032,6 +1033,7 @@ class TestDispatchPipelineEvent:
         assert evt.usage.seconds == 1.1
         assert text_prompt_queue.empty()
         assert runtime_config.chat.buffer == []
+        assert service._state(conn_id).response_pending is False
 
     def test_revised_transcription_replaces_speculative_user_message(self, runtime_config, should_listen):
         text_prompt_queue = Queue()

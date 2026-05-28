@@ -40,6 +40,7 @@ class ResponseHandler(RealtimeBaseHandler):
             st.current_response_id = _generate_id("resp")
             self._start_item(conn_id)
             st.in_response = True
+        st.response_pending = False
         return st.current_response_id, self._current_item_id(conn_id)
 
     def _end_response(self, conn_id: str, status: _ResponseStatus = "completed") -> None:
@@ -65,6 +66,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_item_id = None
         st.content_index = 0
         st.in_response = False
+        st.response_pending = False
         st.current_response_params = None
 
     def _start_item(self, conn_id: str) -> str:
@@ -153,6 +155,7 @@ class ResponseHandler(RealtimeBaseHandler):
                     return self.make_error(message=str(exc), _type="invalid_input_item")
 
         st.in_response = True
+        st.response_pending = False
 
         st.current_response_params = event.response
         st.current_response_id = _generate_id("resp")

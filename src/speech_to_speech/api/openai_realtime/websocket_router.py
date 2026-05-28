@@ -406,8 +406,11 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                     is_speech_start = isinstance(text_msg, SpeechStartedEvent)
 
                     was_in_response = False
+                    was_response_pending = False
                     if is_speech_start and session_id:
-                        was_in_response = unit.service._state(session_id).in_response
+                        st = unit.service._state(session_id)
+                        was_in_response = st.in_response
+                        was_response_pending = st.response_pending
 
                     if unit.cancel_scope.discarding and isinstance(text_msg, AssistantTextEvent):
                         pass
@@ -416,15 +419,23 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                         if events:
                             await _send_events(ws, events)
 
-                    if is_speech_start and was_in_response:
+                    if is_speech_start and (was_in_response or was_response_pending):
                         active_cfg = unit.service._state(session_id).runtime_config if session_id else None
-                        if active_cfg is None or active_cfg.interrupt_response_enabled:
+                        if text_msg.interrupt_response and (
+                            active_cfg is None or active_cfg.interrupt_response_enabled
+                        ):
                             unit.cancel_scope.cancel()
+                            if session_id:
+                                unit.service._state(session_id).response_pending = False
                             _flush_queue(unit.output_queue, preserve=_keep_audio_sentinel)
                             _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
                             if unit.response_playing.is_set():
                                 unit.response_playing.clear()
-                            logger.info(f"Pipeline {unit.index}: speech during response: cancelled, queue flushed")
+                            logger.info(
+                                "Pipeline %d: speech during %s: cancelled, queue flushed",
+                                unit.index,
+                                "response" if was_in_response else "pending response",
+                            )
                         else:
                             logger.info(
                                 f"Pipeline {unit.index}: speech during response: interrupt_response disabled, ignoring"
@@ -447,12 +458,16 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                     if _is_audio_done(audio_chunk):
                         audio_generation = _audio_generation(audio_chunk)
                         if audio_generation is not None and unit.cancel_scope.is_stale(audio_generation):
+                            if session_id:
+                                unit.service._state(session_id).response_pending = False
                             unit.cancel_scope.response_done(audio_generation)
                             unit.should_listen.set()
                             logger.info(f"Pipeline {unit.index}: stale response complete, listening re-enabled")
                             continue
                         if ws is not None and session_id:
                             await _send_events(ws, unit.service.finish_audio_response(session_id))
+                        if session_id:
+                            unit.service._state(session_id).response_pending = False
                         unit.response_playing.clear()
                         unit.cancel_scope.response_done(audio_generation)
                         unit.should_listen.set()

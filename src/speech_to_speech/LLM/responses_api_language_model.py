@@ -94,6 +94,9 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
     def _turn_is_latest(self, turn_id: str | None, turn_revision: int | None) -> bool:
         return self.speculative_turns is None or self.speculative_turns.is_latest(turn_id, turn_revision)
 
+    def _generation_is_stale(self, gen: int | None) -> bool:
+        return gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen)
+
     def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
         if self.speculative_turns is None:
             return True
@@ -257,7 +260,9 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                         sentence_batch.append(printable_text.strip())
                     remaining = " ".join(sentence_batch)
                     if remaining or tools:
-                        if not self._turn_output_allowed(turn_id, turn_revision):
+                        if self._generation_is_stale(gen):
+                            logger.info("LLM generation cancelled (interruption)")
+                        elif not self._turn_output_allowed(turn_id, turn_revision):
                             logger.info("LLM generation cancelled (stale speculative turn)")
                         else:
                             logger.debug(f"Clean text: {clean_text}")
@@ -319,7 +324,9 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     logger.debug(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
                     if clean_text.strip() or tools:
-                        if not self._turn_output_allowed(turn_id, turn_revision):
+                        if self._generation_is_stale(gen):
+                            logger.info("LLM generation cancelled (interruption)")
+                        elif not self._turn_output_allowed(turn_id, turn_revision):
                             logger.info("LLM generation cancelled (stale speculative turn)")
                         else:
                             yield LLMResponseChunk(
@@ -338,7 +345,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                 "OpenAI API read timed out after %.1fs; ending the current response",
                 self.request_timeout_s,
             )
-            if self._turn_output_allowed(turn_id, turn_revision):
+            if not self._generation_is_stale(gen) and self._turn_output_allowed(turn_id, turn_revision):
                 yield LLMResponseChunk(
                     text="Wow I'm a bit slow today, could you repeat that?",
                     runtime_config=runtime_config,
@@ -355,7 +362,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                 except Exception:
                     pass
 
-        if self._turn_output_allowed(turn_id, turn_revision):
+        if not self._generation_is_stale(gen) and self._turn_output_allowed(turn_id, turn_revision):
             for item in pending_chat_items:
                 original_chat.add_item(item)
             original_chat.strip_images()
