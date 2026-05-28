@@ -382,9 +382,11 @@ class TestSendLoop:
                 response_playing.set()
                 # Trigger barge-in
                 text_output_queue.put(SpeechStartedEvent())
-                ws.receive_json()  # input_audio_buffer.speech_started
                 ws.receive_json()  # response.output_audio.done
+                clear_event = ws.receive_json()
+                assert clear_event["type"] == "output_audio_buffer.cleared"
                 ws.receive_json()  # response.done
+                ws.receive_json()  # input_audio_buffer.speech_started
                 time.sleep(0.1)
                 assert cancel_scope.discarding
                 output_queue.put(AUDIO_RESPONSE_DONE)

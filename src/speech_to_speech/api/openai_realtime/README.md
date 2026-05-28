@@ -77,6 +77,7 @@ flowchart LR
 | `response.created` | Emitted on the first outbound audio chunk (response is `in_progress`). |
 | `response.output_audio.delta` | Base64 PCM audio chunk from TTS. |
 | `response.output_audio.done` | Audio stream complete for the current output item. |
+| `output_audio_buffer.cleared` | Server-side VAD interruption cleared already-buffered assistant audio. |
 | `response.output_audio_transcript.done` | Full assistant text transcript for the turn. |
 | `response.function_call_arguments.done` | Tool call with `call_id`, `name`, and JSON `arguments`. |
 | `response.done` | Response finished (`completed`, `cancelled` with reason `turn_detected` or `client_cancelled`). |
@@ -143,8 +144,10 @@ sequenceDiagram
     Note over TTS,Client: Assistant audio is playing (response_playing=set)
     User->>VAD: speaks
     VAD->>SendLoop: speech_started on text_output_queue
-    SendLoop->>Client: input_audio_buffer.speech_started
+    SendLoop->>Client: response.output_audio.done
+    SendLoop->>Client: output_audio_buffer.cleared
     SendLoop->>Client: response.done (status=cancelled, reason=turn_detected)
+    SendLoop->>Client: input_audio_buffer.speech_started
     SendLoop->>SendLoop: cancel_scope.cancel() (gen++ & discarding=True)
     SendLoop->>SendLoop: flush output_queue + text_output_queue
     SendLoop->>SendLoop: response_playing.clear()
@@ -158,7 +161,7 @@ sequenceDiagram
 **Step by step:**
 
 1. **VAD detects speech**: puts `{"type": "speech_started"}` on `text_output_queue`.
-2. **`_send_loop` processes text events first** (priority over audio): translates `speech_started` into protocol events. If an active response was in progress, `RealtimeService.dispatch_pipeline_event` emits `response.output_audio.done` + `response.done` with `status="cancelled"` and `reason="turn_detected"`.
+2. **`_send_loop` processes text events first** (priority over audio): translates `speech_started` into protocol events. If an active response was in progress, `RealtimeService.dispatch_pipeline_event` emits `response.output_audio.done`, `output_audio_buffer.cleared`, and `response.done` with `status="cancelled"` and `reason="turn_detected"`, followed by `input_audio_buffer.speech_started` for the new user turn.
 3. **Cancel + queue flush**: if `response_playing` is set, the send loop calls `cancel_scope.cancel()` (increments generation, enables discard), drains both `output_queue` (preserving `__RESPONSE_DONE__` sentinels) and `text_output_queue`, then clears `response_playing`.
 4. **LLM/TTS cancellation**: handlers capture `gen = cancel_scope.generation` at the start of each response and check `cancel_scope.is_stale(gen)` on every streaming token, aborting early when stale.
 5. **Discard guard**: while `cancel_scope.discarding` is True, the send loop silently drops stale audio chunks and assistant text. The guard clears when `__RESPONSE_DONE__` arrives (via `cancel_scope.response_done()`).

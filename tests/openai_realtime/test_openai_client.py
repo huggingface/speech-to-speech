@@ -148,6 +148,7 @@ RESPONSE_CREATED = "response.created"
 RESPONSE_DONE = "response.done"
 AUDIO_DELTA = "response.output_audio.delta"
 AUDIO_DONE = "response.output_audio.done"
+OUTPUT_AUDIO_BUFFER_CLEARED = "output_audio_buffer.cleared"
 TRANSCRIPT_DONE = "response.output_audio_transcript.done"
 FUNCTION_CALL_DONE = "response.function_call_arguments.done"
 ERROR = "error"
@@ -308,11 +309,12 @@ class TestSDKBargeIn:
             server_env.text_output_queue.put(SpeechStartedEvent())
 
             events = []
-            for _ in range(3):
+            for _ in range(4):
                 events.append(await _recv(conn))
 
             types = [e.type for e in events]
             assert AUDIO_DONE in types
+            assert OUTPUT_AUDIO_BUFFER_CLEARED in types
             assert RESPONSE_DONE in types
             assert SPEECH_STARTED in types
 
@@ -336,11 +338,12 @@ class TestSDKBargeIn:
             server_env.text_output_queue.put(AssistantTextEvent(text="stale response text"))
 
             events = []
-            for _ in range(3):
+            for _ in range(4):
                 events.append(await _recv(conn))
 
             types = [e.type for e in events]
             assert AUDIO_DONE in types
+            assert OUTPUT_AUDIO_BUFFER_CLEARED in types
             assert RESPONSE_DONE in types
             assert SPEECH_STARTED in types
 
@@ -412,11 +415,12 @@ class TestSDKInterruptionState:
 
             server_env.text_output_queue.put(SpeechStartedEvent())
             events = []
-            for _ in range(3):
+            for _ in range(4):
                 events.append(await _recv(conn))
 
             types = [e.type for e in events]
             assert SPEECH_STARTED in types
+            assert OUTPUT_AUDIO_BUFFER_CLEARED in types
             assert RESPONSE_DONE in types
 
             await asyncio.sleep(0.1)
@@ -647,9 +651,10 @@ class TestSDKMultiTurn:
             # Barge-in
             server_env.text_output_queue.put(SpeechStartedEvent())
             events = []
-            for _ in range(3):
+            for _ in range(4):
                 events.append(await _recv(conn))
 
+            assert OUTPUT_AUDIO_BUFFER_CLEARED in [e.type for e in events]
             t1_done = next(e for e in events if e.type == RESPONSE_DONE)
 
             # Simulate pipeline acknowledging cancellation so discard guard clears

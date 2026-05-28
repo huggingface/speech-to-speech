@@ -76,7 +76,9 @@ class ListenAndPlayRealtimeArguments:
     )
     block_mic_during_playback: bool = field(
         default=False,
-        metadata={"help": "If set, pause microphone capture while speaker audio is playing. Disabled by default so barge-in works."},
+        metadata={
+            "help": "If set, pause microphone capture while speaker audio is playing. Disabled by default so barge-in works."
+        },
     )
 
 
@@ -256,6 +258,8 @@ async def listen_and_play_realtime(args: ListenAndPlayRealtimeArguments) -> None
                 speaker_active_until[0] = time.monotonic() + max(0.15, len(audio) / (2 * args.recv_rate))
             elif event.type == "response.output_audio.done":
                 print("ASSISTANT: <audio done>", flush=True)
+            elif event.type == "output_audio_buffer.cleared":
+                clear_playback_buffer()
             elif event.type == "response.output_audio_transcript.done":
                 print(f"ASSISTANT: {event.transcript}", flush=True)
             elif event.type == "response.function_call_arguments.done":
@@ -347,9 +351,7 @@ def main() -> None:
     parser.add_argument(
         "--voice",
         default=defaults.voice,
-        help=(
-            "session.audio.output.voice (Kokoro id like bm_fable, or OpenAI name like marin)."
-        ),
+        help=("session.audio.output.voice (Kokoro id like bm_fable, or OpenAI name like marin)."),
     )
     parser.add_argument("--print-json", action="store_true", default=defaults.print_json)
     parser.add_argument(

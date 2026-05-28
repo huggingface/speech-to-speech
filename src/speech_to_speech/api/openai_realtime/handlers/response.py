@@ -15,6 +15,7 @@ from openai.types.realtime import (
 from openai.types.realtime.realtime_response import Audio, AudioOutput
 from openai.types.realtime.realtime_response_status import RealtimeResponseStatus
 from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
+from openai.types.realtime.realtime_server_event import OutputAudioBufferCleared
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
 from speech_to_speech.LLM.chat import ChatItemError
@@ -210,6 +211,14 @@ class ResponseHandler(RealtimeBaseHandler):
                     response_id=resp_id,
                 )
             )
+            if status == "cancelled" and reason == "turn_detected":
+                events.append(
+                    OutputAudioBufferCleared(
+                        type="output_audio_buffer.cleared",
+                        event_id=self._next_event_id(),
+                        response_id=resp_id,
+                    )
+                )
             events.append(
                 ResponseDoneEvent(
                     type="response.done",
