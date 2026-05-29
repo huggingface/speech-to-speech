@@ -4,7 +4,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Sized
 from queue import Empty
-from threading import Lock, Thread
+from threading import Lock, Thread, local
 from typing import Any, Literal, Optional, Protocol, runtime_checkable
 
 import torch
@@ -656,10 +656,43 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
     gen_kwargs: dict
     torch_dtype: torch.dtype
     streamer: TextIteratorStreamer
+    # MLX-VLM deferred-load state (set in _load_model when backend == "mlx")
+    _mlx_vlm_model_name: str
+    _mlx_vlm_loaded: bool
+    _mlx_vlm_tls: local
 
     def setup(self, **kwargs: Any) -> None:  # type: ignore[override]
         super().setup(**kwargs)
         logger.info(f"VLM Backend: {self.backend}")
+
+    def run(self) -> None:  # type: ignore[override]
+        """Eagerly prepare MLX VLM on the worker thread before the message loop starts."""
+        if self.backend == "mlx" and not self._mlx_vlm_loaded:
+            try:
+                with MLXLockContext(handler_name="MLX-VLM-prep", timeout=30.0):
+                    self._ensure_mlx_vlm_ready()
+            except Exception as e:
+                logger.error("Eager MLX VLM load failed: %s", e, exc_info=True)
+        super().run()
+
+    def _ensure_mlx_vlm_ready(self) -> Any:
+        """Load the model (once, on this thread) and point mlx_vlm's generation stream here.
+
+        MLX binds streams and parts of model state to their creating thread, so loading must
+        happen on the worker thread, and the module-global stream must be re-pointed per call
+        (always under ``MLXLockContext``) to support ``--num_pipelines > 1``.
+        """
+        if not self._mlx_vlm_loaded:
+            self.model, self.processor = mlx_vlm_load(self._mlx_vlm_model_name)  # type: ignore[assignment]
+            self.tokenizer = self.processor.tokenizer  # type: ignore[assignment]
+            self._mlx_vlm_loaded = True
+            logger.info("Loaded MLX VLM model %s on worker thread", self._mlx_vlm_model_name)
+        if not hasattr(self._mlx_vlm_tls, "stream"):
+            self._mlx_vlm_tls.stream = mx.new_stream(mx.gpu)
+        import sys
+
+        sys.modules["mlx_vlm.generate"].generation_stream = self._mlx_vlm_tls.stream  # type: ignore[attr-defined]
+        return self._mlx_vlm_tls.stream
 
     def _load_model(self, model_name: str, device: str, torch_dtype: str, gen_kwargs: dict[str, Any]) -> None:
 
@@ -668,8 +701,16 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
         if self.backend == "mlx":
             if not HAS_MLX_VLM:
                 raise ImportError("mlx-vlm is required for MLX VLM models. Install with: pip install mlx-vlm")
-            self.model, self.processor = mlx_vlm_load(model_name)  # type: ignore[assignment]
-            self.tokenizer = self.processor.tokenizer  # type: ignore[assignment]
+            # Deferred load — see _ensure_mlx_vlm_ready. self.model / self.processor /
+            # self.tokenizer get populated on the first generation call (worker thread).
+            # Compaction's closures reference self.X lazily, so they pick up the loaded
+            # values once generation has run at least once.
+            self._mlx_vlm_model_name = model_name
+            self._mlx_vlm_loaded = False
+            self._mlx_vlm_tls = local()
+            self.model = None  # type: ignore[assignment]
+            self.processor = None  # type: ignore[assignment]
+            self.tokenizer = None  # type: ignore[assignment]
             self.gen_kwargs = gen_kwargs
         else:
             self.torch_dtype = getattr(torch, torch_dtype)
@@ -703,16 +744,18 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             logger.debug("MLX VLM prompt token count: %d", ctx.input_tokens)
 
             with MLXLockContext(handler_name="MLX-VLM", timeout=10.0):
-                token_iter = mlx_vlm_stream_generate(  # type: ignore[arg-type]
-                    self.model,
-                    self.processor,
-                    formatted_prompt,
-                    images or None,
-                    max_tokens=self.gen_kwargs.get("max_new_tokens", 1024),
-                    enable_thinking=self.enable_thinking,
-                )
-                yield from self._stream_tokens(token_iter, gen, language_code, ctx, runtime_config, response)
-                self._finish_mlx_generation(token_iter)
+                stream = self._ensure_mlx_vlm_ready()
+                with mx.stream(stream):
+                    token_iter = mlx_vlm_stream_generate(  # type: ignore[arg-type]
+                        self.model,
+                        self.processor,
+                        formatted_prompt,
+                        images or None,
+                        max_tokens=self.gen_kwargs.get("max_new_tokens", 1024),
+                        enable_thinking=self.enable_thinking,
+                    )
+                    yield from self._stream_tokens(token_iter, gen, language_code, ctx, runtime_config, response)
+                    self._finish_mlx_generation(token_iter)
             try:
                 mx.clear_cache()
             except Exception:
@@ -745,21 +788,21 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
 
     def _build_compaction_generate_fn(self) -> CompactGenerateFn:
         if self.backend == "mlx":
-            model = self.model
-            processor = self.processor
-            tokenizer = self.tokenizer
             max_tokens = 1024
 
             def generate_mlx(system: str, user: str) -> str:
                 messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-                formatted_prompt = processor.apply_chat_template(  # type: ignore[union-attr]
+                formatted_prompt = self.processor.apply_chat_template(  # type: ignore[union-attr]
                     messages, tokenize=False, add_generation_prompt=True
                 )
+                # Compaction runs on a background thread, so install this thread's stream too.
                 with MLXLockContext(handler_name="MLX-VLM-compact", timeout=10.0):
-                    token_iter = mlx_vlm_stream_generate(  # type: ignore[arg-type]
-                        model, processor, formatted_prompt, None, max_tokens=max_tokens
-                    )
-                    return "".join(t.text if hasattr(t, "text") else str(t) for t in token_iter)
+                    stream = self._ensure_mlx_vlm_ready()
+                    with mx.stream(stream):
+                        token_iter = mlx_vlm_stream_generate(  # type: ignore[arg-type]
+                            self.model, self.processor, formatted_prompt, None, max_tokens=max_tokens
+                        )
+                        return "".join(t.text if hasattr(t, "text") else str(t) for t in token_iter)
 
             return generate_mlx
         else:
@@ -811,6 +854,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             converted_messages,
             tokenize=False,
             add_generation_prompt=True,
+            enable_thinking=self.enable_thinking,
         )
         inputs = self.processor(
             text=[text_prompt],
@@ -849,5 +893,6 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             converted_messages,
             tokenize=False,
             add_generation_prompt=True,
+            enable_thinking=self.enable_thinking,
         )
         return images, formatted_prompt
