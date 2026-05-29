@@ -583,7 +583,7 @@ class Chat:
             fco_call_ids_in_range = {
                 x.call_id
                 for x in self.buffer
-                if x.id in marker_ids and isinstance(x, RealtimeConversationItemFunctionCallOutput)
+                if isinstance(x, RealtimeConversationItemFunctionCallOutput) and x.id in marker_ids
             }
             fc_ids_to_keep = {
                 x.id
