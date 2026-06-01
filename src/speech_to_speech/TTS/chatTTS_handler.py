@@ -14,6 +14,7 @@ from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -33,9 +34,11 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
         stream: bool = True,
         chunk_size: int = 512,
         cancel_scope: CancelScope | None = None,
+        speculative_turns: SpeculativeTurnTracker | None = None,
     ) -> None:
         self.should_listen = should_listen
         self.cancel_scope = cancel_scope
+        self.speculative_turns = speculative_turns
         self.device = device
         self.model = ChatTTS.Chat()
         self.model.load(compile=False)  # Doesn't work for me with True
@@ -52,9 +55,24 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
         _ = self.model.infer("text")
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
+        speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
+            if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
+                tts_input.turn_id,
+                tts_input.turn_revision,
+            ):
+                return
             yield AUDIO_RESPONSE_DONE
             return
+
+        if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
+            tts_input.turn_id,
+            tts_input.turn_revision,
+        ):
+            logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
+            return
+        if speculative_turns:
+            speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         text = tts_input.text
 

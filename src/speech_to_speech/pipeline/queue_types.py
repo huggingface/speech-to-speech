@@ -15,6 +15,7 @@ import numpy as np
 from speech_to_speech.pipeline.control import PipelineControlMessage
 from speech_to_speech.pipeline.events import PipelineEvent
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut, STTOut, TTSIn, VADIn, VADOut
+from speech_to_speech.pipeline.messages import AudioOutput
 
 # Use plain ``bytes`` for sentinel values on queues (``PIPELINE_END``, ``AUDIO_RESPONSE_DONE``).
 # ``Queue`` is invariant; ``Literal[b"END"]`` is not accepted where ``bytes`` is required.
@@ -39,7 +40,7 @@ LMOutItem: TypeAlias = LLMOut | PipelineInternalItem
 TTSInItem: TypeAlias = TTSIn | PipelineInternalItem
 
 # Audio outputs flowing to speakers / client (includes sentinels as bytes).
-AudioOutItem: TypeAlias = bytes | np.ndarray | PipelineControlMessage
+AudioOutItem: TypeAlias = bytes | np.ndarray | AudioOutput | PipelineControlMessage
 
 # Side-channel text events sent to websocket/realtime clients.
 TextEventItem: TypeAlias = PipelineEvent | PipelineInternalItem

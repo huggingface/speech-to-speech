@@ -31,6 +31,20 @@ CHUNK_SIZE_BYTES = CHUNK_SAMPLES * BYTES_PER_SAMPLE
 class AudioHandler(RealtimeBaseHandler):
     """Owns inbound audio decoding/chunking and outbound audio encoding."""
 
+    def _start_input_item(self, conn_id: str, *, preserve_active_response: bool = False) -> str:
+        response = self._service.response
+        st = self._state(conn_id)
+        if not preserve_active_response:
+            item_id = response._start_item(conn_id)
+        else:
+            response_item_id = st.current_item_id
+            response_content_index = st.content_index
+            item_id = response._start_item(conn_id)
+            st.current_item_id = response_item_id
+            st.content_index = response_content_index
+        st.input_content_index = 0
+        return item_id
+
     def handle_audio_append(self, conn_id: str, event: InputAudioBufferAppendEvent) -> list[bytes]:
         """Decode base64 audio, resample to pipeline rate, and split into 512-sample PCM16 chunks for the VAD."""
         try:
@@ -84,11 +98,33 @@ class AudioHandler(RealtimeBaseHandler):
         response = self._service.response
         events: list[ServerEvent] = []
         st = self._state(conn_id)
-        if st.in_response and st.runtime_config.interrupt_response_enabled:
+        if st.in_response and event.interrupt_response and st.runtime_config.interrupt_response_enabled:
             events.extend(response.finish_audio_response(conn_id, status="cancelled", reason="turn_detected"))
-        input_item_id = response._start_item(conn_id)
+        is_reopen = bool(event.reopened and event.turn_id is not None and event.turn_id == st.speculative_turn_id)
+        preserve_active_response = st.in_response
+        if is_reopen:
+            input_item_id = st.speculative_input_item_id
+            if input_item_id is None:
+                input_item_id = self._start_input_item(
+                    conn_id,
+                    preserve_active_response=preserve_active_response,
+                )
+                st.speculative_input_item_id = input_item_id
+            elif not preserve_active_response:
+                st.current_item_id = input_item_id
+                st.content_index = 0
+            st.input_audio_duration_s = 0.0
+            st.input_content_index = 0
+        else:
+            input_item_id = self._start_input_item(
+                conn_id,
+                preserve_active_response=preserve_active_response,
+            )
+            st.speculative_input_item_id = input_item_id
+            st.response_usage.turns += 1
+        st.speculative_turn_id = event.turn_id
+        st.speculative_turn_revision = event.turn_revision
         st.last_item_id = input_item_id
-        st.response_usage.turns += 1
         events.append(
             InputAudioBufferSpeechStartedEvent(
                 type="input_audio_buffer.speech_started",
@@ -101,7 +137,6 @@ class AudioHandler(RealtimeBaseHandler):
 
     def on_speech_stopped(self, conn_id: str, event: SpeechStoppedEvent) -> list[ServerEvent]:
         """Handle VAD speech_stopped: record duration and emit stopped event."""
-        response = self._service.response
         if event.duration_s:
             self._state(conn_id).input_audio_duration_s = event.duration_s
         return [
@@ -109,7 +144,7 @@ class AudioHandler(RealtimeBaseHandler):
                 type="input_audio_buffer.speech_stopped",
                 event_id=self._next_event_id(),
                 audio_end_ms=event.audio_end_ms,
-                item_id=response._current_item_id(conn_id),
+                item_id=self._input_item_id(conn_id),
             )
         ]
 

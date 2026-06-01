@@ -13,6 +13,7 @@ class CancelScope:
     def __init__(self) -> None:
         self._gen: int = 0
         self._discarding: bool = False
+        self._discarded_generation: int | None = None
 
     @property
     def generation(self) -> int:
@@ -27,17 +28,26 @@ class CancelScope:
         generation as stale) and enables the send-loop discard guard.
         """
         # prevent overflow... after 4 billion generations, we'll wrap around xD...
+        self._discarded_generation = self._gen
         self._gen = (self._gen + 1) & 0xFFFFFFFF
         self._discarding = True
 
-    def response_done(self) -> None:
+    def response_done(self, generation: int | None = None) -> None:
         """Pipeline acknowledged completion.  Clears the discard guard."""
+        if (
+            generation is not None
+            and self._discarded_generation is not None
+            and generation not in {self._discarded_generation, self._gen}
+        ):
+            return
         self._discarding = False
+        self._discarded_generation = None
 
     def new_response(self) -> None:
         """An explicit ``response.create`` starts a new response.
         Clears the discard guard."""
         self._discarding = False
+        self._discarded_generation = None
 
     def is_stale(self, gen: int) -> bool:
         """Return True if *gen* has been superseded by a ``cancel`` call."""
@@ -51,3 +61,4 @@ class CancelScope:
     def reset(self) -> None:
         """Clear discard state (e.g. on new session connect)."""
         self._discarding = False
+        self._discarded_generation = None

@@ -6,6 +6,9 @@ validated for correct type, attributes, and state transitions.
 
 import base64
 import json
+from queue import Queue
+from threading import Event, Thread
+from time import sleep
 
 import pytest
 from openai.types.realtime import (
@@ -31,6 +34,7 @@ from openai.types.realtime import (
 
 from speech_to_speech.api.openai_realtime.service import (
     CHUNK_SIZE_BYTES,
+    RealtimeService,
 )
 from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
@@ -41,6 +45,7 @@ from speech_to_speech.pipeline.events import (
     TranscriptionCompletedEvent,
 )
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -429,6 +434,32 @@ class TestHandleResponseCreate:
         assert req.response.tool_choice == "auto"
         assert req.runtime_config is runtime_config
 
+    def test_response_create_preserves_latest_user_turn_timing(self, service, conn_id, text_prompt_queue):
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(
+                transcript="hello",
+                language_code="en",
+                turn_id="turn_1",
+                turn_revision=2,
+                speech_stopped_at_s=123.0,
+            ),
+        )
+        initial_req = text_prompt_queue.get()
+        assert isinstance(initial_req, GenerateResponseRequest)
+        assert initial_req.turn_id == "turn_1"
+        assert initial_req.turn_revision == 2
+        assert initial_req.speech_stopped_at_s == 123.0
+
+        result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
+
+        assert isinstance(result, ResponseCreatedEvent)
+        followup_req = text_prompt_queue.get()
+        assert isinstance(followup_req, GenerateResponseRequest)
+        assert followup_req.turn_id == "turn_1"
+        assert followup_req.turn_revision == 2
+        assert followup_req.speech_stopped_at_s == 123.0
+
     def test_response_create_rejects_complex_tool_choice(self, service, conn_id, runtime_config):
         evt = ResponseCreateEvent(
             type="response.create",
@@ -646,7 +677,7 @@ class TestDispatchPipelineEvent:
             type="server_vad",
             interrupt_response=False,
         )
-        service.response._ensure_response(conn_id)
+        _, response_item_id = service.response._ensure_response(conn_id)
         events = service.dispatch_pipeline_event(
             conn_id,
             SpeechStartedEvent(),
@@ -654,6 +685,21 @@ class TestDispatchPipelineEvent:
         assert len(events) == 1
         assert isinstance(events[0], InputAudioBufferSpeechStartedEvent)
         assert service._state(conn_id).in_response is True
+        assert service._state(conn_id).current_item_id == response_item_id
+
+    def test_speech_started_internal_non_interrupt_does_not_cancel(self, service, conn_id):
+        _, response_item_id = service.response._ensure_response(conn_id)
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(interrupt_response=False),
+        )
+
+        assert len(events) == 1
+        assert isinstance(events[0], InputAudioBufferSpeechStartedEvent)
+        assert service._state(conn_id).in_response is True
+        assert service._state(conn_id).current_item_id == response_item_id
+        done_events = service.finish_audio_response(conn_id)
+        assert done_events[0].item_id == response_item_id
 
     def test_consecutive_speech_cycles_get_distinct_item_ids(self, service, conn_id):
         """Each speech_started/stopped cycle generates a new unique item_id."""
@@ -760,6 +806,174 @@ class TestDispatchPipelineEvent:
         assert isinstance(events[0], ResponseFunctionCallArgumentsDoneEvent)
         assert events[0].output_index == 0
 
+    def test_assistant_text_waits_for_pending_reopen_and_drops_confirmed_stale_turn(
+        self,
+        runtime_config,
+        should_listen,
+    ):
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+        tracker.observe("turn_1", 0)
+        candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+        done = Event()
+        result = {}
+
+        def dispatch():
+            result["events"] = service.dispatch_pipeline_event(
+                conn_id,
+                AssistantTextEvent(text="stale", turn_id="turn_1", turn_revision=0),
+            )
+            done.set()
+
+        thread = Thread(target=dispatch)
+        thread.start()
+
+        assert not done.wait(0.05)
+        assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+        assert done.wait(1.0)
+        thread.join(timeout=1.0)
+
+        assert result["events"] == []
+        assert service._state(conn_id).current_response_id is None
+        service.unregister(conn_id)
+
+    def test_assistant_text_waits_for_pending_reopen_and_emits_cancelled_reopen(
+        self,
+        runtime_config,
+        should_listen,
+    ):
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+        tracker.observe("turn_1", 0)
+        candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+        done = Event()
+        result = {}
+
+        def dispatch():
+            result["events"] = service.dispatch_pipeline_event(
+                conn_id,
+                AssistantTextEvent(text="latest", turn_id="turn_1", turn_revision=0),
+            )
+            done.set()
+
+        thread = Thread(target=dispatch)
+        thread.start()
+
+        assert not done.wait(0.05)
+        tracker.cancel_reopen_candidate("turn_1", candidate_revision)
+        assert done.wait(1.0)
+        thread.join(timeout=1.0)
+
+        assert len(result["events"]) == 1
+        assert isinstance(result["events"][0], ResponseAudioTranscriptDoneEvent)
+        assert result["events"][0].transcript == "latest"
+        assert tracker.is_committed("turn_1", 0)
+        service.unregister(conn_id)
+
+    def test_token_usage_waits_for_pending_reopen_and_drops_confirmed_stale_turn(
+        self,
+        runtime_config,
+        should_listen,
+    ):
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+        tracker.observe("turn_1", 0)
+        candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+        done = Event()
+        result = {}
+
+        def dispatch():
+            result["events"] = service.dispatch_pipeline_event(
+                conn_id,
+                TokenUsageEvent(input_tokens=10, output_tokens=5, turn_id="turn_1", turn_revision=0),
+            )
+            done.set()
+
+        thread = Thread(target=dispatch)
+        thread.start()
+
+        assert not done.wait(0.05)
+        assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+        assert done.wait(1.0)
+        thread.join(timeout=1.0)
+
+        assert result["events"] == []
+        assert service._state(conn_id).response_usage.input_tokens == 0
+        assert service._state(conn_id).response_usage.output_tokens == 0
+        service.unregister(conn_id)
+
+    def test_try_dispatch_assistant_text_defers_pending_reopen(self, runtime_config, should_listen):
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+        tracker.observe("turn_1", 0)
+        candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+
+        event = AssistantTextEvent(text="latest", turn_id="turn_1", turn_revision=0)
+
+        assert service.try_dispatch_pipeline_event(conn_id, event) is None
+        assert service._state(conn_id).current_response_id is None
+
+        tracker.cancel_reopen_candidate("turn_1", candidate_revision)
+        events = service.try_dispatch_pipeline_event(conn_id, event)
+
+        assert events is not None
+        assert len(events) == 1
+        assert isinstance(events[0], ResponseAudioTranscriptDoneEvent)
+        assert events[0].transcript == "latest"
+        assert tracker.is_committed("turn_1", 0)
+        service.unregister(conn_id)
+
+    def test_try_dispatch_assistant_text_defers_reopen_grace(self, runtime_config, should_listen):
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+        tracker.observe("turn_1", 0)
+        tracker.start_reopen_grace("turn_1", 0, grace_s=0.05)
+
+        event = AssistantTextEvent(text="latest", turn_id="turn_1", turn_revision=0)
+
+        assert service.should_defer_pipeline_event(event)
+        assert service.try_dispatch_pipeline_event(conn_id, event) is None
+        assert service._state(conn_id).current_response_id is None
+
+        sleep(0.06)
+        events = service.try_dispatch_pipeline_event(conn_id, event)
+
+        assert events is not None
+        assert len(events) == 1
+        assert isinstance(events[0], ResponseAudioTranscriptDoneEvent)
+        assert events[0].transcript == "latest"
+        assert tracker.is_committed("turn_1", 0)
+        service.unregister(conn_id)
+
+    def test_try_dispatch_token_usage_defers_pending_reopen(self, runtime_config, should_listen):
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+        tracker.observe("turn_1", 0)
+        candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+
+        event = TokenUsageEvent(input_tokens=10, output_tokens=5, turn_id="turn_1", turn_revision=0)
+
+        assert service.try_dispatch_pipeline_event(conn_id, event) is None
+        assert service._state(conn_id).response_usage.input_tokens == 0
+
+        assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+        assert service.try_dispatch_pipeline_event(conn_id, event) == []
+        assert service._state(conn_id).response_usage.input_tokens == 0
+        assert service._state(conn_id).response_usage.output_tokens == 0
+        service.unregister(conn_id)
+
     # -- partial_transcription --
 
     def test_partial_transcription_emits_delta(self, service, conn_id):
@@ -797,6 +1011,7 @@ class TestDispatchPipelineEvent:
         assert evt.transcript == "hello world"
         assert evt.usage.seconds == 3.2
         assert evt.usage.type == "duration"
+        assert service._state(conn_id).response_pending is True
 
     def test_empty_transcription_completed_emits_event_without_response(
         self,
@@ -822,6 +1037,170 @@ class TestDispatchPipelineEvent:
         assert evt.usage.seconds == 1.1
         assert text_prompt_queue.empty()
         assert runtime_config.chat.buffer == []
+        assert service._state(conn_id).response_pending is False
+
+    def test_revised_transcription_replaces_speculative_user_message(self, runtime_config, should_listen):
+        text_prompt_queue = Queue()
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(
+            text_prompt_queue=text_prompt_queue,
+            should_listen=should_listen,
+            speculative_turns=tracker,
+        )
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=1.0, turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="hello", turn_id="turn_1", turn_revision=0),
+        )
+
+        tracker.observe("turn_1", 1)
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=2.0, turn_id="turn_1", turn_revision=1),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="hello again", turn_id="turn_1", turn_revision=1),
+        )
+
+        user_items = [item for item in runtime_config.chat.buffer if getattr(item, "role", None) == "user"]
+        assert len(user_items) == 1
+        assert user_items[0].content[0].text == "hello again"
+        first_req = text_prompt_queue.get_nowait()
+        second_req = text_prompt_queue.get_nowait()
+        assert first_req.turn_revision == 0
+        assert second_req.turn_revision == 1
+        assert service._state(conn_id).response_usage.audio_duration_s == 2.0
+        service.unregister(conn_id)
+
+    def test_empty_revised_transcription_removes_speculative_user_message(self, runtime_config, should_listen):
+        text_prompt_queue = Queue()
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(
+            text_prompt_queue=text_prompt_queue,
+            should_listen=should_listen,
+            speculative_turns=tracker,
+        )
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=1.0, turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="hello", turn_id="turn_1", turn_revision=0),
+        )
+
+        tracker.observe("turn_1", 1)
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=2.0, turn_id="turn_1", turn_revision=1),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="", turn_id="turn_1", turn_revision=1),
+        )
+
+        user_items = [item for item in runtime_config.chat.buffer if getattr(item, "role", None) == "user"]
+        assert user_items == []
+        first_req = text_prompt_queue.get_nowait()
+        assert first_req.turn_revision == 0
+        assert text_prompt_queue.empty()
+        assert service._state(conn_id).response_usage.audio_duration_s == 2.0
+        service.unregister(conn_id)
+
+    def test_empty_first_revision_tracks_audio_for_later_nonempty_reopen(self, runtime_config, should_listen):
+        text_prompt_queue = Queue()
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(
+            text_prompt_queue=text_prompt_queue,
+            should_listen=should_listen,
+            speculative_turns=tracker,
+        )
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=1.0, turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="", turn_id="turn_1", turn_revision=0),
+        )
+
+        tracker.observe("turn_1", 1)
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=2.0, turn_id="turn_1", turn_revision=1),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="hello again", turn_id="turn_1", turn_revision=1),
+        )
+
+        user_items = [item for item in runtime_config.chat.buffer if getattr(item, "role", None) == "user"]
+        assert len(user_items) == 1
+        assert user_items[0].content[0].text == "hello again"
+        req = text_prompt_queue.get_nowait()
+        assert req.turn_revision == 1
+        assert text_prompt_queue.empty()
+        assert service._state(conn_id).response_usage.audio_duration_s == 2.0
+        service.unregister(conn_id)
+
+    def test_stale_transcription_revision_is_ignored(self, runtime_config, should_listen):
+        text_prompt_queue = Queue()
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(
+            text_prompt_queue=text_prompt_queue,
+            should_listen=should_listen,
+            speculative_turns=tracker,
+        )
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+        tracker.observe("turn_1", 1)
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="stale", turn_id="turn_1", turn_revision=0),
+        )
+
+        assert events == []
+        assert runtime_config.chat.buffer == []
+        assert text_prompt_queue.empty()
+        service.unregister(conn_id)
 
     # -- unknown --
 

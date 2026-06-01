@@ -30,12 +30,18 @@ class PipelineEvent(BaseModel):
 class SpeechStartedEvent(PipelineEvent):
     type: Literal["speech_started"] = "speech_started"
     audio_start_ms: int = 0
+    turn_id: str | None = None
+    turn_revision: int | None = None
+    reopened: bool = False
+    interrupt_response: bool = Field(default=True, exclude=True)
 
 
 class SpeechStoppedEvent(PipelineEvent):
     type: Literal["speech_stopped"] = "speech_stopped"
     duration_s: float = 0.0
     audio_end_ms: int = 0
+    turn_id: str | None = None
+    turn_revision: int | None = None
 
 
 # ── Transcription events (TranscriptionNotifier) ─────────────────────
@@ -44,12 +50,17 @@ class SpeechStoppedEvent(PipelineEvent):
 class PartialTranscriptionEvent(PipelineEvent):
     type: Literal["partial_transcription"] = "partial_transcription"
     delta: str
+    turn_id: str | None = None
+    turn_revision: int | None = None
 
 
 class TranscriptionCompletedEvent(PipelineEvent):
     type: Literal["transcription_completed"] = "transcription_completed"
     transcript: str
     language_code: Optional[str] = None
+    turn_id: str | None = None
+    turn_revision: int | None = None
+    speech_stopped_at_s: float | None = Field(default=None, exclude=True)
 
 
 # ── LLM output events (LMOutputProcessor) ────────────────────────────
@@ -59,9 +70,13 @@ class AssistantTextEvent(PipelineEvent):
     type: Literal["assistant_text"] = "assistant_text"
     text: str
     tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
+    turn_id: str | None = None
+    turn_revision: int | None = None
 
 
 class TokenUsageEvent(PipelineEvent):
     type: Literal["token_usage"] = "token_usage"
     input_tokens: int = 0
     output_tokens: int = 0
+    turn_id: str | None = None
+    turn_revision: int | None = None

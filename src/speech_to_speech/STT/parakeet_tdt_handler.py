@@ -14,14 +14,16 @@ import logging
 from contextlib import contextmanager
 from sys import platform
 from threading import Lock
+from time import perf_counter
 from typing import Any, Iterator, Optional
 
 import numpy as np
 from rich.console import Console
+from rich.text import Text
 
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
+from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.STT.smart_progressive_streaming import PartialTranscription as ProgressiveStreamPartial
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 
@@ -86,7 +88,7 @@ if LINGUA_AVAILABLE:
     _lingua_detector = _build_lingua_detector()
 
 
-class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
+class ParakeetTDTSTTHandler(BaseSTTHandler):
     """
     Handles Speech-to-Text using NVIDIA Parakeet TDT model.
 
@@ -105,7 +107,7 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
         language: Optional[str] = None,
         gen_kwargs: dict[str, Any] = {},
         enable_live_transcription: bool = False,
-        live_transcription_update_interval: float = 0.25,
+        live_transcription_update_interval: float = 0.5,
     ) -> None:
         """
         Initialize the Parakeet TDT model.
@@ -125,6 +127,7 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
         self.enable_live_transcription = enable_live_transcription
         self.live_transcription_update_interval = live_transcription_update_interval
         self.compute_lock = Lock()
+        self.sample_rate = 16000
 
         # Determine device
         if device == "auto":
@@ -169,6 +172,8 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
             )
             self.processing_final = False  # Track if we're processing final audio
             logger.info(f"Live transcription enabled for Parakeet TDT ({self.backend})")
+        self._live_transcription_active = False
+        self._live_turn_key: tuple[str | None, int | None] | None = None
 
         self.warmup()
 
@@ -235,6 +240,7 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
         Yields:
             :class:`PartialTranscription` or :class:`Transcription`
         """
+        process_start_s = perf_counter()
         is_progressive = vad_audio.mode == "progressive"
         audio_input = vad_audio.audio
 
@@ -243,6 +249,10 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
             audio_input = np.array(audio_input, dtype=np.float32)
         else:
             audio_input = audio_input.astype(np.float32)
+        audio_duration_s = len(audio_input) / getattr(self, "sample_rate", 16000)
+        item_age_s = self._item_age_s(vad_audio)
+
+        self._prepare_live_transcription_turn(vad_audio.turn_id, vad_audio.turn_revision)
 
         # Handle progressive updates: yield tagged partial for TranscriptionNotifier
         if self.enable_live_transcription and is_progressive:
@@ -252,12 +262,31 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
                 return
 
             # Try to acquire lock with short timeout - skip if busy
+            lock_scope_start_s = perf_counter()
             with self._compute_lock_context(handler_name="ParakeetSTT-Progressive", timeout=0.01) as acquired:
                 if acquired:
                     try:
+                        inference_start_s = perf_counter()
                         progressive_text = self._show_progressive_transcription(audio_input)
+                        inference_s = perf_counter() - inference_start_s
+                        if inference_s >= 0.25:
+                            logger.info(
+                                "Parakeet progressive STT timing turn=%s rev=%s audio=%.3fs age=%.3fs "
+                                "lock_scope=%.3fs inference=%.3fs chars=%d",
+                                vad_audio.turn_id,
+                                vad_audio.turn_revision,
+                                audio_duration_s,
+                                item_age_s,
+                                perf_counter() - lock_scope_start_s,
+                                inference_s,
+                                len(progressive_text),
+                            )
                         if progressive_text:
-                            yield PartialTranscription(text=progressive_text)
+                            yield PartialTranscription(
+                                text=progressive_text,
+                                turn_id=vad_audio.turn_id,
+                                turn_revision=vad_audio.turn_revision,
+                            )
                             return
                     except Exception as e:
                         logger.debug(f"Progressive transcription failed: {e}")
@@ -266,21 +295,36 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
             return
 
         # Handle final transcription (send to LLM)
+        logger.info(
+            "Parakeet final STT start turn=%s rev=%s audio=%.3fs age=%.3fs",
+            vad_audio.turn_id,
+            vad_audio.turn_revision,
+            audio_duration_s,
+            item_age_s,
+        )
+        inference_s = 0.0
+        lock_scope_s = 0.0
         try:
             if self.enable_live_transcription:
                 # Mark that we're processing final audio (ignore stale progressive updates)
                 self.processing_final = True
 
             # Acquire lock with longer timeout for final transcription
+            lock_scope_start_s = perf_counter()
             with self._compute_lock_context(handler_name="ParakeetSTT-Final", timeout=5.0) as acquired:
+                lock_scope_s = perf_counter() - lock_scope_start_s
                 if not acquired:
                     logger.error("Failed to acquire compute lock for final transcription")
                     pred_text = ""
                     language_code = self.last_language
-                elif self.backend == "mlx":
-                    pred_text, language_code = self._process_mlx_final(audio_input)
                 else:
-                    pred_text, language_code = self._process_nano_parakeet(audio_input)
+                    inference_start_s = perf_counter()
+                    if self.backend == "mlx":
+                        pred_text, language_code = self._process_mlx_final(audio_input)
+                    else:
+                        pred_text, language_code = self._process_nano_parakeet(audio_input)
+                    inference_s = perf_counter() - inference_start_s
+                    lock_scope_s = perf_counter() - lock_scope_start_s
 
             # Validate and update language
             if language_code and language_code in SUPPORTED_LANGUAGES:
@@ -293,7 +337,18 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
             pred_text = ""
             language_code = self.last_language
 
+        total_s = perf_counter() - process_start_s
+        logger.info(
+            "Parakeet final STT done turn=%s rev=%s total=%.3fs lock_scope=%.3fs inference=%.3fs chars=%d",
+            vad_audio.turn_id,
+            vad_audio.turn_revision,
+            total_s,
+            lock_scope_s,
+            inference_s,
+            len(pred_text),
+        )
         logger.debug("Finished Parakeet TDT inference")
+        self._clear_live_transcription_line()
         if pred_text.strip():
             console.print(f"[yellow]USER: {pred_text.strip()}")
             if language_code:
@@ -304,10 +359,15 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
         # an utterance, and stale timing must not leak into the next turn.
         if self.enable_live_transcription:
             self.processing_final = False
-            if self.streaming_handler is not None:
-                self.streaming_handler.reset()
+            self._reset_live_transcription_state(clear_turn=True)
 
-        yield Transcription(text=pred_text, language_code=language_code)
+        yield Transcription(
+            text=pred_text,
+            language_code=language_code,
+            turn_id=vad_audio.turn_id,
+            turn_revision=vad_audio.turn_revision,
+            speech_stopped_at_s=vad_audio.created_at_s,
+        )
 
     @property
     def timing_log_level(self) -> int:
@@ -349,17 +409,32 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
                 yield acquired
             return
 
+        lock_start_s = perf_counter()
         acquired = self.compute_lock.acquire(timeout=timeout)
+        wait_s = perf_counter() - lock_start_s
+        hold_start_s: float | None = None
+        if acquired:
+            if wait_s >= 0.25:
+                logger.info("%s: compute lock acquired after %.2fs", handler_name, wait_s)
+            else:
+                logger.debug("%s: compute lock acquired after %.3fs", handler_name, wait_s)
+            hold_start_s = perf_counter()
+        else:
+            logger.warning("%s: Failed to acquire compute lock after %.3fs (timeout=%s)", handler_name, wait_s, timeout)
         try:
             yield acquired
         finally:
             if acquired:
+                assert hold_start_s is not None
                 self.compute_lock.release()
+                hold_s = perf_counter() - hold_start_s
+                if hold_s >= 0.25:
+                    logger.info("%s: compute lock released after holding %.2fs", handler_name, hold_s)
+                else:
+                    logger.debug("%s: compute lock released after holding %.3fs", handler_name, hold_s)
 
     def _show_progressive_transcription(self, audio_input: np.ndarray) -> str:
         """Run progressive transcription, print to console, and return the text."""
-        from rich.text import Text
-
         result = self.streaming_handler.transcribe_incremental(audio_input)
         rich_text = Text()
         if result.fixed_text:
@@ -375,12 +450,68 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
 
         progressive_text = self._build_progressive_text(result)
         if progressive_text:
-            if rich_text:
-                console.print(rich_text, end="\r")
-            else:
-                console.print(f"[dim]Live: [/dim]{progressive_text}", end="\r")
+            self._print_live_transcription(rich_text, progressive_text)
 
         return progressive_text
+
+    def _print_live_transcription(self, rich_text: Text, progressive_text: str) -> None:
+        is_terminal = bool(getattr(console, "is_terminal", False))
+        if is_terminal:
+            self._write_live_control("\r\x1b[2K")
+            if rich_text:
+                console.print(self._truncate_live_transcription(rich_text), end="")
+            else:
+                fallback = Text("Live: ", style="dim")
+                fallback.append(progressive_text, style="cyan dim")
+                console.print(self._truncate_live_transcription(fallback), end="")
+            self._write_live_control("\r")
+            self._live_transcription_active = True
+            return
+
+        if rich_text:
+            console.print(rich_text)
+        else:
+            console.print(f"[dim]Live: [/dim]{progressive_text}")
+
+    def _clear_live_transcription_line(self) -> None:
+        if not getattr(self, "_live_transcription_active", False):
+            return
+        self._write_live_control("\r\x1b[2K")
+        self._live_transcription_active = False
+
+    def _write_live_control(self, sequence: str) -> None:
+        file = getattr(console, "file", None)
+        if file is None:
+            return
+        file.write(sequence)
+        file.flush()
+
+    def _truncate_live_transcription(self, text: Text) -> Text:
+        text = text.copy()
+        width = getattr(console, "width", 80)
+        try:
+            max_width = max(1, int(width) - 1)
+        except (TypeError, ValueError):
+            max_width = 79
+        text.truncate(max_width, overflow="ellipsis")
+        return text
+
+    def _prepare_live_transcription_turn(self, turn_id: str | None, turn_revision: int | None) -> None:
+        if not self.enable_live_transcription:
+            return
+        turn_key = (turn_id, turn_revision)
+        if getattr(self, "_live_turn_key", None) == turn_key:
+            return
+        self._reset_live_transcription_state(clear_turn=False)
+        self._live_turn_key = turn_key
+
+    def _reset_live_transcription_state(self, clear_turn: bool) -> None:
+        self._clear_live_transcription_line()
+        streaming_handler = getattr(self, "streaming_handler", None)
+        if streaming_handler is not None:
+            streaming_handler.reset()
+        if clear_turn:
+            self._live_turn_key = None
 
     def _build_progressive_text(self, result: ProgressiveStreamPartial) -> str:
         parts = []
@@ -398,8 +529,7 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
             and hasattr(self.streaming_handler, "fixed_sentences")
             and self.streaming_handler.fixed_sentences
         ):
-            # Clear the live transcription line
-            console.print(" " * 100, end="\r")
+            self._clear_live_transcription_line()
 
             # Get fixed text from previous progressive updates
             fixed_text = " ".join(self.streaming_handler.fixed_sentences).strip()
@@ -408,6 +538,14 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
             fixed_end_time = self.streaming_handler.fixed_end_time
             sample_rate = 16000
             fixed_end_sample = int(fixed_end_time * sample_rate)
+            if fixed_end_sample > len(audio_input):
+                logger.warning(
+                    "Ignoring stale progressive fixed text: fixed_end_sample=%d exceeds final audio samples=%d",
+                    fixed_end_sample,
+                    len(audio_input),
+                )
+                pred_text, language_code = self._process_mlx(audio_input)
+                return pred_text, language_code
 
             # Only transcribe the part after fixed sentences
             if fixed_end_sample < len(audio_input):
@@ -502,9 +640,9 @@ class ParakeetTDTSTTHandler(BaseHandler[STTIn, STTOut]):
             del self.model
 
     def on_session_end(self) -> None:
+        super().on_session_end()
         self.last_language = self.start_language if self.start_language else "en"
         if self.enable_live_transcription:
             self.processing_final = False
-            if self.streaming_handler is not None:
-                self.streaming_handler.reset()
+            self._reset_live_transcription_state(clear_turn=True)
         logger.debug("Parakeet TDT session state reset")

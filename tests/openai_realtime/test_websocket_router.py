@@ -20,8 +20,8 @@ from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, Realt
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
-from speech_to_speech.pipeline.events import AssistantTextEvent, SpeechStartedEvent
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
+from speech_to_speech.pipeline.events import AssistantTextEvent, SpeechStartedEvent, TokenUsageEvent
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -391,6 +391,108 @@ class TestSendLoop:
                 time.sleep(0.15)
                 assert not cancel_scope.discarding
 
+    def test_speech_started_cancels_pending_implicit_response(self, setup):
+        app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                stale_generation = cancel_scope.generation
+                service._state(conn_id).response_pending = True
+
+                text_output_queue.put(SpeechStartedEvent())
+                msg = ws.receive_json()
+
+                assert msg["type"] == "input_audio_buffer.speech_started"
+                time.sleep(0.15)
+                assert cancel_scope.discarding
+                assert cancel_scope.generation == stale_generation + 1
+                assert service._state(conn_id).response_pending is False
+                assert service._state(conn_id).in_response is False
+                assert not response_playing.is_set()
+
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=stale_generation))
+                time.sleep(0.15)
+                assert not cancel_scope.discarding
+
+    def test_speech_started_does_not_cancel_pending_when_internal_non_interrupt(self, setup):
+        app, service, _, _, text_output_queue, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                service._state(conn_id).response_pending = True
+
+                text_output_queue.put(SpeechStartedEvent(interrupt_response=False))
+                msg = ws.receive_json()
+
+                assert msg["type"] == "input_audio_buffer.speech_started"
+                time.sleep(0.15)
+                assert not cancel_scope.discarding
+                assert service._state(conn_id).response_pending is True
+
+    def test_stale_tagged_audio_is_dropped_after_interruption(self, setup):
+        app, _, _, output_queue, _, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                stale_generation = cancel_scope.generation
+                cancel_scope.cancel()
+                current_generation = cancel_scope.generation
+                output_queue.put(AudioOutput(audio=_pcm_bytes(64), cancel_generation=stale_generation))
+                output_queue.put(AudioOutput(audio=_pcm_bytes(512), cancel_generation=current_generation))
+
+                assert ws.receive_json()["type"] == "response.created"
+                delta = ws.receive_json()
+
+                assert delta["type"] == "response.output_audio.delta"
+                assert len(base64.b64decode(delta["delta"])) == len(_pcm_bytes(512))
+
+    def test_stale_tagged_response_done_does_not_finish_current_response(self, setup):
+        app, service, _, output_queue, _, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                stale_generation = cancel_scope.generation
+                service.response._ensure_response(conn_id)
+                service.finish_audio_response(conn_id, status="cancelled")
+                cancel_scope.cancel()
+                current_response_id, _ = service.response._ensure_response(conn_id)
+
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=stale_generation))
+                time.sleep(0.15)
+
+                state = service._state(conn_id)
+                assert state.in_response
+                assert state.current_response_id == current_response_id
+
+    def test_response_done_drains_pending_token_usage_before_finish(self, setup):
+        app, service, _, output_queue, text_output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+
+                text_output_queue.put(
+                    AssistantTextEvent(
+                        text="",
+                        tools=[{"type": "function_call", "call_id": "c1", "name": "f1", "arguments": "{}"}],
+                    )
+                )
+                text_output_queue.put(TokenUsageEvent(input_tokens=10, output_tokens=5))
+                output_queue.put(AUDIO_RESPONSE_DONE)
+
+                assert ws.receive_json()["type"] == "response.function_call_arguments.done"
+                msg1 = ws.receive_json()
+                msg2 = ws.receive_json()
+                assert {msg1["type"], msg2["type"]} == {"response.output_audio.done", "response.done"}
+
+                assert service.total_usage.input_tokens == 10
+                assert service.total_usage.output_tokens == 5
+                assert service._state(conn_id).response_usage.input_tokens == 0
+                assert service._state(conn_id).response_usage.output_tokens == 0
+
     def test_speech_started_does_not_cancel_when_interrupt_disabled(self, setup):
         """With interrupt_response=False, speech during playback should NOT cancel or flush."""
         from openai.types.realtime.realtime_audio_input_turn_detection import ServerVad
@@ -404,7 +506,7 @@ class TestSendLoop:
                     type="server_vad",
                     interrupt_response=False,
                 )
-                service.response._ensure_response(conn_id)
+                _, response_item_id = service.response._ensure_response(conn_id)
                 response_playing.set()
                 text_output_queue.put(SpeechStartedEvent())
                 msg = ws.receive_json()
@@ -413,6 +515,7 @@ class TestSendLoop:
                 assert response_playing.is_set(), "response_playing should remain set"
                 assert not cancel_scope.discarding, "cancel_scope should not be discarding"
                 assert service._state(conn_id).in_response, "response should still be active"
+                assert service._state(conn_id).current_item_id == response_item_id
 
 
 # ===================================================================

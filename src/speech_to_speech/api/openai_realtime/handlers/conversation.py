@@ -100,20 +100,18 @@ class ConversationHandler(RealtimeBaseHandler):
 
     def on_partial_transcription(self, conn_id: str, event: PartialTranscriptionEvent) -> list[ServerEvent]:
         """Handle partial_transcription: emit transcription delta event."""
-        response = self._service.response
         return [
             ConversationItemInputAudioTranscriptionDeltaEvent(
                 type="conversation.item.input_audio_transcription.delta",
                 event_id=self._next_event_id(),
-                content_index=response._next_content_index(conn_id),
-                item_id=response._current_item_id(conn_id),
+                content_index=self._next_input_content_index(conn_id),
+                item_id=self._input_item_id(conn_id),
                 delta=event.delta,
             )
         ]
 
     def on_transcription_completed(self, conn_id: str, event: TranscriptionCompletedEvent) -> list[ServerEvent]:
         """Handle transcription_completed: accumulate duration and emit completed event."""
-        response = self._service.response
         st = self._state(conn_id)
         st.response_usage.audio_duration_s += st.input_audio_duration_s
         return [
@@ -121,7 +119,7 @@ class ConversationHandler(RealtimeBaseHandler):
                 type="conversation.item.input_audio_transcription.completed",
                 event_id=self._next_event_id(),
                 content_index=0,
-                item_id=response._current_item_id(conn_id),
+                item_id=self._input_item_id(conn_id),
                 transcript=event.transcript,
                 usage=UsageTranscriptTextUsageDuration(
                     seconds=st.input_audio_duration_s,

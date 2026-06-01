@@ -8,9 +8,11 @@ from threading import Event
 from time import perf_counter
 from typing import Any, Generic, Iterator, TypeVar, cast
 
+import numpy as np
+
 from speech_to_speech.pipeline.control import PipelineControlMessage, is_control_message, SESSION_END
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
-from speech_to_speech.pipeline.messages import PIPELINE_END
+from speech_to_speech.pipeline.messages import PIPELINE_END, AudioOutput, EndOfResponse
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,36 @@ class BaseHandler(Generic[InT, OutT]):
     def process(self, input: InT) -> Iterator[OutT]:
         raise NotImplementedError
 
+    def should_process_input(self, item: InT) -> bool:
+        cancel_scope = getattr(self, "cancel_scope", None)
+        cancel_generation = getattr(item, "cancel_generation", None)
+        if (
+            cancel_scope is not None
+            and cancel_generation is not None
+            and not isinstance(item, EndOfResponse)
+            and cancel_scope.is_stale(cancel_generation)
+        ):
+            logger.debug(
+                "%s: dropping stale input for cancel generation %s",
+                self.__class__.__name__,
+                cancel_generation,
+            )
+            return False
+        return True
+
+    def should_emit_output(self, output: OutT) -> bool:
+        return True
+
+    def before_emit_output(self, output: OutT) -> None:
+        pass
+
+    def output_for_queue(self, output: OutT, source_input: InT) -> OutT | AudioOutput:
+        cancel_generation = getattr(source_input, "cancel_generation", None)
+        if cancel_generation is not None and (isinstance(output, bytes) or hasattr(output, "tobytes")):
+            audio = cast(bytes | np.ndarray, output)
+            return AudioOutput(audio=audio, cancel_generation=cancel_generation)
+        return output
+
     def run(self) -> None:
         if self.pipeline_index is not None:
             pipeline_log_ctx.set(self.pipeline_index)
@@ -81,13 +113,25 @@ class BaseHandler(Generic[InT, OutT]):
                 logger.warning("%s: unexpected control message kind: %s", self.__class__.__name__, item.kind)
                 continue
 
+            typed_item = cast(InT, item)
+            if not self.should_process_input(typed_item):
+                continue
+
             start_time = perf_counter()
             try:
-                for output in self.process(cast(InT, item)):
+                for output in self.process(typed_item):
+                    if not self.should_emit_output(output):
+                        start_time = perf_counter()
+                        continue
                     self._times.append(perf_counter() - start_time)
                     if self.should_log_timing(output):
                         logger.log(self.timing_log_level, "%s: %.3f s", self.__class__.__name__, self.last_time)
-                    self.queue_out.put(output)
+                    self.before_emit_output(output)
+                    queued_output = cast(
+                        OutT | PipelineControlMessage | bytes,
+                        self.output_for_queue(output, typed_item),
+                    )
+                    self.queue_out.put(queued_output)
                     start_time = perf_counter()
             except Exception as e:
                 logger.error(f"{self.__class__.__name__}: Error in process(): {type(e).__name__}: {e}", exc_info=True)

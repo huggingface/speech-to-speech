@@ -76,7 +76,9 @@ class ListenAndPlayRealtimeArguments:
     )
     block_mic_during_playback: bool = field(
         default=False,
-        metadata={"help": "If set, pause microphone capture while speaker audio is playing. Disabled by default so barge-in works."},
+        metadata={
+            "help": "If set, pause microphone capture while speaker audio is playing. Disabled by default so barge-in works."
+        },
     )
 
 
@@ -347,9 +349,7 @@ def main() -> None:
     parser.add_argument(
         "--voice",
         default=defaults.voice,
-        help=(
-            "session.audio.output.voice (Kokoro id like bm_fable, or OpenAI name like marin)."
-        ),
+        help=("session.audio.output.voice (Kokoro id like bm_fable, or OpenAI name like marin)."),
     )
     parser.add_argument("--print-json", action="store_true", default=defaults.print_json)
     parser.add_argument(

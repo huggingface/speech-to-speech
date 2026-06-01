@@ -14,6 +14,7 @@ from typing import TypeAlias
 import numpy as np
 
 from speech_to_speech.pipeline.messages import (
+    AudioOutput,
     EndOfResponse,
     GenerateResponseRequest,
     LLMResponseChunk,
@@ -40,4 +41,4 @@ LLMOut: TypeAlias = LLMResponseChunk | TokenUsage | EndOfResponse
 
 # ── TTS stage ─────────────────────────────────────────────────────────
 TTSIn: TypeAlias = TTSInput | EndOfResponse
-TTSOut: TypeAlias = bytes | np.ndarray
+TTSOut: TypeAlias = bytes | np.ndarray | AudioOutput

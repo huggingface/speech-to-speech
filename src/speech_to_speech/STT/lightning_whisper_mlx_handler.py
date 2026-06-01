@@ -8,9 +8,9 @@ import torch
 from lightning_whisper_mlx import LightningWhisperMLX
 from rich.console import Console
 
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import Transcription
+from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ SUPPORTED_LANGUAGES = [
 ]
 
 
-class LightningWhisperSTTHandler(BaseHandler[STTIn, STTOut]):
+class LightningWhisperSTTHandler(BaseSTTHandler):
     """
     Handles the Speech To Text generation using a Whisper model.
     """
@@ -94,4 +94,10 @@ class LightningWhisperSTTHandler(BaseHandler[STTIn, STTOut]):
         if self.start_language == "auto":
             language_code += "-auto"
 
-        yield Transcription(text=pred_text, language_code=language_code)
+        yield Transcription(
+            text=pred_text,
+            language_code=language_code,
+            turn_id=vad_audio.turn_id,
+            turn_revision=vad_audio.turn_revision,
+            speech_stopped_at_s=vad_audio.created_at_s,
+        )

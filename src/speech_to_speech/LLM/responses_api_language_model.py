@@ -26,7 +26,7 @@ from openai.types.responses import (
 )
 
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.LLM.chat import Chat, make_system_message, make_user_message
+from speech_to_speech.LLM.chat import Chat, SupportedItem, make_system_message, make_user_message
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
 from speech_to_speech.LLM.utils import remove_unspeechable, resolve_auto_language
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
@@ -37,6 +37,7 @@ from speech_to_speech.pipeline.messages import (
     LLMResponseChunk,
     TokenUsage,
 )
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         stream: bool = True,
         user_role: str = "user",
         cancel_scope: CancelScope | None = None,
+        speculative_turns: SpeculativeTurnTracker | None = None,
         disable_thinking: bool = True,
         request_timeout_s: float = 20.0,
         stream_batch_sentences: int = 3,
@@ -65,6 +67,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         **_kwargs: Any,
     ) -> None:
         self.cancel_scope = cancel_scope
+        self.speculative_turns = speculative_turns
         self.model_name = model_name
         self.stream = stream
         self.stream_batch_sentences = max(1, stream_batch_sentences)
@@ -87,6 +90,17 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         )
         self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
         self.warmup()
+
+    def _turn_is_latest(self, turn_id: str | None, turn_revision: int | None) -> bool:
+        return self.speculative_turns is None or self.speculative_turns.is_latest(turn_id, turn_revision)
+
+    def _generation_is_stale(self, gen: int | None) -> bool:
+        return gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen)
+
+    def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
+        if self.speculative_turns is None:
+            return True
+        return self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
 
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
@@ -151,9 +165,13 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         runtime_config: Any,
         response: Any,
         optional_kwargs: dict[str, Any],
+        turn_id: str | None,
+        turn_revision: int | None,
+        speech_stopped_at_s: float | None,
     ) -> Iterator[LLMOut]:
         api_response: Response | Stream[ResponseStreamEvent] | None = None
         tools: list[ResponseFunctionToolCall] = []
+        pending_chat_items: list[SupportedItem] = []
         clean_text = ""
         input_tokens = 0
         output_tokens = 0
@@ -171,7 +189,9 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                 printable_text = ""
                 sentence_batch: list[str] = []
                 for raw_event in api_response:
-                    if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
+                    if (
+                        gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen)
+                    ) or not self._turn_is_latest(turn_id, turn_revision):
                         logger.info("LLM generation cancelled (interruption)")
                         cancelled = True
                         break
@@ -184,20 +204,30 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                             for s in sentences[:-1]:
                                 sentence_batch.append(s)
                                 if len(sentence_batch) >= self.stream_batch_sentences:
+                                    if not self._turn_output_allowed(turn_id, turn_revision):
+                                        logger.info("LLM generation cancelled (stale speculative turn)")
+                                        cancelled = True
+                                        break
                                     yield LLMResponseChunk(
                                         text=" ".join(sentence_batch),
                                         language_code=language_code,
                                         runtime_config=runtime_config,
                                         response=response,
+                                        turn_id=turn_id,
+                                        turn_revision=turn_revision,
+                                        speech_stopped_at_s=speech_stopped_at_s,
+                                        cancel_generation=gen,
                                     )
                                     sentence_batch = []
+                            if cancelled:
+                                break
                             printable_text = sentences[-1]
                     elif isinstance(raw_event, ResponseOutputItemDoneEvent):
                         if isinstance(raw_event.item, ResponseFunctionToolCall):
                             raw_event.item.call_id = _generate_id("call")
                             raw_event.item.id = _generate_id("fc")
                             tools.append(raw_event.item)
-                            original_chat.add_item(
+                            pending_chat_items.append(
                                 RealtimeConversationItemFunctionCall(
                                     type="function_call",
                                     name=raw_event.item.name,
@@ -215,7 +245,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                                 )
                                 for c in raw_event.item.content
                             ]
-                            original_chat.add_item(
+                            pending_chat_items.append(
                                 RealtimeConversationItemAssistantMessage(
                                     type="message", role="assistant", content=content
                                 )
@@ -230,17 +260,28 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                         sentence_batch.append(printable_text.strip())
                     remaining = " ".join(sentence_batch)
                     if remaining or tools:
-                        logger.debug(f"Clean text: {clean_text}")
-                        logger.info(f"Tools: {tools}")
-                        yield LLMResponseChunk(
-                            text=remaining,
-                            language_code=language_code,
-                            tools=tools,
-                            runtime_config=runtime_config,
-                            response=response,
-                        )
+                        if self._generation_is_stale(gen):
+                            logger.info("LLM generation cancelled (interruption)")
+                        elif not self._turn_output_allowed(turn_id, turn_revision):
+                            logger.info("LLM generation cancelled (stale speculative turn)")
+                        else:
+                            logger.debug(f"Clean text: {clean_text}")
+                            logger.info(f"Tools: {tools}")
+                            yield LLMResponseChunk(
+                                text=remaining,
+                                language_code=language_code,
+                                tools=tools,
+                                runtime_config=runtime_config,
+                                response=response,
+                                turn_id=turn_id,
+                                turn_revision=turn_revision,
+                                speech_stopped_at_s=speech_stopped_at_s,
+                                cancel_generation=gen,
+                            )
             elif isinstance(api_response, Response):
-                if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
+                if (
+                    gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen)
+                ) or not self._turn_is_latest(turn_id, turn_revision):
                     logger.info("LLM generation cancelled (interruption)")
                 else:
                     usage = api_response.usage
@@ -249,17 +290,18 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                         output_tokens = usage.output_tokens or 0
                     for message in api_response.output:
                         if isinstance(message, ResponseFunctionToolCall):
-                            item = original_chat.add_item(
+                            message.call_id = _generate_id("call")
+                            message.id = _generate_id("fc")
+                            pending_chat_items.append(
                                 RealtimeConversationItemFunctionCall(
                                     type="function_call",
                                     name=message.name,
                                     arguments=message.arguments,
+                                    call_id=message.call_id,
+                                    id=message.id,
                                     status="in_progress",
                                 )
                             )
-                            assert (hasattr(item, "call_id") and item.call_id is not None) and item.id is not None
-                            message.call_id = item.call_id
-                            message.id = item.id
                             tools.append(message)
                         elif isinstance(message, ResponseOutputMessage):
                             content = [
@@ -269,7 +311,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                                 )
                                 for c in message.content
                             ]
-                            original_chat.add_item(
+                            pending_chat_items.append(
                                 RealtimeConversationItemAssistantMessage(
                                     type="message", role="assistant", content=content
                                 )
@@ -282,23 +324,37 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     logger.debug(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
                     if clean_text.strip() or tools:
-                        yield LLMResponseChunk(
-                            text=clean_text.strip(),
-                            language_code=language_code,
-                            tools=tools,
-                            runtime_config=runtime_config,
-                            response=response,
-                        )
+                        if self._generation_is_stale(gen):
+                            logger.info("LLM generation cancelled (interruption)")
+                        elif not self._turn_output_allowed(turn_id, turn_revision):
+                            logger.info("LLM generation cancelled (stale speculative turn)")
+                        else:
+                            yield LLMResponseChunk(
+                                text=clean_text.strip(),
+                                language_code=language_code,
+                                tools=tools,
+                                runtime_config=runtime_config,
+                                response=response,
+                                turn_id=turn_id,
+                                turn_revision=turn_revision,
+                                speech_stopped_at_s=speech_stopped_at_s,
+                                cancel_generation=gen,
+                            )
         except httpx.ReadTimeout:
             logger.warning(
                 "OpenAI API read timed out after %.1fs; ending the current response",
                 self.request_timeout_s,
             )
-            yield LLMResponseChunk(
-                text="Wow I'm a bit slow today, could you repeat that?",
-                runtime_config=runtime_config,
-                response=response,
-            )
+            if not self._generation_is_stale(gen) and self._turn_output_allowed(turn_id, turn_revision):
+                yield LLMResponseChunk(
+                    text="Wow I'm a bit slow today, could you repeat that?",
+                    runtime_config=runtime_config,
+                    response=response,
+                    turn_id=turn_id,
+                    turn_revision=turn_revision,
+                    speech_stopped_at_s=speech_stopped_at_s,
+                    cancel_generation=gen,
+                )
         finally:
             if api_response is not None and hasattr(api_response, "close"):
                 try:
@@ -306,11 +362,19 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                 except Exception:
                     pass
 
-        original_chat.strip_images()
-        original_chat.trim_if_needed(self.compactor)
-        if input_tokens or output_tokens:
-            yield TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens)
-        yield EndOfResponse()
+        if not self._generation_is_stale(gen) and self._turn_output_allowed(turn_id, turn_revision):
+            for item in pending_chat_items:
+                original_chat.add_item(item)
+            original_chat.strip_images()
+            original_chat.trim_if_needed(self.compactor)
+            if input_tokens or output_tokens:
+                yield TokenUsage(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    turn_id=turn_id,
+                    turn_revision=turn_revision,
+                )
+        yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision, cancel_generation=gen)
 
     def process(self, request: LLMIn) -> Iterator[LLMOut]:
         """
@@ -324,6 +388,14 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         """
         runtime_config = request.runtime_config
         response = request.response
+        turn_id = request.turn_id
+        turn_revision = request.turn_revision
+        speech_stopped_at_s = request.speech_stopped_at_s
+        if not self._turn_is_latest(turn_id, turn_revision):
+            logger.info("Skipping stale LLM request for turn=%s rev=%s", turn_id, turn_revision)
+            yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision)
+            return
+
         original_chat = runtime_config.chat
         active_chat = original_chat.copy()
         language_code = request.language_code
@@ -353,7 +425,16 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         gen = self.cancel_scope.generation if self.cancel_scope else None
 
         yield from self._generate(
-            active_chat, original_chat, language_code, gen, runtime_config, response, optional_kwargs
+            active_chat,
+            original_chat,
+            language_code,
+            gen,
+            runtime_config,
+            response,
+            optional_kwargs,
+            turn_id,
+            turn_revision,
+            speech_stopped_at_s,
         )
 
     def on_session_end(self) -> None:

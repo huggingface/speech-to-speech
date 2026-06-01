@@ -22,6 +22,7 @@ from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         blocksize: int = 512,
         gen_kwargs: dict[str, Any] | None = None,
         cancel_scope: CancelScope | None = None,
+        speculative_turns: SpeculativeTurnTracker | None = None,
     ) -> None:
         """
         Initialize the Kokoro TTS model.
@@ -115,6 +117,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.speed = speed
         self.blocksize = blocksize
         self.cancel_scope = cancel_scope
+        self.speculative_turns = speculative_turns
 
         # Determine device
         if device == "auto":
@@ -235,9 +238,24 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         Yields:
             Audio chunks as numpy int16 arrays
         """
+        speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
+            if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
+                tts_input.turn_id,
+                tts_input.turn_revision,
+            ):
+                return
             yield AUDIO_RESPONSE_DONE
             return
+
+        if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
+            tts_input.turn_id,
+            tts_input.turn_revision,
+        ):
+            logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
+            return
+        if speculative_turns:
+            speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         runtime_config = tts_input.runtime_config
         response = tts_input.response

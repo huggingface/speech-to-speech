@@ -18,13 +18,13 @@ class VADHandlerArguments:
     min_silence_ms: int = field(
         default=300,
         metadata={
-            "help": "Minimum length of silence intervals to be used for segmenting speech. Measured in milliseconds. Default is 250 ms."
+            "help": "Minimum length of silence intervals to be used for segmenting speech. Measured in milliseconds. Default is 300 ms."
         },
     )
     min_speech_ms: int = field(
-        default=500,
+        default=384,
         metadata={
-            "help": "Minimum length of speech segments to be considered valid speech. Measured in milliseconds. Default is 500 ms."
+            "help": "Minimum length of speech segments to be considered valid speech. Measured in milliseconds. Default is 384 ms."
         },
     )
     max_speech_ms: float = field(
@@ -50,8 +50,14 @@ class VADHandlerArguments:
         metadata={"help": "Enable progressive audio release for live transcription during speech. Default is False."},
     )
     realtime_processing_pause: float = field(
-        default=0.2,
+        default=0.5,
         metadata={
-            "help": "Interval (in seconds) for releasing progressive audio chunks during speech. Default is 0.2s."
+            "help": "Interval (in seconds) for releasing progressive audio chunks during speech. Default is 0.5s."
+        },
+    )
+    speculative_reopen_ms: int = field(
+        default=1000,
+        metadata={
+            "help": "In realtime mode, keep a soft-ended turn reopenable for this many milliseconds unless a response commits it."
         },
     )

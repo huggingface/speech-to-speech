@@ -1,7 +1,8 @@
+import logging
 import sys
 from pathlib import Path
 from queue import Queue
-from threading import Event
+from threading import Event, Thread
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,6 +11,7 @@ import pytest
 import speech_to_speech.TTS.qwen3_tts_handler as qwen3_tts_module
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 
 
@@ -322,6 +324,161 @@ def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     end_outputs = list(handler.process(EndOfResponse()))
 
     assert end_outputs == [AUDIO_RESPONSE_DONE]
+
+
+def test_process_waits_for_pending_reopen_and_drops_stale_tts_input():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.speculative_turns = tracker
+    done = Event()
+    outputs = []
+
+    def run_process():
+        outputs.extend(
+            handler.process(
+                TTSInput(
+                    text="stale",
+                    turn_id="turn_1",
+                    turn_revision=0,
+                )
+            )
+        )
+        done.set()
+
+    thread = Thread(target=run_process)
+    thread.start()
+
+    assert not done.wait(0.05)
+    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+    assert done.wait(1.0)
+    thread.join(timeout=1.0)
+
+    assert outputs == []
+
+
+def test_process_waits_for_pending_reopen_and_drops_stale_end_of_response():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.speculative_turns = tracker
+    done = Event()
+    outputs = []
+
+    def run_process():
+        outputs.extend(handler.process(EndOfResponse(turn_id="turn_1", turn_revision=0)))
+        done.set()
+
+    thread = Thread(target=run_process)
+    thread.start()
+
+    assert not done.wait(0.05)
+    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+    assert done.wait(1.0)
+    thread.join(timeout=1.0)
+
+    assert outputs == []
+
+
+def test_process_waits_for_reopen_grace_and_drops_stale_tts_input():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    tracker.start_reopen_grace("turn_1", 0, grace_s=0.5)
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.speculative_turns = tracker
+    done = Event()
+    outputs = []
+
+    def run_process():
+        outputs.extend(
+            handler.process(
+                TTSInput(
+                    text="stale",
+                    turn_id="turn_1",
+                    turn_revision=0,
+                )
+            )
+        )
+        done.set()
+
+    thread = Thread(target=run_process)
+    thread.start()
+
+    assert not done.wait(0.05)
+    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+    assert done.wait(1.0)
+    thread.join(timeout=1.0)
+
+    assert outputs == []
+
+
+def test_process_waits_for_reopen_grace_and_drops_stale_end_of_response():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    tracker.start_reopen_grace("turn_1", 0, grace_s=0.5)
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.speculative_turns = tracker
+    done = Event()
+    outputs = []
+
+    def run_process():
+        outputs.extend(handler.process(EndOfResponse(turn_id="turn_1", turn_revision=0)))
+        done.set()
+
+    thread = Thread(target=run_process)
+    thread.start()
+
+    assert not done.wait(0.05)
+    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+    assert done.wait(1.0)
+    thread.join(timeout=1.0)
+
+    assert outputs == []
+
+
+def test_process_commits_turn_before_generating_audio(monkeypatch, caplog):
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.should_listen = Event()
+    handler.cancel_scope = None
+    handler.speculative_turns = tracker
+    handler.ref_audio = "TTS/ref_audio.wav"
+    handler.speaker = None
+    handler.instruct = None
+    handler.language = "English"
+    handler.backend = "mlx"
+    handler.queue_in = Queue()
+    handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
+    handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
+
+    def _process_voice_clone(text):
+        assert tracker.is_committed("turn_1", 0)
+        yield np.zeros(512, dtype=np.int16)
+
+    handler._process_voice_clone = _process_voice_clone
+
+    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+
+    with caplog.at_level(logging.INFO, logger="speech_to_speech.TTS.qwen3_tts_handler"):
+        outputs = list(
+            handler.process(
+                TTSInput(
+                    text="Hello there.",
+                    turn_id="turn_1",
+                    turn_revision=0,
+                    speech_stopped_at_s=qwen3_tts_module.perf_counter() - 1.0,
+                )
+            )
+        )
+
+    assert len(outputs) == 1
+    assert tracker.is_committed("turn_1", 0)
+    assert "Last speech detected to first speech out:" in caplog.text
 
 
 def test_process_does_not_set_should_listen_when_generation_fails(monkeypatch):

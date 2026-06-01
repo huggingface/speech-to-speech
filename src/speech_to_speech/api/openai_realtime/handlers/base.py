@@ -39,6 +39,16 @@ class RealtimeBaseHandler:
     def _state(self, conn_id: str) -> ConnState:
         return self._service._state(conn_id)
 
+    def _input_item_id(self, conn_id: str) -> str:
+        st = self._state(conn_id)
+        return st.speculative_input_item_id or self._service.response._current_item_id(conn_id)
+
+    def _next_input_content_index(self, conn_id: str) -> int:
+        st = self._state(conn_id)
+        idx = st.input_content_index
+        st.input_content_index += 1
+        return idx
+
     @staticmethod
     def _next_event_id() -> str:
         return _generate_id("event")

@@ -252,6 +252,36 @@ class Chat:
                 while self._user_turn_count > self.size:
                     self._evict_oldest_turn()
 
+    def replace_user_message_text(self, item_id: str, text: str) -> bool:
+        """Replace the text content of an existing user message.
+
+        Used by speculative turn revisions: the conversation turn remains the
+        same, but the STT transcript is superseded by a transcription of a
+        longer raw-audio buffer.
+        """
+
+        with self._lock:
+            for item in self.buffer:
+                if not isinstance(item, RealtimeConversationItemUserMessage) or item.id != item_id:
+                    continue
+                item.content = [UserContent(type="input_text", text=text)]
+                logger.debug("Replaced speculative user message %s", item_id)
+                return True
+        return False
+
+    def remove_user_message(self, item_id: str) -> bool:
+        """Remove an existing user message from the bounded chat buffer."""
+
+        with self._lock:
+            for index, item in enumerate(self.buffer):
+                if not isinstance(item, RealtimeConversationItemUserMessage) or item.id != item_id:
+                    continue
+                del self.buffer[index]
+                self._user_turn_count -= 1
+                logger.debug("Removed speculative user message %s", item_id)
+                return True
+        return False
+
     def to_responses_api_chat(self, items: list[SupportedItem] | None = None) -> ResponseInputParam:
         """Serialize the chat (system prompt + buffer) for the OpenAI Responses API.
 
@@ -553,7 +583,7 @@ class Chat:
             fco_call_ids_in_range = {
                 x.call_id
                 for x in self.buffer
-                if x.id in marker_ids and isinstance(x, RealtimeConversationItemFunctionCallOutput)
+                if isinstance(x, RealtimeConversationItemFunctionCallOutput) and x.id in marker_ids
             }
             fc_ids_to_keep = {
                 x.id

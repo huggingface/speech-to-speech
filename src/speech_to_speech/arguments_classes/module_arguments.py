@@ -51,8 +51,8 @@ class ModuleArguments:
         },
     )
     live_transcription_update_interval: float = field(
-        default=0.25,
-        metadata={"help": "Update interval for live transcription in seconds (default: 0.25s = 250ms)"},
+        default=0.5,
+        metadata={"help": "Update interval for live transcription in seconds (default: 0.5s = 500ms)"},
     )
     live_transcription_min_silence_ms: int = field(
         default=500,

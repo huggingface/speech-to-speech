@@ -24,13 +24,15 @@ from speech_to_speech.api.openai_realtime.service import ServerEvent, build_erro
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
+    PartialTranscriptionEvent,
     PipelineEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TokenUsageEvent,
+    TranscriptionCompletedEvent,
 )
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
 
 logger = logging.getLogger(__name__)
 MAX_AUDIO_BATCH_BYTES = 6400
@@ -71,11 +73,22 @@ async def _send_events(ws: WebSocket, events: list[ServerEvent]) -> None:
 
 
 def _keep_audio_sentinel(item: Any) -> bool:
-    return isinstance(item, bytes) and item == AUDIO_RESPONSE_DONE
+    return _is_audio_done(item)
 
 
 def _keep_user_text_event(item: Any) -> bool:
-    return isinstance(item, (SpeechStoppedEvent, TokenUsageEvent))
+    return isinstance(
+        item,
+        (SpeechStoppedEvent, PartialTranscriptionEvent, TranscriptionCompletedEvent, TokenUsageEvent),
+    )
+
+
+def _audio_payload(item: Any) -> Any:
+    return item.audio if isinstance(item, AudioOutput) else item
+
+
+def _audio_generation(item: Any) -> int | None:
+    return item.cancel_generation if isinstance(item, AudioOutput) else None
 
 
 def _flush_queue(q: Queue[QItem], *, preserve: Callable[[QItem], bool] | None = None) -> None:
@@ -100,6 +113,33 @@ def _flush_queue(q: Queue[QItem], *, preserve: Callable[[QItem], bool] | None = 
             q.not_empty.notify(len(preserved))
 
 
+def _drain_pending_token_usage(unit: PipelineUnit, session_id: str | None) -> None:
+    if session_id is None:
+        return
+
+    preserved: list[Any] = []
+    drained = 0
+    while True:
+        try:
+            item = unit.text_output_queue.get_nowait()
+        except Empty:
+            break
+        if isinstance(item, TokenUsageEvent):
+            unit.service.dispatch_pipeline_event(session_id, item)
+            drained += 1
+        else:
+            preserved.append(item)
+
+    if preserved:
+        with unit.text_output_queue.mutex:
+            for item in reversed(preserved):
+                unit.text_output_queue.queue.appendleft(item)
+            unit.text_output_queue.not_empty.notify(len(preserved))
+
+    if drained:
+        logger.debug("Pipeline %d: drained %d token usage event(s) before response completion", unit.index, drained)
+
+
 def _clean_unit(unit: PipelineUnit, preserve: Callable[[Any], bool] | None = None) -> None:
     """Cancel in-flight work and flush queues for a single pipeline unit.
 
@@ -121,11 +161,31 @@ def _clean_unit(unit: PipelineUnit, preserve: Callable[[Any], bool] | None = Non
 
 
 def _to_audio_bytes(chunk: Any) -> bytes:
+    chunk = _audio_payload(chunk)
     if isinstance(chunk, PipelineControlMessage):
         raise TypeError(f"unexpected control message on audio output queue: {chunk!r}")
     if isinstance(chunk, np.ndarray) or hasattr(chunk, "tobytes"):
         return chunk.tobytes()
     return chunk
+
+
+def _is_audio_done(item: Any) -> bool:
+    payload = _audio_payload(item)
+    return isinstance(payload, bytes) and payload == AUDIO_RESPONSE_DONE
+
+
+def _is_pipeline_end(item: Any) -> bool:
+    payload = _audio_payload(item)
+    return isinstance(payload, bytes) and payload == PIPELINE_END
+
+
+def _should_discard_audio(unit: PipelineUnit, item: Any) -> bool:
+    generation = _audio_generation(item)
+    if generation is not None and unit.cancel_scope.is_stale(generation):
+        return True
+    if unit.cancel_scope.discarding and generation != unit.cancel_scope.generation:
+        return True
+    return False
 
 
 async def _release_unit_after_drain(unit: PipelineUnit, session: Any, session_id: str) -> None:
@@ -373,8 +433,11 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                     is_speech_start = isinstance(text_msg, SpeechStartedEvent)
 
                     was_in_response = False
+                    was_response_pending = False
                     if is_speech_start and session_id:
-                        was_in_response = unit.service._state(session_id).in_response
+                        st = unit.service._state(session_id)
+                        was_in_response = st.in_response
+                        was_response_pending = st.response_pending
 
                     if unit.cancel_scope.discarding and isinstance(text_msg, AssistantTextEvent):
                         pass
@@ -383,15 +446,23 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                         if events:
                             await _send_events(ws, events)
 
-                    if is_speech_start and was_in_response:
+                    if is_speech_start and (was_in_response or was_response_pending):
                         active_cfg = unit.service._state(session_id).runtime_config if session_id else None
-                        if active_cfg is None or active_cfg.interrupt_response_enabled:
+                        if text_msg.interrupt_response and (
+                            active_cfg is None or active_cfg.interrupt_response_enabled
+                        ):
                             unit.cancel_scope.cancel()
+                            if session_id:
+                                unit.service._state(session_id).response_pending = False
                             _flush_queue(unit.output_queue, preserve=_keep_audio_sentinel)
                             _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
                             if unit.response_playing.is_set():
                                 unit.response_playing.clear()
-                            logger.info(f"Pipeline {unit.index}: speech during response: cancelled, queue flushed")
+                            logger.info(
+                                "Pipeline %d: speech during %s: cancelled, queue flushed",
+                                unit.index,
+                                "response" if was_in_response else "pending response",
+                            )
                         else:
                             logger.info(
                                 f"Pipeline {unit.index}: speech during response: interrupt_response disabled, ignoring"
@@ -406,16 +477,27 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                     else:
                         audio_chunk = unit.output_queue.get_nowait()
 
-                    if isinstance(audio_chunk, bytes) and audio_chunk == PIPELINE_END:
+                    if _is_pipeline_end(audio_chunk):
                         if ws is not None and session_id:
                             await _send_events(ws, unit.service.finish_audio_response(session_id))
                         break
 
-                    if isinstance(audio_chunk, bytes) and audio_chunk == AUDIO_RESPONSE_DONE:
+                    if _is_audio_done(audio_chunk):
+                        audio_generation = _audio_generation(audio_chunk)
+                        if audio_generation is not None and unit.cancel_scope.is_stale(audio_generation):
+                            if session_id:
+                                unit.service._state(session_id).response_pending = False
+                            unit.cancel_scope.response_done(audio_generation)
+                            unit.should_listen.set()
+                            logger.info(f"Pipeline {unit.index}: stale response complete, listening re-enabled")
+                            continue
+                        _drain_pending_token_usage(unit, session_id)
                         if ws is not None and session_id:
                             await _send_events(ws, unit.service.finish_audio_response(session_id))
+                        if session_id:
+                            unit.service._state(session_id).response_pending = False
                         unit.response_playing.clear()
-                        unit.cancel_scope.response_done()
+                        unit.cancel_scope.response_done(audio_generation)
                         unit.should_listen.set()
                         logger.info(f"Pipeline {unit.index}: response complete, listening re-enabled")
                         continue
@@ -432,7 +514,7 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                     if is_control_message(audio_chunk):
                         continue
 
-                    if unit.cancel_scope.discarding:
+                    if _should_discard_audio(unit, audio_chunk):
                         continue
 
                     audio_chunk = _to_audio_bytes(audio_chunk)
@@ -445,12 +527,17 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                             break
 
                         if (
-                            isinstance(next_chunk, bytes) and next_chunk in {PIPELINE_END, AUDIO_RESPONSE_DONE}
-                        ) or is_control_message(next_chunk, SESSION_END.kind):
+                            _is_pipeline_end(next_chunk)
+                            or _is_audio_done(next_chunk)
+                            or is_control_message(next_chunk, SESSION_END.kind)
+                        ):
                             # Only stash if we still have a session; otherwise drop it.
                             if session is not None:
                                 session.pending_output_item = next_chunk
                             break
+
+                        if _should_discard_audio(unit, next_chunk):
+                            continue
 
                         next_audio = _to_audio_bytes(next_chunk)
                         if len(audio_batch) + len(next_audio) > MAX_AUDIO_BATCH_BYTES:

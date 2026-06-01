@@ -40,6 +40,7 @@ class ResponseHandler(RealtimeBaseHandler):
             st.current_response_id = _generate_id("resp")
             self._start_item(conn_id)
             st.in_response = True
+        st.response_pending = False
         return st.current_response_id, self._current_item_id(conn_id)
 
     def _end_response(self, conn_id: str, status: _ResponseStatus = "completed") -> None:
@@ -65,6 +66,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_item_id = None
         st.content_index = 0
         st.in_response = False
+        st.response_pending = False
         st.current_response_params = None
 
     def _start_item(self, conn_id: str) -> str:
@@ -153,6 +155,7 @@ class ResponseHandler(RealtimeBaseHandler):
                     return self.make_error(message=str(exc), _type="invalid_input_item")
 
         st.in_response = True
+        st.response_pending = False
 
         st.current_response_params = event.response
         st.current_response_id = _generate_id("resp")
@@ -165,6 +168,9 @@ class ResponseHandler(RealtimeBaseHandler):
                 GenerateResponseRequest(
                     runtime_config=cfg,
                     response=event.response,
+                    turn_id=st.speculative_user_turn_id,
+                    turn_revision=st.speculative_user_turn_revision,
+                    speech_stopped_at_s=st.speculative_user_speech_stopped_at_s,
                 )
             )
         logger.debug("response.create received, LLM generation triggered")
@@ -216,8 +222,31 @@ class ResponseHandler(RealtimeBaseHandler):
 
     # ── Pipeline event handlers ───────────────────
 
-    def on_assistant_text(self, conn_id: str, event: AssistantTextEvent) -> list[ServerEvent]:
+    def on_assistant_text(
+        self,
+        conn_id: str,
+        event: AssistantTextEvent,
+        *,
+        wait_for_pending_reopen: bool = True,
+    ) -> list[ServerEvent] | None:
         """Handle assistant_text: emit transcript and/or tool-call events."""
+        if self._service.speculative_turns:
+            commit_result: bool | None
+            if wait_for_pending_reopen:
+                commit_result = self._service.speculative_turns.commit_if_latest_after_reopen_grace(
+                    event.turn_id,
+                    event.turn_revision,
+                )
+            else:
+                commit_result = self._service.speculative_turns.try_commit_if_latest_after_reopen_grace(
+                    event.turn_id,
+                    event.turn_revision,
+                )
+            if commit_result is None:
+                return None
+            if not commit_result:
+                logger.debug("Dropping stale assistant text for turn=%s rev=%s", event.turn_id, event.turn_revision)
+                return []
         st = self._state(conn_id)
         events: list[ServerEvent] = []
         resp_id, item_id = self._ensure_response(conn_id)

@@ -168,3 +168,31 @@ def test_brief_silence_is_preserved_when_speech_resumes() -> None:
     assert torch.equal(spoken_utterance[2], pause_chunks[1])
     assert torch.equal(spoken_utterance[3], resumed_chunk)
     assert all(torch.equal(chunk, ending_silence) for chunk in spoken_utterance[4:])
+
+
+def test_active_speech_samples_include_hysteresis_band_and_exclude_trailing_silence() -> None:
+    model = _FakeVADModel([0.1, 0.9, 0.4, 0.1, 0.1, 0.1, 0.1, 0.1])
+    iterator = VADIterator(
+        model=model,
+        threshold=0.5,
+        sampling_rate=16000,
+        min_silence_duration_ms=100,
+        speech_pad_ms=512,
+    )
+
+    pre_speech_chunk = torch.ones(512)
+    speech_chunk = torch.ones(512) * 2
+    maintained_speech_chunk = torch.ones(512) * 3
+    silence_chunk = torch.zeros(512)
+
+    assert iterator(pre_speech_chunk) is None
+    assert iterator(speech_chunk) is None
+    assert iterator(maintained_speech_chunk) is None
+    assert iterator.active_speech_samples == 1024
+
+    spoken_utterance = _finish_utterance(iterator, silence_chunk)
+
+    assert spoken_utterance is not None
+    assert iterator.last_utterance_active_speech_samples == 1024
+    assert iterator.active_speech_samples == 0
+    assert len(spoken_utterance) > 2

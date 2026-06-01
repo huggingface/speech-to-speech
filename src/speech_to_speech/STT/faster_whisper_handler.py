@@ -7,16 +7,16 @@ from typing import Any, Iterator
 from faster_whisper import WhisperModel
 from rich.console import Console
 
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import Transcription
+from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 
 console = Console()
 
 logger = logging.getLogger(__name__)
 
 
-class FasterWhisperSTTHandler(BaseHandler[STTIn, STTOut]):
+class FasterWhisperSTTHandler(BaseSTTHandler):
     """
     Handles the Speech To Text generation using a Whisper model.
     """
@@ -49,7 +49,12 @@ class FasterWhisperSTTHandler(BaseHandler[STTIn, STTOut]):
         if pred_text:
             console.print(f"[yellow]USER: {pred_text}")
 
-            yield Transcription(text=pred_text)
+            yield Transcription(
+                text=pred_text,
+                turn_id=vad_audio.turn_id,
+                turn_revision=vad_audio.turn_revision,
+                speech_stopped_at_s=vad_audio.created_at_s,
+            )
         else:
             logger.debug("no text detected. skipping...")
 

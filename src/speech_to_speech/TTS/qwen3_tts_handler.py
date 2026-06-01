@@ -30,6 +30,7 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, is_control_message
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 
 logger = logging.getLogger(__name__)
@@ -87,8 +88,10 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         blocksize: int = 512,
         gen_kwargs: dict[str, Any] | None = None,
         cancel_scope: CancelScope | None = None,
+        speculative_turns: SpeculativeTurnTracker | None = None,
     ) -> None:
         self.cancel_scope = cancel_scope
+        self.speculative_turns = speculative_turns
         self.should_listen = should_listen
         self.requested_device = device
         self.ref_audio = ref_audio
@@ -616,6 +619,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                     break
                 if not isinstance(next_item, TTSInput):
                     break
+                if current_input.turn_id != next_item.turn_id or current_input.turn_revision != next_item.turn_revision:
+                    break
                 if (
                     language_code is not None
                     and next_item.language_code is not None
@@ -633,9 +638,24 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         return combined_text, language_code, saw_end_of_response
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
+        speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
+            if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
+                tts_input.turn_id,
+                tts_input.turn_revision,
+            ):
+                return
             yield AUDIO_RESPONSE_DONE
             return
+
+        if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
+            tts_input.turn_id,
+            tts_input.turn_revision,
+        ):
+            logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
+            return
+        if speculative_turns:
+            speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         runtime_config = tts_input.runtime_config
         response = tts_input.response
@@ -651,18 +671,37 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         try:
             if self.ref_audio:
-                yield from self._process_voice_clone(text)
+                audio_iter = self._process_voice_clone(text)
             elif model_type == "custom_voice":
-                yield from self._process_custom_voice(text)
+                audio_iter = self._process_custom_voice(text)
             elif model_type == "voice_design":
-                yield from self._process_voice_design(text)
+                audio_iter = self._process_voice_design(text)
             else:
                 raise ValueError(
                     "Qwen3-TTS Base model requires ref_audio for voice cloning. "
                     "Provide qwen3_tts_ref_audio or use a CustomVoice/VoiceDesign model."
                 )
+            first_audio = True
+            for audio_chunk in audio_iter:
+                if first_audio:
+                    self._log_first_audio_latency(tts_input)
+                    first_audio = False
+                yield audio_chunk
         except Exception as e:
             logger.error(f"Error during Qwen3-TTS generation: {e}", exc_info=True)
+
+    def _log_first_audio_latency(self, tts_input: TTSInput) -> None:
+        if tts_input.speech_stopped_at_s is None:
+            return
+        latency_s = perf_counter() - tts_input.speech_stopped_at_s
+        if latency_s < 0:
+            return
+        logger.info(
+            "Last speech detected to first speech out: %.3fs (turn=%s rev=%s)",
+            latency_s,
+            tts_input.turn_id,
+            tts_input.turn_revision,
+        )
 
     def _mlx_streaming_interval(self) -> float:
         return max(1, self.streaming_chunk_size) / MLX_STREAMING_TOKENS_PER_SECOND
