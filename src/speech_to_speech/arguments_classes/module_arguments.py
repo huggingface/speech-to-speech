@@ -21,11 +21,21 @@ class ModuleArguments:
         },
     )
     stt: Optional[
-        Literal["whisper", "whisper-mlx", "mlx-audio-whisper", "faster-whisper", "parakeet-tdt", "paraformer"]
+        Literal[
+            "none",
+            "whisper",
+            "whisper-mlx",
+            "mlx-audio-whisper",
+            "faster-whisper",
+            "parakeet-tdt",
+            "paraformer",
+        ]
     ] = field(
         default="parakeet-tdt",
         metadata={
-            "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', 'parakeet-tdt', or 'paraformer'. Default is 'parakeet-tdt'."
+            "help": "The STT to use. Use 'none' to send VAD audio directly to an audio-input LLM. "
+            "Otherwise choose 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', "
+            "'parakeet-tdt', or 'paraformer'. Default is 'parakeet-tdt'."
         },
     )
     llm_backend: Optional[Literal["transformers", "mlx-lm", "responses-api"]] = field(

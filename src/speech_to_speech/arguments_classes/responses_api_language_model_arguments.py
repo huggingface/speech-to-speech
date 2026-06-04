@@ -32,3 +32,11 @@ class ResponsesApiLanguageModelHandlerArguments(LanguageModelBaseArguments):
             "For Together Qwen3.5 models this sends chat_template_kwargs.enable_thinking=false."
         },
     )
+    responses_api_audio_max_tokens: int = field(
+        default=256,
+        metadata={"help": "Maximum chat completion tokens for audio-input LLM requests. Default is 256."},
+    )
+    responses_api_audio_temperature: float = field(
+        default=0.0,
+        metadata={"help": "Chat completion temperature for audio-input LLM requests. Default is 0.0."},
+    )

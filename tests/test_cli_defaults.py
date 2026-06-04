@@ -119,6 +119,28 @@ def test_parse_arguments_transformers_backend():
     assert args.responses_api_language_model_handler_kwargs.model_name == "gpt-5.4-mini"
 
 
+def test_parse_arguments_stt_none_uses_responses_api_audio_path():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = [
+            "speech-to-speech",
+            "--stt",
+            "none",
+            "--responses_api_base_url",
+            "http://127.0.0.1:8080/v1",
+            "--model_name",
+            "ggml-org/gemma-4-12B-it-GGUF",
+        ]
+        args = parse_arguments()
+    finally:
+        sys.argv = original_argv
+
+    assert args.module_kwargs.stt == "none"
+    assert args.module_kwargs.llm_backend == "responses-api"
+    assert args.responses_api_language_model_handler_kwargs.responses_api_base_url == "http://127.0.0.1:8080/v1"
+    assert args.responses_api_language_model_handler_kwargs.model_name == "ggml-org/gemma-4-12B-it-GGUF"
+
+
 def test_parse_arguments_all_fields_populated():
     original_argv = sys.argv[:]
     try:
