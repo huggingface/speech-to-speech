@@ -34,6 +34,7 @@ from speech_to_speech.LLM.chat import (
     CompactionResult,
     make_assistant_message,
     make_system_message,
+    make_user_audio_message,
     make_user_message,
 )
 
@@ -138,6 +139,15 @@ class TestFactoryHelpers:
         assert len(msg.content) == 1
         assert msg.content[0].type == "input_text"
         assert msg.content[0].text == "hello"
+
+    def test_make_user_audio_message(self):
+        msg = make_user_audio_message("abc123")
+        assert isinstance(msg, RealtimeConversationItemUserMessage)
+        assert msg.role == "user"
+        assert msg.type == "message"
+        assert len(msg.content) == 1
+        assert msg.content[0].type == "input_audio"
+        assert msg.content[0].audio == "abc123"
 
     def test_make_assistant_message(self):
         msg = make_assistant_message("world")
@@ -366,6 +376,14 @@ class TestAddItem:
         chat.add_item(msg)
         assert len(chat.buffer[0].content) == 1
         assert chat.buffer[0].content[0].type == "input_text"
+
+    def test_user_message_keeps_audio_content_with_base64_audio(self):
+        chat = Chat(size=5)
+        msg = make_user_audio_message("abc123")
+        chat.add_item(msg)
+        assert len(chat.buffer[0].content) == 1
+        assert chat.buffer[0].content[0].type == "input_audio"
+        assert chat.buffer[0].content[0].audio == "abc123"
 
     def test_user_message_keeps_image_content(self):
         chat = Chat(size=5)
@@ -741,7 +759,47 @@ class TestToTransformersChat:
 
 
 # ===================================================================
-# 9. TestCopyAndReset
+# 9. TestToChatCompletionsChat
+# ===================================================================
+
+
+class TestToChatCompletionsChat:
+    def test_audio_message_serializes_to_llama_cpp_shape(self):
+        chat = Chat(size=5)
+        chat.init_chat(_system("Be concise."))
+        chat.add_item(make_user_audio_message("abc123"))
+        chat.add_item(_assistant("Yes."))
+
+        result = chat.to_chat_completions_chat()
+
+        assert result == [
+            {"role": "system", "content": "Be concise."},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": "abc123",
+                            "format": "wav",
+                        },
+                    }
+                ],
+            },
+            {"role": "assistant", "content": "Yes."},
+        ]
+
+    def test_strip_audio_removes_audio_from_future_serialization(self):
+        chat = Chat(size=5)
+        chat.add_item(make_user_audio_message("abc123"))
+        chat.strip_audio()
+
+        assert chat.to_chat_completions_chat() == []
+        assert chat._user_turn_count == 1
+
+
+# ===================================================================
+# 10. TestCopyAndReset
 # ===================================================================
 
 

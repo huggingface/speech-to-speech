@@ -41,6 +41,7 @@ class VADAudio(PipelineMessage):
 
     tag: Literal["vad_audio"] = "vad_audio"
     audio: np.ndarray
+    runtime_config: RuntimeConfig | None = None
     mode: Literal["progressive", "final"] | None = None
     turn_id: str | None = None
     turn_revision: int | None = None
@@ -149,6 +150,8 @@ class GenerateResponseRequest(PipelineMessage):
     tag: Literal["generate_response"] = "generate_response"
     runtime_config: RuntimeConfig
     response: RealtimeResponseCreateParams | None = None
+    audio: np.ndarray | None = None
+    audio_sample_rate: int = 16000
     language_code: Optional[str] = None
     turn_id: str | None = None
     turn_revision: int | None = None
