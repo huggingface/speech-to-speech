@@ -9,7 +9,7 @@ from funasr import AutoModel
 from rich.console import Console
 
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
-from speech_to_speech.pipeline.messages import Transcription
+from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 
 logging.basicConfig(
@@ -58,9 +58,16 @@ class ParaformerSTTHandler(BaseSTTHandler):
         logger.debug("finished paraformer inference")
         console.print(f"[yellow]USER: {pred_text}")
 
-        yield Transcription(
-            text=pred_text,
-            turn_id=vad_audio.turn_id,
-            turn_revision=vad_audio.turn_revision,
-            speech_stopped_at_s=vad_audio.created_at_s,
-        )
+        if vad_audio.mode == "progressive":
+            yield PartialTranscription(
+                text=pred_text,
+                turn_id=vad_audio.turn_id,
+                turn_revision=vad_audio.turn_revision,
+            )
+        else:
+            yield Transcription(
+                text=pred_text,
+                turn_id=vad_audio.turn_id,
+                turn_revision=vad_audio.turn_revision,
+                speech_stopped_at_s=vad_audio.created_at_s,
+            )
