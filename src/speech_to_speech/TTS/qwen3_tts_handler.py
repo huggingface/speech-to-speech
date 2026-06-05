@@ -51,6 +51,28 @@ ESTIMATED_QWEN3_CHARS_PER_SECOND = 14.0
 QWEN3_TOKEN_SAFETY_MARGIN = 1.35
 QWEN3_BASE_PROMPT_SECONDS = 1.0
 QWEN3_PUNCTUATION_PAUSE_SECONDS = 0.5
+QWEN3_LANGUAGE_ALIASES = {
+    "zh": "chinese",
+    "zh-cn": "chinese",
+    "zh-hans": "chinese",
+    "zh-hant": "chinese",
+    "cmn": "chinese",
+    "en": "english",
+    "en-us": "english",
+    "en-gb": "english",
+    "ja": "japanese",
+    "jp": "japanese",
+    "ko": "korean",
+    "kr": "korean",
+    "de": "german",
+    "fr": "french",
+    "ru": "russian",
+    "pt": "portuguese",
+    "pt-br": "portuguese",
+    "pt-pt": "portuguese",
+    "es": "spanish",
+    "it": "italian",
+}
 
 
 class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
@@ -96,7 +118,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.requested_device = device
         self.ref_audio = ref_audio
         self.ref_text = ref_text
-        self.language = language
+        self.language = self._normalize_language(language)
         self.speaker = speaker
         self.instruct = instruct
         self.xvec_only = xvec_only
@@ -266,6 +288,14 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         if self.backend == "mlx":
             return DEFAULT_MLX_STREAMING_CHUNK_SIZE
         return DEFAULT_FASTER_STREAMING_CHUNK_SIZE
+
+    def _normalize_language(self, language: str | None) -> str:
+        if language is None:
+            return "auto"
+        normalized = str(language).strip().replace("_", "-").lower()
+        if not normalized:
+            return "auto"
+        return QWEN3_LANGUAGE_ALIASES.get(normalized, normalized)
 
     def _infer_model_type_from_name(self) -> str:
         name = (self.model_name or "").lower()
