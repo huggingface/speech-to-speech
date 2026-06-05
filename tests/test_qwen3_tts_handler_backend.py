@@ -152,6 +152,37 @@ def test_setup_defaults_to_custom_voice_profile_off_darwin(monkeypatch):
     assert handler.non_streaming_mode is True
 
 
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        ("zh", "chinese"),
+        ("zh-CN", "chinese"),
+        ("zh_Hans", "chinese"),
+        ("Chinese", "chinese"),
+        ("en-US", "english"),
+        ("English", "english"),
+        ("Auto", "auto"),
+        ("", "auto"),
+    ],
+)
+def test_setup_normalizes_qwen3_language_aliases(monkeypatch, language, expected):
+    def _setup_mlx(self, *args, **kwargs):
+        raise AssertionError("Non-Darwin setup should not use the mlx backend")
+
+    def _setup_faster(self, model_name, dtype, attn_implementation):
+        return None
+
+    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_faster", _setup_faster)
+    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.setup(Event(), language=language)
+
+    assert handler.language == expected
+
+
 def test_setup_preserves_explicit_chunk_size_on_darwin(monkeypatch):
     def _setup_mlx(self, model_name):
         return None
