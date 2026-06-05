@@ -4,10 +4,10 @@ from dataclasses import dataclass, field
 @dataclass
 class MiniMaxLanguageModelHandlerArguments:
     minimax_model_name: str = field(
-        default="MiniMax-M2.7",
+        default="MiniMax-M3",
         metadata={
-            "help": "The MiniMax model to use. Default is 'MiniMax-M2.7'. "
-            "Also available: 'MiniMax-M2.5', 'MiniMax-M2.5-highspeed'."
+            "help": "The MiniMax model to use. Default is 'MiniMax-M3'. "
+            "Also available: 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed'."
         },
     )
     minimax_user_role: str = field(

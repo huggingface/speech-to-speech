@@ -6,7 +6,7 @@ from LLM.openai_api_language_model import OpenApiModelHandler
 
 logger = logging.getLogger(__name__)
 
-# Pattern to strip thinking tags from MiniMax M2.5/M2.7 responses
+# Pattern to strip thinking tags from MiniMax M3/M2.7 responses
 THINK_TAG_PATTERN = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
 
@@ -20,7 +20,7 @@ class MiniMaxModelHandler(OpenApiModelHandler):
 
     def setup(
         self,
-        model_name="MiniMax-M2.7",
+        model_name="MiniMax-M3",
         device="cuda",
         gen_kwargs={},
         base_url="https://api.minimax.io/v1",

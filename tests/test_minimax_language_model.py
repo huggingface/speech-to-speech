@@ -169,7 +169,7 @@ class TestDefaultValues:
             handler.setup()
         finally:
             os.environ.pop("MINIMAX_API_KEY", None)
-        assert handler._captured_kwargs["model_name"] == "MiniMax-M2.7"
+        assert handler._captured_kwargs["model_name"] == "MiniMax-M3"
 
     def test_disable_thinking_off(self, monkeypatch):
         monkeypatch.setattr(
@@ -198,7 +198,7 @@ class TestProcessThinkTagStripping:
         )
 
         handler = object.__new__(MiniMaxModelHandler)
-        handler.model_name = "MiniMax-M2.7"
+        handler.model_name = "MiniMax-M3"
         handler.stream = False
         handler.gen_kwargs = {}
         handler.disable_thinking = False
@@ -238,7 +238,7 @@ class TestProcessThinkTagStripping:
         )
 
         handler = object.__new__(MiniMaxModelHandler)
-        handler.model_name = "MiniMax-M2.7"
+        handler.model_name = "MiniMax-M3"
         handler.stream = False
         handler.gen_kwargs = {}
         handler.disable_thinking = False
@@ -287,7 +287,7 @@ class TestStreamingWithThinkTags:
         ]
 
         handler = object.__new__(MiniMaxModelHandler)
-        handler.model_name = "MiniMax-M2.7"
+        handler.model_name = "MiniMax-M3"
         handler.stream = True
         handler.gen_kwargs = {}
         handler.disable_thinking = False
@@ -316,7 +316,7 @@ class TestArgumentsDataclass:
         )
 
         args = MiniMaxLanguageModelHandlerArguments()
-        assert args.minimax_model_name == "MiniMax-M2.7"
+        assert args.minimax_model_name == "MiniMax-M3"
         assert args.minimax_base_url == "https://api.minimax.io/v1"
         assert args.minimax_api_key is None
         assert args.minimax_stream is False
@@ -355,7 +355,7 @@ class TestPipelineIntegration:
                     args.__dict__[new_key] = value
         args.__dict__["gen_kwargs"] = gen_kwargs
 
-        assert args.model_name == "MiniMax-M2.7"
+        assert args.model_name == "MiniMax-M3"
         assert args.base_url == "https://api.minimax.io/v1"
         assert args.api_key is None
         assert args.stream is False
@@ -382,7 +382,7 @@ class TestMiniMaxIntegration:
     def test_non_streaming_response(self):
         handler = object.__new__(MiniMaxModelHandler)
         handler.setup(
-            model_name="MiniMax-M2.7",
+            model_name="MiniMax-M3",
             api_key=os.environ["MINIMAX_API_KEY"],
             stream=False,
         )
@@ -396,7 +396,7 @@ class TestMiniMaxIntegration:
     def test_streaming_response(self):
         handler = object.__new__(MiniMaxModelHandler)
         handler.setup(
-            model_name="MiniMax-M2.7",
+            model_name="MiniMax-M3",
             api_key=os.environ["MINIMAX_API_KEY"],
             stream=True,
         )
@@ -409,7 +409,7 @@ class TestMiniMaxIntegration:
     def test_session_reset(self):
         handler = object.__new__(MiniMaxModelHandler)
         handler.setup(
-            model_name="MiniMax-M2.7",
+            model_name="MiniMax-M3",
             api_key=os.environ["MINIMAX_API_KEY"],
             stream=False,
         )
