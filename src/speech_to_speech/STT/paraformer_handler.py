@@ -5,7 +5,6 @@ from typing import Any, Iterator
 
 import numpy as np
 import torch
-from funasr import AutoModel
 from rich.console import Console
 
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
@@ -37,6 +36,13 @@ class ParaformerSTTHandler(BaseSTTHandler):
         if len(model_name.split("/")) > 1:
             model_name = model_name.split("/")[-1]
         self.device = device
+        try:
+            from funasr import AutoModel
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "Paraformer STT requires the optional 'paraformer' extra. "
+                "Install it with `pip install speech-to-speech[paraformer]`."
+            ) from exc
         self.model = AutoModel(model=model_name, device=device)
         self.warmup()
 
