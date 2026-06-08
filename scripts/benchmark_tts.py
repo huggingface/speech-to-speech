@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from speech_to_speech.pipeline.messages import TTSInput
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -86,7 +88,13 @@ class BenchmarkResult:
         return stats
 
 
-def benchmark_handler(handler_name: str, text: str, iterations: int, handler_kwargs: Optional[Dict[str, Any]] = None) -> BenchmarkResult:
+def benchmark_handler(
+    handler_name: str,
+    text: str,
+    iterations: int,
+    handler_kwargs: Optional[Dict[str, Any]] = None,
+    language_code: Optional[str] = "en",
+) -> BenchmarkResult:
     logger.info(f"Benchmarking {handler_name}...")
     result = BenchmarkResult(handler_name)
 
@@ -169,7 +177,8 @@ def benchmark_handler(handler_name: str, text: str, iterations: int, handler_kwa
             first_output = True
             total_samples = 0
 
-            for chunk in handler.process(text):
+            tts_input = TTSInput(text=text, language_code=language_code)
+            for chunk in handler.process(tts_input):
                 if first_output:
                     time_to_first_chunk = time.perf_counter() - start_time
                     first_output = False
@@ -337,6 +346,12 @@ def main():
         help="Output JSON file for results (default: tts_benchmark_results.json)",
     )
     parser.add_argument(
+        "--language_code",
+        type=str,
+        default="en",
+        help="Language code to pass to TTS handlers (default: en)",
+    )
+    parser.add_argument(
         "--qwen3_mlx_quantizations",
         nargs="+",
         default=None,
@@ -365,6 +380,7 @@ def main():
             args.text,
             args.iterations,
             handler_kwargs=handler_kwargs,
+            language_code=args.language_code,
         )
         result.handler_name = result_name
         results.append(result)
