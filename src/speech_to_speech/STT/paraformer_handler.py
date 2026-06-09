@@ -5,11 +5,10 @@ from typing import Any, Iterator
 
 import numpy as np
 import torch
-from funasr import AutoModel
 from rich.console import Console
 
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
-from speech_to_speech.pipeline.messages import Transcription
+from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 
 logging.basicConfig(
@@ -37,6 +36,13 @@ class ParaformerSTTHandler(BaseSTTHandler):
         if len(model_name.split("/")) > 1:
             model_name = model_name.split("/")[-1]
         self.device = device
+        try:
+            from funasr import AutoModel
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "Paraformer STT requires the optional 'paraformer' extra. "
+                "Install it with `pip install speech-to-speech[paraformer]`."
+            ) from exc
         self.model = AutoModel(model=model_name, device=device)
         self.warmup()
 
@@ -58,9 +64,16 @@ class ParaformerSTTHandler(BaseSTTHandler):
         logger.debug("finished paraformer inference")
         console.print(f"[yellow]USER: {pred_text}")
 
-        yield Transcription(
-            text=pred_text,
-            turn_id=vad_audio.turn_id,
-            turn_revision=vad_audio.turn_revision,
-            speech_stopped_at_s=vad_audio.created_at_s,
-        )
+        if vad_audio.mode == "progressive":
+            yield PartialTranscription(
+                text=pred_text,
+                turn_id=vad_audio.turn_id,
+                turn_revision=vad_audio.turn_revision,
+            )
+        else:
+            yield Transcription(
+                text=pred_text,
+                turn_id=vad_audio.turn_id,
+                turn_revision=vad_audio.turn_revision,
+                speech_stopped_at_s=vad_audio.created_at_s,
+            )
