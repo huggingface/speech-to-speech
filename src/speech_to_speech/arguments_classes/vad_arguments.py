@@ -28,9 +28,9 @@ class VADHandlerArguments:
         },
     )
     min_speech_continuation_ms: int = field(
-        default=0,
+        default=192,
         metadata={
-            "help": "Hysteresis threshold (ms of active speech) for accepting speech that continues a reopenable turn (soft-ended, uncommitted, within the reopen window). 0 disables the split and uses min_speech_ms. Clamped to [100, min_speech_ms]. New turns and barge-ins always require min_speech_ms. Recommended: 200 with min_speech_ms 384."
+            "help": "Hysteresis threshold (ms of active speech) for accepting speech that continues a reopenable turn (soft-ended, uncommitted, within the reopen window). Set to 0 to disable the split and use min_speech_ms. Clamped to [100, min_speech_ms]. New turns and barge-ins always require min_speech_ms. Default and recommended: 192 with min_speech_ms 384."
         },
     )
     max_speech_ms: float = field(
