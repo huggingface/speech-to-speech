@@ -61,9 +61,15 @@ class VADHandlerArguments:
             "help": "In realtime mode, keep a soft-ended turn reopenable for this many milliseconds unless a response commits it."
         },
     )
+    unanswered_reopen_ms: int = field(
+        default=7000,
+        metadata={
+            "help": "Sanity cap (ms) for reopening a soft-ended speculative turn that has not yet been answered by any assistant output. While a turn is uncommitted, resumed speech within this window reopens the same turn instead of starting a new one. Has no effect below speculative_reopen_ms."
+        },
+    )
     short_segment_merge_ms: int = field(
         default=0,
         metadata={
-            "help": "When greater than 0, adjacent VAD segments below min_speech_ms are held and stitched for this many milliseconds before being discarded. Useful with very low min_silence_ms values."
+            "help": "When greater than 0, adjacent VAD segments below min_speech_ms are held and stitched for this many milliseconds before being discarded. Fragments shorter than 100 ms of active speech are never held. Useful with very low min_silence_ms values."
         },
     )

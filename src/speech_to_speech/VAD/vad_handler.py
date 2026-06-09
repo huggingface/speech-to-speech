@@ -34,6 +34,12 @@ class _PendingShortSegment:
     end_ms: int
 
 
+# Fragments with less active speech than this are treated as noise and never
+# held for stitching, so sub-threshold bursts cannot sum past min_speech_ms
+# and fire a false barge-in.
+_SHORT_SEGMENT_MIN_FRAGMENT_MS = 100
+
+
 # Optional import for audio enhancement
 try:
     from df.enhance import enhance, init_df
@@ -65,6 +71,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         text_output_queue: Queue[TextEventItem] | None = None,
         speculative_turns: SpeculativeTurnTracker | None = None,
         speculative_reopen_ms: int = 1000,
+        unanswered_reopen_ms: int = 7000,
         short_segment_merge_ms: int = 0,
     ) -> None:
         self.should_listen = should_listen
@@ -77,6 +84,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.text_output_queue = text_output_queue
         self.speculative_turns = speculative_turns
         self.speculative_reopen_ms = speculative_reopen_ms
+        self.unanswered_reopen_ms = max(self.speculative_reopen_ms, unanswered_reopen_ms)
         self.short_segment_merge_ms = max(0, short_segment_merge_ms)
         self._last_turn_detection: dict | None = None
         self.model, _ = torch.hub.load(
@@ -194,15 +202,30 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             return False
         if self._current_turn_id is None or self._current_turn_revision is None or self._last_final_audio_ms is None:
             return False
-        elapsed_ms = max(0, audio_start_ms - self._last_final_audio_ms)
-        if elapsed_ms > self.speculative_reopen_ms:
-            return False
-        if self.speculative_turns and self.speculative_turns.is_committed(
+
+        is_committed = self.speculative_turns is not None and self.speculative_turns.is_committed(
             self._current_turn_id,
             self._current_turn_revision,
-        ):
+        )
+        if is_committed:
             return False
-        return True
+
+        # Elapsed is measured on the audio clock, so the window only advances
+        # while the client streams audio (continuous capture behaves like wall
+        # time; push-to-talk style gaps freeze it).
+        elapsed_ms = max(0, audio_start_ms - self._last_final_audio_ms)
+
+        # Within the short grace window, any uncommitted turn may reopen.
+        # Beyond it, an unanswered turn (no assistant output committed yet)
+        # remains reopenable up to the unanswered_reopen_ms sanity cap, so a
+        # user pause longer than speculative_reopen_ms does not orphan a turn
+        # the assistant has not replied to. The cap also bounds the
+        # empty-transcript case, where no request is queued and the turn would
+        # otherwise never commit.
+        reopen_limit_ms = self.speculative_reopen_ms
+        if self.speculative_turns is not None:
+            reopen_limit_ms = self.unanswered_reopen_ms
+        return elapsed_ms <= reopen_limit_ms
 
     def _begin_pending_reopen_if_needed(self, audio_start_ms: int) -> None:
         if self._pending_reopen_candidate is not None or not self._should_reopen_current_turn(audio_start_ms):
@@ -562,17 +585,27 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
             array = torch.cat(vad_output).cpu().numpy()
             end_ms = self._audio_ms
-            active_speech_duration_ms = self._last_utterance_active_speech_duration_ms()
-            array, active_speech_duration_ms, start_ms, stitched_short_segment = self._merge_pending_short_segment(
-                array,
-                active_speech_duration_ms,
-                end_ms,
-            )
+            raw_active_ms = self._last_utterance_active_speech_duration_ms()
+            active_speech_duration_ms = raw_active_ms
+            stitched_short_segment = False
+            # Fragments below the noise floor never merge with or replace a
+            # held segment; the pending segment's own expiry handles it.
+            if raw_active_ms >= _SHORT_SEGMENT_MIN_FRAGMENT_MS:
+                array, active_speech_duration_ms, start_ms, stitched_short_segment = (
+                    self._merge_pending_short_segment(
+                        array,
+                        active_speech_duration_ms,
+                        end_ms,
+                    )
+                )
+            else:
+                start_ms = self._segment_start_ms(array, end_ms)
             duration_ms = self._segment_duration_ms(array)
 
             if active_speech_duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
                 if (
                     self._short_segment_merge_window_ms() > 0
+                    and raw_active_ms >= _SHORT_SEGMENT_MIN_FRAGMENT_MS
                     and active_speech_duration_ms < self.min_speech_ms
                     and duration_ms <= self.max_speech_ms
                 ):
@@ -643,6 +676,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 self._last_final_wall_time = time.time()
                 self._last_final_audio_ms = end_ms
                 if self.speculative_turns:
+                    # The grace window only delays response commits; reopen
+                    # eligibility for unanswered turns is extended separately
+                    # via unanswered_reopen_ms in _should_reopen_current_turn.
                     self.speculative_turns.start_reopen_grace(
                         turn_id,
                         turn_revision,
@@ -680,16 +716,26 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
             array = torch.cat(vad_output).cpu().numpy()
             end_ms = self._audio_ms
-            active_speech_duration_ms = self._last_utterance_active_speech_duration_ms()
-            array, active_speech_duration_ms, start_ms, stitched_short_segment = self._merge_pending_short_segment(
-                array,
-                active_speech_duration_ms,
-                end_ms,
-            )
+            raw_active_ms = self._last_utterance_active_speech_duration_ms()
+            active_speech_duration_ms = raw_active_ms
+            stitched_short_segment = False
+            # Fragments below the noise floor never merge with or replace a
+            # held segment; the pending segment's own expiry handles it.
+            if raw_active_ms >= _SHORT_SEGMENT_MIN_FRAGMENT_MS:
+                array, active_speech_duration_ms, start_ms, stitched_short_segment = (
+                    self._merge_pending_short_segment(
+                        array,
+                        active_speech_duration_ms,
+                        end_ms,
+                    )
+                )
+            else:
+                start_ms = self._segment_start_ms(array, end_ms)
             duration_ms = self._segment_duration_ms(array)
             if active_speech_duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
                 if (
                     self._short_segment_merge_window_ms() > 0
+                    and raw_active_ms >= _SHORT_SEGMENT_MIN_FRAGMENT_MS
                     and active_speech_duration_ms < self.min_speech_ms
                     and duration_ms <= self.max_speech_ms
                 ):
