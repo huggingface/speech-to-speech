@@ -269,6 +269,35 @@ class Chat:
                 return True
         return False
 
+    def append_user_message_text(self, item_id: str, text: str, separator: str = "\n") -> bool:
+        """Append text to a tracked user message.
+
+        The caller owns the turn semantics. In speculative realtime mode, an
+        unanswered user message remains open until assistant output closes it,
+        even if VAD/STT emits another turn boundary meanwhile.
+        """
+
+        with self._lock:
+            item = next(
+                (
+                    entry
+                    for entry in self.buffer
+                    if isinstance(entry, RealtimeConversationItemUserMessage) and entry.id == item_id
+                ),
+                None,
+            )
+            if item is None:
+                return False
+            existing_text = separator.join(
+                part.text for part in item.content if part.type == "input_text" and part.text
+            )
+            merged = separator.join(part for part in (existing_text, text) if part)
+            if not merged:
+                return False
+            item.content = [UserContent(type="input_text", text=merged)]
+            logger.debug("Appended text to unanswered user message %s", item_id)
+            return True
+
     def remove_user_message(self, item_id: str) -> bool:
         """Remove an existing user message from the bounded chat buffer."""
 

@@ -250,6 +250,14 @@ class ResponseHandler(RealtimeBaseHandler):
         st = self._state(conn_id)
         events: list[ServerEvent] = []
         resp_id, item_id = self._ensure_response(conn_id)
+        if (
+            st.speculative_user_item_id
+            and event.turn_id is not None
+            and event.turn_id == st.speculative_user_turn_id
+            and event.turn_revision == st.speculative_user_turn_revision
+            and (event.text or event.tools)
+        ):
+            st.speculative_user_item_closed = True
         st.last_item_id = item_id
         output_idx = 0
         if event.text:
