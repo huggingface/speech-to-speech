@@ -24,6 +24,10 @@ from speech_to_speech.utils.utils import _generate_id
 logger = logging.getLogger(__name__)
 
 _POSITIONAL_RE = re.compile(r"^__arg_\d+__$")
+_LENIENT_CALL_RE = re.compile(
+    r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*"
+    r"\((?:[^()\"']+|\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*')*\)"
+)
 
 
 # ── AST / tokenize helpers ───────────────────────────────────────────
@@ -79,6 +83,31 @@ def _split_top_level_calls(source: str) -> List[str]:
         i = end + 1
 
     return calls
+
+
+def _split_simple_calls_with_regex(source: str) -> List[str]:
+    """Extract simple ``name(args)`` spans from malformed model output."""
+    return [match.group(0).strip() for match in _LENIENT_CALL_RE.finditer(source)]
+
+
+def _parse_function_exprs(
+    expressions: List[str],
+    pattern_to_match: list[str],
+    *,
+    skip_invalid: bool = False,
+) -> List["FunctionToolCall"]:
+    results: List[FunctionToolCall] = []
+    for expr in expressions:
+        try:
+            call = _parse_call_expr(expr)
+        except Exception:
+            if skip_invalid:
+                continue
+            raise
+        if pattern_to_match and all(pattern not in call.function_name for pattern in pattern_to_match):
+            continue
+        results.append(call)
+    return results
 
 
 def _extract_function_name(node: ast.expr) -> str:
@@ -222,13 +251,16 @@ def parse_function_call(function_string: str, pattern_to_match: list[str] = []) 
     if not function_string:
         return []
 
-    results: List[FunctionToolCall] = []
-    for expr in _split_top_level_calls(function_string):
-        call = _parse_call_expr(expr)
-        if pattern_to_match and all(pattern not in call.function_name for pattern in pattern_to_match):
-            continue
-        results.append(call)
-    return results
+    try:
+        expressions = _split_top_level_calls(function_string)
+    except tokenize.TokenError:
+        return _parse_function_exprs(
+            _split_simple_calls_with_regex(function_string),
+            pattern_to_match,
+            skip_invalid=True,
+        )
+
+    return _parse_function_exprs(expressions, pattern_to_match)
 
 
 def parse_multiple_functions(function_strings: List[str]) -> List[FunctionToolCall]:

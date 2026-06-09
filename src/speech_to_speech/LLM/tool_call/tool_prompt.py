@@ -28,28 +28,21 @@ END_CODE = "</code>"
 
 TOOL_PROMPT_TEMPLATE = Template(
     """\
-You have access to the following tools defined as Python functions:
+Available tools:
 
 {% for tool in tools %}
 {{ tool.to_code_prompt() }}
 
 {% endfor %}
-When you need to use a tool, output the function call between \
-{{ enter_code }} and {{ end_code }} tags in your response:
+To call a tool, put exactly one named-argument function call inside {{ enter_code }}...{{ end_code }}:
+{{ enter_code }}function_name(required_arg='value'){{ end_code }}
 
-{{ enter_code }}
-function_name(arg_name_1=value1, arg_name_2='string_value')
-{{ end_code }}
-
-RULES:
-- NEVER announce, introduce, or reference the tool call. \
-Do NOT write "Here is the call", "I will use", "Let me call", \
-"The function is", or any similar phrasing.
-- The {{ enter_code }}…{{ end_code }} block must appear directly \
-in your response without any surrounding explanation.
-- Arguments MUST always be named: func(x=1, y=2). Positional arguments like func(1, 2) are NOT allowed.
-- String arguments must be quoted: func(name='hello').
-- Only one tool call may appear in a response. Do not include more than one function call between the tags.\
+Rules:
+- You may say one brief natural sentence before the tool call, e.g. "Let me check with my camera."
+- For expression/background tools, always speak first. If asked to show an expression, say something like "Sure, here's my best sadness."; otherwise say something like "That sounds really hard."
+- Do not mention tags, functions, or tools. No prose inside the tags or after {{ end_code }}.
+- Use named arguments only; quote strings. Omit optional args instead of placeholder values like "random", "none", "", or null.
+- Only one tool call may appear in a response.\
 """,
     keep_trailing_newline=True,
 )

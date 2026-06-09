@@ -296,39 +296,46 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         """
         chunks: list[LLMResponseChunk] = []
 
-        if ctx.block_regex and ctx.end_code and ctx.end_code in printable_text:
-            stripped, func_calls = extract_function_calls_from_text(
-                printable_text,
-                ctx.block_regex,
-            )
-            for fc in func_calls:
-                try:
-                    tools.append(fc.to_realtime_function_tool_call(ctx.function_tools))
-                except ValueError as e:
-                    logger.warning("Skipping invalid tool call: %s", e)
-            printable_text = stripped
-
         if ctx.enter_code and ctx.enter_code in printable_text:
             idx = printable_text.index(ctx.enter_code)
             before = printable_text[:idx]
+            code_and_after = printable_text[idx:]
             if before.strip():
                 for s in sent_tokenize(before):
                     ctx.sentence_batch.append(s)
-                    if len(ctx.sentence_batch) >= self.stream_batch_sentences:
-                        chunks.append(
-                            LLMResponseChunk(
-                                text=" ".join(ctx.sentence_batch),
-                                language_code=language_code,
-                                runtime_config=runtime_config,
-                                response=response,
-                                turn_id=ctx.turn_id,
-                                turn_revision=ctx.turn_revision,
-                                speech_stopped_at_s=ctx.speech_stopped_at_s,
-                                cancel_generation=ctx.cancel_generation,
-                            )
+                if ctx.sentence_batch:
+                    chunks.append(
+                        LLMResponseChunk(
+                            text=" ".join(ctx.sentence_batch),
+                            language_code=language_code,
+                            runtime_config=runtime_config,
+                            response=response,
+                            turn_id=ctx.turn_id,
+                            turn_revision=ctx.turn_revision,
+                            speech_stopped_at_s=ctx.speech_stopped_at_s,
+                            cancel_generation=ctx.cancel_generation,
                         )
-                        ctx.sentence_batch = []
-            printable_text = printable_text[idx:]
+                    )
+                    ctx.sentence_batch = []
+            if ctx.block_regex and ctx.end_code and ctx.end_code in code_and_after:
+                stripped, func_calls = extract_function_calls_from_text(
+                    code_and_after,
+                    ctx.block_regex,
+                )
+                for fc in func_calls:
+                    if tools:
+                        logger.warning(
+                            "Skipping extra tool call '%s'; only one tool call is allowed per response",
+                            fc.function_name,
+                        )
+                        continue
+                    try:
+                        tools.append(fc.to_realtime_function_tool_call(ctx.function_tools))
+                    except ValueError as e:
+                        logger.warning("Skipping invalid tool call: %s", e)
+                printable_text = "" if tools else stripped
+            else:
+                printable_text = code_and_after
             return chunks, tools, printable_text
 
         if printable_text:

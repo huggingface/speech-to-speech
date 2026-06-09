@@ -224,6 +224,25 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                             printable_text = sentences[-1]
                     elif isinstance(raw_event, ResponseOutputItemDoneEvent):
                         if isinstance(raw_event.item, ResponseFunctionToolCall):
+                            if printable_text.strip():
+                                sentence_batch.append(printable_text.strip())
+                                printable_text = ""
+                            if sentence_batch:
+                                if not self._turn_output_allowed(turn_id, turn_revision):
+                                    logger.info("LLM generation cancelled (stale speculative turn)")
+                                    cancelled = True
+                                    break
+                                yield LLMResponseChunk(
+                                    text=" ".join(sentence_batch),
+                                    language_code=language_code,
+                                    runtime_config=runtime_config,
+                                    response=response,
+                                    turn_id=turn_id,
+                                    turn_revision=turn_revision,
+                                    speech_stopped_at_s=speech_stopped_at_s,
+                                    cancel_generation=gen,
+                                )
+                                sentence_batch = []
                             raw_event.item.call_id = _generate_id("call")
                             raw_event.item.id = _generate_id("fc")
                             tools.append(raw_event.item)
@@ -323,7 +342,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                             logger.warning(f"Not supported message type: {message.type}")
                     logger.debug(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
-                    if clean_text.strip() or tools:
+                    if clean_text.strip():
                         if self._generation_is_stale(gen):
                             logger.info("LLM generation cancelled (interruption)")
                         elif not self._turn_output_allowed(turn_id, turn_revision):
@@ -331,6 +350,22 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                         else:
                             yield LLMResponseChunk(
                                 text=clean_text.strip(),
+                                language_code=language_code,
+                                runtime_config=runtime_config,
+                                response=response,
+                                turn_id=turn_id,
+                                turn_revision=turn_revision,
+                                speech_stopped_at_s=speech_stopped_at_s,
+                                cancel_generation=gen,
+                            )
+                    if tools:
+                        if self._generation_is_stale(gen):
+                            logger.info("LLM generation cancelled (interruption)")
+                        elif not self._turn_output_allowed(turn_id, turn_revision):
+                            logger.info("LLM generation cancelled (stale speculative turn)")
+                        else:
+                            yield LLMResponseChunk(
+                                text="",
                                 language_code=language_code,
                                 tools=tools,
                                 runtime_config=runtime_config,

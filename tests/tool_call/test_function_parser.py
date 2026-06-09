@@ -190,6 +190,14 @@ class TestExtractFromText:
         assert len(calls) == 1
         assert calls[0].parameters == {"msg": "hello ) world"}
 
+    def test_recovers_simple_call_from_malformed_code_block(self):
+        text = "Let me check.\n<code>camera(question='What is in front of me?')}</code>"
+        outside, calls = extract_function_calls_from_text(text, block_regex=self.CODE_BLOCK_REGEX)
+        assert "Let me check." in outside
+        assert len(calls) == 1
+        assert calls[0].function_name == "camera"
+        assert calls[0].parameters == {"question": "What is in front of me?"}
+
 
 # ---------------------------------------------------------------------------
 # to_realtime_function_tool_call – arg stripping & validation (Bug 2 fixes)
