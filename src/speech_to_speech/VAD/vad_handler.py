@@ -351,6 +351,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         )
 
     def _effective_active_speech_for_start(self, start_ms: int, active_ms: float) -> tuple[int, float]:
+        # A live fragment below the noise floor never counts the held segment
+        # toward the speech-start threshold, mirroring the finalization path.
+        if active_ms < _SHORT_SEGMENT_MIN_FRAGMENT_MS:
+            return start_ms, active_ms
         if not self._can_merge_pending_short_segment(start_ms):
             return start_ms, active_ms
         assert self._pending_short_segment is not None
@@ -369,8 +373,15 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
         pending = self._pending_short_segment
         assert pending is not None
+        # Reinsert the silence between the two segments so the stitched audio
+        # keeps its acoustic gap and its length matches the audio-clock span.
+        gap_samples = int(self._short_segment_gap_ms(start_ms) * self.sample_rate / 1000)
         self._pending_short_segment = None
-        merged = np.concatenate((pending.audio, segment))
+        parts = [pending.audio]
+        if gap_samples > 0:
+            parts.append(np.zeros(gap_samples, dtype=segment.dtype))
+        parts.append(segment)
+        merged = np.concatenate(parts)
         return merged, pending.active_ms + active_ms, pending.start_ms, True
 
     def _hold_short_segment(self, segment: np.ndarray, active_ms: float, start_ms: int, end_ms: int) -> None:
@@ -591,12 +602,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             # Fragments below the noise floor never merge with or replace a
             # held segment; the pending segment's own expiry handles it.
             if raw_active_ms >= _SHORT_SEGMENT_MIN_FRAGMENT_MS:
-                array, active_speech_duration_ms, start_ms, stitched_short_segment = (
-                    self._merge_pending_short_segment(
-                        array,
-                        active_speech_duration_ms,
-                        end_ms,
-                    )
+                array, active_speech_duration_ms, start_ms, stitched_short_segment = self._merge_pending_short_segment(
+                    array,
+                    active_speech_duration_ms,
+                    end_ms,
                 )
             else:
                 start_ms = self._segment_start_ms(array, end_ms)
@@ -722,12 +731,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             # Fragments below the noise floor never merge with or replace a
             # held segment; the pending segment's own expiry handles it.
             if raw_active_ms >= _SHORT_SEGMENT_MIN_FRAGMENT_MS:
-                array, active_speech_duration_ms, start_ms, stitched_short_segment = (
-                    self._merge_pending_short_segment(
-                        array,
-                        active_speech_duration_ms,
-                        end_ms,
-                    )
+                array, active_speech_duration_ms, start_ms, stitched_short_segment = self._merge_pending_short_segment(
+                    array,
+                    active_speech_duration_ms,
+                    end_ms,
                 )
             else:
                 start_ms = self._segment_start_ms(array, end_ms)
