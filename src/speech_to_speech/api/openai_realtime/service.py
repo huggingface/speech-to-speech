@@ -166,7 +166,6 @@ class ConnState(BaseModel):
     speculative_user_turn_revision: Optional[int] = None
     speculative_user_speech_stopped_at_s: Optional[float] = None
     speculative_user_item_id: Optional[str] = None
-    speculative_user_item_closed: bool = False
     speculative_input_item_id: Optional[str] = None
     speculative_audio_duration_s: float = 0.0
 
@@ -396,36 +395,19 @@ class RealtimeService:
         cfg = st.runtime_config
         transcript = event.transcript
         if transcript:
-            if same_speculative_turn and st.speculative_user_item_id and not st.speculative_user_item_closed:
+            if same_speculative_turn and st.speculative_user_item_id:
                 replaced = cfg.chat.replace_user_message_text(st.speculative_user_item_id, transcript)
                 if not replaced:
                     item = cfg.chat.add_item(make_user_message(transcript))
                     st.speculative_user_item_id = item.id
-                st.speculative_user_item_closed = False
             else:
-                merged_with_unanswered_turn = False
-                if (
-                    event.turn_id is not None
-                    and st.speculative_user_turn_id is not None
-                    and st.speculative_user_item_id
-                    and not st.speculative_user_item_closed
-                ):
-                    merged_with_unanswered_turn = cfg.chat.append_user_message_text(
-                        st.speculative_user_item_id,
-                        transcript,
-                    )
-                if not merged_with_unanswered_turn:
-                    item = cfg.chat.add_item(make_user_message(transcript))
-                    st.speculative_user_item_id = item.id
-                st.speculative_user_item_closed = False
-        elif same_speculative_turn and st.speculative_user_item_id and not st.speculative_user_item_closed:
+                item = cfg.chat.add_item(make_user_message(transcript))
+                st.speculative_user_item_id = item.id
+        elif same_speculative_turn and st.speculative_user_item_id:
             cfg.chat.remove_user_message(st.speculative_user_item_id)
             st.speculative_user_item_id = None
-            st.speculative_user_item_closed = False
         elif event.turn_id is not None and event.turn_id != st.speculative_user_turn_id:
-            if st.speculative_user_item_closed:
-                st.speculative_user_item_id = None
-            st.speculative_user_item_closed = False
+            st.speculative_user_item_id = None
 
         if event.turn_id is not None:
             st.speculative_user_turn_id = event.turn_id
