@@ -29,6 +29,7 @@ def test_voice_prompt_requests_spoken_lead_in_and_sparing_expression_tools():
 
     assert "Before a tool call, use a brief natural utterance" in prompt
     assert "Let me check with my camera." in prompt
+    assert "do not pair it with movement" in prompt
     assert "For expression/background tools, speak first." in prompt
     assert "Sure, here's my best sadness." in prompt
     assert "Never mention tools." in prompt
