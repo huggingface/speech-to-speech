@@ -451,6 +451,7 @@ See [ModuleArguments](./src/speech_to_speech/arguments_classes/module_arguments.
 See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments.py) class. Notably:
 - `--thresh`: Threshold value to trigger voice activity detection.
 - `--min_speech_ms`: Minimum duration of detected voice activity to be considered speech.
+- `--min_speech_continuation_ms`: Optional sustain-bar hysteresis threshold for speech that continues a reopenable soft-ended, uncommitted turn within the reopen window. Use `--min_speech_ms 384 --min_speech_continuation_ms 200` to keep the full entry bar while accepting shorter trailing continuation fragments. Barge-in detection is unaffected because reopen candidates only exist for uncommitted turns.
 - `--min_silence_ms`: Minimum length of silence intervals for segmenting speech, balancing sentence cutting and latency reduction.
 - `--short_segment_merge_ms`: Optional merge window for stitching adjacent VAD segments that are each shorter than `--min_speech_ms`; useful when `--min_silence_ms` is very low for lower-latency interruptions. Fragments shorter than 100 ms of active speech are never held.
 - `--unanswered_reopen_ms`: Sanity cap on how long a soft-ended speculative turn that has not yet received any assistant output stays reopenable; resumed speech within this window continues the same turn instead of starting a new one. Not a tuning knob; it only bounds the unanswered case.

@@ -63,6 +63,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         sample_rate: int = 16000,
         min_silence_ms: int = 300,
         min_speech_ms: int = 384,
+        min_speech_continuation_ms: int = 0,
         max_speech_ms: float = float("inf"),
         speech_pad_ms: int = 30,
         audio_enhancement: bool = False,
@@ -78,6 +79,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.sample_rate = sample_rate
         self.min_silence_ms = min_silence_ms
         self.min_speech_ms = min_speech_ms
+        self.min_speech_continuation_ms = self._resolve_min_speech_continuation_ms(
+            self.min_speech_ms,
+            min_speech_continuation_ms,
+        )
         self.max_speech_ms = max_speech_ms
         self.enable_realtime_transcription = enable_realtime_transcription
         self.realtime_processing_pause = realtime_processing_pause
@@ -194,8 +199,23 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         active_speech_samples = getattr(self.iterator, "last_utterance_active_speech_samples", 0)
         return active_speech_samples / self.sample_rate * 1000
 
+    @staticmethod
+    def _resolve_min_speech_continuation_ms(min_speech_ms: int, min_speech_continuation_ms: int) -> int:
+        if min_speech_continuation_ms <= 0:
+            return min_speech_ms
+        return min(
+            min_speech_ms,
+            max(_SHORT_SEGMENT_MIN_FRAGMENT_MS, min_speech_continuation_ms),
+        )
+
     def _uses_realtime_turn_handling(self) -> bool:
         return self.enable_realtime_transcription or self.speculative_turns is not None
+
+    def _active_speech_min_ms(self, start_ms: int) -> float:
+        """Duration hysteresis for speech that continues a reopenable turn."""
+        if self._pending_reopen_candidate is not None or self._should_reopen_current_turn(start_ms):
+            return self.min_speech_continuation_ms
+        return self.min_speech_ms
 
     def _should_reopen_current_turn(self, audio_start_ms: int) -> bool:
         if not self._uses_realtime_turn_handling():
@@ -499,13 +519,15 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 active_speech_duration_ms,
             )
             self._begin_pending_reopen_if_needed(effective_start_ms)
-            if effective_active_speech_duration_ms >= self.min_speech_ms:
+            active_speech_min_ms = self._active_speech_min_ms(effective_start_ms)
+            if effective_active_speech_duration_ms >= active_speech_min_ms:
                 turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start(effective_start_ms)
                 self._speech_started_emitted = True
                 self._log_speech_starts += 1
                 logger.info(
-                    "Speech started (confirmed, active=%.0fms, segment=%.0fms, turn=%s rev=%s)",
+                    "Speech started (confirmed, active=%.0fms, min=%.0fms, segment=%.0fms, turn=%s rev=%s)",
                     effective_active_speech_duration_ms,
+                    active_speech_min_ms,
                     segment_duration_ms,
                     turn_id,
                     turn_revision,
@@ -557,8 +579,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 array = torch.cat(self.iterator.speech_buffer()).cpu().numpy()
                 duration_ms = len(array) / self.sample_rate * 1000
                 active_speech_duration_ms = self._current_active_speech_duration_ms()
+                start_ms = max(0, self._audio_ms - int(duration_ms))
 
-                if active_speech_duration_ms >= self.min_speech_ms:
+                if active_speech_duration_ms >= self._active_speech_min_ms(start_ms):
                     self._log_progressive_yields += 1
                     logger.debug(
                         "VAD: yielding progressive audio (segment=%.0fms, active=%.0fms, interval=%.2fs)",
@@ -610,12 +633,13 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             else:
                 start_ms = self._segment_start_ms(array, end_ms)
             duration_ms = self._segment_duration_ms(array)
+            min_active_ms = 0.0 if self._speech_started_emitted else self._active_speech_min_ms(start_ms)
 
-            if active_speech_duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
+            if active_speech_duration_ms < min_active_ms or duration_ms > self.max_speech_ms:
                 if (
                     self._short_segment_merge_window_ms() > 0
                     and raw_active_ms >= _SHORT_SEGMENT_MIN_FRAGMENT_MS
-                    and active_speech_duration_ms < self.min_speech_ms
+                    and active_speech_duration_ms < min_active_ms
                     and duration_ms <= self.max_speech_ms
                 ):
                     self._hold_short_segment(array, active_speech_duration_ms, start_ms, end_ms)
@@ -624,7 +648,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         "VAD: discarding segment=%.0fms active=%.0fms (active_min=%sms, segment_max=%sms)",
                         duration_ms,
                         active_speech_duration_ms,
-                        self.min_speech_ms,
+                        min_active_ms,
                         self.max_speech_ms,
                     )
                 if self._speech_started_emitted and self.text_output_queue:
@@ -739,11 +763,12 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             else:
                 start_ms = self._segment_start_ms(array, end_ms)
             duration_ms = self._segment_duration_ms(array)
-            if active_speech_duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
+            min_active_ms = 0.0 if self._speech_started_emitted else self._active_speech_min_ms(start_ms)
+            if active_speech_duration_ms < min_active_ms or duration_ms > self.max_speech_ms:
                 if (
                     self._short_segment_merge_window_ms() > 0
                     and raw_active_ms >= _SHORT_SEGMENT_MIN_FRAGMENT_MS
-                    and active_speech_duration_ms < self.min_speech_ms
+                    and active_speech_duration_ms < min_active_ms
                     and duration_ms <= self.max_speech_ms
                 ):
                     self._hold_short_segment(array, active_speech_duration_ms, start_ms, end_ms)
@@ -752,7 +777,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         "VAD: discarding segment=%.0fms active=%.0fms (active_min=%sms, segment_max=%sms)",
                         duration_ms,
                         active_speech_duration_ms,
-                        self.min_speech_ms,
+                        min_active_ms,
                         self.max_speech_ms,
                     )
                 if self._speech_started_emitted and self.text_output_queue:
