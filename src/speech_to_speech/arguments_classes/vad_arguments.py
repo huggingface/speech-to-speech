@@ -61,3 +61,9 @@ class VADHandlerArguments:
             "help": "In realtime mode, keep a soft-ended turn reopenable for this many milliseconds unless a response commits it."
         },
     )
+    short_segment_merge_ms: int = field(
+        default=0,
+        metadata={
+            "help": "When greater than 0, adjacent VAD segments below min_speech_ms are held and stitched for this many milliseconds before being discarded. Useful with very low min_silence_ms values."
+        },
+    )

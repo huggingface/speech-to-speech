@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from queue import Queue
 from threading import Event
 from typing import Any, TypeAlias
@@ -23,6 +24,15 @@ from speech_to_speech.VAD.vad_iterator import VADIterator
 logger = logging.getLogger(__name__)
 
 VADInput: TypeAlias = bytes | tuple[bytes, RuntimeConfig]
+
+
+@dataclass
+class _PendingShortSegment:
+    audio: np.ndarray
+    active_ms: float
+    start_ms: int
+    end_ms: int
+
 
 # Optional import for audio enhancement
 try:
@@ -55,6 +65,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         text_output_queue: Queue[TextEventItem] | None = None,
         speculative_turns: SpeculativeTurnTracker | None = None,
         speculative_reopen_ms: int = 1000,
+        short_segment_merge_ms: int = 0,
     ) -> None:
         self.should_listen = should_listen
         self.sample_rate = sample_rate
@@ -66,6 +77,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.text_output_queue = text_output_queue
         self.speculative_turns = speculative_turns
         self.speculative_reopen_ms = speculative_reopen_ms
+        self.short_segment_merge_ms = max(0, short_segment_merge_ms)
         self._last_turn_detection: dict | None = None
         self.model, _ = torch.hub.load(
             "snakers4/silero-vad",
@@ -110,6 +122,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._last_final_wall_time: float | None = None
         self._last_final_audio_ms: int | None = None
         self._pending_reopen_candidate: tuple[str, int, int] | None = None
+        self._pending_short_segment: _PendingShortSegment | None = None
 
     @property
     def _audio_ms(self) -> int:
@@ -293,6 +306,87 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             return current_segment
         return np.concatenate((self._speculative_audio_prefix, current_segment))
 
+    def _short_segment_merge_window_ms(self) -> int:
+        return int(getattr(self, "short_segment_merge_ms", 0))
+
+    def _segment_duration_ms(self, segment: np.ndarray) -> float:
+        return len(segment) / self.sample_rate * 1000
+
+    def _segment_start_ms(self, segment: np.ndarray, end_ms: int) -> int:
+        return max(0, end_ms - int(self._segment_duration_ms(segment)))
+
+    def _short_segment_gap_ms(self, start_ms: int) -> float:
+        if self._pending_short_segment is None:
+            return float("inf")
+        return max(0, start_ms - self._pending_short_segment.end_ms)
+
+    def _can_merge_pending_short_segment(self, start_ms: int) -> bool:
+        return (
+            self._pending_short_segment is not None
+            and self._short_segment_merge_window_ms() > 0
+            and self._short_segment_gap_ms(start_ms) <= self._short_segment_merge_window_ms()
+        )
+
+    def _effective_active_speech_for_start(self, start_ms: int, active_ms: float) -> tuple[int, float]:
+        if not self._can_merge_pending_short_segment(start_ms):
+            return start_ms, active_ms
+        assert self._pending_short_segment is not None
+        return self._pending_short_segment.start_ms, self._pending_short_segment.active_ms + active_ms
+
+    def _merge_pending_short_segment(
+        self,
+        segment: np.ndarray,
+        active_ms: float,
+        end_ms: int,
+    ) -> tuple[np.ndarray, float, int, bool]:
+        start_ms = self._segment_start_ms(segment, end_ms)
+        if not self._can_merge_pending_short_segment(start_ms):
+            self._discard_expired_pending_short_segment(start_ms)
+            return segment, active_ms, start_ms, False
+
+        pending = self._pending_short_segment
+        assert pending is not None
+        self._pending_short_segment = None
+        merged = np.concatenate((pending.audio, segment))
+        return merged, pending.active_ms + active_ms, pending.start_ms, True
+
+    def _hold_short_segment(self, segment: np.ndarray, active_ms: float, start_ms: int, end_ms: int) -> None:
+        self._pending_short_segment = _PendingShortSegment(
+            audio=segment,
+            active_ms=active_ms,
+            start_ms=start_ms,
+            end_ms=end_ms,
+        )
+        logger.info(
+            "VAD: holding short segment=%.0fms active=%.0fms (active_min=%sms, merge_max=%sms)",
+            self._segment_duration_ms(segment),
+            active_ms,
+            self.min_speech_ms,
+            self._short_segment_merge_window_ms(),
+        )
+
+    def _discard_pending_short_segment(self, reason: str = "expired") -> None:
+        pending = self._pending_short_segment
+        if pending is None:
+            return
+        self._pending_short_segment = None
+        logger.info(
+            "VAD: discarding held short segment=%.0fms active=%.0fms (%s, active_min=%sms)",
+            self._segment_duration_ms(pending.audio),
+            pending.active_ms,
+            reason,
+            self.min_speech_ms,
+        )
+
+    def _discard_expired_pending_short_segment(self, next_start_ms: int | None = None) -> None:
+        pending = self._pending_short_segment
+        if pending is None or self._short_segment_merge_window_ms() <= 0:
+            return
+        reference_ms = self._audio_ms if next_start_ms is None else next_start_ms
+        gap_ms = max(0, reference_ms - pending.end_ms)
+        if gap_ms > self._short_segment_merge_window_ms():
+            self._discard_pending_short_segment("merge window elapsed")
+
     def before_emit_output(self, output: VADOut) -> None:
         if isinstance(output, VADAudio):
             self._drop_superseded_vad_audio(output)
@@ -366,14 +460,18 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             active_speech_duration_ms = self._current_active_speech_duration_ms()
             speech_buffer_duration_ms = self._speech_buffer_duration_ms()
             start_ms = max(0, self._audio_ms - int(speech_buffer_duration_ms))
-            self._begin_pending_reopen_if_needed(start_ms)
-            if active_speech_duration_ms >= self.min_speech_ms:
-                turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start(start_ms)
+            effective_start_ms, effective_active_speech_duration_ms = self._effective_active_speech_for_start(
+                start_ms,
+                active_speech_duration_ms,
+            )
+            self._begin_pending_reopen_if_needed(effective_start_ms)
+            if effective_active_speech_duration_ms >= self.min_speech_ms:
+                turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start(effective_start_ms)
                 self._speech_started_emitted = True
                 self._log_speech_starts += 1
                 logger.info(
                     "Speech started (confirmed, active=%.0fms, segment=%.0fms, turn=%s rev=%s)",
-                    active_speech_duration_ms,
+                    effective_active_speech_duration_ms,
                     segment_duration_ms,
                     turn_id,
                     turn_revision,
@@ -381,12 +479,14 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 if self.text_output_queue:
                     self.text_output_queue.put(
                         SpeechStartedEvent(
-                            audio_start_ms=start_ms,
+                            audio_start_ms=effective_start_ms,
                             turn_id=turn_id,
                             turn_revision=turn_revision,
                             reopened=reopened,
                         )
                     )
+        elif not is_triggered_now and vad_output is None:
+            self._discard_expired_pending_short_segment()
 
         # Log a summary once per second instead of every chunk
         now = time.time()
@@ -457,20 +557,34 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 if not self._speech_started_emitted:
                     self._cancel_pending_reopen()
                 self._speech_started_emitted = False
+                self._discard_expired_pending_short_segment()
                 return
 
             array = torch.cat(vad_output).cpu().numpy()
-            duration_ms = len(array) / self.sample_rate * 1000
+            end_ms = self._audio_ms
             active_speech_duration_ms = self._last_utterance_active_speech_duration_ms()
+            array, active_speech_duration_ms, start_ms, stitched_short_segment = self._merge_pending_short_segment(
+                array,
+                active_speech_duration_ms,
+                end_ms,
+            )
+            duration_ms = self._segment_duration_ms(array)
 
             if active_speech_duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
-                logger.info(
-                    "VAD: discarding segment=%.0fms active=%.0fms (active_min=%sms, segment_max=%sms)",
-                    duration_ms,
-                    active_speech_duration_ms,
-                    self.min_speech_ms,
-                    self.max_speech_ms,
-                )
+                if (
+                    self._short_segment_merge_window_ms() > 0
+                    and active_speech_duration_ms < self.min_speech_ms
+                    and duration_ms <= self.max_speech_ms
+                ):
+                    self._hold_short_segment(array, active_speech_duration_ms, start_ms, end_ms)
+                else:
+                    logger.info(
+                        "VAD: discarding segment=%.0fms active=%.0fms (active_min=%sms, segment_max=%sms)",
+                        duration_ms,
+                        active_speech_duration_ms,
+                        self.min_speech_ms,
+                        self.max_speech_ms,
+                    )
                 if self._speech_started_emitted and self.text_output_queue:
                     turn_id, turn_revision = self._current_turn_metadata()
                     self.text_output_queue.put(
@@ -484,9 +598,13 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     self._cancel_pending_reopen()
                 self._speech_started_emitted = False
             else:
-                end_ms = self._audio_ms
+                if stitched_short_segment:
+                    logger.info(
+                        "VAD: stitched short segment(s) into segment=%.0fms active=%.0fms",
+                        duration_ms,
+                        active_speech_duration_ms,
+                    )
                 if not self._speech_started_emitted:
-                    start_ms = max(0, end_ms - int(duration_ms))
                     turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start(start_ms)
                     if self.text_output_queue:
                         self.text_output_queue.put(
@@ -557,28 +675,47 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 if self._speech_started_emitted and self.text_output_queue:
                     self.text_output_queue.put(SpeechStoppedEvent(audio_end_ms=self._audio_ms))
                 self._speech_started_emitted = False
+                self._discard_expired_pending_short_segment()
                 return
 
             array = torch.cat(vad_output).cpu().numpy()
-            duration_ms = len(array) / self.sample_rate * 1000
+            end_ms = self._audio_ms
             active_speech_duration_ms = self._last_utterance_active_speech_duration_ms()
+            array, active_speech_duration_ms, start_ms, stitched_short_segment = self._merge_pending_short_segment(
+                array,
+                active_speech_duration_ms,
+                end_ms,
+            )
+            duration_ms = self._segment_duration_ms(array)
             if active_speech_duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
-                logger.info(
-                    "VAD: discarding segment=%.0fms active=%.0fms (active_min=%sms, segment_max=%sms)",
-                    duration_ms,
-                    active_speech_duration_ms,
-                    self.min_speech_ms,
-                    self.max_speech_ms,
-                )
+                if (
+                    self._short_segment_merge_window_ms() > 0
+                    and active_speech_duration_ms < self.min_speech_ms
+                    and duration_ms <= self.max_speech_ms
+                ):
+                    self._hold_short_segment(array, active_speech_duration_ms, start_ms, end_ms)
+                else:
+                    logger.info(
+                        "VAD: discarding segment=%.0fms active=%.0fms (active_min=%sms, segment_max=%sms)",
+                        duration_ms,
+                        active_speech_duration_ms,
+                        self.min_speech_ms,
+                        self.max_speech_ms,
+                    )
                 if self._speech_started_emitted and self.text_output_queue:
                     self.text_output_queue.put(SpeechStoppedEvent(audio_end_ms=self._audio_ms))
                 self._speech_started_emitted = False
             else:
-                end_ms = self._audio_ms
+                if stitched_short_segment:
+                    logger.info(
+                        "VAD: stitched short segment(s) into segment=%.0fms active=%.0fms",
+                        duration_ms,
+                        active_speech_duration_ms,
+                    )
                 if not self._speech_started_emitted and self.text_output_queue:
                     self.text_output_queue.put(
                         SpeechStartedEvent(
-                            audio_start_ms=max(0, end_ms - int(duration_ms)),
+                            audio_start_ms=start_ms,
                             interrupt_response=False,
                         )
                     )
@@ -618,6 +755,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
     def on_session_end(self):
         self.iterator.reset_states()
+        self._pending_short_segment = None
         self.iterator.buffer = []
         self.last_process_time = 0.0
         self._total_samples = 0

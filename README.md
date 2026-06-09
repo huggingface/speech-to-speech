@@ -452,6 +452,7 @@ See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments
 - `--thresh`: Threshold value to trigger voice activity detection.
 - `--min_speech_ms`: Minimum duration of detected voice activity to be considered speech.
 - `--min_silence_ms`: Minimum length of silence intervals for segmenting speech, balancing sentence cutting and latency reduction.
+- `--short_segment_merge_ms`: Optional merge window for stitching adjacent VAD segments that are each shorter than `--min_speech_ms`; useful when `--min_silence_ms` is very low for lower-latency interruptions.
 
 
 ### STT, LLM and TTS parameters
