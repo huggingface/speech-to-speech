@@ -20,7 +20,7 @@ def test_voice_prompt_makes_speech_the_default_and_handles_noisy_stt():
     assert "Use at most one tool" in prompt
     assert "Treat transcripts as noisy." in prompt
     assert "Reachy/Richie/Richy" in prompt
-    assert "do not correct them unless the user asks or the meaning matters" in prompt
+    assert "correct them only if asked or meaning depends on it" in prompt
     assert "If unsure whether a tool is needed, just speak." in prompt
 
 
@@ -29,10 +29,11 @@ def test_voice_prompt_requests_spoken_lead_in_and_sparing_expression_tools():
 
     assert "Before a tool call, use a brief natural utterance" in prompt
     assert "Let me check with my camera." in prompt
-    assert "always say a natural sentence before the call" in prompt
+    assert "For expression/background tools, speak first." in prompt
     assert "Sure, here's my best sadness." in prompt
     assert "Never mention tools." in prompt
-    assert "Use motion, dance, emotion, and similar tools sparingly but proactively" in prompt
+    assert "do not add a second spoken comment" in prompt
+    assert "Use motion, dance, emotion, and similar tools sparingly" in prompt
 
 
 def test_local_tool_prompt_forbids_multiple_tool_calls():
