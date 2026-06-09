@@ -156,30 +156,6 @@ def test_process_flushes_tool_lead_in_before_function_call_with_sentence_batchin
     assert isinstance(outputs[2], EndOfResponse)
 
 
-def test_process_limits_streamed_tool_calls_to_one_and_prefers_camera_question():
-    handler = _make_handler()
-    request = _make_request("Could you tell me what you see in front of you?")
-
-    streamed_events = [
-        _make_text_delta_event("Let me take a look."),
-        _make_function_call_done_event(name="move_head", arguments='{"direction":"front"}'),
-        _make_function_call_done_event(name="camera", arguments='{"question":"What do you see in front of you?"}'),
-    ]
-
-    handler.client = SimpleNamespace(
-        responses=SimpleNamespace(
-            create=lambda **kwargs: _make_stream(streamed_events),
-        )
-    )
-
-    outputs = list(handler.process(request))
-
-    tool_chunks = [output for output in outputs if isinstance(output, LLMResponseChunk) and output.tools]
-    assert len(tool_chunks) == 1
-    assert [tool.name for tool in tool_chunks[0].tools] == ["camera"]
-    assert [tool.name for tool in request.runtime_config.chat._pending_tool_calls.values()] == ["camera"]
-
-
 def test_process_handles_cancellation():
     scope = CancelScope()
     handler = _make_handler(cancel_scope=scope)

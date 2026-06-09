@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import time
 from collections.abc import Iterator
@@ -42,44 +41,6 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
-
-_USER_FACING_ARG_KEYS = frozenset({"question", "query", "prompt", "request"})
-_INFORMATION_TOOL_HINTS = ("camera", "search", "lookup", "retrieve", "read", "see", "vision", "image", "describe")
-_ACTION_TOOL_HINTS = ("move", "head", "dance", "emotion", "idle", "stop", "track", "gesture", "pose")
-
-
-def _tool_call_priority(tool: ResponseFunctionToolCall) -> int:
-    """Score a tool call when a model emits more than one despite the prompt."""
-    name = (tool.name or "").lower()
-    score = 0
-    if any(hint in name for hint in _INFORMATION_TOOL_HINTS):
-        score += 20
-    if any(hint in name for hint in _ACTION_TOOL_HINTS):
-        score -= 10
-    try:
-        arguments = json.loads(tool.arguments or "{}")
-    except (TypeError, json.JSONDecodeError):
-        arguments = {}
-    if isinstance(arguments, dict) and any(str(key).lower() in _USER_FACING_ARG_KEYS for key in arguments):
-        score += 30
-    return score
-
-
-def _select_single_tool_call(tools: list[ResponseFunctionToolCall]) -> list[ResponseFunctionToolCall]:
-    if len(tools) <= 1:
-        return tools
-
-    best_index, selected = max(
-        enumerate(tools),
-        key=lambda indexed_tool: (_tool_call_priority(indexed_tool[1]), -indexed_tool[0]),
-    )
-    skipped = [tool.name for idx, tool in enumerate(tools) if idx != best_index]
-    logger.warning(
-        "Skipping extra Responses API tool calls %s; only one tool call is allowed per response (kept %s)",
-        skipped,
-        selected.name,
-    )
-    return [selected]
 
 
 class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
@@ -211,7 +172,6 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         api_response: Response | Stream[ResponseStreamEvent] | None = None
         tools: list[ResponseFunctionToolCall] = []
         pending_chat_items: list[SupportedItem] = []
-        pending_tool_items: dict[str, RealtimeConversationItemFunctionCall] = {}
         clean_text = ""
         input_tokens = 0
         output_tokens = 0
@@ -286,13 +246,15 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                             raw_event.item.call_id = _generate_id("call")
                             raw_event.item.id = _generate_id("fc")
                             tools.append(raw_event.item)
-                            pending_tool_items[raw_event.item.call_id] = RealtimeConversationItemFunctionCall(
-                                type="function_call",
-                                name=raw_event.item.name,
-                                arguments=raw_event.item.arguments,
-                                call_id=raw_event.item.call_id,
-                                id=raw_event.item.id,
-                                status=raw_event.item.status,
+                            pending_chat_items.append(
+                                RealtimeConversationItemFunctionCall(
+                                    type="function_call",
+                                    name=raw_event.item.name,
+                                    arguments=raw_event.item.arguments,
+                                    call_id=raw_event.item.call_id,
+                                    id=raw_event.item.id,
+                                    status=raw_event.item.status,
+                                )
                             )
                         elif isinstance(raw_event.item, ResponseOutputMessage):
                             content = [
@@ -316,7 +278,6 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     if printable_text.strip():
                         sentence_batch.append(printable_text.strip())
                     remaining = " ".join(sentence_batch)
-                    tools = _select_single_tool_call(tools)
                     if remaining or tools:
                         if self._generation_is_stale(gen):
                             logger.info("LLM generation cancelled (interruption)")
@@ -350,13 +311,15 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                         if isinstance(message, ResponseFunctionToolCall):
                             message.call_id = _generate_id("call")
                             message.id = _generate_id("fc")
-                            pending_tool_items[message.call_id] = RealtimeConversationItemFunctionCall(
-                                type="function_call",
-                                name=message.name,
-                                arguments=message.arguments,
-                                call_id=message.call_id,
-                                id=message.id,
-                                status="in_progress",
+                            pending_chat_items.append(
+                                RealtimeConversationItemFunctionCall(
+                                    type="function_call",
+                                    name=message.name,
+                                    arguments=message.arguments,
+                                    call_id=message.call_id,
+                                    id=message.id,
+                                    status="in_progress",
+                                )
                             )
                             tools.append(message)
                         elif isinstance(message, ResponseOutputMessage):
@@ -377,7 +340,6 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                                     clean_text += remove_unspeechable(chunk.text)
                         else:
                             logger.warning(f"Not supported message type: {message.type}")
-                    tools = _select_single_tool_call(tools)
                     logger.debug(f"Clean text: {clean_text}")
                     logger.info(f"Tools: {tools}")
                     if clean_text.strip():
@@ -436,7 +398,6 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     pass
 
         if not self._generation_is_stale(gen) and self._turn_output_allowed(turn_id, turn_revision):
-            pending_chat_items.extend(pending_tool_items[tool.call_id] for tool in tools if tool.call_id in pending_tool_items)
             for item in pending_chat_items:
                 original_chat.add_item(item)
             original_chat.strip_images()
