@@ -345,6 +345,8 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                 elif isinstance(event, ConversationItemCreateEvent):
                     events = unit.service.handle_conversation_item_create(session_id, event)
                     if events:
+                        if any(getattr(e, "type", None) == "response.created" for e in events):
+                            unit.cancel_scope.new_response()
                         await _send_events(ws, events)
 
                 elif isinstance(event, ResponseCreateEvent):
@@ -476,7 +478,9 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                         ):
                             unit.cancel_scope.cancel()
                             if session_id:
-                                unit.service._state(session_id).response_pending = False
+                                st = unit.service._state(session_id)
+                                st.response_pending = False
+                                st.deferred_response_create = None
                             _flush_queue(unit.output_queue, preserve=_keep_audio_sentinel)
                             _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
                             if unit.response_playing.is_set():

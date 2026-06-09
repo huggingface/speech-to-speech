@@ -88,6 +88,47 @@ class ResponseHandler(RealtimeBaseHandler):
         st.content_index += 1
         return idx
 
+    def _start_response(self, conn_id: str, event: ResponseCreateEvent) -> ResponseCreatedEvent:
+        st = self._state(conn_id)
+        st.in_response = True
+        st.response_pending = False
+        st.deferred_response_create = None
+
+        st.current_response_params = event.response
+        st.current_response_id = _generate_id("resp")
+        self._start_item(conn_id)
+
+        cfg = st.runtime_config
+        queue = self._queue(conn_id)
+        if queue:
+            queue.put(
+                GenerateResponseRequest(
+                    runtime_config=cfg,
+                    response=event.response,
+                    turn_id=st.speculative_user_turn_id,
+                    turn_revision=st.speculative_user_turn_revision,
+                    speech_stopped_at_s=st.speculative_user_speech_stopped_at_s,
+                )
+            )
+        logger.debug("response.create received, LLM generation triggered")
+        return ResponseCreatedEvent(
+            type="response.created",
+            event_id=self._next_event_id(),
+            response=self._build_response(conn_id, "in_progress"),
+        )
+
+    def start_deferred_response_if_ready(self, conn_id: str) -> ResponseCreatedEvent | None:
+        st = self._state(conn_id)
+        if st.in_response or st.deferred_response_create is None:
+            return None
+
+        pending_tool_calls = st.runtime_config.chat.pending_tool_call_count()
+        if pending_tool_calls:
+            return None
+
+        logger.info("Starting deferred response after all tool outputs arrived")
+        return self._start_response(conn_id, st.deferred_response_create)
+
     def _build_response(
         self,
         conn_id: str,
@@ -154,34 +195,21 @@ class ResponseHandler(RealtimeBaseHandler):
                 except ChatItemError as exc:
                     return self.make_error(message=str(exc), _type="invalid_input_item")
 
-        st.in_response = True
-        st.response_pending = False
-
-        st.current_response_params = event.response
-        st.current_response_id = _generate_id("resp")
-        self._start_item(conn_id)
-
-        cfg = st.runtime_config
-        queue = self._queue(conn_id)
-        if queue:
-            queue.put(
-                GenerateResponseRequest(
-                    runtime_config=cfg,
-                    response=event.response,
-                    turn_id=st.speculative_user_turn_id,
-                    turn_revision=st.speculative_user_turn_revision,
-                    speech_stopped_at_s=st.speculative_user_speech_stopped_at_s,
-                )
+        pending_tool_calls = st.runtime_config.chat.pending_tool_call_count()
+        if pending_tool_calls:
+            st.deferred_response_create = event
+            st.response_pending = True
+            logger.info(
+                "Deferring response.create until %d pending tool output(s) arrive",
+                pending_tool_calls,
             )
-        logger.debug("response.create received, LLM generation triggered")
-        return ResponseCreatedEvent(
-            type="response.created",
-            event_id=self._next_event_id(),
-            response=self._build_response(conn_id, "in_progress"),
-        )
+            return None
+
+        return self._start_response(conn_id, event)
 
     def handle_response_cancel(self, conn_id: str) -> list[ServerEvent]:
         """Cancel the in-progress response and re-enable listening."""
+        self._state(conn_id).deferred_response_create = None
         events = self.finish_audio_response(conn_id, status="cancelled", reason="client_cancelled")
         should_listen = self._should_listen(conn_id)
         if should_listen:

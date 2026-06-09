@@ -273,6 +273,21 @@ class TestAddItemEviction:
 
 
 class TestAppendToolOutput:
+    def test_pending_tool_call_count_tracks_unresolved_calls(self):
+        chat = Chat(size=5)
+        chat.add_item(_fc("c1"))
+        chat.add_item(_fc("c2"))
+
+        assert chat.pending_tool_call_count() == 2
+
+        chat.append_tool_output("call_c1", _fco("c1"))
+
+        assert chat.pending_tool_call_count() == 1
+
+        chat.append_tool_output("call_c2", _fco("c2"))
+
+        assert chat.pending_tool_call_count() == 0
+
     def test_happy_path(self):
         chat = Chat(size=5)
         chat.add_item(_fc("c1"))

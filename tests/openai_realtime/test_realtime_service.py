@@ -506,6 +506,76 @@ class TestHandleResponseCreate:
         gen_msg = text_prompt_queue.get()
         assert isinstance(gen_msg, GenerateResponseRequest)
 
+    def test_response_create_deferred_until_all_function_call_outputs(self, service, conn_id, text_prompt_queue):
+        from openai.types.realtime.realtime_conversation_item_function_call import (
+            RealtimeConversationItemFunctionCall,
+        )
+
+        chat = service._state(conn_id).runtime_config.chat
+        chat.add_item(
+            RealtimeConversationItemFunctionCall(
+                type="function_call",
+                call_id="call_camera",
+                name="camera",
+                arguments="{}",
+            )
+        )
+        chat.add_item(
+            RealtimeConversationItemFunctionCall(
+                type="function_call",
+                call_id="call_head_tracking",
+                name="head_tracking",
+                arguments='{"start":true}',
+            )
+        )
+
+        first_output = ConversationItemCreateEvent(
+            type="conversation.item.create",
+            item={
+                "type": "function_call_output",
+                "output": '{"result":"scene"}',
+                "call_id": "call_camera",
+            },
+        )
+        first_events = service.handle_conversation_item_create(conn_id, first_output)
+
+        assert len(first_events) == 1
+        assert isinstance(first_events[0], ConversationItemCreatedEvent)
+
+        create_result = service.handle_response_create(
+            conn_id,
+            ResponseCreateEvent(
+                type="response.create",
+                response={"instructions": "Summarize the tool results."},
+            ),
+        )
+
+        assert create_result is None
+        assert service._state(conn_id).deferred_response_create is not None
+        assert service._state(conn_id).response_pending is True
+        assert text_prompt_queue.empty()
+
+        second_output = ConversationItemCreateEvent(
+            type="conversation.item.create",
+            item={
+                "type": "function_call_output",
+                "output": '{"result":"tracking started"}',
+                "call_id": "call_head_tracking",
+            },
+        )
+        second_events = service.handle_conversation_item_create(conn_id, second_output)
+
+        assert len(second_events) == 2
+        assert isinstance(second_events[0], ConversationItemCreatedEvent)
+        assert isinstance(second_events[1], ResponseCreatedEvent)
+        assert service._state(conn_id).deferred_response_create is None
+        assert service._state(conn_id).response_pending is False
+
+        req = text_prompt_queue.get_nowait()
+        assert isinstance(req, GenerateResponseRequest)
+        assert req.response is not None
+        assert req.response.instructions == "Summarize the tool results."
+
     def test_response_create_rejects_invalid_function_call_output_in_input(self, service, conn_id, text_prompt_queue):
         evt = ResponseCreateEvent(
             type="response.create",

@@ -65,6 +65,11 @@ class ConversationHandler(RealtimeBaseHandler):
             )
             st.last_item_id = item.id
 
+            if isinstance(item, RealtimeConversationItemFunctionCallOutput):
+                response_created = self._service.response.start_deferred_response_if_ready(conn_id)
+                if response_created is not None:
+                    events.append(response_created)
+
         return events
 
     def _append_item(self, conn_id: str, item: ConversationItem) -> None:

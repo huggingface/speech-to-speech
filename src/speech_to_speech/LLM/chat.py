@@ -147,6 +147,11 @@ class Chat:
         with self._lock:
             self._append_tool_output_locked(call_id, output_item)
 
+    def pending_tool_call_count(self) -> int:
+        """Return the number of function calls that still need outputs."""
+        with self._lock:
+            return len(self._pending_tool_calls)
+
     def _append_tool_output_locked(self, call_id: str, output_item: RealtimeConversationItemFunctionCallOutput) -> None:
         """Body of :meth:`append_tool_output`. Caller must hold ``_lock``."""
         if self._has_call_id_in_buffer(call_id):
