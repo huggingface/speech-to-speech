@@ -61,7 +61,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         should_listen: Event,
         thresh: float = 0.6,
         sample_rate: int = 16000,
-        min_silence_ms: int = 300,
+        min_silence_ms: int = 64,
         min_speech_ms: int = 384,
         min_speech_continuation_ms: int = 192,
         max_speech_ms: float = float("inf"),

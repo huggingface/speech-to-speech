@@ -16,9 +16,9 @@ class VADHandlerArguments:
         },
     )
     min_silence_ms: int = field(
-        default=300,
+        default=64,
         metadata={
-            "help": "Minimum length of silence intervals to be used for segmenting speech. Measured in milliseconds. Default is 300 ms."
+            "help": "Minimum length of silence intervals to be used for segmenting speech. Measured in milliseconds. Default is 64 ms."
         },
     )
     min_speech_ms: int = field(
