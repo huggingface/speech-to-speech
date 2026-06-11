@@ -113,31 +113,54 @@ def _flush_queue(q: Queue[QItem], *, preserve: Callable[[QItem], bool] | None = 
             q.not_empty.notify(len(preserved))
 
 
-def _drain_pending_token_usage(unit: PipelineUnit, session_id: str | None) -> None:
+async def _drain_pending_response_events(
+    ws: WebSocket | None,
+    unit: PipelineUnit,
+    session_id: str | None,
+) -> None:
     if session_id is None:
         return
 
     preserved: list[Any] = []
-    drained = 0
-    while True:
-        try:
-            item = unit.text_output_queue.get_nowait()
-        except Empty:
-            break
-        if isinstance(item, TokenUsageEvent):
-            unit.service.dispatch_pipeline_event(session_id, item)
-            drained += 1
-        else:
-            preserved.append(item)
+    drained_assistant = 0
+    drained_usage = 0
+    drain_assistant_events = True
+    try:
+        while True:
+            try:
+                item = unit.text_output_queue.get_nowait()
+            except Empty:
+                break
+            # Usage is accounting-only, so keep the old whole-queue drain behavior.
+            # Assistant events are client-visible response output and stop at the
+            # first non-response boundary to preserve normal text-event ordering.
+            if isinstance(item, TokenUsageEvent):
+                unit.service.dispatch_pipeline_event(session_id, item)
+                drained_usage += 1
+            elif drain_assistant_events and isinstance(item, AssistantTextEvent):
+                drained_assistant += 1
+                if unit.cancel_scope.discarding:
+                    continue
+                events = unit.service.dispatch_pipeline_event(session_id, item)
+                if ws is not None and events:
+                    await _send_events(ws, events)
+            else:
+                preserved.append(item)
+                drain_assistant_events = False
+    finally:
+        if preserved:
+            with unit.text_output_queue.mutex:
+                for item in reversed(preserved):
+                    unit.text_output_queue.queue.appendleft(item)
+                unit.text_output_queue.not_empty.notify(len(preserved))
 
-    if preserved:
-        with unit.text_output_queue.mutex:
-            for item in reversed(preserved):
-                unit.text_output_queue.queue.appendleft(item)
-            unit.text_output_queue.not_empty.notify(len(preserved))
-
-    if drained:
-        logger.debug("Pipeline %d: drained %d token usage event(s) before response completion", unit.index, drained)
+    if drained_assistant or drained_usage:
+        logger.debug(
+            "Pipeline %d: drained %d assistant event(s) and %d token usage event(s) before response completion",
+            unit.index,
+            drained_assistant,
+            drained_usage,
+        )
 
 
 def _clean_unit(unit: PipelineUnit, preserve: Callable[[Any], bool] | None = None) -> None:
@@ -478,6 +501,7 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                         audio_chunk = unit.output_queue.get_nowait()
 
                     if _is_pipeline_end(audio_chunk):
+                        await _drain_pending_response_events(ws, unit, session_id)
                         if ws is not None and session_id:
                             await _send_events(ws, unit.service.finish_audio_response(session_id))
                         break
@@ -491,7 +515,7 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                             unit.should_listen.set()
                             logger.info(f"Pipeline {unit.index}: stale response complete, listening re-enabled")
                             continue
-                        _drain_pending_token_usage(unit, session_id)
+                        await _drain_pending_response_events(ws, unit, session_id)
                         if ws is not None and session_id:
                             await _send_events(ws, unit.service.finish_audio_response(session_id))
                         if session_id:
