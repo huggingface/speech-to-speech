@@ -124,16 +124,20 @@ async def _drain_pending_response_events(
     preserved: list[Any] = []
     drained_assistant = 0
     drained_usage = 0
+    drain_assistant_events = True
     try:
         while True:
             try:
                 item = unit.text_output_queue.get_nowait()
             except Empty:
                 break
+            # Usage is accounting-only, so keep the old whole-queue drain behavior.
+            # Assistant events are client-visible response output and stop at the
+            # first non-response boundary to preserve normal text-event ordering.
             if isinstance(item, TokenUsageEvent):
                 unit.service.dispatch_pipeline_event(session_id, item)
                 drained_usage += 1
-            elif isinstance(item, AssistantTextEvent):
+            elif drain_assistant_events and isinstance(item, AssistantTextEvent):
                 drained_assistant += 1
                 if unit.cancel_scope.discarding:
                     continue
@@ -142,7 +146,7 @@ async def _drain_pending_response_events(
                     await _send_events(ws, events)
             else:
                 preserved.append(item)
-                break
+                drain_assistant_events = False
     finally:
         if preserved:
             with unit.text_output_queue.mutex:

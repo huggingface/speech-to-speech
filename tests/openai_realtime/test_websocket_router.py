@@ -550,7 +550,7 @@ class TestSendLoop:
         assert done_events[1].response.usage.output_tokens == 5
         assert text_output_queue.empty()
 
-    def test_response_completion_drain_stops_at_non_response_boundary(self, setup):
+    def test_response_completion_drain_preserves_usage_across_non_response_boundary(self, setup):
         _, service, input_queue, output_queue, text_output_queue, should_listen, _, response_playing, cancel_scope = (
             setup
         )
@@ -576,6 +576,7 @@ class TestSendLoop:
         )
         text_output_queue.put(SpeechStartedEvent())
         text_output_queue.put(TokenUsageEvent(input_tokens=10, output_tokens=5))
+        text_output_queue.put(AssistantTextEvent(text="queued after boundary"))
         ws = _FakeWebSocket()
 
         asyncio.run(router_module._drain_pending_response_events(ws, unit, conn_id))
@@ -583,15 +584,14 @@ class TestSendLoop:
 
         assert [payload["type"] for payload in ws.sent] == ["response.function_call_arguments.done"]
         assert ws.sent[0]["response_id"] == response_id
-        assert done_events[1].response.usage.input_tokens == 0
-        assert done_events[1].response.usage.output_tokens == 0
+        assert done_events[1].response.usage.input_tokens == 10
+        assert done_events[1].response.usage.output_tokens == 5
 
         boundary = text_output_queue.get_nowait()
-        usage = text_output_queue.get_nowait()
+        queued_assistant = text_output_queue.get_nowait()
         assert isinstance(boundary, SpeechStartedEvent)
-        assert isinstance(usage, TokenUsageEvent)
-        assert usage.input_tokens == 10
-        assert usage.output_tokens == 5
+        assert isinstance(queued_assistant, AssistantTextEvent)
+        assert queued_assistant.text == "queued after boundary"
         assert text_output_queue.empty()
 
     def test_speech_started_does_not_cancel_when_interrupt_disabled(self, setup):
