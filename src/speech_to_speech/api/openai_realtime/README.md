@@ -114,9 +114,9 @@ Both handlers yield `(text, language_code, tools)` tuples. `LMOutputProcessor` f
 ### Tool result flow
 
 1. Client executes the tool and sends `conversation.item.create` with `type: "function_call_output"` and `output: "<result>"`
-2. `RealtimeService` enqueues `("__FUNCTION_RESULT__", "<result>")` on `text_prompt_queue`
-3. The LLM handler appends it as a user message (context only, no generation)
-4. Client sends `response.create` to trigger the follow-up generation
+2. `RealtimeService` appends the tool output to the chat context and emits `conversation.item.created`; this does not trigger generation.
+3. If the tool result needs to be spoken to the user, such as camera/search/data results, the client sends `response.create` to trigger follow-up generation.
+4. For fire-and-forget robot actions such as dance, emotion, head movement, stop, or idle tools, the client can stop after `conversation.item.created`; the assistant should already have spoken the natural lead-in before the tool call.
 
 ---
 

@@ -6,6 +6,7 @@ import httpx
 from openai import Stream
 from openai.types.responses import (
     Response,
+    ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
     ResponseTextDeltaEvent,
@@ -47,6 +48,20 @@ def _make_stream(events):
     stream = MagicMock(spec=Stream)
     stream.__iter__.return_value = iter(events)
     return stream
+
+
+def _make_function_call_done_event(name="camera", arguments="{}"):
+    return ResponseOutputItemDoneEvent(
+        type="response.output_item.done",
+        output_index=1,
+        sequence_number=2,
+        item=ResponseFunctionToolCall(
+            type="function_call",
+            call_id="call_original",
+            name=name,
+            arguments=arguments,
+        ),
+    )
 
 
 def _make_response(output, usage=None):
@@ -112,6 +127,109 @@ def test_process_streams_text_from_response_events():
     assert isinstance(outputs[0], LLMResponseChunk) and outputs[0].text == "Hello."
     assert isinstance(outputs[1], LLMResponseChunk) and outputs[1].text == "How are you?"
     assert isinstance(outputs[2], EndOfResponse)
+
+
+def test_process_flushes_tool_lead_in_before_function_call_with_sentence_batching():
+    handler = _make_handler()
+    handler.stream_batch_sentences = 3
+
+    streamed_events = [
+        _make_text_delta_event("Let me check with my camera."),
+        _make_function_call_done_event(name="camera"),
+    ]
+
+    handler.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            create=lambda **kwargs: _make_stream(streamed_events),
+        )
+    )
+
+    outputs = list(handler.process(_make_request("What do you see?")))
+
+    assert len(outputs) == 3
+    assert isinstance(outputs[0], LLMResponseChunk)
+    assert outputs[0].text == "Let me check with my camera."
+    assert outputs[0].tools == []
+    assert isinstance(outputs[1], LLMResponseChunk)
+    assert outputs[1].text == ""
+    assert [tool.name for tool in outputs[1].tools] == ["camera"]
+    assert isinstance(outputs[2], EndOfResponse)
+
+
+def test_process_preserves_streamed_text_after_function_call_order():
+    handler = _make_handler()
+    handler.stream_batch_sentences = 3
+
+    streamed_events = [
+        _make_text_delta_event("Let me check."),
+        _make_function_call_done_event(name="camera"),
+        _make_text_delta_event("This may take a second."),
+    ]
+
+    handler.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            create=lambda **kwargs: _make_stream(streamed_events),
+        )
+    )
+
+    outputs = list(handler.process(_make_request("What do you see?")))
+
+    assert len(outputs) == 4
+    assert isinstance(outputs[0], LLMResponseChunk)
+    assert outputs[0].text == "Let me check."
+    assert outputs[0].tools == []
+    assert isinstance(outputs[1], LLMResponseChunk)
+    assert outputs[1].text == ""
+    assert [tool.name for tool in outputs[1].tools] == ["camera"]
+    assert isinstance(outputs[2], LLMResponseChunk)
+    assert outputs[2].text == "This may take a second."
+    assert outputs[2].tools == []
+    assert isinstance(outputs[3], EndOfResponse)
+
+
+def test_process_preserves_nonstreaming_text_tool_text_order():
+    handler = _make_handler(stream=False)
+
+    api_response = _make_response(
+        output=[
+            ResponseOutputMessage(
+                id="msg_1",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[ResponseOutputText(type="output_text", text="Let me check.", annotations=[])],
+            ),
+            ResponseFunctionToolCall(
+                type="function_call",
+                call_id="call_original",
+                name="camera",
+                arguments="{}",
+            ),
+            ResponseOutputMessage(
+                id="msg_2",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[ResponseOutputText(type="output_text", text="This may take a second.", annotations=[])],
+            ),
+        ],
+    )
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: api_response))
+
+    outputs = list(handler.process(_make_request("What do you see?")))
+
+    assert len(outputs) == 4
+    assert isinstance(outputs[0], LLMResponseChunk)
+    assert outputs[0].text == "Let me check."
+    assert outputs[0].tools == []
+    assert isinstance(outputs[1], LLMResponseChunk)
+    assert outputs[1].text == ""
+    assert [tool.name for tool in outputs[1].tools] == ["camera"]
+    assert isinstance(outputs[2], LLMResponseChunk)
+    assert outputs[2].text == "This may take a second."
+    assert outputs[2].tools == []
+    assert isinstance(outputs[3], EndOfResponse)
 
 
 def test_process_handles_cancellation():
