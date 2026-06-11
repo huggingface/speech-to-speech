@@ -303,25 +303,26 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if before.strip():
                 for s in sent_tokenize(before):
                     ctx.sentence_batch.append(s)
-                if ctx.sentence_batch:
-                    chunks.append(
-                        LLMResponseChunk(
-                            text=" ".join(ctx.sentence_batch),
-                            language_code=language_code,
-                            runtime_config=runtime_config,
-                            response=response,
-                            turn_id=ctx.turn_id,
-                            turn_revision=ctx.turn_revision,
-                            speech_stopped_at_s=ctx.speech_stopped_at_s,
-                            cancel_generation=ctx.cancel_generation,
-                        )
+            if ctx.sentence_batch:
+                chunks.append(
+                    LLMResponseChunk(
+                        text=" ".join(ctx.sentence_batch),
+                        language_code=language_code,
+                        runtime_config=runtime_config,
+                        response=response,
+                        turn_id=ctx.turn_id,
+                        turn_revision=ctx.turn_revision,
+                        speech_stopped_at_s=ctx.speech_stopped_at_s,
+                        cancel_generation=ctx.cancel_generation,
                     )
-                    ctx.sentence_batch = []
+                )
+                ctx.sentence_batch = []
             if ctx.block_regex and ctx.end_code and ctx.end_code in code_and_after:
                 stripped, func_calls = extract_function_calls_from_text(
                     code_and_after,
                     ctx.block_regex,
                 )
+                parsed_tools: list[ResponseFunctionToolCall] = []
                 for fc in func_calls:
                     if tools:
                         logger.warning(
@@ -330,10 +331,27 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         )
                         continue
                     try:
-                        tools.append(fc.to_realtime_function_tool_call(ctx.function_tools))
+                        tool_call = fc.to_realtime_function_tool_call(ctx.function_tools)
                     except ValueError as e:
                         logger.warning("Skipping invalid tool call: %s", e)
-                printable_text = "" if tools else stripped
+                        continue
+                    tools.append(tool_call)
+                    parsed_tools.append(tool_call)
+                if parsed_tools:
+                    chunks.append(
+                        LLMResponseChunk(
+                            text="",
+                            language_code=language_code,
+                            tools=parsed_tools,
+                            runtime_config=runtime_config,
+                            response=response,
+                            turn_id=ctx.turn_id,
+                            turn_revision=ctx.turn_revision,
+                            speech_stopped_at_s=ctx.speech_stopped_at_s,
+                            cancel_generation=ctx.cancel_generation,
+                        )
+                    )
+                printable_text = stripped
             else:
                 printable_text = code_and_after
             return chunks, tools, printable_text
@@ -501,11 +519,10 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         logger.debug("Clean text: %s", ctx.generated_text)
         logger.info(f"Tools: {ctx.tools}")
 
-        if turn_output_allowed and (ctx.printable_text.strip() or ctx.tools):
+        if turn_output_allowed and ctx.printable_text.strip():
             yield LLMResponseChunk(
                 text=ctx.printable_text.strip(),
                 language_code=language_code,
-                tools=list(ctx.tools),
                 runtime_config=runtime_config,
                 response=response,
                 turn_id=ctx.turn_id,

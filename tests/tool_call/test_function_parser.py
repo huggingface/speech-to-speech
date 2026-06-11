@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from speech_to_speech.LLM.tool_call import function_call as function_call_module
 from speech_to_speech.LLM.tool_call.function_call import (
     FunctionToolCall,
     extract_function_calls_from_text,
@@ -190,10 +191,20 @@ class TestExtractFromText:
         assert len(calls) == 1
         assert calls[0].parameters == {"msg": "hello ) world"}
 
-    def test_recovers_simple_call_from_malformed_code_block(self):
-        text = "Let me check.\n<code>camera(question='What is in front of me?')}</code>"
+    def test_recovers_simple_sibling_call_from_malformed_code_block(self, monkeypatch):
+        fallback_used = False
+        original_fallback = function_call_module._split_simple_calls_with_regex
+
+        def spy_fallback(source: str) -> list[str]:
+            nonlocal fallback_used
+            fallback_used = True
+            return original_fallback(source)
+
+        monkeypatch.setattr(function_call_module, "_split_simple_calls_with_regex", spy_fallback)
+        text = "Let me check.\n<code>camera(question='What is in front of me?') dance(</code>"
         outside, calls = extract_function_calls_from_text(text, block_regex=self.CODE_BLOCK_REGEX)
         assert "Let me check." in outside
+        assert fallback_used
         assert len(calls) == 1
         assert calls[0].function_name == "camera"
         assert calls[0].parameters == {"question": "What is in front of me?"}

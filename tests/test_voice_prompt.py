@@ -19,8 +19,8 @@ def test_voice_prompt_makes_speech_the_default_and_handles_noisy_stt():
     assert "Speech is the default." in prompt
     assert "Use at most one tool" in prompt
     assert "Treat transcripts as noisy." in prompt
-    assert "Reachy/Richie/Richy" in prompt
-    assert "correct them only if asked or meaning depends on it" in prompt
+    assert "Correct likely mishearings only if asked or meaning depends on it" in prompt
+    assert "Reachy/Richie/Richy" not in prompt
     assert "If unsure whether a tool is needed, just speak." in prompt
 
 
@@ -28,9 +28,10 @@ def test_voice_prompt_requests_spoken_lead_in_and_sparing_expression_tools():
     prompt = build_voice_system_prompt("Be concise.")
 
     assert "Before a tool call, use a brief natural utterance" in prompt
-    assert "Let me check with my camera." in prompt
+    assert "briefly say that you will check" in prompt
     assert "For expression/background tools, speak first." in prompt
-    assert "Sure, here's my best sadness." in prompt
+    assert "Sure, here's my best <emotion>." in prompt
+    assert "Sure, here's my best sadness." not in prompt
     assert "Never mention tools." in prompt
     assert "do not add a second spoken comment" in prompt
     assert "Use motion, dance, emotion, and similar tools sparingly" in prompt
@@ -66,9 +67,10 @@ def test_local_tool_prompt_allows_spoken_lead_in_before_code_block():
 
     assert "one brief natural sentence before the tool call" in prompt
     assert "always speak first" in prompt
-    assert "Sure, here's my best sadness." in prompt
-    assert "That sounds really hard." in prompt
-    assert "No prose inside the tags" in prompt
+    assert "Sure, here's my best <emotion>." in prompt
+    assert "Sure, here's my best sadness." not in prompt
+    assert "fitting empathetic sentence" in prompt
+    assert "do not claim tool results before a tool result is available" in prompt
     assert "Omit optional args instead of placeholder values" in prompt
 
 
@@ -91,12 +93,41 @@ def test_local_tool_parser_flushes_lead_in_before_tool_even_with_large_sentence_
 
     chunks, tools, remaining = handler._process_printable_text(text, None, [], ctx)
 
-    assert [chunk.text for chunk in chunks] == ["Here we go."]
+    assert [chunk.text for chunk in chunks] == ["Here we go.", ""]
+    assert chunks[0].tools == []
+    assert [tool.name for tool in chunks[1].tools] == ["dance"]
     assert [tool.name for tool in tools] == ["dance"]
     assert remaining == ""
 
 
-def test_local_tool_parser_ignores_duplicate_tool_blocks_and_trailing_text():
+def test_local_tool_parser_flushes_pending_batch_before_tool_with_empty_before_text():
+    handler = object.__new__(LanguageModelHandler)
+    ctx = StreamContext(
+        function_tools=[
+            FunctionTool(
+                type="function",
+                name="dance",
+                description="Dance once.",
+                parameters={"type": "object", "properties": {}},
+            )
+        ],
+        block_regex=build_block_regex(),
+        enter_code=ENTER_CODE,
+        end_code=END_CODE,
+        sentence_batch=["Queued lead-in."],
+    )
+    text = f"{ENTER_CODE}dance(){END_CODE}"
+
+    chunks, tools, remaining = handler._process_printable_text(text, None, [], ctx)
+
+    assert [chunk.text for chunk in chunks] == ["Queued lead-in.", ""]
+    assert chunks[0].tools == []
+    assert [tool.name for tool in chunks[1].tools] == ["dance"]
+    assert [tool.name for tool in tools] == ["dance"]
+    assert remaining == ""
+
+
+def test_local_tool_parser_skips_duplicate_tool_blocks_and_preserves_trailing_text():
     handler = object.__new__(LanguageModelHandler)
     ctx = StreamContext(
         function_tools=[
@@ -115,6 +146,7 @@ def test_local_tool_parser_ignores_duplicate_tool_blocks_and_trailing_text():
 
     chunks, tools, remaining = handler._process_printable_text(text, None, [], ctx)
 
-    assert [chunk.text for chunk in chunks] == ["Watch this."]
+    assert [chunk.text for chunk in chunks] == ["Watch this.", ""]
+    assert [tool.name for tool in chunks[1].tools] == ["dance"]
     assert [tool.name for tool in tools] == ["dance"]
-    assert remaining == ""
+    assert remaining.strip() == "Watch this."

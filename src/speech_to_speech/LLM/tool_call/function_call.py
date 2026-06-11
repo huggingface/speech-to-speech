@@ -86,7 +86,11 @@ def _split_top_level_calls(source: str) -> List[str]:
 
 
 def _split_simple_calls_with_regex(source: str) -> List[str]:
-    """Extract simple ``name(args)`` spans from malformed model output."""
+    """Extract complete simple ``name(args)`` spans from malformed model output.
+
+    This fallback can recover well-formed siblings before a tokenizer error,
+    but not the incomplete call that caused the tokenizer error.
+    """
     return [match.group(0).strip() for match in _LENIENT_CALL_RE.finditer(source)]
 
 

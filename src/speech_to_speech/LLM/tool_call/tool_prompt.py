@@ -38,9 +38,9 @@ To call a tool, put exactly one named-argument function call inside {{ enter_cod
 {{ enter_code }}function_name(required_arg='value'){{ end_code }}
 
 Rules:
-- You may say one brief natural sentence before the tool call, e.g. "Let me check with my camera."
-- For expression/background tools, always speak first. If asked to show an expression, say something like "Sure, here's my best sadness."; otherwise say something like "That sounds really hard."
-- Do not mention tags, functions, or tools. No prose inside the tags or after {{ end_code }}.
+- You may say one brief natural sentence before the tool call; for slow information tools, briefly say that you will check.
+- For expression/background tools, always speak first. For requested expressions, use a short pattern like "Sure, here's my best <emotion>."; otherwise use a fitting empathetic sentence.
+- Do not mention tags, functions, or tools. Keep prose outside tags brief, and do not claim tool results before a tool result is available.
 - Use named arguments only; quote strings. Omit optional args instead of placeholder values like "random", "none", "", or null.
 - Only one tool call may appear in a response.\
 """,
