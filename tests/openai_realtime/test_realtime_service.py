@@ -34,6 +34,7 @@ from openai.types.realtime import (
 
 from speech_to_speech.api.openai_realtime.service import (
     CHUNK_SIZE_BYTES,
+    SESSION_WARMUP_PROMPT,
     RealtimeService,
 )
 from speech_to_speech.pipeline.events import (
@@ -256,6 +257,36 @@ class TestHandleSessionUpdate:
         service.handle_session_update(conn_id, self._make_update(instructions="Be concise"))
         assert runtime_config.session.instructions == "Be concise"
         assert runtime_config.session.audio.output.voice == "echo"  # preserved from first update
+
+    def test_session_update_with_instructions_starts_warmup_once(
+        self,
+        service,
+        conn_id,
+        runtime_config,
+        text_prompt_queue,
+    ):
+        evt = self._make_update(instructions="Introduce yourself as Rover.")
+
+        assert service.handle_session_update(conn_id, evt) is None
+        result = service.maybe_start_session_warmup(conn_id, evt)
+
+        assert isinstance(result, ResponseCreatedEvent)
+        req = text_prompt_queue.get(timeout=1)
+        assert isinstance(req, GenerateResponseRequest)
+        assert req.runtime_config is runtime_config
+        assert req.ephemeral_user_prompt == SESSION_WARMUP_PROMPT
+        assert service._state(conn_id).session_warmup_started is True
+
+        assert service.maybe_start_session_warmup(conn_id, evt) is None
+        assert text_prompt_queue.empty()
+
+    def test_session_update_without_instructions_does_not_warmup(self, service, conn_id, text_prompt_queue):
+        evt = self._make_update(audio={"output": {"voice": "shimmer"}})
+
+        assert service.handle_session_update(conn_id, evt) is None
+
+        assert service.maybe_start_session_warmup(conn_id, evt) is None
+        assert text_prompt_queue.empty()
 
 
 # ===================================================================

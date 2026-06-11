@@ -56,6 +56,11 @@ PIPELINE_SAMPLE_RATE = 16000
 CHUNK_SAMPLES = 512
 BYTES_PER_SAMPLE = 2
 CHUNK_SIZE_BYTES = CHUNK_SAMPLES * BYTES_PER_SAMPLE
+SESSION_WARMUP_PROMPT = (
+    "The local user has just joined this realtime voice session. "
+    "If your instructions ask you to introduce yourself, do that now. "
+    "Otherwise greet them briefly."
+)
 
 _ResponseStatus = Literal["completed", "cancelled", "failed", "incomplete", "in_progress"]
 _StatusReason = Literal["turn_detected", "client_cancelled", "max_output_tokens", "content_filter"]
@@ -168,6 +173,7 @@ class ConnState(BaseModel):
     speculative_user_item_id: Optional[str] = None
     speculative_input_item_id: Optional[str] = None
     speculative_audio_duration_s: float = 0.0
+    session_warmup_started: bool = False
 
 
 class RealtimeService:
@@ -268,6 +274,32 @@ class RealtimeService:
 
     def handle_session_update(self, conn_id: str, event: SessionUpdateEvent) -> Optional[RealtimeErrorEvent]:
         return self.session.handle_session_update(conn_id, event)
+
+    def maybe_start_session_warmup(self, conn_id: str, event: SessionUpdateEvent) -> ServerEvent | None:
+        """Start one prompt-aware greeting response after initial instructions arrive."""
+        st = self._state(conn_id)
+        session = event.session
+        fields_set = getattr(session, "model_fields_set", set()) if session is not None else set()
+        instructions = getattr(session, "instructions", None) if session is not None else None
+        if (
+            st.session_warmup_started
+            or st.in_response
+            or st.response_pending
+            or self.text_prompt_queue is None
+            or "instructions" not in fields_set
+            or not instructions
+            or st.last_item_id is not None
+        ):
+            return None
+
+        result = self.response.handle_response_create(
+            conn_id,
+            ResponseCreateEvent(type="response.create"),
+            ephemeral_user_prompt=SESSION_WARMUP_PROMPT,
+        )
+        if result is not None and result.type != "error":
+            st.session_warmup_started = True
+        return result
 
     def handle_audio_append(self, conn_id: str, event: InputAudioBufferAppendEvent) -> list[bytes]:
         return self.audio.handle_audio_append(conn_id, event)

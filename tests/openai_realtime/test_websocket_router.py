@@ -18,12 +18,12 @@ from starlette.websockets import WebSocketState
 
 import speech_to_speech.api.openai_realtime.websocket_router as router_module
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
-from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService
+from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, SESSION_WARMUP_PROMPT, RealtimeService
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import AssistantTextEvent, SpeechStartedEvent, TokenUsageEvent
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput, GenerateResponseRequest
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -193,6 +193,30 @@ class TestClientEventDispatch:
                 time.sleep(0.1)
                 cid = service.connection_ids[0]
                 assert service._state(cid).runtime_config.session.audio.output.voice == "coral"
+
+    def test_session_update_with_instructions_starts_initial_response(self, setup):
+        app, service, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                ws.send_json(
+                    {
+                        "type": "session.update",
+                        "session": {
+                            "type": "realtime",
+                            "instructions": "Introduce yourself as Rover.",
+                        },
+                    }
+                )
+
+                msg = ws.receive_json()
+                assert msg["type"] == "response.created"
+                assert msg["response"]["status"] == "in_progress"
+
+                req = service.text_prompt_queue.get(timeout=1)
+                assert isinstance(req, GenerateResponseRequest)
+                assert req.ephemeral_user_prompt == SESSION_WARMUP_PROMPT
+                assert req.runtime_config.session.instructions == "Introduce yourself as Rover."
 
     def test_conversation_item_create_returns_events(self, setup):
         app, *_ = setup

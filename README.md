@@ -224,7 +224,7 @@ with client.beta.realtime.connect(model="model_name") as conn:
 | Event | Description |
 |---|---|
 | `input_audio_buffer.append` | Stream base64 PCM audio. Decoded, resampled to 16 kHz, and chunked for the VAD. |
-| `session.update` | Deep-merge session config (instructions, tools, voice, turn detection, audio format). |
+| `session.update` | Deep-merge session config (instructions, tools, voice, turn detection, audio format). Initial instructions trigger a one-time greeting/warmup response. |
 | `conversation.item.create` | Inject `input_text` or `function_call_output` into the LLM context without triggering generation. |
 | `response.create` | Trigger LLM generation. Supports per-response `instructions` and `tool_choice` overrides. |
 | `response.cancel` | Cancel the in-progress response and re-enable listening. |

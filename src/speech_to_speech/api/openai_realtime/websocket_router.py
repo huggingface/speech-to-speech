@@ -341,6 +341,12 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                     err = unit.service.handle_session_update(session_id, event)
                     if err:
                         await _send_event(ws, err)
+                    else:
+                        result = unit.service.maybe_start_session_warmup(session_id, event)
+                        if result:
+                            if result.type != "error":
+                                unit.cancel_scope.new_response()
+                            await _send_event(ws, result)
 
                 elif isinstance(event, ConversationItemCreateEvent):
                     events = unit.service.handle_conversation_item_create(session_id, event)

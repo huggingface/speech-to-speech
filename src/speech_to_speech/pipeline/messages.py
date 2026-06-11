@@ -144,11 +144,16 @@ class GenerateResponseRequest(PipelineMessage):
     ``response`` carries per-response overrides from ``response.create``.
     Downstream handlers resolve each attribute by preferring the
     per-response value over the session default.
+
+    ``ephemeral_user_prompt`` is appended only to the per-request chat copy.
+    It lets the realtime layer trigger a join/greeting response without
+    storing a synthetic user message in conversation history.
     """
 
     tag: Literal["generate_response"] = "generate_response"
     runtime_config: RuntimeConfig
     response: RealtimeResponseCreateParams | None = None
+    ephemeral_user_prompt: str | None = None
     language_code: Optional[str] = None
     turn_id: str | None = None
     turn_revision: int | None = None

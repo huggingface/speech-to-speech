@@ -407,6 +407,8 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
             response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
         )
         self._apply_config(active_chat, instructions)
+        if request.ephemeral_user_prompt:
+            active_chat.add_item(make_user_message(request.ephemeral_user_prompt))
         language_code, lang_name = resolve_auto_language(language_code)
         if lang_name and self.enable_lang_prompt:
             active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))

@@ -200,6 +200,33 @@ def test_no_disable_thinking_omits_extra_body():
     assert captured.get("extra_body") is None
 
 
+def test_ephemeral_user_prompt_is_sent_without_persisting_user_message():
+    handler = _make_handler(stream=False)
+    captured = {}
+    cfg = _make_runtime_config()
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _make_response(output=[])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+
+    outputs = list(
+        handler.process(
+            GenerateResponseRequest(
+                runtime_config=cfg,
+                ephemeral_user_prompt="The user just joined. Greet them briefly.",
+            )
+        )
+    )
+
+    assert isinstance(outputs[-1], EndOfResponse)
+    user_items = [item for item in captured["input"] if item.get("role") == "user"]
+    assert len(user_items) == 1
+    assert user_items[0]["content"][0]["text"] == "The user just joined. Greet them briefly."
+    assert cfg.chat.buffer == []
+
+
 def test_second_turn_flattens_assistant_history_for_responses():
     handler = _make_handler(stream=False)
     captured = {}

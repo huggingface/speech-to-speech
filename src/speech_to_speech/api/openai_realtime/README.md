@@ -47,7 +47,7 @@ flowchart LR
 3. **Transcription**: STT output passes through `TranscriptionNotifier`, which taps the transcript for `transcription.delta` / `transcription.completed` events before forwarding to the LLM.
 4. **Generation**: The LLM generates text (and optional tool calls). `LMOutputProcessor` splits the output: clean text goes to TTS, and `assistant_text` + tool call dicts go to the `text_output_queue`.
 5. **Outbound audio**: TTS writes PCM chunks to `send_audio_chunks_queue`. The router's async `_send_loop` drains both queues, encoding PCM as `response.output_audio.delta` events and translating internal messages into protocol events.
-6. **Session config**: `session.update` events deep-merge into `RuntimeConfig`, which is a shared Pydantic model read by VAD (turn detection thresholds), LLM (instructions, tools), and TTS (voice) at processing time.
+6. **Session config**: `session.update` events deep-merge into `RuntimeConfig`, which is a shared Pydantic model read by VAD (turn detection thresholds), LLM (instructions, tools), and TTS (voice) at processing time. The first update that supplies instructions also starts a one-time greeting/warmup response.
 
 ---
 
@@ -58,7 +58,7 @@ flowchart LR
 | Event | Description |
 |---|---|
 | `input_audio_buffer.append` | Stream base64 PCM audio. Decoded, resampled to 16 kHz, and chunked for the VAD. |
-| `session.update` | Deep-merge session config (instructions, tools, voice, turn detection, audio format). |
+| `session.update` | Deep-merge session config (instructions, tools, voice, turn detection, audio format). Initial instructions trigger a one-time greeting/warmup response. |
 | `conversation.item.create` | Inject `input_text` or `function_call_output` into the LLM context without triggering generation. |
 | `response.create` | Trigger LLM generation. Supports per-response `instructions` and `tool_choice` overrides. |
 | `response.cancel` | Cancel the in-progress response and re-enable listening. |

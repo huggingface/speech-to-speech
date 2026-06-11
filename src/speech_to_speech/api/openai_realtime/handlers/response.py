@@ -128,7 +128,13 @@ class ResponseHandler(RealtimeBaseHandler):
 
     # ── Public handlers ───────────────────────────
 
-    def handle_response_create(self, conn_id: str, event: ResponseCreateEvent) -> ServerEvent | None:
+    def handle_response_create(
+        self,
+        conn_id: str,
+        event: ResponseCreateEvent,
+        *,
+        ephemeral_user_prompt: str | None = None,
+    ) -> ServerEvent | None:
         """Trigger a response.
 
         Returns a ``ResponseCreatedEvent`` on success, a ``RealtimeErrorEvent``
@@ -168,6 +174,7 @@ class ResponseHandler(RealtimeBaseHandler):
                 GenerateResponseRequest(
                     runtime_config=cfg,
                     response=event.response,
+                    ephemeral_user_prompt=ephemeral_user_prompt,
                     turn_id=st.speculative_user_turn_id,
                     turn_revision=st.speculative_user_turn_revision,
                     speech_stopped_at_s=st.speculative_user_speech_stopped_at_s,
