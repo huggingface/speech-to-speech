@@ -1202,6 +1202,62 @@ class TestDispatchPipelineEvent:
         assert text_prompt_queue.empty()
         service.unregister(conn_id)
 
+    def test_stale_assistant_text_dropped_after_unanswered_reopen(self, runtime_config, should_listen):
+        text_prompt_queue = Queue()
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(
+            text_prompt_queue=text_prompt_queue,
+            should_listen=should_listen,
+            speculative_turns=tracker,
+        )
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=1.0, turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="hello", turn_id="turn_1", turn_revision=0),
+        )
+
+        # The VAD reopens an unanswered turn past the grace window through the
+        # same candidate protocol it uses for an in-grace reopen.
+        candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+        assert candidate_revision == 1
+        assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantTextEvent(text="stale", turn_id="turn_1", turn_revision=0),
+        )
+
+        assert events == []
+        assert service._state(conn_id).current_response_id is None
+
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=2.5, turn_id="turn_1", turn_revision=1),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="hello and more", turn_id="turn_1", turn_revision=1),
+        )
+
+        user_items = [item for item in runtime_config.chat.buffer if getattr(item, "role", None) == "user"]
+        assert len(user_items) == 1
+        assert user_items[0].content[0].text == "hello and more"
+        service.unregister(conn_id)
+
     # -- unknown --
 
     def test_unknown_type_returns_empty(self, service, conn_id):

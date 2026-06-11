@@ -16,15 +16,21 @@ class VADHandlerArguments:
         },
     )
     min_silence_ms: int = field(
-        default=300,
+        default=64,
         metadata={
-            "help": "Minimum length of silence intervals to be used for segmenting speech. Measured in milliseconds. Default is 300 ms."
+            "help": "Minimum length of silence intervals to be used for segmenting speech. Measured in milliseconds. Default is 64 ms."
         },
     )
     min_speech_ms: int = field(
         default=384,
         metadata={
             "help": "Minimum length of speech segments to be considered valid speech. Measured in milliseconds. Default is 384 ms."
+        },
+    )
+    min_speech_continuation_ms: int = field(
+        default=192,
+        metadata={
+            "help": "Hysteresis threshold (ms of active speech) for accepting speech that continues a reopenable turn (soft-ended, uncommitted, within the reopen window). Set to 0 to disable the split and use min_speech_ms. Clamped to [100, min_speech_ms]. New turns and barge-ins always require min_speech_ms. Default and recommended: 192 with min_speech_ms 384."
         },
     )
     max_speech_ms: float = field(
@@ -59,5 +65,17 @@ class VADHandlerArguments:
         default=1000,
         metadata={
             "help": "In realtime mode, keep a soft-ended turn reopenable for this many milliseconds unless a response commits it."
+        },
+    )
+    unanswered_reopen_ms: int = field(
+        default=7000,
+        metadata={
+            "help": "Sanity cap (ms) for reopening a soft-ended speculative turn that has not yet been answered by any assistant output. While a turn is uncommitted, resumed speech within this window reopens the same turn instead of starting a new one. Has no effect below speculative_reopen_ms."
+        },
+    )
+    short_segment_merge_ms: int = field(
+        default=0,
+        metadata={
+            "help": "When greater than 0, adjacent VAD segments below min_speech_ms are held and stitched for this many milliseconds before being discarded. Fragments shorter than 100 ms of active speech are never held. Useful with very low min_silence_ms values."
         },
     )
