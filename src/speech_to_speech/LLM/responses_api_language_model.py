@@ -29,6 +29,7 @@ from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import Chat, SupportedItem, make_system_message, make_user_message
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
 from speech_to_speech.LLM.utils import remove_unspeechable, resolve_auto_language
+from speech_to_speech.LLM.vision_router import VisionRouter, build_vision_router
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
@@ -64,6 +65,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
         compact_history: bool = False,
+        vision_router_kwargs: dict[str, Any] | None = None,
         **_kwargs: Any,
     ) -> None:
         self.cancel_scope = cancel_scope
@@ -81,6 +83,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
 
         self.user_role = user_role
         self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.vision_router: VisionRouter | None = build_vision_router(self.stop_event, vision_router_kwargs)
         self._extra_body = (
             {"chat_template_kwargs": {"enable_thinking": False}}
             if disable_thinking
@@ -447,6 +450,10 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
             return
 
         original_chat = runtime_config.chat
+        if self.vision_router is not None:
+            routed = self.vision_router.process_chat(original_chat)
+            if routed:
+                logger.info("Routed %d image item(s) through the vision model", routed)
         active_chat = original_chat.copy()
         language_code = request.language_code
         instructions = (
