@@ -316,6 +316,38 @@ speech-to-speech \
     --enable_live_transcription
 ```
 
+#### Vision routing
+
+By default, image inputs are handled by the selected LLM backend. To keep normal text turns on a fast text-only model while sending only image work to a VLM, enable the optional vision router with `--vision_backend` and `--vision_model_name`. The router converts user image messages and camera-style tool outputs containing `b64_im` into a short text observation before the text LLM runs.
+
+```bash
+# Fast deployed text model + local MLX VLM
+speech-to-speech \
+    --mode realtime \
+    --stt parakeet-tdt \
+    --llm_backend responses-api \
+    --model_name "llama3.1-8b" \
+    --responses_api_base_url "https://api.cerebras.ai/v1" \
+    --responses_api_api_key "$CEREBRAS_API_KEY" \
+    --vision_backend mlx-lm \
+    --vision_model_name "mlx-community/Qwen2.5-VL-3B-Instruct-4bit" \
+    --vision_device mps \
+    --tts qwen3
+```
+
+```bash
+# Separate deployed text and vision endpoints
+speech-to-speech \
+    --llm_backend responses-api \
+    --model_name "text-model" \
+    --responses_api_base_url "https://text-provider.example/v1" \
+    --responses_api_api_key "$TEXT_API_KEY" \
+    --vision_backend responses-api \
+    --vision_model_name "vision-model" \
+    --vision_responses_api_base_url "https://vision-provider.example/v1" \
+    --vision_responses_api_api_key "$VISION_API_KEY"
+```
+
 #### Fully local (Apple Silicon)
 
 ```bash
@@ -459,7 +491,7 @@ See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments
 
 ### STT, LLM and TTS parameters
 
-`model_name`, `torch_dtype`, and `device` are exposed for each implementation of the Speech to Text, Language Model, and Text to Speech. STT and TTS parameters use the handler prefix (e.g. `--stt_model_name`, `--llm_device`). LLM model selection and chat settings are shared across backends via unprefixed flags (e.g. `--model_name`, `--chat_size`); backend-specific flags use the `responses_api_` prefix for the `responses-api` backend and `llm_` prefix for local backends. See the [arguments classes](./src/speech_to_speech/arguments_classes) for the full list.
+`model_name`, `torch_dtype`, and `device` are exposed for each implementation of the Speech to Text, Language Model, and Text to Speech. STT and TTS parameters use the handler prefix (e.g. `--stt_model_name`, `--llm_device`). LLM model selection and chat settings are shared across backends via unprefixed flags (e.g. `--model_name`, `--chat_size`); backend-specific flags use the `responses_api_` prefix for the `responses-api` backend and `llm_` prefix for local backends. Optional image-only routing uses the `vision_` prefix (e.g. `--vision_backend`, `--vision_model_name`, `--vision_responses_api_base_url`). See the [arguments classes](./src/speech_to_speech/arguments_classes) for the full list.
 
 For example:
 ```bash

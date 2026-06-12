@@ -4,6 +4,8 @@ from unittest.mock import MagicMock
 
 import httpx
 from openai import Stream
+from openai.types.realtime.conversation_item import RealtimeConversationItemUserMessage
+from openai.types.realtime.realtime_conversation_item_user_message import Content as UserContent
 from openai.types.responses import (
     Response,
     ResponseFunctionToolCall,
@@ -16,6 +18,7 @@ from openai.types.responses.response_output_text import ResponseOutputText
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
+from speech_to_speech.LLM.vision_router import VisionRouter
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.messages import EndOfResponse, GenerateResponseRequest, LLMResponseChunk, TokenUsage
 
@@ -103,6 +106,7 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler.tools_choice = None
     handler.enable_lang_prompt = False
     handler.compactor = None
+    handler.vision_router = None
     return handler
 
 
@@ -230,6 +234,48 @@ def test_process_preserves_nonstreaming_text_tool_text_order():
     assert outputs[2].text == "This may take a second."
     assert outputs[2].tools == []
     assert isinstance(outputs[3], EndOfResponse)
+
+
+def test_process_routes_image_messages_before_responses_api_call():
+    handler = _make_handler(stream=False)
+    cfg = _make_runtime_config()
+    cfg.chat.add_item(
+        RealtimeConversationItemUserMessage(
+            type="message",
+            role="user",
+            content=[
+                UserContent(type="input_text", text="What do you see?"),
+                UserContent(type="input_image", image_url="data:image/jpeg;base64,abc123"),
+            ],
+        )
+    )
+    handler.vision_router = VisionRouter(lambda image_urls, question: "A blue cube.")
+
+    api_response = _make_response(
+        output=[
+            ResponseOutputMessage(
+                id="msg_1",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[ResponseOutputText(type="output_text", text="It looks like a blue cube.", annotations=[])],
+            )
+        ],
+    )
+    captured: dict[str, object] = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return api_response
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+
+    outputs = list(handler.process(GenerateResponseRequest(runtime_config=cfg)))
+
+    assert isinstance(outputs[-1], EndOfResponse)
+    user_entry = next(item for item in captured["input"] if item["role"] == "user")
+    assert all(part["type"] != "input_image" for part in user_entry["content"])
+    assert "Image analysis: A blue cube." in user_entry["content"][0]["text"]
 
 
 def test_process_handles_cancellation():

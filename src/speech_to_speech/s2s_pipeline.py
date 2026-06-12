@@ -44,6 +44,7 @@ from speech_to_speech.arguments_classes.responses_api_language_model_arguments i
 from speech_to_speech.arguments_classes.socket_receiver_arguments import SocketReceiverArguments
 from speech_to_speech.arguments_classes.socket_sender_arguments import SocketSenderArguments
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
+from speech_to_speech.arguments_classes.vision_model_arguments import VisionModelHandlerArguments
 from speech_to_speech.arguments_classes.websocket_streamer_arguments import WebSocketStreamerArguments
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
 from speech_to_speech.baseHandler import BaseHandler
@@ -99,6 +100,7 @@ class ParsedArguments:
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments
     language_model_handler_kwargs: LanguageModelHandlerArguments
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments
+    vision_model_handler_kwargs: VisionModelHandlerArguments
     chat_tts_handler_kwargs: ChatTTSHandlerArguments
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments
@@ -152,6 +154,7 @@ def parse_arguments() -> ParsedArguments:
             MLXAudioWhisperSTTHandlerArguments,
             ParakeetTDTSTTHandlerArguments,
             _lm_class,
+            VisionModelHandlerArguments,
             ChatTTSHandlerArguments,
             FacebookMMSTTSHandlerArguments,
             PocketTTSHandlerArguments,
@@ -184,6 +187,7 @@ def parse_arguments() -> ParsedArguments:
         responses_api_language_model_handler_kwargs=by_type.get(
             ResponsesApiLanguageModelHandlerArguments, ResponsesApiLanguageModelHandlerArguments()
         ),
+        vision_model_handler_kwargs=by_type[VisionModelHandlerArguments],
         chat_tts_handler_kwargs=by_type[ChatTTSHandlerArguments],
         facebook_mms_tts_handler_kwargs=by_type[FacebookMMSTTSHandlerArguments],
         pocket_tts_handler_kwargs=by_type[PocketTTSHandlerArguments],
@@ -254,6 +258,8 @@ def overwrite_device_argument(common_device: Optional[str], *handler_kwargs: Any
         for kwargs in handler_kwargs:
             if hasattr(kwargs, "llm_device"):
                 kwargs.llm_device = common_device
+            if hasattr(kwargs, "vision_device"):
+                kwargs.vision_device = common_device
             if hasattr(kwargs, "tts_device"):
                 kwargs.tts_device = common_device
             if hasattr(kwargs, "stt_device"):
@@ -284,6 +290,7 @@ def prepare_all_args(
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
+    vision_model_handler_kwargs: VisionModelHandlerArguments,
     chat_tts_handler_kwargs: ChatTTSHandlerArguments,
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
@@ -299,6 +306,7 @@ def prepare_all_args(
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         responses_api_language_model_handler_kwargs,
+        vision_model_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,
         pocket_tts_handler_kwargs,
@@ -359,6 +367,7 @@ def _build_pipeline_handlers(
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
+    vision_model_handler_kwargs: VisionModelHandlerArguments,
     chat_tts_handler_kwargs: ChatTTSHandlerArguments,
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
@@ -409,6 +418,7 @@ def _build_pipeline_handlers(
         lm_response_queue,
         language_model_handler_kwargs,
         responses_api_language_model_handler_kwargs,
+        vision_model_handler_kwargs,
     )
 
     lm_processor = LMOutputProcessor(
@@ -447,6 +457,7 @@ def _build_realtime_pipeline_unit(
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
+    vision_model_handler_kwargs: VisionModelHandlerArguments,
     chat_tts_handler_kwargs: ChatTTSHandlerArguments,
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
@@ -470,6 +481,7 @@ def _build_realtime_pipeline_unit(
     parakeet_kw = deepcopy(parakeet_tdt_stt_handler_kwargs)
     lm_kw = deepcopy(language_model_handler_kwargs)
     responses_api_kw = deepcopy(responses_api_language_model_handler_kwargs)
+    vision_kw = deepcopy(vision_model_handler_kwargs)
     chat_tts_kw = deepcopy(chat_tts_handler_kwargs)
     facebook_mms_kw = deepcopy(facebook_mms_tts_handler_kwargs)
     pocket_tts_kw = deepcopy(pocket_tts_handler_kwargs)
@@ -543,6 +555,7 @@ def _build_realtime_pipeline_unit(
         parakeet_tdt_stt_handler_kwargs=parakeet_kw,
         language_model_handler_kwargs=lm_kw,
         responses_api_language_model_handler_kwargs=responses_api_kw,
+        vision_model_handler_kwargs=vision_kw,
         chat_tts_handler_kwargs=chat_tts_kw,
         facebook_mms_tts_handler_kwargs=facebook_mms_kw,
         pocket_tts_handler_kwargs=pocket_tts_kw,
@@ -580,6 +593,7 @@ def build_pipeline(
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
+    vision_model_handler_kwargs: VisionModelHandlerArguments,
     chat_tts_handler_kwargs: ChatTTSHandlerArguments,
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
@@ -642,6 +656,7 @@ def build_pipeline(
                 parakeet_tdt_stt_handler_kwargs=parakeet_tdt_stt_handler_kwargs,
                 language_model_handler_kwargs=language_model_handler_kwargs,
                 responses_api_language_model_handler_kwargs=responses_api_language_model_handler_kwargs,
+                vision_model_handler_kwargs=vision_model_handler_kwargs,
                 chat_tts_handler_kwargs=chat_tts_handler_kwargs,
                 facebook_mms_tts_handler_kwargs=facebook_mms_tts_handler_kwargs,
                 pocket_tts_handler_kwargs=pocket_tts_handler_kwargs,
@@ -726,6 +741,7 @@ def build_pipeline(
         parakeet_tdt_stt_handler_kwargs=parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs=language_model_handler_kwargs,
         responses_api_language_model_handler_kwargs=responses_api_language_model_handler_kwargs,
+        vision_model_handler_kwargs=vision_model_handler_kwargs,
         chat_tts_handler_kwargs=chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs=facebook_mms_tts_handler_kwargs,
         pocket_tts_handler_kwargs=pocket_tts_handler_kwargs,
@@ -843,7 +859,9 @@ def get_llm_handler(
     lm_response_queue: Queue[LMOutItem],
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
+    vision_model_handler_kwargs: VisionModelHandlerArguments,
 ) -> BaseHandler[LLMIn, LLMOut]:
+    vision_router_kwargs = vars(vision_model_handler_kwargs)
     if module_kwargs.llm_backend == "responses-api":
         from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
 
@@ -851,11 +869,14 @@ def get_llm_handler(
             stop_event,
             queue_in=text_prompt_queue,
             queue_out=lm_response_queue,
-            setup_kwargs=vars(responses_api_language_model_handler_kwargs),
+            setup_kwargs={
+                **vars(responses_api_language_model_handler_kwargs),
+                "vision_router_kwargs": vision_router_kwargs,
+            },
         )
 
     if module_kwargs.llm_backend in ("transformers", "mlx-lm"):
-        lm_kwargs = vars(language_model_handler_kwargs)
+        lm_kwargs = dict(vars(language_model_handler_kwargs))
         is_vlm = lm_kwargs.pop("is_vlm", False)
         if module_kwargs.llm_backend == "mlx-lm":
             lm_kwargs["backend"] = "mlx"
@@ -867,15 +888,16 @@ def get_llm_handler(
                 stop_event,
                 queue_in=text_prompt_queue,
                 queue_out=lm_response_queue,
-                setup_kwargs=lm_kwargs,
+                setup_kwargs={**lm_kwargs, "vision_router_kwargs": vision_router_kwargs},
             )
+
         from speech_to_speech.LLM.language_model import LanguageModelHandler
 
         return LanguageModelHandler(
             stop_event,
             queue_in=text_prompt_queue,
             queue_out=lm_response_queue,
-            setup_kwargs=lm_kwargs,
+            setup_kwargs={**lm_kwargs, "vision_router_kwargs": vision_router_kwargs},
         )
 
     raise ValueError("The LLM should be either transformers, mlx-lm or responses-api")
@@ -975,6 +997,7 @@ def main() -> None:
         args.parakeet_tdt_stt_handler_kwargs,
         args.language_model_handler_kwargs,
         args.responses_api_language_model_handler_kwargs,
+        args.vision_model_handler_kwargs,
         args.chat_tts_handler_kwargs,
         args.facebook_mms_tts_handler_kwargs,
         args.pocket_tts_handler_kwargs,
@@ -1019,6 +1042,7 @@ def main() -> None:
         args.parakeet_tdt_stt_handler_kwargs,
         args.language_model_handler_kwargs,
         args.responses_api_language_model_handler_kwargs,
+        args.vision_model_handler_kwargs,
         args.chat_tts_handler_kwargs,
         args.facebook_mms_tts_handler_kwargs,
         args.pocket_tts_handler_kwargs,
