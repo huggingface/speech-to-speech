@@ -7,8 +7,8 @@ def test_text_prompt_keeps_persona_in_session_prompt():
     prompt = build_text_system_prompt("Be helpful.")
 
     assert "Be helpful." in prompt
-    assert "You are a helpful assistant." in prompt
-    assert "You are a helpful assistant." in TEXT_SYSTEM_PROMPT
+    assert "You are a helpful assistant in a text conversation." in prompt
+    assert "You are a helpful assistant in a text conversation." in TEXT_SYSTEM_PROMPT
 
 
 def test_text_prompt_allows_markdown_and_drops_voice_rules():
