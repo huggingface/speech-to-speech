@@ -1,7 +1,7 @@
 """Text-channel system prompt: lead + session prompt + tail (strongest constraints last)."""
 
 TEXT_SYSTEM_PROMPT_LEAD = """\
-You are in a text conversation. The user reads your written replies.
+You are a helpful assistant.
 """
 
 TEXT_SYSTEM_PROMPT_TAIL = """\
