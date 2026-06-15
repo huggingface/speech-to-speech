@@ -270,6 +270,8 @@ def prepare_module_args(module_kwargs: ModuleArguments, *handler_kwargs: Any) ->
     optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs, *handler_kwargs)
     if module_kwargs.tts is None:
         module_kwargs.tts = "qwen3"
+    if module_kwargs.stt == "none" and module_kwargs.llm_backend != "responses-api":
+        raise ValueError("--stt none requires --llm_backend responses-api for audio-input LLM requests.")
     if platform == "darwin":
         check_mac_settings(module_kwargs)
     overwrite_device_argument(module_kwargs.device, *handler_kwargs)
@@ -366,7 +368,7 @@ def _build_pipeline_handlers(
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
     speculative_turns: SpeculativeTurnTracker | None = None,
 ) -> list[Any]:
-    """Build the shared handler chain: VAD → STT → TranscriptionNotifier → LM → LMOutputProcessor → TTS.
+    """Build the shared handler chain: VAD → STT/AudioInput → LM → LMOutputProcessor → TTS.
 
     Callers own the queues, events, and any per-mode mutations to handler kwargs (cancel_scope,
     text_output_queue, live transcription flags). `transcription_notifier_setup` differs by mode:
@@ -382,25 +384,44 @@ def _build_pipeline_handlers(
         setup_kwargs=vars(vad_handler_kwargs),
     )
 
-    transcription_notifier = TranscriptionNotifier(
-        stop_event,
-        queue_in=stt_output_queue,
-        queue_out=text_prompt_queue,  # type: ignore[arg-type]
-        setup_kwargs=transcription_notifier_setup,
-    )
+    speech_input_handlers: list[Any]
+    if module_kwargs.stt == "none":
+        from speech_to_speech.LLM.audio_input_notifier import AudioInputNotifier
 
-    stt = get_stt_handler(
-        module_kwargs,
-        stop_event,
-        spoken_prompt_queue,
-        stt_output_queue,
-        speculative_turns,
-        whisper_stt_handler_kwargs,
-        faster_whisper_stt_handler_kwargs,
-        paraformer_stt_handler_kwargs,
-        mlx_audio_whisper_stt_handler_kwargs,
-        parakeet_tdt_stt_handler_kwargs,
-    )
+        speech_input_handlers = [
+            AudioInputNotifier(
+                stop_event,
+                queue_in=spoken_prompt_queue,
+                queue_out=text_prompt_queue,
+                setup_kwargs={
+                    "runtime_config": transcription_notifier_setup.get("runtime_config"),
+                    "should_listen": should_listen,
+                    "sample_rate": vad_handler_kwargs.sample_rate,
+                    "speculative_turns": speculative_turns,
+                },
+            )
+        ]
+    else:
+        transcription_notifier = TranscriptionNotifier(
+            stop_event,
+            queue_in=stt_output_queue,
+            queue_out=text_prompt_queue,  # type: ignore[arg-type]
+            setup_kwargs=transcription_notifier_setup,
+        )
+
+        stt = get_stt_handler(
+            module_kwargs,
+            stop_event,
+            spoken_prompt_queue,
+            stt_output_queue,
+            speculative_turns,
+            whisper_stt_handler_kwargs,
+            faster_whisper_stt_handler_kwargs,
+            paraformer_stt_handler_kwargs,
+            mlx_audio_whisper_stt_handler_kwargs,
+            parakeet_tdt_stt_handler_kwargs,
+        )
+        speech_input_handlers = [stt, transcription_notifier]
 
     lm = get_llm_handler(
         module_kwargs,
@@ -431,7 +452,7 @@ def _build_pipeline_handlers(
         qwen3_tts_handler_kwargs,
     )
 
-    return [vad, stt, transcription_notifier, lm, lm_processor, tts]
+    return [vad, *speech_input_handlers, lm, lm_processor, tts]
 
 
 def _build_realtime_pipeline_unit(
@@ -832,7 +853,7 @@ def get_stt_handler(
         )
     else:
         raise ValueError(
-            "The STT should be either whisper, whisper-mlx, mlx-audio-whisper, faster-whisper, parakeet-tdt, or paraformer."
+            "The STT should be either none, whisper, whisper-mlx, mlx-audio-whisper, faster-whisper, parakeet-tdt, or paraformer."
         )
 
 

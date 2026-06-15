@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
+import numpy as np
 from openai import Stream
 from openai.types.responses import (
     Response,
@@ -13,6 +14,7 @@ from openai.types.responses import (
 )
 from openai.types.responses.response_output_text import ResponseOutputText
 
+import speech_to_speech.LLM.responses_api_language_model as responses_api_language_model
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
@@ -103,6 +105,8 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler.tools_choice = None
     handler.enable_lang_prompt = False
     handler.compactor = None
+    handler.audio_max_tokens = 80
+    handler.audio_temperature = 0.0
     return handler
 
 
@@ -258,6 +262,26 @@ def test_responses_api_timing_logs_only_text_chunks():
     assert not handler.should_log_timing(EndOfResponse())
 
 
+def test_setup_uses_dummy_api_key_for_custom_base_url(monkeypatch):
+    captured = {}
+
+    class FakeOpenAI:
+        def __init__(self, *, api_key, base_url):
+            captured["api_key"] = api_key
+            captured["base_url"] = base_url
+
+    monkeypatch.setattr(responses_api_language_model, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(ResponsesApiModelHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(ResponsesApiModelHandler)
+    handler.setup(base_url="http://127.0.0.1:8080/v1", api_key=None, compact_history=False)
+
+    assert captured == {
+        "api_key": "none",
+        "base_url": "http://127.0.0.1:8080/v1",
+    }
+
+
 def test_process_read_timeout_ends_response_cleanly():
     handler = _make_handler()
 
@@ -361,3 +385,40 @@ def test_second_turn_flattens_assistant_history_for_responses():
     assert len(ai["content"]) == 1
     assert ai["content"][0]["type"] == "output_text"
     assert ai["content"][0]["text"] == "Hello."
+
+
+def test_audio_request_uses_chat_completions_input_audio_payload():
+    handler = _make_handler(stream=False)
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="Yes, I heard you."))],
+            usage=SimpleNamespace(prompt_tokens=12, completion_tokens=5),
+        )
+
+    handler.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)),
+    )
+
+    request = _make_request("unused")
+    request.audio = np.zeros(1600, dtype=np.float32)
+    request.audio_sample_rate = 16000
+    outputs = list(handler.process(request))
+
+    assert isinstance(outputs[0], LLMResponseChunk)
+    assert outputs[0].text == "Yes, I heard you."
+    assert isinstance(outputs[1], TokenUsage)
+    assert outputs[1].input_tokens == 12
+    assert outputs[1].output_tokens == 5
+    assert isinstance(outputs[2], EndOfResponse)
+
+    assert captured["model"] == "test-model"
+    assert captured["stream"] is False
+    assert captured["max_tokens"] == 80
+    user_messages = [m for m in captured["messages"] if m["role"] == "user"]
+    assert user_messages[-1]["content"][0]["type"] == "input_audio"
+    audio_part = user_messages[-1]["content"][0]["input_audio"]
+    assert audio_part["format"] == "wav"
+    assert audio_part["data"]
