@@ -33,6 +33,7 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import Chat, make_assistant_message, make_system_message, make_user_message
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
+from speech_to_speech.LLM.text_prompt import build_text_system_prompt
 from speech_to_speech.LLM.tool_call.function_call import extract_function_calls_from_text
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
@@ -47,6 +48,7 @@ from speech_to_speech.pipeline.messages import (
     TokenUsage,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.utils.utils import response_wants_audio
 
 try:
     import mlx.core as mx
@@ -248,6 +250,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         raw_tools: list[Any] | None,
         tool_choice: Optional[str],
         ctx: StreamContext | None = None,
+        wants_audio: bool = True,
     ) -> None:
         if not instructions:
             return
@@ -256,14 +259,16 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         function_tools = [FunctionTool(**t.model_dump()) for t in raw_tools if t.type == "function"]
 
+        build_system_prompt = build_voice_system_prompt if wants_audio else build_text_system_prompt
+
         if function_tools and tool_choice != "none":
-            tool_section = build_tool_system_prompt(function_tools)
-            full_instructions = build_voice_system_prompt(instructions, tool_section=tool_section)
+            tool_section = build_tool_system_prompt(function_tools, text_only=not wants_audio)
+            full_instructions = build_system_prompt(instructions, tool_section=tool_section)
             block_regex = build_block_regex()
             enter_code = ENTER_CODE
             end_code = END_CODE
         else:
-            full_instructions = build_voice_system_prompt(instructions)
+            full_instructions = build_system_prompt(instructions)
             block_regex = None
             enter_code = None
             end_code = None
@@ -485,7 +490,14 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         )
         tools = response.tools if response and response.tools else runtime_config.session.tools
         tool_choice = response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
-        self._apply_instructions(active_chat, instructions, tools, str(tool_choice) if tool_choice else None, ctx)
+        self._apply_instructions(
+            active_chat,
+            instructions,
+            tools,
+            str(tool_choice) if tool_choice else None,
+            ctx,
+            response_wants_audio(response),
+        )
         language_code, lang_name = resolve_auto_language(language_code)
         if lang_name and self.enable_lang_prompt:
             active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))

@@ -28,6 +28,7 @@ from openai.types.responses import (
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import Chat, SupportedItem, make_system_message, make_user_message
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
+from speech_to_speech.LLM.text_prompt import build_text_system_prompt
 from speech_to_speech.LLM.utils import remove_unspeechable, resolve_auto_language
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
@@ -38,7 +39,7 @@ from speech_to_speech.pipeline.messages import (
     TokenUsage,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.utils.utils import _generate_id
+from speech_to_speech.utils.utils import _generate_id, response_wants_audio
 
 logger = logging.getLogger(__name__)
 
@@ -151,9 +152,11 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         self,
         chat: Chat,
         instructions: Optional[str],
+        wants_audio: bool = True,
     ) -> None:
         if instructions:
-            full_instructions = build_voice_system_prompt(instructions)
+            builder = build_voice_system_prompt if wants_audio else build_text_system_prompt
+            full_instructions = builder(instructions)
             chat.add_item(make_system_message(full_instructions))
 
     def _generate(
@@ -456,7 +459,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         req_tool_choice = (
             response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
         )
-        self._apply_config(active_chat, instructions)
+        self._apply_config(active_chat, instructions, response_wants_audio(response))
         language_code, lang_name = resolve_auto_language(language_code)
         if lang_name and self.enable_lang_prompt:
             active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
