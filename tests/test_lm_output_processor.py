@@ -99,6 +99,26 @@ def test_audio_chunk_is_forwarded_to_tts():
     assert outputs[0].text == "hello"
 
 
+def test_empty_modalities_is_forwarded_to_tts():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    processor = _processor(tracker)
+
+    outputs = list(
+        processor.process(
+            LLMResponseChunk(
+                text="hello",
+                turn_id="turn_1",
+                turn_revision=0,
+                response=RealtimeResponseCreateParams(output_modalities=[]),
+            )
+        )
+    )
+
+    assert len(outputs) == 1
+    assert isinstance(outputs[0], TTSInput)
+
+
 def test_pending_reopen_holds_assistant_chunk_until_cancelled():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
