@@ -265,6 +265,13 @@ def build_input(system_prompt: str, user_prompt: str) -> list[dict[str, Any]]:
     ]
 
 
+def build_chat_messages(system_prompt: str, user_prompt: str) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
 def normalize_space(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
@@ -517,23 +524,44 @@ def run_model_case(
     client: OpenAI,
     case: ModelCase,
     *,
+    api: str,
     model: str,
     timeout_s: float,
     max_output_tokens: int,
+    chat_token_param: str,
+    reasoning_effort: str,
     extra_body: dict[str, Any] | None,
 ) -> EvalResult:
     tool_section = build_tool_system_prompt(list(case.tools)) if case.tools else ""
     system_prompt = build_voice_system_prompt(DEFAULT_SESSION_PROMPT, tool_section=tool_section)
     start = time.perf_counter()
-    response = client.responses.create(
-        model=model,
-        input=build_input(system_prompt, case.user_prompt),
-        max_output_tokens=max_output_tokens,
-        extra_body=extra_body,
-        timeout=httpx.Timeout(timeout_s, connect=min(10.0, timeout_s)),
-    )
+    timeout = httpx.Timeout(timeout_s, connect=min(10.0, timeout_s))
+    if api == "responses":
+        reasoning = {} if reasoning_effort == "omit" else {"reasoning": {"effort": reasoning_effort}}
+        response = client.responses.create(
+            model=model,
+            input=build_input(system_prompt, case.user_prompt),
+            max_output_tokens=max_output_tokens,
+            extra_body=extra_body,
+            timeout=timeout,
+            **reasoning,
+        )
+        raw_output = response.output_text
+    elif api == "chat-completions":
+        token_limit = {chat_token_param: max_output_tokens}
+        reasoning = {} if reasoning_effort == "omit" else {"reasoning_effort": reasoning_effort}
+        response = client.chat.completions.create(
+            model=model,
+            messages=build_chat_messages(system_prompt, case.user_prompt),
+            extra_body=extra_body,
+            timeout=timeout,
+            **token_limit,
+            **reasoning,
+        )
+        raw_output = response.choices[0].message.content or ""
+    else:
+        raise ValueError(f"Unsupported API: {api}")
     elapsed_s = time.perf_counter() - start
-    raw_output = response.output_text
     checks, _, parsed_tools = check_model_case(case, raw_output)
     return EvalResult(
         kind="model",
@@ -568,7 +596,13 @@ def print_result(result: EvalResult) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     all_case_names = [case.name for case in MODEL_CASES + STRESS_MODEL_CASES]
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="Responses API model to evaluate.")
+    parser.add_argument(
+        "--api",
+        choices=["responses", "chat-completions"],
+        default="responses",
+        help="OpenAI-compatible API surface to use for model cases.",
+    )
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="Model to evaluate.")
     parser.add_argument("--base-url", default=None, help="Optional OpenAI-compatible base URL.")
     parser.add_argument(
         "--api-key-env",
@@ -588,19 +622,46 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout-s", type=float, default=30.0, help="Per-request timeout.")
     parser.add_argument("--max-output-tokens", type=int, default=180, help="Maximum output tokens per model case.")
     parser.add_argument(
+        "--chat-token-param",
+        choices=["auto", "max_tokens", "max_completion_tokens"],
+        default="auto",
+        help=(
+            "Token-limit parameter for Chat Completions. "
+            "auto uses max_completion_tokens for OpenAI and max_tokens for custom base URLs."
+        ),
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=["omit", "none", "minimal", "low", "medium", "high", "xhigh"],
+        default="none",
+        help=(
+            "Reasoning effort for model calls. "
+            "Use omit for providers or models that reject reasoning controls."
+        ),
+    )
+    parser.add_argument(
         "--extra-body-json",
         default=None,
-        help="Optional JSON object merged into each Responses API request body.",
+        help="Optional JSON object merged into each model request body.",
     )
     parser.add_argument("--json-output", type=Path, default=None, help="Optional path for a JSON report.")
     return parser.parse_args()
 
 
 def main() -> int:
+    started_at = time.perf_counter()
     args = parse_args()
     extra_body = json.loads(args.extra_body_json) if args.extra_body_json else None
     if extra_body is not None and not isinstance(extra_body, dict):
         raise SystemExit("--extra-body-json must decode to a JSON object")
+    chat_token_param = args.chat_token_param
+    if chat_token_param == "auto":
+        base_url = args.base_url.rstrip("/") if args.base_url else None
+        chat_token_param = (
+            "max_completion_tokens"
+            if base_url in {None, "https://api.openai.com/v1"}
+            else "max_tokens"
+        )
     selected_names = set(args.case or [])
     available_cases = list(MODEL_CASES)
     if args.include_stress or selected_names:
@@ -626,9 +687,12 @@ def main() -> int:
             result = run_model_case(
                 client,
                 case,
+                api=args.api,
                 model=args.model,
                 timeout_s=args.timeout_s,
                 max_output_tokens=args.max_output_tokens,
+                chat_token_param=chat_token_param,
+                reasoning_effort=args.reasoning_effort,
                 extra_body=extra_body,
             )
             print_result(result)
@@ -636,12 +700,22 @@ def main() -> int:
             if args.fail_fast and not result.passed:
                 break
 
+    model_results = [result for result in all_results if result.kind == "model"]
+    total_latency_s = sum(result.elapsed_s for result in model_results)
+
     if args.json_output:
         args.json_output.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "api": args.api,
             "model": args.model,
             "base_url": args.base_url,
+            "chat_token_param": chat_token_param if args.api == "chat-completions" else None,
+            "reasoning_effort": args.reasoning_effort,
             "extra_body": extra_body,
+            "model_latency_count": len(model_results),
+            "model_latency_mean_s": total_latency_s / len(model_results) if model_results else 0.0,
+            "model_latency_total_s": total_latency_s,
+            "wall_time_s": time.perf_counter() - started_at,
             "results": [result_to_json(result) for result in all_results],
         }
         args.json_output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -650,6 +724,14 @@ def main() -> int:
     passed = sum(1 for result in all_results if result.passed)
     failed = len(all_results) - passed
     print(f"\nSummary: {passed} passed, {failed} failed")
+    if model_results:
+        print(
+            "Model latency: "
+            f"total={total_latency_s:.2f}s "
+            f"mean={total_latency_s / len(model_results):.2f}s "
+            f"count={len(model_results)}"
+        )
+    print(f"Wall time: {time.perf_counter() - started_at:.2f}s")
     return 0 if failed == 0 else 1
 
 

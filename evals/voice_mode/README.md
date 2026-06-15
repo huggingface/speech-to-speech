@@ -20,17 +20,16 @@ uv run python evals/voice_mode/run_voice_mode_eval.py \
   --api-key-env HF_TOKEN
 ```
 
-Some OpenAI-compatible providers need extra request-body fields. For example,
-Hugging Face Inference Providers with Cerebras GLM 4.7 should send GLM's
-no-reasoning flag and allow enough output budget for the final answer:
+Some OpenAI-compatible providers work better through Chat Completions. For
+example, Hugging Face Inference Providers with Cerebras GLM 4.7 can use the
+default no-reasoning flag there:
 
 ```bash
 uv run python evals/voice_mode/run_voice_mode_eval.py \
+  --api chat-completions \
   --base-url https://router.huggingface.co/v1 \
   --api-key-env HF_TOKEN \
-  --model zai-org/GLM-4.7:cerebras \
-  --max-output-tokens 1024 \
-  --extra-body-json '{"reasoning_effort":"none"}'
+  --model zai-org/GLM-4.7:cerebras
 ```
 
 Write a machine-readable report for before/after prompt comparisons:
@@ -51,6 +50,10 @@ The suite has two layers:
   when a tool is appropriate.
 
 The default run reports 20 results: 4 parser fixtures and 16 model cases.
+Model runs also report aggregate model latency: total, mean, and case count.
+Model calls default to `--reasoning-effort none` for lower latency. Use
+`--reasoning-effort omit` for providers or models that reject reasoning
+controls.
 
 Use `--parser-only` when changing only parser code, or `--case NAME` to run a
 single model case while iterating on prompts.
