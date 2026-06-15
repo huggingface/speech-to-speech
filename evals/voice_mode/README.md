@@ -37,6 +37,8 @@ The suite has two layers:
   that local tool calls appear as exactly one parseable `<code>...</code>` block
   when a tool is appropriate.
 
+The default run reports 20 results: 4 parser fixtures and 16 model cases.
+
 Use `--parser-only` when changing only parser code, or `--case NAME` to run a
 single model case while iterating on prompts.
 
