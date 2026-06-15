@@ -18,6 +18,7 @@ from speech_to_speech.pipeline.handler_types import LLMOut, TTSIn
 from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk, TokenUsage, TTSInput
 from speech_to_speech.pipeline.queue_types import TextEventItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.utils.utils import response_wants_audio
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +122,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                 logger.debug(f"Sending to clients: text='{lm_output.text}' (no tools)")
             self.text_output_queue.put(event)
 
-        if lm_output.text:
+        if lm_output.text and response_wants_audio(lm_output.response):
             logger.debug(f"Forwarding to TTS: '{lm_output.text}'")
             yield TTSInput(
                 text=lm_output.text,

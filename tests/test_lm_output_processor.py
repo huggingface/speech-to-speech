@@ -1,8 +1,10 @@
 from queue import Queue
 from threading import Event, Thread
 
+from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
-from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk
+from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 
@@ -52,6 +54,49 @@ def test_cancel_generation_is_forwarded_to_tts():
 
     assert len(outputs) == 1
     assert outputs[0].cancel_generation == 7
+
+
+def test_text_only_chunk_is_not_forwarded_to_tts():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    processor = _processor(tracker)
+
+    outputs = list(
+        processor.process(
+            LLMResponseChunk(
+                text="hello",
+                turn_id="turn_1",
+                turn_revision=0,
+                response=RealtimeResponseCreateParams(output_modalities=["text"]),
+            )
+        )
+    )
+
+    assert outputs == []
+    # The assistant text still reaches clients even when TTS is skipped.
+    event = processor.text_output_queue.get_nowait()
+    assert event.text == "hello"
+
+
+def test_audio_chunk_is_forwarded_to_tts():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    processor = _processor(tracker)
+
+    outputs = list(
+        processor.process(
+            LLMResponseChunk(
+                text="hello",
+                turn_id="turn_1",
+                turn_revision=0,
+                response=RealtimeResponseCreateParams(output_modalities=["audio"]),
+            )
+        )
+    )
+
+    assert len(outputs) == 1
+    assert isinstance(outputs[0], TTSInput)
+    assert outputs[0].text == "hello"
 
 
 def test_pending_reopen_holds_assistant_chunk_until_cancelled():

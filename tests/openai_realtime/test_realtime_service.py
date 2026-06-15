@@ -28,6 +28,8 @@ from openai.types.realtime import (
     ResponseCreateEvent,
     ResponseDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
+    ResponseTextDeltaEvent,
+    ResponseTextDoneEvent,
     SessionCreatedEvent,
     SessionUpdateEvent,
 )
@@ -605,6 +607,19 @@ class TestFinishAudioResponse:
         assert isinstance(events[1], ResponseDoneEvent)
         assert events[1].response.status == "completed"
 
+    def test_finish_text_only_skips_audio_done(self, service, conn_id):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            output_modalities=["text"],
+        )
+        service.response._ensure_response(conn_id)
+        events = service.finish_audio_response(conn_id)
+        assert len(events) == 1
+        assert isinstance(events[0], ResponseDoneEvent)
+        assert events[0].response.status == "completed"
+        assert not any(isinstance(e, ResponseAudioDoneEvent) for e in events)
+
     def test_finish_with_cancel_status(self, service, conn_id):
         service.response._ensure_response(conn_id)
         events = service.finish_audio_response(conn_id, status="cancelled", reason="turn_detected")
@@ -805,6 +820,47 @@ class TestDispatchPipelineEvent:
         assert len(events) == 1
         assert isinstance(events[0], ResponseFunctionCallArgumentsDoneEvent)
         assert events[0].output_index == 0
+
+    def test_assistant_text_text_only_emits_text_events(self, service, conn_id):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            output_modalities=["text"],
+        )
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantTextEvent(text="Hello there"),
+        )
+        assert len(events) == 2
+        assert isinstance(events[0], ResponseTextDeltaEvent)
+        assert events[0].content_index == 0
+        assert events[0].output_index == 0
+        assert events[0].delta == "Hello there"
+        assert isinstance(events[1], ResponseTextDoneEvent)
+        assert events[1].content_index == 0
+        assert events[1].output_index == 0
+        assert events[1].text == "Hello there"
+        assert not any(isinstance(e, ResponseAudioTranscriptDoneEvent) for e in events)
+
+    def test_assistant_text_text_only_keeps_tool_events(self, service, conn_id):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            output_modalities=["text"],
+        )
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantTextEvent(
+                text="Let me check",
+                tools=[{"type": "function_call", "call_id": "c1", "name": "get_weather", "arguments": "{}"}],
+            ),
+        )
+        assert isinstance(events[0], ResponseTextDeltaEvent)
+        assert isinstance(events[1], ResponseTextDoneEvent)
+        tool_event = events[2]
+        assert isinstance(tool_event, ResponseFunctionCallArgumentsDoneEvent)
+        assert tool_event.output_index == 1
+        assert tool_event.name == "get_weather"
 
     def test_assistant_text_waits_for_pending_reopen_and_drops_confirmed_stale_turn(
         self,

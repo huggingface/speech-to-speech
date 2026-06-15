@@ -11,6 +11,8 @@ from openai.types.realtime import (
     ResponseCreateEvent,
     ResponseDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
+    ResponseTextDeltaEvent,
+    ResponseTextDoneEvent,
 )
 from openai.types.realtime.realtime_response import Audio, AudioOutput
 from openai.types.realtime.realtime_response_status import RealtimeResponseStatus
@@ -20,7 +22,7 @@ from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandl
 from speech_to_speech.LLM.chat import ChatItemError
 from speech_to_speech.pipeline.events import AssistantTextEvent
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
-from speech_to_speech.utils.utils import _generate_id
+from speech_to_speech.utils.utils import _generate_id, response_wants_audio
 
 if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import ServerEvent, _ResponseStatus, _StatusReason
@@ -200,16 +202,17 @@ class ResponseHandler(RealtimeBaseHandler):
         events: list[ServerEvent] = []
         if st.in_response:
             resp_id, item_id = self._ensure_response(conn_id)
-            events.append(
-                ResponseAudioDoneEvent(
-                    type="response.output_audio.done",
-                    event_id=self._next_event_id(),
-                    content_index=0,
-                    item_id=item_id,
-                    output_index=0,
-                    response_id=resp_id,
+            if response_wants_audio(st.current_response_params):
+                events.append(
+                    ResponseAudioDoneEvent(
+                        type="response.output_audio.done",
+                        event_id=self._next_event_id(),
+                        content_index=0,
+                        item_id=item_id,
+                        output_index=0,
+                        response_id=resp_id,
+                    )
                 )
-            )
             events.append(
                 ResponseDoneEvent(
                     type="response.done",
@@ -253,17 +256,41 @@ class ResponseHandler(RealtimeBaseHandler):
         st.last_item_id = item_id
         output_idx = 0
         if event.text:
-            events.append(
-                ResponseAudioTranscriptDoneEvent(
-                    type="response.output_audio_transcript.done",
-                    event_id=self._next_event_id(),
-                    content_index=0,
-                    item_id=item_id,
-                    output_index=output_idx,
-                    response_id=resp_id,
-                    transcript=event.text,
+            if response_wants_audio(st.current_response_params):
+                events.append(
+                    ResponseAudioTranscriptDoneEvent(
+                        type="response.output_audio_transcript.done",
+                        event_id=self._next_event_id(),
+                        content_index=0,
+                        item_id=item_id,
+                        output_index=output_idx,
+                        response_id=resp_id,
+                        transcript=event.text,
+                    )
                 )
-            )
+            else:
+                events.append(
+                    ResponseTextDeltaEvent(
+                        type="response.output_text.delta",
+                        event_id=self._next_event_id(),
+                        content_index=0,
+                        item_id=item_id,
+                        output_index=output_idx,
+                        response_id=resp_id,
+                        delta=event.text,
+                    )
+                )
+                events.append(
+                    ResponseTextDoneEvent(
+                        type="response.output_text.done",
+                        event_id=self._next_event_id(),
+                        content_index=0,
+                        item_id=item_id,
+                        output_index=output_idx,
+                        response_id=resp_id,
+                        text=event.text,
+                    )
+                )
             output_idx += 1
         if event.tools:
             st.response_usage.tool_calls += len(event.tools)
