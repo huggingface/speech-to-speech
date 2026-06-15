@@ -20,6 +20,19 @@ uv run python evals/voice_mode/run_voice_mode_eval.py \
   --api-key-env HF_TOKEN
 ```
 
+Some OpenAI-compatible providers need extra request-body fields. For example,
+Hugging Face Inference Providers with Cerebras GLM 4.7 should send GLM's
+no-reasoning flag and allow enough output budget for the final answer:
+
+```bash
+uv run python evals/voice_mode/run_voice_mode_eval.py \
+  --base-url https://router.huggingface.co/v1 \
+  --api-key-env HF_TOKEN \
+  --model zai-org/GLM-4.7:cerebras \
+  --max-output-tokens 1024 \
+  --extra-body-json '{"reasoning_effort":"none"}'
+```
+
 Write a machine-readable report for before/after prompt comparisons:
 
 ```bash

@@ -520,6 +520,7 @@ def run_model_case(
     model: str,
     timeout_s: float,
     max_output_tokens: int,
+    extra_body: dict[str, Any] | None,
 ) -> EvalResult:
     tool_section = build_tool_system_prompt(list(case.tools)) if case.tools else ""
     system_prompt = build_voice_system_prompt(DEFAULT_SESSION_PROMPT, tool_section=tool_section)
@@ -528,6 +529,7 @@ def run_model_case(
         model=model,
         input=build_input(system_prompt, case.user_prompt),
         max_output_tokens=max_output_tokens,
+        extra_body=extra_body,
         timeout=httpx.Timeout(timeout_s, connect=min(10.0, timeout_s)),
     )
     elapsed_s = time.perf_counter() - start
@@ -585,12 +587,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fail-fast", action="store_true", help="Stop after the first failed result.")
     parser.add_argument("--timeout-s", type=float, default=30.0, help="Per-request timeout.")
     parser.add_argument("--max-output-tokens", type=int, default=180, help="Maximum output tokens per model case.")
+    parser.add_argument(
+        "--extra-body-json",
+        default=None,
+        help="Optional JSON object merged into each Responses API request body.",
+    )
     parser.add_argument("--json-output", type=Path, default=None, help="Optional path for a JSON report.")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    extra_body = json.loads(args.extra_body_json) if args.extra_body_json else None
+    if extra_body is not None and not isinstance(extra_body, dict):
+        raise SystemExit("--extra-body-json must decode to a JSON object")
     selected_names = set(args.case or [])
     available_cases = list(MODEL_CASES)
     if args.include_stress or selected_names:
@@ -619,6 +629,7 @@ def main() -> int:
                 model=args.model,
                 timeout_s=args.timeout_s,
                 max_output_tokens=args.max_output_tokens,
+                extra_body=extra_body,
             )
             print_result(result)
             all_results.append(result)
@@ -630,6 +641,7 @@ def main() -> int:
         payload = {
             "model": args.model,
             "base_url": args.base_url,
+            "extra_body": extra_body,
             "results": [result_to_json(result) for result in all_results],
         }
         args.json_output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
