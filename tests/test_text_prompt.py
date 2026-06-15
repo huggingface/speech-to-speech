@@ -6,8 +6,8 @@ from speech_to_speech.LLM.tool_call.tool_prompt import build_tool_system_prompt
 def test_text_prompt_keeps_persona_in_session_prompt():
     prompt = build_text_system_prompt("Be helpful.")
 
-    assert "The session prompt defines who you are and what to do." in prompt
     assert "Be helpful." in prompt
+    assert "You are in a text conversation." in prompt
     assert "You are in a text conversation." in TEXT_SYSTEM_PROMPT
 
 
