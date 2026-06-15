@@ -2,7 +2,6 @@
 
 TEXT_SYSTEM_PROMPT_LEAD = """\
 You are in a text conversation. The user reads your written replies.
-The session prompt defines who you are and what to do. These channel rules only control written output and tool-use behavior.
 """
 
 TEXT_SYSTEM_PROMPT_TAIL = """\
