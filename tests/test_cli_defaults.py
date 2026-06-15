@@ -18,6 +18,7 @@ from speech_to_speech.arguments_classes.responses_api_language_model_arguments i
 from speech_to_speech.arguments_classes.socket_receiver_arguments import SocketReceiverArguments
 from speech_to_speech.arguments_classes.socket_sender_arguments import SocketSenderArguments
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
+from speech_to_speech.arguments_classes.vision_model_arguments import VisionModelHandlerArguments
 from speech_to_speech.arguments_classes.websocket_streamer_arguments import WebSocketStreamerArguments
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
 from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments
@@ -27,6 +28,7 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_realtime_profile():
     module_args = ModuleArguments()
     vad_args = VADHandlerArguments()
     responses_api_args = ResponsesApiLanguageModelHandlerArguments()
+    vision_args = VisionModelHandlerArguments()
     qwen3_args = Qwen3TTSHandlerArguments()
 
     assert module_args.mode == "realtime"
@@ -45,6 +47,7 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_realtime_profile():
     assert responses_api_args.model_name == "gpt-5.4-mini"
     assert responses_api_args.chat_size == 30
     assert responses_api_args.responses_api_stream is True
+    assert vision_args.vision_backend == "none"
     assert qwen3_args.qwen3_tts_model_name == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     assert qwen3_args.qwen3_tts_speaker == "Aiden"
     assert qwen3_args.qwen3_tts_language == "auto"
@@ -68,6 +71,7 @@ EXPECTED_FIELD_TYPES = {
     "parakeet_tdt_stt_handler_kwargs": ParakeetTDTSTTHandlerArguments,
     "language_model_handler_kwargs": LanguageModelHandlerArguments,
     "responses_api_language_model_handler_kwargs": ResponsesApiLanguageModelHandlerArguments,
+    "vision_model_handler_kwargs": VisionModelHandlerArguments,
     "chat_tts_handler_kwargs": ChatTTSHandlerArguments,
     "facebook_mms_tts_handler_kwargs": FacebookMMSTTSHandlerArguments,
     "pocket_tts_handler_kwargs": PocketTTSHandlerArguments,
@@ -118,6 +122,27 @@ def test_parse_arguments_transformers_backend():
     assert args.language_model_handler_kwargs.model_name == "Qwen/Qwen3-4B-Instruct-2507"
     # unused slot gets a default instance
     assert args.responses_api_language_model_handler_kwargs.model_name == "gpt-5.4-mini"
+
+
+def test_parse_arguments_accepts_vision_router_flags():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = [
+            "speech-to-speech",
+            "--vision_backend",
+            "mlx-lm",
+            "--vision_model_name",
+            "mlx-community/example-vlm",
+            "--vision_device",
+            "mps",
+        ]
+        args = parse_arguments()
+    finally:
+        sys.argv = original_argv
+
+    assert args.vision_model_handler_kwargs.vision_backend == "mlx-lm"
+    assert args.vision_model_handler_kwargs.vision_model_name == "mlx-community/example-vlm"
+    assert args.vision_model_handler_kwargs.vision_device == "mps"
 
 
 def test_parse_arguments_all_fields_populated():

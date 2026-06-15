@@ -37,6 +37,7 @@ from speech_to_speech.LLM.tool_call.function_call import extract_function_calls_
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
 from speech_to_speech.LLM.utils import image_url_to_pil, remove_unspeechable, resolve_auto_language
+from speech_to_speech.LLM.vision_router import VisionRouter, build_vision_router
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
@@ -159,6 +160,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
         compact_history: bool = False,
+        vision_router_kwargs: dict[str, Any] | None = None,
         **_kwargs: Any,
     ) -> None:
         self.backend = backend
@@ -171,6 +173,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.enable_lang_prompt = enable_lang_prompt
 
         self._load_model(model_name, device, torch_dtype, gen_kwargs)
+        self.vision_router: VisionRouter | None = build_vision_router(self.stop_event, vision_router_kwargs)
 
         self.user_role = user_role
         # Serializes transformers pipe/model.generate calls between the speech
@@ -478,6 +481,10 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         runtime_config = request.runtime_config
         response = request.response
         original_chat = runtime_config.chat
+        if self.vision_router is not None:
+            routed = self.vision_router.process_chat(original_chat)
+            if routed:
+                logger.info("Routed %d image item(s) through the vision model", routed)
         active_chat = original_chat.copy()
         language_code = request.language_code
         instructions = (
@@ -812,8 +819,10 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             logger.debug("VLM prompt token count: %d", ctx.input_tokens)
 
             self._cancel_criteria.reset()
+            local_gen_kwargs = {k: v for k, v in self.gen_kwargs.items() if k != "max_new_tokens"}
             generate_kwargs = {
                 **inputs,
+                **local_gen_kwargs,
                 "max_new_tokens": self.gen_kwargs.get("max_new_tokens", 1024),
                 "streamer": self.streamer,
                 "stopping_criteria": StoppingCriteriaList([self._cancel_criteria]),
