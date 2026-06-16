@@ -44,6 +44,7 @@ The pipeline provides a fully open and modular approach, with a focus on leverag
 - [MLX Audio Whisper](https://github.com/huggingface/mlx-audio) - Fast Whisper inference on Apple Silicon
 - [Parakeet TDT](https://huggingface.co/nvidia/parakeet-tdt-1.1b) - Real-time streaming STT with sub-100ms latency on Apple Silicon (CUDA/CPU via nano-parakeet, no NeMo)
 - [Paraformer - FunASR](https://github.com/modelscope/FunASR)
+- [SenseVoice - FunASR](https://github.com/FunAudioLLM/SenseVoice) - Fast non-autoregressive multilingual STT (50+ languages), with optional language/emotion/audio-event tags
 
 **LLM**
 - Any instruction-following model on the [Hugging Face Hub](https://huggingface.co/models?pipeline_tag=text-generation&sort=trending) via Transformers 🤗
