@@ -99,12 +99,19 @@ class TokenUsage(PipelineMessage):
 
 
 class EndOfResponse(PipelineMessage):
-    """Sentinel marking the end of a response."""
+    """Sentinel marking the end of a response.
+
+    ``error`` is set when generation could not start (e.g. an out-of-band
+    response whose ``input`` failed validation); the output processor turns it
+    into a ``response.done(status="failed")`` while still closing the response
+    normally for pipeline cleanup.
+    """
 
     tag: Literal["end_of_response"] = "end_of_response"
     turn_id: str | None = None
     turn_revision: int | None = None
     cancel_generation: int | None = None
+    error: str | None = None
 
 
 # ── LMOutputProcessor → TTS ──────────────────────────────────────────

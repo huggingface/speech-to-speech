@@ -10,19 +10,12 @@ from openai.types.realtime import (
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
 )
-from openai.types.realtime.conversation_item import (
-    RealtimeConversationItemAssistantMessage,
-    RealtimeConversationItemFunctionCall,
-    RealtimeConversationItemFunctionCallOutput,
-    RealtimeConversationItemSystemMessage,
-    RealtimeConversationItemUserMessage,
-)
 from openai.types.realtime.conversation_item_input_audio_transcription_completed_event import (
     UsageTranscriptTextUsageDuration,
 )
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
-from speech_to_speech.LLM.chat import ChatItemError
+from speech_to_speech.LLM.chat import ChatItemError, add_supported_item
 from speech_to_speech.pipeline.events import PartialTranscriptionEvent, TranscriptionCompletedEvent
 
 if TYPE_CHECKING:
@@ -72,29 +65,7 @@ class ConversationHandler(RealtimeBaseHandler):
 
         Raises :class:`ChatItemError` on validation failure or unsupported type.
         """
-        chat = self._state(conn_id).runtime_config.chat
-
-        # call_id on function_call items must be client-supplied: it is referenced later by
-        # function_call_output items, so we cannot silently generate one here.
-        if isinstance(item, RealtimeConversationItemFunctionCall) and (
-            item.call_id is None or not item.call_id.startswith("call_")
-        ):
-            raise ChatItemError("function_call item is missing a call_id. The call_id should start with 'call_'.")
-
-        if isinstance(
-            item,
-            (
-                RealtimeConversationItemSystemMessage,
-                RealtimeConversationItemUserMessage,
-                RealtimeConversationItemAssistantMessage,
-                RealtimeConversationItemFunctionCall,
-                RealtimeConversationItemFunctionCallOutput,
-            ),
-        ):
-            chat.add_item(item)
-            return
-
-        raise ChatItemError(f"Unsupported item type: {getattr(item, 'type', None)}")
+        add_supported_item(self._state(conn_id).runtime_config.chat, item)
 
     # ── Pipeline event handlers ────────────────────
 

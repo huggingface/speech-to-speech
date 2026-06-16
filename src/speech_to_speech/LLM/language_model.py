@@ -31,7 +31,14 @@ from transformers import (
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.LLM.chat import Chat, make_assistant_message, make_system_message, make_user_message
+from speech_to_speech.LLM.chat import (
+    Chat,
+    ChatItemError,
+    build_active_chat,
+    make_assistant_message,
+    make_system_message,
+    make_user_message,
+)
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
 from speech_to_speech.LLM.text_prompt import build_text_system_prompt
 from speech_to_speech.LLM.tool_call.function_call import extract_function_calls_from_text
@@ -48,7 +55,7 @@ from speech_to_speech.pipeline.messages import (
     TokenUsage,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.utils.utils import response_wants_audio
+from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
 
 try:
     import mlx.core as mx
@@ -483,7 +490,16 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         runtime_config = request.runtime_config
         response = request.response
         original_chat = runtime_config.chat
-        active_chat = original_chat.copy()
+        out_of_band = is_out_of_band(response)
+        if out_of_band:
+            try:
+                active_chat = build_active_chat(original_chat, response)
+            except ChatItemError as exc:
+                logger.info("Out-of-band response rejected: %s", exc)
+                yield EndOfResponse(turn_id=ctx.turn_id, turn_revision=ctx.turn_revision, error=str(exc))
+                return
+        else:
+            active_chat = original_chat.copy()
         language_code = request.language_code
         instructions = (
             response.instructions if response and response.instructions else runtime_config.session.instructions
@@ -511,9 +527,12 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return
 
         turn_output_allowed = not ctx.cancelled and self._turn_output_allowed(ctx.turn_id, ctx.turn_revision)
-        if turn_output_allowed:
+        # Out-of-band responses still emit output, but never write back to the default
+        # conversation (their context was a throwaway chat).
+        commit_allowed = turn_output_allowed and not out_of_band
+        if commit_allowed:
             original_chat.add_item(make_assistant_message(ctx.generated_text))
-        if turn_output_allowed and ctx.tools:
+        if commit_allowed and ctx.tools:
             for t in ctx.tools:
                 original_chat.add_item(
                     RealtimeConversationItemFunctionCall(
@@ -525,7 +544,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         status=t.status,
                     )
                 )
-        if turn_output_allowed:
+        if commit_allowed:
             original_chat.strip_images()
             original_chat.trim_if_needed(self.compactor)
         logger.debug("Clean text: %s", ctx.generated_text)

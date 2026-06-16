@@ -531,6 +531,72 @@ class TestHandleResponseCreate:
         assert isinstance(result2, RealtimeErrorEvent)
         assert result2.error.type == "conversation_already_has_active_response"
 
+    @staticmethod
+    def _user_input(text):
+        return {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
+
+    def test_response_create_out_of_band_does_not_append_input_to_default_chat(
+        self, service, conn_id, text_prompt_queue
+    ):
+        chat = service._state(conn_id).runtime_config.chat
+        assert len(chat.buffer) == 0
+        evt = ResponseCreateEvent(
+            type="response.create",
+            response={"conversation": "none", "input": [self._user_input("OOB question")]},
+        )
+        result = service.handle_response_create(conn_id, evt)
+        assert isinstance(result, ResponseCreatedEvent)
+        # Out-of-band: the default conversation is left untouched...
+        assert len(chat.buffer) == 0
+        # ...while the input still rides along on the queued request for the LM to use.
+        req = text_prompt_queue.get()
+        assert isinstance(req, GenerateResponseRequest)
+        assert req.response.input is not None and len(req.response.input) == 1
+
+    def test_response_create_in_band_appends_input_to_default_chat(self, service, conn_id, text_prompt_queue):
+        chat = service._state(conn_id).runtime_config.chat
+        evt = ResponseCreateEvent(type="response.create", response={"input": [self._user_input("in band")]})
+        result = service.handle_response_create(conn_id, evt)
+        assert isinstance(result, ResponseCreatedEvent)
+        assert len(chat.buffer) == 1  # in-band input is threaded into the conversation
+
+    def test_response_create_out_of_band_carries_null_turn(self, service, conn_id, text_prompt_queue):
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(
+                transcript="hello",
+                language_code="en",
+                turn_id="turn_1",
+                turn_revision=2,
+                speech_stopped_at_s=123.0,
+            ),
+        )
+        text_prompt_queue.get()  # drain the STT-triggered request
+
+        result = service.handle_response_create(
+            conn_id, ResponseCreateEvent(type="response.create", response={"conversation": "none"})
+        )
+        assert isinstance(result, ResponseCreatedEvent)
+        req = text_prompt_queue.get()
+        # Null turn identity makes every speculative-staleness gate treat it as always-latest.
+        assert req.turn_id is None
+        assert req.turn_revision is None
+        assert req.speech_stopped_at_s is None
+
+    def test_response_create_out_of_band_reports_null_conversation_id(self, service, conn_id):
+        result = service.handle_response_create(
+            conn_id, ResponseCreateEvent(type="response.create", response={"conversation": "none"})
+        )
+        assert isinstance(result, ResponseCreatedEvent)
+        assert result.response.conversation_id is None
+        done = [e for e in service.finish_audio_response(conn_id) if isinstance(e, ResponseDoneEvent)]
+        assert done and done[0].response.conversation_id is None
+
+    def test_response_create_in_band_reports_conversation_id(self, service, conn_id):
+        result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
+        assert isinstance(result, ResponseCreatedEvent)
+        assert result.response.conversation_id == service._state(conn_id).conversation_id
+
 
 # ===================================================================
 # Response cancel

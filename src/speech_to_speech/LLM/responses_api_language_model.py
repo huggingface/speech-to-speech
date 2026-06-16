@@ -26,7 +26,14 @@ from openai.types.responses import (
 )
 
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.LLM.chat import Chat, SupportedItem, make_system_message, make_user_message
+from speech_to_speech.LLM.chat import (
+    Chat,
+    ChatItemError,
+    SupportedItem,
+    build_active_chat,
+    make_system_message,
+    make_user_message,
+)
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
 from speech_to_speech.LLM.text_prompt import build_text_system_prompt
 from speech_to_speech.LLM.utils import remove_unspeechable, resolve_auto_language
@@ -39,7 +46,7 @@ from speech_to_speech.pipeline.messages import (
     TokenUsage,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.utils.utils import _generate_id, response_wants_audio
+from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
 
 logger = logging.getLogger(__name__)
 
@@ -416,10 +423,13 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     pass
 
         if not self._generation_is_stale(gen) and self._turn_output_allowed(turn_id, turn_revision):
-            for item in pending_chat_items:
-                original_chat.add_item(item)
-            original_chat.strip_images()
-            original_chat.trim_if_needed(self.compactor)
+            # Out-of-band responses emit output and usage but never write back to the
+            # default conversation (their context was a throwaway chat).
+            if not is_out_of_band(response):
+                for item in pending_chat_items:
+                    original_chat.add_item(item)
+                original_chat.strip_images()
+                original_chat.trim_if_needed(self.compactor)
             if input_tokens or output_tokens:
                 yield TokenUsage(
                     input_tokens=input_tokens,
@@ -450,7 +460,16 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
             return
 
         original_chat = runtime_config.chat
-        active_chat = original_chat.copy()
+        out_of_band = is_out_of_band(response)
+        if out_of_band:
+            try:
+                active_chat = build_active_chat(original_chat, response)
+            except ChatItemError as exc:
+                logger.info("Out-of-band response rejected: %s", exc)
+                yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision, error=str(exc))
+                return
+        else:
+            active_chat = original_chat.copy()
         language_code = request.language_code
         instructions = (
             response.instructions if response and response.instructions else runtime_config.session.instructions

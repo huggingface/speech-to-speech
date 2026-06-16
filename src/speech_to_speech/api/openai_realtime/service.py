@@ -42,6 +42,7 @@ from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
     PartialTranscriptionEvent,
     PipelineEvent,
+    ResponseFailedEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TokenUsageEvent,
@@ -207,6 +208,7 @@ class RealtimeService:
             TokenUsageEvent: self._on_token_usage,
             PartialTranscriptionEvent: self.conversation.on_partial_transcription,
             TranscriptionCompletedEvent: self._on_transcription_completed,
+            ResponseFailedEvent: self._on_response_failed,
         }
 
     # ── Connection lifecycle ─────────────────────
@@ -452,6 +454,16 @@ class RealtimeService:
             st.response_usage.output_tokens,
         )
         return []
+
+    def _on_response_failed(self, conn_id: str, event: ResponseFailedEvent) -> list[ServerEvent]:
+        """Close the in-progress response with ``status="failed"``.
+
+        Emitted when generation could not start (e.g. invalid out-of-band input).
+        Idempotent: ``finish_audio_response`` is a no-op once the response slot is
+        already closed, so a subsequent EndOfResponse-driven close does nothing.
+        """
+        logger.info("Response failed: %s", event.message)
+        return self.response.finish_audio_response(conn_id, status="failed")
 
     def get_usage(self) -> dict[str, Any]:
         """Return cumulative usage metrics across all completed responses."""

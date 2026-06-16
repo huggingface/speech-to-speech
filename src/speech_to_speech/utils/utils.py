@@ -23,6 +23,18 @@ def response_wants_audio(response: RealtimeResponseCreateParams | None) -> bool:
     return not mods or "audio" in mods
 
 
+def is_out_of_band(response: RealtimeResponseCreateParams | None) -> bool:
+    """Whether a response is *out-of-band* (``conversation="none"``).
+
+    Out-of-band responses are generated against a temporary context and are
+    never threaded into the default conversation: their ``input`` (if any)
+    seeds a throwaway chat, their assistant output is not committed back, and
+    their ``conversation_id`` is reported as ``null``. Any other ``conversation``
+    value (``"auto"``, ``None``, or an arbitrary id) is treated as in-band.
+    """
+    return response is not None and response.conversation == "none"
+
+
 def next_power_of_2(x: int) -> int:
     return 1 if x == 0 else 2 ** (x - 1).bit_length()
 

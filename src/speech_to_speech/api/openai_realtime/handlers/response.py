@@ -22,7 +22,7 @@ from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandl
 from speech_to_speech.LLM.chat import ChatItemError
 from speech_to_speech.pipeline.events import AssistantTextEvent
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
-from speech_to_speech.utils.utils import _generate_id, response_wants_audio
+from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
 
 if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import ServerEvent, _ResponseStatus, _StatusReason
@@ -113,13 +113,16 @@ class ResponseHandler(RealtimeBaseHandler):
             audio_output = audio_cfg.output if audio_cfg is not None else None
             voice = str(audio_output.voice) if audio_output is not None and audio_output.voice else None
 
+        # Out-of-band responses are not threaded into any conversation: report a null id.
+        conversation_id = None if is_out_of_band(rp) else st.conversation_id
+
         return RealtimeResponse(
             id=st.current_response_id,
             object="realtime.response",
             status=status,
             status_details=status_details,
             audio=Audio(output=AudioOutput(voice=str(voice) if voice else None)),  # type: ignore[arg-type]
-            conversation_id=st.conversation_id,
+            conversation_id=conversation_id,
             metadata=metadata,
             usage=RealtimeResponseUsage(
                 input_tokens=st.response_usage.input_tokens,
@@ -149,7 +152,12 @@ class ResponseHandler(RealtimeBaseHandler):
                 _type="conversation_already_has_active_response",
             )
 
-        if event.response and event.response.input:
+        out_of_band = is_out_of_band(event.response)
+
+        # In-band: response.input items are added to the default conversation here so
+        # they appear in history. Out-of-band: leave the default conversation untouched —
+        # the input rides along on the request and seeds a throwaway chat in the LM.
+        if not out_of_band and event.response and event.response.input:
             for input_item in event.response.input:
                 try:
                     self._service.conversation._append_item(conn_id, input_item)
@@ -166,13 +174,16 @@ class ResponseHandler(RealtimeBaseHandler):
         cfg = st.runtime_config
         queue = self._queue(conn_id)
         if queue:
+            # Out-of-band responses carry no turn identity: a null turn_id makes every
+            # speculative-turn staleness gate treat them as always-latest, so a new user
+            # turn mid-generation can never silently drop their output.
             queue.put(
                 GenerateResponseRequest(
                     runtime_config=cfg,
                     response=event.response,
-                    turn_id=st.speculative_user_turn_id,
-                    turn_revision=st.speculative_user_turn_revision,
-                    speech_stopped_at_s=st.speculative_user_speech_stopped_at_s,
+                    turn_id=None if out_of_band else st.speculative_user_turn_id,
+                    turn_revision=None if out_of_band else st.speculative_user_turn_revision,
+                    speech_stopped_at_s=None if out_of_band else st.speculative_user_speech_stopped_at_s,
                 )
             )
         logger.debug("response.create received, LLM generation triggered")

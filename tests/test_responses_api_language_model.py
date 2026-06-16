@@ -4,6 +4,11 @@ from unittest.mock import MagicMock
 
 import httpx
 from openai import Stream
+from openai.types.realtime.conversation_item import (
+    RealtimeConversationItemAssistantMessage,
+    RealtimeConversationItemFunctionCallOutput,
+)
+from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses import (
     Response,
     ResponseFunctionToolCall,
@@ -361,3 +366,101 @@ def test_second_turn_flattens_assistant_history_for_responses():
     assert len(ai["content"]) == 1
     assert ai["content"][0]["type"] == "output_text"
     assert ai["content"][0]["text"] == "Hello."
+
+
+# ── Out-of-band (conversation="none") responses ──────────────────────────
+
+
+def _make_oob_request(input_items, *, conversation="none", chat_size=2, seed_default="Hi"):
+    cfg = _make_runtime_config(chat_size=chat_size)
+    if seed_default is not None:
+        cfg.chat.add_item(make_user_message(seed_default))
+    resp = RealtimeResponseCreateParams(conversation=conversation, input=input_items)
+    return GenerateResponseRequest(runtime_config=cfg, response=resp), cfg
+
+
+def _capture_create(handler, events):
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _make_stream(events)
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+    return captured
+
+
+def test_out_of_band_emits_output_but_does_not_commit_to_default_conversation():
+    handler = _make_handler()
+    req, cfg = _make_oob_request([make_user_message("OOB question")])
+    events = [_make_text_delta_event("OOB answer."), _make_output_item_done_event(content="OOB answer.")]
+    _capture_create(handler, events)
+
+    outputs = list(handler.process(req))
+
+    # The response is still produced and streamed back to the client...
+    assert any(isinstance(o, LLMResponseChunk) and o.text == "OOB answer." for o in outputs)
+    # ...but the default conversation keeps only the seeded user turn — no assistant commit.
+    assert len(cfg.chat.buffer) == 1
+    assert not any(isinstance(i, RealtimeConversationItemAssistantMessage) for i in cfg.chat.buffer)
+
+
+def test_out_of_band_input_builds_fresh_context():
+    handler = _make_handler()
+    req, _cfg = _make_oob_request([make_user_message("OOB question")])
+    captured = _capture_create(handler, [_make_output_item_done_event(content="ok")])
+
+    list(handler.process(req))
+
+    serialized = str(captured["input"])
+    assert "OOB question" in serialized
+    assert "Hi" not in serialized  # default conversation history is excluded
+
+
+def test_out_of_band_empty_input_clears_context():
+    handler = _make_handler()
+    req, _cfg = _make_oob_request([])
+    captured = _capture_create(handler, [_make_output_item_done_event(content="ok")])
+
+    list(handler.process(req))
+
+    serialized = str(captured["input"])
+    assert "Hi" not in serialized  # default conversation not used
+    assert "helpful AI assistant" in serialized  # only the system prompt remains
+
+
+def test_out_of_band_absent_input_reads_default_conversation():
+    handler = _make_handler()
+    req, cfg = _make_oob_request(None)
+    captured = _capture_create(handler, [_make_output_item_done_event(content="ok")])
+
+    list(handler.process(req))
+
+    serialized = str(captured["input"])
+    assert "Hi" in serialized  # default conversation used as read-only context
+    # Still read-only: no assistant message committed back.
+    assert len(cfg.chat.buffer) == 1
+
+
+def test_out_of_band_invalid_input_emits_failed_end_of_response():
+    handler = _make_handler()
+    called = False
+
+    def fake_create(**kwargs):
+        nonlocal called
+        called = True
+        return _make_stream([])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+    # function_call_output referencing an unknown call_id fails validation.
+    orphan = RealtimeConversationItemFunctionCallOutput(
+        type="function_call_output", call_id="call_missing", output="{}"
+    )
+    req, _cfg = _make_oob_request([orphan])
+
+    outputs = list(handler.process(req))
+
+    assert not called  # generation never started
+    assert len(outputs) == 1
+    assert isinstance(outputs[0], EndOfResponse)
+    assert outputs[0].error is not None
