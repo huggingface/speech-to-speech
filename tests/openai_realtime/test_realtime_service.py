@@ -589,7 +589,7 @@ class TestHandleResponseCreate:
         )
         assert isinstance(result, ResponseCreatedEvent)
         assert result.response.conversation_id is None
-        done = [e for e in service.finish_audio_response(conn_id) if isinstance(e, ResponseDoneEvent)]
+        done = [e for e in service.finish_response(conn_id) if isinstance(e, ResponseDoneEvent)]
         assert done and done[0].response.conversation_id is None
 
     def test_response_create_in_band_reports_conversation_id(self, service, conn_id):
@@ -666,7 +666,7 @@ class TestEncodeAudioChunk:
 class TestFinishAudioResponse:
     def test_finish_emits_audio_done_and_response_done(self, service, conn_id):
         service.response._ensure_response(conn_id)
-        events = service.finish_audio_response(conn_id)
+        events = service.finish_response(conn_id)
         assert len(events) == 2
         assert isinstance(events[0], ResponseAudioDoneEvent)
         assert events[0].content_index == 0
@@ -680,7 +680,7 @@ class TestFinishAudioResponse:
             output_modalities=["text"],
         )
         service.response._ensure_response(conn_id)
-        events = service.finish_audio_response(conn_id)
+        events = service.finish_response(conn_id)
         assert len(events) == 1
         assert isinstance(events[0], ResponseDoneEvent)
         assert events[0].response.status == "completed"
@@ -688,7 +688,7 @@ class TestFinishAudioResponse:
 
     def test_finish_with_cancel_status(self, service, conn_id):
         service.response._ensure_response(conn_id)
-        events = service.finish_audio_response(conn_id, status="cancelled", reason="turn_detected")
+        events = service.finish_response(conn_id, status="cancelled", reason="turn_detected")
         done = events[1]
         assert done.response.status == "cancelled"
         assert done.response.status_details.reason == "turn_detected"
@@ -700,7 +700,7 @@ class TestFinishAudioResponse:
             metadata={"k": "v"},
         )
         service.response._ensure_response(conn_id)
-        service.finish_audio_response(conn_id)
+        service.finish_response(conn_id)
         st = service._state(conn_id)
         assert st.in_response is False
         assert st.current_response_id is None
@@ -779,7 +779,7 @@ class TestDispatchPipelineEvent:
         assert isinstance(events[0], InputAudioBufferSpeechStartedEvent)
         assert service._state(conn_id).in_response is True
         assert service._state(conn_id).current_item_id == response_item_id
-        done_events = service.finish_audio_response(conn_id)
+        done_events = service.finish_response(conn_id)
         assert done_events[0].item_id == response_item_id
 
     def test_consecutive_speech_cycles_get_distinct_item_ids(self, service, conn_id):
@@ -897,16 +897,47 @@ class TestDispatchPipelineEvent:
             conn_id,
             AssistantTextEvent(text="Hello there"),
         )
-        assert len(events) == 2
+        # on_assistant_text streams only the delta now; the matching done is
+        # emitted once at close in finish_response.
+        assert len(events) == 1
         assert isinstance(events[0], ResponseTextDeltaEvent)
         assert events[0].content_index == 0
         assert events[0].output_index == 0
         assert events[0].delta == "Hello there"
-        assert isinstance(events[1], ResponseTextDoneEvent)
-        assert events[1].content_index == 0
-        assert events[1].output_index == 0
-        assert events[1].text == "Hello there"
+        assert not any(isinstance(e, ResponseTextDoneEvent) for e in events)
         assert not any(isinstance(e, ResponseAudioTranscriptDoneEvent) for e in events)
+
+        done_events = service.finish_response(conn_id)
+        text_done = [e for e in done_events if isinstance(e, ResponseTextDoneEvent)]
+        assert len(text_done) == 1
+        assert text_done[0].content_index == 0
+        assert text_done[0].output_index == 0
+        assert text_done[0].text == "Hello there"
+
+    def test_text_only_done_space_joins_streamed_parts(self, service, conn_id):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            output_modalities=["text"],
+        )
+        service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="Hello there."))
+        service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="How are you?"))
+        done_events = service.finish_response(conn_id)
+        text_done = [e for e in done_events if isinstance(e, ResponseTextDoneEvent)]
+        assert len(text_done) == 1
+        # done.text space-joins the per-chunk parts collected during streaming.
+        assert text_done[0].text == "Hello there. How are you?"
+
+    def test_text_only_no_text_done_on_cancel(self, service, conn_id):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            output_modalities=["text"],
+        )
+        service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="partial"))
+        done_events = service.finish_response(conn_id, status="cancelled", reason="client_cancelled")
+        assert not any(isinstance(e, ResponseTextDoneEvent) for e in done_events)
+        assert any(isinstance(e, ResponseDoneEvent) for e in done_events)
 
     def test_assistant_text_text_only_keeps_tool_events(self, service, conn_id):
         from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
@@ -921,9 +952,10 @@ class TestDispatchPipelineEvent:
                 tools=[{"type": "function_call", "call_id": "c1", "name": "get_weather", "arguments": "{}"}],
             ),
         )
+        # No per-chunk done anymore: delta, then the tool event at output_index 1.
         assert isinstance(events[0], ResponseTextDeltaEvent)
-        assert isinstance(events[1], ResponseTextDoneEvent)
-        tool_event = events[2]
+        assert not any(isinstance(e, ResponseTextDoneEvent) for e in events)
+        tool_event = events[1]
         assert isinstance(tool_event, ResponseFunctionCallArgumentsDoneEvent)
         assert tool_event.output_index == 1
         assert tool_event.name == "get_weather"
@@ -1551,7 +1583,7 @@ class TestUsageMetricsTracking:
             conn_id,
             TokenUsageEvent(input_tokens=100, output_tokens=50),
         )
-        events = service.finish_audio_response(conn_id)
+        events = service.finish_response(conn_id)
         done_evt = events[1]
         assert isinstance(done_evt, ResponseDoneEvent)
         assert done_evt.response.usage.input_tokens == 100
@@ -1615,14 +1647,14 @@ class TestUsageMetricsTracking:
         assert service.total_usage.input_tokens == 0
         assert service.total_usage.output_tokens == 0
 
-    def test_finish_audio_response_resets_per_response_tokens(self, service, conn_id):
-        """After finish_audio_response, per-response counters are zero."""
+    def test_finish_response_resets_per_response_tokens(self, service, conn_id):
+        """After finish_response, per-response counters are zero."""
         service.response._ensure_response(conn_id)
         service.dispatch_pipeline_event(
             conn_id,
             TokenUsageEvent(input_tokens=50, output_tokens=25),
         )
-        service.finish_audio_response(conn_id)
+        service.finish_response(conn_id)
         usage = service._state(conn_id).response_usage
         assert usage.input_tokens == 0
         assert usage.output_tokens == 0
@@ -1669,23 +1701,23 @@ class TestUsageMetricsTracking:
 
     def test_responses_completed_increments(self, service, conn_id):
         service.response._ensure_response(conn_id)
-        service.finish_audio_response(conn_id)
+        service.finish_response(conn_id)
         assert service.total_usage.responses_completed == 1
         assert service.total_usage.responses_cancelled == 0
 
     def test_responses_cancelled_increments(self, service, conn_id):
         service.response._ensure_response(conn_id)
-        service.finish_audio_response(conn_id, status="cancelled", reason="turn_detected")
+        service.finish_response(conn_id, status="cancelled", reason="turn_detected")
         assert service.total_usage.responses_cancelled == 1
         assert service.total_usage.responses_completed == 0
 
     def test_multiple_responses_accumulate_status_counters(self, service, conn_id):
         service.response._ensure_response(conn_id)
-        service.finish_audio_response(conn_id)
+        service.finish_response(conn_id)
         service.response._ensure_response(conn_id)
-        service.finish_audio_response(conn_id, status="cancelled", reason="client_cancelled")
+        service.finish_response(conn_id, status="cancelled", reason="client_cancelled")
         service.response._ensure_response(conn_id)
-        service.finish_audio_response(conn_id)
+        service.finish_response(conn_id)
         assert service.total_usage.responses_completed == 2
         assert service.total_usage.responses_cancelled == 1
 
@@ -1713,7 +1745,7 @@ class TestUsageMetricsTracking:
                 tools=[{"type": "function_call", "call_id": "c1", "name": "f1", "arguments": "{}"}],
             ),
         )
-        service.finish_audio_response(conn_id)
+        service.finish_response(conn_id)
         assert service.total_usage.tool_calls == 1
         assert service._state(conn_id).response_usage.tool_calls == 0
 
@@ -1778,7 +1810,7 @@ class TestUsageMetricsTracking:
                 tools=[{"type": "function_call", "call_id": "c1", "name": "f1", "arguments": "{}"}],
             ),
         )
-        service.finish_audio_response(conn_id)
+        service.finish_response(conn_id)
         service.make_error("oops", "some_error")
         usage = service.get_usage()
         assert usage["input_tokens"] == 10

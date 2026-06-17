@@ -185,11 +185,15 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         clean_text = ""
         input_tokens = 0
         output_tokens = 0
+        # Text-only responses have no TTS to feed, so streaming buys no latency:
+        # force a single non-streamed call (the Response branch yields one full-text
+        # chunk). Audio responses keep streaming for low-latency synthesis.
+        use_stream = self.stream and response_wants_audio(response)
         try:
             api_response = self.client.responses.create(
                 model=self.model_name,
                 input=active_chat.to_responses_api_chat(),
-                stream=self.stream,
+                stream=use_stream,
                 extra_body=self._extra_body,
                 timeout=self.request_timeout,
                 **optional_kwargs,

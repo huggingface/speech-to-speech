@@ -164,6 +164,7 @@ class ConnState(BaseModel):
     input_audio_duration_s: float = 0.0
     last_item_id: Optional[str] = None
     current_response_params: RealtimeResponseCreateParams | None = None
+    pending_output_text_parts: list[str] = Field(default_factory=list)
     response_usage: UsageMetrics = Field(default_factory=UsageMetrics)
     speculative_turn_id: Optional[str] = None
     speculative_turn_revision: Optional[int] = None
@@ -290,13 +291,13 @@ class RealtimeService:
     def handle_response_cancel(self, conn_id: str) -> list[ServerEvent]:
         return self.response.handle_response_cancel(conn_id)
 
-    def finish_audio_response(
+    def finish_response(
         self,
         conn_id: str,
         status: _ResponseStatus = "completed",
         reason: _StatusReason | None = None,
     ) -> list[ServerEvent]:
-        return self.response.finish_audio_response(conn_id, status, reason)
+        return self.response.finish_response(conn_id, status, reason)
 
     def handle_conversation_item_create(self, conn_id: str, event: ConversationItemCreateEvent) -> list[ServerEvent]:
         return self.conversation.handle_conversation_item_create(conn_id, event)
@@ -459,11 +460,11 @@ class RealtimeService:
         """Close the in-progress response with ``status="failed"``.
 
         Emitted when generation could not start (e.g. invalid out-of-band input).
-        Idempotent: ``finish_audio_response`` is a no-op once the response slot is
+        Idempotent: ``finish_response`` is a no-op once the response slot is
         already closed, so a subsequent EndOfResponse-driven close does nothing.
         """
         logger.info("Response failed: %s", event.message)
-        return self.response.finish_audio_response(conn_id, status="failed")
+        return self.response.finish_response(conn_id, status="failed")
 
     def get_usage(self) -> dict[str, Any]:
         """Return cumulative usage metrics across all completed responses."""

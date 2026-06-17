@@ -162,7 +162,7 @@ sequenceDiagram
 3. **Cancel + queue flush**: if `response_playing` is set, the send loop calls `cancel_scope.cancel()` (increments generation, enables discard), drains both `output_queue` (preserving `__RESPONSE_DONE__` sentinels) and `text_output_queue`, then clears `response_playing`.
 4. **LLM/TTS cancellation**: handlers capture `gen = cancel_scope.generation` at the start of each response and check `cancel_scope.is_stale(gen)` on every streaming token, aborting early when stale.
 5. **Discard guard**: while `cancel_scope.discarding` is True, the send loop silently drops stale audio chunks and assistant text. The guard clears when `__RESPONSE_DONE__` arrives (via `cancel_scope.response_done()`).
-6. **Client-initiated cancel**: `response.cancel` calls `cancel_scope.cancel()` (only if a response was active), triggers `finish_audio_response(status="cancelled", reason="client_cancelled")`, and re-enables `should_listen`.
+6. **Client-initiated cancel**: `response.cancel` calls `cancel_scope.cancel()` (only if a response was active), triggers `finish_response(status="cancelled", reason="client_cancelled")`, and re-enables `should_listen`.
 7. **Spurious cancel safety**: if no response is active, `cancel_scope.cancel()` is not called, preventing the discard guard from being set without a `__RESPONSE_DONE__` to clear it.
 
 ---

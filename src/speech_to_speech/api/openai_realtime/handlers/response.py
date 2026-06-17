@@ -70,6 +70,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.in_response = False
         st.response_pending = False
         st.current_response_params = None
+        st.pending_output_text_parts = []
 
     def _start_item(self, conn_id: str) -> str:
         """Generate a new item ID, reset content index, and store it."""
@@ -195,20 +196,27 @@ class ResponseHandler(RealtimeBaseHandler):
 
     def handle_response_cancel(self, conn_id: str) -> list[ServerEvent]:
         """Cancel the in-progress response and re-enable listening."""
-        events = self.finish_audio_response(conn_id, status="cancelled", reason="client_cancelled")
+        events = self.finish_response(conn_id, status="cancelled", reason="client_cancelled")
         should_listen = self._should_listen(conn_id)
         if should_listen:
             should_listen.set()
         logger.info("Response cancelled, listening re-enabled")
         return events
 
-    def finish_audio_response(
+    def finish_response(
         self,
         conn_id: str,
         status: _ResponseStatus = "completed",
         reason: _StatusReason | None = None,
     ) -> list[ServerEvent]:
-        """Close the current response (audio done + response done)."""
+        """Close the current response (audio/text done + response done).
+
+        Audio responses emit ``response.output_audio.done`` for any terminal
+        status. Text-only responses emit a single ``response.output_text.done``
+        carrying the full streamed text, but only on ``status="completed"`` —
+        a cancelled or failed text response sends no audio, so it just closes
+        with ``response.done``.
+        """
         st = self._state(conn_id)
         events: list[ServerEvent] = []
         if st.in_response:
@@ -222,6 +230,18 @@ class ResponseHandler(RealtimeBaseHandler):
                         item_id=item_id,
                         output_index=0,
                         response_id=resp_id,
+                    )
+                )
+            elif status == "completed" and st.pending_output_text_parts:
+                events.append(
+                    ResponseTextDoneEvent(
+                        type="response.output_text.done",
+                        event_id=self._next_event_id(),
+                        content_index=0,
+                        item_id=item_id,
+                        output_index=0,
+                        response_id=resp_id,
+                        text=" ".join(st.pending_output_text_parts),
                     )
                 )
             events.append(
@@ -280,6 +300,10 @@ class ResponseHandler(RealtimeBaseHandler):
                     )
                 )
             else:
+                # Stream the delta now; the matching response.output_text.done is
+                # emitted once at close in finish_response, carrying the per-chunk
+                # parts collected here, space-joined ("" when there were none).
+                st.pending_output_text_parts.append(event.text)
                 events.append(
                     ResponseTextDeltaEvent(
                         type="response.output_text.delta",
@@ -289,17 +313,6 @@ class ResponseHandler(RealtimeBaseHandler):
                         output_index=output_idx,
                         response_id=resp_id,
                         delta=event.text,
-                    )
-                )
-                events.append(
-                    ResponseTextDoneEvent(
-                        type="response.output_text.done",
-                        event_id=self._next_event_id(),
-                        content_index=0,
-                        item_id=item_id,
-                        output_index=output_idx,
-                        response_id=resp_id,
-                        text=event.text,
                     )
                 )
             output_idx += 1

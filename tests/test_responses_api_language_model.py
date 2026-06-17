@@ -134,6 +134,56 @@ def test_process_streams_text_from_response_events():
     assert isinstance(outputs[2], EndOfResponse)
 
 
+def test_text_only_response_forces_non_streaming_call():
+    handler = _make_handler(stream=True)
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _make_response(
+            output=[
+                ResponseOutputMessage(
+                    id="msg_1",
+                    type="message",
+                    role="assistant",
+                    status="completed",
+                    content=[ResponseOutputText(type="output_text", text="Hello there.", annotations=[])],
+                )
+            ]
+        )
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+
+    cfg = _make_runtime_config()
+    cfg.chat.add_item(make_user_message("Hi"))
+    req = GenerateResponseRequest(
+        runtime_config=cfg,
+        response=RealtimeResponseCreateParams(output_modalities=["text"]),
+    )
+
+    outputs = list(handler.process(req))
+
+    # Text-only forces stream=False even though the handler is configured to stream.
+    assert captured["stream"] is False
+    assert any(isinstance(o, LLMResponseChunk) and o.text == "Hello there." for o in outputs)
+
+
+def test_audio_response_keeps_streaming_call():
+    handler = _make_handler(stream=True)
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _make_stream([_make_text_delta_event("Hi."), _make_output_item_done_event(content="Hi.")])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+
+    # response=None defaults to audio, so streaming is preserved.
+    list(handler.process(_make_request("Hi")))
+
+    assert captured["stream"] is True
+
+
 def test_process_flushes_tool_lead_in_before_function_call_with_sentence_batching():
     handler = _make_handler()
     handler.stream_batch_sentences = 3
