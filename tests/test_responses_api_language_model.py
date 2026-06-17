@@ -333,6 +333,62 @@ def test_process_read_timeout_ends_response_cleanly():
     assert isinstance(outputs[1], EndOfResponse)
 
 
+def test_generation_error_emits_failed_end_of_response():
+    """A non-timeout failure (e.g. provider rejecting empty input) must still emit a
+    terminating EndOfResponse carrying the error, so the response is closed instead
+    of escaping process() and locking st.in_response forever."""
+    handler = _make_handler()
+
+    def boom(**kwargs):
+        raise RuntimeError("input must not be empty")
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=boom))
+
+    outputs = list(handler.process(_make_request("Hi")))
+
+    eors = [o for o in outputs if isinstance(o, EndOfResponse)]
+    assert len(eors) == 1
+    assert eors[0].error is not None
+    assert "input must not be empty" in eors[0].error
+    # No partial output committed; the only thing emitted is the failed EndOfResponse.
+    assert all(isinstance(o, EndOfResponse) for o in outputs)
+
+
+def test_empty_context_fails_with_clear_message_without_calling_provider():
+    """Out-of-band, text-only, empty `instructions`, input=[] -> empty context. We
+    fail fast with a clear, instructions-aware message and never call the provider
+    (which would reject the empty input), so the response terminates instead of
+    hanging."""
+    handler = _make_handler()
+    called = False
+
+    def fake_create(**kwargs):
+        nonlocal called
+        called = True
+        return _make_response(output=[])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+
+    cfg = _make_runtime_config(instructions="")  # empty instructions -> no system message
+    req = GenerateResponseRequest(
+        runtime_config=cfg,
+        response=RealtimeResponseCreateParams(
+            conversation="none",
+            output_modalities=["text"],
+            input=[],
+        ),
+    )
+
+    outputs = list(handler.process(req))
+
+    assert not called  # short-circuited before reaching the provider
+    eors = [o for o in outputs if isinstance(o, EndOfResponse)]
+    assert len(eors) == 1
+    assert eors[0].error is not None
+    assert "instructions" in eors[0].error
+    assert "input" in eors[0].error
+
+
 def test_disable_thinking_passes_extra_body():
     handler = _make_handler(disable_thinking=True)
     captured = {}

@@ -41,6 +41,7 @@ from speech_to_speech.api.openai_realtime.service import (
 from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
     PartialTranscriptionEvent,
+    ResponseFailedEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TokenUsageEvent,
@@ -1411,6 +1412,34 @@ class TestDispatchPipelineEvent:
         assert len(user_items) == 1
         assert user_items[0].content[0].text == "hello and more"
         service.unregister(conn_id)
+
+    # -- response_failed --
+
+    def test_response_failed_emits_error_and_failed_done(self, service, conn_id):
+        service.response._ensure_response(conn_id)
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            ResponseFailedEvent(message="input must not be empty"),
+        )
+        # A top-level error event carries the reason (response.done can't), then
+        # the response is closed as failed.
+        err = events[0]
+        assert isinstance(err, RealtimeErrorEvent)
+        assert err.error.message == "input must not be empty"
+        assert err.error.type == "response_failed"
+        done = [e for e in events if isinstance(e, ResponseDoneEvent)]
+        assert len(done) == 1
+        assert done[0].response.status == "failed"
+        # Slot released so the next response is not locked out.
+        assert service._state(conn_id).in_response is False
+
+    def test_response_failed_without_active_response_is_noop(self, service, conn_id):
+        # No active response (e.g. already closed): nothing to fail, emit nothing.
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            ResponseFailedEvent(message="too late"),
+        )
+        assert events == []
 
     # -- unknown --
 

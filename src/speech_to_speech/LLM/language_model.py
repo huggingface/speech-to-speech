@@ -521,55 +521,68 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         gen = self.cancel_scope.generation if self.cancel_scope else None
         ctx.cancel_generation = gen
 
-        yield from self._generate(active_chat, language_code, gen, ctx, runtime_config, response)
+        try:
+            yield from self._generate(active_chat, language_code, gen, ctx, runtime_config, response)
 
-        if ctx.stopped:
-            return
+            if ctx.stopped:
+                return
 
-        turn_output_allowed = not ctx.cancelled and self._turn_output_allowed(ctx.turn_id, ctx.turn_revision)
-        # Out-of-band responses still emit output, but never write back to the default
-        # conversation (their context was a throwaway chat).
-        commit_allowed = turn_output_allowed and not out_of_band
-        if commit_allowed:
-            original_chat.add_item(make_assistant_message(ctx.generated_text))
-        if commit_allowed and ctx.tools:
-            for t in ctx.tools:
-                original_chat.add_item(
-                    RealtimeConversationItemFunctionCall(
-                        type="function_call",
-                        id=t.id,
-                        call_id=t.call_id,
-                        name=t.name,
-                        arguments=t.arguments,
-                        status=t.status,
+            turn_output_allowed = not ctx.cancelled and self._turn_output_allowed(ctx.turn_id, ctx.turn_revision)
+            # Out-of-band responses still emit output, but never write back to the default
+            # conversation (their context was a throwaway chat).
+            commit_allowed = turn_output_allowed and not out_of_band
+            if commit_allowed:
+                original_chat.add_item(make_assistant_message(ctx.generated_text))
+            if commit_allowed and ctx.tools:
+                for t in ctx.tools:
+                    original_chat.add_item(
+                        RealtimeConversationItemFunctionCall(
+                            type="function_call",
+                            id=t.id,
+                            call_id=t.call_id,
+                            name=t.name,
+                            arguments=t.arguments,
+                            status=t.status,
+                        )
                     )
+            if commit_allowed:
+                original_chat.strip_images()
+                original_chat.trim_if_needed(self.compactor)
+            logger.debug("Clean text: %s", ctx.generated_text)
+            logger.info(f"Tools: {ctx.tools}")
+
+            if turn_output_allowed and ctx.printable_text.strip():
+                yield LLMResponseChunk(
+                    text=ctx.printable_text.strip(),
+                    language_code=language_code,
+                    runtime_config=runtime_config,
+                    response=response,
+                    turn_id=ctx.turn_id,
+                    turn_revision=ctx.turn_revision,
+                    speech_stopped_at_s=ctx.speech_stopped_at_s,
+                    cancel_generation=ctx.cancel_generation,
                 )
-        if commit_allowed:
-            original_chat.strip_images()
-            original_chat.trim_if_needed(self.compactor)
-        logger.debug("Clean text: %s", ctx.generated_text)
-        logger.info(f"Tools: {ctx.tools}")
 
-        if turn_output_allowed and ctx.printable_text.strip():
-            yield LLMResponseChunk(
-                text=ctx.printable_text.strip(),
-                language_code=language_code,
-                runtime_config=runtime_config,
-                response=response,
+            output_tokens = len(self.tokenizer.encode(ctx.raw_generated_text)) if ctx.raw_generated_text else 0
+            if turn_output_allowed and (ctx.input_tokens or output_tokens):
+                yield TokenUsage(
+                    input_tokens=ctx.input_tokens,
+                    output_tokens=output_tokens,
+                    turn_id=ctx.turn_id,
+                    turn_revision=ctx.turn_revision,
+                )
+        except Exception as exc:
+            # Any generation failure must still terminate the response. Without this
+            # the exception would escape process() and no EndOfResponse would be
+            # emitted, leaving st.in_response stuck and locking every later response.
+            logger.exception("LLM generation failed; ending the current response")
+            yield EndOfResponse(
                 turn_id=ctx.turn_id,
                 turn_revision=ctx.turn_revision,
-                speech_stopped_at_s=ctx.speech_stopped_at_s,
                 cancel_generation=ctx.cancel_generation,
+                error=f"Language model generation failed: {exc}",
             )
-
-        output_tokens = len(self.tokenizer.encode(ctx.raw_generated_text)) if ctx.raw_generated_text else 0
-        if turn_output_allowed and (ctx.input_tokens or output_tokens):
-            yield TokenUsage(
-                input_tokens=ctx.input_tokens,
-                output_tokens=output_tokens,
-                turn_id=ctx.turn_id,
-                turn_revision=ctx.turn_revision,
-            )
+            return
         yield EndOfResponse(
             turn_id=ctx.turn_id,
             turn_revision=ctx.turn_revision,

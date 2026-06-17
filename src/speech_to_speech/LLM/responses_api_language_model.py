@@ -185,19 +185,27 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         clean_text = ""
         input_tokens = 0
         output_tokens = 0
+        error_message: str | None = None
         # Text-only responses have no TTS to feed, so streaming buys no latency:
         # force a single non-streamed call (the Response branch yields one full-text
         # chunk). Audio responses keep streaming for low-latency synthesis.
         use_stream = self.stream and response_wants_audio(response)
+        api_input = active_chat.to_responses_api_chat()
+        if not api_input:
+            # Nothing to send: empty `instructions` and no `input` (in the response,
+            # the default conversation, or the out-of-band context). The provider
+            # would reject this; fail with a clear message instead of an opaque error.
+            error_message = "Cannot generate a response: no instructions and no input were provided."
         try:
-            api_response = self.client.responses.create(
-                model=self.model_name,
-                input=active_chat.to_responses_api_chat(),
-                stream=use_stream,
-                extra_body=self._extra_body,
-                timeout=self.request_timeout,
-                **optional_kwargs,
-            )
+            if error_message is None:
+                api_response = self.client.responses.create(
+                    model=self.model_name,
+                    input=api_input,
+                    stream=use_stream,
+                    extra_body=self._extra_body,
+                    timeout=self.request_timeout,
+                    **optional_kwargs,
+                )
             if isinstance(api_response, Stream):
                 cancelled = False
                 printable_text = ""
@@ -419,6 +427,14 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     speech_stopped_at_s=speech_stopped_at_s,
                     cancel_generation=gen,
                 )
+        except Exception as exc:
+            # Any other generation failure must still terminate the response: record
+            # the error and fall through to the EndOfResponse below. Without this the
+            # exception would escape process() and no EndOfResponse would be emitted,
+            # leaving st.in_response stuck and locking every subsequent response.
+            logger.exception("LLM generation failed; ending the current response")
+            if error_message is None:
+                error_message = f"Language model generation failed: {exc}"
         finally:
             if api_response is not None and hasattr(api_response, "close"):
                 try:
@@ -426,7 +442,11 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                 except Exception:
                     pass
 
-        if not self._generation_is_stale(gen) and self._turn_output_allowed(turn_id, turn_revision):
+        if (
+            error_message is None
+            and not self._generation_is_stale(gen)
+            and self._turn_output_allowed(turn_id, turn_revision)
+        ):
             # Out-of-band responses emit output and usage but never write back to the
             # default conversation (their context was a throwaway chat).
             if not is_out_of_band(response):
@@ -441,7 +461,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     turn_id=turn_id,
                     turn_revision=turn_revision,
                 )
-        yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision, cancel_generation=gen)
+        yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision, cancel_generation=gen, error=error_message)
 
     def process(self, request: LLMIn) -> Iterator[LLMOut]:
         """

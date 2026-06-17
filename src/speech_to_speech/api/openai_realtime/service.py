@@ -457,14 +457,23 @@ class RealtimeService:
         return []
 
     def _on_response_failed(self, conn_id: str, event: ResponseFailedEvent) -> list[ServerEvent]:
-        """Close the in-progress response with ``status="failed"``.
+        """Surface the failure to the client and close the response as ``failed``.
 
-        Emitted when generation could not start (e.g. invalid out-of-band input).
-        Idempotent: ``finish_response`` is a no-op once the response slot is
-        already closed, so a subsequent EndOfResponse-driven close does nothing.
+        Emitted when generation failed (e.g. invalid out-of-band input, or the
+        provider rejecting an empty context). A top-level ``error`` event carries
+        the human-readable reason — ``response.done.status_details.error`` only
+        has code/type, no message — then ``finish_response`` closes the slot.
+
+        Idempotent: gated on an active response, and ``finish_response`` is itself
+        a no-op once the slot is closed, so a later EndOfResponse-driven close does
+        nothing.
         """
         logger.info("Response failed: %s", event.message)
-        return self.response.finish_response(conn_id, status="failed")
+        if not self._state(conn_id).in_response:
+            return []
+        events: list[ServerEvent] = [self.make_error(event.message, "response_failed")]
+        events.extend(self.response.finish_response(conn_id, status="failed"))
+        return events
 
     def get_usage(self) -> dict[str, Any]:
         """Return cumulative usage metrics across all completed responses."""
