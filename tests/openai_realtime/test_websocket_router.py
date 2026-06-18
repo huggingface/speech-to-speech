@@ -468,7 +468,7 @@ class TestSendLoop:
                 conn_id = list(service._conns.keys())[0]
                 stale_generation = cancel_scope.generation
                 service.response._ensure_response(conn_id)
-                service.finish_audio_response(conn_id, status="cancelled")
+                service.finish_response(conn_id, status="cancelled")
                 cancel_scope.cancel()
                 current_response_id, _ = service.response._ensure_response(conn_id)
 
@@ -540,7 +540,7 @@ class TestSendLoop:
         ws = _FakeWebSocket()
 
         asyncio.run(router_module._drain_pending_response_events(ws, unit, conn_id))
-        done_events = service.finish_audio_response(conn_id)
+        done_events = service.finish_response(conn_id)
 
         assert [payload["type"] for payload in ws.sent] == ["response.function_call_arguments.done"]
         assert [event.type for event in done_events] == ["response.output_audio.done", "response.done"]
@@ -580,7 +580,7 @@ class TestSendLoop:
         ws = _FakeWebSocket()
 
         asyncio.run(router_module._drain_pending_response_events(ws, unit, conn_id))
-        done_events = service.finish_audio_response(conn_id)
+        done_events = service.finish_response(conn_id)
 
         assert [payload["type"] for payload in ws.sent] == ["response.function_call_arguments.done"]
         assert ws.sent[0]["response_id"] == response_id

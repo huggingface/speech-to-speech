@@ -26,8 +26,16 @@ from openai.types.responses import (
 )
 
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.LLM.chat import Chat, SupportedItem, make_system_message, make_user_message
+from speech_to_speech.LLM.chat import (
+    Chat,
+    ChatItemError,
+    SupportedItem,
+    build_active_chat,
+    make_system_message,
+    make_user_message,
+)
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
+from speech_to_speech.LLM.text_prompt import build_text_system_prompt
 from speech_to_speech.LLM.utils import remove_unspeechable, resolve_auto_language
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
@@ -38,7 +46,7 @@ from speech_to_speech.pipeline.messages import (
     TokenUsage,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.utils.utils import _generate_id
+from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
 
 logger = logging.getLogger(__name__)
 
@@ -151,9 +159,11 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         self,
         chat: Chat,
         instructions: Optional[str],
+        wants_audio: bool = True,
     ) -> None:
         if instructions:
-            full_instructions = build_voice_system_prompt(instructions)
+            builder = build_voice_system_prompt if wants_audio else build_text_system_prompt
+            full_instructions = builder(instructions)
             chat.add_item(make_system_message(full_instructions))
 
     def _generate(
@@ -175,15 +185,24 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         clean_text = ""
         input_tokens = 0
         output_tokens = 0
+        error_message: str | None = None
+        wants_audio = response_wants_audio(response)
+        api_input = active_chat.to_responses_api_chat()
+        if not api_input:
+            # Nothing to send: empty `instructions` and no `input` (in the response,
+            # the default conversation, or the out-of-band context). The provider
+            # would reject this; fail with a clear message instead of an opaque error.
+            error_message = "Cannot generate a response: no instructions and no input were provided."
         try:
-            api_response = self.client.responses.create(
-                model=self.model_name,
-                input=active_chat.to_responses_api_chat(),
-                stream=self.stream,
-                extra_body=self._extra_body,
-                timeout=self.request_timeout,
-                **optional_kwargs,
-            )
+            if error_message is None:
+                api_response = self.client.responses.create(
+                    model=self.model_name,
+                    input=api_input,
+                    stream=self.stream,
+                    extra_body=self._extra_body,
+                    timeout=self.request_timeout,
+                    **optional_kwargs,
+                )
             if isinstance(api_response, Stream):
                 cancelled = False
                 printable_text = ""
@@ -196,6 +215,29 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                         cancelled = True
                         break
                     if isinstance(raw_event, ResponseTextDeltaEvent):
+                        if not wants_audio:
+                            # Text-only: forward the delta verbatim. Keep every
+                            # character (no remove_unspeechable, which strips
+                            # TTS-unfriendly symbols) and don't sentence-split
+                            # (sent_tokenize would collapse newlines / markdown).
+                            delta = raw_event.delta
+                            clean_text += delta
+                            if delta:
+                                if not self._turn_output_allowed(turn_id, turn_revision):
+                                    logger.info("LLM generation cancelled (stale speculative turn)")
+                                    cancelled = True
+                                    break
+                                yield LLMResponseChunk(
+                                    text=delta,
+                                    language_code=language_code,
+                                    runtime_config=runtime_config,
+                                    response=response,
+                                    turn_id=turn_id,
+                                    turn_revision=turn_revision,
+                                    speech_stopped_at_s=speech_stopped_at_s,
+                                    cancel_generation=gen,
+                                )
+                            continue
                         new_text = remove_unspeechable(raw_event.delta)
                         clean_text += new_text
                         printable_text += new_text
@@ -365,19 +407,22 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                                     type="message", role="assistant", content=content
                                 )
                             )
+                            # Text-only keeps every character verbatim; audio strips
+                            # TTS-unfriendly symbols via remove_unspeechable.
                             message_text = ""
                             for chunk in message.content:
                                 if chunk.type == "output_text":
-                                    message_text += remove_unspeechable(chunk.text)
+                                    message_text += chunk.text if not wants_audio else remove_unspeechable(chunk.text)
                             clean_text += message_text
-                            if message_text.strip():
+                            chunk_text = message_text if not wants_audio else message_text.strip()
+                            if chunk_text:
                                 if self._generation_is_stale(gen):
                                     logger.info("LLM generation cancelled (interruption)")
                                 elif not self._turn_output_allowed(turn_id, turn_revision):
                                     logger.info("LLM generation cancelled (stale speculative turn)")
                                 else:
                                     yield LLMResponseChunk(
-                                        text=message_text.strip(),
+                                        text=chunk_text,
                                         language_code=language_code,
                                         runtime_config=runtime_config,
                                         response=response,
@@ -405,6 +450,14 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     speech_stopped_at_s=speech_stopped_at_s,
                     cancel_generation=gen,
                 )
+        except Exception as exc:
+            # Any other generation failure must still terminate the response: record
+            # the error and fall through to the EndOfResponse below. Without this the
+            # exception would escape process() and no EndOfResponse would be emitted,
+            # leaving st.in_response stuck and locking every subsequent response.
+            logger.exception("LLM generation failed; ending the current response")
+            if error_message is None:
+                error_message = f"Language model generation failed: {exc}"
         finally:
             if api_response is not None and hasattr(api_response, "close"):
                 try:
@@ -412,11 +465,18 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                 except Exception:
                     pass
 
-        if not self._generation_is_stale(gen) and self._turn_output_allowed(turn_id, turn_revision):
-            for item in pending_chat_items:
-                original_chat.add_item(item)
-            original_chat.strip_images()
-            original_chat.trim_if_needed(self.compactor)
+        if (
+            error_message is None
+            and not self._generation_is_stale(gen)
+            and self._turn_output_allowed(turn_id, turn_revision)
+        ):
+            # Out-of-band responses emit output and usage but never write back to the
+            # default conversation (their context was a throwaway chat).
+            if not is_out_of_band(response):
+                for item in pending_chat_items:
+                    original_chat.add_item(item)
+                original_chat.strip_images()
+                original_chat.trim_if_needed(self.compactor)
             if input_tokens or output_tokens:
                 yield TokenUsage(
                     input_tokens=input_tokens,
@@ -424,7 +484,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     turn_id=turn_id,
                     turn_revision=turn_revision,
                 )
-        yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision, cancel_generation=gen)
+        yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision, cancel_generation=gen, error=error_message)
 
     def process(self, request: LLMIn) -> Iterator[LLMOut]:
         """
@@ -447,7 +507,16 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
             return
 
         original_chat = runtime_config.chat
-        active_chat = original_chat.copy()
+        out_of_band = is_out_of_band(response)
+        if out_of_band:
+            try:
+                active_chat = build_active_chat(original_chat, response)
+            except ChatItemError as exc:
+                logger.info("Out-of-band response rejected: %s", exc)
+                yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision, error=str(exc))
+                return
+        else:
+            active_chat = original_chat.copy()
         language_code = request.language_code
         instructions = (
             response.instructions if response and response.instructions else runtime_config.session.instructions
@@ -456,7 +525,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         req_tool_choice = (
             response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
         )
-        self._apply_config(active_chat, instructions)
+        self._apply_config(active_chat, instructions, response_wants_audio(response))
         language_code, lang_name = resolve_auto_language(language_code)
         if lang_name and self.enable_lang_prompt:
             active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))

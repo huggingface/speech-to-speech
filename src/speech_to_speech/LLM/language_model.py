@@ -31,8 +31,16 @@ from transformers import (
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.LLM.chat import Chat, make_assistant_message, make_system_message, make_user_message
+from speech_to_speech.LLM.chat import (
+    Chat,
+    ChatItemError,
+    build_active_chat,
+    make_assistant_message,
+    make_system_message,
+    make_user_message,
+)
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
+from speech_to_speech.LLM.text_prompt import build_text_system_prompt
 from speech_to_speech.LLM.tool_call.function_call import extract_function_calls_from_text
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
@@ -47,6 +55,7 @@ from speech_to_speech.pipeline.messages import (
     TokenUsage,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
 
 try:
     import mlx.core as mx
@@ -248,6 +257,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         raw_tools: list[Any] | None,
         tool_choice: Optional[str],
         ctx: StreamContext | None = None,
+        wants_audio: bool = True,
     ) -> None:
         if not instructions:
             return
@@ -256,14 +266,16 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         function_tools = [FunctionTool(**t.model_dump()) for t in raw_tools if t.type == "function"]
 
+        build_system_prompt = build_voice_system_prompt if wants_audio else build_text_system_prompt
+
         if function_tools and tool_choice != "none":
-            tool_section = build_tool_system_prompt(function_tools)
-            full_instructions = build_voice_system_prompt(instructions, tool_section=tool_section)
+            tool_section = build_tool_system_prompt(function_tools, text_only=not wants_audio)
+            full_instructions = build_system_prompt(instructions, tool_section=tool_section)
             block_regex = build_block_regex()
             enter_code = ENTER_CODE
             end_code = END_CODE
         else:
-            full_instructions = build_voice_system_prompt(instructions)
+            full_instructions = build_system_prompt(instructions)
             block_regex = None
             enter_code = None
             end_code = None
@@ -356,6 +368,25 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 printable_text = code_and_after
             return chunks, tools, printable_text
 
+        if printable_text and not response_wants_audio(response) and ctx.enter_code is None:
+            # Text-only with no tool block: stream the raw text immediately. No TTS
+            # means no need to split into sentences, and sent_tokenize would collapse
+            # newlines / markdown. Streaming (vs buffering to the end) keeps the
+            # response interruptible by a new speech turn.
+            chunks.append(
+                LLMResponseChunk(
+                    text=printable_text,
+                    language_code=language_code,
+                    runtime_config=runtime_config,
+                    response=response,
+                    turn_id=ctx.turn_id,
+                    turn_revision=ctx.turn_revision,
+                    speech_stopped_at_s=ctx.speech_stopped_at_s,
+                    cancel_generation=ctx.cancel_generation,
+                )
+            )
+            return chunks, tools, ""
+
         if printable_text:
             sentences = sent_tokenize(printable_text)
             if len(sentences) > 1:
@@ -405,6 +436,9 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
         """Consume *token_iter*, accumulate text in *ctx*, yield sentence chunks."""
+        # Text-only output keeps every character; only audio strips TTS-unfriendly
+        # symbols via remove_unspeechable.
+        wants_audio = response_wants_audio(response)
         while True:
             try:
                 token = next(token_iter)
@@ -420,7 +454,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
             raw_text: str = token.text if hasattr(token, "text") else token
             ctx.raw_generated_text += raw_text
-            clean = remove_unspeechable(raw_text)
+            clean = raw_text if not wants_audio else remove_unspeechable(raw_text)
             ctx.generated_text += clean
             ctx.printable_text += clean
             chunks, ctx.tools, ctx.printable_text = self._process_printable_text(
@@ -478,14 +512,30 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         runtime_config = request.runtime_config
         response = request.response
         original_chat = runtime_config.chat
-        active_chat = original_chat.copy()
+        out_of_band = is_out_of_band(response)
+        if out_of_band:
+            try:
+                active_chat = build_active_chat(original_chat, response)
+            except ChatItemError as exc:
+                logger.info("Out-of-band response rejected: %s", exc)
+                yield EndOfResponse(turn_id=ctx.turn_id, turn_revision=ctx.turn_revision, error=str(exc))
+                return
+        else:
+            active_chat = original_chat.copy()
         language_code = request.language_code
         instructions = (
             response.instructions if response and response.instructions else runtime_config.session.instructions
         )
         tools = response.tools if response and response.tools else runtime_config.session.tools
         tool_choice = response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
-        self._apply_instructions(active_chat, instructions, tools, str(tool_choice) if tool_choice else None, ctx)
+        self._apply_instructions(
+            active_chat,
+            instructions,
+            tools,
+            str(tool_choice) if tool_choice else None,
+            ctx,
+            response_wants_audio(response),
+        )
         language_code, lang_name = resolve_auto_language(language_code)
         if lang_name and self.enable_lang_prompt:
             active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
@@ -493,52 +543,68 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         gen = self.cancel_scope.generation if self.cancel_scope else None
         ctx.cancel_generation = gen
 
-        yield from self._generate(active_chat, language_code, gen, ctx, runtime_config, response)
+        try:
+            yield from self._generate(active_chat, language_code, gen, ctx, runtime_config, response)
 
-        if ctx.stopped:
-            return
+            if ctx.stopped:
+                return
 
-        turn_output_allowed = not ctx.cancelled and self._turn_output_allowed(ctx.turn_id, ctx.turn_revision)
-        if turn_output_allowed:
-            original_chat.add_item(make_assistant_message(ctx.generated_text))
-        if turn_output_allowed and ctx.tools:
-            for t in ctx.tools:
-                original_chat.add_item(
-                    RealtimeConversationItemFunctionCall(
-                        type="function_call",
-                        id=t.id,
-                        call_id=t.call_id,
-                        name=t.name,
-                        arguments=t.arguments,
-                        status=t.status,
+            turn_output_allowed = not ctx.cancelled and self._turn_output_allowed(ctx.turn_id, ctx.turn_revision)
+            # Out-of-band responses still emit output, but never write back to the default
+            # conversation (their context was a throwaway chat).
+            commit_allowed = turn_output_allowed and not out_of_band
+            if commit_allowed:
+                original_chat.add_item(make_assistant_message(ctx.generated_text))
+            if commit_allowed and ctx.tools:
+                for t in ctx.tools:
+                    original_chat.add_item(
+                        RealtimeConversationItemFunctionCall(
+                            type="function_call",
+                            id=t.id,
+                            call_id=t.call_id,
+                            name=t.name,
+                            arguments=t.arguments,
+                            status=t.status,
+                        )
                     )
+            if commit_allowed:
+                original_chat.strip_images()
+                original_chat.trim_if_needed(self.compactor)
+            logger.debug("Clean text: %s", ctx.generated_text)
+            logger.info(f"Tools: {ctx.tools}")
+
+            if turn_output_allowed and ctx.printable_text.strip():
+                yield LLMResponseChunk(
+                    text=ctx.printable_text.strip(),
+                    language_code=language_code,
+                    runtime_config=runtime_config,
+                    response=response,
+                    turn_id=ctx.turn_id,
+                    turn_revision=ctx.turn_revision,
+                    speech_stopped_at_s=ctx.speech_stopped_at_s,
+                    cancel_generation=ctx.cancel_generation,
                 )
-        if turn_output_allowed:
-            original_chat.strip_images()
-            original_chat.trim_if_needed(self.compactor)
-        logger.debug("Clean text: %s", ctx.generated_text)
-        logger.info(f"Tools: {ctx.tools}")
 
-        if turn_output_allowed and ctx.printable_text.strip():
-            yield LLMResponseChunk(
-                text=ctx.printable_text.strip(),
-                language_code=language_code,
-                runtime_config=runtime_config,
-                response=response,
+            output_tokens = len(self.tokenizer.encode(ctx.raw_generated_text)) if ctx.raw_generated_text else 0
+            if turn_output_allowed and (ctx.input_tokens or output_tokens):
+                yield TokenUsage(
+                    input_tokens=ctx.input_tokens,
+                    output_tokens=output_tokens,
+                    turn_id=ctx.turn_id,
+                    turn_revision=ctx.turn_revision,
+                )
+        except Exception as exc:
+            # Any generation failure must still terminate the response. Without this
+            # the exception would escape process() and no EndOfResponse would be
+            # emitted, leaving st.in_response stuck and locking every later response.
+            logger.exception("LLM generation failed; ending the current response")
+            yield EndOfResponse(
                 turn_id=ctx.turn_id,
                 turn_revision=ctx.turn_revision,
-                speech_stopped_at_s=ctx.speech_stopped_at_s,
                 cancel_generation=ctx.cancel_generation,
+                error=f"Language model generation failed: {exc}",
             )
-
-        output_tokens = len(self.tokenizer.encode(ctx.raw_generated_text)) if ctx.raw_generated_text else 0
-        if turn_output_allowed and (ctx.input_tokens or output_tokens):
-            yield TokenUsage(
-                input_tokens=ctx.input_tokens,
-                output_tokens=output_tokens,
-                turn_id=ctx.turn_id,
-                turn_revision=ctx.turn_revision,
-            )
+            return
         yield EndOfResponse(
             turn_id=ctx.turn_id,
             turn_revision=ctx.turn_revision,

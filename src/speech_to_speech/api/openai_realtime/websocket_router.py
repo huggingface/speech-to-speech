@@ -503,7 +503,7 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                     if _is_pipeline_end(audio_chunk):
                         await _drain_pending_response_events(ws, unit, session_id)
                         if ws is not None and session_id:
-                            await _send_events(ws, unit.service.finish_audio_response(session_id))
+                            await _send_events(ws, unit.service.finish_response(session_id))
                         break
 
                     if _is_audio_done(audio_chunk):
@@ -517,7 +517,7 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                             continue
                         await _drain_pending_response_events(ws, unit, session_id)
                         if ws is not None and session_id:
-                            await _send_events(ws, unit.service.finish_audio_response(session_id))
+                            await _send_events(ws, unit.service.finish_response(session_id))
                         if session_id:
                             unit.service._state(session_id).response_pending = False
                         unit.response_playing.clear()

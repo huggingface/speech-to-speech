@@ -99,7 +99,7 @@ class AudioHandler(RealtimeBaseHandler):
         events: list[ServerEvent] = []
         st = self._state(conn_id)
         if st.in_response and event.interrupt_response and st.runtime_config.interrupt_response_enabled:
-            events.extend(response.finish_audio_response(conn_id, status="cancelled", reason="turn_detected"))
+            events.extend(response.finish_response(conn_id, status="cancelled", reason="turn_detected"))
         is_reopen = bool(event.reopened and event.turn_id is not None and event.turn_id == st.speculative_turn_id)
         preserve_active_response = st.in_response
         if is_reopen:
