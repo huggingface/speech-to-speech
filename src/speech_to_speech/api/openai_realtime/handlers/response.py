@@ -241,7 +241,7 @@ class ResponseHandler(RealtimeBaseHandler):
                         item_id=item_id,
                         output_index=0,
                         response_id=resp_id,
-                        text=" ".join(st.pending_output_text_parts),
+                        text="".join(st.pending_output_text_parts),
                     )
                 )
             events.append(

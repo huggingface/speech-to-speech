@@ -186,10 +186,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         input_tokens = 0
         output_tokens = 0
         error_message: str | None = None
-        # Text-only responses have no TTS to feed, so streaming buys no latency:
-        # force a single non-streamed call (the Response branch yields one full-text
-        # chunk). Audio responses keep streaming for low-latency synthesis.
-        use_stream = self.stream and response_wants_audio(response)
+        wants_audio = response_wants_audio(response)
         api_input = active_chat.to_responses_api_chat()
         if not api_input:
             # Nothing to send: empty `instructions` and no `input` (in the response,
@@ -201,7 +198,7 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                 api_response = self.client.responses.create(
                     model=self.model_name,
                     input=api_input,
-                    stream=use_stream,
+                    stream=self.stream,
                     extra_body=self._extra_body,
                     timeout=self.request_timeout,
                     **optional_kwargs,
@@ -218,6 +215,29 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                         cancelled = True
                         break
                     if isinstance(raw_event, ResponseTextDeltaEvent):
+                        if not wants_audio:
+                            # Text-only: forward the delta verbatim. Keep every
+                            # character (no remove_unspeechable, which strips
+                            # TTS-unfriendly symbols) and don't sentence-split
+                            # (sent_tokenize would collapse newlines / markdown).
+                            delta = raw_event.delta
+                            clean_text += delta
+                            if delta:
+                                if not self._turn_output_allowed(turn_id, turn_revision):
+                                    logger.info("LLM generation cancelled (stale speculative turn)")
+                                    cancelled = True
+                                    break
+                                yield LLMResponseChunk(
+                                    text=delta,
+                                    language_code=language_code,
+                                    runtime_config=runtime_config,
+                                    response=response,
+                                    turn_id=turn_id,
+                                    turn_revision=turn_revision,
+                                    speech_stopped_at_s=speech_stopped_at_s,
+                                    cancel_generation=gen,
+                                )
+                            continue
                         new_text = remove_unspeechable(raw_event.delta)
                         clean_text += new_text
                         printable_text += new_text
@@ -387,19 +407,22 @@ class ResponsesApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                                     type="message", role="assistant", content=content
                                 )
                             )
+                            # Text-only keeps every character verbatim; audio strips
+                            # TTS-unfriendly symbols via remove_unspeechable.
                             message_text = ""
                             for chunk in message.content:
                                 if chunk.type == "output_text":
-                                    message_text += remove_unspeechable(chunk.text)
+                                    message_text += chunk.text if not wants_audio else remove_unspeechable(chunk.text)
                             clean_text += message_text
-                            if message_text.strip():
+                            chunk_text = message_text if not wants_audio else message_text.strip()
+                            if chunk_text:
                                 if self._generation_is_stale(gen):
                                     logger.info("LLM generation cancelled (interruption)")
                                 elif not self._turn_output_allowed(turn_id, turn_revision):
                                     logger.info("LLM generation cancelled (stale speculative turn)")
                                 else:
                                     yield LLMResponseChunk(
-                                        text=message_text.strip(),
+                                        text=chunk_text,
                                         language_code=language_code,
                                         runtime_config=runtime_config,
                                         response=response,

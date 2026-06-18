@@ -134,21 +134,20 @@ def test_process_streams_text_from_response_events():
     assert isinstance(outputs[2], EndOfResponse)
 
 
-def test_text_only_response_forces_non_streaming_call():
+def test_text_only_streams_raw_deltas_without_sentence_trimming():
+    """Text-only streams (so a new speech turn can interrupt it) and forwards each
+    delta verbatim — no sent_tokenize (newlines / markdown survive) and no
+    remove_unspeechable (emoji / symbols survive)."""
     handler = _make_handler(stream=True)
     captured = {}
 
     def fake_create(**kwargs):
         captured.update(kwargs)
-        return _make_response(
-            output=[
-                ResponseOutputMessage(
-                    id="msg_1",
-                    type="message",
-                    role="assistant",
-                    status="completed",
-                    content=[ResponseOutputText(type="output_text", text="Hello there.", annotations=[])],
-                )
+        return _make_stream(
+            [
+                _make_text_delta_event("# Title 🎉\n"),
+                _make_text_delta_event("- one\n- two 😀\n"),
+                _make_output_item_done_event(content="# Title 🎉\n- one\n- two 😀\n"),
             ]
         )
 
@@ -163,12 +162,15 @@ def test_text_only_response_forces_non_streaming_call():
 
     outputs = list(handler.process(req))
 
-    # Text-only forces stream=False even though the handler is configured to stream.
-    assert captured["stream"] is False
-    assert any(isinstance(o, LLMResponseChunk) and o.text == "Hello there." for o in outputs)
+    # Still streamed, not a single buffered chunk.
+    assert captured["stream"] is True
+    texts = [o.text for o in outputs if isinstance(o, LLMResponseChunk)]
+    # Raw deltas: markdown layout AND emoji preserved (no trimming, no unspeechable filter).
+    assert texts == ["# Title 🎉\n", "- one\n- two 😀\n"]
+    assert "".join(texts) == "# Title 🎉\n- one\n- two 😀\n"
 
 
-def test_audio_response_keeps_streaming_call():
+def test_audio_response_sentence_batches_streaming_call():
     handler = _make_handler(stream=True)
     captured = {}
 

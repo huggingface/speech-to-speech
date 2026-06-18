@@ -368,6 +368,25 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 printable_text = code_and_after
             return chunks, tools, printable_text
 
+        if printable_text and not response_wants_audio(response) and ctx.enter_code is None:
+            # Text-only with no tool block: stream the raw text immediately. No TTS
+            # means no need to split into sentences, and sent_tokenize would collapse
+            # newlines / markdown. Streaming (vs buffering to the end) keeps the
+            # response interruptible by a new speech turn.
+            chunks.append(
+                LLMResponseChunk(
+                    text=printable_text,
+                    language_code=language_code,
+                    runtime_config=runtime_config,
+                    response=response,
+                    turn_id=ctx.turn_id,
+                    turn_revision=ctx.turn_revision,
+                    speech_stopped_at_s=ctx.speech_stopped_at_s,
+                    cancel_generation=ctx.cancel_generation,
+                )
+            )
+            return chunks, tools, ""
+
         if printable_text:
             sentences = sent_tokenize(printable_text)
             if len(sentences) > 1:
@@ -417,6 +436,9 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
         """Consume *token_iter*, accumulate text in *ctx*, yield sentence chunks."""
+        # Text-only output keeps every character; only audio strips TTS-unfriendly
+        # symbols via remove_unspeechable.
+        wants_audio = response_wants_audio(response)
         while True:
             try:
                 token = next(token_iter)
@@ -432,7 +454,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
             raw_text: str = token.text if hasattr(token, "text") else token
             ctx.raw_generated_text += raw_text
-            clean = remove_unspeechable(raw_text)
+            clean = raw_text if not wants_audio else remove_unspeechable(raw_text)
             ctx.generated_text += clean
             ctx.printable_text += clean
             chunks, ctx.tools, ctx.printable_text = self._process_printable_text(

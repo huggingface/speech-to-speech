@@ -915,18 +915,18 @@ class TestDispatchPipelineEvent:
         assert text_done[0].output_index == 0
         assert text_done[0].text == "Hello there"
 
-    def test_text_only_done_space_joins_streamed_parts(self, service, conn_id):
+    def test_text_only_done_concatenates_streamed_parts(self, service, conn_id):
         from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
         service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
             output_modalities=["text"],
         )
-        service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="Hello there."))
+        service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="Hello there. "))
         service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="How are you?"))
         done_events = service.finish_response(conn_id)
         text_done = [e for e in done_events if isinstance(e, ResponseTextDoneEvent)]
         assert len(text_done) == 1
-        # done.text space-joins the per-chunk parts collected during streaming.
+        # done.text concatenates the raw streamed parts verbatim (== sum of deltas).
         assert text_done[0].text == "Hello there. How are you?"
 
     def test_text_only_no_text_done_on_cancel(self, service, conn_id):
