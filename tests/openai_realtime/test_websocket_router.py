@@ -479,9 +479,7 @@ class TestSendLoop:
                 current_generation = cancel_scope.generation
                 assert cancel_scope.discarding
 
-                text_output_queue.put(
-                    AssistantTextEvent(text="hello there", cancel_generation=current_generation)
-                )
+                text_output_queue.put(AssistantTextEvent(text="hello there", cancel_generation=current_generation))
                 output_queue.put(AudioOutput(audio=_pcm_bytes(256), cancel_generation=current_generation))
                 output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=current_generation))
 
