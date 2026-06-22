@@ -21,6 +21,9 @@ from transformers import HfArgumentParser
 
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.arguments_classes.chat_completions_language_model_arguments import (
+    ChatCompletionsLanguageModelHandlerArguments,
+)
 from speech_to_speech.arguments_classes.chat_tts_arguments import ChatTTSHandlerArguments
 from speech_to_speech.arguments_classes.facebookmms_tts_arguments import FacebookMMSTTSHandlerArguments
 from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import (
@@ -38,9 +41,6 @@ from speech_to_speech.arguments_classes.parakeet_tdt_arguments import (
 )
 from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
-from speech_to_speech.arguments_classes.chat_completions_language_model_arguments import (
-    ChatCompletionsLanguageModelHandlerArguments,
-)
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
     ResponsesApiLanguageModelHandlerArguments,
 )
