@@ -125,6 +125,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                 text=lm_output.text,
                 turn_id=lm_output.turn_id,
                 turn_revision=lm_output.turn_revision,
+                cancel_generation=lm_output.cancel_generation,
             )
             if lm_output.tools:
                 event.tools = lm_output.tools

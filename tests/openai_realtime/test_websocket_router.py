@@ -460,6 +460,41 @@ class TestSendLoop:
                 assert delta["type"] == "response.output_audio.delta"
                 assert len(base64.b64decode(delta["delta"])) == len(_pcm_bytes(512))
 
+    def test_current_generation_text_survives_stuck_discarding(self, setup):
+        """Regression: a fresh response's transcript must survive a stuck discard guard.
+
+        A superseded speculative turn can leave ``cancel_scope.discarding`` stuck True
+        (its TTS dropped the stale ``EndOfResponse`` without emitting AUDIO_RESPONSE_DONE,
+        so ``response_done()`` never cleared the flag). The next response's audio is tagged
+        with the current generation and streams fine, but the assistant text used to be
+        blanket-dropped while discarding — leaving audio + ``response.done`` with no
+        ``response.output_audio_transcript.done``. The text is now discarded by the same
+        generation-aware rule as audio, so a current-generation transcript is kept.
+        """
+        app, _, _, output_queue, text_output_queue, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                cancel_scope.cancel()  # discarding=True, generation bumped; sentinel never arrived
+                current_generation = cancel_scope.generation
+                assert cancel_scope.discarding
+
+                text_output_queue.put(AssistantTextEvent(text="hello there", cancel_generation=current_generation))
+                output_queue.put(AudioOutput(audio=_pcm_bytes(256), cancel_generation=current_generation))
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=current_generation))
+
+                types: list[str] = []
+                transcript = None
+                for _ in range(8):
+                    msg = ws.receive_json()
+                    types.append(msg["type"])
+                    if msg["type"] == "response.output_audio_transcript.done":
+                        transcript = msg["transcript"]
+                    if msg["type"] == "response.done":
+                        break
+                assert "response.output_audio_transcript.done" in types
+                assert transcript == "hello there"
+
     def test_stale_tagged_response_done_does_not_finish_current_response(self, setup):
         app, service, _, output_queue, _, _, _, _, cancel_scope = setup
         with TestClient(app) as client:

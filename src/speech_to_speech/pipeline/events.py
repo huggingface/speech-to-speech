@@ -72,6 +72,10 @@ class AssistantTextEvent(PipelineEvent):
     tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
     turn_id: str | None = None
     turn_revision: int | None = None
+    # Response generation that produced this text, mirroring AudioOutput. Lets the
+    # send loop discard stale assistant text by the same generation-aware rule as
+    # audio, instead of blanket-dropping while cancel_scope.discarding is set.
+    cancel_generation: int | None = None
 
 
 class TokenUsageEvent(PipelineEvent):
