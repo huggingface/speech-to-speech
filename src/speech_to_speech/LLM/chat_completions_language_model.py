@@ -283,10 +283,12 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         api_response: Stream[ChatCompletionChunk] | Any = None
         tools: list[ResponseFunctionToolCall] = []
         pending_chat_items: list[SupportedItem] = []
+        # clean_text accumulates the filtered (TTS-ready) text purely for the
+        # debug log; the text actually spoken is yielded per sentence batch.
         clean_text = ""
-        # Raw (unfiltered) assistant text written back to history; clean_text is the
-        # TTS-ready string sent to the speaker. Storing the filtered text would show
-        # the model a degraded view of its own past turns and cause multi-turn drift.
+        # Raw (unfiltered) assistant text written back to history. Storing the
+        # filtered text would show the model a degraded view of its own past turns
+        # and cause multi-turn drift, so history uses raw_text, not clean_text.
         raw_text = ""
         input_tokens = 0
         output_tokens = 0
