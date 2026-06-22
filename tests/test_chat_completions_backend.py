@@ -14,26 +14,28 @@ import queue
 import threading
 from types import SimpleNamespace
 
-import speech_to_speech.LLM.chat_completions_language_model as ccm
-from speech_to_speech.LLM.chat_completions_language_model import (
-    ChatCompletionsApiModelHandler,
-    _to_chat_tools,
-    _to_chat_tool_choice,
-)
-from speech_to_speech.LLM.chat import Chat, make_user_message
-from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.pipeline.messages import (
-    GenerateResponseRequest,
-    LLMResponseChunk,
-    TokenUsage,
-)
-from openai.types.realtime.realtime_session_create_request import RealtimeSessionCreateRequest
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemFunctionCall,
     RealtimeConversationItemFunctionCallOutput,
 )
+from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+from openai.types.realtime.realtime_session_create_request import RealtimeSessionCreateRequest
 from openai.types.responses import ResponseFunctionToolCall
 
+import speech_to_speech.LLM.chat_completions_language_model as ccm
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.LLM.chat import Chat, make_user_message
+from speech_to_speech.LLM.chat_completions_language_model import (
+    ChatCompletionsApiModelHandler,
+    _to_chat_tool_choice,
+    _to_chat_tools,
+)
+from speech_to_speech.pipeline.messages import (
+    EndOfResponse,
+    GenerateResponseRequest,
+    LLMResponseChunk,
+    TokenUsage,
+)
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
 
@@ -114,26 +116,38 @@ def _tc_delta(index, id=None, name=None, arguments=None):
     return SimpleNamespace(index=index, id=id, function=SimpleNamespace(name=name, arguments=arguments))
 
 
-def _drive(handler, *, tools=None, tool_choice=None, user="Hallo", chat=None):
+def _drive(
+    handler,
+    *,
+    tools=None,
+    tool_choice=None,
+    user="Hallo",
+    chat=None,
+    response=None,
+    instructions="Du bist ein Roboter.",
+):
     chat = chat or Chat(10)
-    chat.add_item(make_user_message(user))
-    session = RealtimeSessionCreateRequest(type="realtime", instructions="Du bist ein Roboter.")
+    if user:
+        chat.add_item(make_user_message(user))
+    session = RealtimeSessionCreateRequest(type="realtime", instructions=instructions)
     if tools is not None:
         session.tools = tools
     if tool_choice is not None:
         session.tool_choice = tool_choice
     rc = RuntimeConfig(chat=chat, session=session)
     req = GenerateResponseRequest(
-        runtime_config=rc, response=None, language_code="de", turn_id="t", turn_revision=0
+        runtime_config=rc, response=response, language_code="de", turn_id="t", turn_revision=0
     )
-    text, tools_out, usage = "", [], None
+    text, tools_out, usage, end = "", [], None, None
     for out in handler.process(req):
         if isinstance(out, LLMResponseChunk):
             text += out.text
             tools_out += list(out.tools)
         elif isinstance(out, TokenUsage):
             usage = (out.input_tokens, out.output_tokens)
-    return text, tools_out, usage, chat
+        elif isinstance(out, EndOfResponse):
+            end = out
+    return text, tools_out, usage, chat, end
 
 
 # ── Converter tests ──────────────────────────────────────────────────────────
@@ -141,7 +155,9 @@ def _drive(handler, *, tools=None, tool_choice=None, user="Hallo", chat=None):
 
 def test_to_chat_tools_flat_to_nested():
     out = _to_chat_tools([{"type": "function", "name": "f", "description": "d", "parameters": {"type": "object"}}])
-    assert out == [{"type": "function", "function": {"name": "f", "description": "d", "parameters": {"type": "object"}}}]
+    assert out == [
+        {"type": "function", "function": {"name": "f", "description": "d", "parameters": {"type": "object"}}}
+    ]
 
 
 def test_to_chat_tools_passthrough_and_none():
@@ -198,7 +214,7 @@ def test_streaming_text_and_usage():
             _chunk(usage=SimpleNamespace(prompt_tokens=12, completion_tokens=5)),
         ]
     )
-    text, tools, usage, chat = _drive(h)
+    text, tools, usage, chat, _end = _drive(h)
     assert "Hallo" in text and "Wie geht es dir" in text
     assert usage == (12, 5)
     assert tools == []
@@ -216,7 +232,7 @@ def test_streaming_tool_call_accumulates_arguments():
             _chunk(usage=SimpleNamespace(prompt_tokens=20, completion_tokens=8)),
         ]
     )
-    text, tools, usage, chat = _drive(
+    text, tools, usage, chat, _end = _drive(
         h,
         tools=[{"type": "function", "name": "move_head", "parameters": {"type": "object"}}],
         tool_choice="required",
@@ -249,7 +265,7 @@ def test_non_streaming_tool_call():
         ],
         usage=SimpleNamespace(prompt_tokens=7, completion_tokens=3),
     )
-    text, tools, usage, chat = _drive(
+    text, tools, usage, chat, _end = _drive(
         h,
         tools=[{"type": "function", "name": "move_head", "parameters": {"type": "object"}}],
         tool_choice="required",
@@ -274,6 +290,111 @@ def test_tools_converted_to_chat_format_on_request():
     assert captured["tool_choice"] == "auto"
     assert captured["stream"] is True
     assert captured["stream_options"] == {"include_usage": True}
+
+
+# ── Text-only (output_modalities=["text"]) ────────────────────────────────────
+
+
+def test_text_only_streaming_preserves_raw_deltas():
+    """With output_modalities=["text"], deltas are forwarded verbatim: no
+    remove_unspeechable (emoji/markdown survive) and no sentence batching."""
+    h = _make_handler(stream=True)
+    h.client.chat.completions.create = lambda **k: _FakeStream(
+        [
+            _chunk(content="# Title 🎉\n"),
+            _chunk(content="- one\n- two 😀\n"),
+            _chunk(usage=SimpleNamespace(prompt_tokens=3, completion_tokens=4)),
+        ]
+    )
+    text, tools, usage, chat, end = _drive(h, response=RealtimeResponseCreateParams(output_modalities=["text"]))
+    # Raw markdown layout and emoji preserved end-to-end.
+    assert text == "# Title 🎉\n- one\n- two 😀\n"
+    assert tools == []
+    assert usage == (3, 4)
+    # Raw assistant text is committed to history (not the filtered TTS string).
+    assert any(getattr(i, "role", None) == "assistant" for i in chat.buffer), "assistant turn should be stored"
+
+
+def test_non_streaming_text_only_preserves_symbols():
+    h = _make_handler(stream=False)
+    h.client.chat.completions.create = lambda **k: SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="**bold** 🎉", tool_calls=[]))],
+        usage=SimpleNamespace(prompt_tokens=2, completion_tokens=2),
+    )
+    text, tools, usage, chat, end = _drive(h, response=RealtimeResponseCreateParams(output_modalities=["text"]))
+    assert text == "**bold** 🎉"  # symbols not stripped
+
+
+# ── tool_choice decoupled from tools ──────────────────────────────────────────
+
+
+def test_tool_choice_sent_without_tools():
+    """A session-level tool_choice must reach the server even when no tools list
+    is supplied (e.g. tool_choice="none" to suppress tool use)."""
+    h = _make_handler(stream=True)
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _FakeStream([_chunk(content="ok.")])
+
+    h.client.chat.completions.create = fake_create
+    _drive(h, tool_choice="none")
+    assert "tools" not in captured
+    assert captured["tool_choice"] == "none"
+
+
+# ── Error propagation ─────────────────────────────────────────────────────────
+
+
+def test_empty_input_emits_failed_end_of_response():
+    """No instructions and no conversation input → terminating EndOfResponse with
+    an error, instead of an opaque provider 400."""
+    h = _make_handler(stream=True)
+    called = {"n": 0}
+
+    def fake_create(**kwargs):
+        called["n"] += 1
+        return _FakeStream([_chunk(content="should not happen")])
+
+    h.client.chat.completions.create = fake_create
+    # Empty chat + empty instructions => nothing to send.
+    text, tools, usage, chat, end = _drive(h, user="", instructions="", chat=Chat(10))
+    assert called["n"] == 0, "no API call should be made when there is nothing to send"
+    assert end is not None and end.error is not None
+    assert text == ""
+
+
+def test_generation_error_emits_failed_end_of_response():
+    """An exception during generation is caught and surfaced on EndOfResponse.error
+    so the response is closed instead of leaving the pipeline stuck."""
+    h = _make_handler(stream=True)
+
+    def boom(**kwargs):
+        raise RuntimeError("kaboom")
+
+    h.client.chat.completions.create = boom
+    text, tools, usage, chat, end = _drive(h)
+    assert end is not None and end.error is not None
+    assert "kaboom" in end.error
+
+
+# ── Out-of-band (conversation="none") responses ───────────────────────────────
+
+
+def test_out_of_band_does_not_commit_to_default_conversation():
+    """Out-of-band output is emitted but never written back to the default chat."""
+    h = _make_handler(stream=True)
+    h.client.chat.completions.create = lambda **k: _FakeStream(
+        [_chunk(content="Background note."), _chunk(usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1))]
+    )
+    chat = Chat(10)
+    text, tools, usage, chat, end = _drive(
+        h, chat=chat, response=RealtimeResponseCreateParams(conversation="none", output_modalities=["text"])
+    )
+    assert "Background note." in text
+    # Default conversation keeps only the seeded user turn — no assistant commit.
+    assert not any(getattr(i, "role", None) == "assistant" for i in chat.buffer)
 
 
 # ── Standalone runner (no pytest required) ────────────────────────────────────
