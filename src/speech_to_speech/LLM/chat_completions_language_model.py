@@ -130,7 +130,20 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         self.warmup()
 
     @staticmethod
+    def _is_official_openai(base_url: Optional[str]) -> bool:
+        """Whether ``base_url`` points at the official OpenAI server.
+
+        Normalises a trailing slash so ``https://api.openai.com/v1/`` is also
+        recognised; the official server rejects the provider-specific extra_body
+        keys we send to vLLM / the HF router.
+        """
+        if base_url is None:
+            return False
+        return base_url.rstrip("/") == "https://api.openai.com/v1"
+
+    @classmethod
     def _build_extra_body(
+        cls,
         base_url: Optional[str],
         disable_thinking: bool,
         reasoning_effort: Optional[str],
@@ -139,14 +152,14 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
 
         Providers differ in how reasoning is turned off: vLLM/Qwen honour
         ``chat_template_kwargs.enable_thinking=false``, while others (e.g. GLM via
-        the HF router) ignore that and require ``reasoning_effort='none'``. An
-        explicit ``reasoning_effort`` therefore takes precedence; otherwise we fall
+        the HF router) ignore that and require ``reasoning_effort='none'``. A
+        non-empty ``reasoning_effort`` therefore takes precedence; otherwise we fall
         back to the chat-template flag. None of this applies to the official
         OpenAI server, which rejects unknown extra_body keys.
         """
-        if base_url is None or base_url == "https://api.openai.com/v1":
+        if base_url is None or cls._is_official_openai(base_url):
             return None
-        if reasoning_effort is not None:
+        if reasoning_effort:
             return {"reasoning_effort": reasoning_effort}
         if disable_thinking:
             return {"chat_template_kwargs": {"enable_thinking": False}}
@@ -211,13 +224,37 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
             chat.add_item(make_system_message(full_instructions))
 
     @staticmethod
-    def _chat_messages(chat: Chat) -> list[dict[str, Any]]:
+    def _to_chat_content_part(part: dict[str, Any]) -> dict[str, Any]:
+        """Convert one transformers content part to Chat-Completions shape.
+
+        ``to_transformers_chat`` keeps Realtime-style parts (``input_text`` /
+        ``input_image`` with a bare-string ``image_url``). The Chat Completions
+        HTTP API instead wants ``{type:"text", text}`` and
+        ``{type:"image_url", image_url:{url, detail}}``. Unknown parts pass through.
+        """
+        ptype = part.get("type")
+        if ptype == "input_text":
+            return {"type": "text", "text": part.get("text") or ""}
+        if ptype == "input_image":
+            image_url = part.get("image_url")
+            if not isinstance(image_url, dict):
+                image_url = {"url": image_url}
+                detail = part.get("detail")
+                if detail is not None:
+                    image_url["detail"] = detail
+            return {"type": "image_url", "image_url": image_url}
+        return part
+
+    @classmethod
+    def _chat_messages(cls, chat: Chat) -> list[dict[str, Any]]:
         """Serialise the chat for the Chat Completions API.
 
         ``Chat.to_transformers_chat`` targets HuggingFace ``apply_chat_template``,
-        which expects tool-call ``arguments`` as a parsed object. The OpenAI Chat
-        Completions HTTP API instead requires ``arguments`` to be a JSON *string*,
-        so re-encode any object back to a string here.
+        so two shapes need fixing up for the OpenAI Chat Completions HTTP API:
+        tool-call ``arguments`` must be a JSON *string* (not a parsed object), and
+        multimodal ``content`` parts must use the Chat Completions ``text`` /
+        ``image_url`` shape rather than the Realtime ``input_text`` /
+        ``input_image`` shape.
         """
         messages = chat.to_transformers_chat()
         for message in messages:
@@ -225,6 +262,9 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                 fn = tool_call.get("function")
                 if fn is not None and not isinstance(fn.get("arguments"), str):
                     fn["arguments"] = json.dumps(fn.get("arguments") or {}, ensure_ascii=False)
+            content = message.get("content")
+            if isinstance(content, list):
+                message["content"] = [cls._to_chat_content_part(p) for p in content]
         return messages
 
     def _generate(
@@ -314,20 +354,37 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
 
                     delta = chunk.choices[0].delta
 
-                    if delta.content:
-                        raw_text += delta.content
+                    # Accumulate tool-call deltas first: a single chunk can carry
+                    # both content and tool_calls, and the text-only branch below
+                    # `continue`s, which would otherwise skip this block.
+                    if delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            entry = tool_accum.setdefault(tc.index, {"name": "", "args": "", "id": ""})
+                            if tc.id:
+                                entry["id"] = tc.id
+                            if tc.function is not None:
+                                if tc.function.name:
+                                    entry["name"] = tc.function.name
+                                if tc.function.arguments:
+                                    entry["args"] += tc.function.arguments
+
+                    # A refusal streams as `delta.refusal` with `delta.content`
+                    # None; surface it as assistant text so it is spoken and stored.
+                    text_piece = delta.content or getattr(delta, "refusal", None)
+                    if text_piece:
+                        raw_text += text_piece
                         if not wants_audio:
                             # Text-only: forward the delta verbatim. Keep every
                             # character (no remove_unspeechable, which strips
                             # TTS-unfriendly symbols) and don't sentence-split
                             # (sent_tokenize would collapse newlines / markdown).
-                            clean_text += delta.content
+                            clean_text += text_piece
                             if not self._turn_output_allowed(turn_id, turn_revision):
                                 logger.info("LLM generation cancelled (stale speculative turn)")
                                 cancelled = True
                                 break
                             yield LLMResponseChunk(
-                                text=delta.content,
+                                text=text_piece,
                                 language_code=language_code,
                                 runtime_config=runtime_config,
                                 response=response,
@@ -337,7 +394,7 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                                 cancel_generation=gen,
                             )
                             continue
-                        new_text = remove_unspeechable(delta.content)
+                        new_text = remove_unspeechable(text_piece)
                         clean_text += new_text
                         printable_text += new_text
                         sentences = sent_tokenize(printable_text)
@@ -354,17 +411,6 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                             if cancelled:
                                 break
                             printable_text = sentences[-1]
-
-                    if delta.tool_calls:
-                        for tc in delta.tool_calls:
-                            entry = tool_accum.setdefault(tc.index, {"name": "", "args": "", "id": ""})
-                            if tc.id:
-                                entry["id"] = tc.id
-                            if tc.function is not None:
-                                if tc.function.name:
-                                    entry["name"] = tc.function.name
-                                if tc.function.arguments:
-                                    entry["args"] += tc.function.arguments
 
                 if not cancelled:
                     # Flush any trailing text before emitting tool calls.
@@ -407,21 +453,25 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     if usage:
                         input_tokens = usage.prompt_tokens or 0
                         output_tokens = usage.completion_tokens or 0
-                    message = api_response.choices[0].message
+                    # A valid-but-empty response (e.g. content filter) returns no
+                    # choices; complete cleanly with no assistant text rather than
+                    # raising IndexError.
+                    message = api_response.choices[0].message if api_response.choices else None
+                    # A refusal arrives as `message.refusal` with `message.content`
+                    # None; treat it as assistant text so it is spoken and stored.
+                    raw_content = (message.content or getattr(message, "refusal", None)) if message else None
                     # Text-only keeps every character verbatim; audio strips
                     # TTS-unfriendly symbols via remove_unspeechable.
-                    message_text = (
-                        (message.content or "") if not wants_audio else remove_unspeechable(message.content or "")
-                    )
+                    message_text = (raw_content or "") if not wants_audio else remove_unspeechable(raw_content or "")
                     clean_text += message_text
                     # Gate history write-back on the raw content so a turn that is
                     # entirely TTS-unfriendly symbols is still stored, not dropped.
-                    if message.content:
+                    if raw_content:
                         pending_chat_items.append(
                             RealtimeConversationItemAssistantMessage(
                                 type="message",
                                 role="assistant",
-                                content=[AssistantContent(type="output_text", text=message.content)],
+                                content=[AssistantContent(type="output_text", text=raw_content)],
                             )
                         )
                     chunk_text = message_text if not wants_audio else message_text.strip()
@@ -437,7 +487,7 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                                 speech_stopped_at_s=speech_stopped_at_s,
                                 cancel_generation=gen,
                             )
-                    for tc in message.tool_calls or []:
+                    for tc in (message.tool_calls if message else None) or []:
                         tool_accum[len(tool_accum)] = {
                             "name": tc.function.name or "",
                             "args": tc.function.arguments or "",

@@ -17,7 +17,9 @@ from types import SimpleNamespace
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemFunctionCall,
     RealtimeConversationItemFunctionCallOutput,
+    RealtimeConversationItemUserMessage,
 )
+from openai.types.realtime.realtime_conversation_item_user_message import Content as UserContent
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.realtime.realtime_session_create_request import RealtimeSessionCreateRequest
 from openai.types.responses import ResponseFunctionToolCall
@@ -178,6 +180,8 @@ def test_build_extra_body_variants():
     assert f("http://x/v1", True, None) == {"chat_template_kwargs": {"enable_thinking": False}}
     assert f("http://x/v1", True, "none") == {"reasoning_effort": "none"}  # explicit effort wins
     assert f("https://api.openai.com/v1", True, "none") is None  # official OpenAI: no extra_body
+    assert f("https://api.openai.com/v1/", True, "none") is None  # trailing slash still official
+    assert f("http://x/v1", True, "") == {"chat_template_kwargs": {"enable_thinking": False}}  # empty effort ignored
     assert f("http://x/v1", False, None) is None
     assert f(None, True, None) is None
 
@@ -200,6 +204,31 @@ def test_chat_messages_encodes_tool_arguments_as_string():
     args = tool_call_msgs[0]["tool_calls"][0]["function"]["arguments"]
     assert isinstance(args, str), f"arguments must be a JSON string, got {type(args)}"
     assert json.loads(args) == {"direction": "left"}
+
+
+def test_chat_messages_converts_image_and_text_parts_to_chat_shape():
+    """to_transformers_chat emits Realtime-shaped parts (input_text / input_image
+    with a bare-string image_url); the Chat Completions API needs text / image_url
+    with a nested object."""
+    chat = Chat(10)
+    chat.add_item(
+        RealtimeConversationItemUserMessage(
+            type="message",
+            role="user",
+            content=[
+                UserContent(type="input_text", text="What is this?"),
+                UserContent(type="input_image", image_url="https://example.com/img.png", detail="auto"),
+            ],
+        )
+    )
+    messages = ChatCompletionsApiModelHandler._chat_messages(chat)
+    user = [m for m in messages if m.get("role") == "user"][0]
+    assert isinstance(user["content"], list)
+    parts = {p["type"]: p for p in user["content"]}
+    assert parts["text"]["text"] == "What is this?"
+    assert parts["image_url"]["image_url"] == {"url": "https://example.com/img.png", "detail": "auto"}
+    # No Realtime-shaped parts leak through.
+    assert all(p["type"] not in ("input_text", "input_image") for p in user["content"])
 
 
 # ── Streaming / non-streaming parse tests ─────────────────────────────────────
@@ -275,6 +304,53 @@ def test_non_streaming_tool_call():
     assert usage == (7, 3)
 
 
+def test_streaming_refusal_is_spoken_and_stored():
+    """A refusal streams as delta.refusal (content None); it must be surfaced as
+    assistant text and written to history, not silently dropped."""
+    h = _make_handler(stream=True)
+    h.client.chat.completions.create = lambda **k: _FakeStream(
+        [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content=None, refusal="I cannot help with that.", tool_calls=None),
+                        finish_reason=None,
+                    )
+                ],
+                usage=None,
+            ),
+            _chunk(usage=SimpleNamespace(prompt_tokens=4, completion_tokens=6)),
+        ]
+    )
+    text, tools, usage, chat, _end = _drive(h)
+    assert "I cannot help with that." in text
+    assert any(getattr(i, "role", None) == "assistant" for i in chat.buffer)
+
+
+def test_non_streaming_refusal_is_spoken_and_stored():
+    h = _make_handler(stream=False)
+    h.client.chat.completions.create = lambda **k: SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=None, refusal="No can do.", tool_calls=[]))],
+        usage=SimpleNamespace(prompt_tokens=2, completion_tokens=2),
+    )
+    text, tools, usage, chat, _end = _drive(h)
+    assert text == "No can do."
+    assert any(getattr(i, "role", None) == "assistant" for i in chat.buffer)
+
+
+def test_non_streaming_empty_choices_completes_cleanly():
+    """A valid response with no choices (e.g. content filter) completes with no
+    assistant text and no error, instead of raising IndexError."""
+    h = _make_handler(stream=False)
+    h.client.chat.completions.create = lambda **k: SimpleNamespace(
+        choices=[], usage=SimpleNamespace(prompt_tokens=1, completion_tokens=0)
+    )
+    text, tools, usage, chat, end = _drive(h)
+    assert text == ""
+    assert tools == []
+    assert end is not None and end.error is None  # clean end, not a generation failure
+
+
 def test_tools_converted_to_chat_format_on_request():
     """The request sent to the server must carry Chat-Completions-shaped tools."""
     h = _make_handler(stream=True)
@@ -313,6 +389,37 @@ def test_text_only_streaming_preserves_raw_deltas():
     assert usage == (3, 4)
     # Raw assistant text is committed to history (not the filtered TTS string).
     assert any(getattr(i, "role", None) == "assistant" for i in chat.buffer), "assistant turn should be stored"
+
+
+def test_text_only_tool_call_in_same_delta_not_dropped():
+    """In text-only mode a delta can carry both content and a tool_call fragment;
+    the tool_call must still be accumulated despite the verbatim-forward `continue`."""
+    h = _make_handler(stream=True)
+    h.client.chat.completions.create = lambda **k: _FakeStream(
+        [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content="Looking it up. ",
+                            tool_calls=[_tc_delta(0, id="srv_1", name="search", arguments='{"q":"x"}')],
+                        ),
+                        finish_reason=None,
+                    )
+                ],
+                usage=None,
+            ),
+            _chunk(usage=SimpleNamespace(prompt_tokens=5, completion_tokens=5)),
+        ]
+    )
+    text, tools, usage, chat, _end = _drive(
+        h,
+        tools=[{"type": "function", "name": "search", "parameters": {"type": "object"}}],
+        response=RealtimeResponseCreateParams(output_modalities=["text"]),
+    )
+    assert "Looking it up." in text
+    assert len(tools) == 1 and tools[0].name == "search"  # not dropped by the text-only continue
+    assert json.loads(tools[0].arguments) == {"q": "x"}
 
 
 def test_non_streaming_text_only_preserves_symbols():
