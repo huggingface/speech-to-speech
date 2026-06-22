@@ -24,6 +24,7 @@ from openai.types.realtime.realtime_response_create_params import RealtimeRespon
 from openai.types.realtime.realtime_session_create_request import RealtimeSessionCreateRequest
 from openai.types.responses import ResponseFunctionToolCall
 
+import speech_to_speech.LLM.base_openai_compatible_language_model as base_mod
 import speech_to_speech.LLM.chat_completions_language_model as ccm
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
@@ -86,8 +87,8 @@ class _FakeClient:
 
 def _make_handler(stream=True):
     """Build a handler whose warmup hits the fake client (no network)."""
-    orig_openai = ccm.OpenAI
-    ccm.OpenAI = _FakeClient
+    orig_openai = base_mod.OpenAI
+    base_mod.OpenAI = _FakeClient
     try:
         h = ChatCompletionsApiModelHandler(
             threading.Event(),
@@ -103,7 +104,7 @@ def _make_handler(stream=True):
             ),
         )
     finally:
-        ccm.OpenAI = orig_openai
+        base_mod.OpenAI = orig_openai
     return h
 
 
