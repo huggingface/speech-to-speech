@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import httpx
@@ -17,6 +16,7 @@ from openai.types.realtime.realtime_conversation_item_assistant_message import (
     Content as AssistantContent,
 )
 from openai.types.responses import ResponseFunctionToolCall
+from pydantic import BaseModel, ConfigDict, Field
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import (
@@ -50,30 +50,26 @@ logger = logging.getLogger(__name__)
 # lives in one place. Subclasses differ only in how they produce these events.
 
 
-@dataclass
-class TextDelta:
+class TextDelta(BaseModel):
     """Incremental assistant text. Always RAW (unfiltered); the base applies
     ``remove_unspeechable`` for the audio path."""
 
     text: str
 
 
-@dataclass
-class AssistantMessage:
+class AssistantMessage(BaseModel):
     """A complete assistant turn to write back to history."""
 
     content: list[AssistantContent]
 
 
-@dataclass
-class ToolCall:
+class ToolCall(BaseModel):
     """A complete function tool call (``call_id`` / ``id`` already regenerated)."""
 
     item: ResponseFunctionToolCall
 
 
-@dataclass
-class Usage:
+class Usage(BaseModel):
     """Token accounting for the turn."""
 
     input_tokens: int
@@ -83,9 +79,10 @@ class Usage:
 ProviderEvent = TextDelta | AssistantMessage | ToolCall | Usage
 
 
-@dataclass
-class _Turn:
+class _Turn(BaseModel):
     """Per-request context threaded through generation (immutable for the turn)."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     language_code: Optional[str]
     gen: int | None
@@ -97,12 +94,13 @@ class _Turn:
     wants_audio: bool
 
 
-@dataclass
-class _GenState:
+class _GenState(BaseModel):
     """Mutable accumulators collected while consuming a turn's events."""
 
-    tools: list[ResponseFunctionToolCall] = field(default_factory=list)
-    pending: list[SupportedItem] = field(default_factory=list)
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
+    pending: list[SupportedItem] = Field(default_factory=list)
     clean_text: str = ""  # filtered text, kept only for the debug log
     input_tokens: int = 0
     output_tokens: int = 0

@@ -112,35 +112,35 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
     def _iter_stream_events(self, api_response: Stream) -> Iterator[ProviderEvent]:
         for raw_event in api_response:
             if isinstance(raw_event, ResponseTextDeltaEvent):
-                yield TextDelta(raw_event.delta)
+                yield TextDelta(text=raw_event.delta)
             elif isinstance(raw_event, ResponseOutputItemDoneEvent):
                 item = raw_event.item
                 if isinstance(item, ResponseFunctionToolCall):
                     item.call_id = _generate_id("call")
                     item.id = _generate_id("fc")
-                    yield ToolCall(item)
+                    yield ToolCall(item=item)
                 elif isinstance(item, ResponseOutputMessage):
-                    yield AssistantMessage(self._assistant_content(item.content))
+                    yield AssistantMessage(content=self._assistant_content(item.content))
             elif isinstance(raw_event, ResponseCompletedEvent):
                 usage = getattr(raw_event.response, "usage", None)
                 if usage:
-                    yield Usage(usage.input_tokens or 0, usage.output_tokens or 0)
+                    yield Usage(input_tokens=usage.input_tokens or 0, output_tokens=usage.output_tokens or 0)
 
     def _iter_response_events(self, api_response: Any) -> Iterator[ProviderEvent]:
         usage = api_response.usage
         if usage:
-            yield Usage(usage.input_tokens or 0, usage.output_tokens or 0)
+            yield Usage(input_tokens=usage.input_tokens or 0, output_tokens=usage.output_tokens or 0)
         for message in api_response.output:
             if isinstance(message, ResponseFunctionToolCall):
                 message.call_id = _generate_id("call")
                 message.id = _generate_id("fc")
-                yield ToolCall(message)
+                yield ToolCall(item=message)
             elif isinstance(message, ResponseOutputMessage):
-                yield AssistantMessage(self._assistant_content(message.content))
+                yield AssistantMessage(content=self._assistant_content(message.content))
                 # Text-only keeps every character; the base applies remove_unspeechable
                 # for audio. Only output_text parts are spoken (refusals are stored).
                 raw = "".join(c.text for c in message.content if c.type == "output_text")
-                yield TextDelta(raw)
+                yield TextDelta(text=raw)
             else:
                 logger.warning(f"Not supported message type: {message.type}")
 

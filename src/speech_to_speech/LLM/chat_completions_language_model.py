@@ -191,7 +191,9 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         for chunk in api_response:
             # Usage-only trailing chunk (choices == []) when include_usage is set.
             if chunk.usage is not None:
-                usage = Usage(chunk.usage.prompt_tokens or 0, chunk.usage.completion_tokens or 0)
+                usage = Usage(
+                    input_tokens=chunk.usage.prompt_tokens or 0, output_tokens=chunk.usage.completion_tokens or 0
+                )
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
@@ -210,10 +212,10 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
             text_piece = delta.content or getattr(delta, "refusal", None)
             if text_piece:
                 raw_text += text_piece
-                yield TextDelta(text_piece)
+                yield TextDelta(text=text_piece)
 
         if raw_text.strip():
-            yield AssistantMessage([AssistantContent(type="output_text", text=raw_text)])
+            yield AssistantMessage(content=[AssistantContent(type="output_text", text=raw_text)])
         yield from self._tool_calls_from_accum(tool_accum)
         if usage is not None:
             yield usage
@@ -221,7 +223,7 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
     def _iter_response_events(self, api_response: Any) -> Iterator[ProviderEvent]:
         usage = api_response.usage
         if usage:
-            yield Usage(usage.prompt_tokens or 0, usage.completion_tokens or 0)
+            yield Usage(input_tokens=usage.prompt_tokens or 0, output_tokens=usage.completion_tokens or 0)
         # A valid-but-empty response (e.g. content filter) returns no choices;
         # complete cleanly with no assistant text rather than raising IndexError.
         message = api_response.choices[0].message if api_response.choices else None
@@ -231,8 +233,8 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         # it as assistant text so it is spoken and stored.
         raw_content = message.content or getattr(message, "refusal", None)
         if raw_content:
-            yield AssistantMessage([AssistantContent(type="output_text", text=raw_content)])
-            yield TextDelta(raw_content)
+            yield AssistantMessage(content=[AssistantContent(type="output_text", text=raw_content)])
+            yield TextDelta(text=raw_content)
         tool_accum: dict[int, dict[str, str]] = {}
         for tc in message.tool_calls or []:
             tool_accum[len(tool_accum)] = {
@@ -254,7 +256,7 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
             if not entry["name"]:
                 continue
             yield ToolCall(
-                ResponseFunctionToolCall(
+                item=ResponseFunctionToolCall(
                     type="function_call",
                     name=entry["name"],
                     arguments=entry["args"] or "{}",
