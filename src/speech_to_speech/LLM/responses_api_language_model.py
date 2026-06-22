@@ -109,12 +109,6 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
             AssistantContent(type="output_text", text=c.text if c.type == "output_text" else c.refusal) for c in content
         ]
 
-    def _iter_events(self, api_response: Any) -> Iterator[ProviderEvent]:
-        if isinstance(api_response, Stream):
-            yield from self._iter_stream_events(api_response)
-        else:
-            yield from self._iter_response_events(api_response)
-
     def _iter_stream_events(self, api_response: Stream) -> Iterator[ProviderEvent]:
         for raw_event in api_response:
             if isinstance(raw_event, ResponseTextDeltaEvent):

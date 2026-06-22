@@ -219,9 +219,23 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         ...
 
     @abstractmethod
-    def _iter_events(self, api_response: Any) -> Iterator[ProviderEvent]:
-        """Map the backend response/stream to normalised :data:`ProviderEvent`s."""
+    def _iter_stream_events(self, api_response: Any) -> Iterator[ProviderEvent]:
+        """Map a streaming response to normalised :data:`ProviderEvent`s."""
         ...
+
+    @abstractmethod
+    def _iter_response_events(self, api_response: Any) -> Iterator[ProviderEvent]:
+        """Map a non-streaming response to normalised :data:`ProviderEvent`s."""
+        ...
+
+    def _iter_events(self, api_response: Any) -> Iterator[ProviderEvent]:
+        """Dispatch to the stream/non-stream mapper. ``self.stream`` is the single
+        source of truth (it set the request's ``stream=`` flag), so the response
+        type always matches it."""
+        if self.stream:
+            yield from self._iter_stream_events(api_response)
+        else:
+            yield from self._iter_response_events(api_response)
 
     @abstractmethod
     def _build_optional_kwargs(self, req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:

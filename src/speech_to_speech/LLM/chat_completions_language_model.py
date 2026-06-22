@@ -181,12 +181,6 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
             **create_kwargs,
         )
 
-    def _iter_events(self, api_response: Stream[ChatCompletionChunk] | Any) -> Iterator[ProviderEvent]:
-        if isinstance(api_response, Stream):
-            yield from self._iter_stream_events(api_response)
-        else:
-            yield from self._iter_response_events(api_response)
-
     def _iter_stream_events(self, api_response: Stream[ChatCompletionChunk]) -> Iterator[ProviderEvent]:
         # Accumulate streamed tool-call deltas, keyed by their stream index, and the
         # raw assistant text, then emit assistant message + tool calls + usage once
