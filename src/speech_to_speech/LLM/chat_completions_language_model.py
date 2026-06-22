@@ -174,7 +174,7 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
             create_kwargs["stream_options"] = {"include_usage": True}
         return self.client.chat.completions.create(
             model=self.model_name,
-            messages=api_input,
+            messages=api_input,  # type: ignore[arg-type]  # runtime dicts match the Chat Completions message shape
             stream=self.stream,
             extra_body=self._extra_body,
             timeout=self.request_timeout,
