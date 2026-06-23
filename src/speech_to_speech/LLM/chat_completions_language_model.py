@@ -12,13 +12,17 @@ from openai.types.chat import (
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartParam,
     ChatCompletionContentPartTextParam,
-    ChatCompletionMessageParam,
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionToolChoiceOptionParam,
+    ChatCompletionToolParam,
 )
 from openai.types.chat.chat_completion_content_part_image_param import ImageURL
+from openai.types.chat.chat_completion_named_tool_choice_param import Function as NamedToolChoiceFunction
 from openai.types.realtime.realtime_conversation_item_assistant_message import (
     Content as AssistantContent,
 )
 from openai.types.responses import ResponseFunctionToolCall
+from openai.types.shared_params import FunctionDefinition
 
 from speech_to_speech.LLM.base_openai_compatible_language_model import (
     AssistantMessage,
@@ -35,7 +39,7 @@ from speech_to_speech.utils.utils import _generate_id
 logger = logging.getLogger(__name__)
 
 
-def _to_chat_tools(req_tools: Any) -> list[dict[str, Any]] | None:
+def _to_chat_tools(req_tools: Any) -> list[ChatCompletionToolParam] | None:
     """Convert Responses-API function tools to Chat-Completions tool format.
 
     Responses tools are flat ``{type:"function", name, description, parameters}``;
@@ -44,31 +48,37 @@ def _to_chat_tools(req_tools: Any) -> list[dict[str, Any]] | None:
     """
     if not req_tools:
         return None
-    chat_tools: list[dict[str, Any]] = []
+    chat_tools: list[ChatCompletionToolParam] = []
     for t in req_tools:
         d = t if isinstance(t, dict) else t.model_dump(exclude_none=True)
         if d.get("type") == "function" and "function" not in d:
-            fn = {k: d[k] for k in ("name", "description", "parameters") if k in d}
-            chat_tools.append({"type": "function", "function": fn})
+            fn = FunctionDefinition(name=d["name"])
+            if d.get("description") is not None:
+                fn["description"] = d["description"]
+            if d.get("parameters") is not None:
+                fn["parameters"] = d["parameters"]
+            chat_tools.append(ChatCompletionToolParam(type="function", function=fn))
         else:
-            chat_tools.append(d)
+            chat_tools.append(cast("ChatCompletionToolParam", d))
     return chat_tools
 
 
-def _to_chat_tool_choice(tool_choice: Any) -> Any:
+def _to_chat_tool_choice(tool_choice: Any) -> ChatCompletionToolChoiceOptionParam:
     """Convert a Responses-API tool_choice to Chat-Completions form.
 
     The string forms ("auto"/"required"/"none") are identical across both APIs;
     only the forced-function object differs (flat ``name`` vs nested ``function``).
     """
     if isinstance(tool_choice, dict) and tool_choice.get("type") == "function" and "name" in tool_choice:
-        return {"type": "function", "function": {"name": tool_choice["name"]}}
+        return ChatCompletionNamedToolChoiceParam(
+            type="function", function=NamedToolChoiceFunction(name=tool_choice["name"])
+        )
     if tool_choice is not None and not isinstance(tool_choice, (str, dict)):
         d = tool_choice.model_dump(exclude_none=True)
         if d.get("type") == "function" and "name" in d:
-            return {"type": "function", "function": {"name": d["name"]}}
-        return d
-    return tool_choice
+            return ChatCompletionNamedToolChoiceParam(type="function", function=NamedToolChoiceFunction(name=d["name"]))
+        return cast("ChatCompletionToolChoiceOptionParam", d)
+    return cast("ChatCompletionToolChoiceOptionParam", tool_choice)
 
 
 class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
@@ -130,11 +140,11 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         if ptype == "input_text":
             return ChatCompletionContentPartTextParam(type="text", text=part.get("text") or "")
         if ptype == "input_image":
-            raw_url = part.get("image_url")
+            raw_url: Any = part.get("image_url")
             if isinstance(raw_url, dict):
                 image_url = cast("ImageURL", raw_url)
             else:
-                image_url = ImageURL(url=cast("str", raw_url))
+                image_url = ImageURL(url=raw_url)
                 detail = part.get("detail")
                 if detail is not None:
                     image_url["detail"] = detail
@@ -142,7 +152,7 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         return cast("ChatCompletionContentPartParam", part)
 
     @classmethod
-    def _chat_messages(cls, chat: Chat) -> list[ChatCompletionMessageParam]:
+    def _chat_messages(cls, chat: Chat) -> list[dict[str, Any]]:
         """Serialise the chat for the Chat Completions API.
 
         ``Chat.to_transformers_chat`` targets HuggingFace ``apply_chat_template``,
@@ -151,10 +161,6 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         multimodal ``content`` parts must use the Chat Completions ``text`` /
         ``image_url`` shape rather than the Realtime ``input_text`` /
         ``input_image`` shape.
-
-        ``to_transformers_chat`` returns plain ``dict``s; the cast records that the
-        patched-up shape conforms to ``ChatCompletionMessageParam`` (a TypedDict, so
-        the cast is a no-op at runtime).
         """
         messages = chat.to_transformers_chat()
         for message in messages:
@@ -165,11 +171,11 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
             content = message.get("content")
             if isinstance(content, list):
                 message["content"] = [cls._to_chat_content_part(p) for p in content]
-        return cast("list[ChatCompletionMessageParam]", messages)
+        return messages
 
     # ── base hooks ──────────────────────────────────────────────────────────--
 
-    def _serialize(self, active_chat: Chat) -> list[ChatCompletionMessageParam]:
+    def _serialize(self, active_chat: Chat) -> list[dict[str, Any]]:
         return self._chat_messages(active_chat)
 
     def _build_optional_kwargs(self, req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:
@@ -181,13 +187,13 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
             optional_kwargs["tool_choice"] = _to_chat_tool_choice(req_tool_choice)
         return optional_kwargs
 
-    def _request(self, api_input: list[ChatCompletionMessageParam], optional_kwargs: dict[str, Any]) -> Any:
+    def _request(self, api_input: list[dict[str, Any]], optional_kwargs: dict[str, Any]) -> Any:
         create_kwargs: dict[str, Any] = dict(optional_kwargs)
         if self.stream:
             create_kwargs["stream_options"] = {"include_usage": True}
         return self.client.chat.completions.create(
             model=self.model_name,
-            messages=api_input,
+            messages=api_input,  # type: ignore[arg-type]  # runtime dicts match the Chat Completions message shape
             stream=self.stream,
             extra_body=self._extra_body,
             timeout=self.request_timeout,
