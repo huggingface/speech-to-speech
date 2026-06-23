@@ -256,8 +256,9 @@ The LLM is the most compute-intensive and highest-latency component in the pipel
 - **Local inference** — `transformers` (CUDA / CPU) and `mlx-lm` (Apple Silicon) run the model entirely on your machine with no external dependency.
 - **Self-hosted servers** — `--llm_backend responses-api` can point at a local [vLLM](https://github.com/vllm-project/vllm) or [llama.cpp](https://github.com/ggerganov/llama.cpp) server, giving you control over quantization, batching, and hardware while keeping traffic on-premise.
 - **Provider APIs** — the same `responses-api` backend works with OpenAI, [HuggingFace Inference Providers](https://huggingface.co/inference-providers), [OpenRouter](https://openrouter.ai), and any other provider that implements the OpenAI Responses API.
+- **Chat Completions** — `--llm_backend chat-completions` targets the OpenAI-compatible `/v1/chat/completions` endpoint instead of `/v1/responses`. Use it for providers/servers where Responses cannot reliably disable reasoning, or whose Responses streaming tool-call path is unreliable (see [#312](https://github.com/huggingface/speech-to-speech/issues/312)).
 
-Select a backend with `--llm_backend` (`responses-api` by default) and pair it with `--model_name`. Backend-specific options (`--responses_api_base_url`, `--responses_api_api_key`, `--responses_api_stream`, etc.) are only needed for the `responses-api` backend.
+Select a backend with `--llm_backend` (`responses-api` by default) and pair it with `--model_name`. Backend-specific options (`--responses_api_base_url`, `--responses_api_api_key`, `--responses_api_stream`, etc.) are shared by the `responses-api` and `chat-completions` backends.
 
 > The examples below pair Parakeet TDT (local STT) and Qwen3-TTS (local TTS) with different LLM backends.
 
@@ -314,6 +315,44 @@ speech-to-speech \
     --responses_api_api_key "$HF_TOKEN" \
     --responses_api_stream \
     --enable_live_transcription
+```
+
+#### Chat Completions backend (`--llm_backend chat-completions`)
+
+Identical configuration to `responses-api` (it reuses the same `--responses_api_*`
+connection flags), but talks to `/v1/chat/completions` instead of `/v1/responses`.
+Prefer it when:
+
+- the provider ignores `chat_template_kwargs.enable_thinking` on the Responses path and
+  needs a `reasoning_effort` knob to suppress reasoning, or
+- the server's Responses **streaming tool-call** path is unreliable (e.g. some vLLM
+  builds), while its Chat Completions tool-call streaming is solid.
+
+Add `--responses_api_reasoning_effort none` (chat-completions only) to disable reasoning
+on providers where the chat-template flag has no effect:
+
+```bash
+# vLLM (local) serving a Qwen model with tool calling
+speech-to-speech \
+    --mode realtime \
+    --stt parakeet-tdt \
+    --llm_backend chat-completions \
+    --tts qwen3 \
+    --model_name "Qwen/Qwen3-4B-Instruct-2507" \
+    --responses_api_base_url "http://localhost:8000/v1" \
+    --responses_api_stream
+
+# GLM via the HF router — disable reasoning for low voice latency
+speech-to-speech \
+    --mode realtime \
+    --stt parakeet-tdt \
+    --llm_backend chat-completions \
+    --tts qwen3 \
+    --model_name "zai-org/GLM-4.7:cerebras" \
+    --responses_api_base_url "https://router.huggingface.co/v1" \
+    --responses_api_api_key "$HF_TOKEN" \
+    --responses_api_reasoning_effort none \
+    --responses_api_stream
 ```
 
 #### Fully local (Apple Silicon)
