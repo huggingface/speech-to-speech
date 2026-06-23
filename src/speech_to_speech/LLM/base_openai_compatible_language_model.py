@@ -154,7 +154,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         self.user_role = user_role
         self.client = OpenAI(api_key=api_key, base_url=base_url)
-        self._extra_body = self._build_extra_body(base_url, disable_thinking, reasoning_effort)
+        self._extra_body = self._build_extra_body(base_url, disable_thinking, reasoning_effort, self.model_name)
         self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
         self.warmup()
 
@@ -176,6 +176,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         base_url: Optional[str],
         disable_thinking: bool,
         reasoning_effort: Optional[str],
+        model_name: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         """Build the provider-specific ``extra_body`` used to disable reasoning.
 
@@ -190,9 +191,22 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return None
         if reasoning_effort:
             return {"reasoning_effort": reasoning_effort}
+        if cls._is_cerebras_endpoint(base_url, model_name):
+            return None
         if disable_thinking:
             return {"chat_template_kwargs": {"enable_thinking": False}}
         return None
+
+    @staticmethod
+    def _is_cerebras_endpoint(base_url: Optional[str], model_name: Optional[str]) -> bool:
+        if base_url is None:
+            return False
+        normalized_base_url = base_url.rstrip("/")
+        if normalized_base_url == "https://api.cerebras.ai/v1":
+            return True
+        return normalized_base_url == "https://router.huggingface.co/v1" and bool(
+            model_name and model_name.lower().endswith(":cerebras")
+        )
 
     # ── subclass hooks ──────────────────────────────────────────────────────--
 

@@ -182,6 +182,14 @@ def test_build_extra_body_variants():
     assert f("http://x/v1", True, "none") == {"reasoning_effort": "none"}  # explicit effort wins
     assert f("https://api.openai.com/v1", True, "none") is None  # official OpenAI: no extra_body
     assert f("https://api.openai.com/v1/", True, "none") is None  # trailing slash still official
+    assert f("https://api.cerebras.ai/v1", True, None, "gemma-4-31b-trial") is None
+    assert f("https://api.cerebras.ai/v1/", True, None, "gemma-4-31b-trial") is None
+    assert f("https://api.cerebras.ai/v1", True, "none", "gemma-4-31b-trial") == {"reasoning_effort": "none"}
+    assert f("https://router.huggingface.co/v1", True, None, "google/gemma-4-31B-it:cerebras") is None
+    assert f("https://router.huggingface.co/v1/", True, None, "zai-org/GLM-4.7:cerebras") is None
+    assert f("https://router.huggingface.co/v1", True, "none", "google/gemma-4-31B-it:cerebras") == {
+        "reasoning_effort": "none"
+    }
     assert f("http://x/v1", True, "") == {"chat_template_kwargs": {"enable_thinking": False}}  # empty effort ignored
     assert f("http://x/v1", False, None) is None
     assert f(None, True, None) is None

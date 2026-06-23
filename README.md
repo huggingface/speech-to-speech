@@ -331,6 +331,12 @@ Prefer it when:
 Add `--responses_api_reasoning_effort none` (chat-completions only) to disable reasoning
 on providers where the chat-template flag has no effect:
 
+For Hugging Face Router models pinned to the Cerebras provider with a `:cerebras`
+suffix, the backend skips `chat_template_kwargs.enable_thinking=false`
+automatically because Cerebras rejects that request field. You can still pass
+`--responses_api_reasoning_effort none` when you want to set the provider's
+reasoning control explicitly.
+
 ```bash
 # vLLM (local) serving a Qwen model with tool calling
 speech-to-speech \
