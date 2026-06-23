@@ -4,10 +4,17 @@ import json
 import logging
 import time
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
 from openai import Stream
-from openai.types.chat import ChatCompletionChunk
+from openai.types.chat import (
+    ChatCompletionChunk,
+    ChatCompletionContentPartImageParam,
+    ChatCompletionContentPartParam,
+    ChatCompletionContentPartTextParam,
+    ChatCompletionMessageParam,
+)
+from openai.types.chat.chat_completion_content_part_image_param import ImageURL
 from openai.types.realtime.realtime_conversation_item_assistant_message import (
     Content as AssistantContent,
 )
@@ -111,7 +118,7 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         return generate
 
     @staticmethod
-    def _to_chat_content_part(part: dict[str, Any]) -> dict[str, Any]:
+    def _to_chat_content_part(part: dict[str, Any]) -> ChatCompletionContentPartParam:
         """Convert one transformers content part to Chat-Completions shape.
 
         ``to_transformers_chat`` keeps Realtime-style parts (``input_text`` /
@@ -121,19 +128,21 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         """
         ptype = part.get("type")
         if ptype == "input_text":
-            return {"type": "text", "text": part.get("text") or ""}
+            return ChatCompletionContentPartTextParam(type="text", text=part.get("text") or "")
         if ptype == "input_image":
-            image_url = part.get("image_url")
-            if not isinstance(image_url, dict):
-                image_url = {"url": image_url}
+            raw_url = part.get("image_url")
+            if isinstance(raw_url, dict):
+                image_url = cast("ImageURL", raw_url)
+            else:
+                image_url = ImageURL(url=cast("str", raw_url))
                 detail = part.get("detail")
                 if detail is not None:
                     image_url["detail"] = detail
-            return {"type": "image_url", "image_url": image_url}
-        return part
+            return ChatCompletionContentPartImageParam(type="image_url", image_url=image_url)
+        return cast("ChatCompletionContentPartParam", part)
 
     @classmethod
-    def _chat_messages(cls, chat: Chat) -> list[dict[str, Any]]:
+    def _chat_messages(cls, chat: Chat) -> list[ChatCompletionMessageParam]:
         """Serialise the chat for the Chat Completions API.
 
         ``Chat.to_transformers_chat`` targets HuggingFace ``apply_chat_template``,
@@ -142,6 +151,10 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         multimodal ``content`` parts must use the Chat Completions ``text`` /
         ``image_url`` shape rather than the Realtime ``input_text`` /
         ``input_image`` shape.
+
+        ``to_transformers_chat`` returns plain ``dict``s; the cast records that the
+        patched-up shape conforms to ``ChatCompletionMessageParam`` (a TypedDict, so
+        the cast is a no-op at runtime).
         """
         messages = chat.to_transformers_chat()
         for message in messages:
@@ -152,11 +165,11 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
             content = message.get("content")
             if isinstance(content, list):
                 message["content"] = [cls._to_chat_content_part(p) for p in content]
-        return messages
+        return cast("list[ChatCompletionMessageParam]", messages)
 
     # ── base hooks ──────────────────────────────────────────────────────────--
 
-    def _serialize(self, active_chat: Chat) -> list[dict[str, Any]]:
+    def _serialize(self, active_chat: Chat) -> list[ChatCompletionMessageParam]:
         return self._chat_messages(active_chat)
 
     def _build_optional_kwargs(self, req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:
@@ -168,13 +181,13 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
             optional_kwargs["tool_choice"] = _to_chat_tool_choice(req_tool_choice)
         return optional_kwargs
 
-    def _request(self, api_input: list[dict[str, Any]], optional_kwargs: dict[str, Any]) -> Any:
+    def _request(self, api_input: list[ChatCompletionMessageParam], optional_kwargs: dict[str, Any]) -> Any:
         create_kwargs: dict[str, Any] = dict(optional_kwargs)
         if self.stream:
             create_kwargs["stream_options"] = {"include_usage": True}
         return self.client.chat.completions.create(
             model=self.model_name,
-            messages=api_input,  # type: ignore[arg-type]  # runtime dicts match the Chat Completions message shape
+            messages=api_input,
             stream=self.stream,
             extra_body=self._extra_body,
             timeout=self.request_timeout,
