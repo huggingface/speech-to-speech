@@ -207,6 +207,30 @@ def test_chat_messages_encodes_tool_arguments_as_string():
     assert json.loads(args) == {"direction": "left"}
 
 
+def test_chat_messages_strips_tool_output_name():
+    """to_transformers_chat adds a tool name for HF templates; Chat Completions
+    tool messages only accept role/tool_call_id/content."""
+    chat = Chat(10)
+    chat.add_item(make_user_message("Search for x"))
+    chat.add_item(
+        RealtimeConversationItemFunctionCall(
+            type="function_call",
+            name="search",
+            arguments='{"q": "x"}',
+            call_id="call_1",
+            id="fc_1",
+            status="completed",
+        )
+    )
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(type="function_call_output", call_id="call_1", output="found")
+    )
+
+    messages = ChatCompletionsApiModelHandler._chat_messages(chat)
+    tool_message = [m for m in messages if m.get("role") == "tool"][0]
+    assert tool_message == {"role": "tool", "tool_call_id": "call_1", "content": "found"}
+
+
 def test_chat_messages_converts_image_and_text_parts_to_chat_shape():
     """to_transformers_chat emits Realtime-shaped parts (input_text / input_image
     with a bare-string image_url); the Chat Completions API needs text / image_url

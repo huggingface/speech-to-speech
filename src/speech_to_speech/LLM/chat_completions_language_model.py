@@ -171,6 +171,8 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
             content = message.get("content")
             if isinstance(content, list):
                 message["content"] = [cls._to_chat_content_part(p) for p in content]
+            if message.get("role") == "tool":
+                message.pop("name", None)
         return messages
 
     # ── base hooks ──────────────────────────────────────────────────────────--
