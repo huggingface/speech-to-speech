@@ -66,8 +66,33 @@ pip install speech-to-speech
 The default install is scoped to the standard realtime voice-agent path:
 - Parakeet TDT for STT
 - OpenAI-compatible API for the language model
-- Qwen3-TTS for speech output
+- Qwen3-TTS for speech output, using the GGML backend by default on non-macOS platforms
 - local audio and realtime server modes
+
+On Linux, the Qwen3-TTS GGML backend comes from `faster-qwen3-tts[ggml]`.
+Its default `qwentts-cpp-python` wheel on PyPI targets CUDA 12.8. If your
+machine does not have the CUDA 12 runtime that wheel expects, install the
+matching wheel from the Hugging Face wheelhouse before installing
+`speech-to-speech`:
+
+```bash
+# CUDA 13.x
+pip install "qwentts-cpp-python==0.3.0+cu130" \
+  -f https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/tree/main/whl/cu130
+
+# CUDA 12.4
+pip install "qwentts-cpp-python==0.3.0+cu124" \
+  -f https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/tree/main/whl/cu124
+
+# CPU-only fallback
+pip install "qwentts-cpp-python==0.3.0+cpu" \
+  -f https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/tree/main/whl/cpu
+
+pip install speech-to-speech
+```
+
+To use the previous CUDA-graphs implementation instead of GGML, pass
+`--qwen3_tts_backend torch`.
 
 Optional backends are installed with extras:
 ```bash
@@ -131,6 +156,7 @@ speech-to-speech \
     --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
     --qwen3_tts_speaker Aiden \
     --qwen3_tts_language auto \
+    --qwen3_tts_backend ggml \
     --qwen3_tts_non_streaming_mode True \
     --qwen3_tts_mlx_quantization 6bit \
     --model_name gpt-5.4-mini \

@@ -44,6 +44,7 @@ DEFAULT_MLX_STREAMING_CHUNK_SIZE = 4
 DEFAULT_QWEN3_TTS_MAX_NEW_TOKENS = 1536
 MIN_QWEN3_TTS_UTTERANCE_TOKENS = 360
 VALID_MLX_QUANTIZATION_SUFFIXES = ("bf16", "4bit", "6bit", "8bit")
+VALID_FASTER_BACKENDS = ("ggml", "torch")
 MLX_STREAMING_TOKENS_PER_SECOND = 12.5
 PIPELINE_SR = 16000
 ESTIMATED_QWEN3_WORDS_PER_SECOND = 2.6
@@ -96,6 +97,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         device: str = "cuda",
         dtype: str | torch.dtype = "auto",
         attn_implementation: str = "eager",
+        backend: str = "ggml",
         ref_audio: str | Path | None = None,
         ref_text: str = DEFAULT_REF_TEXT,
         language: str = "auto",
@@ -124,6 +126,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.xvec_only = xvec_only
         self.parity_mode = parity_mode
         self.non_streaming_mode = non_streaming_mode
+        self.faster_backend = self._normalize_faster_backend(backend)
         self.mlx_quantization = self._normalize_mlx_quantization(mlx_quantization)
         self.max_new_tokens = max_new_tokens
         self.blocksize = blocksize
@@ -155,11 +158,16 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         else:
             self.device = device
             self.model_name = model_name
-            logger.info(f"Loading Qwen3-TTS model: {self.model_name} via faster-qwen3-tts")
+            logger.info(
+                "Loading Qwen3-TTS model: %s via faster-qwen3-tts (%s backend)",
+                self.model_name,
+                self.faster_backend,
+            )
             self._setup_faster(
                 model_name=self.model_name,
                 dtype=dtype,
                 attn_implementation=attn_implementation,
+                backend=self.faster_backend,
             )
 
         logger.info(
@@ -174,7 +182,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         self.warmup()
 
-    def _setup_faster(self, model_name: str, dtype: Any, attn_implementation: str) -> None:
+    def _setup_faster(self, model_name: str, dtype: Any, attn_implementation: str, backend: str) -> None:
         try:
             import torch
         except ImportError as e:
@@ -192,7 +200,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         except ImportError as e:
             raise ImportError(
                 "faster-qwen3-tts is required for Qwen3 TTS on non-macOS platforms. "
-                "Install with: pip install faster-qwen3-tts"
+                "Install with: pip install 'faster-qwen3-tts[ggml]'"
             ) from e
 
         self.model = FasterQwen3TTS.from_pretrained(
@@ -200,6 +208,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             device=self.device,
             dtype=self.dtype,
             attn_implementation=attn_implementation,
+            backend=backend,
         )
         logger.info("Qwen3-TTS model loaded")
 
@@ -229,6 +238,14 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             ) from e
 
         logger.info("MLX Audio Qwen3-TTS model loaded")
+
+    def _normalize_faster_backend(self, backend: Any) -> str:
+        value = str(backend or "ggml").strip().lower()
+        if value not in VALID_FASTER_BACKENDS:
+            raise ValueError(
+                f"Unsupported qwen3_tts_backend value {backend!r}. Supported values: {', '.join(VALID_FASTER_BACKENDS)}"
+            )
+        return value
 
     def _normalize_mlx_quantization(self, mlx_quantization: Any) -> Optional[str]:
         if mlx_quantization is None:
