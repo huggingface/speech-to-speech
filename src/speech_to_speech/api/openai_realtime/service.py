@@ -5,6 +5,7 @@ from threading import Event as ThreadingEvent
 from typing import Any, Callable, Literal, Optional, TypeVar, Union
 
 from openai.types.realtime import (
+    ConversationItem,
     ConversationItemCreatedEvent,
     ConversationItemCreateEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
@@ -174,6 +175,11 @@ class ConnState(BaseModel):
     speculative_user_item_id: Optional[str] = None
     speculative_input_item_id: Optional[str] = None
     speculative_audio_duration_s: float = 0.0
+    # Client conversation.item.create items that arrived while a response was
+    # generating. Applying them mid-generation races the LLM handler's chat
+    # write-back (cross-thread), so they are buffered here and flushed in order
+    # once the response completes. See ConversationHandler.flush_deferred_items.
+    deferred_items: list[ConversationItem] = Field(default_factory=list)
 
 
 class RealtimeService:

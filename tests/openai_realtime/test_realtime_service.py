@@ -379,6 +379,87 @@ class TestHandleConversationItemCreate:
         assert last.content[1].image_url == "data:image/png;base64,abc123"
 
 
+class TestDeferConversationItemsDuringResponse:
+    """conversation.item.create is buffered while a response is generating and
+    flushed, in order, once it completes — so a client item never races the LLM
+    handler's chat write-back (which runs on the pipeline thread)."""
+
+    def _text_event(self, text: str, item_id: str = "msg_x") -> ConversationItemCreateEvent:
+        return ConversationItemCreateEvent(
+            type="conversation.item.create",
+            item={  # type: ignore[arg-type]
+                "id": item_id,
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            },
+        )
+
+    def _user_texts(self, chat) -> list[str]:
+        return [i.content[0].text for i in chat.buffer if getattr(i, "role", None) == "user"]
+
+    def test_applied_immediately_when_no_active_response(self, service, conn_id):
+        st = service._state(conn_id)
+        assert st.in_response is False
+        events = service.handle_conversation_item_create(conn_id, self._text_event("hi"))
+        assert len(events) == 1
+        assert isinstance(events[0], ConversationItemCreatedEvent)
+        assert self._user_texts(st.runtime_config.chat) == ["hi"]
+        assert st.deferred_items == []
+
+    def test_item_deferred_while_in_response(self, service, conn_id):
+        st = service._state(conn_id)
+        st.in_response = True
+        events = service.handle_conversation_item_create(conn_id, self._text_event("hi"))
+        assert events == []  # ack deferred too
+        assert len(st.deferred_items) == 1
+        assert self._user_texts(st.runtime_config.chat) == []  # not yet in chat
+
+    def test_deferred_items_flushed_in_order_on_finish(self, service, conn_id):
+        st = service._state(conn_id)
+        st.in_response = True
+        service.handle_conversation_item_create(conn_id, self._text_event("a", "msg_1"))
+        service.handle_conversation_item_create(conn_id, self._text_event("b", "msg_2"))
+        assert self._user_texts(st.runtime_config.chat) == []
+
+        events = service.finish_response(conn_id)
+
+        assert st.in_response is False
+        assert st.deferred_items == []
+        assert self._user_texts(st.runtime_config.chat) == ["a", "b"]  # arrival order preserved
+        created = [e for e in events if isinstance(e, ConversationItemCreatedEvent)]
+        assert len(created) == 2
+
+    def test_function_call_output_deferred_then_pairs_after_response(self, service, conn_id):
+        from openai.types.realtime.realtime_conversation_item_function_call import (
+            RealtimeConversationItemFunctionCall,
+        )
+
+        st = service._state(conn_id)
+        chat = st.runtime_config.chat
+        # The function_call the generation produced (held in _pending_tool_calls).
+        chat.add_item(
+            RealtimeConversationItemFunctionCall(
+                type="function_call", call_id="call_1", name="camera_snapshot", arguments="{}"
+            )
+        )
+        st.in_response = True
+        evt = ConversationItemCreateEvent(
+            type="conversation.item.create",
+            item={"type": "function_call_output", "output": "ok", "call_id": "call_1"},
+        )
+        # Output arrives mid-response: deferred (applying now could race), no error.
+        assert service.handle_conversation_item_create(conn_id, evt) == []
+        assert len(st.deferred_items) == 1
+
+        finish_events = service.finish_response(conn_id)
+
+        # Flushed after completion → pairs cleanly, no invalid_conversation_item error.
+        assert not any(isinstance(e, RealtimeErrorEvent) for e in finish_events)
+        assert chat._has_call_id_in_buffer("call_1")
+        assert chat.buffer[-1].type == "function_call_output"
+
+
 # ===================================================================
 # Audio commit
 # ===================================================================

@@ -37,27 +37,55 @@ class ConversationHandler(RealtimeBaseHandler):
         Items are added to the LLM chat context but do NOT trigger response
         generation on their own.  A subsequent ``response.create`` event is
         required to trigger the model.
-        """
-        events: list[ServerEvent] = []
-        item = event.item
 
+        While a response is generating, the item is *deferred*: applying it now
+        would race the LLM handler's end-of-turn chat write-back, which runs on
+        the pipeline thread (e.g. a ``function_call_output`` arriving before its
+        ``function_call`` is recorded, or an image stripped before the next
+        turn reads it). Deferred items are flushed, in order, once the response
+        completes — see :meth:`flush_deferred_items`.
+        """
+        st = self._state(conn_id)
+        if st.in_response:
+            st.deferred_items.append(event.item)
+            logger.debug("Deferred conversation item until the active response completes")
+            return []
+        return self._apply_item(conn_id, event.item)
+
+    def _apply_item(self, conn_id: str, item: ConversationItem) -> list[ServerEvent]:
+        """Add one item to the chat and build its ``conversation.item.created``."""
         try:
             self._append_item(conn_id, item)
         except ChatItemError as exc:
             return [self.make_error(str(exc), "invalid_conversation_item")]
 
-        if item:
-            st = self._state(conn_id)
-            events.append(
-                ConversationItemCreatedEvent(
-                    type="conversation.item.created",
-                    event_id=self._next_event_id(),
-                    previous_item_id=st.last_item_id,
-                    item=item,
-                )
-            )
-            st.last_item_id = item.id
+        if not item:
+            return []
+        st = self._state(conn_id)
+        event = ConversationItemCreatedEvent(
+            type="conversation.item.created",
+            event_id=self._next_event_id(),
+            previous_item_id=st.last_item_id,
+            item=item,
+        )
+        st.last_item_id = item.id
+        return [event]
 
+    def flush_deferred_items(self, conn_id: str) -> list[ServerEvent]:
+        """Apply items buffered during a response, in arrival order.
+
+        Called at response completion (after the generation's own write-back),
+        so a ``function_call_output`` pairs with its now-recorded ``function_call``
+        and an image survives the just-finished response's ``strip_images``.
+        """
+        st = self._state(conn_id)
+        if not st.deferred_items:
+            return []
+        items = st.deferred_items
+        st.deferred_items = []
+        events: list[ServerEvent] = []
+        for item in items:
+            events.extend(self._apply_item(conn_id, item))
         return events
 
     def _append_item(self, conn_id: str, item: ConversationItem) -> None:
