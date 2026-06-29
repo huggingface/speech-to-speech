@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Literal, Optional
 
 
 @dataclass
@@ -26,6 +26,12 @@ class Qwen3TTSHandlerArguments:
         default="eager",
         metadata={
             "help": "Attention implementation. Options: 'eager', 'flash_attention_2', 'sdpa'. Use 'eager' on Jetson. Default is 'eager'."
+        },
+    )
+    qwen3_tts_backend: Literal["ggml", "torch"] = field(
+        default="ggml",
+        metadata={
+            "help": "faster-qwen3-tts backend on non-macOS platforms. Options: 'ggml' or 'torch'. Default is 'ggml'. On Apple Silicon, mlx-audio is selected automatically and this option is ignored."
         },
     )
     qwen3_tts_ref_audio: Optional[str] = field(
