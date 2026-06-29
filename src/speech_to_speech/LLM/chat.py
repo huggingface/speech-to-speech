@@ -458,15 +458,32 @@ class Chat:
             self._gen_counter += 1
             self._compact_in_flight = False
 
-    def strip_images(self) -> None:
-        """Remove all image content parts from user messages in the buffer.
+    def image_message_ids(self) -> set[str]:
+        """IDs of user messages currently carrying ``input_image`` content."""
+        with self._lock:
+            return {
+                item.id
+                for item in self.buffer
+                if isinstance(item, RealtimeConversationItemUserMessage)
+                and item.id is not None
+                and any(p.type == "input_image" for p in item.content)
+            }
+
+    def strip_images(self, only_ids: set[str] | None = None) -> None:
+        """Remove image content parts from user messages in the buffer.
 
         Called after appending the assistant response so images don't persist
-        across turns.
+        across turns. With *only_ids*, strip only those message IDs — the images
+        the just-completed response actually consumed (captured before the
+        request was sent). This leaves intact an image a fast client injected
+        mid-generation for the *next* turn, which the current response never saw.
+        Without *only_ids*, every image is stripped.
         """
         with self._lock:
             for item in self.buffer:
                 if isinstance(item, RealtimeConversationItemUserMessage):
+                    if only_ids is not None and item.id not in only_ids:
+                        continue
                     item.content = [p for p in item.content if p.type != "input_image"]
 
     # ── Compaction internals ──────────────────────────────────

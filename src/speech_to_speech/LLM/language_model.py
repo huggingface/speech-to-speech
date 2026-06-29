@@ -542,6 +542,10 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
         ctx.cancel_generation = gen
+        # Images the model sees this turn; only these are stripped on write-back,
+        # so an image a fast client injects mid-generation for the next turn
+        # survives (it is not in this serialized snapshot).
+        consumed_image_ids = active_chat.image_message_ids()
 
         try:
             yield from self._generate(active_chat, language_code, gen, ctx, runtime_config, response)
@@ -568,7 +572,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         )
                     )
             if commit_allowed:
-                original_chat.strip_images()
+                original_chat.strip_images(consumed_image_ids)
                 original_chat.trim_if_needed(self.compactor)
             logger.debug("Clean text: %s", ctx.generated_text)
             logger.info(f"Tools: {ctx.tools}")
