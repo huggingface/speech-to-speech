@@ -301,6 +301,44 @@ def test_streaming_tool_call_accumulates_arguments():
     assert chat._pending_tool_calls, "tool call should be recorded in chat history"
 
 
+def test_tool_call_recorded_before_chunk_is_emitted():
+    """Regression: a fast client can return function_call_output before the
+    deferred end-of-turn write-back runs. The call must already be in history
+    the instant its chunk is yielded, otherwise the output is rejected with
+    'No function_call with call_id ... found' and the model re-issues the call."""
+    h = _make_handler(stream=True)
+    h.client.chat.completions.create = lambda **k: _FakeStream(
+        [
+            _chunk(content="Sure."),
+            _chunk(tool_calls=[_tc_delta(0, id="srv_1", name="camera_snapshot", arguments="{}")]),
+            _chunk(usage=SimpleNamespace(prompt_tokens=5, completion_tokens=2)),
+        ]
+    )
+    chat = Chat(10)
+    chat.add_item(make_user_message("take a photo"))
+    session = RealtimeSessionCreateRequest(type="realtime", instructions="Du bist ein Roboter.")
+    session.tools = [{"type": "function", "name": "camera_snapshot", "parameters": {"type": "object"}}]
+    rc = RuntimeConfig(chat=chat, session=session)
+    req = GenerateResponseRequest(runtime_config=rc, language_code="de", turn_id="t", turn_revision=0)
+
+    emitted_call_id = None
+    for out in h.process(req):
+        if isinstance(out, LLMResponseChunk) and out.tools:
+            emitted_call_id = out.tools[0].call_id
+            # At the moment the client receives the call, it must exist in history.
+            assert emitted_call_id in chat._pending_tool_calls, (
+                "function_call must be recorded BEFORE its chunk is forwarded to the client"
+            )
+            # A fast client returning the output here must pair cleanly (no raise).
+            chat.add_item(
+                RealtimeConversationItemFunctionCallOutput(
+                    type="function_call_output", call_id=emitted_call_id, output="ok"
+                )
+            )
+    assert emitted_call_id is not None, "a tool call should have been emitted"
+    assert chat._has_call_id_in_buffer(emitted_call_id), "call+output should be paired in the buffer"
+
+
 def test_non_streaming_tool_call():
     h = _make_handler(stream=False)
     h.client.chat.completions.create = lambda **k: SimpleNamespace(

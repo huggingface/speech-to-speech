@@ -287,22 +287,39 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         )
 
     def _record_tool_call(self, state: _GenState, turn: _Turn, item: ResponseFunctionToolCall) -> Iterator[LLMOut]:
-        """Append a tool call to history + the tools list, and emit it (unless the
-        turn went stale, in which case it is recorded but not spoken)."""
+        """Emit a tool call, persisting it (and any assistant text seen so far)
+        to history *before* it is forwarded to the client.
+
+        The function_call must already exist in the conversation by the time the
+        client returns its ``function_call_output``; otherwise a fast client
+        races ahead of the deferred end-of-turn write-back and the output is
+        rejected ("No function_call with call_id ... found"), which makes the
+        model re-issue the same tool call. The call lands in ``_pending_tool_calls``
+        (not serialized until its output pairs it), so eager recording is safe.
+
+        Out-of-band turns never touch the default conversation, and a stale turn
+        records nothing (it is not forwarded to the client either)."""
         state.tools.append(item)
-        state.pending.append(
-            RealtimeConversationItemFunctionCall(
-                type="function_call",
-                name=item.name,
-                arguments=item.arguments,
-                call_id=item.call_id,
-                id=item.id,
-                status=item.status,
-            )
+        fc_item = RealtimeConversationItemFunctionCall(
+            type="function_call",
+            name=item.name,
+            arguments=item.arguments,
+            call_id=item.call_id,
+            id=item.id,
+            status=item.status,
         )
         if self._generation_is_stale(turn.gen) or not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
             logger.info("LLM generation cancelled (stale speculative turn)")
             return
+        if not is_out_of_band(turn.response):
+            # Flush assistant text accumulated before this call first (so history
+            # order matches what the client received), then persist the call —
+            # all before the chunk leaves for the client.
+            chat = turn.runtime_config.chat
+            for pending_item in state.pending:
+                chat.add_item(pending_item)
+            state.pending.clear()
+            chat.add_item(fc_item)
         yield self._chunk(turn, tools=[item])
 
     # ── consumption ─────────────────────────────────────────────────────────--
@@ -430,6 +447,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         state = _GenState()
         error_message: str | None = None
         api_input = self._serialize(active_chat)
+        # Images the model actually sees this turn; only these are stripped on
+        # write-back, so an image a fast client injects mid-generation for the
+        # next turn survives (it is not in this serialized snapshot).
+        consumed_image_ids = active_chat.image_message_ids()
         if not api_input:
             # Nothing to send: empty `instructions` and no `input` (in the response,
             # the default conversation, or the out-of-band context). The provider
@@ -484,9 +505,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             # Out-of-band responses emit output and usage but never write back to the
             # default conversation (their context was a throwaway chat).
             if not is_out_of_band(turn.response):
+                # Tool calls (and any assistant text preceding them) were already
+                # written eagerly in _record_tool_call; only trailing items remain.
                 for item in state.pending:
                     original_chat.add_item(item)
-                original_chat.strip_images()
+                original_chat.strip_images(consumed_image_ids)
                 original_chat.trim_if_needed(self.compactor)
             if state.input_tokens or state.output_tokens:
                 yield TokenUsage(
