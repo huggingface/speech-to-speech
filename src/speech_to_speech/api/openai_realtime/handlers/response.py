@@ -252,6 +252,10 @@ class ResponseHandler(RealtimeBaseHandler):
                 )
             )
             self._end_response(conn_id, status)
+        # Apply any client items that arrived mid-generation now that in_response
+        # is cleared and the generation's own write-back has landed. Done outside
+        # the in_response guard so a stray terminal call still drains the buffer.
+        events.extend(self._service.conversation.flush_deferred_items(conn_id))
         return events
 
     # ── Pipeline event handlers ───────────────────
