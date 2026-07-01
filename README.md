@@ -342,13 +342,13 @@ speech-to-speech \
     --responses_api_base_url "http://localhost:8000/v1" \
     --responses_api_stream
 
-# GLM via the HF router — disable reasoning for low voice latency
+# Gemma 4 31B via the HF router on Cerebras — keep reasoning disabled for low voice latency
 speech-to-speech \
     --mode realtime \
     --stt parakeet-tdt \
     --llm_backend chat-completions \
     --tts qwen3 \
-    --model_name "zai-org/GLM-4.7:cerebras" \
+    --model_name "google/gemma-4-31B-it:cerebras" \
     --responses_api_base_url "https://router.huggingface.co/v1" \
     --responses_api_api_key "$HF_TOKEN" \
     --responses_api_reasoning_effort none \
