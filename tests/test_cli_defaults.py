@@ -15,6 +15,7 @@ from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandl
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
     ResponsesApiLanguageModelHandlerArguments,
 )
+from speech_to_speech.arguments_classes.sense_voice_stt_arguments import SenseVoiceSTTHandlerArguments
 from speech_to_speech.arguments_classes.socket_receiver_arguments import SocketReceiverArguments
 from speech_to_speech.arguments_classes.socket_sender_arguments import SocketSenderArguments
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
@@ -64,6 +65,7 @@ EXPECTED_FIELD_TYPES = {
     "vad_handler_kwargs": VADHandlerArguments,
     "whisper_stt_handler_kwargs": WhisperSTTHandlerArguments,
     "paraformer_stt_handler_kwargs": ParaformerSTTHandlerArguments,
+    "sense_voice_stt_handler_kwargs": SenseVoiceSTTHandlerArguments,
     "faster_whisper_stt_handler_kwargs": FasterWhisperSTTHandlerArguments,
     "mlx_audio_whisper_stt_handler_kwargs": MLXAudioWhisperSTTHandlerArguments,
     "parakeet_tdt_stt_handler_kwargs": ParakeetTDTSTTHandlerArguments,

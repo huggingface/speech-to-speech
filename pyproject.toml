@@ -80,6 +80,9 @@ mlx-lm = [
     "mlx-lm==0.31.1; platform_system == 'Darwin'",
     "mlx-vlm==0.4.1; platform_system == 'Darwin'",
 ]
+sensevoice = [
+    "funasr>=1.1.6",
+]
 paraformer = [
     "funasr>=1.1.6",
     "modelscope>=1.17.1",
