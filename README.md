@@ -2,7 +2,7 @@
   <div>&nbsp;</div>
   <img src="https://raw.githubusercontent.com/huggingface/speech-to-speech/main/logo.png" width="600"/>
 
-# Speech To Speech: Build local voice agents with open-source models
+# Speech To Speech: Build voice agents with open-source models
 
 [![PyPI](https://img.shields.io/pypi/v/speech-to-speech)](https://pypi.org/project/speech-to-speech/)
 [![Python](https://img.shields.io/pypi/pyversions/speech-to-speech)](https://pypi.org/project/speech-to-speech/)
