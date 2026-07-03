@@ -38,12 +38,19 @@ From a source checkout, talk to it from a second terminal:
 python scripts/listen_and_play_realtime.py --host 127.0.0.1 --port 8765
 ```
 
-Prefer to keep the LLM on your own machine? Point the OpenAI-compatible LLM backend at a local server:
+Prefer to keep the LLM on your own machine? Serve Gemma 4 with llama.cpp:
+
+```bash
+llama-server -hf ggml-org/gemma-4-E4B-it-GGUF -np 2 -c 65536 -fa on --swa-full
+```
+
+Then point the OpenAI-compatible LLM backend at it:
 
 ```bash
 speech-to-speech \
-    --model_name "Qwen/Qwen3-4B-Instruct-2507" \
-    --responses_api_base_url "http://localhost:8000/v1"
+    --model_name "ggml-org/gemma-4-E4B-it-GGUF" \
+    --responses_api_base_url "http://127.0.0.1:8080/v1" \
+    --responses_api_api_key ""
 ```
 
 Any OpenAI Realtime-compatible client can connect. See [Realtime API](#realtime-api) for the protocol and [LLM backends](#llm-backends) for provider and local-server options.
@@ -332,7 +339,7 @@ Works with any provider or server that implements the OpenAI Responses API. Poin
 | HF Inference Providers | `https://router.huggingface.co/v1` | `$HF_TOKEN` |
 | OpenRouter | `https://openrouter.ai/api/v1` | `$OPENROUTER_API_KEY` |
 | vLLM | `http://localhost:8000/v1` | omit or any string |
-| llama.cpp | `http://localhost:8080/v1` | omit or any string |
+| llama.cpp | `http://127.0.0.1:8080/v1` | empty string |
 
 ```bash
 # OpenAI
@@ -414,28 +421,28 @@ speech-to-speech \
 
 ### Fully Local
 
+Run the LLM in a separate llama.cpp process for the lowest-friction fully local setup, as shown in the [Reachy Mini local conversation guide](https://huggingface.co/blog/local-reachy-mini-conversation):
+
 ```bash
-# MLX backend on Apple Silicon
-speech-to-speech \
-    --mode local \
-    --stt parakeet-tdt \
-    --llm_backend mlx-lm \
-    --tts qwen3 \
-    --qwen3_tts_mlx_quantization 6bit \
-    --model_name "mlx-community/Qwen3-4B-Instruct-2507-bf16" \
-    --enable_live_transcription
+# Terminal 1: llama.cpp serving Gemma 4
+llama-server -hf ggml-org/gemma-4-E4B-it-GGUF -np 2 -c 65536 -fa on --swa-full
 ```
 
 ```bash
-# Transformers backend on CUDA / CPU
+# Terminal 2: speech-to-speech using that local LLM server
 speech-to-speech \
-    --mode local \
+    --mode realtime \
     --stt parakeet-tdt \
-    --llm_backend transformers \
+    --llm_backend responses-api \
     --tts qwen3 \
-    --model_name "Qwen/Qwen3-4B-Instruct-2507" \
+    --model_name "ggml-org/gemma-4-E4B-it-GGUF" \
+    --responses_api_base_url "http://127.0.0.1:8080/v1" \
+    --responses_api_api_key "" \
+    --responses_api_stream \
     --enable_live_transcription
 ```
+
+You can use `--mode local` instead of `--mode realtime` when you want to talk through the machine running the server directly. In-process local backends are still available with `--llm_backend mlx-lm` on Apple Silicon or `--llm_backend transformers` on CUDA / CPU.
 
 ## Multi-Language Support
 
