@@ -14,6 +14,14 @@ A low-latency, modular voice-agent pipeline: **VAD -> STT -> LLM -> TTS**, expos
 
 This pipeline runs in production as the conversation backend for thousands of [Reachy Mini](https://huggingface.co/blog/reachy-mini) robots.
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/endpoint-swap-dark.gif">
+    <source media="(prefers-color-scheme: light)" srcset="./docs/assets/endpoint-swap-light.gif">
+    <img src="./docs/assets/endpoint-swap-light.gif" alt="Switching an OpenAI Realtime client endpoint from hosted OpenAI to a self-hosted speech-to-speech server" width="640">
+  </picture>
+</p>
+
 ## Quickstart
 
 ```bash
