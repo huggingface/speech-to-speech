@@ -5,21 +5,22 @@ services:
     build:
       context: .
       dockerfile: ${DOCKERFILE:-Dockerfile}
-    command: 
-      - python3 
-      - s2s_pipeline.py 
-      - --recv_host 
-      - 0.0.0.0 
-      - --send_host 
-      - 0.0.0.0 
-      - --model_name 
-      - microsoft/Phi-3-mini-4k-instruct 
-      - --init_chat_role 
+    command:
+      - speech-to-speech
+      - --mode
+      - socket
+      - --recv_host
+      - 0.0.0.0
+      - --send_host
+      - 0.0.0.0
+      - --llm_backend
+      - transformers
+      - --model_name
+      - microsoft/Phi-3-mini-4k-instruct
+      - --init_chat_role
       - system
       - --init_chat_prompt
       - "You are a helpful assistant"
-      - --stt_compile_mode 
-      - reduce-overhead 
     expose:
       - 12345/tcp
       - 12346/tcp
@@ -28,7 +29,6 @@ services:
       - 12346:12346/tcp
     volumes:
       - ./cache/:/root/.cache/
-      - ./s2s_pipeline.py:/usr/src/app/s2s_pipeline.py
     deploy:
       resources:
         reservations:
