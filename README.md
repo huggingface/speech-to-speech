@@ -254,6 +254,8 @@ python scripts/benchmark_tts.py \
 
 ### TCP Socket
 
+TCP socket mode is intentionally minimal. It streams raw PCM audio, but does not provide the full Realtime API feature set, including interruption handling, live transcript events, or tool-call events.
+
 1. Run the pipeline on the server:
 
    ```bash
@@ -274,7 +276,7 @@ Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-
 docker compose up
 ```
 
-The compose file starts the TCP socket server and exposes ports `12345` and `12346`.
+The compose file starts a llama.cpp server with Gemma 4, starts the TCP socket server, and exposes ports `8080`, `12345`, and `12346`.
 
 ## Realtime API
 

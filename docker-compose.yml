@@ -1,7 +1,37 @@
 ---
 services:
 
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    command:
+      - -hf
+      - ggml-org/gemma-4-E4B-it-GGUF
+      - -np
+      - "2"
+      - -c
+      - "65536"
+      - -fa
+      - "on"
+      - --swa-full
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+    ports:
+      - 8080:8080/tcp
+    volumes:
+      - ./cache/:/root/.cache/
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+
   pipeline:
+    depends_on:
+      - llama
     build:
       context: .
       dockerfile: ${DOCKERFILE:-Dockerfile}
@@ -14,9 +44,13 @@ services:
       - --send_host
       - 0.0.0.0
       - --llm_backend
-      - transformers
+      - responses-api
       - --model_name
-      - microsoft/Phi-3-mini-4k-instruct
+      - ggml-org/gemma-4-E4B-it-GGUF
+      - --responses_api_base_url
+      - http://llama:8080/v1
+      - --responses_api_api_key
+      - ""
       - --init_chat_role
       - system
       - --init_chat_prompt
