@@ -32,3 +32,24 @@ class ResponsesApiLanguageModelHandlerArguments(LanguageModelBaseArguments):
             "For Together Qwen3.5 models this sends chat_template_kwargs.enable_thinking=false."
         },
     )
+    keenable_web_search: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable native live web search: the server advertises Keenable web_search/fetch_page tools "
+            "to the model and executes them inside the pipeline, so clients need no tool handling. Default is False."
+        },
+    )
+    keenable_api_key: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Keenable API key (keen_...). Falls back to the KEENABLE_API_KEY env var; with no key the "
+            "keyless rate-limited free tier is used. Default is None."
+        },
+    )
+    tool_call_max_rounds: int = field(
+        default=3,
+        metadata={
+            "help": "Maximum LLM rounds per turn when server-executed tools (Keenable web search) are enabled; "
+            "the final round forces a spoken answer. Default is 3."
+        },
+    )

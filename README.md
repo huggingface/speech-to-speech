@@ -421,6 +421,39 @@ speech-to-speech \
     --responses_api_stream
 ```
 
+### Live web search with Keenable
+
+The OpenAI-compatible backends (`chat-completions` and `responses-api`) can give the
+assistant native access to the live web via [Keenable](https://docs.keenable.ai): the
+server advertises `web_search` and `fetch_page` tools to the model and executes them
+*inside the pipeline*, feeding results back to the model in the same turn. Clients need
+no tool handling — ask about news, weather, sports or prices and the spoken answer is
+grounded in a fresh search. Fast inference (e.g. Cerebras) is what makes the extra LLM
+round-trip per search comfortable in a voice loop.
+
+```bash
+# The Cerebras voice stack, now with live web answers
+export KEENABLE_API_KEY="keen_..."   # optional: keyless free tier works too
+speech-to-speech \
+    --mode realtime \
+    --stt parakeet-tdt \
+    --llm_backend chat-completions \
+    --tts qwen3 \
+    --model_name "google/gemma-4-31B-it:cerebras" \
+    --responses_api_base_url "https://router.huggingface.co/v1" \
+    --responses_api_api_key "$HF_TOKEN" \
+    --responses_api_reasoning_effort none \
+    --responses_api_stream \
+    --keenable_web_search
+```
+
+Flags: `--keenable_web_search` enables the tools, `--keenable_api_key` (or the
+`KEENABLE_API_KEY` env var) authenticates for higher rate limits, and
+`--tool_call_max_rounds` bounds search→answer rounds per turn (default 3, the last
+round always forces a spoken answer). A client-registered tool with the same name
+takes precedence, so existing clients that implement their own `web_search` keep
+working unchanged.
+
 ### Fully Local
 
 Run the LLM in a separate llama.cpp process for the lowest-friction fully local setup, as shown in the [Reachy Mini local conversation guide](https://huggingface.co/blog/local-reachy-mini-conversation):
