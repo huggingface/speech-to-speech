@@ -13,11 +13,12 @@ from collections.abc import Iterator
 from queue import Queue
 
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.pipeline.events import AssistantTextEvent, TokenUsageEvent
+from speech_to_speech.pipeline.events import AssistantTextEvent, ResponseFailedEvent, TokenUsageEvent
 from speech_to_speech.pipeline.handler_types import LLMOut, TTSIn
 from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk, TokenUsage, TTSInput
 from speech_to_speech.pipeline.queue_types import TextEventItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.utils.utils import response_wants_audio
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,17 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                     lm_output.turn_revision,
                 )
                 return
+            # A failed generation (e.g. invalid out-of-band input) closes the response as
+            # "failed" via the text side-channel, then falls through to emit the normal
+            # EndOfResponse so the audio path still re-enables listening / releases the slot.
+            if lm_output.error and self.text_output_queue is not None:
+                self.text_output_queue.put(
+                    ResponseFailedEvent(
+                        message=lm_output.error,
+                        turn_id=lm_output.turn_id,
+                        turn_revision=lm_output.turn_revision,
+                    )
+                )
             yield EndOfResponse(
                 turn_id=lm_output.turn_id,
                 turn_revision=lm_output.turn_revision,
@@ -113,6 +125,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                 text=lm_output.text,
                 turn_id=lm_output.turn_id,
                 turn_revision=lm_output.turn_revision,
+                cancel_generation=lm_output.cancel_generation,
             )
             if lm_output.tools:
                 event.tools = lm_output.tools
@@ -121,7 +134,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                 logger.debug(f"Sending to clients: text='{lm_output.text}' (no tools)")
             self.text_output_queue.put(event)
 
-        if lm_output.text:
+        if lm_output.text and response_wants_audio(lm_output.response):
             logger.debug(f"Forwarding to TTS: '{lm_output.text}'")
             yield TTSInput(
                 text=lm_output.text,

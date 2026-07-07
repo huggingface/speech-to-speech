@@ -49,6 +49,7 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_realtime_profile():
     assert qwen3_args.qwen3_tts_model_name == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     assert qwen3_args.qwen3_tts_speaker == "Aiden"
     assert qwen3_args.qwen3_tts_language == "auto"
+    assert qwen3_args.qwen3_tts_backend == "ggml"
     assert qwen3_args.qwen3_tts_non_streaming_mode is True
     assert qwen3_args.qwen3_tts_ref_audio is None
     assert qwen3_args.qwen3_tts_mlx_quantization == "6bit"
@@ -104,6 +105,17 @@ def test_parse_arguments_default_backend_returns_openai_api():
     assert isinstance(args.language_model_handler_kwargs, LanguageModelHandlerArguments)
     assert args.responses_api_language_model_handler_kwargs.model_name == "gpt-5.4-mini"
     assert args.module_kwargs.llm_backend == "responses-api"
+
+
+def test_parse_arguments_accepts_qwen3_tts_backend_override():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = ["speech-to-speech", "--qwen3_tts_backend", "torch"]
+        args = parse_arguments()
+    finally:
+        sys.argv = original_argv
+
+    assert args.qwen3_tts_handler_kwargs.qwen3_tts_backend == "torch"
 
 
 def test_parse_arguments_transformers_backend():

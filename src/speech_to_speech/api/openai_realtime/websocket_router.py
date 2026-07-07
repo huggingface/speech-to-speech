@@ -139,7 +139,7 @@ async def _drain_pending_response_events(
                 drained_usage += 1
             elif drain_assistant_events and isinstance(item, AssistantTextEvent):
                 drained_assistant += 1
-                if unit.cancel_scope.discarding:
+                if _generation_is_discardable(unit, item.cancel_generation):
                     continue
                 events = unit.service.dispatch_pipeline_event(session_id, item)
                 if ws is not None and events:
@@ -202,13 +202,26 @@ def _is_pipeline_end(item: Any) -> bool:
     return isinstance(payload, bytes) and payload == PIPELINE_END
 
 
-def _should_discard_audio(unit: PipelineUnit, item: Any) -> bool:
-    generation = _audio_generation(item)
+def _generation_is_discardable(unit: PipelineUnit, generation: int | None) -> bool:
+    """Whether output tagged with *generation* should be dropped.
+
+    A generation is discardable if it has been superseded (``is_stale``) or if the
+    cancel scope is in its post-cancel discard window and this is not the current
+    live generation. Shared by audio and assistant-text so the two paths stay in
+    lockstep: dropping text whenever ``discarding`` is set (without this generation
+    check) silently swallows the transcript of a fresh response when ``discarding``
+    lingers — e.g. a superseded speculative turn whose TTS never emitted an
+    AUDIO_RESPONSE_DONE sentinel, so response_done() never cleared the flag.
+    """
     if generation is not None and unit.cancel_scope.is_stale(generation):
         return True
     if unit.cancel_scope.discarding and generation != unit.cancel_scope.generation:
         return True
     return False
+
+
+def _should_discard_audio(unit: PipelineUnit, item: Any) -> bool:
+    return _generation_is_discardable(unit, _audio_generation(item))
 
 
 async def _release_unit_after_drain(unit: PipelineUnit, session: Any, session_id: str) -> None:
@@ -462,7 +475,9 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                         was_in_response = st.in_response
                         was_response_pending = st.response_pending
 
-                    if unit.cancel_scope.discarding and isinstance(text_msg, AssistantTextEvent):
+                    if isinstance(text_msg, AssistantTextEvent) and _generation_is_discardable(
+                        unit, text_msg.cancel_generation
+                    ):
                         pass
                     elif ws is not None and isinstance(text_msg, PipelineEvent) and session_id:
                         events = unit.service.dispatch_pipeline_event(session_id, text_msg)
@@ -503,7 +518,7 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                     if _is_pipeline_end(audio_chunk):
                         await _drain_pending_response_events(ws, unit, session_id)
                         if ws is not None and session_id:
-                            await _send_events(ws, unit.service.finish_audio_response(session_id))
+                            await _send_events(ws, unit.service.finish_response(session_id))
                         break
 
                     if _is_audio_done(audio_chunk):
@@ -517,7 +532,7 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                             continue
                         await _drain_pending_response_events(ws, unit, session_id)
                         if ws is not None and session_id:
-                            await _send_events(ws, unit.service.finish_audio_response(session_id))
+                            await _send_events(ws, unit.service.finish_response(session_id))
                         if session_id:
                             unit.service._state(session_id).response_pending = False
                         unit.response_playing.clear()

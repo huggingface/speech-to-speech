@@ -80,17 +80,30 @@ python s2s_pipeline.py \
   --tts qwen3 \
   --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
   --qwen3_tts_device cuda \
+  --qwen3_tts_backend ggml \
   --qwen3_tts_speaker Aiden \
   --qwen3_tts_language auto \
   --qwen3_tts_non_streaming_mode True
 ```
 
 Behavior:
-- Uses `faster-qwen3-tts` on non-macOS platforms.
+- Uses `faster-qwen3-tts` on non-macOS platforms, defaulting to the GGML backend. Pass `--qwen3_tts_backend torch` to use the CUDA-graphs backend instead.
 - Uses `mlx-audio` on Apple Silicon and auto-maps `Qwen/...` model IDs to `mlx-community/...`, defaulting to the `6bit` MLX variant unless the model name already pins a suffix.
 - Supports MLX quantization overrides on Apple Silicon via `--qwen3_tts_mlx_quantization bf16|4bit|6bit|8bit`.
 - Keeps the existing voice-clone/custom-voice/voice-design handler flow intact.
 - Defaults to the CustomVoice model with speaker `Aiden`, so no reference audio is required. Voice-clone/base models can still use `--qwen3_tts_ref_audio`.
+
+Install notes for Linux GGML:
+- The default PyPI `qwentts-cpp-python` wheel targets CUDA 12.8.
+- If that wheel does not match your CUDA runtime, install one of the Hugging Face wheelhouse builds before installing `speech-to-speech`.
+
+```bash
+pip install "qwentts-cpp-python==0.3.0+cu130" \
+  -f https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/tree/main/whl/cu130
+pip install speech-to-speech
+```
+
+Available wheelhouse directories include `cu124`, `cu128`, `cu130`, and `cpu`.
 
 Example for Apple Silicon using the default 6-bit MLX variant:
 

@@ -6,6 +6,7 @@ import threading
 from collections.abc import Callable
 from typing import Any, Literal, Union
 
+from openai.types.realtime import ConversationItem
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
@@ -18,6 +19,7 @@ from openai.types.realtime.realtime_conversation_item_assistant_message import (
 )
 from openai.types.realtime.realtime_conversation_item_system_message import Content as SystemContent
 from openai.types.realtime.realtime_conversation_item_user_message import Content as UserContent
+from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses.response_input_image_param import ResponseInputImageParam
 from openai.types.responses.response_input_message_content_list_param import (
     ResponseInputMessageContentListParam,
@@ -456,15 +458,32 @@ class Chat:
             self._gen_counter += 1
             self._compact_in_flight = False
 
-    def strip_images(self) -> None:
-        """Remove all image content parts from user messages in the buffer.
+    def image_message_ids(self) -> set[str]:
+        """IDs of user messages currently carrying ``input_image`` content."""
+        with self._lock:
+            return {
+                item.id
+                for item in self.buffer
+                if isinstance(item, RealtimeConversationItemUserMessage)
+                and item.id is not None
+                and any(p.type == "input_image" for p in item.content)
+            }
+
+    def strip_images(self, only_ids: set[str] | None = None) -> None:
+        """Remove image content parts from user messages in the buffer.
 
         Called after appending the assistant response so images don't persist
-        across turns.
+        across turns. With *only_ids*, strip only those message IDs — the images
+        the just-completed response actually consumed (captured before the
+        request was sent). This leaves intact an image a fast client injected
+        mid-generation for the *next* turn, which the current response never saw.
+        Without *only_ids*, every image is stripped.
         """
         with self._lock:
             for item in self.buffer:
                 if isinstance(item, RealtimeConversationItemUserMessage):
+                    if only_ids is not None and item.id not in only_ids:
+                        continue
                     item.content = [p for p in item.content if p.type != "input_image"]
 
     # ── Compaction internals ──────────────────────────────────
@@ -688,3 +707,54 @@ def make_system_message(text: str) -> RealtimeConversationItemSystemMessage:
         role="system",
         content=[SystemContent(type="input_text", text=text)],
     )
+
+
+def add_supported_item(chat: Chat, item: ConversationItem) -> None:
+    """Narrow a protocol ``ConversationItem`` to a :data:`SupportedItem` and add it to *chat*.
+
+    Raises :class:`ChatItemError` on validation failure or unsupported type. Shared
+    by the conversation handler (in-band item injection) and the language-model
+    handlers (seeding an out-of-band response's throwaway chat from ``response.input``).
+    """
+    # call_id on function_call items must be client-supplied: it is referenced later by
+    # function_call_output items, so we cannot silently generate one here.
+    if isinstance(item, RealtimeConversationItemFunctionCall) and (
+        item.call_id is None or not item.call_id.startswith("call_")
+    ):
+        raise ChatItemError("function_call item is missing a call_id. The call_id should start with 'call_'.")
+
+    if isinstance(
+        item,
+        (
+            RealtimeConversationItemSystemMessage,
+            RealtimeConversationItemUserMessage,
+            RealtimeConversationItemAssistantMessage,
+            RealtimeConversationItemFunctionCall,
+            RealtimeConversationItemFunctionCallOutput,
+        ),
+    ):
+        chat.add_item(item)
+        return
+
+    raise ChatItemError(f"Unsupported item type: {getattr(item, 'type', None)}")
+
+
+def build_active_chat(original_chat: Chat, response: RealtimeResponseCreateParams | None) -> Chat:
+    """Build the chat an *out-of-band* response generates against (caller ensures out-of-band).
+
+    Mirrors the OpenAI realtime semantics for ``input``:
+
+    - ``input is None`` -> a read-only **copy of the default conversation** (the
+      out-of-band response reads history but never commits back).
+    - ``input == []`` -> a **fresh, empty chat** (context cleared; only the
+      system prompt, added later by the handler, will be present).
+    - ``input == [...]`` -> a **fresh chat seeded** with those items.
+
+    Raises :class:`ChatItemError` if an ``input`` item fails validation.
+    """
+    if response is not None and response.input is not None:
+        fresh = Chat(original_chat.size)
+        for item in response.input:
+            add_supported_item(fresh, item)
+        return fresh
+    return original_chat.copy()

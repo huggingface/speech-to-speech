@@ -21,6 +21,9 @@ from transformers import HfArgumentParser
 
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.arguments_classes.chat_completions_language_model_arguments import (
+    ChatCompletionsLanguageModelHandlerArguments,
+)
 from speech_to_speech.arguments_classes.chat_tts_arguments import ChatTTSHandlerArguments
 from speech_to_speech.arguments_classes.facebookmms_tts_arguments import FacebookMMSTTSHandlerArguments
 from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import (
@@ -126,20 +129,25 @@ def rename_args(args: Any, prefix: str) -> None:
 
 
 def parse_arguments() -> ParsedArguments:
-    # Pre-parse to determine which LM backend is selected, so only one of the two
+    # Pre-parse to determine which LM backend is selected, so only one of the
     # mutually exclusive LM argument classes is registered with HfArgumentParser
     # (avoids duplicate field names from the shared LanguageModelBaseArguments base).
+    # chat-completions reuses the responses-api connection fields via subclassing.
+    _backend_lm_class = {
+        "responses-api": ResponsesApiLanguageModelHandlerArguments,
+        "chat-completions": ChatCompletionsLanguageModelHandlerArguments,
+    }
     _is_json = len(sys.argv) == 2 and sys.argv[1].endswith(".json")
     if _is_json:
         with open(sys.argv[1]) as _f:
-            _use_responses_api = json.load(_f).get("llm_backend") == "responses-api"
+            _backend = json.load(_f).get("llm_backend")
     else:
         _pre = argparse.ArgumentParser(add_help=False)
         _pre.add_argument("--llm_backend", default="responses-api")
-        _use_responses_api = _pre.parse_known_args()[0].llm_backend == "responses-api"
+        _backend = _pre.parse_known_args()[0].llm_backend
 
-    _lm_class = ResponsesApiLanguageModelHandlerArguments if _use_responses_api else LanguageModelHandlerArguments
-    logger.debug("LLM backend pre-parse: use_responses_api=%s, registering %s", _use_responses_api, _lm_class.__name__)
+    _lm_class = _backend_lm_class.get(_backend, LanguageModelHandlerArguments)
+    logger.debug("LLM backend pre-parse: backend=%s, registering %s", _backend, _lm_class.__name__)
 
     parser = HfArgumentParser(
         (  # type: ignore[arg-type]
@@ -185,8 +193,11 @@ def parse_arguments() -> ParsedArguments:
         mlx_audio_whisper_stt_handler_kwargs=by_type[MLXAudioWhisperSTTHandlerArguments],
         parakeet_tdt_stt_handler_kwargs=by_type[ParakeetTDTSTTHandlerArguments],
         language_model_handler_kwargs=by_type.get(LanguageModelHandlerArguments, LanguageModelHandlerArguments()),
+        # The OpenAI-compatible slot holds whichever class was registered:
+        # ChatCompletions... (a subclass) for chat-completions, else ResponsesApi....
         responses_api_language_model_handler_kwargs=by_type.get(
-            ResponsesApiLanguageModelHandlerArguments, ResponsesApiLanguageModelHandlerArguments()
+            ChatCompletionsLanguageModelHandlerArguments,
+            by_type.get(ResponsesApiLanguageModelHandlerArguments, ResponsesApiLanguageModelHandlerArguments()),
         ),
         chat_tts_handler_kwargs=by_type[ChatTTSHandlerArguments],
         facebook_mms_tts_handler_kwargs=by_type[FacebookMMSTTSHandlerArguments],
@@ -516,7 +527,7 @@ def _build_realtime_pipeline_unit(
         vars(kw)["cancel_scope"] = cancel_scope
         vars(kw)["speculative_turns"] = speculative_turns
 
-    if module_kwargs.llm_backend == "responses-api":
+    if module_kwargs.llm_backend in ("responses-api", "chat-completions"):
         chat_size = vars(responses_api_kw).get("chat_size", 10)
     else:
         chat_size = vars(lm_kw).get("chat_size", 10)
@@ -705,7 +716,7 @@ def build_pipeline(
         vad_handler_kwargs.enable_realtime_transcription = True
         vad_handler_kwargs.realtime_processing_pause = module_kwargs.live_transcription_update_interval
 
-    if module_kwargs.llm_backend == "responses-api":
+    if module_kwargs.llm_backend in ("responses-api", "chat-completions"):
         _lm_vars = vars(responses_api_language_model_handler_kwargs)
     else:
         _lm_vars = vars(language_model_handler_kwargs)
@@ -883,6 +894,18 @@ def get_llm_handler(
             setup_kwargs=vars(responses_api_language_model_handler_kwargs),
         )
 
+    if module_kwargs.llm_backend == "chat-completions":
+        from speech_to_speech.LLM.chat_completions_language_model import ChatCompletionsApiModelHandler
+
+        # Reuses the responses-api argument class (identical fields: model_name,
+        # base_url, api_key, stream, disable_thinking, ...).
+        return ChatCompletionsApiModelHandler(
+            stop_event,
+            queue_in=text_prompt_queue,
+            queue_out=lm_response_queue,
+            setup_kwargs=vars(responses_api_language_model_handler_kwargs),
+        )
+
     if module_kwargs.llm_backend in ("transformers", "mlx-lm"):
         lm_kwargs = vars(language_model_handler_kwargs)
         is_vlm = lm_kwargs.pop("is_vlm", False)
@@ -907,7 +930,7 @@ def get_llm_handler(
             setup_kwargs=lm_kwargs,
         )
 
-    raise ValueError("The LLM should be either transformers, mlx-lm or responses-api")
+    raise ValueError("The LLM should be either transformers, mlx-lm, responses-api or chat-completions")
 
 
 def get_tts_handler(

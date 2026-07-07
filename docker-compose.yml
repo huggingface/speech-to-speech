@@ -1,25 +1,60 @@
 ---
 services:
 
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    command:
+      - -hf
+      - ggml-org/gemma-4-E4B-it-GGUF
+      - -np
+      - "2"
+      - -c
+      - "65536"
+      - -fa
+      - "on"
+      - --swa-full
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+    ports:
+      - 8080:8080/tcp
+    volumes:
+      - ./cache/:/root/.cache/
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+
   pipeline:
+    depends_on:
+      - llama
     build:
       context: .
       dockerfile: ${DOCKERFILE:-Dockerfile}
-    command: 
-      - python3 
-      - s2s_pipeline.py 
-      - --recv_host 
-      - 0.0.0.0 
-      - --send_host 
-      - 0.0.0.0 
-      - --model_name 
-      - microsoft/Phi-3-mini-4k-instruct 
-      - --init_chat_role 
+    command:
+      - speech-to-speech
+      - --mode
+      - socket
+      - --recv_host
+      - 0.0.0.0
+      - --send_host
+      - 0.0.0.0
+      - --llm_backend
+      - responses-api
+      - --model_name
+      - ggml-org/gemma-4-E4B-it-GGUF
+      - --responses_api_base_url
+      - http://llama:8080/v1
+      - --responses_api_api_key
+      - ""
+      - --init_chat_role
       - system
       - --init_chat_prompt
       - "You are a helpful assistant"
-      - --stt_compile_mode 
-      - reduce-overhead 
     expose:
       - 12345/tcp
       - 12346/tcp
@@ -28,7 +63,6 @@ services:
       - 12346:12346/tcp
     volumes:
       - ./cache/:/root/.cache/
-      - ./s2s_pipeline.py:/usr/src/app/s2s_pipeline.py
     deploy:
       resources:
         reservations:

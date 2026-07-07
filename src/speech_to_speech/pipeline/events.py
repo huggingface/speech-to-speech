@@ -72,11 +72,28 @@ class AssistantTextEvent(PipelineEvent):
     tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
     turn_id: str | None = None
     turn_revision: int | None = None
+    # Response generation that produced this text, mirroring AudioOutput. Lets the
+    # send loop discard stale assistant text by the same generation-aware rule as
+    # audio, instead of blanket-dropping while cancel_scope.discarding is set.
+    cancel_generation: int | None = None
 
 
 class TokenUsageEvent(PipelineEvent):
     type: Literal["token_usage"] = "token_usage"
     input_tokens: int = 0
     output_tokens: int = 0
+    turn_id: str | None = None
+    turn_revision: int | None = None
+
+
+class ResponseFailedEvent(PipelineEvent):
+    """Signals that a response could not be generated (e.g. invalid out-of-band input).
+
+    Dispatched to the service so it can close the in-progress response with
+    ``status="failed"`` instead of the usual ``completed``.
+    """
+
+    type: Literal["response_failed"] = "response_failed"
+    message: str = ""
     turn_id: str | None = None
     turn_revision: int | None = None

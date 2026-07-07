@@ -47,7 +47,7 @@ dependencies = [
     "uvicorn>=0.30.0",
     "websockets>=12.0",
     "nano-parakeet>=0.2.0; platform_system != 'Darwin'",
-    "faster-qwen3-tts>=0.2.6; platform_system != 'Darwin'",
+    "faster-qwen3-tts[ggml]>=0.3.0; platform_system != 'Darwin'",
     "lingua-language-detector>=2.0.2",
     "miniaudio==1.61; platform_system == 'Darwin'",
     "mlx==0.31.1; platform_system == 'Darwin'",

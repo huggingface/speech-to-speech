@@ -11,6 +11,8 @@ from openai.types.realtime import (
     ResponseCreateEvent,
     ResponseDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
+    ResponseTextDeltaEvent,
+    ResponseTextDoneEvent,
 )
 from openai.types.realtime.realtime_response import Audio, AudioOutput
 from openai.types.realtime.realtime_response_status import RealtimeResponseStatus
@@ -20,7 +22,7 @@ from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandl
 from speech_to_speech.LLM.chat import ChatItemError
 from speech_to_speech.pipeline.events import AssistantTextEvent
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
-from speech_to_speech.utils.utils import _generate_id
+from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
 
 if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import ServerEvent, _ResponseStatus, _StatusReason
@@ -68,6 +70,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.in_response = False
         st.response_pending = False
         st.current_response_params = None
+        st.pending_output_text_parts = []
 
     def _start_item(self, conn_id: str) -> str:
         """Generate a new item ID, reset content index, and store it."""
@@ -111,13 +114,16 @@ class ResponseHandler(RealtimeBaseHandler):
             audio_output = audio_cfg.output if audio_cfg is not None else None
             voice = str(audio_output.voice) if audio_output is not None and audio_output.voice else None
 
+        # Out-of-band responses are not threaded into any conversation: report a null id.
+        conversation_id = None if is_out_of_band(rp) else st.conversation_id
+
         return RealtimeResponse(
             id=st.current_response_id,
             object="realtime.response",
             status=status,
             status_details=status_details,
             audio=Audio(output=AudioOutput(voice=str(voice) if voice else None)),  # type: ignore[arg-type]
-            conversation_id=st.conversation_id,
+            conversation_id=conversation_id,
             metadata=metadata,
             usage=RealtimeResponseUsage(
                 input_tokens=st.response_usage.input_tokens,
@@ -147,7 +153,12 @@ class ResponseHandler(RealtimeBaseHandler):
                 _type="conversation_already_has_active_response",
             )
 
-        if event.response and event.response.input:
+        out_of_band = is_out_of_band(event.response)
+
+        # In-band: response.input items are added to the default conversation here so
+        # they appear in history. Out-of-band: leave the default conversation untouched —
+        # the input rides along on the request and seeds a throwaway chat in the LM.
+        if not out_of_band and event.response and event.response.input:
             for input_item in event.response.input:
                 try:
                     self._service.conversation._append_item(conn_id, input_item)
@@ -164,13 +175,16 @@ class ResponseHandler(RealtimeBaseHandler):
         cfg = st.runtime_config
         queue = self._queue(conn_id)
         if queue:
+            # Out-of-band responses carry no turn identity: a null turn_id makes every
+            # speculative-turn staleness gate treat them as always-latest, so a new user
+            # turn mid-generation can never silently drop their output.
             queue.put(
                 GenerateResponseRequest(
                     runtime_config=cfg,
                     response=event.response,
-                    turn_id=st.speculative_user_turn_id,
-                    turn_revision=st.speculative_user_turn_revision,
-                    speech_stopped_at_s=st.speculative_user_speech_stopped_at_s,
+                    turn_id=None if out_of_band else st.speculative_user_turn_id,
+                    turn_revision=None if out_of_band else st.speculative_user_turn_revision,
+                    speech_stopped_at_s=None if out_of_band else st.speculative_user_speech_stopped_at_s,
                 )
             )
         logger.debug("response.create received, LLM generation triggered")
@@ -182,34 +196,54 @@ class ResponseHandler(RealtimeBaseHandler):
 
     def handle_response_cancel(self, conn_id: str) -> list[ServerEvent]:
         """Cancel the in-progress response and re-enable listening."""
-        events = self.finish_audio_response(conn_id, status="cancelled", reason="client_cancelled")
+        events = self.finish_response(conn_id, status="cancelled", reason="client_cancelled")
         should_listen = self._should_listen(conn_id)
         if should_listen:
             should_listen.set()
         logger.info("Response cancelled, listening re-enabled")
         return events
 
-    def finish_audio_response(
+    def finish_response(
         self,
         conn_id: str,
         status: _ResponseStatus = "completed",
         reason: _StatusReason | None = None,
     ) -> list[ServerEvent]:
-        """Close the current response (audio done + response done)."""
+        """Close the current response (audio/text done + response done).
+
+        Audio responses emit ``response.output_audio.done`` for any terminal
+        status. Text-only responses emit a single ``response.output_text.done``
+        carrying the full streamed text, but only on ``status="completed"`` —
+        a cancelled or failed text response sends no audio, so it just closes
+        with ``response.done``.
+        """
         st = self._state(conn_id)
         events: list[ServerEvent] = []
         if st.in_response:
             resp_id, item_id = self._ensure_response(conn_id)
-            events.append(
-                ResponseAudioDoneEvent(
-                    type="response.output_audio.done",
-                    event_id=self._next_event_id(),
-                    content_index=0,
-                    item_id=item_id,
-                    output_index=0,
-                    response_id=resp_id,
+            if response_wants_audio(st.current_response_params):
+                events.append(
+                    ResponseAudioDoneEvent(
+                        type="response.output_audio.done",
+                        event_id=self._next_event_id(),
+                        content_index=0,
+                        item_id=item_id,
+                        output_index=0,
+                        response_id=resp_id,
+                    )
                 )
-            )
+            elif status == "completed" and st.pending_output_text_parts:
+                events.append(
+                    ResponseTextDoneEvent(
+                        type="response.output_text.done",
+                        event_id=self._next_event_id(),
+                        content_index=0,
+                        item_id=item_id,
+                        output_index=0,
+                        response_id=resp_id,
+                        text="".join(st.pending_output_text_parts),
+                    )
+                )
             events.append(
                 ResponseDoneEvent(
                     type="response.done",
@@ -218,6 +252,10 @@ class ResponseHandler(RealtimeBaseHandler):
                 )
             )
             self._end_response(conn_id, status)
+        # Apply any client items that arrived mid-generation now that in_response
+        # is cleared and the generation's own write-back has landed. Done outside
+        # the in_response guard so a stray terminal call still drains the buffer.
+        events.extend(self._service.conversation.flush_deferred_items(conn_id))
         return events
 
     # ── Pipeline event handlers ───────────────────
@@ -253,17 +291,34 @@ class ResponseHandler(RealtimeBaseHandler):
         st.last_item_id = item_id
         output_idx = 0
         if event.text:
-            events.append(
-                ResponseAudioTranscriptDoneEvent(
-                    type="response.output_audio_transcript.done",
-                    event_id=self._next_event_id(),
-                    content_index=0,
-                    item_id=item_id,
-                    output_index=output_idx,
-                    response_id=resp_id,
-                    transcript=event.text,
+            if response_wants_audio(st.current_response_params):
+                events.append(
+                    ResponseAudioTranscriptDoneEvent(
+                        type="response.output_audio_transcript.done",
+                        event_id=self._next_event_id(),
+                        content_index=0,
+                        item_id=item_id,
+                        output_index=output_idx,
+                        response_id=resp_id,
+                        transcript=event.text,
+                    )
                 )
-            )
+            else:
+                # Stream the delta now; the matching response.output_text.done is
+                # emitted once at close in finish_response, carrying the per-chunk
+                # parts collected here, space-joined ("" when there were none).
+                st.pending_output_text_parts.append(event.text)
+                events.append(
+                    ResponseTextDeltaEvent(
+                        type="response.output_text.delta",
+                        event_id=self._next_event_id(),
+                        content_index=0,
+                        item_id=item_id,
+                        output_index=output_idx,
+                        response_id=resp_id,
+                        delta=event.text,
+                    )
+                )
             output_idx += 1
         if event.tools:
             st.response_usage.tool_calls += len(event.tools)

@@ -5,6 +5,7 @@ from threading import Event as ThreadingEvent
 from typing import Any, Callable, Literal, Optional, TypeVar, Union
 
 from openai.types.realtime import (
+    ConversationItem,
     ConversationItemCreatedEvent,
     ConversationItemCreateEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
@@ -22,6 +23,8 @@ from openai.types.realtime import (
     ResponseCreateEvent,
     ResponseDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
+    ResponseTextDeltaEvent,
+    ResponseTextDoneEvent,
     SessionCreatedEvent,
     SessionUpdateEvent,
 )
@@ -40,6 +43,7 @@ from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
     PartialTranscriptionEvent,
     PipelineEvent,
+    ResponseFailedEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TokenUsageEvent,
@@ -90,6 +94,8 @@ ServerEvent = Union[
     ResponseAudioDoneEvent,
     ResponseAudioTranscriptDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
+    ResponseTextDeltaEvent,
+    ResponseTextDoneEvent,
 ]
 
 RealtimeEvent = Union[ClientEvent, ServerEvent]
@@ -159,6 +165,7 @@ class ConnState(BaseModel):
     input_audio_duration_s: float = 0.0
     last_item_id: Optional[str] = None
     current_response_params: RealtimeResponseCreateParams | None = None
+    pending_output_text_parts: list[str] = Field(default_factory=list)
     response_usage: UsageMetrics = Field(default_factory=UsageMetrics)
     speculative_turn_id: Optional[str] = None
     speculative_turn_revision: Optional[int] = None
@@ -168,6 +175,11 @@ class ConnState(BaseModel):
     speculative_user_item_id: Optional[str] = None
     speculative_input_item_id: Optional[str] = None
     speculative_audio_duration_s: float = 0.0
+    # Client conversation.item.create items that arrived while a response was
+    # generating. Applying them mid-generation races the LLM handler's chat
+    # write-back (cross-thread), so they are buffered here and flushed in order
+    # once the response completes. See ConversationHandler.flush_deferred_items.
+    deferred_items: list[ConversationItem] = Field(default_factory=list)
 
 
 class RealtimeService:
@@ -203,6 +215,7 @@ class RealtimeService:
             TokenUsageEvent: self._on_token_usage,
             PartialTranscriptionEvent: self.conversation.on_partial_transcription,
             TranscriptionCompletedEvent: self._on_transcription_completed,
+            ResponseFailedEvent: self._on_response_failed,
         }
 
     # ── Connection lifecycle ─────────────────────
@@ -284,13 +297,13 @@ class RealtimeService:
     def handle_response_cancel(self, conn_id: str) -> list[ServerEvent]:
         return self.response.handle_response_cancel(conn_id)
 
-    def finish_audio_response(
+    def finish_response(
         self,
         conn_id: str,
         status: _ResponseStatus = "completed",
         reason: _StatusReason | None = None,
     ) -> list[ServerEvent]:
-        return self.response.finish_audio_response(conn_id, status, reason)
+        return self.response.finish_response(conn_id, status, reason)
 
     def handle_conversation_item_create(self, conn_id: str, event: ConversationItemCreateEvent) -> list[ServerEvent]:
         return self.conversation.handle_conversation_item_create(conn_id, event)
@@ -448,6 +461,25 @@ class RealtimeService:
             st.response_usage.output_tokens,
         )
         return []
+
+    def _on_response_failed(self, conn_id: str, event: ResponseFailedEvent) -> list[ServerEvent]:
+        """Surface the failure to the client and close the response as ``failed``.
+
+        Emitted when generation failed (e.g. invalid out-of-band input, or the
+        provider rejecting an empty context). A top-level ``error`` event carries
+        the human-readable reason — ``response.done.status_details.error`` only
+        has code/type, no message — then ``finish_response`` closes the slot.
+
+        Idempotent: gated on an active response, and ``finish_response`` is itself
+        a no-op once the slot is closed, so a later EndOfResponse-driven close does
+        nothing.
+        """
+        logger.info("Response failed: %s", event.message)
+        if not self._state(conn_id).in_response:
+            return []
+        events: list[ServerEvent] = [self.make_error(event.message, "response_failed")]
+        events.extend(self.response.finish_response(conn_id, status="failed"))
+        return events
 
     def get_usage(self) -> dict[str, Any]:
         """Return cumulative usage metrics across all completed responses."""

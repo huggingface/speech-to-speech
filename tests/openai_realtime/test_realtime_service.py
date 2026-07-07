@@ -28,6 +28,8 @@ from openai.types.realtime import (
     ResponseCreateEvent,
     ResponseDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
+    ResponseTextDeltaEvent,
+    ResponseTextDoneEvent,
     SessionCreatedEvent,
     SessionUpdateEvent,
 )
@@ -39,6 +41,7 @@ from speech_to_speech.api.openai_realtime.service import (
 from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
     PartialTranscriptionEvent,
+    ResponseFailedEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TokenUsageEvent,
@@ -376,6 +379,87 @@ class TestHandleConversationItemCreate:
         assert last.content[1].image_url == "data:image/png;base64,abc123"
 
 
+class TestDeferConversationItemsDuringResponse:
+    """conversation.item.create is buffered while a response is generating and
+    flushed, in order, once it completes — so a client item never races the LLM
+    handler's chat write-back (which runs on the pipeline thread)."""
+
+    def _text_event(self, text: str, item_id: str = "msg_x") -> ConversationItemCreateEvent:
+        return ConversationItemCreateEvent(
+            type="conversation.item.create",
+            item={  # type: ignore[arg-type]
+                "id": item_id,
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            },
+        )
+
+    def _user_texts(self, chat) -> list[str]:
+        return [i.content[0].text for i in chat.buffer if getattr(i, "role", None) == "user"]
+
+    def test_applied_immediately_when_no_active_response(self, service, conn_id):
+        st = service._state(conn_id)
+        assert st.in_response is False
+        events = service.handle_conversation_item_create(conn_id, self._text_event("hi"))
+        assert len(events) == 1
+        assert isinstance(events[0], ConversationItemCreatedEvent)
+        assert self._user_texts(st.runtime_config.chat) == ["hi"]
+        assert st.deferred_items == []
+
+    def test_item_deferred_while_in_response(self, service, conn_id):
+        st = service._state(conn_id)
+        st.in_response = True
+        events = service.handle_conversation_item_create(conn_id, self._text_event("hi"))
+        assert events == []  # ack deferred too
+        assert len(st.deferred_items) == 1
+        assert self._user_texts(st.runtime_config.chat) == []  # not yet in chat
+
+    def test_deferred_items_flushed_in_order_on_finish(self, service, conn_id):
+        st = service._state(conn_id)
+        st.in_response = True
+        service.handle_conversation_item_create(conn_id, self._text_event("a", "msg_1"))
+        service.handle_conversation_item_create(conn_id, self._text_event("b", "msg_2"))
+        assert self._user_texts(st.runtime_config.chat) == []
+
+        events = service.finish_response(conn_id)
+
+        assert st.in_response is False
+        assert st.deferred_items == []
+        assert self._user_texts(st.runtime_config.chat) == ["a", "b"]  # arrival order preserved
+        created = [e for e in events if isinstance(e, ConversationItemCreatedEvent)]
+        assert len(created) == 2
+
+    def test_function_call_output_deferred_then_pairs_after_response(self, service, conn_id):
+        from openai.types.realtime.realtime_conversation_item_function_call import (
+            RealtimeConversationItemFunctionCall,
+        )
+
+        st = service._state(conn_id)
+        chat = st.runtime_config.chat
+        # The function_call the generation produced (held in _pending_tool_calls).
+        chat.add_item(
+            RealtimeConversationItemFunctionCall(
+                type="function_call", call_id="call_1", name="camera_snapshot", arguments="{}"
+            )
+        )
+        st.in_response = True
+        evt = ConversationItemCreateEvent(
+            type="conversation.item.create",
+            item={"type": "function_call_output", "output": "ok", "call_id": "call_1"},
+        )
+        # Output arrives mid-response: deferred (applying now could race), no error.
+        assert service.handle_conversation_item_create(conn_id, evt) == []
+        assert len(st.deferred_items) == 1
+
+        finish_events = service.finish_response(conn_id)
+
+        # Flushed after completion → pairs cleanly, no invalid_conversation_item error.
+        assert not any(isinstance(e, RealtimeErrorEvent) for e in finish_events)
+        assert chat._has_call_id_in_buffer("call_1")
+        assert chat.buffer[-1].type == "function_call_output"
+
+
 # ===================================================================
 # Audio commit
 # ===================================================================
@@ -529,6 +613,72 @@ class TestHandleResponseCreate:
         assert isinstance(result2, RealtimeErrorEvent)
         assert result2.error.type == "conversation_already_has_active_response"
 
+    @staticmethod
+    def _user_input(text):
+        return {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
+
+    def test_response_create_out_of_band_does_not_append_input_to_default_chat(
+        self, service, conn_id, text_prompt_queue
+    ):
+        chat = service._state(conn_id).runtime_config.chat
+        assert len(chat.buffer) == 0
+        evt = ResponseCreateEvent(
+            type="response.create",
+            response={"conversation": "none", "input": [self._user_input("OOB question")]},
+        )
+        result = service.handle_response_create(conn_id, evt)
+        assert isinstance(result, ResponseCreatedEvent)
+        # Out-of-band: the default conversation is left untouched...
+        assert len(chat.buffer) == 0
+        # ...while the input still rides along on the queued request for the LM to use.
+        req = text_prompt_queue.get()
+        assert isinstance(req, GenerateResponseRequest)
+        assert req.response.input is not None and len(req.response.input) == 1
+
+    def test_response_create_in_band_appends_input_to_default_chat(self, service, conn_id, text_prompt_queue):
+        chat = service._state(conn_id).runtime_config.chat
+        evt = ResponseCreateEvent(type="response.create", response={"input": [self._user_input("in band")]})
+        result = service.handle_response_create(conn_id, evt)
+        assert isinstance(result, ResponseCreatedEvent)
+        assert len(chat.buffer) == 1  # in-band input is threaded into the conversation
+
+    def test_response_create_out_of_band_carries_null_turn(self, service, conn_id, text_prompt_queue):
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(
+                transcript="hello",
+                language_code="en",
+                turn_id="turn_1",
+                turn_revision=2,
+                speech_stopped_at_s=123.0,
+            ),
+        )
+        text_prompt_queue.get()  # drain the STT-triggered request
+
+        result = service.handle_response_create(
+            conn_id, ResponseCreateEvent(type="response.create", response={"conversation": "none"})
+        )
+        assert isinstance(result, ResponseCreatedEvent)
+        req = text_prompt_queue.get()
+        # Null turn identity makes every speculative-staleness gate treat it as always-latest.
+        assert req.turn_id is None
+        assert req.turn_revision is None
+        assert req.speech_stopped_at_s is None
+
+    def test_response_create_out_of_band_reports_null_conversation_id(self, service, conn_id):
+        result = service.handle_response_create(
+            conn_id, ResponseCreateEvent(type="response.create", response={"conversation": "none"})
+        )
+        assert isinstance(result, ResponseCreatedEvent)
+        assert result.response.conversation_id is None
+        done = [e for e in service.finish_response(conn_id) if isinstance(e, ResponseDoneEvent)]
+        assert done and done[0].response.conversation_id is None
+
+    def test_response_create_in_band_reports_conversation_id(self, service, conn_id):
+        result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
+        assert isinstance(result, ResponseCreatedEvent)
+        assert result.response.conversation_id == service._state(conn_id).conversation_id
+
 
 # ===================================================================
 # Response cancel
@@ -598,16 +748,29 @@ class TestEncodeAudioChunk:
 class TestFinishAudioResponse:
     def test_finish_emits_audio_done_and_response_done(self, service, conn_id):
         service.response._ensure_response(conn_id)
-        events = service.finish_audio_response(conn_id)
+        events = service.finish_response(conn_id)
         assert len(events) == 2
         assert isinstance(events[0], ResponseAudioDoneEvent)
         assert events[0].content_index == 0
         assert isinstance(events[1], ResponseDoneEvent)
         assert events[1].response.status == "completed"
 
+    def test_finish_text_only_skips_audio_done(self, service, conn_id):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            output_modalities=["text"],
+        )
+        service.response._ensure_response(conn_id)
+        events = service.finish_response(conn_id)
+        assert len(events) == 1
+        assert isinstance(events[0], ResponseDoneEvent)
+        assert events[0].response.status == "completed"
+        assert not any(isinstance(e, ResponseAudioDoneEvent) for e in events)
+
     def test_finish_with_cancel_status(self, service, conn_id):
         service.response._ensure_response(conn_id)
-        events = service.finish_audio_response(conn_id, status="cancelled", reason="turn_detected")
+        events = service.finish_response(conn_id, status="cancelled", reason="turn_detected")
         done = events[1]
         assert done.response.status == "cancelled"
         assert done.response.status_details.reason == "turn_detected"
@@ -619,7 +782,7 @@ class TestFinishAudioResponse:
             metadata={"k": "v"},
         )
         service.response._ensure_response(conn_id)
-        service.finish_audio_response(conn_id)
+        service.finish_response(conn_id)
         st = service._state(conn_id)
         assert st.in_response is False
         assert st.current_response_id is None
@@ -698,7 +861,7 @@ class TestDispatchPipelineEvent:
         assert isinstance(events[0], InputAudioBufferSpeechStartedEvent)
         assert service._state(conn_id).in_response is True
         assert service._state(conn_id).current_item_id == response_item_id
-        done_events = service.finish_audio_response(conn_id)
+        done_events = service.finish_response(conn_id)
         assert done_events[0].item_id == response_item_id
 
     def test_consecutive_speech_cycles_get_distinct_item_ids(self, service, conn_id):
@@ -805,6 +968,79 @@ class TestDispatchPipelineEvent:
         assert len(events) == 1
         assert isinstance(events[0], ResponseFunctionCallArgumentsDoneEvent)
         assert events[0].output_index == 0
+
+    def test_assistant_text_text_only_emits_text_events(self, service, conn_id):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            output_modalities=["text"],
+        )
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantTextEvent(text="Hello there"),
+        )
+        # on_assistant_text streams only the delta now; the matching done is
+        # emitted once at close in finish_response.
+        assert len(events) == 1
+        assert isinstance(events[0], ResponseTextDeltaEvent)
+        assert events[0].content_index == 0
+        assert events[0].output_index == 0
+        assert events[0].delta == "Hello there"
+        assert not any(isinstance(e, ResponseTextDoneEvent) for e in events)
+        assert not any(isinstance(e, ResponseAudioTranscriptDoneEvent) for e in events)
+
+        done_events = service.finish_response(conn_id)
+        text_done = [e for e in done_events if isinstance(e, ResponseTextDoneEvent)]
+        assert len(text_done) == 1
+        assert text_done[0].content_index == 0
+        assert text_done[0].output_index == 0
+        assert text_done[0].text == "Hello there"
+
+    def test_text_only_done_concatenates_streamed_parts(self, service, conn_id):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            output_modalities=["text"],
+        )
+        service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="Hello there. "))
+        service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="How are you?"))
+        done_events = service.finish_response(conn_id)
+        text_done = [e for e in done_events if isinstance(e, ResponseTextDoneEvent)]
+        assert len(text_done) == 1
+        # done.text concatenates the raw streamed parts verbatim (== sum of deltas).
+        assert text_done[0].text == "Hello there. How are you?"
+
+    def test_text_only_no_text_done_on_cancel(self, service, conn_id):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            output_modalities=["text"],
+        )
+        service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="partial"))
+        done_events = service.finish_response(conn_id, status="cancelled", reason="client_cancelled")
+        assert not any(isinstance(e, ResponseTextDoneEvent) for e in done_events)
+        assert any(isinstance(e, ResponseDoneEvent) for e in done_events)
+
+    def test_assistant_text_text_only_keeps_tool_events(self, service, conn_id):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            output_modalities=["text"],
+        )
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantTextEvent(
+                text="Let me check",
+                tools=[{"type": "function_call", "call_id": "c1", "name": "get_weather", "arguments": "{}"}],
+            ),
+        )
+        # No per-chunk done anymore: delta, then the tool event at output_index 1.
+        assert isinstance(events[0], ResponseTextDeltaEvent)
+        assert not any(isinstance(e, ResponseTextDoneEvent) for e in events)
+        tool_event = events[1]
+        assert isinstance(tool_event, ResponseFunctionCallArgumentsDoneEvent)
+        assert tool_event.output_index == 1
+        assert tool_event.name == "get_weather"
 
     def test_assistant_text_waits_for_pending_reopen_and_drops_confirmed_stale_turn(
         self,
@@ -1258,6 +1494,34 @@ class TestDispatchPipelineEvent:
         assert user_items[0].content[0].text == "hello and more"
         service.unregister(conn_id)
 
+    # -- response_failed --
+
+    def test_response_failed_emits_error_and_failed_done(self, service, conn_id):
+        service.response._ensure_response(conn_id)
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            ResponseFailedEvent(message="input must not be empty"),
+        )
+        # A top-level error event carries the reason (response.done can't), then
+        # the response is closed as failed.
+        err = events[0]
+        assert isinstance(err, RealtimeErrorEvent)
+        assert err.error.message == "input must not be empty"
+        assert err.error.type == "response_failed"
+        done = [e for e in events if isinstance(e, ResponseDoneEvent)]
+        assert len(done) == 1
+        assert done[0].response.status == "failed"
+        # Slot released so the next response is not locked out.
+        assert service._state(conn_id).in_response is False
+
+    def test_response_failed_without_active_response_is_noop(self, service, conn_id):
+        # No active response (e.g. already closed): nothing to fail, emit nothing.
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            ResponseFailedEvent(message="too late"),
+        )
+        assert events == []
+
     # -- unknown --
 
     def test_unknown_type_returns_empty(self, service, conn_id):
@@ -1429,7 +1693,7 @@ class TestUsageMetricsTracking:
             conn_id,
             TokenUsageEvent(input_tokens=100, output_tokens=50),
         )
-        events = service.finish_audio_response(conn_id)
+        events = service.finish_response(conn_id)
         done_evt = events[1]
         assert isinstance(done_evt, ResponseDoneEvent)
         assert done_evt.response.usage.input_tokens == 100
@@ -1493,14 +1757,14 @@ class TestUsageMetricsTracking:
         assert service.total_usage.input_tokens == 0
         assert service.total_usage.output_tokens == 0
 
-    def test_finish_audio_response_resets_per_response_tokens(self, service, conn_id):
-        """After finish_audio_response, per-response counters are zero."""
+    def test_finish_response_resets_per_response_tokens(self, service, conn_id):
+        """After finish_response, per-response counters are zero."""
         service.response._ensure_response(conn_id)
         service.dispatch_pipeline_event(
             conn_id,
             TokenUsageEvent(input_tokens=50, output_tokens=25),
         )
-        service.finish_audio_response(conn_id)
+        service.finish_response(conn_id)
         usage = service._state(conn_id).response_usage
         assert usage.input_tokens == 0
         assert usage.output_tokens == 0
@@ -1547,23 +1811,23 @@ class TestUsageMetricsTracking:
 
     def test_responses_completed_increments(self, service, conn_id):
         service.response._ensure_response(conn_id)
-        service.finish_audio_response(conn_id)
+        service.finish_response(conn_id)
         assert service.total_usage.responses_completed == 1
         assert service.total_usage.responses_cancelled == 0
 
     def test_responses_cancelled_increments(self, service, conn_id):
         service.response._ensure_response(conn_id)
-        service.finish_audio_response(conn_id, status="cancelled", reason="turn_detected")
+        service.finish_response(conn_id, status="cancelled", reason="turn_detected")
         assert service.total_usage.responses_cancelled == 1
         assert service.total_usage.responses_completed == 0
 
     def test_multiple_responses_accumulate_status_counters(self, service, conn_id):
         service.response._ensure_response(conn_id)
-        service.finish_audio_response(conn_id)
+        service.finish_response(conn_id)
         service.response._ensure_response(conn_id)
-        service.finish_audio_response(conn_id, status="cancelled", reason="client_cancelled")
+        service.finish_response(conn_id, status="cancelled", reason="client_cancelled")
         service.response._ensure_response(conn_id)
-        service.finish_audio_response(conn_id)
+        service.finish_response(conn_id)
         assert service.total_usage.responses_completed == 2
         assert service.total_usage.responses_cancelled == 1
 
@@ -1591,7 +1855,7 @@ class TestUsageMetricsTracking:
                 tools=[{"type": "function_call", "call_id": "c1", "name": "f1", "arguments": "{}"}],
             ),
         )
-        service.finish_audio_response(conn_id)
+        service.finish_response(conn_id)
         assert service.total_usage.tool_calls == 1
         assert service._state(conn_id).response_usage.tool_calls == 0
 
@@ -1656,7 +1920,7 @@ class TestUsageMetricsTracking:
                 tools=[{"type": "function_call", "call_id": "c1", "name": "f1", "arguments": "{}"}],
             ),
         )
-        service.finish_audio_response(conn_id)
+        service.finish_response(conn_id)
         service.make_error("oops", "some_error")
         usage = service.get_usage()
         assert usage["input_tokens"] == 10

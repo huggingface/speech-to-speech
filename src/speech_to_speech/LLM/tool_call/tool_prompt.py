@@ -47,6 +47,28 @@ Rules:
     keep_trailing_newline=True,
 )
 
+# Text-channel variant: same call format and structural rules, without the
+# voice-specific "speak first" prose.
+TEXT_TOOL_PROMPT_TEMPLATE = Template(
+    """\
+Available tools:
+
+{% for tool in tools %}
+{{ tool.to_code_prompt() }}
+
+{% endfor %}
+To call a tool, put exactly one named-argument function call inside {{ enter_code }}...{{ end_code }}:
+{{ enter_code }}function_name(required_arg='value'){{ end_code }}
+
+Rules:
+- Call a tool directly when it helps fulfill the request; no preamble sentence is required.
+- Do not mention tags, functions, or tools in your prose, and do not claim tool results before a tool result is available.
+- Use named arguments only; quote strings. Omit optional args instead of placeholder values like "random", "none", "", or null.
+- Only one tool call may appear in a response.\
+""",
+    keep_trailing_newline=True,
+)
+
 
 # ---------------------------------------------------------------------------
 # Public helpers
@@ -57,16 +79,20 @@ def build_tool_system_prompt(
     tools: list[FunctionTool],
     enter_code: str = ENTER_CODE,
     end_code: str = END_CODE,
+    *,
+    text_only: bool = False,
 ) -> str:
     """Render the tool-calling system-prompt section.
 
     Returns an empty string when *tools* is empty so it can be
-    unconditionally appended to a base system prompt.
+    unconditionally appended to a base system prompt.  When *text_only* is set,
+    the written-channel variant is used (no voice "speak first" prose).
     """
     if not tools:
         return ""
 
-    return TOOL_PROMPT_TEMPLATE.render(
+    template = TEXT_TOOL_PROMPT_TEMPLATE if text_only else TOOL_PROMPT_TEMPLATE
+    return template.render(
         tools=tools,
         enter_code=enter_code,
         end_code=end_code,

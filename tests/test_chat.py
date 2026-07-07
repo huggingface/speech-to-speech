@@ -27,11 +27,13 @@ from openai.types.realtime.realtime_conversation_item_system_message import (
 from openai.types.realtime.realtime_conversation_item_user_message import (
     Content as UserContent,
 )
+from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
 from speech_to_speech.LLM.chat import (
     Chat,
     ChatItemError,
     CompactionResult,
+    build_active_chat,
     make_assistant_message,
     make_system_message,
     make_user_message,
@@ -835,6 +837,29 @@ class TestStripImages:
         assert chat.buffer[0].content[0].text == "just text"
         assert len(chat.buffer[0].content) == 1
 
+    def test_image_message_ids_reports_only_image_carriers(self):
+        chat = Chat(size=10)
+        chat.add_item(_user("text only"))
+        img_msg = chat.add_item(_user_msg_with_parts(("text", "b"), ("image", "url2")))
+        assert chat.image_message_ids() == {img_msg.id}
+
+    def test_strip_images_only_ids_spares_concurrent_image(self):
+        """Regression: an image injected for the *next* turn (not in the set the
+        finished response consumed) must survive the write-back strip."""
+        chat = Chat(size=10)
+        consumed = chat.add_item(_user_msg_with_parts(("text", "a"), ("image", "old")))
+        # snapshot of what the just-finished response actually saw
+        consumed_ids = chat.image_message_ids()
+        # a fast client injects the next turn's image mid-generation
+        fresh = chat.add_item(_user_msg_with_parts(("text", "b"), ("image", "new")))
+
+        chat.strip_images(consumed_ids)
+
+        consumed_after = next(i for i in chat.buffer if i.id == consumed.id)
+        fresh_after = next(i for i in chat.buffer if i.id == fresh.id)
+        assert all(p.type != "input_image" for p in consumed_after.content)  # consumed → stripped
+        assert any(p.type == "input_image" for p in fresh_after.content)  # next turn's image → kept
+
 
 # ===================================================================
 # 11. TestMarkCallCompleted
@@ -1197,3 +1222,59 @@ class TestCompaction:
             if isinstance(msg, dict) and msg.get("role") == "user":
                 for c in msg.get("content", []):
                     assert c.get("type") != "input_image"
+
+
+# ===================================================================
+# build_active_chat (out-of-band response context)
+# ===================================================================
+
+
+class TestBuildActiveChat:
+    def _default(self) -> Chat:
+        chat = Chat(size=4)
+        chat.init_chat(make_system_message("default system"))
+        chat.add_item(_user("default question"))
+        return chat
+
+    def test_input_items_seed_fresh_chat(self):
+        original = self._default()
+        resp = RealtimeResponseCreateParams(conversation="none", input=[make_user_message("fresh question")])
+
+        active = build_active_chat(original, resp)
+
+        assert active is not original
+        texts = [p.text for item in active.buffer for p in item.content]
+        assert texts == ["fresh question"]
+        # The default conversation's history did not leak in.
+        assert active.init_chat_message is None
+
+    def test_empty_input_clears_context(self):
+        original = self._default()
+        resp = RealtimeResponseCreateParams(conversation="none", input=[])
+
+        active = build_active_chat(original, resp)
+
+        assert active.buffer == []
+
+    def test_absent_input_copies_default(self):
+        original = self._default()
+        resp = RealtimeResponseCreateParams(conversation="none", input=None)
+
+        active = build_active_chat(original, resp)
+
+        assert active is not original
+        texts = [p.text for item in active.buffer for p in item.content]
+        assert texts == ["default question"]
+        assert active.init_chat_message is original.init_chat_message
+
+    def test_invalid_input_item_raises(self):
+        original = self._default()
+        from openai.types.realtime.conversation_item import RealtimeConversationItemFunctionCallOutput
+
+        orphan = RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output", call_id="call_missing", output="{}"
+        )
+        resp = RealtimeResponseCreateParams(conversation="none", input=[orphan])
+
+        with pytest.raises(ChatItemError):
+            build_active_chat(original, resp)
