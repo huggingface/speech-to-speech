@@ -129,7 +129,9 @@ Barge-in (user speaks while the assistant is playing audio) is handled cooperati
 `CancelScope` replaces the old two-signal pattern (`cancel_response` Event + `discard_stale_output` boolean) with a single object that manages:
 
 - **Generation counter** (`cancel_scope.generation`): pipeline threads (LLM, TTS) capture the current generation at the start of each response and check `cancel_scope.is_stale(gen)` on every streaming token. When `cancel()` is called, the generation increments and all prior generations become stale -- no timing games required.
-- **Discard flag** (`cancel_scope.discarding`): the async `_send_loop` checks this to drop stale audio/text that arrives between `cancel()` and `response_done()`.
+- **Discard flag** (`cancel_scope.discarding`): set by `cancel()`, checked by the async `_send_loop` to drop output from superseded generations that arrives between `cancel()` and `response_done()`. Cleared by `response_done(generation)` (only when the sentinel's generation matches the discarded or current one -- sentinels from unrelated older generations are ignored), by `new_response()` on an explicit `response.create`, or by `reset()` on session claim/release.
+
+Pipeline output is **generation-tagged**: `AudioOutput` chunks and `AssistantTextEvent`s carry a `cancel_generation` field stamped by the handler that produced them. The send loop's `_generation_is_discardable` drops an item if its generation is stale, or if `discarding` is set and the item is not from the current generation. Output from the *current* generation always passes through, so a fresh response is never swallowed by a lingering discard window (e.g. a superseded speculative turn whose TTS never emitted a `__RESPONSE_DONE__` sentinel).
 
 ```mermaid
 sequenceDiagram
@@ -140,7 +142,7 @@ sequenceDiagram
     participant TTS
     participant Client
 
-    Note over TTS,Client: Assistant audio is playing (response_playing=set)
+    Note over TTS,Client: Response active or pending (in_response / response_pending)
     User->>VAD: speaks
     VAD->>SendLoop: speech_started on text_output_queue
     SendLoop->>Client: input_audio_buffer.speech_started
@@ -150,20 +152,21 @@ sequenceDiagram
     SendLoop->>SendLoop: response_playing.clear()
     LLM->>LLM: is_stale(gen) → True, aborts generation
     TTS->>TTS: is_stale(gen) → True, aborts generation
-    TTS->>SendLoop: __RESPONSE_DONE__
-    SendLoop->>SendLoop: cancel_scope.response_done() (discarding=False)
+    TTS->>SendLoop: __RESPONSE_DONE__ (tagged with gen)
+    SendLoop->>SendLoop: cancel_scope.response_done(gen) (discarding=False)
     Note over VAD,Client: Pipeline is now processing the new user utterance
 ```
 
 **Step by step:**
 
-1. **VAD detects speech**: puts `{"type": "speech_started"}` on `text_output_queue`.
+1. **VAD detects speech**: puts a `SpeechStartedEvent` on `text_output_queue`.
 2. **`_send_loop` processes text events first** (priority over audio): translates `speech_started` into protocol events. If an active response was in progress, `RealtimeService.dispatch_pipeline_event` emits `response.output_audio.done` + `response.done` with `status="cancelled"` and `reason="turn_detected"`.
-3. **Cancel + queue flush**: if `response_playing` is set, the send loop calls `cancel_scope.cancel()` (increments generation, enables discard), drains both `output_queue` (preserving `__RESPONSE_DONE__` sentinels) and `text_output_queue`, then clears `response_playing`.
-4. **LLM/TTS cancellation**: handlers capture `gen = cancel_scope.generation` at the start of each response and check `cancel_scope.is_stale(gen)` on every streaming token, aborting early when stale.
-5. **Discard guard**: while `cancel_scope.discarding` is True, the send loop silently drops stale audio chunks and assistant text. The guard clears when `__RESPONSE_DONE__` arrives (via `cancel_scope.response_done()`).
-6. **Client-initiated cancel**: `response.cancel` calls `cancel_scope.cancel()` (only if a response was active), triggers `finish_response(status="cancelled", reason="client_cancelled")`, and re-enables `should_listen`.
-7. **Spurious cancel safety**: if no response is active, `cancel_scope.cancel()` is not called, preventing the discard guard from being set without a `__RESPONSE_DONE__` to clear it.
+3. **Cancel + queue flush**: if a response is active (`in_response`) *or* pending (`response_pending` -- accepted `response.create`, no audio yet), and interrupts are enabled (see step 4), the send loop calls `cancel_scope.cancel()` (increments generation, enables discard), clears `response_pending`, drains `output_queue` (preserving `__RESPONSE_DONE__` sentinels) and `text_output_queue` (preserving user-side events: `speech_stopped`, partial/completed transcriptions, token usage), then clears `response_playing`.
+4. **Interrupt gating**: the cancel only fires if the `SpeechStartedEvent.interrupt_response` flag is set *and* the session config allows it (`turn_detection.interrupt_response`, read via `RuntimeConfig.interrupt_response_enabled`, default true). When disabled, user speech during a response is transcribed but the response keeps playing.
+5. **LLM/TTS cancellation**: handlers capture `gen = cancel_scope.generation` at the start of each response and check `cancel_scope.is_stale(gen)` on every streaming token, aborting early when stale.
+6. **Discard guard**: while `cancel_scope.discarding` is True, the send loop drops audio chunks and assistant text whose `cancel_generation` is not current (see `_generation_is_discardable` above). The guard clears when a `__RESPONSE_DONE__` with a matching generation arrives (via `cancel_scope.response_done(gen)`), or when an explicit `response.create` starts a new response (`cancel_scope.new_response()`).
+7. **Client-initiated cancel**: `response.cancel` calls `cancel_scope.cancel()` (only if a response was active), flushes both queues with the same preservation rules, triggers `finish_response(status="cancelled", reason="client_cancelled")`, re-enables `should_listen`, and clears `response_playing`.
+8. **Spurious cancel safety**: if no response is active, `cancel_scope.cancel()` is not called, preventing the discard guard from being set without a `__RESPONSE_DONE__` to clear it.
 
 ---
 
