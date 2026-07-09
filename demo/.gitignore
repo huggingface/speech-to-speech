@@ -1,0 +1,21 @@
+# macOS metadata
+.DS_Store
+
+# Editor scratch
+.vscode/
+.idea/
+*.swp
+
+# Static HTTP server logs (we don't ship them)
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local-only replica deploy script (never tracked)
+deploy_replica.py
+
+.env
