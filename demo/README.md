@@ -120,18 +120,6 @@ button, top-right):
   calls the tool, the current frame is sent to the vision-language model so it can
   see what you're showing it.
 
-## Why WebSocket instead of WebRTC
-
-| | WebRTC (original) | WebSocket (this) |
-|---|---|---|
-| Transport | UDP + Opus 48 kHz + ICE/STUN | TCP + raw PCM16 |
-| NAT traversal | needs STUN, can fail on corporate / cellular | none, works everywhere TCP is allowed |
-| Audio quality | excellent (Opus, jitter buffer, FEC) | good (raw PCM, simple ring buffer) |
-| Latency | lowest (~50-150 ms) | low (~150-300 ms typical) |
-| Echo cancellation | browser AEC active on the WebRTC track | browser AEC active via `getUserMedia` constraints |
-| Debuggability | needs `chrome://webrtc-internals` | `wscat` / DevTools network tab |
-| Mobile data | sometimes blocked (UDP) | always works (HTTPS+WSS) |
-
 ## Usage limits (deployed Space only)
 
 Conversation time is metered per UTC day by sign-in tier (see `limiter.py` /
