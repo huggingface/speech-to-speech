@@ -41,16 +41,16 @@ Realtime **GA** protocol and plays back the assistant's audio as it arrives.
 2. **Start this app**, pointing it at the backend with `SPEECH_TO_SPEECH_URL`:
 
    ```bash
-   pip install -r requirements.txt
+   uv pip install -r demo/requirements.txt
    export SPEECH_TO_SPEECH_URL=ws://localhost:8765/v1/realtime
    export SERPER_API_KEY=...   # optional; web search is disabled without it
-   uvicorn server:app --reload --port 7860
+   uv run uvicorn --app-dir demo server:app --reload --port 7860
    ```
 
    Or with Docker:
 
    ```bash
-   docker build -t s2s-demo .
+   docker build -t s2s-demo demo/
    docker run -p 7860:7860 -e SPEECH_TO_SPEECH_URL=ws://host.docker.internal:8765/v1/realtime s2s-demo
    ```
 
