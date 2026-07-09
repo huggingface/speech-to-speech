@@ -175,7 +175,7 @@ sequenceDiagram
 ### Local LLM with Transformers
 
 ```bash
-.venv/bin/python s2s_pipeline.py \
+uv run speech-to-speech \
   --mode realtime \
   --stt parakeet-tdt \
   --llm_backend transformers \
@@ -189,7 +189,7 @@ sequenceDiagram
 ### Local LLM with MLX-LM
 
 ```bash
-.venv/bin/python s2s_pipeline.py \
+uv run speech-to-speech \
   --mode realtime \
   --stt parakeet-tdt \
   --llm_backend mlx-lm \
@@ -203,7 +203,7 @@ sequenceDiagram
 ### Remote LLM with OpenAI-compatible API
 
 ```bash
-.venv/bin/python s2s_pipeline.py \
+uv run speech-to-speech \
   --mode realtime \
   --stt parakeet-tdt \
   --llm_backend responses-api \
