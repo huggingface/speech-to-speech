@@ -20,12 +20,32 @@ SPEECHABLE_PATTERN = re.compile(
     flags=re.UNICODE,
 )
 
+MARKDOWN_PATTERN = re.compile(
+    r"\*\*(.*?)\*\*|__(.*?)__|\*(.*?)\*|_(.*?)_|`{1,3}(.*?)`{1,3}|^#{1,6}\s*|^[-*+]\s+",
+    flags=re.MULTILINE | re.DOTALL,
+)
+
+
+def _markdown_replacement(match: "re.Match[str]") -> str:
+    for group in match.groups():
+        if group is not None:
+            return group
+    return ""
+
+
+def remove_markdown(text: str) -> str:
+    """Strip common Markdown syntax (bold, italic, headings, code, bullets),
+    keeping only the enclosed text so TTS doesn't read out symbols like '**'.
+    """
+    return MARKDOWN_PATTERN.sub(_markdown_replacement, text)
+
 
 def remove_unspeechable(text: str) -> str:
     """Keep only speechable characters: letters, digits, punctuation, whitespace.
     support unicode characters (english, arabic, chinese, japanese, korean, etc.)
     """
     text = text.translate(SMART_PUNCT_TRANSLATION)
+    text = remove_markdown(text)
     return SPEECHABLE_PATTERN.sub("", text)
 
 
