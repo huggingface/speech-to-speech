@@ -6,7 +6,7 @@ Measures: warmup time, inference time, time-to-first-chunk, audio duration, and 
 
 Usage:
     python benchmark_tts.py --text "Hello world" --iterations 3
-    python benchmark_tts.py --handlers kokoro qwen3 pocket_tts
+    python benchmark_tts.py --handlers kokoro kitten qwen3 pocket_tts
 """
 
 import argparse
@@ -113,6 +113,16 @@ def benchmark_handler(
             from speech_to_speech.TTS.kokoro_handler import KokoroTTSHandler
             setup_kwargs = {"device": "auto", **setup_kwargs}
             handler = KokoroTTSHandler(
+                stop_event,
+                queue_in=queue_in,
+                queue_out=queue_out,
+                setup_args=(should_listen,),
+                setup_kwargs=setup_kwargs,
+            )
+        elif handler_name == "kitten":
+            from speech_to_speech.TTS.kitten_tts_handler import KittenTTSHandler
+            setup_kwargs = {"device": "cpu", **setup_kwargs}
+            handler = KittenTTSHandler(
                 stop_event,
                 queue_in=queue_in,
                 queue_out=queue_out,
@@ -330,8 +340,8 @@ def main():
     parser.add_argument(
         "--handlers",
         nargs="+",
-        default=["kokoro", "qwen3", "pocket_tts"],
-        help="List of handlers to benchmark (kokoro, qwen3, pocket_tts, chatTTS, facebookMMS)",
+        default=["kokoro", "qwen3", "pocket_tts", "kitten"],
+        help="List of handlers to benchmark (kokoro, qwen3, pocket_tts, kitten, chatTTS, facebookMMS)",
     )
     parser.add_argument(
         "--iterations",

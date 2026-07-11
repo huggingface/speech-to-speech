@@ -8,6 +8,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 - `facebookMMS` → `facebookmms_handler.py`
 - `pocket` → `pocket_tts_handler.py`
 - `kokoro` → `kokoro_handler.py`
+- `kitten` → `kitten_tts_handler.py`
 - `qwen3` → `qwen3_tts_handler.py`
 
 Deprecated TTS implementations, including MeloTTS, live in [`../../../archive/TTS`](../../../archive/TTS) and are no longer wired into `s2s_pipeline.py`.
@@ -71,7 +72,27 @@ Behavior:
 - Uses native kokoro pipeline otherwise (`hexgrad/Kokoro-82M`)
 - Can auto-switch voice/language based on STT language code mapping
 
-### 5) Qwen3-TTS (`--tts qwen3`)
+### 5) KittenTTS (`--tts kitten`)
+
+Primary args prefix: `--kitten_*`
+
+```bash
+python s2s_pipeline.py \
+  --tts kitten \
+  --kitten_device cpu \
+  --kitten_voice Bruno \
+  --kitten_model_name KittenML/kitten-tts-mini-0.8
+```
+
+Behavior:
+- Uses the KittenML backend with stream generation.
+- Defaults to CPU processing, switch to `--kitten_device cuda` if available.
+- **System Requirement**: KittenTTS relies on `phonemizer`. You MUST install `espeak-ng` on your system:
+  - **Windows**: Install the `.msi` from [eSpeak NG Releases](https://github.com/espeak-ng/espeak-ng/releases) and restart your terminal.
+  - **macOS**: `brew install espeak-ng`
+  - **Linux (Ubuntu/Debian)**: `sudo apt-get install espeak-ng`
+
+### 6) Qwen3-TTS (`--tts qwen3`)
 
 Primary args prefix: `--qwen3_tts_*`
 

@@ -29,6 +29,7 @@ from speech_to_speech.arguments_classes.facebookmms_tts_arguments import Faceboo
 from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import (
     FasterWhisperSTTHandlerArguments,
 )
+from speech_to_speech.arguments_classes.kitten_tts_arguments import KittenTTSHandlerArguments
 from speech_to_speech.arguments_classes.kokoro_tts_arguments import KokoroTTSHandlerArguments
 from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
@@ -106,6 +107,7 @@ class ParsedArguments:
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments
     kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments
+    kitten_tts_handler_kwargs: KittenTTSHandlerArguments
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments
 
 
@@ -164,6 +166,7 @@ def parse_arguments() -> ParsedArguments:
             FacebookMMSTTSHandlerArguments,
             PocketTTSHandlerArguments,
             KokoroTTSHandlerArguments,
+            KittenTTSHandlerArguments,
             Qwen3TTSHandlerArguments,
         )
     )
@@ -199,6 +202,7 @@ def parse_arguments() -> ParsedArguments:
         facebook_mms_tts_handler_kwargs=by_type[FacebookMMSTTSHandlerArguments],
         pocket_tts_handler_kwargs=by_type[PocketTTSHandlerArguments],
         kokoro_tts_handler_kwargs=by_type[KokoroTTSHandlerArguments],
+        kitten_tts_handler_kwargs=by_type[KittenTTSHandlerArguments],
         qwen3_tts_handler_kwargs=by_type[Qwen3TTSHandlerArguments],
     )
 
@@ -254,7 +258,7 @@ def check_mac_settings(module_kwargs: ModuleArguments) -> None:
             logger.warning(
                 "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm_backend mlx-lm."
             )
-        if module_kwargs.tts not in ("pocket", "kokoro", "qwen3"):
+        if module_kwargs.tts not in ("pocket", "kokoro", "qwen3", "kitten"):
             logger.warning(
                 "For macOS users, it is recommended to use qwen3 for TTS (pocket and kokoro are also valid options)."
             )
@@ -299,6 +303,7 @@ def prepare_all_args(
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
     kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
+    kitten_tts_handler_kwargs: KittenTTSHandlerArguments,
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
 ) -> None:
     prepare_module_args(
@@ -314,6 +319,7 @@ def prepare_all_args(
         facebook_mms_tts_handler_kwargs,
         pocket_tts_handler_kwargs,
         kokoro_tts_handler_kwargs,
+        kitten_tts_handler_kwargs,
         qwen3_tts_handler_kwargs,
     )
 
@@ -328,6 +334,7 @@ def prepare_all_args(
     rename_args(facebook_mms_tts_handler_kwargs, "facebook_mms")
     rename_args(pocket_tts_handler_kwargs, "pocket_tts")
     rename_args(kokoro_tts_handler_kwargs, "kokoro")
+    rename_args(kitten_tts_handler_kwargs, "kitten")
     rename_args(qwen3_tts_handler_kwargs, "qwen3_tts")
 
 
@@ -374,6 +381,7 @@ def _build_pipeline_handlers(
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
     kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
+    kitten_tts_handler_kwargs: KittenTTSHandlerArguments,
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
     speculative_turns: SpeculativeTurnTracker | None = None,
 ) -> list[Any]:
@@ -439,6 +447,7 @@ def _build_pipeline_handlers(
         facebook_mms_tts_handler_kwargs,
         pocket_tts_handler_kwargs,
         kokoro_tts_handler_kwargs,
+        kitten_tts_handler_kwargs,
         qwen3_tts_handler_kwargs,
     )
 
@@ -462,6 +471,7 @@ def _build_realtime_pipeline_unit(
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
     kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
+    kitten_tts_handler_kwargs: KittenTTSHandlerArguments,
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
 ) -> "PipelineUnit":
     """Build one isolated realtime pipeline (own queues, events, service, handlers).
@@ -485,6 +495,7 @@ def _build_realtime_pipeline_unit(
     facebook_mms_kw = deepcopy(facebook_mms_tts_handler_kwargs)
     pocket_tts_kw = deepcopy(pocket_tts_handler_kwargs)
     kokoro_tts_kw = deepcopy(kokoro_tts_handler_kwargs)
+    kitten_tts_kw = deepcopy(kitten_tts_handler_kwargs)
     qwen3_tts_kw = deepcopy(qwen3_tts_handler_kwargs)
 
     should_listen = Event()
@@ -506,6 +517,7 @@ def _build_realtime_pipeline_unit(
         lm_kw,
         responses_api_kw,
         kokoro_tts_kw,
+        kitten_tts_kw,
         qwen3_tts_kw,
         pocket_tts_kw,
         chat_tts_kw,
@@ -558,6 +570,7 @@ def _build_realtime_pipeline_unit(
         facebook_mms_tts_handler_kwargs=facebook_mms_kw,
         pocket_tts_handler_kwargs=pocket_tts_kw,
         kokoro_tts_handler_kwargs=kokoro_tts_kw,
+        kitten_tts_handler_kwargs=kitten_tts_kw,
         qwen3_tts_handler_kwargs=qwen3_tts_kw,
         speculative_turns=speculative_turns,
     )
@@ -595,6 +608,7 @@ def build_pipeline(
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
     kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
+    kitten_tts_handler_kwargs: KittenTTSHandlerArguments,
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
     queues_and_events: dict[str, Any],
 ) -> ThreadManager:
@@ -657,6 +671,7 @@ def build_pipeline(
                 facebook_mms_tts_handler_kwargs=facebook_mms_tts_handler_kwargs,
                 pocket_tts_handler_kwargs=pocket_tts_handler_kwargs,
                 kokoro_tts_handler_kwargs=kokoro_tts_handler_kwargs,
+                kitten_tts_handler_kwargs=kitten_tts_handler_kwargs,
                 qwen3_tts_handler_kwargs=qwen3_tts_handler_kwargs,
             )
             for i in range(pool_size)
@@ -741,6 +756,7 @@ def build_pipeline(
         facebook_mms_tts_handler_kwargs=facebook_mms_tts_handler_kwargs,
         pocket_tts_handler_kwargs=pocket_tts_handler_kwargs,
         kokoro_tts_handler_kwargs=kokoro_tts_handler_kwargs,
+        kitten_tts_handler_kwargs=kitten_tts_handler_kwargs,
         qwen3_tts_handler_kwargs=qwen3_tts_handler_kwargs,
     )
 
@@ -914,6 +930,7 @@ def get_tts_handler(
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
     kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
+    kitten_tts_handler_kwargs: KittenTTSHandlerArguments,
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
 ) -> BaseHandler[TTSIn, TTSOut]:
     if module_kwargs.tts == "chatTTS":
@@ -967,6 +984,18 @@ def get_tts_handler(
             setup_args=(should_listen,),
             setup_kwargs=vars(kokoro_tts_handler_kwargs),
         )
+    elif module_kwargs.tts == "kitten":
+        try:
+            from speech_to_speech.TTS.kitten_tts_handler import KittenTTSHandler
+        except ImportError as e:
+            raise ImportError('KittenTTS is optional. Install it with `pip install "speech-to-speech[kitten]"`.') from e
+        return KittenTTSHandler(
+            stop_event,
+            queue_in=lm_response_queue,
+            queue_out=send_audio_chunks_queue,
+            setup_args=(should_listen,),
+            setup_kwargs=vars(kitten_tts_handler_kwargs),
+        )
     elif module_kwargs.tts == "qwen3":
         from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 
@@ -978,7 +1007,7 @@ def get_tts_handler(
             setup_kwargs=vars(qwen3_tts_handler_kwargs),
         )
     else:
-        raise ValueError("The TTS should be either chatTTS, facebookMMS, pocket, kokoro, or qwen3")
+        raise ValueError("The TTS should be either chatTTS, facebookMMS, pocket, kokoro, qwen3, or kitten")
 
 
 def main() -> None:
@@ -1002,6 +1031,7 @@ def main() -> None:
         args.facebook_mms_tts_handler_kwargs,
         args.pocket_tts_handler_kwargs,
         args.kokoro_tts_handler_kwargs,
+        args.kitten_tts_handler_kwargs,
         args.qwen3_tts_handler_kwargs,
     )
 
@@ -1046,6 +1076,7 @@ def main() -> None:
         args.facebook_mms_tts_handler_kwargs,
         args.pocket_tts_handler_kwargs,
         args.kokoro_tts_handler_kwargs,
+        args.kitten_tts_handler_kwargs,
         args.qwen3_tts_handler_kwargs,
         queues_and_events,
     )

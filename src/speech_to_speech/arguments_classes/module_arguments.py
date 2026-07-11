@@ -35,10 +35,10 @@ class ModuleArguments:
             "'chat-completions' (OpenAI-compatible /v1/chat/completions). Default is 'responses-api'."
         },
     )
-    tts: Optional[Literal["chatTTS", "facebookMMS", "pocket", "kokoro", "qwen3"]] = field(
+    tts: Optional[Literal["chatTTS", "facebookMMS", "pocket", "kokoro", "qwen3", "kitten"]] = field(
         default="qwen3",
         metadata={
-            "help": "The TTS to use. Either 'chatTTS', 'facebookMMS', 'pocket', 'kokoro', or 'qwen3'. Default is 'qwen3'."
+            "help": "The TTS to use. Either 'chatTTS', 'facebookMMS', 'pocket', 'kokoro', 'qwen3', or 'kitten'. Default is 'qwen3'."
         },
     )
     log_level: str = field(
