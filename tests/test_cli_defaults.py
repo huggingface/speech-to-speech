@@ -12,6 +12,7 @@ from speech_to_speech.arguments_classes.paraformer_stt_arguments import Paraform
 from speech_to_speech.arguments_classes.parakeet_tdt_arguments import ParakeetTDTSTTHandlerArguments
 from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
+from speech_to_speech.arguments_classes.supertonic_tts_arguments import SupertonicTTSHandlerArguments
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
     ResponsesApiLanguageModelHandlerArguments,
 )
@@ -74,6 +75,7 @@ EXPECTED_FIELD_TYPES = {
     "pocket_tts_handler_kwargs": PocketTTSHandlerArguments,
     "kokoro_tts_handler_kwargs": KokoroTTSHandlerArguments,
     "qwen3_tts_handler_kwargs": Qwen3TTSHandlerArguments,
+    "supertonic_tts_handler_kwargs": SupertonicTTSHandlerArguments,
 }
 
 

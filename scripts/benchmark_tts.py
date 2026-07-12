@@ -164,6 +164,16 @@ def benchmark_handler(
                 setup_args=(should_listen,),
                 setup_kwargs=setup_kwargs,
             )
+        elif handler_name == "supertonic":
+            from speech_to_speech.TTS.supertonic_tts_handler import SupertonicTTSHandler
+            setup_kwargs = {"supertonic_voice": "M1", **setup_kwargs}
+            handler = SupertonicTTSHandler(
+                stop_event,
+                queue_in=queue_in,
+                queue_out=queue_out,
+                setup_args=(should_listen,),
+                setup_kwargs=setup_kwargs,
+            )
         else:
             raise ValueError(f"Unknown handler: {handler_name}")
 
@@ -330,8 +340,8 @@ def main():
     parser.add_argument(
         "--handlers",
         nargs="+",
-        default=["kokoro", "qwen3", "pocket_tts"],
-        help="List of handlers to benchmark (kokoro, qwen3, pocket_tts, chatTTS, facebookMMS)",
+        default=["kokoro", "qwen3", "pocket_tts", "supertonic"],
+        help="List of handlers to benchmark (kokoro, qwen3, pocket_tts, chatTTS, facebookMMS, supertonic)",
     )
     parser.add_argument(
         "--iterations",
