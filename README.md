@@ -67,6 +67,7 @@ Any OpenAI Realtime-compatible client can connect. See [Realtime API](#realtime-
 * [Pocket TTS](#pocket-tts)
 * [CLI reference](#cli-reference)
 * [Contributing](#contributing)
+* [Star history](#star-history)
 * [Citations](#citations)
 
 ## How it works
@@ -557,6 +558,10 @@ uv sync
 pytest
 ruff check
 ```
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=huggingface/speech-to-speech&type=Date)](https://star-history.com/#huggingface/speech-to-speech)
 
 ## Citations
 
