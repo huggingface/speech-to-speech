@@ -149,8 +149,8 @@ python s2s_pipeline.py \
 
 Behavior:
 - Supports real-time text-to-speech using Supertone's ONNX runtime models
-- Downloads the models locally to `.cache/supertonic3`
-- Supports 4 built-in voice models: `M1`, `M2`, `F1`, and `F2`.
+- Downloads the models locally to `~/.cache/supertonic3/`
+- Supports 10 built-in voice models: `M1`-`M5` and `F1`-`F5`.
 - Outputs natively at 44.1kHz but gets downsampled in the pipeline to 16kHz for uniform playback
 
 
