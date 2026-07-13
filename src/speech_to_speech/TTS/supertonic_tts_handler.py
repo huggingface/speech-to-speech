@@ -1,11 +1,11 @@
 import logging
+
 import numpy as np
 import scipy.signal
-
 from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.pipeline.messages import EndOfResponse, AUDIO_RESPONSE_DONE
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -67,7 +67,7 @@ class SupertonicTTSHandler(BaseHandler):
             voice_style=self.voice_style,
             speed=self.supertonic_speed,
         )
-        
+
         # Squeeze down to 1D
         audio_44k = wav.squeeze()
 
