@@ -74,6 +74,9 @@ faster-whisper = [
 kokoro = [
     "kokoro>=0.9.2; platform_system != 'Darwin'",
 ]
+kitten = [
+    "kittentts>=0.1.0",
+]
 language-detection = [
     "lingua-language-detector>=2.0.2",
 ]

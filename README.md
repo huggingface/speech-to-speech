@@ -125,6 +125,7 @@ Extra backends are installed with pip extras:
 
 ```bash
 pip install "speech-to-speech[kokoro]"          # Kokoro-82M TTS on non-macOS
+pip install "speech-to-speech[kitten]"          # KittenTTS
 pip install "speech-to-speech[pocket]"          # Pocket TTS
 pip install "speech-to-speech[chattts]"         # ChatTTS
 pip install "speech-to-speech[facebook-mms]"    # MMS TTS
@@ -164,6 +165,7 @@ This installs the package in editable mode and makes the `speech-to-speech` CLI 
 | LLM | [mlx-lm](https://github.com/ml-explore/mlx-lm) | Apple Silicon | built-in on macOS |
 | TTS | [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) (default) | GGML / CUDA on Linux, mlx-audio on macOS | built-in |
 | TTS | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | CUDA / CPU, Apple Silicon | `kokoro` on non-macOS; built-in on macOS |
+| TTS | [KittenTTS](https://github.com/KittenML/KittenTTS) | CUDA / CPU | `kitten` (*requires espeak-ng*) |
 | TTS | [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) | CPU / CUDA | `pocket` |
 | TTS | [ChatTTS](https://github.com/2noise/ChatTTS) | CUDA / CPU | `chattts` |
 | TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | `facebook-mms` |
@@ -231,7 +233,7 @@ This setting:
 - Sets Qwen3-TTS for TTS, using `mlx-audio` with the `6bit` MLX variant by default.
 - Sets `--mode local`.
 
-`--tts pocket` and `--tts kokoro` are also valid on macOS.
+`--tts pocket`, `--tts kokoro`, and `--tts kitten` are also valid on macOS.
 
 To compare the MLX quantization variants locally:
 
@@ -457,6 +459,7 @@ Language coverage depends on the STT and TTS backends you pick, not on the pipel
 | STT | Paraformer | Depends on the selected FunASR checkpoint; the default is Chinese-oriented |
 | TTS | Qwen3-TTS (default) | Multilingual, with `--qwen3_tts_language auto` by default |
 | TTS | Kokoro | Multiple language/voice mappings, depending on backend availability |
+| TTS | KittenTTS | Default voice (Bruno), CPU/CUDA execution |
 | TTS | ChatTTS | English and Chinese |
 | TTS | MMS TTS | Broad multilingual coverage through MMS checkpoints |
 
@@ -598,4 +601,4 @@ If you use this pipeline, please also cite the component models you run. The def
 }
 ```
 
-Citations for optional backends such as Kokoro, Pocket TTS, ChatTTS, Whisper variants, Paraformer, and MMS live in the respective [component READMEs](./src/speech_to_speech).
+Citations for optional backends such as Kokoro, KittenTTS, Pocket TTS, ChatTTS, Whisper variants, Paraformer, and MMS live in the respective [component READMEs](./src/speech_to_speech).
