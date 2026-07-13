@@ -14,43 +14,69 @@ import sys
 import urllib.request
 from datetime import datetime, timezone
 
-API = "https://api.github.com"
+API = "https://api.github.com/graphql"
 PER_PAGE = 100
+MAX_PAGES = 400  # preserve the REST implementation's 40k-star cap
 MAX_POINTS = 120  # downsample the curve to at most this many points
 
 
-def gh_get(url: str, token: str) -> tuple[bytes, dict]:
-    req = urllib.request.Request(url)
-    req.add_header("Accept", "application/vnd.github.star+json")
+def gh_post(query: str, variables: dict, token: str) -> dict:
+    payload = json.dumps({"query": query, "variables": variables}).encode()
+    req = urllib.request.Request(API, data=payload)
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("Content-Type", "application/json")
     req.add_header("X-GitHub-Api-Version", "2022-11-28")
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     with urllib.request.urlopen(req, timeout=30) as resp:
-        return resp.read(), dict(resp.headers)
+        result = json.loads(resp.read())
+    if result.get("errors"):
+        raise RuntimeError(json.dumps(result["errors"]))
+    return result
 
 
 def fetch_star_dates(repo: str, token: str) -> list[datetime]:
+    owner, name = repo.split("/", 1)
+    query = """
+    query($owner: String!, $name: String!, $cursor: String, $perPage: Int!) {
+      repository(owner: $owner, name: $name) {
+        stargazers(first: $perPage, after: $cursor) {
+          edges { starredAt }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+    """
     dates = []
     page = 1
+    cursor = None
     while True:
-        url = f"{API}/repos/{repo}/stargazers?per_page={PER_PAGE}&page={page}"
-        body, headers = gh_get(url, token)
-        items = json.loads(body)
-        if not items:
-            break
-        for item in items:
-            ts = item.get("starred_at")
+        result = gh_post(
+            query,
+            {
+                "owner": owner,
+                "name": name,
+                "cursor": cursor,
+                "perPage": PER_PAGE,
+            },
+            token,
+        )
+        stargazers = result["data"]["repository"]["stargazers"]
+        for edge in stargazers["edges"]:
+            ts = edge.get("starredAt")
             if ts:
                 dates.append(
                     datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(
                         tzinfo=timezone.utc
                     )
                 )
-        if len(items) < PER_PAGE:
+        page_info = stargazers["pageInfo"]
+        if not page_info["hasNextPage"]:
             break
         page += 1
-        if page > 400:  # GitHub caps stargazer pagination at 40k stars
+        if page > MAX_PAGES:
             break
+        cursor = page_info["endCursor"]
     dates.sort()
     return dates
 
