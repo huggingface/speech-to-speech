@@ -1,8 +1,6 @@
 name: Update star history chart
 
 on:
-  schedule:
-    - cron: "17 3 * * 1"  # Mondays 03:17 UTC
   workflow_dispatch:
 
 permissions:
@@ -13,20 +11,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
 
       - name: Generate chart
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 .github/scripts/star_history.py "${{ github.repository }}" assets/star-history.svg
 
-      - name: Commit if changed
+      - name: Commit to update branch if changed
+        env:
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          UPDATE_BRANCH: star-history-update-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add assets/star-history.svg
           if ! git diff --cached --quiet; then
             git commit -m "chore: update star history chart [skip ci]"
-            git push
+            git push origin "HEAD:refs/heads/${UPDATE_BRANCH}"
+            pr_url="https://github.com/${{ github.repository }}/compare/${BASE_BRANCH}...${UPDATE_BRANCH}?expand=1"
+            echo "Open a PR: ${pr_url}"
+            echo "Open a PR: [${UPDATE_BRANCH}](${pr_url})" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No changes"
           fi
