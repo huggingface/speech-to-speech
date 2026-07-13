@@ -279,8 +279,6 @@ def overwrite_device_argument(common_device: Optional[str], *handler_kwargs: Any
                 kwargs.facebook_mms_device = common_device
             if hasattr(kwargs, "qwen3_tts_device"):
                 kwargs.qwen3_tts_device = common_device
-            if hasattr(kwargs, "supertonic_device"):
-                kwargs.supertonic_device = common_device
 
 
 def prepare_module_args(module_kwargs: ModuleArguments, *handler_kwargs: Any) -> None:

@@ -138,13 +138,13 @@ This will run separate benchmark entries for `qwen3[bf16]`, `qwen3[4bit]`, `qwen
 
 ### 6) Supertonic (`--tts supertonic`)
 
-Primary args prefix: `--supertonic_*`
+Primary args prefix: `--supertonic_tts_*`
 
 ```bash
 python s2s_pipeline.py \
   --tts supertonic \
-  --supertonic_voice M1 \
-  --supertonic_speed 1.0
+  --supertonic_tts_voice M1 \
+  --supertonic_tts_speed 1.0
 ```
 
 Behavior:
