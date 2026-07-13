@@ -561,7 +561,7 @@ ruff check
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=huggingface/speech-to-speech&type=Date)](https://star-history.com/#huggingface/speech-to-speech)
+[![Star History Chart](assets/star-history.svg)](https://github.com/huggingface/speech-to-speech/stargazers)
 
 ## Citations
 
