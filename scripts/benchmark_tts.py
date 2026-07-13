@@ -340,7 +340,7 @@ def main():
     parser.add_argument(
         "--handlers",
         nargs="+",
-        default=["kokoro", "qwen3", "pocket_tts", "kitten"],
+        default=["kokoro", "qwen3", "pocket_tts"],
         help="List of handlers to benchmark (kokoro, qwen3, pocket_tts, kitten, chatTTS, facebookMMS)",
     )
     parser.add_argument(
