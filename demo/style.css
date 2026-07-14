@@ -1,0 +1,2646 @@
+:root {
+  --bg: #0a0b10;
+  --bg-elev: #13151c;
+  --bg-elev-2: #1b1e29;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --text: #f5f6fa;
+  --text-dim: rgba(245, 246, 250, 0.65);
+  --text-faint: rgba(245, 246, 250, 0.42);
+
+  --accent: #8b7dff;
+  --accent-2: #22d3ee;
+  --listening: #22d3ee;
+  --speaking: #8b7dff;
+  --processing: #f59e0b;
+  --error: #ff6a75;
+  --success: #34d399;
+
+  /* Mono is the "machine voice": reserved for system text the app emits —
+   * the orb's status caption, tool calls, the transport tag. Body/UI stays
+   * Inter. */
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+
+  /* Thesis: color belongs to the voice. The chrome is monochrome; saturated
+   * hue appears only on the orb and on these tiny role echoes, which mirror
+   * the orb's own state colors (you listening = cyan, assistant = violet,
+   * tool = amber) so the transcript reads in the same color language. */
+  --voice-user: var(--accent-2);
+  --voice-assistant: var(--accent);
+  --voice-tool: var(--processing);
+
+  /* Smoothed mic RMS in [0..1], updated every frame from JS while a session
+   * is active. Used by audio-reactive circle states. */
+  --audio-level: 0;
+  /* Five log-spaced frequency bands extracted from the mic analyser;
+   * drive each bar's height independently for a real "spectrum" feel. */
+  --bar0: 0;
+  --bar1: 0;
+  --bar2: 0;
+  --bar3: 0;
+  --bar4: 0;
+
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 22px;
+
+  --shadow-soft: 0 10px 40px rgba(0, 0, 0, 0.35);
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: radial-gradient(ellipse at 50% 20%, #1a1c28 0%, var(--bg) 60%);
+  color: var(--text);
+  min-height: 100vh;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font-family: inherit;
+}
+
+a {
+  color: var(--text);
+  text-decoration: none;
+  border-bottom: 1px solid var(--border-strong);
+}
+a:hover {
+  border-bottom-color: var(--text);
+}
+
+#app {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-height: 100vh;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* ─── Topbar ──────────────────────────────────────────────────────────── */
+
+/* Topbar is just a floating row of controls over the stage - no
+ * separator line, no background. Same story for the footer. Keeps the
+ * app feeling like one continuous canvas. */
+.topbar {
+  display: flex;
+  /* Top-align so the right control cluster sits up with the title instead of
+   * floating to the vertical middle of the tall identity block. */
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 18px 28px;
+  /* Default stacking (below the conversation panel, z 200) so the panel drawer
+   * covers the controls when it's open. */
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: 0.01em;
+  color: var(--text-dim);
+}
+
+/* Transport tag rides the wordmark as a system label, not prose — mono,
+ * dimmed, the only mono in the topbar. */
+.brand-tag {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  opacity: 0.55;
+}
+
+.brand .brand-logo {
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+  flex: none;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
+  transition: transform 0.2s ease;
+}
+.brand .brand-logo:hover {
+  transform: translateY(-1px) rotate(-2deg);
+}
+
+/* Narrow viewports (typically the mobile shell iframe and phone-sized
+   browser windows): the full product name pushes the topbar's right
+   cluster off-screen. Keep the logo as the brand cue and drop the
+   wordmark - the orb already gives enough context. */
+@media (max-width: 600px) {
+  /* The full identity stack is too tall for a phone topbar. Show only the
+   * title + (i); the popup carries the blurb, credits and pipeline.
+   * `.brand` prefix raises specificity so this beats the later base
+   * `.ident-meta { display: flex }` rule regardless of source order. */
+  .brand .ident-blurb,
+  .brand .ident-meta {
+    display: none;
+  }
+  .ident-title {
+    font-size: 18px;
+  }
+  /* (i) moves into the right-hand control cluster on phones, leaving the
+   * title alone on the left. */
+  .brand .about-btn {
+    display: none;
+  }
+  .about-btn-mobile {
+    display: inline-flex;
+  }
+  /* Keep phone icons at the current compact size — the desktop bump above
+   * shouldn't leak into the mobile topbar. */
+  .topbar-right .icon-btn {
+    width: 36px;
+    height: 36px;
+  }
+  .topbar-right .icon-btn svg {
+    width: 18px;
+    height: 18px;
+  }
+  /* Keep the account control compact on phones: avatar-only chip, shorter pill. */
+  .account-chip {
+    height: 36px;
+    padding: 0 6px;
+  }
+  .account-handle {
+    display: none;
+  }
+  .signin-pill {
+    height: 36px;
+    padding: 0 12px;
+  }
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* The HF user pill: compact avatar + handle. Rendered as a flex row so
+ * the avatar stays aligned with the text baseline even when the text
+ * wraps on narrow viewports. */
+.hf-user {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-dim);
+  padding: 4px 10px 4px 4px;
+  border-radius: 999px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  line-height: 1;
+}
+
+.hf-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: color-mix(in srgb, var(--accent) 25%, var(--bg-elev-2));
+  /* Hidden until an actual URL loads (see `setHfAvatar` in main.ts).
+   * Keeps the initial login flash from showing a broken image icon. */
+  opacity: 0;
+  transition: opacity 0.25s ease;
+  flex: none;
+}
+.hf-avatar.loaded {
+  opacity: 1;
+}
+
+.hf-user-name {
+  white-space: nowrap;
+}
+
+/* ─── Transport pill ──────────────────────────────────────────────
+ * Surface the actual network path WebRTC picked for the robot peer
+ * connection (LAN, direct-through-NAT, or TURN-relayed). Lets the
+ * user spot at a glance when audio is going through the internet
+ * instead of staying on-prem.
+ */
+.transport-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  user-select: none;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.transport-pill .transport-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 25%, transparent);
+  flex: none;
+}
+
+/* Bitrate readout sits after the kind label. Dimmer + monospace so the
+ * kind (LAN / Direct / Relayed) stays the primary info and the numbers
+ * don't wiggle the layout as digits change. */
+.transport-pill .transport-bitrate {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: color-mix(in srgb, currentColor 75%, var(--text-dim));
+  opacity: 0.85;
+  padding-left: 6px;
+  border-left: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+}
+.transport-pill .transport-bitrate:empty {
+  display: none;
+}
+
+.transport-pill.transport-checking {
+  color: var(--text-dim);
+}
+.transport-pill.transport-checking .transport-dot {
+  animation: transport-blink 1.2s ease-in-out infinite;
+}
+
+.transport-pill.transport-lan {
+  color: #4ade80;
+  border-color: color-mix(in srgb, #4ade80 35%, var(--border));
+  background: color-mix(in srgb, #4ade80 10%, var(--bg-elev));
+}
+
+.transport-pill.transport-direct {
+  color: #60a5fa;
+  border-color: color-mix(in srgb, #60a5fa 35%, var(--border));
+  background: color-mix(in srgb, #60a5fa 10%, var(--bg-elev));
+}
+
+.transport-pill.transport-relay {
+  color: #fbbf24;
+  border-color: color-mix(in srgb, #fbbf24 35%, var(--border));
+  background: color-mix(in srgb, #fbbf24 10%, var(--bg-elev));
+}
+
+@keyframes transport-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.icon-btn {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.icon-btn:hover {
+  background: var(--bg-elev-2);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+/* Topbar control cluster reads a touch bigger on desktop. Phones keep the
+ * compact 36px (reset in the mobile media query). */
+.topbar-right .icon-btn {
+  width: 40px;
+  height: 40px;
+}
+.topbar-right .icon-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* ─── Account (HF login chip + sign-in pill + popover) ─────────────────────── */
+.account {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+/* Signed-out: a compact pill that reads as the primary affordance. */
+.signin-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 40px;
+  padding: 0 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.15s, border-color 0.15s;
+}
+.signin-pill svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+.signin-pill:hover {
+  background: var(--bg-elev-2);
+  border-color: var(--text);
+}
+/* Narrow viewports: collapse the pill to an icon-only square. */
+@media (max-width: 800px) {
+  .signin-pill {
+    gap: 0;
+    width: 40px;
+    padding: 0;
+    justify-content: center;
+  }
+  .signin-pill span {
+    display: none;
+  }
+}
+/* Signed-in: avatar + handle chip. */
+.account-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 10px 0 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.account-chip:hover {
+  background: var(--bg-elev-2);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.account-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex: none;
+}
+.account-avatar-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-elev-2);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+.account-handle {
+  font-size: 13px;
+  font-weight: 600;
+  max-width: 12ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-pro {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 2px 5px;
+  border-radius: 5px;
+  background: var(--text);
+  color: var(--bg);
+}
+/* Org "Team" badge: same pill as PRO, accent-coloured so it reads as
+ * unlimited without claiming a paid PRO subscription. */
+.account-team {
+  background: var(--accent);
+  color: var(--bg);
+}
+.account-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 200px;
+  padding: 6px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-soft);
+  z-index: 50;
+}
+.account-pop[hidden] {
+  display: none;
+}
+.account-pop-row {
+  padding: 8px 10px;
+}
+.account-pop-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+.account-pop-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.account-tier {
+  font-weight: 600;
+  color: var(--text);
+}
+.account-pop-link {
+  display: block;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 13px;
+  text-decoration: none;
+  transition: background 0.15s, color 0.15s;
+}
+.account-pop-link:hover {
+  background: var(--bg-elev-2);
+  color: var(--text);
+}
+.account-signout {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding-top: 10px;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+}
+
+/* ─── Daily-limit modal ────────────────────────────────────────────────────── */
+.limit-modal {
+  width: min(400px, 92vw);
+}
+.limit-card {
+  position: relative;
+  align-items: center;
+  text-align: center;
+  gap: 14px;
+  padding: 34px 28px 26px;
+}
+.limit-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+}
+/* HF smiling face (brand yellow) on a neutral badge — friendly, not a stop sign.
+ * The logo is the single pop of colour, so the badge itself stays quiet. */
+.limit-badge {
+  width: 66px;
+  height: 66px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  margin: 2px auto 2px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 0 0 6px rgba(255, 210, 30, 0.06);
+}
+.limit-badge .hf-logo {
+  width: 46px;
+  height: auto;
+}
+.limit-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+.limit-msg {
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1.55;
+  margin: 0;
+  max-width: 30ch;
+}
+.limit-cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.limit-cta .hf-logo {
+  width: 20px;
+  height: auto;
+  flex: none;
+}
+.limit-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+#limit-cta[hidden] {
+  display: none;
+}
+
+/* ─── Stage ───────────────────────────────────────────────────────────── */
+
+.stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 24px 32px;
+  gap: 20px;
+  /* Let the stage shrink inside the grid's 1fr row so a height-capped orb can
+   * give back space rather than forcing the whole app to overflow. */
+  min-height: 0;
+}
+
+/* ─── Central circle ──────────────────────────────────────────────────── */
+
+/* Wraps the orb and its two side controls so they stay aligned on one row. */
+.orb-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(18px, 3vw, 32px);
+}
+
+.circle {
+  position: relative;
+  /* Cap by height as well as width (min(vw, vh)-style): in a short container
+   * the orb shrinks instead of overflowing, so the page stays scroll-free even
+   * when embedded in a small box. On normal screens the 320px cap still wins,
+   * so the desktop size is unchanged. */
+  width: clamp(140px, min(38vw, 46vh), 320px);
+  aspect-ratio: 1 / 1;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  outline: none;
+  display: grid;
+  place-items: center;
+  color: var(--glow, var(--accent));
+  transition: transform 0.18s ease, filter 0.18s ease;
+  -webkit-tap-highlight-color: transparent;
+  /* Treat taps as immediate clicks (no 300ms delay / double-tap-zoom). */
+  touch-action: manipulation;
+}
+.circle:hover {
+  filter: brightness(1.08);
+}
+.circle:active {
+  transform: scale(0.97);
+  filter: brightness(0.92);
+}
+.circle:focus-visible .circle-core {
+  outline: 2px solid var(--glow, var(--accent));
+  outline-offset: 6px;
+}
+.circle[disabled] {
+  cursor: default;
+  opacity: 0.75;
+}
+
+.circle-glow {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle at center, var(--glow, var(--accent)) 0%, transparent 65%);
+  filter: blur(28px);
+  opacity: 0.5;
+  transform: scale(1);
+  transition: opacity 0.25s, background 0.25s, transform 1.4s ease-in-out;
+  pointer-events: none;
+}
+
+/* Two nested circular rings: the inner tracks the core edge, the outer
+ * expands / fades to convey "audio radiating out" during speaking. */
+.circle-ring,
+.circle-ring-outer {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  transition: opacity 0.4s ease, border-color 0.4s ease, transform 0.3s ease;
+}
+.circle-ring {
+  width: 82%;
+  height: 82%;
+  border: 1.5px solid color-mix(in srgb, var(--glow, var(--accent)) 35%, transparent);
+  opacity: 0.35;
+}
+.circle-ring-outer {
+  width: 94%;
+  height: 94%;
+  border: 1px solid color-mix(in srgb, var(--glow, var(--accent)) 22%, transparent);
+  opacity: 0;
+}
+
+.circle-core {
+  position: relative;
+  width: 72%;
+  height: 72%;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 35% 28%,
+    color-mix(in srgb, var(--glow, var(--accent)) 28%, transparent),
+    color-mix(in srgb, var(--glow, var(--accent)) 10%, transparent) 55%,
+    color-mix(in srgb, var(--glow, var(--accent)) 5%, transparent)
+  );
+  border: 2px solid color-mix(in srgb, var(--glow, var(--accent)) 40%, transparent);
+  display: grid;
+  place-items: center;
+  box-shadow:
+    0 0 32px color-mix(in srgb, var(--glow, var(--accent)) 22%, transparent),
+    inset 0 0 28px color-mix(in srgb, var(--glow, var(--accent)) 18%, transparent);
+  transition: background 0.4s ease, border-color 0.4s ease, box-shadow 0.4s ease, transform 0.4s ease;
+}
+
+/* Indicator slot: a single SVG / spinner / bar group is visible at a time,
+ * driven by the state class on `.circle`. */
+.circle-indicator {
+  position: relative;
+  width: 44%;
+  height: 44%;
+  display: grid;
+  place-items: center;
+  color: var(--glow, var(--accent));
+}
+.circle-indicator > .ind {
+  grid-area: 1 / 1;
+  opacity: 0;
+  transform: scale(0.85);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  pointer-events: none;
+}
+.circle-indicator > svg.ind {
+  width: 60%;
+  height: 60%;
+}
+
+/* Spinner: a rotating ring gap, CSS-only.
+ *
+ * Note: the base `.circle-indicator > .ind` rule forces `transform:
+ * scale(.85)` / `scale(1)` on every indicator to drive the show/hide
+ * transition. If we only rotate here, the browser has to interpolate
+ * between `scale(1)` and `rotate(360deg)` (two different transform
+ * functions), which produces a broken, barely-moving animation. So we
+ * include the scale explicitly in the keyframes and bump specificity
+ * with `!important` so the spinner always wins over the state rule. */
+.ind-spinner {
+  width: 48%;
+  height: 48%;
+  border: 3px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  opacity: 0;
+  animation: ind-spin 0.9s linear infinite;
+}
+
+/* Thinking dots: 3 soft pulsing dots while the model is composing a
+ * response. Apple-style cadence: each dot scales up and brightens in
+ * turn, staggered by ~160 ms. Per-dot animation is on the child, so
+ * the parent's scale(.85 → 1) show/hide transform composes cleanly. */
+.ind-thinking {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 60%;
+  height: 60%;
+}
+.ind-thinking .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.3;
+  animation: thinking-dot 1.25s ease-in-out infinite;
+}
+.ind-thinking .dot:nth-child(1) { animation-delay: 0s; }
+.ind-thinking .dot:nth-child(2) { animation-delay: 0.16s; }
+.ind-thinking .dot:nth-child(3) { animation-delay: 0.32s; }
+
+/* Bars: 5 vertical pills driven by --bar0..--bar4 CSS vars. */
+.ind-bars {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 42%;
+}
+.ind-bars .bar {
+  width: 4px;
+  min-height: 4px;
+  border-radius: 3px;
+  background: currentColor;
+  opacity: 0.7;
+  --h: var(--bar0, 0);
+  height: calc(4px + var(--h) * 36px);
+  transition: height 0.08s ease-out, opacity 0.08s ease-out;
+}
+.ind-bars .bar:nth-child(1) { --h: var(--bar0); }
+.ind-bars .bar:nth-child(2) { --h: var(--bar1); }
+.ind-bars .bar:nth-child(3) { --h: var(--bar2); }
+.ind-bars .bar:nth-child(4) { --h: var(--bar3); }
+.ind-bars .bar:nth-child(5) { --h: var(--bar4); }
+.ind-bars .bar {
+  opacity: calc(0.55 + 0.45 * var(--h));
+}
+
+/* Active indicator per state.
+ *
+ * Note: `ai-speaking` deliberately has NO indicator here. The orb
+ * itself becomes the indicator by pulsing on Reachy's voice (see the
+ * `--ai-audio-level` rules further down), which is a lot clearer and
+ * less confusing than reusing the mic-bars (which viewers would read
+ * as "you are speaking"). */
+.state-signed-out .ind-connect,
+.state-authenticated .ind-mic,
+.state-ready .ind-mic,
+.state-connecting .ind-spinner,
+.state-connected .ind-spinner,
+.state-auto-selecting .ind-spinner,
+.state-starting .ind-spinner,
+.state-queued .ind-spinner,
+.state-processing .ind-thinking,
+.state-listening .ind-bars,
+.state-user-speaking .ind-bars,
+.state-ai-speaking .ind-voice,
+.state-error .ind-error {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* AI speaking indicator: speaker + two sound waves.
+ *
+ * Each wave pulses outward (opacity + stroke grow) with a quarter-
+ * beat offset so it reads as sound radiating out. Kept as a pure
+ * CSS animation so the icon is always visually alive even between
+ * syllables when --ai-audio-level momentarily dips. */
+.ind-voice .wave {
+  transform-origin: 50% 50%;
+  animation: voice-wave 1.35s ease-out infinite;
+}
+.ind-voice .wave-1 { animation-delay: 0s; }
+.ind-voice .wave-2 { animation-delay: 0.35s; }
+
+/* Idle indicators: a chain-link "connect" glyph for the signed-out
+ * step (invites the user to authenticate with HF) and a microphone
+ * once a session is ready. Both picked up by the generic
+ * `.circle-indicator > svg.ind` sizing rule (60% × 60% of the slot)
+ * and rely on per-state opacity transitions for show / hide. */
+.ind-connect,
+.ind-mic {
+  color: color-mix(in srgb, var(--glow, var(--accent)) 85%, white);
+}
+
+/* ─── Caption below the circle ────────────────────────────────────────── */
+
+/* The caption under the orb is meant to whisper, not shout: micro-label
+ * vibe, uppercase, letter-spaced, muted. Only appears for actionable /
+ * transitional states (see STATE_VIEWS). During a live conversation the
+ * orb alone carries the state so we collapse this row entirely. */
+.circle-caption {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  min-height: 1.2em;
+  text-align: center;
+  opacity: 0.75;
+  transition: opacity 0.25s ease, color 0.25s ease, transform 0.25s ease,
+    min-height 0.25s ease;
+}
+.circle-caption.empty {
+  opacity: 0;
+  min-height: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+}
+.circle-caption.muted {
+  color: var(--text-faint);
+  opacity: 0.65;
+}
+.circle-caption.error {
+  color: var(--error);
+  opacity: 1;
+  letter-spacing: 0.08em;
+}
+
+/* Warm, human line under the mono caption — sentence case, only while queued.
+ * The caption keeps the terse position; this reassures. */
+.circle-subcaption {
+  margin: 8px 0 0;
+  max-width: 32ch;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  text-align: center;
+  text-wrap: balance;
+  transition: opacity 0.25s ease;
+}
+.circle-subcaption[hidden] { display: none; }
+
+/* Queue actions sit under the caption: "Join now" (primary, only when it's your
+ * turn) stacked above the quiet "Leave queue" escape hatch. */
+.queue-actions {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.queue-actions[hidden] { display: none; }
+
+/* "Join now": the one call to action in the queue flow, so it reads as inviting
+ * (filled accent) while everything around it stays quiet. */
+.join-queue-btn {
+  padding: 10px 26px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #0b0b10;
+  background: var(--accent);
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+  transition: transform 0.12s ease, filter 0.2s ease;
+}
+.join-queue-btn:hover { filter: brightness(1.08); }
+.join-queue-btn:active { transform: scale(0.97); }
+.join-queue-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.join-queue-btn[hidden] { display: none; }
+
+/* "Leave queue": a quiet outlined pill, understated so it reads as an escape
+ * hatch, not a CTA. */
+.leave-queue-btn {
+  padding: 7px 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--text-faint) 35%, transparent);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+}
+.leave-queue-btn:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--text-faint) 60%, transparent);
+  background: color-mix(in srgb, var(--text-faint) 8%, transparent);
+}
+.leave-queue-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.leave-queue-btn[hidden] { display: none; }
+
+/* ─── Tool-call toaster ───────────────────────────────────────────────── */
+
+/* A small, non-interactive pill that appears below the circle when the
+ * model invokes a tool (move_head, play_move). Sits just under the
+ * state caption, collapses to zero height when no toast is active. */
+.tool-toast {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: color-mix(in srgb, var(--bg-elev-2) 78%, transparent);
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  line-height: 1;
+  white-space: nowrap;
+  max-width: 80vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+
+  opacity: 0;
+  transform: translateY(-4px) scale(0.96);
+  pointer-events: none;
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+.tool-toast.visible {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+.tool-toast-icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: color-mix(in srgb, var(--voice-tool) 80%, white);
+  animation: tool-toast-spin 3.2s linear infinite;
+  animation-play-state: paused;
+}
+.tool-toast.visible .tool-toast-icon {
+  animation-play-state: running;
+}
+.tool-toast-text {
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@keyframes tool-toast-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* ─── Side controls (mic / stop) ──────────────────────────────────────── */
+
+/* Mic button + its radial noise-gate arc. The wrapper centres the button; the
+   arc SVG is an absolute overlay larger than the button, revealed with the
+   live session (it has no layout footprint, so the idle collapse is unaffected). */
+.mic-gate {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.mic-gate-arc {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 80px;
+  height: 80px;
+  transform: translate(-50%, -50%);
+  pointer-events: none; /* only the hit-path below catches drags */
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+.orb-wrap.live .mic-gate-arc { opacity: 1; }
+.mga-track {
+  stroke: rgba(255, 255, 255, 0.1); /* hairline; recedes until needed */
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+.mga-fill {
+  stroke: var(--accent-2);
+  stroke-width: 2;
+  stroke-linecap: round;
+  opacity: 0.85;
+  transition: stroke-dashoffset 0.06s linear;
+}
+/* Threshold setpoint: a bead riding the ring. White with a thin dark outline so
+   it stays legible over the moving fill; it recolors to cyan with a soft glow
+   the moment the live level crosses it (the gate opening). */
+.mga-handle {
+  fill: var(--text);
+  stroke: none;
+  transition: fill 0.2s ease, filter 0.2s ease;
+}
+.mic-gate.gate-open .mga-handle {
+  fill: var(--accent-2);
+  filter: drop-shadow(0 0 3px var(--accent-2));
+}
+.mga-hit {
+  stroke: transparent;
+  stroke-width: 16;
+  pointer-events: none; /* enabled only while live (below) */
+  cursor: pointer;
+  touch-action: none;
+}
+/* Only catch drags during a live call; when idle the arc is hidden and must
+   not steal clicks near the collapsed mic button / orb. */
+.orb-wrap.live .mga-hit { pointer-events: stroke; }
+
+.side-btn {
+  flex: none;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  /* Brighter background so the buttons actually stand out against the
+   * deep-blue stage gradient; previous var(--bg-elev) was too close to
+   * the page bg to be readable. */
+  background: color-mix(in srgb, var(--bg-elev-2) 80%, #2a2e3c);
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: manipulation;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  /* Hidden by default: take up no space until the session is live. The
+   * `width: 0` collapse keeps the orb centered on the idle screen. */
+  opacity: 0;
+  transform: scale(0.55);
+  width: 0;
+  padding: 0;
+  pointer-events: none;
+  overflow: hidden;
+  transition: opacity 0.25s ease, transform 0.25s ease, width 0.25s ease,
+    background 0.15s, color 0.15s, border-color 0.15s;
+}
+.side-btn:hover {
+  background: color-mix(in srgb, var(--bg-elev-2) 60%, #323746);
+  border-color: var(--text-dim);
+}
+.side-btn svg {
+  width: 22px;
+  height: 22px;
+  flex: none;
+}
+.side-btn .mic-off { display: none; }
+.side-btn.muted {
+  color: #fff;
+  border-color: var(--error);
+  background: color-mix(in srgb, var(--error) 70%, #1a0e13);
+}
+.side-btn.muted .mic-on { display: none; }
+.side-btn.muted .mic-off { display: block; }
+
+/* Stop button: subtle warm tint so "end" reads as destructive. */
+#stop-btn:hover {
+  color: #fff;
+  border-color: color-mix(in srgb, var(--error) 60%, var(--border-strong));
+  background: color-mix(in srgb, var(--error) 25%, var(--bg-elev-2));
+}
+
+/* Reveal when the session is live: buttons flank the orb on a flex row. */
+.orb-wrap.live .side-btn {
+  opacity: 1;
+  transform: scale(1);
+  width: 52px;
+  pointer-events: auto;
+}
+
+/* Disable every transition / animation during the first paint so the
+ * orb doesn't fade-and-scale in when the page loads. `main.ts` removes
+ * the class after one animation frame. */
+body.booting,
+body.booting *,
+body.booting *::before,
+body.booting *::after {
+  transition: none !important;
+  animation-duration: 0s !important;
+  animation-delay: 0s !important;
+}
+
+/* ─── Circle animation keyframes ──────────────────────────────────────── */
+
+/* Slow, subtle breathing for "warm idle" states. */
+@keyframes breathe {
+  0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.4; }
+  50%      { transform: translate(-50%, -50%) scale(1.06); opacity: 0.15; }
+}
+
+/* Outer ring expanding and fading - conveys "I am producing audio". */
+@keyframes ring-out {
+  0%   { transform: translate(-50%, -50%) scale(1); opacity: 0.35; }
+  100% { transform: translate(-50%, -50%) scale(1.18); opacity: 0; }
+}
+
+/* Soft inner scale for the core while talking. */
+@keyframes core-breathe {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.04); }
+}
+
+/* Subtle glow throb used for "thinking" — dimmer than speaking. */
+@keyframes thinking {
+  0%, 100% { transform: scale(1); opacity: 0.7; }
+  50%      { transform: scale(0.96); opacity: 0.45; }
+}
+
+/* Individual dot pulse for the 3-dot processing indicator. */
+@keyframes thinking-dot {
+  0%, 60%, 100% { transform: scale(0.7); opacity: 0.3; }
+  30%           { transform: scale(1.15); opacity: 1; }
+}
+
+/* Sound-wave pulse: arc fades in, scales up slightly, fades out.
+ * The transform-origin is the speaker's center (roughly x=12), so
+ * the waves feel like they're emanating from the cone. */
+@keyframes voice-wave {
+  0%   { opacity: 0; transform: scale(0.7); }
+  30%  { opacity: 1; transform: scale(1); }
+  70%  { opacity: 0.2; transform: scale(1.12); }
+  100% { opacity: 0; transform: scale(0.7); }
+}
+
+@keyframes ind-spin {
+  /* Scale kept at 1 so we don't fight with the indicator's base
+   * show/hide transform (see `.ind-spinner` for the rationale). */
+  from { transform: scale(1) rotate(0deg); }
+  to   { transform: scale(1) rotate(360deg); }
+}
+
+/* ─── State-specific colors ──────────────────────────────────────────── */
+
+.circle.state-signed-out   { --glow: #8b7dff; }
+.circle.state-authenticated,
+.circle.state-ready        { --glow: #34d399; }
+.circle.state-connecting,
+.circle.state-connected,
+.circle.state-auto-selecting,
+.circle.state-starting     { --glow: #facc15; }
+/* Queued: a calm slate glow, distinct from connecting's active yellow — this is
+ * waiting, not working. The spinner turns slowly and the ring breathes. */
+.circle.state-queued       { --glow: #94a3b8; }
+.circle.state-queued .ind-spinner { animation-duration: 2.4s; }
+.circle.state-queued .circle-ring { animation: breathe 2.6s ease-in-out infinite; }
+/* Your turn: a slot is held for you — the orb warms to the accent and breathes a
+ * little quicker, an invitation to join. */
+.circle.state-your-turn    { --glow: var(--accent); }
+.circle.state-your-turn .circle-ring { animation: breathe 1.6s ease-in-out infinite; }
+.circle.state-listening,
+.circle.state-user-speaking { --glow: var(--listening); }
+.circle.state-processing   { --glow: var(--processing); }
+.circle.state-ai-speaking  { --glow: var(--speaking); }
+.circle.state-error        { --glow: var(--error); }
+
+/* Idle / ready: gentle breathing of the inner ring. Kept out of the
+ * `signed-out` state so the very first paint on page load stays quiet
+ * (the orb now shows the Reachy head silhouette, no need to also pulse). */
+.circle.state-authenticated .circle-ring,
+.circle.state-ready .circle-ring {
+  animation: breathe 2.4s ease-in-out infinite;
+}
+
+/* Connecting flows: subtle glow throb so the orb feels thoughtful
+ * while the session is being negotiated. Kept off `processing` on
+ * purpose - the 3 thinking dots already pulse, and layering another
+ * throb on top competes with them for attention. */
+.circle.state-connecting .circle-core,
+.circle.state-connected .circle-core,
+.circle.state-auto-selecting .circle-core,
+.circle.state-starting .circle-core {
+  animation: thinking 1.4s ease-in-out infinite;
+}
+
+/* User is speaking: the mic RMS drives scale + opacity via --audio-level. */
+.circle.state-user-speaking .circle-ring {
+  animation: none;
+  opacity: calc(0.25 + 0.55 * var(--audio-level));
+  transform: translate(-50%, -50%) scale(calc(1 + 0.08 * var(--audio-level)));
+  transition: transform 0.08s linear, opacity 0.08s linear;
+}
+.circle.state-user-speaking .circle-ring-outer {
+  opacity: calc(0.1 + 0.35 * var(--audio-level));
+  transform: translate(-50%, -50%) scale(calc(1 + 0.12 * var(--audio-level)));
+  transition: transform 0.08s linear, opacity 0.08s linear;
+}
+.circle.state-listening .circle-ring {
+  animation: breathe 2s ease-in-out infinite;
+}
+
+/* Assistant is speaking: the whole orb breathes in sync with Reachy's
+ * voice instead of running a fixed timer. `--ai-audio-level` (0-1) is
+ * updated at display rate by AiLevelMonitor from the OpenAI output
+ * track, so every syllable visibly moves the core + outer ring. This
+ * reads instantly as "the orb is the voice" and completely avoids the
+ * ambiguity of bars-vs-mic the user flagged. */
+.circle.state-ai-speaking .circle-core {
+  animation: none;
+  transform: scale(calc(1 + 0.09 * var(--ai-audio-level, 0)));
+  transition: transform 0.08s linear;
+}
+.circle.state-ai-speaking .circle-ring {
+  animation: none;
+  opacity: calc(0.3 + 0.5 * var(--ai-audio-level, 0));
+  transform: translate(-50%, -50%) scale(calc(1 + 0.05 * var(--ai-audio-level, 0)));
+  transition: transform 0.08s linear, opacity 0.08s linear;
+}
+.circle.state-ai-speaking .circle-ring-outer {
+  animation: none;
+  opacity: calc(0.15 + 0.55 * var(--ai-audio-level, 0));
+  transform: translate(-50%, -50%) scale(calc(1 + 0.18 * var(--ai-audio-level, 0)));
+  transition: transform 0.08s linear, opacity 0.08s linear;
+}
+.circle.state-ai-speaking .circle-glow {
+  opacity: calc(0.35 + 0.45 * var(--ai-audio-level, 0));
+  transition: opacity 0.08s linear;
+}
+
+/* ─── Robot picker ────────────────────────────────────────────────────── */
+
+.robot-picker {
+  width: min(420px, 92vw);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  box-shadow: var(--shadow-soft);
+}
+
+.picker-title {
+  margin: 0 0 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.robot-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.robot-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev-2);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.robot-card:hover {
+  border-color: var(--border-strong);
+}
+.robot-card.selected {
+  border-color: var(--border-strong);
+  background: var(--bg-elev);
+}
+
+.robot-card .name {
+  font-weight: 600;
+  font-size: 14px;
+}
+.robot-card .id {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.robot-empty {
+  padding: 14px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 13px;
+}
+
+/* ─── Footer ──────────────────────────────────────────────────────────── */
+
+.footer {
+  padding: 12px 28px 18px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--text-faint);
+  display: flex;
+  justify-content: center;
+  opacity: 0.55;
+  transition: opacity 0.25s ease;
+}
+.footer:hover {
+  opacity: 0.9;
+}
+.footer a {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px dotted currentColor;
+}
+.footer a:hover {
+  color: var(--text-dim);
+}
+/* While the webcam preview sits bottom-left, push the credit to the
+ * bottom-right so the two don't collide. */
+body.cam-on .footer {
+  justify-content: flex-end;
+}
+
+/* ─── Modal ───────────────────────────────────────────────────────────── */
+
+.modal {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0;
+  background: var(--bg-elev);
+  color: var(--text);
+  width: min(440px, 92vw);
+  box-shadow: var(--shadow-soft);
+}
+.modal::backdrop {
+  background: rgba(8, 9, 13, 0.65);
+  backdrop-filter: blur(4px);
+}
+
+.modal-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 22px 24px 20px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.modal-header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.field[hidden] { display: none; }
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim);
+}
+.field > span {
+  color: var(--text);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.field input,
+.field select,
+.field textarea {
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  outline: none;
+  transition: border-color 0.15s;
+  resize: vertical;
+}
+.field textarea {
+  min-height: 84px;
+}
+.field input:focus,
+.field select:focus,
+.field textarea:focus {
+  border-color: var(--text-dim);
+}
+/* Deploy-pinned server URL: shown for transparency, not editable. */
+.field input[readonly] {
+  color: var(--text-dim);
+  border-style: dashed;
+  cursor: default;
+}
+.field input[readonly]:focus {
+  border-color: var(--border);
+}
+.field small {
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.field small.error { color: var(--error); }
+.field small code {
+  background: var(--bg);
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+/* Noise gate: a header with a live value, a level meter, and a range slider
+   that shares the meter's horizontal (dB) axis. */
+.field-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.field-value {
+  font-weight: 500;
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-dim);
+}
+/* The slider and the level meter are one widget: the range input is overlaid
+   on the meter track (its native track is transparent), so the live-level fill
+   shows through behind the thumb and the thumb itself is the threshold. */
+.gate {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.gate-track {
+  position: relative;
+  height: 14px;
+  display: flex;
+  align-items: center;
+}
+.gate-track::before {
+  /* the visible meter track */
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+.gate-meter-fill {
+  position: absolute;
+  left: 1px;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 6px;
+  width: 0;
+  border-radius: 999px;
+  background: var(--accent-2);
+  transition: width 0.06s linear;
+  pointer-events: none;
+}
+.gate-ends {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-faint);
+  letter-spacing: 0;
+  text-transform: none;
+}
+/* The range input sits transparently on top of the meter track. */
+.gate-track input[type="range"] {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  margin: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  padding: 0;
+  border: none;
+  background: transparent;
+  height: 14px;
+  cursor: pointer;
+}
+.gate-track input[type="range"]::-webkit-slider-runnable-track {
+  height: 14px;
+  background: transparent;
+}
+.gate-track input[type="range"]::-moz-range-track {
+  height: 14px;
+  background: transparent;
+}
+.gate-track input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 6px;
+  height: 18px;
+  border-radius: 3px;
+  background: var(--text);
+  border: 2px solid var(--bg-elev);
+  box-shadow: 0 0 0 1px var(--border-strong);
+}
+.gate-track input[type="range"]::-moz-range-thumb {
+  width: 6px;
+  height: 18px;
+  border-radius: 3px;
+  background: var(--text);
+  border: 2px solid var(--bg-elev);
+  box-shadow: 0 0 0 1px var(--border-strong);
+}
+.gate-track input[type="range"]:focus { border: none; }
+
+.modal-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 6px;
+}
+
+.btn {
+  padding: 10px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev-2);
+  color: var(--text);
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.05s;
+}
+.btn:hover {
+  border-color: var(--text);
+}
+.btn:active {
+  transform: translateY(1px);
+}
+.btn.primary {
+  background: var(--text);
+  border-color: var(--text);
+  color: var(--bg);
+}
+.btn.primary:hover {
+  background: #fff;
+  border-color: #fff;
+}
+.btn.ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+.btn.wide {
+  width: 100%;
+  padding: 12px 16px;
+}
+.btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn[disabled]:hover {
+  border-color: var(--border-strong);
+}
+
+/* ─── Settings tabs ───────────────────────────────────────────────────── */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.tab {
+  flex: 1;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border-radius: calc(var(--radius-sm) - 3px);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.tab:hover {
+  color: var(--text);
+}
+.tab.active {
+  background: var(--bg-elev-2);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+.tab-panels {
+  display: flex;
+  flex-direction: column;
+}
+.tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.tab-panel[hidden] {
+  display: none;
+}
+
+/* Horizontal layout for Voice + Model. */
+.field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+/* ─── Chat button + badge ────────────────────────────────────────────── */
+
+#chat-btn {
+  position: relative;
+}
+
+.chat-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text);
+  border: 1.5px solid var(--bg-elev);
+  opacity: 0;
+  transform: scale(0);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  pointer-events: none;
+}
+.chat-badge.visible {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* ─── Ephemeral bubble stack ─────────────────────────────────────────── */
+
+.bubble-stack {
+  position: fixed;
+  /* Clear the topbar control row so the first bubble doesn't sit at the same
+   * height as the buttons. */
+  top: 96px;
+  right: 28px;
+  width: min(300px, calc(100vw - 56px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+  z-index: 100;
+}
+
+.bubble {
+  --bubble-dx: 10px;
+  pointer-events: auto;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  line-height: 1.5;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.32);
+  max-width: 100%;
+  word-break: break-word;
+  opacity: 0;
+  transform: translateX(var(--bubble-dx));
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+.bubble.in {
+  opacity: 1;
+  transform: translateX(0);
+}
+.bubble.out {
+  opacity: 0;
+  transform: translateX(var(--bubble-dx));
+  pointer-events: none;
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+/* Surfaces stay neutral; the side they sit on plus the mono role label
+ * carry the distinction. No tinted fills — color is the orb's job. */
+.bubble.user {
+  --bubble-dx: -10px;
+  align-self: flex-start;
+}
+.bubble.assistant {
+  --bubble-dx: 10px;
+  align-self: flex-end;
+}
+.bubble.tool {
+  --bubble-dx: -10px;
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.bubble.tool .bubble-tool-icon {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  color: var(--voice-tool);
+}
+
+.bubble-role {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+  opacity: 0.7;
+}
+.bubble.user .bubble-role { color: var(--voice-user); }
+.bubble.assistant .bubble-role { color: var(--voice-assistant); }
+
+/* ─── Conversation history panel ─────────────────────────────────────── */
+
+.chat-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  pointer-events: none;
+}
+.chat-panel-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(8, 9, 13, 0.45);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+.chat-panel.open .chat-panel-backdrop {
+  opacity: 1;
+  pointer-events: auto;
+}
+.chat-panel-inner {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(360px, 90vw);
+  background: var(--bg-elev);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+  pointer-events: auto;
+  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.35);
+}
+.chat-panel.open .chat-panel-inner {
+  transform: translateX(0);
+}
+.chat-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.chat-panel-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.chat-history {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  scroll-behavior: smooth;
+}
+.chat-history::-webkit-scrollbar { width: 3px; }
+.chat-history::-webkit-scrollbar-track { background: transparent; }
+.chat-history::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+
+.chat-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-faint);
+  padding: 48px 0;
+  opacity: 0.65;
+}
+.chat-empty svg {
+  margin-bottom: 6px;
+  opacity: 0.8;
+}
+.chat-empty-title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.chat-empty-hint {
+  font-size: 12px;
+  color: var(--text-faint);
+  opacity: 0.7;
+}
+
+/* ─── History messages ───────────────────────────────────────────────── */
+
+.hist-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: 88%;
+}
+.hist-msg.user { align-self: flex-start; }
+.hist-msg.assistant { align-self: flex-end; }
+.hist-msg.tool { align-self: flex-start; max-width: 100%; }
+
+.hist-role {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  padding: 0 2px;
+}
+.hist-msg.user .hist-role { color: color-mix(in srgb, var(--voice-user) 75%, var(--text-faint)); }
+.hist-msg.assistant .hist-role { color: color-mix(in srgb, var(--voice-assistant) 75%, var(--text-faint)); }
+.hist-msg.tool .hist-role { color: color-mix(in srgb, var(--voice-tool) 75%, var(--text-faint)); }
+
+.hist-body {
+  padding: 9px 12px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  line-height: 1.5;
+  border: 1px solid var(--border);
+  background: var(--bg-elev-2);
+  word-break: break-word;
+}
+/* Bodies share one neutral surface; alignment + the mono role label do the
+ * distinguishing, so the panel reads as one quiet column. */
+.hist-msg.user .hist-body.partial { opacity: 0.65; }
+
+/* ─── Tool call history item ─────────────────────────────────────────── */
+
+.hist-tool-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  background: color-mix(in srgb, var(--processing) 10%, var(--bg-elev-2));
+  border: 1px solid color-mix(in srgb, var(--processing) 22%, var(--border));
+  border-bottom: 1px solid color-mix(in srgb, var(--processing) 15%, var(--border));
+  cursor: pointer;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  width: 100%;
+  text-align: left;
+  transition: background 0.15s;
+}
+.hist-tool-header:only-child {
+  border-radius: var(--radius-md);
+  border-bottom: 1px solid color-mix(in srgb, var(--processing) 22%, var(--border));
+}
+.hist-tool-header:hover {
+  background: color-mix(in srgb, var(--processing) 16%, var(--bg-elev-2));
+}
+.hist-tool-icon {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  color: var(--processing);
+}
+.hist-tool-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--voice-tool);
+  font-weight: 600;
+}
+.hist-tool-chevron {
+  margin-left: auto;
+  width: 13px;
+  height: 13px;
+  color: var(--text-faint);
+  transition: transform 0.2s ease;
+  flex: none;
+}
+.hist-tool-header[aria-expanded="true"] .hist-tool-chevron {
+  transform: rotate(180deg);
+}
+.hist-tool-body {
+  padding: 10px 12px 12px;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  background: var(--bg);
+  border: 1px solid color-mix(in srgb, var(--processing) 22%, var(--border));
+  border-top: none;
+  display: none;
+}
+.hist-tool-body.open { display: block; }
+.hist-tool-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin: 8px 0 4px;
+}
+.hist-tool-label:first-child { margin-top: 0; }
+.hist-tool-block {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+.hist-tool-output { color: var(--text); }
+
+/* ─── Phone layout ────────────────────────────────────────────────────────
+ * On phones the floating bubble stream overlaps the orb and there isn't room
+ * for it, so we drop it entirely and rely on the conversation panel (opened
+ * from the top-right chat button) as the single place to read the transcript.
+ * The badge still pulses there when new messages arrive while it's closed.
+ * We also stack the mic / stop controls above and below the orb (instead of
+ * left/right) so the wide live row never overflows, and let the panel take
+ * the full width. */
+@media (max-width: 600px) {
+  .bubble-stack {
+    display: none;
+  }
+
+  .topbar {
+    padding: 14px 16px;
+  }
+
+  .stage {
+    padding: 16px 12px 24px;
+  }
+
+  /* Stack vertically: mic above the orb, stop below it (DOM order is
+   * mic → circle → stop). */
+  .orb-wrap {
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .circle {
+    /* Height-capped like the base rule so a narrow AND short box still fits. */
+    width: clamp(130px, min(56vw, 52vh), 240px);
+  }
+
+  /* In the column layout the side controls must collapse by HEIGHT, not
+   * width, so they take no vertical space until the session is live. */
+  .side-btn {
+    width: 44px;
+    height: 0;
+    transition: opacity 0.25s ease, transform 0.25s ease, height 0.25s ease,
+      background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .side-btn svg {
+    width: 19px;
+    height: 19px;
+  }
+  .orb-wrap.live .side-btn {
+    width: 44px;
+    height: 44px;
+  }
+  .mic-gate-arc { width: 70px; height: 70px; }
+
+  /* Full-screen conversation on phones — feels more deliberate than a
+   * narrow slide-over. It already spans top-to-bottom (inset 0); make it
+   * span edge-to-edge too and drop the now-pointless border/shadow. */
+  .chat-panel-inner {
+    width: 100vw;
+    border-left: none;
+    box-shadow: none;
+  }
+}
+
+/* ─── About panel ─────────────────────────────────────────────────────────
+ * Opened from the (i) by the wordmark. Reuses the <dialog> .modal shell.
+ * Strictly monochrome per DESIGN.md — the only "color" is the orb, never
+ * here. Machine identifiers (model IDs, role tags, usernames) ride Geist
+ * Mono; everything human stays Inter. */
+.about-modal {
+  /* Roomier on tablet/desktop; the 92vw cap keeps phones full-width. */
+  width: min(680px, 92vw);
+  max-height: 88vh;
+}
+.about-modal .modal-content {
+  max-height: 88vh;
+  overflow-y: auto;
+  gap: 20px;
+  padding: 26px 30px 24px;
+}
+.about-modal .modal-content::-webkit-scrollbar { width: 3px; }
+.about-modal .modal-content::-webkit-scrollbar-track { background: transparent; }
+.about-modal .modal-content::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+
+/* Links here are quiet: no permanent underline (the global dotted rule is
+ * too loud for a dense credit block), brighten + underline on hover only. */
+.about-modal a {
+  color: var(--text);
+  border-bottom: none;
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+.about-modal a:hover {
+  color: #fff;
+}
+.about-intro a:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.about-modal .ext {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  opacity: 0.5;
+}
+
+/* Title row: the demo name and the (i) read as one unit. */
+.ident-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+/* (i) trigger sits right after the title. A faint outline keeps it
+ * catchable without turning into a card; it fills in on hover. */
+.about-btn {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.about-btn:hover {
+  background: var(--bg-elev);
+  border-color: var(--text-dim);
+  color: var(--text);
+}
+.about-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* The mobile twin of (i) lives in the right-hand control cluster and is
+ * hidden on desktop (the in-title one shows there instead). */
+.about-btn-mobile {
+  display: none;
+}
+
+/* ── Popup intro: a plain paragraph on the project + a repo link ── */
+.about-intro p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+.about-repo {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 12px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+/* ── Corner identity (replaces the wordmark) ──
+ * A compact stack in the topbar: title, one-line blurb, two meta rows.
+ * Monochrome; only the role/name identifiers ride the machine typeface. */
+.ident {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+/* Reset the global underlined-anchor styling inside the identity block. */
+.ident a {
+  border-bottom: none;
+  color: inherit;
+  transition: color 0.15s ease;
+}
+.ident a:hover {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.ident-title {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.005em;
+  line-height: 1.1;
+  color: var(--text);
+}
+.ident-blurb {
+  margin: 0;
+  max-width: 48ch;
+  font-size: 14.5px;
+  line-height: 1.5;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+.ident-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+.ident-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+.ident-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* Shared credit bits — now used in the corner identity block. */
+.sep {
+  color: var(--text-faint);
+  opacity: 0.6;
+}
+.hf-credit {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+/* Brand marks keep their own color — a deliberate exception to the
+ * monochrome rule, for the HF and Cerebras logos only. */
+.hf-mark {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: #ffd21e;
+}
+.cerebras-credit {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.cerebras-mark {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+/* Usernames are identifiers, so they ride the machine typeface. */
+.handle {
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+}
+
+/* ── Pipeline (the signal flow) ── */
+.about-pipeline {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+.pipeline-title {
+  margin: 0 0 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.pipeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  position: relative;
+}
+/* One continuous rail threading every node, dot centers at x=8.5px. */
+.pipeline::before {
+  content: "";
+  position: absolute;
+  left: 8px;
+  top: 7px;
+  bottom: 7px;
+  width: 1px;
+  background: var(--border-strong);
+}
+.pipeline > li {
+  position: relative;
+  padding-left: 30px;
+}
+/* Stages: solid node. Endpoints (you / orb): hollow node. */
+.pipe-stage::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+.pipe-endpoint::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1px solid var(--text-faint);
+  background: var(--bg-elev);
+}
+.pipe-endpoint {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  padding-bottom: 12px;
+}
+.pipeline > li.pipe-endpoint:last-child {
+  padding-bottom: 0;
+}
+.pipe-stage {
+  padding-bottom: 16px;
+}
+.pipe-tag {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--text);
+  margin-right: 9px;
+}
+.pipe-job {
+  font-size: 14px;
+  color: var(--text-dim);
+}
+/* Middot between the job and its model link, matching the separators
+ * used elsewhere. */
+.pipe-job::after {
+  content: "·";
+  margin: 0 7px;
+  color: var(--text-faint);
+}
+.pipe-note {
+  color: var(--text-faint);
+}
+/* The Cerebras link stays as quiet as the note; brightens + underlines on hover. */
+.pipe-note a {
+  color: inherit;
+}
+.pipe-note a:hover {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.pipe-model {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+.pipe-model:hover {
+  color: #fff;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.pipe-model .ext {
+  width: 11px;
+  height: 11px;
+}
+
+/* "Interrupted" tag on an assistant reply the user barged in on. */
+.hist-note {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  padding: 0 2px;
+}
+.hist-msg.assistant .hist-note {
+  align-self: flex-end;
+}
+.hist-msg.interrupted .hist-body {
+  opacity: 0.7;
+}
+
+/* Captured webcam frame shown in the transcript (camera tool result). */
+.hist-image {
+  display: block;
+  width: 100%;
+  max-width: 240px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  margin-top: 2px;
+}
+
+/* ─── Tools panel ──────────────────────────────────────────────────────────
+ * Reuses the modal/field shell. Switches are monochrome (checked = near-white,
+ * the same high-contrast treatment as the primary button): color belongs to
+ * the voice, not the chrome. */
+.tools-intro {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.tool-list {
+  display: flex;
+  flex-direction: column;
+}
+.tool-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+}
+.tool-row-sep {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+.tool-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.tool-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.tool-desc {
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+.tool-row.disabled .tool-name,
+.tool-row.disabled .tool-desc {
+  opacity: 0.5;
+}
+.tool-hint {
+  display: block;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-faint);
+}
+.tools-key {
+  margin: 0 0 4px;
+}
+
+/* Toggle switch */
+.switch {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  width: 40px;
+  height: 24px;
+  cursor: pointer;
+}
+.switch input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.switch-track {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  transition: background 0.15s, border-color 0.15s;
+}
+.switch-track::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 3px;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: transform 0.18s ease, background 0.15s;
+}
+.switch input:checked + .switch-track {
+  background: var(--text);
+  border-color: var(--text);
+}
+.switch input:checked + .switch-track::after {
+  transform: translate(16px, -50%);
+  background: var(--bg);
+}
+.switch input:focus-visible + .switch-track {
+  outline: 2px solid var(--text-dim);
+  outline-offset: 2px;
+}
+.switch input:disabled {
+  cursor: not-allowed;
+}
+.switch input:disabled + .switch-track {
+  opacity: 0.5;
+}
+
+/* ─── Webcam preview (camera tool) ──────────────────────────────────────────
+ * Floating self-view, bottom-left. Mirrored for the user; the frame sent to
+ * the model is drawn un-mirrored (see captureSnapshot). */
+.cam-pip {
+  position: fixed;
+  left: 20px;
+  bottom: 20px;
+  width: 280px;
+  aspect-ratio: 4 / 3;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-soft);
+  z-index: 90;
+  opacity: 0;
+  transform: translateY(8px) scale(0.96);
+  pointer-events: none;
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+.cam-pip.visible {
+  opacity: 1;
+  transform: none;
+}
+.cam-video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1); /* mirror the self-view only */
+  background: var(--bg);
+}
+.cam-label {
+  position: absolute;
+  left: 8px;
+  bottom: 6px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text);
+  opacity: 0.8;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+}
+.cam-flash {
+  position: absolute;
+  inset: 0;
+  background: #fff;
+  opacity: 0;
+  pointer-events: none;
+}
+.cam-pip.flash .cam-flash {
+  animation: cam-flash 0.4s ease;
+}
+@keyframes cam-flash {
+  0% { opacity: 0; }
+  12% { opacity: 0.85; }
+  100% { opacity: 0; }
+}
+@media (max-width: 600px) {
+  /* Bottom-centred on phones. Auto margins centre it without touching the
+   * transform, so the slide/scale-in animation still works. */
+  .cam-pip {
+    left: 0;
+    right: 0;
+    margin-inline: auto;
+    bottom: 16px;
+    width: min(188px, 52vw);
+  }
+  /* The credit would sit under the centred preview, so drop it while the
+   * camera is on. */
+  body.cam-on .footer {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cam-pip {
+    transition: opacity 0.22s ease;
+    transform: none;
+  }
+  .cam-pip.flash .cam-flash {
+    animation: none;
+  }
+}
+
+/* ─── Desktop type scale ────────────────────────────────────────────────────
+ * A uniform step up (~+1px, title +2) for all UI text on larger screens.
+ * Scoped to min-width: 601px so it can't reach phones — the ≤600px layout
+ * keeps every size exactly as it was. */
+@media (min-width: 601px) {
+  .cam-label { font-size: 10.5px; }
+
+  .bubble-role,
+  .hist-role { font-size: 11px; }
+
+  .circle-caption,
+  .footer,
+  .chat-empty-title,
+  .hist-tool-block,
+  .ident-label,
+  .pipeline-title,
+  .pipe-endpoint { font-size: 12px; }
+
+  .field > span,
+  .field small,
+  .bubble.tool,
+  .chat-empty-hint,
+  .hist-tool-name,
+  .pipe-tag,
+  .pipe-model,
+  .tool-hint { font-size: 13px; }
+
+  .tool-desc { font-size: 13.5px; }
+
+  .btn,
+  .bubble,
+  .field,
+  .hist-body,
+  .hist-tool-header,
+  .tools-intro { font-size: 14px; }
+
+  .handle { font-size: 14.5px; }
+
+  .about-intro p,
+  .about-repo,
+  .brand,
+  .chat-panel-header h3,
+  .field textarea,
+  .ident-meta,
+  .pipe-job,
+  .tool-name { font-size: 15px; }
+
+  .ident-blurb { font-size: 15.5px; }
+
+  .modal-header h2 { font-size: 17px; }
+
+  .ident-title { font-size: 24px; }
+}
+
+/* ─── Short viewports: fit without a vertical scrollbar ─────────────────────
+ * The base media queries only react to WIDTH, so a short container (e.g. the
+ * app embedded in a small box, or a laptop window once the browser chrome eats
+ * into the viewport) used to overflow vertically and get clipped. We KEEP the
+ * identity header, orb, caption and credits — we just undo the desktop type
+ * bump, tighten the vertical rhythm and let the height-capped orb shrink, so
+ * everything fits with comfortable margin. No opt-in needed.
+ *
+ * The single biggest space eater is the identity block (~180px at the desktop
+ * type scale), so this tier compacts it first. */
+@media (max-height: 780px) {
+  .topbar { padding: 14px 24px; }
+  .ident { gap: 5px; }
+  .ident-title { font-size: 20px; }
+  .ident-blurb { font-size: 13.5px; line-height: 1.4; }
+  .ident-meta { gap: 5px; font-size: 13px; }
+  .stage { padding: 12px 20px 16px; gap: 12px; }
+  .footer { padding: 8px 24px 10px; }
+  .circle { width: clamp(140px, min(38vw, 44vh), 300px); }
+}
+
+@media (max-height: 560px) {
+  .topbar { padding: 8px 16px; }
+  .ident-title { font-size: 17px; }
+  /* Below this, room is tight enough that the one-line blurb and the footer
+   * (a verbatim duplicate of the header's "Powered by" credit) are dropped so
+   * the title + credits still read; the rest of the header stays. */
+  .ident-blurb { display: none; }
+  .stage { padding: 8px 14px 10px; gap: 8px; }
+  .footer { display: none; }
+  .circle { width: clamp(120px, min(50vw, 46vh), 240px); }
+}

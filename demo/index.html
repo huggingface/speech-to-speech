@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Minimal Conversation · S2S backend (WebSocket)</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <!--
+    `booting` disables transitions/animations until the first paint commits.
+    Without this the orb visibly fades/scales in on the very first frame
+    because `state-idle` and the generic `.ind` defaults differ. The
+    bootstrap script at the end of main.js strips the class after one rAF.
+  -->
+  <body class="booting">
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">
+          <div class="ident">
+            <div class="ident-head">
+              <a class="ident-title" href="https://github.com/huggingface/speech-to-speech" target="_blank" rel="noopener">Hugging Face Realtime</a>
+              <button id="about-btn" class="about-btn" title="About this space" aria-label="About this space">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+              </button>
+            </div>
+            <p class="ident-blurb">An open, real-time voice chat built on Hugging Face's speech-to-speech stack.</p>
+            <div class="ident-meta">
+              <span class="ident-row">
+                <span class="ident-label">Powered by</span>
+                <a href="https://huggingface.co/inference-endpoints" target="_blank" rel="noopener">Inference Endpoints</a>
+                <span class="sep" aria-hidden="true">·</span>
+                <a class="cerebras-credit" href="https://cerebras.ai" target="_blank" rel="noopener"><svg class="cerebras-mark" viewBox="0 0 50 50" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M29.4186 5.62713C24.2806 5.62713 19.353 7.6682 15.7199 11.3013C12.0868 14.9345 10.0457 19.862 10.0457 25C10.0457 30.1381 12.0868 35.0656 15.7199 38.6988C19.353 42.3319 24.2806 44.373 29.4186 44.373V47.2917C17.1061 47.2917 7.12695 37.3105 7.12695 24.998C7.12695 12.6855 17.104 2.7063 29.4165 2.7063V5.62505L29.4186 5.62713ZM39.3186 13.2875C37.7794 11.9809 35.9971 10.9915 34.0741 10.3761C32.1512 9.76067 30.1256 9.53147 28.1137 9.70166C26.1019 9.87185 24.1435 10.4381 22.3513 11.3677C20.559 12.2974 18.9683 13.5722 17.6704 15.1189C16.3726 16.6655 15.3933 18.4534 14.7888 20.3798C14.1844 22.3062 13.9667 24.3332 14.1483 26.344C14.33 28.3548 14.9073 30.3099 15.8472 32.0968C16.787 33.8838 18.0709 35.4673 19.6249 36.7563L17.7478 38.9938C15.9126 37.4545 14.3987 35.5687 13.2924 33.4442C12.1862 31.3197 11.5092 28.9981 11.3003 26.6119C11.0914 24.2258 11.3545 21.8219 12.0747 19.5374C12.7949 17.253 13.9581 15.1328 15.4978 13.298C17.0373 11.4628 18.9233 9.94877 21.0479 8.84247C23.1726 7.73618 25.4944 7.05923 27.8807 6.8503C30.267 6.64136 32.6711 6.90453 34.9557 7.62477C37.2403 8.34501 39.3607 9.50822 41.1957 11.048L39.3186 13.2875ZM34.6207 15.0459C31.9818 13.6829 28.9113 13.4172 26.0776 14.3068C23.2438 15.1964 20.876 17.1691 19.4895 19.7958C18.1029 22.4224 17.8099 25.4903 18.6741 28.332C19.5384 31.1736 21.4899 33.5589 24.104 34.9688L22.7374 37.5521C19.4721 35.7617 17.0418 32.7592 15.9707 29.1927C14.8996 25.6261 15.2737 21.7815 17.0123 18.4883C18.7509 15.1952 21.7146 12.7176 25.2637 11.5903C28.8129 10.463 32.663 10.7763 35.9832 12.4625L34.6207 15.0459ZM29.4165 17.7896C27.5042 17.7896 25.6702 18.5493 24.318 19.9015C22.9658 21.2537 22.2061 23.0877 22.2061 25C22.2061 26.9124 22.9658 28.7464 24.318 30.0986C25.6702 31.4508 27.5042 32.2105 29.4165 32.2105V35.1313C26.7296 35.1313 24.1526 34.0639 22.2527 32.1639C20.3527 30.2639 19.2853 27.687 19.2853 25C19.2853 22.3131 20.3527 19.7362 22.2527 17.8362C24.1526 15.9362 26.7296 14.8688 29.4165 14.8688V17.7896Z" fill="#F15A29"/><path d="M32.0981 22.5749C31.7875 22.2404 31.4295 21.9534 31.0356 21.7228C30.6925 21.519 30.3014 21.4097 29.9023 21.4062C29.371 21.4062 28.896 21.5041 28.4773 21.6978C28.0725 21.8802 27.7089 22.1425 27.4081 22.469C27.1074 22.7955 26.8758 23.1795 26.7273 23.5978C26.5731 24.0207 26.4981 24.4645 26.4981 24.9124C26.4981 25.3666 26.5731 25.8082 26.7273 26.227C26.877 26.6449 27.1091 27.0286 27.4096 27.3553C27.7102 27.682 28.0733 27.9451 28.4773 28.1291C28.8939 28.3228 29.3731 28.4207 29.9023 28.4207C30.3523 28.4207 30.771 28.3249 31.1564 28.1395C31.5481 27.952 31.8856 27.6707 32.146 27.3228L34.0794 29.4187C33.7877 29.7103 33.4544 29.9624 33.0752 30.1749C32.374 30.566 31.6108 30.8338 30.8189 30.9666C30.4648 31.0207 30.1585 31.0499 29.9023 31.0499C29.0617 31.0552 28.2271 30.9069 27.4398 30.6124C26.6954 30.3371 26.0144 29.914 25.4377 29.3687C24.8643 28.8208 24.4078 28.1624 24.096 27.4332C23.7572 26.6366 23.5883 25.778 23.6002 24.9124C23.6002 23.9874 23.7669 23.1478 24.096 22.3916C24.4085 21.6624 24.8627 21.0041 25.4356 20.4562C26.0148 19.9124 26.696 19.4895 27.4398 19.2145C28.2271 18.92 29.0617 18.7717 29.9023 18.777C30.6419 18.777 31.3856 18.9187 32.1356 19.202C32.8877 19.4895 33.5627 19.952 34.1023 20.5541L32.0981 22.5749Z" fill="#fff"/></svg>Cerebras</a>
+              </span>
+              <span class="ident-row">
+                <span class="ident-label">Built by</span>
+                <a class="hf-credit" href="https://huggingface.co" target="_blank" rel="noopener"><svg class="hf-mark" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12.025 1.13c-5.77 0-10.449 4.647-10.449 10.378 0 1.112.178 2.181.503 3.185.064-.222.203-.444.416-.577a.96.96 0 0 1 .524-.15c.293 0 .584.124.84.284.278.173.48.408.71.694.226.282.458.611.684.951v-.014c.017-.324.106-.622.264-.874s.403-.487.762-.543c.3-.047.596.06.787.203s.31.313.4.467c.15.257.212.468.233.542.01.026.653 1.552 1.657 2.54.616.605 1.01 1.223 1.082 1.912.055.537-.096 1.059-.38 1.572.637.121 1.294.187 1.967.187.657 0 1.298-.063 1.921-.178-.287-.517-.44-1.041-.384-1.581.07-.69.465-1.307 1.081-1.913 1.004-.987 1.647-2.513 1.657-2.539.021-.074.083-.285.233-.542.09-.154.208-.323.4-.467a1.08 1.08 0 0 1 .787-.203c.359.056.604.29.762.543s.247.55.265.874v.015c.225-.34.457-.67.683-.952.23-.286.432-.52.71-.694.257-.16.547-.284.84-.285a.97.97 0 0 1 .524.151c.228.143.373.388.43.625l.006.04a10.3 10.3 0 0 0 .534-3.273c0-5.731-4.678-10.378-10.449-10.378M8.327 6.583a1.5 1.5 0 0 1 .713.174 1.487 1.487 0 0 1 .617 2.013c-.183.343-.762-.214-1.102-.094-.38.134-.532.914-.917.71a1.487 1.487 0 0 1 .69-2.803m7.486 0a1.487 1.487 0 0 1 .689 2.803c-.385.204-.536-.576-.916-.71-.34-.12-.92.437-1.103.094a1.487 1.487 0 0 1 .617-2.013 1.5 1.5 0 0 1 .713-.174m-10.68 1.55a.96.96 0 1 1 0 1.921.96.96 0 0 1 0-1.92m13.838 0a.96.96 0 1 1 0 1.92.96.96 0 0 1 0-1.92M8.489 11.458c.588.01 1.965 1.157 3.572 1.164 1.607-.007 2.984-1.155 3.572-1.164.196-.003.305.12.305.454 0 .886-.424 2.328-1.563 3.202-.22-.756-1.396-1.366-1.63-1.32q-.011.001-.02.006l-.044.026-.01.008-.03.024q-.018.017-.035.036l-.032.04a1 1 0 0 0-.058.09l-.014.025q-.049.088-.11.19a1 1 0 0 1-.083.116 1.2 1.2 0 0 1-.173.18q-.035.029-.075.058a1.3 1.3 0 0 1-.251-.243 1 1 0 0 1-.076-.107c-.124-.193-.177-.363-.337-.444-.034-.016-.104-.008-.2.022q-.094.03-.216.087-.06.028-.125.063l-.13.074q-.067.04-.136.086a3 3 0 0 0-.135.096 3 3 0 0 0-.26.219 2 2 0 0 0-.12.121 2 2 0 0 0-.106.128l-.002.002a2 2 0 0 0-.09.132l-.001.001a1.2 1.2 0 0 0-.105.212q-.013.036-.024.073c-1.139-.875-1.563-2.317-1.563-3.203 0-.334.109-.457.305-.454m.836 10.354c.824-1.19.766-2.082-.365-3.194-1.13-1.112-1.789-2.738-1.789-2.738s-.246-.945-.806-.858-.97 1.499.202 2.362c1.173.864-.233 1.45-.685.64-.45-.812-1.683-2.896-2.322-3.295s-1.089-.175-.938.647 2.822 2.813 2.562 3.244-1.176-.506-1.176-.506-2.866-2.567-3.49-1.898.473 1.23 2.037 2.16c1.564.932 1.686 1.178 1.464 1.53s-3.675-2.511-4-1.297c-.323 1.214 3.524 1.567 3.287 2.405-.238.839-2.71-1.587-3.216-.642-.506.946 3.49 2.056 3.522 2.064 1.29.33 4.568 1.028 5.713-.624m5.349 0c-.824-1.19-.766-2.082.365-3.194 1.13-1.112 1.789-2.738 1.789-2.738s.246-.945.806-.858.97 1.499-.202 2.362c-1.173.864.233 1.45.685.64.451-.812 1.683-2.896 2.322-3.295s1.089-.175.938.647-2.822 2.813-2.562 3.244 1.176-.506 1.176-.506 2.866-2.567 3.49-1.898-.473 1.23-2.037 2.16c-1.564.932-1.686 1.178-1.464 1.53s3.675-2.511 4-1.297c.323 1.214-3.524 1.567-3.287 2.405.238.839 2.71-1.587 3.216-.642.506.946-3.49 2.056-3.522 2.064-1.29.33-4.568 1.028-5.713-.624"/></svg>Hugging Face</a>
+                <span class="sep" aria-hidden="true">·</span>
+                <a class="handle" href="https://huggingface.co/tfrere" target="_blank" rel="noopener">tfrere</a>
+                <span class="sep" aria-hidden="true">·</span>
+                <a class="handle" href="https://huggingface.co/A-Mahla" target="_blank" rel="noopener">A-Mahla</a>
+                <span class="sep" aria-hidden="true">·</span>
+                <a class="handle" href="https://huggingface.co/andito" target="_blank" rel="noopener">andito</a>
+              </span>
+            </div>
+          </div>
+        </div>
+        <div class="topbar-right">
+          <!-- HF login chip / sign-in pill. Populated by ui/account.js; only
+               shown when the deploy runs behind a load balancer with OAuth. -->
+          <div id="account" class="account" hidden></div>
+          <button id="about-btn-m" class="icon-btn about-btn-mobile" title="About this space" aria-label="About this space">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+          </button>
+          <button id="tools-btn" class="icon-btn" title="Tools" aria-label="Tools">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+          </button>
+          <button id="chat-btn" class="icon-btn" title="Conversation history" aria-label="Conversation history">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <span id="chat-badge" class="chat-badge" aria-hidden="true"></span>
+          </button>
+          <button id="settings-btn" class="icon-btn" title="Settings" aria-label="Settings">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c0 .66.39 1.25 1 1.51H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <main class="stage">
+        <div class="orb-wrap">
+          <div id="mic-gate" class="mic-gate">
+            <svg id="mic-gate-arc" class="mic-gate-arc" viewBox="0 0 100 100" aria-hidden="true">
+              <path id="mga-track" class="mga-track" fill="none" />
+              <path id="mga-fill" class="mga-fill" fill="none" />
+              <path id="mga-hit" class="mga-hit" fill="none" />
+              <circle id="mga-handle" class="mga-handle" r="3" />
+            </svg>
+            <button id="mic-btn" class="side-btn" type="button" aria-label="Mute" title="Mute" aria-hidden="true">
+              <svg class="mic-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+              <svg class="mic-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="2" x2="22" y2="22"/><path d="M9 5a3 3 0 0 1 6 0v4"/><path d="M9 10v1a3 3 0 0 0 5.1 2.1"/><path d="M19 10a7 7 0 0 1-1.24 3.97"/><path d="M5 10a7 7 0 0 0 11 5.67"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+            </button>
+          </div>
+
+          <button
+            id="main-circle"
+            class="circle state-idle"
+            type="button"
+            aria-label="Start voice conversation"
+          >
+            <span class="circle-glow" aria-hidden="true"></span>
+            <span class="circle-ring" aria-hidden="true"></span>
+            <span class="circle-ring-outer" aria-hidden="true"></span>
+            <span class="circle-core">
+              <span class="circle-indicator" aria-hidden="true">
+                <svg class="ind ind-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="9" y="2" width="6" height="12" rx="3" fill="currentColor" stroke="none"/>
+                  <path d="M5 10a7 7 0 0 0 14 0"/>
+                  <line x1="12" y1="19" x2="12" y2="22"/>
+                  <line x1="8" y1="22" x2="16" y2="22"/>
+                </svg>
+                <svg class="ind ind-error" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="13"/><line x1="12" y1="16" x2="12" y2="16"/></svg>
+                <span class="ind ind-spinner"></span>
+                <span class="ind ind-thinking">
+                  <span class="dot"></span>
+                  <span class="dot"></span>
+                  <span class="dot"></span>
+                </span>
+                <span class="ind ind-bars">
+                  <span class="bar"></span>
+                  <span class="bar"></span>
+                  <span class="bar"></span>
+                  <span class="bar"></span>
+                  <span class="bar"></span>
+                </span>
+                <svg class="ind ind-voice" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M3 10v4a1 1 0 0 0 1 1h3l5 4V5L7 9H4a1 1 0 0 0-1 1z" fill="currentColor" stroke="none"/>
+                  <path class="wave wave-1" d="M16 8a5 5 0 0 1 0 8"/>
+                  <path class="wave wave-2" d="M19 5a9 9 0 0 1 0 14"/>
+                </svg>
+              </span>
+            </span>
+          </button>
+
+          <button id="stop-btn" class="side-btn" type="button" aria-label="End" title="End" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          </button>
+        </div>
+
+        <p id="circle-caption" class="circle-caption" role="status">Tap to start</p>
+        <p id="circle-subcaption" class="circle-subcaption" hidden></p>
+
+        <div id="queue-actions" class="queue-actions" hidden>
+          <button id="join-queue-btn" class="join-queue-btn" type="button" hidden>
+            Join now
+          </button>
+          <button id="leave-queue-btn" class="leave-queue-btn" type="button" hidden>
+            Leave queue
+          </button>
+        </div>
+      </main>
+
+      <footer class="footer">
+        <span>
+          Powered by
+          <a href="https://github.com/huggingface/speech-to-speech" target="_blank" rel="noopener">huggingface/speech-to-speech</a>
+        </span>
+      </footer>
+    </div>
+
+    <!-- Ephemeral chat bubbles anchored to the top-right -->
+    <div id="bubble-stack" class="bubble-stack" aria-live="polite" aria-atomic="false"></div>
+
+    <!-- Webcam self-view, shown bottom-left while the camera tool is enabled -->
+    <div id="cam-pip" class="cam-pip" aria-hidden="true">
+      <video id="cam-video" class="cam-video" autoplay playsinline muted></video>
+      <span class="cam-flash" aria-hidden="true"></span>
+      <span class="cam-label">camera</span>
+    </div>
+
+    <!-- Conversation history panel (overlay) -->
+    <div id="chat-panel" class="chat-panel">
+      <div id="chat-panel-backdrop" class="chat-panel-backdrop"></div>
+      <div class="chat-panel-inner">
+        <header class="chat-panel-header">
+          <h3>Conversation</h3>
+          <button id="chat-panel-close" class="icon-btn" aria-label="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </header>
+        <div id="chat-history" class="chat-history"></div>
+      </div>
+    </div>
+
+    <dialog id="about-modal" class="modal about-modal">
+      <div class="modal-content">
+        <header class="modal-header">
+          <h2>About</h2>
+          <button id="about-close" class="icon-btn" aria-label="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </header>
+
+        <!-- General intro to the speech-to-speech project -->
+        <div class="about-intro">
+          <p>Speech-to-speech is Hugging Face's open framework for real-time voice agents. Rather than one end-to-end model, it chains four open models from the Hub (speech detection, transcription, a vision-language model, and synthesis), so any stage can be swapped or run locally. This demo wires that pipeline to hosted inference.</p>
+          <a class="about-repo" href="https://github.com/huggingface/speech-to-speech" target="_blank" rel="noopener">View the project on GitHub<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg></a>
+        </div>
+
+        <!-- The backend, shown as the path a turn actually travels -->
+        <div class="about-pipeline">
+          <p class="pipeline-title">The pipeline</p>
+          <ol class="pipeline">
+            <li class="pipe-endpoint">You speak</li>
+            <li class="pipe-stage">
+              <span class="pipe-tag">VAD</span>
+              <span class="pipe-job">detects speech</span>
+              <a class="pipe-model" href="https://github.com/snakers4/silero-vad" target="_blank" rel="noopener">silero-vad<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg></a>
+            </li>
+            <li class="pipe-stage">
+              <span class="pipe-tag">STT</span>
+              <span class="pipe-job">transcribes it</span>
+              <a class="pipe-model" href="https://huggingface.co/nvidia/parakeet-tdt-1.1b" target="_blank" rel="noopener">nvidia/parakeet-tdt-1.1b<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg></a>
+            </li>
+            <li class="pipe-stage">
+              <span class="pipe-tag">VLM</span>
+              <span class="pipe-job">analyses and composes the reply <span class="pipe-note">· via <a class="cerebras-credit" href="https://cerebras.ai" target="_blank" rel="noopener"><svg class="cerebras-mark" viewBox="0 0 50 50" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M29.4186 5.62713C24.2806 5.62713 19.353 7.6682 15.7199 11.3013C12.0868 14.9345 10.0457 19.862 10.0457 25C10.0457 30.1381 12.0868 35.0656 15.7199 38.6988C19.353 42.3319 24.2806 44.373 29.4186 44.373V47.2917C17.1061 47.2917 7.12695 37.3105 7.12695 24.998C7.12695 12.6855 17.104 2.7063 29.4165 2.7063V5.62505L29.4186 5.62713ZM39.3186 13.2875C37.7794 11.9809 35.9971 10.9915 34.0741 10.3761C32.1512 9.76067 30.1256 9.53147 28.1137 9.70166C26.1019 9.87185 24.1435 10.4381 22.3513 11.3677C20.559 12.2974 18.9683 13.5722 17.6704 15.1189C16.3726 16.6655 15.3933 18.4534 14.7888 20.3798C14.1844 22.3062 13.9667 24.3332 14.1483 26.344C14.33 28.3548 14.9073 30.3099 15.8472 32.0968C16.787 33.8838 18.0709 35.4673 19.6249 36.7563L17.7478 38.9938C15.9126 37.4545 14.3987 35.5687 13.2924 33.4442C12.1862 31.3197 11.5092 28.9981 11.3003 26.6119C11.0914 24.2258 11.3545 21.8219 12.0747 19.5374C12.7949 17.253 13.9581 15.1328 15.4978 13.298C17.0373 11.4628 18.9233 9.94877 21.0479 8.84247C23.1726 7.73618 25.4944 7.05923 27.8807 6.8503C30.267 6.64136 32.6711 6.90453 34.9557 7.62477C37.2403 8.34501 39.3607 9.50822 41.1957 11.048L39.3186 13.2875ZM34.6207 15.0459C31.9818 13.6829 28.9113 13.4172 26.0776 14.3068C23.2438 15.1964 20.876 17.1691 19.4895 19.7958C18.1029 22.4224 17.8099 25.4903 18.6741 28.332C19.5384 31.1736 21.4899 33.5589 24.104 34.9688L22.7374 37.5521C19.4721 35.7617 17.0418 32.7592 15.9707 29.1927C14.8996 25.6261 15.2737 21.7815 17.0123 18.4883C18.7509 15.1952 21.7146 12.7176 25.2637 11.5903C28.8129 10.463 32.663 10.7763 35.9832 12.4625L34.6207 15.0459ZM29.4165 17.7896C27.5042 17.7896 25.6702 18.5493 24.318 19.9015C22.9658 21.2537 22.2061 23.0877 22.2061 25C22.2061 26.9124 22.9658 28.7464 24.318 30.0986C25.6702 31.4508 27.5042 32.2105 29.4165 32.2105V35.1313C26.7296 35.1313 24.1526 34.0639 22.2527 32.1639C20.3527 30.2639 19.2853 27.687 19.2853 25C19.2853 22.3131 20.3527 19.7362 22.2527 17.8362C24.1526 15.9362 26.7296 14.8688 29.4165 14.8688V17.7896Z" fill="#F15A29"/><path d="M32.0981 22.5749C31.7875 22.2404 31.4295 21.9534 31.0356 21.7228C30.6925 21.519 30.3014 21.4097 29.9023 21.4062C29.371 21.4062 28.896 21.5041 28.4773 21.6978C28.0725 21.8802 27.7089 22.1425 27.4081 22.469C27.1074 22.7955 26.8758 23.1795 26.7273 23.5978C26.5731 24.0207 26.4981 24.4645 26.4981 24.9124C26.4981 25.3666 26.5731 25.8082 26.7273 26.227C26.877 26.6449 27.1091 27.0286 27.4096 27.3553C27.7102 27.682 28.0733 27.9451 28.4773 28.1291C28.8939 28.3228 29.3731 28.4207 29.9023 28.4207C30.3523 28.4207 30.771 28.3249 31.1564 28.1395C31.5481 27.952 31.8856 27.6707 32.146 27.3228L34.0794 29.4187C33.7877 29.7103 33.4544 29.9624 33.0752 30.1749C32.374 30.566 31.6108 30.8338 30.8189 30.9666C30.4648 31.0207 30.1585 31.0499 29.9023 31.0499C29.0617 31.0552 28.2271 30.9069 27.4398 30.6124C26.6954 30.3371 26.0144 29.914 25.4377 29.3687C24.8643 28.8208 24.4078 28.1624 24.096 27.4332C23.7572 26.6366 23.5883 25.778 23.6002 24.9124C23.6002 23.9874 23.7669 23.1478 24.096 22.3916C24.4085 21.6624 24.8627 21.0041 25.4356 20.4562C26.0148 19.9124 26.696 19.4895 27.4398 19.2145C28.2271 18.92 29.0617 18.7717 29.9023 18.777C30.6419 18.777 31.3856 18.9187 32.1356 19.202C32.8877 19.4895 33.5627 19.952 34.1023 20.5541L32.0981 22.5749Z" fill="#fff"/></svg>Cerebras</a></span></span>
+              <a class="pipe-model" href="https://huggingface.co/google/gemma-4-31B-it" target="_blank" rel="noopener">google/gemma-4-31B-it<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg></a>
+            </li>
+            <li class="pipe-stage">
+              <span class="pipe-tag">TTS</span>
+              <span class="pipe-job">speaks it back</span>
+              <a class="pipe-model" href="https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice" target="_blank" rel="noopener">Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg></a>
+            </li>
+            <li class="pipe-endpoint">The orb replies</li>
+          </ol>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="settings-modal" class="modal">
+      <form method="dialog" class="modal-content">
+        <header class="modal-header">
+          <h2>Settings</h2>
+          <button class="icon-btn" value="close" aria-label="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </header>
+
+        <div class="tab-panels">
+          <section class="tab-panel active" role="tabpanel">
+            <label class="field" id="conn-field">
+              <span id="conn-label">Speech-to-speech server URL</span>
+              <input id="lb-url" type="text" autocomplete="off" spellcheck="false" placeholder="http://localhost:port" />
+              <small id="conn-hint">
+                URL of your speech-to-speech server, e.g.
+                <code>http://localhost:8080</code> (the app adds <code>/v1/realtime</code>).
+              </small>
+            </label>
+
+            <div class="field-row">
+              <label class="field">
+                <span>Voice</span>
+                <select id="voice">
+                  <option value="Aiden" selected>Aiden</option>
+                  <option value="Ryan">Ryan</option>
+                  <option value="Dylan">Dylan</option>
+                  <option value="Eric">Eric</option>
+                  <option value="Ono_Anna">Ono_Anna</option>
+                  <option value="Serena">Serena</option>
+                  <option value="Sohee">Sohee</option>
+                  <option value="Uncle_Fu">Uncle_Fu</option>
+                  <option value="Vivian">Vivian</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="field">
+              <span class="field-head">
+                Noise gate
+                <span id="gate-value" class="field-value">Off</span>
+              </span>
+              <div class="gate">
+                <div class="gate-track" aria-hidden="true">
+                  <div id="gate-meter-fill" class="gate-meter-fill"></div>
+                  <input
+                    id="noise-gate"
+                    type="range"
+                    min="-66"
+                    max="-3"
+                    step="1"
+                    value="-50"
+                    aria-label="Noise gate threshold"
+                  />
+                </div>
+                <div class="gate-ends">
+                  <span>Off</span>
+                  <span>−3 dB</span>
+                </div>
+              </div>
+              <small>
+                Mutes the mic below the handle so room noise isn't sent. Slide fully
+                left to turn it off; the bar shows your live input while in a call.
+              </small>
+            </div>
+
+            <label class="field">
+              <span>Instructions</span>
+              <textarea id="instructions" rows="5" placeholder="You are a friendly voice assistant..."></textarea>
+            </label>
+
+            <div class="field">
+              <button id="restart-conversation" type="button" class="btn primary wide" disabled>
+                Restart conversation with these settings
+              </button>
+              <small id="restart-hint">Connect first, then come back here to apply live changes.</small>
+            </div>
+          </section>
+        </div>
+
+        <footer class="modal-footer">
+          <button id="settings-save" type="submit" class="btn primary" value="save">Save</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="tools-modal" class="modal">
+      <div class="modal-content">
+        <header class="modal-header">
+          <h2>Tools</h2>
+          <button id="tools-close" class="icon-btn" aria-label="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </header>
+
+        <p class="tools-intro">Let the assistant act during the conversation. Changes apply live.</p>
+
+        <div class="tool-list">
+          <div class="tool-row" id="tool-web-row">
+            <div class="tool-info">
+              <span class="tool-name">Web search</span>
+              <span class="tool-desc">Look things up on Google, via Serper.</span>
+            </div>
+            <label class="switch">
+              <input id="tool-web" type="checkbox" />
+              <span class="switch-track" aria-hidden="true"></span>
+            </label>
+          </div>
+          <label class="field tools-key">
+            <span>Search API key</span>
+            <input id="search-key" type="password" autocomplete="off" spellcheck="false" />
+            <small id="tool-web-hint"></small>
+          </label>
+
+          <div class="tool-row tool-row-sep" id="tool-cam-row">
+            <div class="tool-info">
+              <span class="tool-name">Camera</span>
+              <span class="tool-desc">Let the assistant see through your webcam.</span>
+            </div>
+            <label class="switch">
+              <input id="tool-cam" type="checkbox" />
+              <span class="switch-track" aria-hidden="true"></span>
+            </label>
+          </div>
+          <small id="tool-cam-hint" class="tool-hint">A live preview shows bottom-left while the camera is on.</small>
+        </div>
+      </div>
+    </dialog>
+
+    <!-- Shown when the per-day conversation budget is spent (mid-call or at
+         start). Title / message / CTA / note are filled per tier by
+         ui/account.js. The hero is the HF mark — a friendly smiling face. -->
+    <dialog id="limit-modal" class="modal limit-modal">
+      <div class="modal-content limit-card">
+        <button id="limit-close" class="icon-btn limit-close" aria-label="Close">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+        <div class="limit-badge" aria-hidden="true">
+          <svg class="hf-logo" viewBox="0 0 95 88" fill="none" aria-hidden="true"><path fill="#FFD21E" d="M47.21 76.5a34.75 34.75 0 1 0 0-69.5 34.75 34.75 0 0 0 0 69.5Z"/><path fill="#FF9D0B" d="M81.96 41.75a34.75 34.75 0 1 0-69.5 0 34.75 34.75 0 0 0 69.5 0Zm-73.5 0a38.75 38.75 0 1 1 77.5 0 38.75 38.75 0 0 1-77.5 0Z"/><path fill="#3A3B45" d="M58.5 32.3c1.28.44 1.78 3.06 3.07 2.38a5 5 0 1 0-6.76-2.07c.61 1.15 2.55-.72 3.7-.32ZM34.95 32.3c-1.28.44-1.79 3.06-3.07 2.38a5 5 0 1 1 6.76-2.07c-.61 1.15-2.56-.72-3.7-.32Z"/><path fill="#FF323D" d="M46.96 56.29c9.83 0 13-8.76 13-13.26 0-2.34-1.57-1.6-4.09-.36-2.33 1.15-5.46 2.74-8.9 2.74-7.19 0-13-6.88-13-2.38s3.16 13.26 13 13.26Z"/><path fill="#3A3B45" fill-rule="evenodd" d="M39.43 54a8.7 8.7 0 0 1 5.3-4.49c.4-.12.81.57 1.24 1.28.4.68.82 1.37 1.24 1.37.45 0 .9-.68 1.33-1.35.45-.7.89-1.38 1.32-1.25a8.61 8.61 0 0 1 5 4.17c3.73-2.94 5.1-7.74 5.1-10.7 0-2.34-1.57-1.6-4.09-.36l-.14.07c-2.31 1.15-5.39 2.67-8.77 2.67s-6.45-1.52-8.77-2.67c-2.6-1.29-4.23-2.1-4.23.29 0 3.05 1.46 8.06 5.47 10.97Z" clip-rule="evenodd"/><path fill="#FF9D0B" d="M70.71 37a3.25 3.25 0 1 0 0-6.5 3.25 3.25 0 0 0 0 6.5ZM24.21 37a3.25 3.25 0 1 0 0-6.5 3.25 3.25 0 0 0 0 6.5ZM17.52 48c-1.62 0-3.06.66-4.07 1.87a5.97 5.97 0 0 0-1.33 3.76 7.1 7.1 0 0 0-1.94-.3c-1.55 0-2.95.59-3.94 1.66a5.8 5.8 0 0 0-.8 7 5.3 5.3 0 0 0-1.79 2.82c-.24.9-.48 2.8.8 4.74a5.22 5.22 0 0 0-.37 5.02c1.02 2.32 3.57 4.14 8.52 6.1 3.07 1.22 5.89 2 5.91 2.01a44.33 44.33 0 0 0 10.93 1.6c5.86 0 10.05-1.8 12.46-5.34 3.88-5.69 3.33-10.9-1.7-15.92-2.77-2.78-4.62-6.87-5-7.77-.78-2.66-2.84-5.62-6.25-5.62a5.7 5.7 0 0 0-4.6 2.46c-1-1.26-1.98-2.25-2.86-2.82A7.4 7.4 0 0 0 17.52 48Zm0 4c.51 0 1.14.22 1.82.65 2.14 1.36 6.25 8.43 7.76 11.18.5.92 1.37 1.31 2.14 1.31 1.55 0 2.75-1.53.15-3.48-3.92-2.93-2.55-7.72-.68-8.01.08-.02.17-.02.24-.02 1.7 0 2.45 2.93 2.45 2.93s2.2 5.52 5.98 9.3c3.77 3.77 3.97 6.8 1.22 10.83-1.88 2.75-5.47 3.58-9.16 3.58-3.81 0-7.73-.9-9.92-1.46-.11-.03-13.45-3.8-11.76-7 .28-.54.75-.76 1.34-.76 2.38 0 6.7 3.54 8.57 3.54.41 0 .7-.17.83-.6.79-2.85-12.06-4.05-10.98-8.17.2-.73.71-1.02 1.44-1.02 3.14 0 10.2 5.53 11.68 5.53.11 0 .2-.03.24-.1.74-1.2.33-2.04-4.9-5.2-5.21-3.16-8.88-5.06-6.8-7.33.24-.26.58-.38 1-.38 3.17 0 10.66 6.82 10.66 6.82s2.02 2.1 3.25 2.1c.28 0 .52-.1.68-.38.86-1.46-8.06-8.22-8.56-11.01-.34-1.9.24-2.85 1.31-2.85Z"/><path fill="#FFD21E" d="M38.6 76.69c2.75-4.04 2.55-7.07-1.22-10.84-3.78-3.77-5.98-9.3-5.98-9.3s-.82-3.2-2.69-2.9c-1.87.3-3.24 5.08.68 8.01 3.91 2.93-.78 4.92-2.29 2.17-1.5-2.75-5.62-9.82-7.76-11.18-2.13-1.35-3.63-.6-3.13 2.2.5 2.79 9.43 9.55 8.56 11-.87 1.47-3.93-1.71-3.93-1.71s-9.57-8.71-11.66-6.44c-2.08 2.27 1.59 4.17 6.8 7.33 5.23 3.16 5.64 4 4.9 5.2-.75 1.2-12.28-8.53-13.36-4.4-1.08 4.11 11.77 5.3 10.98 8.15-.8 2.85-9.06-5.38-10.74-2.18-1.7 3.21 11.65 6.98 11.76 7.01 4.3 1.12 15.25 3.49 19.08-2.12Z"/><path fill="#FF9D0B" d="M77.4 48c1.62 0 3.07.66 4.07 1.87a5.97 5.97 0 0 1 1.33 3.76 7.1 7.1 0 0 1 1.95-.3c1.55 0 2.95.59 3.94 1.66a5.8 5.8 0 0 1 .8 7 5.3 5.3 0 0 1 1.78 2.82c.24.9.48 2.8-.8 4.74a5.22 5.22 0 0 1 .37 5.02c-1.02 2.32-3.57 4.14-8.51 6.1-3.08 1.22-5.9 2-5.92 2.01a44.33 44.33 0 0 1-10.93 1.6c-5.86 0-10.05-1.8-12.46-5.34-3.88-5.69-3.33-10.9 1.7-15.92 2.78-2.78 4.63-6.87 5.01-7.77.78-2.66 2.83-5.62 6.24-5.62a5.7 5.7 0 0 1 4.6 2.46c1-1.26 1.98-2.25 2.87-2.82A7.4 7.4 0 0 1 77.4 48Zm0 4c-.51 0-1.13.22-1.82.65-2.13 1.36-6.25 8.43-7.76 11.18a2.43 2.43 0 0 1-2.14 1.31c-1.54 0-2.75-1.53-.14-3.48 3.91-2.93 2.54-7.72.67-8.01a1.54 1.54 0 0 0-.24-.02c-1.7 0-2.45 2.93-2.45 2.93s-2.2 5.52-5.97 9.3c-3.78 3.77-3.98 6.8-1.22 10.83 1.87 2.75 5.47 3.58 9.15 3.58 3.82 0 7.73-.9 9.93-1.46.1-.03 13.45-3.8 11.76-7-.29-.54-.75-.76-1.34-.76-2.38 0-6.71 3.54-8.57 3.54-.42 0-.71-.17-.83-.6-.8-2.85 12.05-4.05 10.97-8.17-.19-.73-.7-1.02-1.44-1.02-3.14 0-10.2 5.53-11.68 5.53-.1 0-.19-.03-.23-.1-.74-1.2-.34-2.04 4.88-5.2 5.23-3.16 8.9-5.06 6.8-7.33-.23-.26-.57-.38-.98-.38-3.18 0-10.67 6.82-10.67 6.82s-2.02 2.1-3.24 2.1a.74.74 0 0 1-.68-.38c-.87-1.46 8.05-8.22 8.55-11.01.34-1.9-.24-2.85-1.31-2.85Z"/><path fill="#FFD21E" d="M56.33 76.69c-2.75-4.04-2.56-7.07 1.22-10.84 3.77-3.77 5.97-9.3 5.97-9.3s.82-3.2 2.7-2.9c1.86.3 3.23 5.08-.68 8.01-3.92 2.93.78 4.92 2.28 2.17 1.51-2.75 5.63-9.82 7.76-11.18 2.13-1.35 3.64-.6 3.13 2.2-.5 2.79-9.42 9.55-8.55 11 .86 1.47 3.92-1.71 3.92-1.71s9.58-8.71 11.66-6.44c2.08 2.27-1.58 4.17-6.8 7.33-5.23 3.16-5.63 4-4.9 5.2.75 1.2 12.28-8.53 13.36-4.4 1.08 4.11-11.76 5.3-10.97 8.15.8 2.85 9.05-5.38 10.74-2.18 1.69 3.21-11.65 6.98-11.76 7.01-4.31 1.12-15.26 3.49-19.08-2.12Z"/></svg>
+        </div>
+        <h2 id="limit-title" class="limit-title">That's a wrap for now</h2>
+        <p id="limit-msg" class="limit-msg"></p>
+        <a id="limit-cta" class="btn primary wide limit-cta" href="#"></a>
+        <p id="limit-note" class="limit-note"></p>
+      </div>
+    </dialog>
+
+    <script type="module" src="main.js"></script>
+  </body>
+</html>
