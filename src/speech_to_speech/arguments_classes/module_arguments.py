@@ -21,7 +21,9 @@ class ModuleArguments:
         },
     )
     stt: Optional[
-        Literal["whisper", "whisper-mlx", "mlx-audio-whisper", "faster-whisper", "parakeet-tdt", "paraformer", "sense-voice"]
+        Literal[
+            "whisper", "whisper-mlx", "mlx-audio-whisper", "faster-whisper", "parakeet-tdt", "paraformer", "sense-voice"
+        ]
     ] = field(
         default="parakeet-tdt",
         metadata={
