@@ -25,6 +25,7 @@ from openai.types.responses import ResponseFunctionToolCall
 from openai.types.shared_params import FunctionDefinition
 
 from speech_to_speech.LLM.base_openai_compatible_language_model import (
+    WARMUP_MAX_RETRIES,
     AssistantMessage,
     BaseOpenAICompatibleHandler,
     ProviderEvent,
@@ -94,7 +95,7 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
         start = time.time()
-        self.client.chat.completions.create(
+        self.client.with_options(max_retries=WARMUP_MAX_RETRIES).chat.completions.create(
             model=self.model_name,
             messages=[
                 {"role": "system", "content": "You are a helpful assistant"},

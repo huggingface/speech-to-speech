@@ -18,6 +18,7 @@ from openai.types.responses import (
 )
 
 from speech_to_speech.LLM.base_openai_compatible_language_model import (
+    WARMUP_MAX_RETRIES,
     AssistantMessage,
     BaseOpenAICompatibleHandler,
     ProviderEvent,
@@ -38,7 +39,7 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
         start = time.time()
-        self.client.responses.create(
+        self.client.with_options(max_retries=WARMUP_MAX_RETRIES).responses.create(
             model=self.model_name,
             input=[
                 {
