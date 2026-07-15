@@ -45,7 +45,6 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_realtime_profile():
     assert responses_api_args.model_name == "gpt-5.4-mini"
     assert responses_api_args.chat_size == 30
     assert responses_api_args.responses_api_stream is True
-    assert responses_api_args.responses_api_warmup_timeout_s == 30.0
     assert qwen3_args.qwen3_tts_model_name == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     assert qwen3_args.qwen3_tts_speaker == "Aiden"
     assert qwen3_args.qwen3_tts_language == "auto"

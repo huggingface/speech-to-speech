@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterator
 from typing import Any
 
-import httpx
 from openai import Stream
 from openai.types.realtime.realtime_conversation_item_assistant_message import (
     Content as AssistantContent,
@@ -18,6 +18,7 @@ from openai.types.responses import (
 )
 
 from speech_to_speech.LLM.base_openai_compatible_language_model import (
+    WARMUP_MAX_RETRIES,
     AssistantMessage,
     BaseOpenAICompatibleHandler,
     ProviderEvent,
@@ -35,8 +36,10 @@ logger = logging.getLogger(__name__)
 class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
     """LLM handler that talks to an OpenAI ``/v1/responses`` server."""
 
-    def _warmup_request(self, timeout: httpx.Timeout) -> None:
-        self._warmup_client.responses.create(
+    def warmup(self) -> None:
+        logger.info(f"Warming up {self.__class__.__name__}")
+        start = time.time()
+        self.client.with_options(max_retries=WARMUP_MAX_RETRIES).responses.create(
             model=self.model_name,
             input=[
                 {
@@ -44,14 +47,12 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
                     "role": "system",
                     "content": [{"type": "input_text", "text": "You are a helpful assistant"}],
                 },
-                {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "Hello"}],
-                },
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]},
             ],
-            timeout=timeout,
+            timeout=self.request_timeout,
         )
+        end = time.time()
+        logger.info(f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s")
 
     def _build_compaction_generate_fn(self) -> CompactGenerateFn:
         """Return a generate fn that calls the Responses API for compaction."""

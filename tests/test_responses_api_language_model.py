@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
+import pytest
 from openai import Stream
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
@@ -19,6 +20,7 @@ from openai.types.responses import (
 from openai.types.responses.response_output_text import ResponseOutputText
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.LLM.base_openai_compatible_language_model import WARMUP_MAX_RETRIES
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
@@ -109,6 +111,27 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler.enable_lang_prompt = False
     handler.compactor = None
     return handler
+
+
+def test_warmup_uses_request_scoped_sdk_retries():
+    handler = _make_handler()
+    handler.client = MagicMock()
+    handler.client.with_options.return_value = handler.client
+
+    handler.warmup()
+
+    handler.client.with_options.assert_called_once_with(max_retries=WARMUP_MAX_RETRIES)
+    handler.client.responses.create.assert_called_once()
+
+
+def test_warmup_failure_propagates_and_prevents_readiness():
+    handler = _make_handler()
+    handler.client = MagicMock()
+    handler.client.with_options.return_value = handler.client
+    handler.client.responses.create.side_effect = RuntimeError("provider unavailable")
+
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        handler.warmup()
 
 
 def test_process_streams_text_from_response_events():

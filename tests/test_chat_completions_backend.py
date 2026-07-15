@@ -83,9 +83,10 @@ class _FakeChat:
 class _FakeClient:
     def __init__(self, *a, **k):
         self.chat = _FakeChat()
+        self.last_options = None
 
     def with_options(self, **kwargs):
-        assert kwargs == {"max_retries": 0}
+        self.last_options = kwargs
         return self
 
 
@@ -110,6 +111,12 @@ def _make_handler(stream=True):
     finally:
         base_mod.OpenAI = orig_openai
     return h
+
+
+def test_warmup_uses_request_scoped_sdk_retries():
+    handler = _make_handler()
+
+    assert handler.client.last_options == {"max_retries": base_mod.WARMUP_MAX_RETRIES}
 
 
 def _chunk(content=None, tool_calls=None, usage=None):

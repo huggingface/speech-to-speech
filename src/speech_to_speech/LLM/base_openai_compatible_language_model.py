@@ -1,17 +1,13 @@
 from __future__ import annotations
 
 import logging
-import random
-import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from typing import Any, Optional
 
 import httpx
 from nltk import sent_tokenize
-from openai import APIConnectionError, APIStatusError, OpenAI
+from openai import OpenAI
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
@@ -47,9 +43,8 @@ from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
 
 logger = logging.getLogger(__name__)
 
-WARMUP_INITIAL_BACKOFF_S = 1.0
-WARMUP_MAX_BACKOFF_S = 8.0
-WARMUP_RETRY_AFTER_MAX_JITTER_S = 1.0
+# About 18–24 seconds of default SDK backoff before warmup fails.
+WARMUP_MAX_RETRIES = 6
 
 
 # ── Normalised provider events ────────────────────────────────────────────────
@@ -118,7 +113,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
     """Shared lifecycle for OpenAI-compatible LLM backends (Responses & Chat
     Completions).
 
-    Subclasses implement hooks including :meth:`_warmup_request`,
+    Subclasses implement four hooks — :meth:`warmup`,
     :meth:`_build_compaction_generate_fn`, :meth:`_serialize`, :meth:`_request`,
     :meth:`_iter_events` and :meth:`_build_optional_kwargs` — and inherit the
     request/response orchestration: speculative-turn gating, cancellation,
@@ -142,7 +137,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         disable_thinking: bool = True,
         reasoning_effort: Optional[str] = None,
         request_timeout_s: float = 20.0,
-        warmup_timeout_s: float = 30.0,
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
         compact_history: bool = False,
@@ -160,15 +154,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             self.request_timeout_s,
             connect=min(10.0, self.request_timeout_s),
         )
-        self.warmup_timeout_s = float(warmup_timeout_s)
-        if self.warmup_timeout_s <= 0:
-            raise ValueError("warmup_timeout_s must be greater than zero")
 
         self.user_role = user_role
         self.client = OpenAI(api_key=api_key, base_url=base_url)
-        # Warmup owns its retry deadline and backoff. Disable the SDK's nested
-        # retries so the startup window remains predictable.
-        self._warmup_client = self.client.with_options(max_retries=0)
         self._extra_body = self._build_extra_body(base_url, disable_thinking, reasoning_effort)
         self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
         self.warmup()
@@ -209,120 +197,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return {"chat_template_kwargs": {"enable_thinking": False}}
         return None
 
-    @staticmethod
-    def _is_retryable_warmup_error(exc: Exception) -> bool:
-        """Whether a failed warmup may succeed once the provider recovers."""
-        if isinstance(exc, APIConnectionError):
-            return True
-        if not isinstance(exc, APIStatusError):
-            return False
-
-        should_retry = exc.response.headers.get("x-should-retry")
-        if should_retry == "true":
-            return True
-        if should_retry == "false":
-            return False
-        return exc.status_code in (408, 409, 429) or exc.status_code >= 500
-
-    @staticmethod
-    def _retry_after_seconds(exc: Exception) -> float | None:
-        """Parse provider retry guidance from a failed status response."""
-        if not isinstance(exc, APIStatusError):
-            return None
-
-        retry_after_ms = exc.response.headers.get("retry-after-ms")
-        if retry_after_ms is not None:
-            try:
-                value = float(retry_after_ms) / 1000
-                return value if value > 0 else None
-            except ValueError:
-                pass
-
-        retry_after = exc.response.headers.get("retry-after")
-        if retry_after is None:
-            return None
-        try:
-            value = float(retry_after)
-            return value if value > 0 else None
-        except ValueError:
-            try:
-                retry_at = parsedate_to_datetime(retry_after)
-            except (TypeError, ValueError, OverflowError):
-                return None
-            if retry_at.tzinfo is None:
-                retry_at = retry_at.replace(tzinfo=timezone.utc)
-            value = (retry_at - datetime.now(timezone.utc)).total_seconds()
-            return value if value > 0 else None
-
-    @staticmethod
-    def _warmup_attempt_timeout(request_timeout_s: float, remaining_s: float) -> httpx.Timeout:
-        timeout_s = max(0.001, min(request_timeout_s, remaining_s))
-        return httpx.Timeout(timeout_s, connect=min(10.0, timeout_s))
-
-    @staticmethod
-    def _warmup_retry_delay(attempt: int, exc: Exception) -> float:
-        retry_after_s = BaseOpenAICompatibleHandler._retry_after_seconds(exc)
-        if retry_after_s is not None:
-            # Never retry earlier than requested, but add a small positive jitter
-            # so replicas receiving the same header do not wake simultaneously.
-            jitter_cap_s = min(WARMUP_RETRY_AFTER_MAX_JITTER_S, retry_after_s * 0.1)
-            return retry_after_s + random.uniform(0.0, jitter_cap_s)
-        backoff_s = min(WARMUP_INITIAL_BACKOFF_S * 2 ** (attempt - 1), WARMUP_MAX_BACKOFF_S)
-        return backoff_s * (0.5 + random.random())
-
-    def _run_warmup_request(self) -> None:
-        """Gate readiness on warmup success within one wall-clock retry budget."""
-        deadline = time.monotonic() + self.warmup_timeout_s
-        attempt = 1
-        while True:
-            remaining_s = deadline - time.monotonic()
-            try:
-                self._warmup_request(self._warmup_attempt_timeout(self.request_timeout_s, remaining_s))
-                return
-            except Exception as exc:
-                if not self._is_retryable_warmup_error(exc):
-                    raise
-                remaining_s = deadline - time.monotonic()
-                if remaining_s <= 0:
-                    logger.error(
-                        "%s warmup failed after %.1f s; refusing to become ready: %s",
-                        self.__class__.__name__,
-                        self.warmup_timeout_s,
-                        exc,
-                    )
-                    raise
-                delay_s = self._warmup_retry_delay(attempt, exc)
-                if delay_s >= remaining_s:
-                    logger.error(
-                        "%s cannot retry warmup within the remaining %.1f s budget; refusing to become ready: %s",
-                        self.__class__.__name__,
-                        remaining_s,
-                        exc,
-                    )
-                    raise
-                logger.warning(
-                    "%s warmup attempt %d failed; retrying in %.1f s (%.1f s budget remaining): %s",
-                    self.__class__.__name__,
-                    attempt,
-                    delay_s,
-                    remaining_s,
-                    exc,
-                )
-                time.sleep(delay_s)
-                attempt += 1
-
     # ── subclass hooks ──────────────────────────────────────────────────────--
 
-    def warmup(self) -> None:
-        """Issue a startup-gating request so the model is ready before serving."""
-        logger.info("Warming up %s", self.__class__.__name__)
-        start = time.monotonic()
-        self._run_warmup_request()
-        logger.info("%s: warmed up! time: %.3f s", self.__class__.__name__, time.monotonic() - start)
-
     @abstractmethod
-    def _warmup_request(self, timeout: httpx.Timeout) -> None:
-        """Issue one warmup attempt using the supplied remaining-budget timeout."""
+    def warmup(self) -> None:
+        """Issue a cheap request so the model/connection is ready before serving."""
         ...
 
     @abstractmethod
