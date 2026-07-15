@@ -537,9 +537,6 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
         # previous session that survived SESSION_END propagation doesn't leak.
         _clean_unit(unit)
 
-        config = rtc_configuration_from_env()
-        pc = RTCPeerConnection(configuration=config) if config is not None else RTCPeerConnection()
-
         released = False
 
         def _on_closed() -> None:
@@ -553,6 +550,7 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
             _release_session(unit, session_id)
 
         async def _on_client_event(raw: dict[str, Any]) -> None:
+            assert session is not None  # callbacks only fire after setup()
             await _dispatch_client_event(unit, session_id, raw, session, transport_kind="webrtc")
 
         def _on_audio(pcm: bytes) -> None:
@@ -564,18 +562,33 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                 unit.input_queue.put((chunk, rt_cfg))
 
         async def _on_open() -> None:
+            assert session is not None  # callbacks only fire after setup()
             await session.send_events([unit.service.build_session_created(session_id)])
             logger.info(f"WebRTC session.created sent (session {session_id})")
 
-        session = WebRTCSession(
-            pc,
-            on_client_event=_on_client_event,
-            on_audio=_on_audio,
-            on_open=_on_open,
-            on_closed=_on_closed,
-        )
-        session.setup()
-        unit.session.transport = session
+        # Any failure between the claim above and a successful negotiate()
+        # must release the unit, or it stays occupied forever with no peer
+        # attached — the connect watchdog only exists once negotiate() ran.
+        session = None
+        try:
+            config = rtc_configuration_from_env()
+            pc = RTCPeerConnection(configuration=config) if config is not None else RTCPeerConnection()
+            session = WebRTCSession(
+                pc,
+                on_client_event=_on_client_event,
+                on_audio=_on_audio,
+                on_open=_on_open,
+                on_closed=_on_closed,
+            )
+            session.setup()
+            unit.session.transport = session
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"WebRTC session setup failed (session {session_id}): {type(e).__name__}: {e}")
+            if session is not None:
+                await session.close()  # fires _on_closed → _release_session
+            else:
+                _on_closed()
+            return Response(content="WebRTC session setup failed", status_code=500, media_type="text/plain")
 
         try:
             answer_sdp = await session.negotiate(offer_sdp)
@@ -631,29 +644,35 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                         if events:
                             await transport.send_events(events)
 
-                    if is_speech_start and (was_in_response or was_response_pending):
-                        active_cfg = unit.service._state(session_id).runtime_config if session_id else None
-                        if text_msg.interrupt_response and (
+                    if is_speech_start and session_id:
+                        active_cfg = unit.service._state(session_id).runtime_config
+                        interrupt_enabled = text_msg.interrupt_response and (
                             active_cfg is None or active_cfg.interrupt_response_enabled
-                        ):
-                            unit.cancel_scope.cancel()
-                            if session_id:
+                        )
+                        if interrupt_enabled and transport is not None:
+                            # Flush even when no response is active: the WebRTC
+                            # track can still hold unplayed audio from a response
+                            # whose done-sentinel was already observed —
+                            # finish_response() runs on the sentinel, not when
+                            # playback completes. No-op over WebSocket.
+                            transport.discard_pending_audio()
+                        if was_in_response or was_response_pending:
+                            if interrupt_enabled:
+                                unit.cancel_scope.cancel()
                                 unit.service._state(session_id).response_pending = False
-                            _flush_queue(unit.output_queue, preserve=_keep_audio_sentinel)
-                            _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
-                            if transport is not None:
-                                transport.discard_pending_audio()
-                            if unit.response_playing.is_set():
-                                unit.response_playing.clear()
-                            logger.info(
-                                "Pipeline %d: speech during %s: cancelled, queue flushed",
-                                unit.index,
-                                "response" if was_in_response else "pending response",
-                            )
-                        else:
-                            logger.info(
-                                f"Pipeline {unit.index}: speech during response: interrupt_response disabled, ignoring"
-                            )
+                                _flush_queue(unit.output_queue, preserve=_keep_audio_sentinel)
+                                _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
+                                if unit.response_playing.is_set():
+                                    unit.response_playing.clear()
+                                logger.info(
+                                    "Pipeline %d: speech during %s: cancelled, queue flushed",
+                                    unit.index,
+                                    "response" if was_in_response else "pending response",
+                                )
+                            else:
+                                logger.info(
+                                    f"Pipeline {unit.index}: speech during response: interrupt_response disabled, ignoring"
+                                )
                 except Empty:
                     pass
 

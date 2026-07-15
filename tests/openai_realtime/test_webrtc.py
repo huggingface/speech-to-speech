@@ -30,6 +30,7 @@ av = pytest.importorskip("av")
 import httpx  # noqa: E402  (ships with the openai dependency)
 from aiortc import RTCPeerConnection, RTCSessionDescription  # noqa: E402
 from aiortc.mediastreams import AudioStreamTrack, MediaStreamError  # noqa: E402
+from starlette.testclient import TestClient  # noqa: E402
 
 import speech_to_speech.api.openai_realtime.websocket_router as router_module  # noqa: E402
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit  # noqa: E402
@@ -41,6 +42,7 @@ from speech_to_speech.api.openai_realtime.webrtc_session import (  # noqa: E402
     PipelineAudioTrack,
 )
 from speech_to_speech.pipeline.cancel_scope import CancelScope  # noqa: E402
+from speech_to_speech.pipeline.events import SpeechStartedEvent  # noqa: E402
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE  # noqa: E402
 
 from .test_openai_client import _ServerEnv  # noqa: E402
@@ -295,6 +297,43 @@ class TestWebRTCDispatch:
 
 
 # ---------------------------------------------------------------------------
+# Send-loop barge-in against transport-buffered audio
+# ---------------------------------------------------------------------------
+
+
+class TestBargeInAfterResponseDone:
+    """Speech starting after a response finished must still flush audio the
+    transport buffered but has not played yet: finish_response() runs when the
+    done-sentinel is observed, not when playback completes, so fast TTS can
+    leave seconds of unplayed audio in the WebRTC track with in_response
+    already cleared."""
+
+    def test_speech_start_flushes_buffered_transport_audio(self):
+        unit = _make_unit()
+        stop_event = ThreadingEvent()
+        app = router_module.create_app(pool=[unit], stop_event=stop_event)
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                # No response is active or pending. Swap in a spy transport so
+                # the send loop's discard call is observable.
+                spy = _FakeTransport()
+                assert unit.session is not None
+                unit.session.transport = spy
+                generation_before = unit.cancel_scope.generation
+
+                unit.text_output_queue.put(SpeechStartedEvent())
+
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and spy.discards == 0:
+                    time.sleep(0.02)
+                assert spy.discards == 1
+                # Nothing to cancel: no response was active.
+                assert unit.cancel_scope.generation == generation_before
+        stop_event.set()
+
+
+# ---------------------------------------------------------------------------
 # Loopback integration: real aiortc peer against the served app
 # ---------------------------------------------------------------------------
 
@@ -459,3 +498,55 @@ class TestWebRTCLoopback:
             assert second.json()["error"]["type"] == "session_limit_reached"
         finally:
             await pc.close()
+
+    async def test_invalid_offer_releases_unit(self, server_env):
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"http://127.0.0.1:{server_env.port}/v1/realtime/calls",
+                content="not an sdp",
+                headers={"Content-Type": "application/sdp"},
+                timeout=10.0,
+            )
+        assert resp.status_code == 400
+        await _wait_for_release(server_env)
+
+    async def test_setup_failure_releases_unit(self, server_env, monkeypatch):
+        """A failure between claiming the unit and negotiate() (e.g. peer
+        connection construction) must release the unit, not leak it."""
+        import speech_to_speech.api.openai_realtime.webrtc_session as webrtc_module
+
+        def _boom():
+            raise RuntimeError("boom")
+
+        # The calls endpoint imports this at request time, so the patch takes.
+        monkeypatch.setattr(webrtc_module, "rtc_configuration_from_env", _boom)
+
+        pc = RTCPeerConnection()
+        try:
+            pc.createDataChannel("oai-events")
+            pc.addTrack(AudioStreamTrack())
+            offer = await pc.createOffer()
+            await pc.setLocalDescription(offer)
+
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"http://127.0.0.1:{server_env.port}/v1/realtime/calls",
+                    content=pc.localDescription.sdp,
+                    headers={"Content-Type": "application/sdp"},
+                    timeout=10.0,
+                )
+            assert resp.status_code == 500
+        finally:
+            await pc.close()
+        await _wait_for_release(server_env)
+
+
+async def _wait_for_release(server_env, timeout: float = 5.0) -> None:
+    """Assert the unit was released (or is draining) after a failed call."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        session = server_env.unit.session
+        if session is None or session.released_at is not None:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("failed WebRTC call left the pipeline unit claimed")
