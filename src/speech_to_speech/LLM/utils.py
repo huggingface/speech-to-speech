@@ -20,32 +20,40 @@ SPEECHABLE_PATTERN = re.compile(
     flags=re.UNICODE,
 )
 
-MARKDOWN_PATTERN = re.compile(
-    r"\*\*(.*?)\*\*|__(.*?)__|\*(.*?)\*|_(.*?)_|`{1,3}(.*?)`{1,3}|^#{1,6}\s*|^[-*+]\s+",
-    flags=re.MULTILINE | re.DOTALL,
-)
+MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]\[]*)\]\([^)]*\)")
+MARKDOWN_HEADING_PATTERN = re.compile(r"^#{1,6}[ \t]*", flags=re.MULTILINE)
+MARKDOWN_BULLET_PATTERN = re.compile(r"^[-*+][ \t]+", flags=re.MULTILINE)
 
+# Must run before MARKDOWN_DELIMITER_PATTERN so the language tag is still identifiable.
+MARKDOWN_FENCE_PATTERN = re.compile(r"```[ \t]*[\w+#-]*[ \t]*\n?")
 
-def _markdown_replacement(match: "re.Match[str]") -> str:
-    for group in match.groups():
-        if group is not None:
-            return group
-    return ""
+# Touches non-space on at least one side -> delimiter; `2 * 3` (spaces both sides) survives.
+MARKDOWN_DELIMITER_PATTERN = re.compile(r"(?<=\S)[*`]{1,3}|[*`]{1,3}(?=\S)")
 
 
 def remove_markdown(text: str) -> str:
-    """Strip common Markdown syntax (bold, italic, headings, code, bullets),
-    keeping only the enclosed text so TTS doesn't read out symbols like '**'.
+    """Strip Markdown syntax so TTS doesn't read out symbols like '**' or a raw URL.
+
+    Must run on complete text, not per-token deltas: a delimiter run can arrive
+    split across two streaming chunks.
     """
-    return MARKDOWN_PATTERN.sub(_markdown_replacement, text)
+    text = MARKDOWN_LINK_PATTERN.sub(r"\1", text)
+    text = MARKDOWN_HEADING_PATTERN.sub("", text)
+    text = MARKDOWN_BULLET_PATTERN.sub("", text)
+    text = MARKDOWN_FENCE_PATTERN.sub("", text)
+    text = MARKDOWN_DELIMITER_PATTERN.sub("", text)
+    return text
 
 
 def remove_unspeechable(text: str) -> str:
     """Keep only speechable characters: letters, digits, punctuation, whitespace.
     support unicode characters (english, arabic, chinese, japanese, korean, etc.)
+
+    Safe to call per streaming delta. Markdown stripping is intentionally not
+    included here -- unlike character filtering, it needs complete text (see
+    remove_markdown), so callers apply it separately once a full sentence exists.
     """
     text = text.translate(SMART_PUNCT_TRANSLATION)
-    text = remove_markdown(text)
     return SPEECHABLE_PATTERN.sub("", text)
 
 
