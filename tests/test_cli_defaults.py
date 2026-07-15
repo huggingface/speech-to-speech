@@ -17,6 +17,7 @@ from speech_to_speech.arguments_classes.responses_api_language_model_arguments i
 )
 from speech_to_speech.arguments_classes.socket_receiver_arguments import SocketReceiverArguments
 from speech_to_speech.arguments_classes.socket_sender_arguments import SocketSenderArguments
+from speech_to_speech.arguments_classes.supertonic_tts_arguments import SupertonicTTSHandlerArguments
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 from speech_to_speech.arguments_classes.websocket_streamer_arguments import WebSocketStreamerArguments
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
@@ -74,6 +75,7 @@ EXPECTED_FIELD_TYPES = {
     "pocket_tts_handler_kwargs": PocketTTSHandlerArguments,
     "kokoro_tts_handler_kwargs": KokoroTTSHandlerArguments,
     "qwen3_tts_handler_kwargs": Qwen3TTSHandlerArguments,
+    "supertonic_tts_handler_kwargs": SupertonicTTSHandlerArguments,
 }
 
 

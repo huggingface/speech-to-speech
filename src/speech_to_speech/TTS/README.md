@@ -9,6 +9,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 - `pocket` → `pocket_tts_handler.py`
 - `kokoro` → `kokoro_handler.py`
 - `qwen3` → `qwen3_tts_handler.py`
+- `supertonic` → `supertonic_tts_handler.py`
 
 Deprecated TTS implementations, including MeloTTS, live in [`../../../archive/TTS`](../../../archive/TTS) and are no longer wired into `s2s_pipeline.py`.
 
@@ -134,6 +135,24 @@ To benchmark the Apple Silicon MLX variants side by side:
 ```
 
 This will run separate benchmark entries for `qwen3[bf16]`, `qwen3[4bit]`, `qwen3[6bit]`, and `qwen3[8bit]`.
+
+### 6) Supertonic (`--tts supertonic`)
+
+Primary args prefix: `--supertonic_tts_*`
+
+```bash
+python s2s_pipeline.py \
+  --tts supertonic \
+  --supertonic_tts_voice M1 \
+  --supertonic_tts_speed 1.0
+```
+
+Behavior:
+- Supports real-time text-to-speech using Supertone's ONNX runtime models
+- Downloads the models locally to `~/.cache/supertonic3/`
+- Supports 10 built-in voice models: `M1`-`M5` and `F1`-`F5`.
+- Outputs natively at 44.1kHz but gets downsampled in the pipeline to 16kHz for uniform playback
+
 
 ## Setup
 
