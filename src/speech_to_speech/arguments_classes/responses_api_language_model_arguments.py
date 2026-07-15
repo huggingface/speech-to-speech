@@ -32,3 +32,10 @@ class ResponsesApiLanguageModelHandlerArguments(LanguageModelBaseArguments):
             "For Together Qwen3.5 models this sends chat_template_kwargs.enable_thinking=false."
         },
     )
+    responses_api_warmup_timeout_s: float = field(
+        default=30.0,
+        metadata={
+            "help": "Maximum wall-clock retry budget for API-backed LLM startup warmup. "
+            "The endpoint becomes ready only after warmup succeeds. Default is 30 seconds."
+        },
+    )

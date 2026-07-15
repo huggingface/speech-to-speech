@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from collections.abc import Iterator
 from typing import Any, cast
 
+import httpx
 from openai import Stream
 from openai.types.chat import (
     ChatCompletionChunk,
@@ -91,22 +91,16 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
     which already emits OpenAI chat messages including ``tool_calls``/``tool`` roles.
     """
 
-    def warmup(self) -> None:
-        logger.info(f"Warming up {self.__class__.__name__}")
-        start = time.time()
-        self._run_warmup_request(
-            lambda: self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant"},
-                    {"role": "user", "content": "Hello"},
-                ],
-                extra_body=self._extra_body,
-                timeout=self.request_timeout,
-            )
+    def _warmup_request(self, timeout: httpx.Timeout) -> None:
+        self._warmup_client.chat.completions.create(
+            model=self.model_name,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant"},
+                {"role": "user", "content": "Hello"},
+            ],
+            extra_body=self._extra_body,
+            timeout=timeout,
         )
-        end = time.time()
-        logger.info(f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s")
 
     def _build_compaction_generate_fn(self) -> CompactGenerateFn:
         """Return a generate fn that calls Chat Completions for compaction."""

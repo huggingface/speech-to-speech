@@ -84,6 +84,10 @@ class _FakeClient:
     def __init__(self, *a, **k):
         self.chat = _FakeChat()
 
+    def with_options(self, **kwargs):
+        assert kwargs == {"max_retries": 0}
+        return self
+
 
 def _make_handler(stream=True):
     """Build a handler whose warmup hits the fake client (no network)."""
