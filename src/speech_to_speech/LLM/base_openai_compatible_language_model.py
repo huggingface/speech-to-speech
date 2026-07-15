@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any, Optional
 
 import httpx
 from nltk import sent_tokenize
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, RateLimitError
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
@@ -193,6 +193,35 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         if disable_thinking:
             return {"chat_template_kwargs": {"enable_thinking": False}}
         return None
+
+    @staticmethod
+    def _is_retryable_warmup_error(exc: Exception) -> bool:
+        """Whether a failed warmup may succeed once the provider recovers."""
+        return isinstance(exc, (APIConnectionError, APITimeoutError, RateLimitError)) or (
+            isinstance(exc, APIStatusError) and exc.status_code >= 500
+        )
+
+    def _run_warmup_request(self, request: Callable[[], Any]) -> bool:
+        """Run an API warmup without making transient provider load fatal.
+
+        The OpenAI client retries connection failures, timeouts, rate limits and
+        server errors before returning them here. Warmup is only an optimisation,
+        so an exhausted retry budget should not keep the endpoint from becoming
+        ready. Non-retryable errors still fail setup so invalid credentials or
+        request configuration remain visible immediately.
+        """
+        try:
+            request()
+        except Exception as exc:
+            if not self._is_retryable_warmup_error(exc):
+                raise
+            logger.warning(
+                "%s warmup failed after provider retries; continuing startup without warmup: %s",
+                self.__class__.__name__,
+                exc,
+            )
+            return False
+        return True
 
     # ── subclass hooks ──────────────────────────────────────────────────────--
 
