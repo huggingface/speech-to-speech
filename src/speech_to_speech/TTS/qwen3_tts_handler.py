@@ -457,12 +457,12 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         if self.backend == "faster_qwen3_tts":
             if self.parity_mode:
-                logger.info("Qwen3-TTS parity mode enabled: skipping CUDA graph capture warmup")
+                logger.info("Qwen3-TTS parity mode enabled: skipping backend warmup")
             else:
                 try:
-                    self.model._warmup(prefill_len=100)
+                    self.model.warmup(prefill_len=100)
                 except Exception as e:
-                    logger.warning(f"CUDA graph capture failed: {e}")
+                    logger.warning("Qwen3-TTS backend warmup failed: %s", e)
 
         try:
             for _ in self._warmup_process("Hello, this is a warmup."):
