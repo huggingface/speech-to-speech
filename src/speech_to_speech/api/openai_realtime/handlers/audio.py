@@ -60,7 +60,19 @@ class AudioHandler(RealtimeBaseHandler):
             client_in_rate = getattr(audio_cfg.input.format, "rate", None) or PIPELINE_SAMPLE_RATE
         else:
             client_in_rate = PIPELINE_SAMPLE_RATE
-        pcm_bytes = resample(pcm_bytes, client_in_rate, PIPELINE_SAMPLE_RATE)
+        return self.append_pcm(conn_id, pcm_bytes, client_in_rate)
+
+    def append_pcm(self, conn_id: str, pcm_bytes: bytes, src_rate: int) -> list[bytes]:
+        """Resample raw PCM16 to the pipeline rate and split into 512-sample chunks for the VAD.
+
+        Shared by both transports: the WebSocket route feeds it decoded
+        ``input_audio_buffer.append`` payloads, the WebRTC transport feeds it
+        PCM decoded from inbound media-track frames. Keeps the sub-chunk
+        remainder and the commit bookkeeping (``audio_buffer_has_data``) in
+        one place regardless of how audio arrives.
+        """
+        st = self._state(conn_id)
+        pcm_bytes = resample(pcm_bytes, src_rate, PIPELINE_SAMPLE_RATE)
 
         pcm_bytes = st.audio_remainder + pcm_bytes
 
@@ -150,14 +162,19 @@ class AudioHandler(RealtimeBaseHandler):
 
     # ── Outbound audio encoding ──────────────────
 
-    def encode_audio_chunk(self, conn_id: str, audio: bytes) -> list[ServerEvent]:
-        """Encode a raw PCM audio chunk, emitting ResponseCreated on the first chunk.
+    def begin_audio_response(self, conn_id: str) -> tuple[str, str, list[ServerEvent]]:
+        """Ensure a response exists for outbound audio, emitting ResponseCreated once.
 
         When ``handle_response_create`` already allocated the response,
         ``current_response_id`` is set and no duplicate event is emitted.
         For the implicit-response path (VAD -> STT -> LLM -> TTS, no
         ``response.create``), ``current_response_id`` is still ``None``
         and the event is emitted here on the first audio chunk.
+
+        Returns ``(response_id, item_id, events)``. Shared by both
+        transports: the WebSocket path appends the base64 audio delta to the
+        returned events, the WebRTC path sends only the bookkeeping events
+        over the data channel while audio travels on the media track.
         """
         response = self._service.response
         st = self._state(conn_id)
@@ -173,6 +190,14 @@ class AudioHandler(RealtimeBaseHandler):
                     response=response._build_response(conn_id, "in_progress"),
                 )
             )
+        return resp_id, item_id, events
+
+    def encode_audio_chunk(self, conn_id: str, audio: bytes) -> list[ServerEvent]:
+        """Encode a raw PCM audio chunk as a base64 delta event for the WebSocket transport."""
+        response = self._service.response
+        st = self._state(conn_id)
+
+        resp_id, item_id, events = self.begin_audio_response(conn_id)
         rp = st.current_response_params
         client_out_rate = None
         if rp and rp.audio and rp.audio.output and rp.audio.output.format:

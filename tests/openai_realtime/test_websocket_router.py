@@ -19,6 +19,7 @@ from starlette.websockets import WebSocketState
 import speech_to_speech.api.openai_realtime.websocket_router as router_module
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService
+from speech_to_speech.api.openai_realtime.transports import WebSocketTransport
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
@@ -574,7 +575,7 @@ class TestSendLoop:
         text_output_queue.put(TokenUsageEvent(input_tokens=10, output_tokens=5))
         ws = _FakeWebSocket()
 
-        asyncio.run(router_module._drain_pending_response_events(ws, unit, conn_id))
+        asyncio.run(router_module._drain_pending_response_events(WebSocketTransport(ws), unit, conn_id))
         done_events = service.finish_response(conn_id)
 
         assert [payload["type"] for payload in ws.sent] == ["response.function_call_arguments.done"]
@@ -614,7 +615,7 @@ class TestSendLoop:
         text_output_queue.put(AssistantTextEvent(text="queued after boundary"))
         ws = _FakeWebSocket()
 
-        asyncio.run(router_module._drain_pending_response_events(ws, unit, conn_id))
+        asyncio.run(router_module._drain_pending_response_events(WebSocketTransport(ws), unit, conn_id))
         done_events = service.finish_response(conn_id)
 
         assert [payload["type"] for payload in ws.sent] == ["response.function_call_arguments.done"]
