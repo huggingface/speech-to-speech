@@ -94,7 +94,7 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
         start = time.time()
-        if not self._run_warmup_request(
+        self._run_warmup_request(
             lambda: self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[
@@ -104,8 +104,7 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
                 extra_body=self._extra_body,
                 timeout=self.request_timeout,
             )
-        ):
-            return
+        )
         end = time.time()
         logger.info(f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s")
 

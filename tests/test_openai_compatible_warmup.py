@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from types import SimpleNamespace
 from typing import Callable
 
@@ -8,6 +7,7 @@ import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AuthenticationError, RateLimitError
 
+import speech_to_speech.LLM.base_openai_compatible_language_model as base_mod
 from speech_to_speech.LLM.base_openai_compatible_language_model import BaseOpenAICompatibleHandler
 from speech_to_speech.LLM.chat_completions_language_model import ChatCompletionsApiModelHandler
 from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
@@ -37,18 +37,45 @@ def _chat_completions_handler(create: Callable[..., object]) -> ChatCompletionsA
 
 
 @pytest.mark.parametrize("make_handler", [_responses_handler, _chat_completions_handler])
-def test_transient_rate_limit_does_not_fail_startup(make_handler, caplog):
+def test_transient_rate_limit_retries_until_warmup_succeeds(make_handler, monkeypatch):
     error = _status_error(RateLimitError, 429)
+    attempts = 0
+    sleeps = []
 
     def raise_rate_limit(**_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 6:
+            raise error
+
+    handler = make_handler(raise_rate_limit)
+    monkeypatch.setattr(base_mod.time, "sleep", sleeps.append)
+
+    handler.warmup()
+
+    assert attempts == 6
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 8.0]
+
+
+@pytest.mark.parametrize("make_handler", [_responses_handler, _chat_completions_handler])
+def test_transient_warmup_failure_still_fails_startup_after_retries(make_handler, monkeypatch):
+    error = _status_error(RateLimitError, 429)
+    attempts = 0
+    sleeps = []
+
+    def raise_rate_limit(**_kwargs):
+        nonlocal attempts
+        attempts += 1
         raise error
 
     handler = make_handler(raise_rate_limit)
+    monkeypatch.setattr(base_mod.time, "sleep", sleeps.append)
 
-    with caplog.at_level(logging.WARNING):
+    with pytest.raises(RateLimitError):
         handler.warmup()
 
-    assert "continuing startup without warmup" in caplog.text
+    assert attempts == 6
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 8.0]
 
 
 def test_retryable_warmup_errors_cover_connection_timeout_and_server_failures():
@@ -62,13 +89,19 @@ def test_retryable_warmup_errors_cover_connection_timeout_and_server_failures():
 
 
 @pytest.mark.parametrize("make_handler", [_responses_handler, _chat_completions_handler])
-def test_non_retryable_warmup_error_still_fails_startup(make_handler):
+def test_non_retryable_warmup_error_still_fails_startup_without_retry(make_handler, monkeypatch):
     error = _status_error(AuthenticationError, 401)
+    attempts = 0
 
     def raise_authentication_error(**_kwargs):
+        nonlocal attempts
+        attempts += 1
         raise error
 
     handler = make_handler(raise_authentication_error)
+    monkeypatch.setattr(base_mod.time, "sleep", lambda _seconds: pytest.fail("non-retryable error was retried"))
 
     with pytest.raises(AuthenticationError):
         handler.warmup()
+
+    assert attempts == 1

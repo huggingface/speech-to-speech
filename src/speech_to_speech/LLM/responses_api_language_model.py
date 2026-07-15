@@ -38,7 +38,7 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
         start = time.time()
-        if not self._run_warmup_request(
+        self._run_warmup_request(
             lambda: self.client.responses.create(
                 model=self.model_name,
                 input=[
@@ -55,8 +55,7 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
                 ],
                 timeout=self.request_timeout,
             )
-        ):
-            return
+        )
         end = time.time()
         logger.info(f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s")
 

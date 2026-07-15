@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from typing import Any, Optional
@@ -42,6 +43,10 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
 
 logger = logging.getLogger(__name__)
+
+WARMUP_MAX_ATTEMPTS = 6
+WARMUP_INITIAL_BACKOFF_S = 1.0
+WARMUP_MAX_BACKOFF_S = 8.0
 
 
 # ── Normalised provider events ────────────────────────────────────────────────
@@ -201,27 +206,40 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             isinstance(exc, APIStatusError) and exc.status_code >= 500
         )
 
-    def _run_warmup_request(self, request: Callable[[], Any]) -> bool:
-        """Run an API warmup without making transient provider load fatal.
+    def _run_warmup_request(self, request: Callable[[], Any]) -> None:
+        """Gate readiness on a successful warmup, retrying transient failures.
 
-        The OpenAI client retries connection failures, timeouts, rate limits and
-        server errors before returning them here. Warmup is only an optimisation,
-        so an exhausted retry budget should not keep the endpoint from becoming
-        ready. Non-retryable errors still fail setup so invalid credentials or
-        request configuration remain visible immediately.
+        Six attempts with capped exponential backoff retry at approximately 1,
+        3, 7, 15, and 23 seconds when failures return immediately. This is in
+        addition to the OpenAI client's request-level retries. If the provider
+        never recovers, the final exception escapes setup and the node stays
+        unready. Non-retryable errors fail immediately.
         """
-        try:
-            request()
-        except Exception as exc:
-            if not self._is_retryable_warmup_error(exc):
-                raise
-            logger.warning(
-                "%s warmup failed after provider retries; continuing startup without warmup: %s",
-                self.__class__.__name__,
-                exc,
-            )
-            return False
-        return True
+        for attempt in range(1, WARMUP_MAX_ATTEMPTS + 1):
+            try:
+                request()
+                return
+            except Exception as exc:
+                if not self._is_retryable_warmup_error(exc):
+                    raise
+                if attempt == WARMUP_MAX_ATTEMPTS:
+                    logger.error(
+                        "%s warmup failed after %d attempts; refusing to become ready: %s",
+                        self.__class__.__name__,
+                        WARMUP_MAX_ATTEMPTS,
+                        exc,
+                    )
+                    raise
+                delay_s = min(WARMUP_INITIAL_BACKOFF_S * 2 ** (attempt - 1), WARMUP_MAX_BACKOFF_S)
+                logger.warning(
+                    "%s warmup attempt %d/%d failed; retrying in %.1f s: %s",
+                    self.__class__.__name__,
+                    attempt,
+                    WARMUP_MAX_ATTEMPTS,
+                    delay_s,
+                    exc,
+                )
+                time.sleep(delay_s)
 
     # ── subclass hooks ──────────────────────────────────────────────────────--
 
