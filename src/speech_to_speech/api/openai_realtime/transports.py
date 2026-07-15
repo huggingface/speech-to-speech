@@ -13,7 +13,8 @@ and hands client-visible traffic to the transport attached to the current
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Protocol
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 from fastapi import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
@@ -24,15 +25,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class SessionTransport(Protocol):
+class SessionTransport(ABC):
     """What the send loop and client-event dispatch need from a transport."""
 
+    kind: str
+
+    @abstractmethod
     async def send_events(self, events: list[ServerEvent]) -> None: ...
 
+    @abstractmethod
     async def send_audio_chunk(self, service: RealtimeService, session_id: str, pcm: bytes) -> None:
         """Deliver a pipeline-rate PCM16 chunk to the client."""
-        ...
 
+    @abstractmethod
     def discard_pending_audio(self) -> None:
         """Drop transport-buffered audio that has not reached the client yet.
 
@@ -40,8 +45,8 @@ class SessionTransport(Protocol):
         the WebRTC transport paces playback server-side and must flush its
         track buffer for barge-in to actually silence the assistant.
         """
-        ...
 
+    @abstractmethod
     async def close(self) -> None: ...
 
 
@@ -68,7 +73,7 @@ async def send_ws_event(ws: WebSocket, event: ServerEvent) -> None:
         logger.error(f"Failed to send event to client: {e}")
 
 
-class WebSocketTransport:
+class WebSocketTransport(SessionTransport):
     """JSON-over-WebSocket transport: audio is sent as base64 delta events."""
 
     kind = "websocket"

@@ -6,6 +6,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from speech_to_speech.api.openai_realtime.service import RealtimeService
+from speech_to_speech.api.openai_realtime.transports import SessionTransport
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 
 
@@ -18,9 +19,9 @@ class SessionState(BaseModel):
     (pending_output_item) here ensures these fields share one lifecycle — a
     stale value can't outlive its session.
 
-    `transport` is a SessionTransport (WebSocketTransport or WebRTCSession);
-    it may briefly be None while a WebRTC claim finishes constructing the
-    session, so the send loop must tolerate a transport-less snapshot.
+    `transport` may briefly be None while a WebRTC claim finishes
+    constructing the session, so the send loop must tolerate a
+    transport-less snapshot.
 
     `drained` is set by the send loop when SESSION_END travels through the handler
     chain back to the output queue; the release path awaits it before clearing
@@ -30,7 +31,7 @@ class SessionState(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    transport: Any = None
+    transport: Optional[SessionTransport] = None
     session_id: str = ""
     pending_output_item: Any = None
     drained: asyncio.Event = Field(default_factory=asyncio.Event)

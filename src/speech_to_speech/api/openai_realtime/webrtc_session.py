@@ -5,8 +5,8 @@ Requires the ``webrtc`` extra (aiortc). Audio travels over RTP media tracks
 use the same protocol as the WebSocket transport, carried on the
 ``oai-events`` data channel.
 
-``WebRTCSession`` implements the ``SessionTransport`` protocol from
-``transports``, so the per-unit send loop in ``websocket_router`` drives it
+``WebRTCSession`` subclasses ``SessionTransport`` from ``transports``,
+so the per-unit send loop in ``websocket_router`` drives it
 exactly like a WebSocket session: it stays the sole consumer of the pipeline
 output queues, and this module only turns delivered PCM into paced RTP frames.
 """
@@ -26,6 +26,8 @@ import av
 import numpy as np
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import MediaStreamError, MediaStreamTrack
+
+from speech_to_speech.api.openai_realtime.transports import SessionTransport
 
 if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import RealtimeService, ServerEvent
@@ -150,7 +152,7 @@ class PipelineAudioTrack(MediaStreamTrack):
         return frame
 
 
-class WebRTCSession:
+class WebRTCSession(SessionTransport):
     """One WebRTC peer connection, used as the SessionState transport.
 
     All pipeline integration arrives through callbacks supplied by the route
@@ -283,7 +285,7 @@ class WebRTCSession:
         self._on_closed()
         logger.info("[WebRTC] Session closed")
 
-    # ── SessionTransport protocol ─────────────────
+    # ── SessionTransport interface ────────────────
 
     async def send_events(self, events: list[ServerEvent]) -> None:
         dc = self._dc

@@ -35,6 +35,7 @@ from starlette.testclient import TestClient  # noqa: E402
 import speech_to_speech.api.openai_realtime.websocket_router as router_module  # noqa: E402
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit  # noqa: E402
 from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService  # noqa: E402
+from speech_to_speech.api.openai_realtime.transports import SessionTransport  # noqa: E402
 from speech_to_speech.api.openai_realtime.webrtc_session import (  # noqa: E402
     WEBRTC_FRAME_SAMPLES,
     WEBRTC_SAMPLE_RATE,
@@ -74,7 +75,7 @@ def _make_unit() -> PipelineUnit:
     )
 
 
-class _FakeTransport:
+class _FakeTransport(SessionTransport):
     kind = "webrtc"
 
     def __init__(self):
