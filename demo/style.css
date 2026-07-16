@@ -1009,6 +1009,9 @@ a:hover {
   transition: opacity 0.25s ease;
 }
 .orb-wrap.live .mic-gate-arc { opacity: 1; }
+/* The gate is a WebSocket-transport feature (it lives in the WS capture
+ * worklet). During a WebRTC call only the mute button remains. */
+body.rtc-live .mic-gate-arc { display: none; }
 .mga-track {
   stroke: rgba(255, 255, 255, 0.1); /* hairline; recedes until needed */
   stroke-width: 1.5;
