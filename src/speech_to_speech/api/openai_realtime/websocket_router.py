@@ -41,12 +41,16 @@ MAX_AUDIO_BATCH_BYTES = 6400
 # Tests monkeypatch this to a small value since their fixtures usually skip
 # the real handler chain.
 SESSION_END_DRAIN_TIMEOUT_S = 10.0
-# Hard ceiling on the drain wait: past this, the unit is force-released even
-# though SESSION_END never came back (e.g. a wedged handler thread), trading
-# a possible leak of stale output into the next session for restored pool
-# capacity. Stale audio tagged with an old cancel generation is still dropped
-# by the send loop's discard checks.
-SESSION_END_FORCE_RELEASE_TIMEOUT_S = 180.0
+# Past this, the unit is quarantined: its service session is unregistered
+# (closing the chat so late handler output can't mutate or bill it), but the
+# unit stays unclaimable. Releasing it instead would let a new client claim a
+# unit whose handlers may still emit the previous session's output (e.g. a
+# transcript, which carries no session identity and would be appended to the
+# new session's conversation) — a cross-session leak. If SESSION_END does
+# eventually drain, the chain has proven itself clean and the unit returns to
+# the pool; a dead handler keeps it quarantined forever, visible in /v1/pool
+# as "stuck".
+SESSION_END_QUARANTINE_TIMEOUT_S = 180.0
 QItem = TypeVar("QItem")
 
 
@@ -232,6 +236,13 @@ def _should_discard_audio(unit: PipelineUnit, item: Any) -> bool:
     return _generation_is_discardable(unit, _audio_generation(item))
 
 
+def _safe_unregister(unit: PipelineUnit, session_id: str) -> None:
+    try:
+        unit.service.unregister(session_id)
+    except Exception:
+        logger.exception(f"Pipeline {unit.index}: unregister failed for session {session_id}")
+
+
 async def _release_unit_after_drain(unit: PipelineUnit, session: Any, session_id: str) -> None:
     """Wait for SESSION_END to propagate, then release the unit.
 
@@ -240,13 +251,14 @@ async def _release_unit_after_drain(unit: PipelineUnit, session: Any, session_id
     until SESSION_END travels all the way through the handler chain back to
     output_queue — observed by the send loop, which sets session.drained.
 
-    If the chain is still busy past SESSION_END_FORCE_RELEASE_TIMEOUT_S (e.g. a
-    wedged or dead handler thread), the unit is force-released anyway so the pool
-    doesn't lose capacity permanently. The next claim's _clean_unit flush plus the
-    session_id tag on SESSION_END (the send loop ignores a late one from another
-    session) keep the previous session's leftovers from being mistaken for the
-    new session's state; operators can spot force releases in the logs and slow
-    drains in `/v1/pool` (long `released_at` age).
+    Past SESSION_END_QUARANTINE_TIMEOUT_S (a wedged or dead handler thread) the
+    unit is quarantined, NOT released: still-running handlers could emit the old
+    session's output (transcripts carry no session identity) into whichever
+    session claimed the unit next, and a dead handler would make the unit accept
+    clients it can never serve. The session is unregistered right away so late
+    output can't mutate or bill the closed conversation; the unit itself only
+    returns to the pool if SESSION_END eventually drains, proving the chain is
+    clean. Operators can spot quarantined units in `/v1/pool` (state "stuck").
     """
     elapsed = 0.0
     warned = False
@@ -260,22 +272,23 @@ async def _release_unit_after_drain(unit: PipelineUnit, session: Any, session_id
                     f"unit will remain unavailable until handlers finish (session {session_id})"
                 )
                 warned = True
-            if elapsed >= SESSION_END_FORCE_RELEASE_TIMEOUT_S:
+            if session.quarantined_at is None and elapsed >= SESSION_END_QUARANTINE_TIMEOUT_S:
+                session.quarantined_at = time.monotonic()
+                _safe_unregister(unit, session_id)
                 logger.error(
                     f"Pipeline {unit.index}: SESSION_END still not drained after {elapsed:.0f}s — "
-                    f"force-releasing unit; stale output from session {session_id} may still be in flight"
+                    f"quarantining unit until the handler chain drains (session {session_id})"
                 )
-                break
     finally:
-        # Release unconditionally: even if unregister raises (or the task is
-        # cancelled at shutdown), the unit must not stay claimed forever.
+        # Runs when the drain completed (chain proven clean) or the task is
+        # cancelled at shutdown. Release unconditionally: even if unregister
+        # raises, the unit must not stay claimed forever.
         try:
-            unit.service.unregister(session_id)
-        except Exception:
-            logger.exception(f"Pipeline {unit.index}: unregister failed for session {session_id}")
+            _safe_unregister(unit, session_id)
         finally:
             unit.session = None
-        logger.info(f"Pipeline {unit.index} released (session {session_id} ended)")
+        recovered = " after quarantine" if session.quarantined_at is not None else ""
+        logger.info(f"Pipeline {unit.index} released{recovered} (session {session_id} ended)")
 
 
 def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
@@ -464,6 +477,17 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                 return {"index": u.index, "state": "idle", "session_id": None}
             if s.released_at is None:
                 return {"index": u.index, "state": "active", "session_id": s.session_id}
+            # Drain wait gave up (quarantine timeout): the unit stays occupied
+            # until SESSION_END actually drains — possibly forever if a handler
+            # thread died. Surfaced distinctly so operators can act on it.
+            if s.quarantined_at is not None:
+                return {
+                    "index": u.index,
+                    "state": "stuck",
+                    "session_id": s.session_id,
+                    "draining_for_s": round(now - s.released_at, 2),
+                    "stuck_for_s": round(now - s.quarantined_at, 2),
+                }
             # released by client but SESSION_END hasn't drained yet → unit
             # is still occupied; surface elapsed time so operators can spot
             # stuck handlers.

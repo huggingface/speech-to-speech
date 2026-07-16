@@ -33,6 +33,11 @@ class SessionState(BaseModel):
     # `None` while the client is still active. Used by /v1/pool to surface stuck
     # units (handlers haven't finished propagating SESSION_END).
     released_at: Optional[float] = None
+    # Wall-clock time when the drain wait gave up and quarantined the unit
+    # (SESSION_END_QUARANTINE_TIMEOUT_S elapsed). The unit stays unclaimable —
+    # its handlers may still emit this session's output — until SESSION_END
+    # actually drains. Reported as "stuck" by /v1/pool.
+    quarantined_at: Optional[float] = None
 
 
 class PipelineUnit(BaseModel):
