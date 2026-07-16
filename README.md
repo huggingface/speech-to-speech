@@ -458,7 +458,7 @@ Language coverage depends on the STT and TTS backends you pick, not on the pipel
 | STT | Parakeet TDT (default) | 25 European languages |
 | STT | Whisper / Whisper MLX / Faster Whisper | Broad multilingual coverage, depending on the selected Whisper checkpoint |
 | STT | Paraformer | Depends on the selected FunASR checkpoint; the default is Chinese-oriented |
-| STT | SenseVoice | 50+ languages, with optional language/emotion/audio-event tags depending on the selected checkpoint |
+| STT | SenseVoiceSmall | Mandarin, Cantonese, English, Japanese, and Korean, with language/emotion/audio-event tags |
 | TTS | Qwen3-TTS (default) | Multilingual, with `--qwen3_tts_language auto` by default |
 | TTS | Kokoro | Multiple language/voice mappings, depending on backend availability |
 | TTS | ChatTTS | English and Chinese |

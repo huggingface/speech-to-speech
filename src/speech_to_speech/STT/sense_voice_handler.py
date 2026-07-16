@@ -23,11 +23,10 @@ class SenseVoiceSTTHandler(BaseSTTHandler):
     """
     Handles Speech To Text using a FunASR SenseVoice model.
 
-    SenseVoice is a non-autoregressive multilingual speech understanding model
-    (50+ languages). Being non-autoregressive it is markedly faster than
-    autoregressive models such as Whisper, which suits low-latency voice agents.
-    This handler returns the transcript; SenseVoice can additionally tag
-    language / emotion / audio events.
+    The default SenseVoiceSmall checkpoint supports Mandarin, Cantonese, English,
+    Japanese, and Korean. Its non-autoregressive architecture is suited to
+    low-latency voice agents. This handler returns the transcript;
+    SenseVoiceSmall can additionally tag language, emotion, and audio events.
     """
 
     def setup(

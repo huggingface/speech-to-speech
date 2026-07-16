@@ -278,6 +278,43 @@ def test_setup_rejects_invalid_faster_backend(monkeypatch):
         handler.setup(Event(), backend="cuda")
 
 
+@pytest.mark.parametrize("faster_backend", ["ggml", "torch"])
+def test_warmup_uses_public_faster_backend_api(faster_backend):
+    calls = []
+    generated = []
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.backend = "faster_qwen3_tts"
+    handler.faster_backend = faster_backend
+    handler.parity_mode = False
+    handler.model = SimpleNamespace(
+        warmup=lambda **kwargs: calls.append(kwargs),
+    )
+    handler._warmup_process = lambda text: generated.append(text) or iter(())
+
+    handler.warmup()
+
+    assert calls == [{"prefill_len": 100}]
+    assert generated == ["Hello, this is a warmup."]
+
+
+def test_warmup_logs_backend_neutral_failure(caplog):
+    def fail_warmup(**_kwargs):
+        raise RuntimeError("boom")
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.backend = "faster_qwen3_tts"
+    handler.faster_backend = "ggml"
+    handler.parity_mode = False
+    handler.model = SimpleNamespace(warmup=fail_warmup)
+    handler._warmup_process = lambda _text: iter(())
+
+    with caplog.at_level(logging.WARNING):
+        handler.warmup()
+
+    assert "Qwen3-TTS backend warmup failed: boom" in caplog.text
+    assert "CUDA graph capture failed" not in caplog.text
+
+
 def test_mlx_helper_methods_use_model_config_and_streaming_conversion():
     handler = object.__new__(Qwen3TTSHandler)
     handler.backend = "mlx"
