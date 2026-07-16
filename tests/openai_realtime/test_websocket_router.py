@@ -760,9 +760,7 @@ class TestDrainRelease:
                 unit.output_queue.put(PipelineControlMessage(SESSION_END.kind, session_id="sess_stale"))
                 time.sleep(0.3)
                 assert not unit.session.drained.is_set()
-                unit.output_queue.put(
-                    PipelineControlMessage(SESSION_END.kind, session_id=unit.session.session_id)
-                )
+                unit.output_queue.put(PipelineControlMessage(SESSION_END.kind, session_id=unit.session.session_id))
                 time.sleep(0.3)
                 assert unit.session.drained.is_set()
 
