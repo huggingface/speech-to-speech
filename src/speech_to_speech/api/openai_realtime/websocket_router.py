@@ -37,10 +37,16 @@ from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 logger = logging.getLogger(__name__)
 MAX_AUDIO_BATCH_BYTES = 6400
 # How long the release path waits for SESSION_END to propagate through the
-# handler chain back to output_queue before clearing unit.session. Tests
-# monkeypatch this to a small value since their fixtures usually skip the
-# real handler chain.
+# handler chain back to output_queue before warning that the unit is stuck.
+# Tests monkeypatch this to a small value since their fixtures usually skip
+# the real handler chain.
 SESSION_END_DRAIN_TIMEOUT_S = 10.0
+# Hard ceiling on the drain wait: past this, the unit is force-released even
+# though SESSION_END never came back (e.g. a wedged handler thread), trading
+# a possible leak of stale output into the next session for restored pool
+# capacity. Stale audio tagged with an old cancel generation is still dropped
+# by the send loop's discard checks.
+SESSION_END_FORCE_RELEASE_TIMEOUT_S = 180.0
 QItem = TypeVar("QItem")
 
 
@@ -73,7 +79,9 @@ async def _send_events(ws: WebSocket, events: list[ServerEvent]) -> None:
 
 
 def _keep_audio_sentinel(item: Any) -> bool:
-    return _is_audio_done(item)
+    # SESSION_END must survive barge-in flushes of output_queue: dropping it
+    # would leave the release path waiting forever for the drain signal.
+    return _is_audio_done(item) or is_control_message(item, SESSION_END.kind)
 
 
 def _keep_user_text_event(item: Any) -> bool:
@@ -225,34 +233,49 @@ def _should_discard_audio(unit: PipelineUnit, item: Any) -> bool:
 
 
 async def _release_unit_after_drain(unit: PipelineUnit, session: Any, session_id: str) -> None:
-    """Wait indefinitely for SESSION_END to propagate, then release the unit.
+    """Wait for SESSION_END to propagate, then release the unit.
 
     Runs in its own asyncio task so the route handler's finally block can return
     immediately. The unit stays unavailable for new claims (unit.session != None)
     until SESSION_END travels all the way through the handler chain back to
     output_queue — observed by the send loop, which sets session.drained.
 
-    Intentionally has no timeout-fallback release. If a handler (e.g. an LM HTTP
-    call) is still busy past SESSION_END_DRAIN_TIMEOUT_S, releasing the unit
-    would let a new client claim it while stale output from the previous session
-    is still in flight — that output would be dispatched under the new session.
-    We accept reduced pool capacity over a cross-session leak; operators can see
-    stuck units in `/v1/pool` (long `released_at` age).
+    If the chain is still busy past SESSION_END_FORCE_RELEASE_TIMEOUT_S (e.g. a
+    wedged or dead handler thread), the unit is force-released anyway so the pool
+    doesn't lose capacity permanently. The next claim's _clean_unit flush plus the
+    session_id tag on SESSION_END (the send loop ignores a late one from another
+    session) keep the previous session's leftovers from being mistaken for the
+    new session's state; operators can spot force releases in the logs and slow
+    drains in `/v1/pool` (long `released_at` age).
     """
     elapsed = 0.0
     warned = False
-    while not session.drained.is_set():
-        await asyncio.sleep(0.05)
-        elapsed += 0.05
-        if not warned and elapsed >= SESSION_END_DRAIN_TIMEOUT_S:
-            logger.warning(
-                f"Pipeline {unit.index}: SESSION_END not drained after {elapsed:.1f}s — "
-                f"unit will remain unavailable until handlers finish (session {session_id})"
-            )
-            warned = True
-    unit.service.unregister(session_id)
-    unit.session = None
-    logger.info(f"Pipeline {unit.index} released (session {session_id} ended)")
+    try:
+        while not session.drained.is_set():
+            await asyncio.sleep(0.05)
+            elapsed += 0.05
+            if not warned and elapsed >= SESSION_END_DRAIN_TIMEOUT_S:
+                logger.warning(
+                    f"Pipeline {unit.index}: SESSION_END not drained after {elapsed:.1f}s — "
+                    f"unit will remain unavailable until handlers finish (session {session_id})"
+                )
+                warned = True
+            if elapsed >= SESSION_END_FORCE_RELEASE_TIMEOUT_S:
+                logger.error(
+                    f"Pipeline {unit.index}: SESSION_END still not drained after {elapsed:.0f}s — "
+                    f"force-releasing unit; stale output from session {session_id} may still be in flight"
+                )
+                break
+    finally:
+        # Release unconditionally: even if unregister raises (or the task is
+        # cancelled at shutdown), the unit must not stay claimed forever.
+        try:
+            unit.service.unregister(session_id)
+        except Exception:
+            logger.exception(f"Pipeline {unit.index}: unregister failed for session {session_id}")
+        finally:
+            unit.session = None
+        logger.info(f"Pipeline {unit.index} released (session {session_id} ended)")
 
 
 def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
@@ -278,6 +301,10 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                     pass
 
     app = FastAPI(lifespan=lifespan)
+
+    # Strong references to in-flight drain-and-release tasks (asyncio only
+    # holds tasks weakly); each task removes itself on completion.
+    release_tasks: set[asyncio.Task[None]] = set()
 
     def _claim_unit(ws: WebSocket) -> PipelineUnit | None:
         """Atomically (between asyncio yield points) reserve the first idle unit.
@@ -310,17 +337,20 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
             return
 
         pipeline_log_ctx.set(unit.index)
-        session_id = unit.service.register()
         # _claim_unit guarantees unit.session is not None for the returned unit.
         assert unit.session is not None
-        unit.session.session_id = session_id
-        logger.info(f"Client connected to pipeline {unit.index} (session {session_id})")
-
-        # Defensive: drain edge queues and reset events so stale data from a
-        # previous session that survived SESSION_END propagation doesn't leak.
-        _clean_unit(unit)
-
+        # Everything after the claim runs inside try so the finally below always
+        # releases the unit, even if session setup fails.
+        session_id = ""
         try:
+            session_id = unit.service.register()
+            unit.session.session_id = session_id
+            logger.info(f"Client connected to pipeline {unit.index} (session {session_id})")
+
+            # Defensive: drain edge queues and reset events so stale data from a
+            # previous session that survived SESSION_END propagation doesn't leak.
+            _clean_unit(unit)
+
             await _send_event(ws, unit.service.build_session_created(session_id))
 
             while not stop_event.is_set():
@@ -391,12 +421,17 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
             if old_session is not None:
                 old_session.released_at = time.monotonic()
             _clean_unit(unit)
-            unit.input_queue.put(SESSION_END)
+            # Tag SESSION_END with this session's id so that, after a force
+            # release, a late arrival can't satisfy the next session's drain.
+            unit.input_queue.put(PipelineControlMessage(SESSION_END.kind, session_id=session_id))
             # Spawn the drain-and-release as a separate task so the route handler's
             # finally returns immediately. Awaiting here is unreliable: after
             # WebSocketDisconnect propagates, subsequent awaits in the same task
             # can be skipped/cancelled by Starlette's runner and never resume.
-            asyncio.create_task(_release_unit_after_drain(unit, old_session, session_id))
+            # asyncio holds tasks weakly — keep a reference until it completes.
+            task = asyncio.create_task(_release_unit_after_drain(unit, old_session, session_id))
+            release_tasks.add(task)
+            task.add_done_callback(release_tasks.discard)
 
     @app.get("/v1/usage")
     async def usage_endpoint() -> dict[str, Any]:
@@ -543,9 +578,12 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
 
                     # SESSION_END travels from input_queue through every handler to
                     # output_queue. Observing it here means the chain has fully reset;
-                    # signal the release path so it can clear unit.session.
+                    # signal the release path so it can clear unit.session. A tag from
+                    # another session means the emitting session was force-released —
+                    # its late SESSION_END must not stand in for this session's drain.
                     if is_control_message(audio_chunk, SESSION_END.kind):
-                        if session is not None:
+                        chunk_session_id = getattr(audio_chunk, "session_id", None)
+                        if session is not None and chunk_session_id in (None, session.session_id):
                             session.drained.set()
                             logger.debug(f"Pipeline {unit.index}: SESSION_END drained")
                         continue
