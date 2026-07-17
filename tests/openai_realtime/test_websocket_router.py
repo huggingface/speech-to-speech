@@ -36,8 +36,10 @@ def short_drain_timeout(monkeypatch):
     """Shorten the SESSION_END drain warning threshold so tests don't wait 10s.
 
     The constant only controls when the release task logs a warning about a
-    slow-draining unit — there is no longer a release-anyway timeout, so the
-    unit stays unavailable until SESSION_END actually drains.
+    slow-draining unit. The quarantine timeout
+    (SESSION_END_QUARANTINE_TIMEOUT_S) is left at its real value so units
+    stay unavailable until SESSION_END actually drains; tests that exercise the
+    quarantine shorten it themselves.
     """
     monkeypatch.setattr(router_module, "SESSION_END_DRAIN_TIMEOUT_S", 0.1)
 
@@ -714,6 +716,97 @@ class TestCleanup:
         assert cancel_scope.generation == 2
         assert not response_playing.is_set()
         assert text_output_queue.empty()
+
+
+# ===================================================================
+# Drain / release robustness
+# ===================================================================
+
+
+class TestDrainRelease:
+    def test_barge_in_flush_preserves_session_end(self):
+        """The output_queue flush on barge-in must not swallow an in-flight
+        SESSION_END — losing it would leave the release task waiting forever."""
+        q: Queue = Queue()
+        q.put(_pcm_bytes(10))
+        q.put(PipelineControlMessage(SESSION_END.kind, session_id="sess_a"))
+        q.put(_pcm_bytes(10))
+        router_module._flush_queue(q, preserve=router_module._keep_audio_sentinel)
+        assert is_control_message(q.get_nowait(), SESSION_END.kind)
+        assert q.empty()
+
+    def test_quarantine_keeps_unit_unclaimable_when_session_end_never_drains(self, setup, monkeypatch):
+        """With no handler chain, SESSION_END never reaches output_queue; past
+        the quarantine timeout the session is unregistered (no more chat
+        mutation or billing) but the unit must NOT become claimable — its
+        handlers could still emit the old session's output."""
+        monkeypatch.setattr(router_module, "SESSION_END_QUARANTINE_TIMEOUT_S", 0.2)
+        app, service, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+            time.sleep(0.8)
+            assert len(service._conns) == 0
+            pool = client.get("/v1/pool").json()
+            assert pool["in_use"] == 1
+            assert pool["units"][0]["state"] == "stuck"
+            assert pool["units"][0]["stuck_for_s"] >= 0
+            with client.websocket_connect("/v1/realtime") as ws2:
+                msg = ws2.receive_json()
+                assert msg["type"] == "error"
+                assert msg["error"]["type"] == "session_limit_reached"
+
+    def test_quarantined_unit_returns_to_pool_after_late_drain(self, setup, monkeypatch):
+        """If SESSION_END eventually drains after the quarantine kicked in, the
+        chain has proven itself clean and the unit becomes claimable again."""
+        monkeypatch.setattr(router_module, "SESSION_END_QUARANTINE_TIMEOUT_S", 0.2)
+        app, service, input_queue, output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+            time.sleep(0.8)
+            assert client.get("/v1/pool").json()["units"][0]["state"] == "stuck"
+            # Late drain: the wedged "handler chain" finally forwards SESSION_END.
+            _simulate_session_end_drain(input_queue, output_queue)
+            time.sleep(0.3)
+            assert client.get("/v1/pool").json()["in_use"] == 0
+            with client.websocket_connect("/v1/realtime") as ws2:
+                assert ws2.receive_json()["type"] == "session.created"
+
+    def test_stale_session_end_does_not_satisfy_next_sessions_drain(self):
+        """A SESSION_END tagged with a force-released session's id must not set
+        `drained` for the session that claimed the unit afterwards."""
+        unit = _make_unit(0)
+        app = create_app(pool=[unit], stop_event=ThreadingEvent())
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                assert unit.session is not None
+                unit.output_queue.put(PipelineControlMessage(SESSION_END.kind, session_id="sess_stale"))
+                time.sleep(0.3)
+                assert not unit.session.drained.is_set()
+                unit.output_queue.put(PipelineControlMessage(SESSION_END.kind, session_id=unit.session.session_id))
+                time.sleep(0.3)
+                assert unit.session.drained.is_set()
+
+    def test_register_failure_still_releases_unit(self, setup, monkeypatch):
+        """An exception during session setup (after the claim) must not leak the
+        slot: the finally still enqueues SESSION_END and spawns the release task."""
+        app, service, input_queue, output_queue, *_ = setup
+
+        def _boom():
+            raise RuntimeError("register failed")
+
+        monkeypatch.setattr(service, "register", _boom)
+        with TestClient(app) as client:
+            try:
+                with client.websocket_connect("/v1/realtime"):
+                    pass
+            except Exception:
+                pass
+            _simulate_session_end_drain(input_queue, output_queue)
+            time.sleep(0.3)
+            assert client.get("/v1/pool").json()["in_use"] == 0
 
 
 # ===================================================================

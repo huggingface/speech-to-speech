@@ -43,6 +43,9 @@ from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
 
 logger = logging.getLogger(__name__)
 
+# About 18–24 seconds of default SDK backoff before warmup fails.
+WARMUP_MAX_RETRIES = 6
+
 
 # ── Normalised provider events ────────────────────────────────────────────────
 # Each backend's stream/response is mapped to this small vocabulary so the shared
