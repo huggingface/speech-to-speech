@@ -526,9 +526,7 @@ class TestWebRTCLoopback:
                 )
                 assert missing.status_code == 404
 
-                hangup = await client.delete(
-                    f"http://127.0.0.1:{server_env.port}{location}", timeout=10.0
-                )
+                hangup = await client.delete(f"http://127.0.0.1:{server_env.port}{location}", timeout=10.0)
                 assert hangup.status_code == 200
         finally:
             await pc.close()
