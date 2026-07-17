@@ -98,7 +98,7 @@ Install notes for Linux GGML:
 - If that wheel does not match your CUDA runtime, install one of the Hugging Face wheelhouse builds before installing `speech-to-speech`.
 
 ```bash
-pip install "qwentts-cpp-python==0.3.0+cu130" \
+pip install "qwentts-cpp-python==0.3.1+cu130" \
   -f https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/tree/main/whl/cu130
 pip install speech-to-speech
 ```
