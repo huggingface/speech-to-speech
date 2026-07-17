@@ -10,12 +10,13 @@ short_description: Voice chat over WebSocket against a HF speech-to-speech
 hf_oauth: true
 ---
 
-# Realtime Voice Demo (WebSocket transport)
+# Realtime Voice Demo
 
 Browser voice-chat UI for the
 [huggingface/speech-to-speech](https://github.com/huggingface/speech-to-speech)
-backend. The browser streams mic audio over a WebSocket using the OpenAI
-Realtime **GA** protocol and plays back the assistant's audio as it arrives.
+backend, speaking the OpenAI Realtime **GA** protocol over **WebSocket**
+(default) or **WebRTC** (Settings → Transport, env-pinned deploys only — see
+[WebRTC transport](#webrtc-transport)).
 
 ## Quick start (local)
 
@@ -80,6 +81,46 @@ websocat ws://localhost:8765/v1/realtime
 The backend exposes one concurrent session per pipeline unit
 (`--num_pipelines` to serve more).
 
+## WebRTC transport
+
+With `SPEECH_TO_SPEECH_URL` set, **Settings → Transport** offers WebRTC as an
+alternative to the WebSocket. Same conversation, different plumbing:
+
+1. The browser adds its mic track and an `oai-events` data channel to an
+   `RTCPeerConnection` and POSTs the SDP offer to the same-origin
+   `/api/calls` proxy, which forwards it to the backend's
+   `POST /v1/realtime/calls` (the OpenAI GA handshake). The proxy exists
+   because the s2s server has no CORS middleware — and it forwards **only**
+   to the env-pinned URL, never to a client-supplied one, so it can't be used
+   as an open proxy. That's why the toggle is locked to WebSocket when the
+   URL isn't pinned (user-typed URLs, LB mode).
+2. Only the handshake goes through the proxy: the negotiated audio (Opus RTP
+   both ways) and the data channel flow directly browser ↔ backend.
+3. JSON events on the data channel are the same GA protocol as the WebSocket,
+   minus the audio: mic audio rides the media track (never
+   `input_audio_buffer.append`, which the backend rejects over WebRTC), and
+   the assistant's voice arrives as a remote audio track (never
+   `response.output_audio.delta`). Barge-in flushing is server-side.
+
+Backend requirement: the `webrtc` extra
+(`pip install "speech-to-speech[webrtc]"`), otherwise `/v1/realtime/calls`
+answers 501 and the handshake fails with a clear message.
+
+Caveats vs. WebSocket:
+
+- **NAT**: host ICE candidates only by default — fine when browser and backend
+  are on the same machine/LAN. Across the internet, set `RTC_ICE_SERVERS` on
+  *this* app (a JSON list of `RTCIceServer` dicts, or comma-separated
+  STUN/TURN URLs; served to the browser via `/api/config`) and
+  `SPEECH_TO_SPEECH_ICE_SERVERS` on the backend. There is no TURN relay
+  fallback, so symmetric-NAT setups may still not connect.
+- **Noise gate**: implemented in the WebSocket capture worklet, so it's
+  hidden on WebRTC — the raw mic track (with the browser's own
+  `noiseSuppression`) is sent instead.
+- **Camera snapshots** are re-encoded to fit one data-channel message
+  (~60 KB), so the model may see a smaller frame than over WebSocket.
+- **Load-balancer mode is WebSocket-only** for now.
+
 ## Connecting to a backend
 
 Three modes, picked by env (`/api/config` tells the client which one is active):
@@ -98,12 +139,12 @@ Three modes, picked by env (`/api/config` tells the client which one is active):
   and the browser dials the per-session compute URL the LB hands back. The LB
   address never reaches the browser; the Settings URL field is hidden.
 
-| `SPEECH_TO_SPEECH_URL` | `LOAD_BALANCER_URL` | `SPACE_ID` | Connection | URL field | Metering |
-|:---:|:---:|:---:|---|---|---|
-| ✅ | any | any | direct → pinned URL | visible, locked | off |
-| – | – | any | direct → user URL | editable | off |
-| – | ✅ | ✅ | LB proxy | hidden | **on** |
-| – | ✅ | – | LB proxy | hidden | off |
+| `SPEECH_TO_SPEECH_URL` | `LOAD_BALANCER_URL` | `SPACE_ID` | Connection | URL field | Transport | Metering |
+|:---:|:---:|:---:|---|---|---|---|
+| ✅ | any | any | direct → pinned URL | visible, locked | WS or WebRTC | off |
+| – | – | any | direct → user URL | editable | WS only | off |
+| – | ✅ | ✅ | LB proxy | hidden | WS only | **on** |
+| – | ✅ | – | LB proxy | hidden | WS only | off |
 
 **Settings → Restart** reconnects with the current voice, instructions and URL.
 
@@ -145,11 +186,12 @@ case-insensitively against the user's organisations from HF OAuth.
 | Key | What |
 |-----|------|
 | Speech-to-speech server URL | Direct realtime WebSocket URL (hidden/locked when pinned by env) |
+| Transport | WebSocket (default) or WebRTC; selectable only with an env-pinned URL |
 | Voice | Qwen3-TTS speaker name (Aiden, Ryan, Dylan, Eric, Ono_Anna, Serena, Sohee, Uncle_Fu, Vivian) |
-| Instructions | System prompt sent in `session.update` once the WS opens |
+| Instructions | System prompt sent in `session.update` once the connection opens |
 
-LocalStorage keys are namespaced `s2s.ws.*` so this app's settings do
-NOT collide with the WebRTC variant.
+LocalStorage keys are namespaced `s2s.ws.*` (plus `s2s.transport` for the
+transport pick).
 
 ## Files
 
@@ -163,6 +205,7 @@ NOT collide with the WebRTC variant.
 | `auth.py` | HF OAuth + per-request identity (tier, hashed keys) |
 | `limiter.py` | SQLite per-day talk-time budget (chunked server-clock reservation) |
 | `ws/s2s-ws-client.js` | WebSocket handshake + OpenAI Realtime GA protocol |
+| `rtc/s2s-rtc-client.js` | WebRTC sibling: SDP handshake via `/api/calls`, events over the data channel, track audio |
 | `ws/codec.js` | base64 <-> PCM helpers + transcript extraction (pure) |
 | `ws/orb-visualizer.js` | `OrbVisualiser`: FFT bands -> orb CSS custom properties |
 | `worklets/mic-capture.js` | AudioWorklet: 48 kHz Float32 -> 16 kHz Int16 PCM, posts ~40 ms chunks |
