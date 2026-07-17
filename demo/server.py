@@ -84,11 +84,11 @@ LIMITER_ENABLED = bool(LOAD_BALANCER_URL) and bool(SPACE_ID)
 def _parse_ice_servers(raw: str) -> list:
     """ICE servers for the browser's RTCPeerConnection, from RTC_ICE_SERVERS.
 
-    Accepts either a JSON list of RTCIceServer dicts (same format as the s2s
+    Accepts a JSON list of RTCIceServer dicts (same format as the s2s
     server's SPEECH_TO_SPEECH_ICE_SERVERS, e.g.
-    ``[{"urls": "turn:t.example.com", "username": "u", "credential": "c"}]``)
-    or a plain comma-separated list of STUN/TURN URLs. Empty when unset —
-    host candidates only, which is fine for local use."""
+    ``[{"urls": "turn:t.example.com", "username": "u", "credential": "c"}]``),
+    a single such dict, or a plain comma-separated list of STUN/TURN URLs.
+    Empty when unset — host candidates only, which is fine for local use."""
     raw = raw.strip()
     if not raw:
         return []
@@ -96,6 +96,8 @@ def _parse_ice_servers(raw: str) -> list:
         data = json.loads(raw)
         if isinstance(data, list):
             return data
+        if isinstance(data, dict):
+            return [data]
     except ValueError:
         pass
     return [{"urls": u.strip()} for u in raw.split(",") if u.strip()]

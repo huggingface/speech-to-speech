@@ -500,6 +500,40 @@ class TestWebRTCLoopback:
         finally:
             await pc.close()
 
+    async def test_delete_location_hangs_up(self, server_env):
+        """DELETE on the Location URL advertised by the 201 releases the unit;
+        an unknown call id answers 404."""
+        pc = RTCPeerConnection()
+        try:
+            pc.createDataChannel("oai-events")
+            pc.addTrack(AudioStreamTrack())
+            offer = await pc.createOffer()
+            await pc.setLocalDescription(offer)
+
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"http://127.0.0.1:{server_env.port}/v1/realtime/calls",
+                    content=pc.localDescription.sdp,
+                    headers={"Content-Type": "application/sdp"},
+                    timeout=10.0,
+                )
+                assert resp.status_code == 201
+                location = resp.headers["location"]
+
+                missing = await client.delete(
+                    f"http://127.0.0.1:{server_env.port}/v1/realtime/calls/no-such-call",
+                    timeout=10.0,
+                )
+                assert missing.status_code == 404
+
+                hangup = await client.delete(
+                    f"http://127.0.0.1:{server_env.port}{location}", timeout=10.0
+                )
+                assert hangup.status_code == 200
+        finally:
+            await pc.close()
+        await _wait_for_release(server_env)
+
     async def test_invalid_offer_releases_unit(self, server_env):
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -514,13 +548,14 @@ class TestWebRTCLoopback:
     async def test_setup_failure_releases_unit(self, server_env, monkeypatch):
         """A failure between claiming the unit and negotiate() (e.g. peer
         connection construction) must release the unit, not leak it."""
-        import speech_to_speech.api.openai_realtime.webrtc_session as webrtc_module
+        import speech_to_speech.api.openai_realtime.websocket_router as router_module
 
         def _boom():
             raise RuntimeError("boom")
 
-        # The calls endpoint imports this at request time, so the patch takes.
-        monkeypatch.setattr(webrtc_module, "rtc_configuration_from_env", _boom)
+        # The calls endpoint uses the router's module-level binding (imported
+        # eagerly at load), so that's the name to patch.
+        monkeypatch.setattr(router_module, "rtc_configuration_from_env", _boom)
 
         pc = RTCPeerConnection()
         try:

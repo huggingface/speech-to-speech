@@ -613,7 +613,14 @@ export class S2sRtcRealtimeClient extends EventTarget {
     const state = this._pc?.connectionState;
     if (this._debug) console.debug(`[rtc] connection state: ${state}`);
     if (this._closed) return;
-    if (state === "failed" || state === "disconnected") {
+    if (state === "disconnected") {
+      // Transient: browsers fire this on brief packet loss and usually recover
+      // to "connected" on their own; the terminal state is "failed", which
+      // fires this handler again if recovery doesn't happen.
+      console.warn("[rtc] connection disconnected — waiting for recovery or failure");
+      return;
+    }
+    if (state === "failed") {
       if (this._status === "closed" || this._status === "error") return;
       this.dispatchEvent(
         new CustomEvent("error", { detail: { error: new Error(`WebRTC connection ${state}`) } }),

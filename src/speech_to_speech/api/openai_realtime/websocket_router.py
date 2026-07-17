@@ -42,6 +42,22 @@ from speech_to_speech.pipeline.events import (
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
 
+# aiortc (the 'webrtc' extra) is optional. Import it here, at module load,
+# rather than lazily in the calls endpoint: the av/cryptography C extensions
+# take up to a second to load cold, which would block the shared event loop —
+# and every live conversation's audio — on the first WebRTC handshake.
+try:
+    from aiortc import RTCPeerConnection
+
+    from speech_to_speech.api.openai_realtime.webrtc_session import (
+        WebRTCSession,
+        rtc_configuration_from_env,
+    )
+
+    WEBRTC_AVAILABLE = True
+except ImportError:
+    WEBRTC_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 MAX_AUDIO_BATCH_BYTES = 6400
 # How long the release path waits for SESSION_END to propagate through the
@@ -491,14 +507,7 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
         events flow over the 'oai-events' data channel using the same JSON
         protocol as the WebSocket transport.
         """
-        try:
-            from aiortc import RTCPeerConnection
-
-            from speech_to_speech.api.openai_realtime.webrtc_session import (
-                WebRTCSession,
-                rtc_configuration_from_env,
-            )
-        except ImportError:
+        if not WEBRTC_AVAILABLE:
             return Response(
                 content="WebRTC support requires the 'webrtc' extra: pip install 'speech-to-speech[webrtc]'",
                 status_code=501,
@@ -528,14 +537,21 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
             )
 
         pipeline_log_ctx.set(unit.index)
-        session_id = unit.service.register()
-        assert unit.session is not None
-        unit.session.session_id = session_id
-        logger.info(f"WebRTC client claiming pipeline {unit.index} (session {session_id})")
+        try:
+            session_id = unit.service.register()
+            assert unit.session is not None
+            unit.session.session_id = session_id
+            logger.info(f"WebRTC client claiming pipeline {unit.index} (session {session_id})")
 
-        # Defensive: drain edge queues and reset events so stale data from a
-        # previous session that survived SESSION_END propagation doesn't leak.
-        _clean_unit(unit)
+            # Defensive: drain edge queues and reset events so stale data from a
+            # previous session that survived SESSION_END propagation doesn't leak.
+            _clean_unit(unit)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"WebRTC call setup failed (pipeline {unit.index}): {type(e).__name__}: {e}")
+            # No transport or drain task exists yet, so undoing the claim
+            # directly is the whole release.
+            unit.session = None
+            return Response(content="WebRTC session setup failed", status_code=500, media_type="text/plain")
 
         released = False
 
@@ -604,6 +620,26 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
             media_type="application/sdp",
             headers={"Location": f"/v1/realtime/calls/{session_id}"},
         )
+
+    @app.delete("/v1/realtime/calls/{call_id}")
+    async def webrtc_hangup_endpoint(call_id: str) -> Response:
+        """Hang up a WebRTC call — the Location URL advertised by the POST above."""
+        for unit in pool:
+            session = unit.session
+            if (
+                session is None
+                or session.session_id != call_id
+                or session.released_at is not None
+                or session.transport is None
+                or session.transport.kind != "webrtc"
+            ):
+                continue
+            logger.info(f"WebRTC call {call_id} hung up via DELETE (pipeline {unit.index})")
+            # close() fires the session's on_closed callback, which releases
+            # the unit exactly once (idempotent with aiortc's own callbacks).
+            await session.transport.close()
+            return Response(status_code=200)
+        return Response(content="Unknown call", status_code=404, media_type="text/plain")
 
     async def _send_loop_for(unit: PipelineUnit) -> None:
         """Per-pipeline send loop. Polls this unit's output queues and forwards

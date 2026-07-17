@@ -27,6 +27,7 @@ import numpy as np
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import MediaStreamError, MediaStreamTrack
 
+from speech_to_speech.api.openai_realtime.service import PIPELINE_SAMPLE_RATE
 from speech_to_speech.api.openai_realtime.transports import SessionTransport
 
 if TYPE_CHECKING:
@@ -34,7 +35,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-PIPELINE_SAMPLE_RATE = 16_000
 WEBRTC_SAMPLE_RATE = 48_000
 AUDIO_PTIME = 0.02  # 20 ms frames
 WEBRTC_FRAME_SAMPLES = int(WEBRTC_SAMPLE_RATE * AUDIO_PTIME)
