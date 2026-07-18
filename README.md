@@ -104,15 +104,15 @@ On Linux, the Qwen3-TTS GGML backend comes from `faster-qwen3-tts[ggml]`. Its de
 
 ```bash
 # CUDA 13.x
-pip install "qwentts-cpp-python==0.3.0+cu130" \
+pip install "qwentts-cpp-python==0.3.1+cu130" \
   -f https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/tree/main/whl/cu130
 
 # CUDA 12.4
-pip install "qwentts-cpp-python==0.3.0+cu124" \
+pip install "qwentts-cpp-python==0.3.1+cu124" \
   -f https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/tree/main/whl/cu124
 
 # CPU-only fallback
-pip install "qwentts-cpp-python==0.3.0+cpu" \
+pip install "qwentts-cpp-python==0.3.1+cpu" \
   -f https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/tree/main/whl/cpu
 
 pip install speech-to-speech
