@@ -86,6 +86,67 @@ class TokenUsageEvent(PipelineEvent):
     turn_revision: int | None = None
 
 
+# ── s2mlt translation events ─────────────────────────────────────────
+#
+# Events for the speech → multi-language-translation-text pipeline
+# (``s2mlt.py``). One VAD turn == one translated segment; clients key on
+# ``turn_id`` and treat a higher ``turn_revision`` (a reopened segment) or a
+# newer event for the same key as an upsert of that segment.
+
+
+class InputTranscriptionDeltaEvent(PipelineEvent):
+    """Live transcription snapshot for a segment.
+
+    ``text`` is the full transcription of the segment so far (a snapshot, not
+    an append-only delta); the client replaces the segment's text with it.
+    """
+
+    type: Literal["input.transcription.delta"] = "input.transcription.delta"
+    text: str
+    turn_id: str | None = None
+    turn_revision: int | None = None
+
+
+class InputTranscriptionDoneEvent(PipelineEvent):
+    """Final transcription for a segment (may be empty for discarded noise)."""
+
+    type: Literal["input.transcription.done"] = "input.transcription.done"
+    text: str
+    language_code: Optional[str] = None
+    turn_id: str | None = None
+    turn_revision: int | None = None
+
+
+class TranslationDeltaEvent(PipelineEvent):
+    """Streaming snapshot of the structured translation for a segment.
+
+    ``translations`` maps target language code → translation-so-far;
+    ``corrected`` is the cleaned-up input transcript. Fields fill in as the
+    model streams; each event supersedes the previous one for the segment.
+    """
+
+    type: Literal["translation.delta"] = "translation.delta"
+    corrected: str = ""
+    translations: dict[str, str] = Field(default_factory=dict)
+    turn_id: str | None = None
+    turn_revision: int | None = None
+
+
+class TranslationDoneEvent(PipelineEvent):
+    """Final structured translation for a segment.
+
+    ``error`` is set (with empty payload fields) when generation failed or the
+    model output could not be parsed.
+    """
+
+    type: Literal["translation.done"] = "translation.done"
+    corrected: str = ""
+    translations: dict[str, str] = Field(default_factory=dict)
+    turn_id: str | None = None
+    turn_revision: int | None = None
+    error: str | None = None
+
+
 class ResponseFailedEvent(PipelineEvent):
     """Signals that a response could not be generated (e.g. invalid out-of-band input).
 
