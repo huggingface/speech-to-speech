@@ -21,10 +21,27 @@ SPEECHABLE_PATTERN = re.compile(
 )
 
 
+_MARKDOWN_PATTERNS = [
+    (re.compile(r"```.*?```", re.DOTALL), ""),       # fenced code blocks
+    (re.compile(r"\*\*(.+?)\*\*"), r"\1"),            # bold
+    (re.compile(r"__(.+?)__"), r"\1"),               # bold (underscore)
+    (re.compile(r"`([^`]+?)`"), r"\1"),               # inline code
+    (re.compile(r"\*(.+?)\*"), r"\1"),               # italic
+    (re.compile(r"_(.+?)_"), r"\1"),                 # italic (underscore)
+    (re.compile(r"(?m)^\s{0,3}#{1,6}\s+"), ""),       # headings
+    (re.compile(r"(?m)^\s{0,3}[-*+]\s+"), ""),        # bullet markers
+]
+
+
 def remove_unspeechable(text: str) -> str:
     """Keep only speechable characters: letters, digits, punctuation, whitespace.
-    support unicode characters (english, arabic, chinese, japanese, korean, etc.)
+
+    Markdown formatting is stripped first (keeping the enclosed text) so the TTS
+    engine does not voice formatting symbols such as asterisks, hashes, or backticks.
+    Supports unicode characters (english, arabic, chinese, japanese, korean, etc.)
     """
+    for pattern, replacement in _MARKDOWN_PATTERNS:
+        text = pattern.sub(replacement, text)
     text = text.translate(SMART_PUNCT_TRANSLATION)
     return SPEECHABLE_PATTERN.sub("", text)
 
