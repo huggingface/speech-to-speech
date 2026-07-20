@@ -55,6 +55,24 @@ backend, speaking the OpenAI Realtime **GA** protocol over **WebSocket**
    docker run -p 7860:7860 -e SPEECH_TO_SPEECH_URL=ws://host.docker.internal:8765/v1/realtime s2s-demo
    ```
 
+   > **Docker + host backend: WebSocket and WebRTC need different hostnames.**
+   > The two transports dial the backend from different network namespaces:
+   >
+   > - **WebRTC** is dialed **server-side** — the browser POSTs its SDP offer to
+   >   the demo's `/api/calls` proxy, which forwards it from *inside the
+   >   container*. There `host.docker.internal` resolves to your host, so the
+   >   command above works.
+   > - **WebSocket** is dialed **client-side** — the demo hands the URL straight
+   >   to the browser, which opens the socket itself. The browser runs on your
+   >   *host*, where `host.docker.internal` is not a real DNS name, so the
+   >   connection never reaches the backend and the server logs nothing.
+   >
+   > A single Docker `SPEECH_TO_SPEECH_URL` can therefore only make one transport
+   > work at a time (`localhost:8765` for WebSocket, `host.docker.internal:8765`
+   > for WebRTC). To exercise **both** without swapping the env, run the demo
+   > **without Docker** (the `uvicorn` command above) so host and container
+   > namespaces collapse — then `ws://localhost:8765/v1/realtime` works for both.
+
 3. Open <http://localhost:7860/>, click the orb, allow the mic, talk.
 
 > Browsers require **HTTPS or `localhost`** for `getUserMedia()` (mic + camera).
