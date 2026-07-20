@@ -23,9 +23,10 @@ disabled entirely (no session proxy, no queue, no metering, no sign-in) and the
 browser connects directly to that URL, shown read-only in Settings.
 
 Endpoints:
-  GET  /api/config           -> { search, lb, allowDirect, s2sUrl, auth }
+  GET  /api/config           -> { search, lb, allowDirect, s2sUrl, rtc, iceServers, auth }
   GET  /api/me               -> login + tier + remaining budget (LB mode only)
   POST /api/search           -> { results, answer }  Google via Serper.dev
+  POST /api/calls            -> proxies the WebRTC SDP offer to <s2s>/v1/realtime/calls
   POST /api/session          -> proxies <LB>/session: a grant, or a queue ticket
   GET  /api/queue/{id}       -> proxies <LB>/queue/{id}: position, or a grant on claim
   DELETE /api/queue/{id}     -> leave the queue (explicit "Leave queue" button)
@@ -41,17 +42,18 @@ the moment a slot is actually claimed (a grant), never while queued.
 """
 
 import asyncio
+import json
 import logging
 import os
+from urllib.parse import urlsplit, urlunsplit
 
+import auth
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+import limiter
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-
-import auth
-import limiter
 
 logger = logging.getLogger("s2s.search")
 
@@ -77,6 +79,48 @@ if SPEECH_TO_SPEECH_URL:
 # but nothing is metered: no budget, no reservations, no sign-in gating.
 SPACE_ID = os.environ.get("SPACE_ID", "").strip()
 LIMITER_ENABLED = bool(LOAD_BALANCER_URL) and bool(SPACE_ID)
+
+
+def _parse_ice_servers(raw: str) -> list:
+    """ICE servers for the browser's RTCPeerConnection, from RTC_ICE_SERVERS.
+
+    Accepts a JSON list of RTCIceServer dicts (same format as the s2s
+    server's SPEECH_TO_SPEECH_ICE_SERVERS, e.g.
+    ``[{"urls": "turn:t.example.com", "username": "u", "credential": "c"}]``),
+    a single such dict, or a plain comma-separated list of STUN/TURN URLs.
+    Empty when unset — host candidates only, which is fine for local use."""
+    raw = raw.strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return [data]
+    except ValueError:
+        pass
+    return [{"urls": u.strip()} for u in raw.split(",") if u.strip()]
+
+
+RTC_ICE_SERVERS = _parse_ice_servers(os.environ.get("RTC_ICE_SERVERS", ""))
+
+
+def _webrtc_calls_url(s2s_url: str) -> str:
+    """Derive the WebRTC handshake URL from the pinned realtime URL.
+
+    ``ws://host:port/v1/realtime`` -> ``http://host:port/v1/realtime/calls``
+    (ws->http, wss->https; a bare host gets the default /v1/realtime path,
+    mirroring the client's buildDirectWsUrl normalisation)."""
+    s = s2s_url.strip()
+    if not s.startswith(("ws://", "wss://", "http://", "https://")):
+        s = "http://" + s
+    parts = urlsplit(s)
+    scheme = {"ws": "http", "wss": "https"}.get(parts.scheme, parts.scheme)
+    path = parts.path if parts.path not in ("", "/") else "/v1/realtime"
+    return urlunsplit((scheme, parts.netloc, path.rstrip("/") + "/calls", parts.query, ""))
+
+
 SERPER_URL = "https://google.serper.dev/search"
 # Cap results so the tool output stays small enough to feed back to the model.
 MAX_RESULTS = 5
@@ -127,6 +171,11 @@ def config():
         # Deploy-pinned direct s2s URL (empty when unset). Not a secret: the
         # browser dials it itself, and Settings shows it locked.
         "s2sUrl": SPEECH_TO_SPEECH_URL,
+        # WebRTC transport availability: the /api/calls proxy only forwards to
+        # the env-pinned URL (never a client-supplied one), so the toggle is
+        # offered exactly when that URL exists.
+        "rtc": bool(SPEECH_TO_SPEECH_URL),
+        "iceServers": RTC_ICE_SERVERS,
         "auth": AUTH_ENABLED,
     }
 
@@ -212,6 +261,46 @@ async def search(req: SearchRequest):
         answer = kg.get("description") or None
 
     return JSONResponse({"query": query, "answer": answer, "results": results})
+
+
+@app.post("/api/calls")
+async def calls(request: Request):
+    """Proxy the WebRTC SDP handshake to the pinned s2s server.
+
+    The browser can't POST /v1/realtime/calls cross-origin (the s2s server has
+    no CORS middleware, and an application/sdp POST is preflighted), so it
+    posts the offer here and we forward it server-side. Only the signaling hop
+    goes through this proxy — the negotiated audio/data-channel media flows
+    directly between the browser and the s2s server.
+
+    Deliberately forwards ONLY to SPEECH_TO_SPEECH_URL: honouring a
+    client-supplied target would make this an open proxy (SSRF). No env pin,
+    no WebRTC — the client keeps such setups on the WebSocket transport."""
+    if not SPEECH_TO_SPEECH_URL:
+        raise HTTPException(status_code=404, detail="Not found.")
+
+    offer = await request.body()
+    url = _webrtc_calls_url(SPEECH_TO_SPEECH_URL)
+    try:
+        # Generous timeout: the s2s server waits for its own ICE gathering
+        # (up to ~5 s) before returning the answer.
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            resp = await http.post(url, headers={"Content-Type": "application/sdp"}, content=offer)
+    except httpx.RequestError as exc:
+        logger.warning("s2s calls endpoint unreachable: %r", exc)
+        raise HTTPException(status_code=502, detail="Speech service unreachable.")
+
+    # Relay the answer (or the error body) as-is; keep the Location header the
+    # s2s server sets on success (the call id, per the OpenAI GA contract).
+    headers = {}
+    if "location" in resp.headers:
+        headers["Location"] = resp.headers["location"]
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type=resp.headers.get("content-type", "application/sdp"),
+        headers=headers,
+    )
 
 
 @app.post("/api/session")

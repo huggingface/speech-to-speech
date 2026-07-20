@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>Minimal Conversation · S2S backend (WebSocket)</title>
+    <title>Minimal Conversation · S2S backend</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -241,6 +241,21 @@
               </small>
             </label>
 
+            <!-- Transport picker. Hidden in LB mode; disabled (locked to
+                 WebSocket) unless the deploy pins SPEECH_TO_SPEECH_URL — the
+                 WebRTC handshake goes through the server-side /api/calls
+                 proxy, which only forwards to the pinned URL. -->
+            <label class="field" id="transport-field" hidden>
+              <span>Transport</span>
+              <select id="transport">
+                <option value="ws" selected>WebSocket</option>
+                <option value="webrtc">WebRTC</option>
+              </select>
+              <small id="transport-hint">
+                How audio travels to the server. Applies on the next conversation.
+              </small>
+            </label>
+
             <div class="field-row">
               <label class="field">
                 <span>Voice</span>
@@ -258,7 +273,9 @@
               </label>
             </div>
 
-            <div class="field">
+            <!-- WS-only: the gate runs in the WebSocket capture worklet; the
+                 WebRTC mic path sends the raw track, so this hides there. -->
+            <div class="field" id="gate-field">
               <span class="field-head">
                 Noise gate
                 <span id="gate-value" class="field-value">Off</span>

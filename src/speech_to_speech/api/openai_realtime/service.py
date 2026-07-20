@@ -11,8 +11,10 @@ from openai.types.realtime import (
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
     InputAudioBufferAppendEvent,
+    InputAudioBufferCommitEvent,
     InputAudioBufferSpeechStartedEvent,
     InputAudioBufferSpeechStoppedEvent,
+    OutputAudioBufferClearEvent,
     RealtimeError,
     RealtimeErrorEvent,
     ResponseAudioDeltaEvent,
@@ -66,6 +68,8 @@ _StatusReason = Literal["turn_detected", "client_cancelled", "max_output_tokens"
 
 _EVENT_TYPE_TO_MODEL: dict[str, type[BaseModel]] = {
     "input_audio_buffer.append": InputAudioBufferAppendEvent,
+    "input_audio_buffer.commit": InputAudioBufferCommitEvent,
+    "output_audio_buffer.clear": OutputAudioBufferClearEvent,
     "session.update": SessionUpdateEvent,
     "conversation.item.create": ConversationItemCreateEvent,
     "response.create": ResponseCreateEvent,
@@ -74,6 +78,8 @@ _EVENT_TYPE_TO_MODEL: dict[str, type[BaseModel]] = {
 
 ClientEvent = Union[
     InputAudioBufferAppendEvent,
+    InputAudioBufferCommitEvent,
+    OutputAudioBufferClearEvent,
     SessionUpdateEvent,
     ConversationItemCreateEvent,
     ResponseCreateEvent,
@@ -285,8 +291,14 @@ class RealtimeService:
     def handle_audio_append(self, conn_id: str, event: InputAudioBufferAppendEvent) -> list[bytes]:
         return self.audio.handle_audio_append(conn_id, event)
 
+    def append_pcm(self, conn_id: str, pcm_bytes: bytes, src_rate: int) -> list[bytes]:
+        return self.audio.append_pcm(conn_id, pcm_bytes, src_rate)
+
     def handle_audio_commit(self, conn_id: str) -> RealtimeErrorEvent | None:
         return self.audio.handle_audio_commit(conn_id)
+
+    def begin_audio_response(self, conn_id: str) -> tuple[str, str, list[ServerEvent]]:
+        return self.audio.begin_audio_response(conn_id)
 
     def encode_audio_chunk(self, conn_id: str, audio: bytes) -> list[ServerEvent]:
         return self.audio.encode_audio_chunk(conn_id, audio)
