@@ -637,6 +637,7 @@ def build_pipeline(
         )
         comms_handlers = [websocket_streamer]
     elif module_kwargs.mode == "realtime":
+        from speech_to_speech.api.openai_realtime.llm_proxy import LLMProxyConfig
         from speech_to_speech.api.openai_realtime.server import RealtimeServer
 
         pool_size = max(1, module_kwargs.num_pipelines)
@@ -662,11 +663,25 @@ def build_pipeline(
             for i in range(pool_size)
         ]
 
+        # Both remote backends read their connection settings from the
+        # responses-api argument class (see get_llm_handler), so the proxy
+        # reuses the same upstream URL, key, and model the pipeline LM uses.
+        llm_proxy_config = LLMProxyConfig(
+            enabled=module_kwargs.enable_llm_proxy,
+            llm_backend=module_kwargs.llm_backend,
+            upstream_base_url=responses_api_language_model_handler_kwargs.responses_api_base_url,
+            upstream_api_key=responses_api_language_model_handler_kwargs.responses_api_api_key,
+            model_name=responses_api_language_model_handler_kwargs.model_name,
+            connect_timeout_s=module_kwargs.llm_proxy_connect_timeout_s,
+            rate_limit_rpm=module_kwargs.llm_proxy_requests_per_minute,
+        )
+
         realtime_server = RealtimeServer(
             stop_event=stop_event,
             pool=pool,
             host=websocket_streamer_kwargs.ws_host,
             port=websocket_streamer_kwargs.ws_port,
+            llm_proxy_config=llm_proxy_config,
         )
 
         all_handlers: list[Any] = [realtime_server]

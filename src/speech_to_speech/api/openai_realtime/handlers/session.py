@@ -54,7 +54,11 @@ class SessionHandler(RealtimeBaseHandler):
     def build_session_created(self, conn_id: str) -> SessionCreatedEvent:
         """Build a SessionCreatedEvent populated with the current config."""
         cfg = self._state(conn_id).runtime_config
-        session = cfg.session
+        # The OpenAI GA protocol includes the session id in session.created;
+        # clients also need it as the bearer token for the LLM proxy routes.
+        # The SDK model has no `id` field but allows extras, and model_dump()
+        # carries them onto the wire.
+        session = cfg.session.model_copy(update={"id": conn_id})
         return SessionCreatedEvent(
             type="session.created",
             event_id=self._next_event_id(),

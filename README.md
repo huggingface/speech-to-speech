@@ -317,6 +317,27 @@ with client.realtime.connect(model="local") as conn:
 
 The server implements the core Realtime event set: `input_audio_buffer.append`, `session.update`, `conversation.item.create`, `response.create`, and `response.cancel` inbound; speech start/stop, streaming transcription, audio deltas, tool calls, and `response.done` outbound. The full event reference, architecture, and design details live in the [Realtime Engine README](./src/speech_to_speech/api/openai_realtime/README.md).
 
+### LLM Proxy
+
+With `--enable_llm_proxy`, the realtime server also exposes the remote LLM it is configured with as a plain OpenAI compatible endpoint, so a client holding an open realtime session can run side tasks (summaries, titles, background agents) with tools and streaming, fully concurrent with the voice conversation and never interrupted by new speech:
+
+* `POST /v1/chat/completions` when running `--llm_backend chat-completions`
+* `POST /v1/responses` when running `--llm_backend responses-api`
+
+The bearer token is the realtime session id. **Read this twice: the session id arrives in the `session.created` event on the realtime connection** (behind a load balancer it is not the session id returned by the session creation call). Point the stock OpenAI SDK at the server and pass the session id as the API key:
+
+```python
+from openai import OpenAI
+
+llm = OpenAI(base_url="http://localhost:8765/v1", api_key=session_id)
+completion = llm.chat.completions.create(
+    model="anything",  # ignored: the server forces its configured --model_name
+    messages=[{"role": "user", "content": "Summarize the conversation so far: ..."}],
+)
+```
+
+Requests are stateless (send the full message list each time) and are proxied to the configured upstream with the key held by the server, which never reaches clients. The `model` field is always overwritten with the server configured `--model_name`. The proxy is off by default, requires a remote backend (`chat-completions` or `responses-api`), and answers 501 with the reason otherwise; a missing or unknown session id answers 401.
+
 ## LLM Backends
 
 The LLM is the most compute-intensive and highest-latency component in the pipeline. A single forward pass through a large model can dominate end-to-end response time, so choosing the right backend for your hardware and latency budget matters. The pipeline supports:
