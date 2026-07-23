@@ -432,7 +432,7 @@ def create_app(
 
     app = FastAPI(lifespan=lifespan)
 
-    mount_llm_proxy(app, pool, llm_proxy_config)
+    llm_proxy_usage = mount_llm_proxy(app, pool, llm_proxy_config)
 
     def _claim_unit(transport: SessionTransport | None) -> PipelineUnit | None:
         """Atomically (between asyncio yield points) reserve the first idle unit.
@@ -525,6 +525,9 @@ def create_app(
         total: dict[str, Any] = {}
         for unit in pool:
             _merge(total, unit.service.get_usage())
+        # Additive section: proxy traffic is app-level, not per-unit, so it
+        # lands after the per-unit merge and never collides with unit keys.
+        total["llm_proxy"] = llm_proxy_usage.model_dump()
         return total
 
     @app.get("/v1/pool")

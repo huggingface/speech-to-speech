@@ -10,9 +10,13 @@ so proxied generations run fully concurrent with the speech pipeline and are
 never interrupted by new speech.
 """
 
+import json
 import logging
+import re
 import time
 from collections import defaultdict, deque
+from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request, Response
@@ -39,6 +43,70 @@ class LLMProxyConfig(BaseModel):
     model_name: str | None = None
     connect_timeout_s: float = 10.0
     rate_limit_rpm: int = 20
+
+
+class LLMProxyUsage(BaseModel):
+    """Replica-local proxy counters, reset with the process.
+
+    Surfaced as the additive ``llm_proxy`` section of the usage endpoint.
+    429 is its own bucket (not double-counted under 4xx) so a melting
+    client is visible at a glance.
+    """
+
+    requests: int = 0
+    responses_2xx: int = 0
+    responses_4xx: int = 0
+    responses_429: int = 0
+    responses_5xx: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    def record_status(self, status: int) -> None:
+        self.requests += 1
+        if status == 429:
+            self.responses_429 += 1
+        elif 200 <= status < 300:
+            self.responses_2xx += 1
+        elif 400 <= status < 500:
+            self.responses_4xx += 1
+        elif status >= 500:
+            self.responses_5xx += 1
+
+    def record_token_payload(self, payload: Any) -> None:
+        """Accumulate tokens from any upstream JSON payload that carries usage.
+
+        Handles the three shapes the proxy sees: chat completions bodies and
+        stream chunks (``usage`` at the top level, prompt/completion keys),
+        Responses bodies (``usage`` at the top level, input/output keys), and
+        Responses streaming events (``usage`` under ``response``).
+        """
+        if not isinstance(payload, dict):
+            return
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            response = payload.get("response")
+            usage = response.get("usage") if isinstance(response, dict) else None
+        if not isinstance(usage, dict):
+            return
+        input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
+        output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
+        if isinstance(input_tokens, int):
+            self.input_tokens += input_tokens
+        if isinstance(output_tokens, int):
+            self.output_tokens += output_tokens
+
+    def record_sse_event(self, event: bytes) -> None:
+        for line in event.splitlines():
+            if not line.startswith(b"data:"):
+                continue
+            data = line[len(b"data:") :].strip()
+            if not data or data == b"[DONE]":
+                continue
+            try:
+                payload = json.loads(data)
+            except ValueError:
+                continue
+            self.record_token_payload(payload)
 
 
 def _now() -> float:
@@ -118,14 +186,18 @@ def _session_is_active(pool: list[PipelineUnit], session_id: str) -> bool:
     return False
 
 
-def mount_llm_proxy(app: FastAPI, pool: list[PipelineUnit], config: LLMProxyConfig | None) -> None:
+def mount_llm_proxy(app: FastAPI, pool: list[PipelineUnit], config: LLMProxyConfig | None) -> LLMProxyUsage:
     """Mount the proxy paths on *app* according to *config*.
 
     Both known paths always answer: the path matching an enabled remote
     backend proxies, every other combination answers 501 naming the reason,
     so a misconfigured deployment is diagnosed in one request.
+
+    Returns the usage counters the passthrough records into, for the usage
+    endpoint to surface (all zeros when the proxy is unavailable).
     """
     config = config or LLMProxyConfig()
+    usage = LLMProxyUsage()
 
     if not config.enabled:
         reason = "The LLM proxy is disabled. Start the server with --enable_llm_proxy to enable it."
@@ -140,19 +212,20 @@ def mount_llm_proxy(app: FastAPI, pool: list[PipelineUnit], config: LLMProxyConf
     if reason is not None:
         for path in _PATHS.values():
             _mount_unavailable(app, path, reason)
-        return
+        return usage
 
     assert config.llm_backend is not None
     serving_path = _PATHS[config.llm_backend]
     for path in _PATHS.values():
         if path == serving_path:
-            _mount_passthrough(app, path, pool, config)
+            _mount_passthrough(app, path, pool, config, usage)
         else:
             _mount_unavailable(
                 app,
                 path,
                 f"This server runs the '{config.llm_backend}' backend; use {serving_path} instead.",
             )
+    return usage
 
 
 def _mount_unavailable(app: FastAPI, path: str, reason: str) -> None:
@@ -161,13 +234,24 @@ def _mount_unavailable(app: FastAPI, path: str, reason: str) -> None:
         return _error_response(501, reason, "not_implemented")
 
 
-def _mount_passthrough(app: FastAPI, path: str, pool: list[PipelineUnit], config: LLMProxyConfig) -> None:
+def _mount_passthrough(
+    app: FastAPI,
+    path: str,
+    pool: list[PipelineUnit],
+    config: LLMProxyConfig,
+    usage: LLMProxyUsage,
+) -> None:
     base_url = (config.upstream_base_url or DEFAULT_UPSTREAM_BASE_URL).rstrip("/")
     upstream_url = base_url + path.removeprefix("/v1")
     rate_limiter = _SessionRateLimiter(config.rate_limit_rpm)
 
     @app.post(path)
     async def passthrough_endpoint(request: Request) -> Response:
+        response = await _proxy(request)
+        usage.record_status(response.status_code)
+        return response
+
+    async def _proxy(request: Request) -> Response:
         session_id = _bearer_session_id(request)
         if session_id is None or not _session_is_active(pool, session_id):
             return _error_response(
@@ -194,6 +278,15 @@ def _mount_passthrough(app: FastAPI, path: str, pool: list[PipelineUnit], config
             # Session holders are anonymous; forcing store off keeps them from
             # creating persistent state on the operator's provider account.
             body["store"] = False
+        elif body.get("stream"):
+            # Streamed chat completions only report usage when asked; inject
+            # the ask so the proxy can account tokens. The client receives
+            # every upstream frame verbatim, including the final usage chunk
+            # it may not have requested (valid protocol). Responses streams
+            # always carry usage on response.completed, so no mutation there.
+            stream_options = body.get("stream_options") or {}
+            stream_options["include_usage"] = True
+            body["stream_options"] = stream_options
 
         headers = {"Authorization": f"Bearer {config.upstream_api_key}"}
         # Generation can legitimately take minutes, so only the connect
@@ -206,6 +299,11 @@ def _mount_passthrough(app: FastAPI, path: str, pool: list[PipelineUnit], config
                     upstream = await client.post(upstream_url, json=body, headers=headers)
             except httpx.HTTPError as e:
                 return _upstream_unreachable(e)
+            if upstream.status_code < 400:
+                try:
+                    usage.record_token_payload(upstream.json())
+                except ValueError:
+                    pass
             return _verbatim_response(upstream, upstream.content)
 
         # Streaming: forward every upstream byte as it arrives. The client
@@ -234,8 +332,30 @@ def _mount_passthrough(app: FastAPI, path: str, pool: list[PipelineUnit], config
             return _verbatim_response(upstream, content)
 
         return StreamingResponse(
-            upstream.aiter_raw(),
+            _forward_and_account(upstream, usage),
             status_code=upstream.status_code,
             media_type=upstream.headers.get("content-type"),
             background=BackgroundTask(_cleanup),
         )
+
+
+# SSE events end at a blank line; the spec allows LF, CRLF, or CR line endings.
+_SSE_EVENT_END = re.compile(rb"\r\n\r\n|\n\n|\r\r")
+
+
+async def _forward_and_account(upstream: httpx.Response, usage: LLMProxyUsage) -> AsyncIterator[bytes]:
+    """Yield upstream bytes verbatim while parsing SSE events for token usage.
+
+    Accounting happens on a copy of the byte stream; nothing it does can
+    change what the client receives.
+    """
+    buffer = b""
+    async for chunk in upstream.aiter_raw():
+        yield chunk
+        buffer += chunk
+        while True:
+            end = _SSE_EVENT_END.search(buffer)
+            if end is None:
+                break
+            event, buffer = buffer[: end.start()], buffer[end.end() :]
+            usage.record_sse_event(event)

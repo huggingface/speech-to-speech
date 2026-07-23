@@ -578,6 +578,142 @@ class TestRateLimit:
                 assert self._post(client, session_id).status_code == 200
 
 
+class TestUsageSection:
+    def _post(self, client, session_id, body=None, path="/v1/chat/completions"):
+        return client.post(
+            path,
+            json=body or CHAT_BODY,
+            headers={"Authorization": f"Bearer {session_id}"},
+        )
+
+    def test_counters_after_mixed_traffic(self, upstream):
+        answers = iter(
+            [
+                (200, {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 3}}),
+                (200, {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 3}}),
+                (500, {"error": {"message": "boom", "type": "server_error"}}),
+            ]
+        )
+        upstream.responder = lambda request: next(answers)
+        app = _make_app(_proxy_config(upstream, rate_limit_rpm=3))
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                session_id = ws.receive_json()["session"]["id"]
+                assert self._post(client, session_id).status_code == 200
+                assert self._post(client, session_id).status_code == 200
+                assert self._post(client, session_id).status_code == 500
+                assert self._post(client, session_id).status_code == 429
+                assert self._post(client, "sess_unknown").status_code == 401
+                usage = client.get("/v1/usage").json()["llm_proxy"]
+        assert usage["requests"] == 5
+        assert usage["responses_2xx"] == 2
+        assert usage["responses_5xx"] == 1
+        assert usage["responses_429"] == 1
+        assert usage["responses_4xx"] == 1
+        assert usage["input_tokens"] == 14
+        assert usage["output_tokens"] == 6
+
+    def test_streamed_chat_completions_get_include_usage_injected_and_tokens_counted(self, upstream):
+        frames = SSE_FRAMES[:2] + [
+            b'data: {"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":5}}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+        upstream.responder = lambda request: SSEScript(frames=[(0.0, f) for f in frames])
+        app = _make_app(_proxy_config(upstream))
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                session_id = ws.receive_json()["session"]["id"]
+                with client.stream(
+                    "POST",
+                    "/v1/chat/completions",
+                    json=STREAM_BODY,
+                    headers={"Authorization": f"Bearer {session_id}"},
+                ) as r:
+                    received = b"".join(r.iter_raw())
+                usage = client.get("/v1/usage").json()["llm_proxy"]
+        # The client did not ask for usage, the server injected it upstream,
+        # and the byte stream still arrives verbatim including the usage frame.
+        (request,) = upstream.requests
+        assert request["body"]["stream_options"]["include_usage"] is True
+        assert received == b"".join(frames)
+        assert usage["input_tokens"] == 11
+        assert usage["output_tokens"] == 5
+
+    def test_streamed_responses_tokens_come_from_completed_event_without_mutation(self, upstream):
+        frames = RESPONSES_SSE_FRAMES[:2] + [
+            b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1",'
+            b'"usage":{"input_tokens":9,"output_tokens":4}}}\n\n',
+        ]
+        upstream.responder = lambda request: SSEScript(frames=[(0.0, f) for f in frames])
+        app = _make_app(_proxy_config(upstream, llm_backend="responses-api"))
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                session_id = ws.receive_json()["session"]["id"]
+                with client.stream(
+                    "POST",
+                    "/v1/responses",
+                    json={**RESPONSES_BODY, "stream": True},
+                    headers={"Authorization": f"Bearer {session_id}"},
+                ) as r:
+                    received = b"".join(r.iter_raw())
+                usage = client.get("/v1/usage").json()["llm_proxy"]
+        (request,) = upstream.requests
+        assert "stream_options" not in request["body"]  # no request mutation on Responses
+        assert received == b"".join(frames)
+        assert usage["input_tokens"] == 9
+        assert usage["output_tokens"] == 4
+
+    def test_tokens_counted_from_crlf_delimited_sse(self, upstream):
+        # The SSE spec allows CRLF event delimiters; accounting must not
+        # depend on LF-only upstreams (the bytes pass through verbatim
+        # either way).
+        frames = [
+            b'data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"Hi"}}]}\r\n\r\n',
+            b'data: {"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":6,"completion_tokens":2}}\r\n\r\n',
+            b"data: [DONE]\r\n\r\n",
+        ]
+        upstream.responder = lambda request: SSEScript(frames=[(0.0, f) for f in frames])
+        app = _make_app(_proxy_config(upstream))
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                session_id = ws.receive_json()["session"]["id"]
+                with client.stream(
+                    "POST",
+                    "/v1/chat/completions",
+                    json=STREAM_BODY,
+                    headers={"Authorization": f"Bearer {session_id}"},
+                ) as r:
+                    received = b"".join(r.iter_raw())
+                usage = client.get("/v1/usage").json()["llm_proxy"]
+        assert received == b"".join(frames)
+        assert usage["input_tokens"] == 6
+        assert usage["output_tokens"] == 2
+
+    def test_non_streaming_responses_tokens_come_from_body(self, upstream):
+        upstream.responder = lambda request: (
+            200,
+            {"id": "resp_1", "output": [], "usage": {"input_tokens": 21, "output_tokens": 8}},
+        )
+        app = _make_app(_proxy_config(upstream, llm_backend="responses-api"))
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                session_id = ws.receive_json()["session"]["id"]
+                assert self._post(client, session_id, RESPONSES_BODY, "/v1/responses").status_code == 200
+                usage = client.get("/v1/usage").json()["llm_proxy"]
+        assert usage["input_tokens"] == 21
+        assert usage["output_tokens"] == 8
+
+    def test_existing_usage_shape_keeps_its_keys(self, upstream):
+        app = _make_app(_proxy_config(upstream))
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                data = client.get("/v1/usage").json()
+        # Pre-existing aggregate keys survive next to the additive section.
+        assert "connections" in data
+        assert "llm_proxy" in data
+
+
 class TestUpstreamErrorPassthrough:
     @pytest.mark.parametrize("status", [400, 429, 500, 503])
     def test_upstream_errors_pass_through_verbatim(self, upstream, status):
