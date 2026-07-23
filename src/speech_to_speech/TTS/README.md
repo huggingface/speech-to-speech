@@ -9,6 +9,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 - `pocket` → `pocket_tts_handler.py`
 - `kokoro` → `kokoro_handler.py`
 - `qwen3` → `qwen3_tts_handler.py`
+- `openai` → `openai_compatible_handler.py`
 
 Deprecated TTS implementations, including MeloTTS, live in [`../../../archive/TTS`](../../../archive/TTS) and are no longer wired into `s2s_pipeline.py`.
 
@@ -134,6 +135,16 @@ To benchmark the Apple Silicon MLX variants side by side:
 ```
 
 This will run separate benchmark entries for `qwen3[bf16]`, `qwen3[4bit]`, `qwen3[6bit]`, and `qwen3[8bit]`.
+
+### 6) OpenAI-compatible endpoint (`--tts openai`)
+
+The handler sends text to `POST /v1/audio/speech`. It supports streaming raw
+PCM16 and complete WAV responses, resamples them to the pipeline's 16 kHz
+format, and closes the active transport when the response generation is
+cancelled. The default settings target Qwen3-TTS on vLLM-Omni.
+
+See [`docs/openai-audio-endpoints.md`](../../../docs/openai-audio-endpoints.md)
+for server commands and all relevant flags.
 
 ## Setup
 

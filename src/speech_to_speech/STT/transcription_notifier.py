@@ -8,9 +8,18 @@ from typing import Iterator, Union
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import make_user_message
-from speech_to_speech.pipeline.events import PartialTranscriptionEvent, TranscriptionCompletedEvent
+from speech_to_speech.pipeline.events import (
+    PartialTranscriptionEvent,
+    TranscriptionCompletedEvent,
+    TranscriptionFailedEvent,
+)
 from speech_to_speech.pipeline.handler_types import LLMIn, STTOut
-from speech_to_speech.pipeline.messages import GenerateResponseRequest, PartialTranscription, Transcription
+from speech_to_speech.pipeline.messages import (
+    GenerateResponseRequest,
+    PartialTranscription,
+    Transcription,
+    TranscriptionFailure,
+)
 from speech_to_speech.pipeline.queue_types import TextEventItem
 
 logger = logging.getLogger(__name__)
@@ -50,6 +59,19 @@ class TranscriptionNotifier(BaseHandler[STTOut, Union[STTOut, LLMIn]]):
                     )
                 )
                 logger.debug("Partial transcription: %s", str(transcription.text)[:80])
+            return
+
+        if isinstance(transcription, TranscriptionFailure):
+            if self.text_output_queue is not None:
+                self.text_output_queue.put(
+                    TranscriptionFailedEvent(
+                        message=transcription.message,
+                        turn_id=transcription.turn_id,
+                        turn_revision=transcription.turn_revision,
+                    )
+                )
+            if self.should_listen is not None:
+                self.should_listen.set()
             return
 
         if isinstance(transcription, Transcription):

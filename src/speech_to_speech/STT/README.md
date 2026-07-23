@@ -10,6 +10,7 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - `faster-whisper` → `STT/faster_whisper_handler.py`
 - `parakeet-tdt` → `STT/parakeet_tdt_handler.py`
 - `paraformer` → `STT/paraformer_handler.py`
+- `openai` → `STT/openai_compatible_handler.py`
 
 ## Language Support by Handler
 
@@ -74,6 +75,16 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - Practical support:
   - Depends on selected FunASR model checkpoint
   - Default setup is Chinese-oriented (`zh`)
+
+### 7) OpenAI-compatible endpoint (`--stt openai`)
+
+- Handler: `OpenAICompatibleSTTHandler`
+- Endpoint: `POST /v1/audio/transcriptions`
+- Upload: mono PCM16 WAV at 16 kHz
+- Supports JSON (`{"text": "..."}`) and plain-text responses
+- Shares bounded concurrency, coalescing, final priority, and cancellation
+  across all pipelines configured for the same endpoint
+- See [`docs/openai-audio-endpoints.md`](../../../docs/openai-audio-endpoints.md)
 
 ## Language Abbreviations (ISO-style codes seen in STT handlers)
 
