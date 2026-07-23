@@ -61,6 +61,15 @@ class ModuleArguments:
             "help": "Minimum silence duration (ms) before ending speech when live transcription is enabled (default: 500ms)"
         },
     )
+    enable_llm_proxy: bool = field(
+        default=False,
+        metadata={
+            "help": "Expose the configured remote LLM (--llm_backend chat-completions or responses-api) as an "
+            "OpenAI-compatible HTTP endpoint on the realtime server, gated by an open realtime session: clients "
+            "authenticate with their realtime session id as the bearer token. Off by default. Only valid for "
+            "--mode realtime."
+        },
+    )
     num_pipelines: int = field(
         default=1,
         metadata={
