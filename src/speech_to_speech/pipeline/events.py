@@ -63,6 +63,13 @@ class TranscriptionCompletedEvent(PipelineEvent):
     speech_stopped_at_s: float | None = Field(default=None, exclude=True)
 
 
+class TranscriptionFailedEvent(PipelineEvent):
+    type: Literal["transcription_failed"] = "transcription_failed"
+    message: str
+    turn_id: str | None = None
+    turn_revision: int | None = None
+
+
 # ── LLM output events (LMOutputProcessor) ────────────────────────────
 
 

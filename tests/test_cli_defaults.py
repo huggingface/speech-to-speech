@@ -8,6 +8,8 @@ from speech_to_speech.arguments_classes.kokoro_tts_arguments import KokoroTTSHan
 from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import MLXAudioWhisperSTTHandlerArguments
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
+from speech_to_speech.arguments_classes.openai_stt_arguments import OpenAICompatibleSTTHandlerArguments
+from speech_to_speech.arguments_classes.openai_tts_arguments import OpenAICompatibleTTSHandlerArguments
 from speech_to_speech.arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
 from speech_to_speech.arguments_classes.parakeet_tdt_arguments import ParakeetTDTSTTHandlerArguments
 from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
@@ -67,6 +69,7 @@ EXPECTED_FIELD_TYPES = {
     "faster_whisper_stt_handler_kwargs": FasterWhisperSTTHandlerArguments,
     "mlx_audio_whisper_stt_handler_kwargs": MLXAudioWhisperSTTHandlerArguments,
     "parakeet_tdt_stt_handler_kwargs": ParakeetTDTSTTHandlerArguments,
+    "openai_stt_handler_kwargs": OpenAICompatibleSTTHandlerArguments,
     "language_model_handler_kwargs": LanguageModelHandlerArguments,
     "responses_api_language_model_handler_kwargs": ResponsesApiLanguageModelHandlerArguments,
     "chat_tts_handler_kwargs": ChatTTSHandlerArguments,
@@ -74,6 +77,7 @@ EXPECTED_FIELD_TYPES = {
     "pocket_tts_handler_kwargs": PocketTTSHandlerArguments,
     "kokoro_tts_handler_kwargs": KokoroTTSHandlerArguments,
     "qwen3_tts_handler_kwargs": Qwen3TTSHandlerArguments,
+    "openai_tts_handler_kwargs": OpenAICompatibleTTSHandlerArguments,
 }
 
 
@@ -114,6 +118,34 @@ def test_parse_arguments_accepts_qwen3_tts_backend_override():
         sys.argv = original_argv
 
     assert args.qwen3_tts_handler_kwargs.qwen3_tts_backend == "torch"
+
+
+def test_parse_arguments_accepts_openai_audio_backends():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = [
+            "speech-to-speech",
+            "--stt",
+            "openai",
+            "--tts",
+            "openai",
+            "--openai_stt_base_url",
+            "http://localhost:8000/v1",
+            "--openai_stt_model",
+            "Qwen/Qwen3-ASR-1.7B",
+            "--openai_tts_base_url",
+            "http://localhost:8091/v1",
+            "--openai_tts_voice",
+            "vivian",
+        ]
+        args = parse_arguments()
+    finally:
+        sys.argv = original_argv
+
+    assert args.module_kwargs.stt == "openai"
+    assert args.module_kwargs.tts == "openai"
+    assert args.openai_stt_handler_kwargs.openai_stt_model == "Qwen/Qwen3-ASR-1.7B"
+    assert args.openai_tts_handler_kwargs.openai_tts_voice == "vivian"
 
 
 def test_parse_arguments_transformers_backend():

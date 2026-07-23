@@ -70,6 +70,16 @@ class Transcription(PipelineMessage):
     speech_stopped_at_s: float | None = None
 
 
+class TranscriptionFailure(PipelineMessage):
+    """A final STT operation failed without producing LLM input."""
+
+    tag: Literal["transcription_failure"] = "transcription_failure"
+    message: str
+    turn_id: str | None = None
+    turn_revision: int | None = None
+    speech_stopped_at_s: float | None = None
+
+
 # ── LLM → LMOutputProcessor ──────────────────────────────────────────
 
 

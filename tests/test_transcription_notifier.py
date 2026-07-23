@@ -3,8 +3,17 @@ from queue import Queue
 from threading import Event
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.pipeline.events import PartialTranscriptionEvent, TranscriptionCompletedEvent
-from speech_to_speech.pipeline.messages import GenerateResponseRequest, PartialTranscription, Transcription
+from speech_to_speech.pipeline.events import (
+    PartialTranscriptionEvent,
+    TranscriptionCompletedEvent,
+    TranscriptionFailedEvent,
+)
+from speech_to_speech.pipeline.messages import (
+    GenerateResponseRequest,
+    PartialTranscription,
+    Transcription,
+    TranscriptionFailure,
+)
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 
 
@@ -78,3 +87,27 @@ def test_empty_final_transcription_reenables_listening_without_runtime_config():
     assert list(notifier.process(Transcription(text="", language_code="en"))) == []
 
     assert should_listen.is_set()
+
+
+def test_transcription_failure_emits_error_without_llm_work_and_reenables_listening():
+    text_output_queue = Queue()
+    should_listen = Event()
+    notifier = _notifier(text_output_queue=text_output_queue, should_listen=should_listen)
+
+    result = list(
+        notifier.process(
+            TranscriptionFailure(
+                message="transcription request timed out",
+                turn_id="turn-1",
+                turn_revision=2,
+            )
+        )
+    )
+
+    assert result == []
+    assert should_listen.is_set()
+    event = text_output_queue.get_nowait()
+    assert isinstance(event, TranscriptionFailedEvent)
+    assert event.message == "transcription request timed out"
+    assert event.turn_id == "turn-1"
+    assert event.turn_revision == 2
