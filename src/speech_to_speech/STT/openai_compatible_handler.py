@@ -56,6 +56,7 @@ class HttpTranscriptionOperation:
     def __init__(
         self,
         *,
+        request_id: str,
         endpoint_url: str,
         api_key: str | None,
         model: str | None,
@@ -64,6 +65,7 @@ class HttpTranscriptionOperation:
         response_format: str,
         timeout_s: float,
     ) -> None:
+        self.request_id = request_id
         self.endpoint_url = endpoint_url
         self.api_key = api_key
         self.model = model
@@ -75,10 +77,11 @@ class HttpTranscriptionOperation:
         self._transport_lock = Lock()
         self._client: httpx.Client | None = None
         self._response: httpx.Response | None = None
+        self._cancel_reason: CancellationReason | None = None
 
     def run(self) -> HttpTranscriptionResult:
         if self._cancelled.is_set():
-            raise TranscriptionCancelled("undispatched", "superseded")
+            raise self._cancellation_exception()
 
         headers = {}
         if self.api_key:
@@ -94,6 +97,8 @@ class HttpTranscriptionOperation:
             self._client = client
 
         try:
+            if self._cancelled.is_set():
+                raise self._cancellation_exception()
             with client.stream(
                 "POST",
                 self.endpoint_url,
@@ -104,26 +109,36 @@ class HttpTranscriptionOperation:
                 with self._transport_lock:
                     self._response = response
                 if self._cancelled.is_set():
-                    raise TranscriptionCancelled("active", "superseded")
+                    raise self._cancellation_exception()
                 try:
                     response.raise_for_status()
                 except httpx.HTTPStatusError as exc:
+                    if self._cancelled.is_set():
+                        raise self._cancellation_exception() from exc
                     raise TranscriptionRequestError(
                         f"transcription server returned HTTP {exc.response.status_code}"
                     ) from exc
 
                 body = response.read()
                 if self._cancelled.is_set():
-                    raise TranscriptionCancelled("active", "superseded")
+                    raise self._cancellation_exception()
                 return self._parse_response(body, response.headers.get("content-type", ""))
         except TranscriptionCancelled:
             raise
         except TranscriptionRequestError:
             raise
         except httpx.TimeoutException as exc:
+            if self._cancelled.is_set():
+                raise self._cancellation_exception() from exc
             raise TranscriptionRequestError("transcription request timed out") from exc
         except httpx.HTTPError as exc:
+            if self._cancelled.is_set():
+                raise self._cancellation_exception() from exc
             raise TranscriptionRequestError(f"transcription transport failed: {type(exc).__name__}") from exc
+        except RuntimeError as exc:
+            if self._cancelled.is_set():
+                raise self._cancellation_exception() from exc
+            raise
         finally:
             with self._transport_lock:
                 self._response = None
@@ -131,9 +146,10 @@ class HttpTranscriptionOperation:
             client.close()
 
     def cancel(self, reason: CancellationReason) -> None:
-        del reason
-        self._cancelled.set()
         with self._transport_lock:
+            if self._cancel_reason is None:
+                self._cancel_reason = reason
+            self._cancelled.set()
             response = self._response
             client = self._client
         if response is not None:
@@ -146,6 +162,13 @@ class HttpTranscriptionOperation:
                 client.close()
             except Exception:
                 logger.debug("Error closing transcription client", exc_info=True)
+
+    def _cancellation_exception(self) -> TranscriptionCancelled:
+        with self._transport_lock:
+            reason = self._cancel_reason
+        if reason is None:
+            raise RuntimeError("transcription operation was cancelled without a reason")
+        return TranscriptionCancelled(self.request_id, reason)
 
     def _parse_response(self, body: bytes, content_type: str) -> HttpTranscriptionResult:
         if self.response_format == "text" or "text/plain" in content_type:
@@ -239,7 +262,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             turn_id=turn_id,
             turn_revision=turn_revision,
             mode=mode,
-            operation_factory=lambda: self._make_operation(vad_audio.audio),
+            operation_factory=lambda: self._make_operation(request_id, vad_audio.audio),
             is_relevant=lambda: self._is_request_relevant(vad_audio, session_generation),
         )
         future = self.admission.submit(request)
@@ -255,8 +278,9 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         # accepting and coalescing newer progressive windows while HTTP runs.
         yield from ()
 
-    def _make_operation(self, audio: np.ndarray) -> HttpTranscriptionOperation:
+    def _make_operation(self, request_id: str, audio: np.ndarray) -> HttpTranscriptionOperation:
         return HttpTranscriptionOperation(
+            request_id=request_id,
             endpoint_url=self.endpoint_url,
             api_key=self.api_key,
             model=self.model,

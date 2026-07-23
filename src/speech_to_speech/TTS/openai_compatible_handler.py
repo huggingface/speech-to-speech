@@ -265,8 +265,6 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         ):
             logger.debug("Dropping stale remote TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
             return
-        if self.speculative_turns:
-            self.speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         text, input_language = self._coalesce_pending_tts_input(tts_input)
         if not text:
@@ -288,11 +286,18 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             cancel_generation = self.cancel_scope.generation
 
         def cancel_check() -> bool:
-            return self.stop_event.is_set() or (
+            cancelled = self.stop_event.is_set() or (
                 cancel_generation is not None
                 and self.cancel_scope is not None
                 and self.cancel_scope.is_stale(cancel_generation)
             )
+            if cancelled:
+                return True
+            return self.speculative_turns is not None and not self.speculative_turns.is_latest(
+                tts_input.turn_id,
+                tts_input.turn_revision,
+            )
+
         first_audio = True
         started_at_s = perf_counter()
         try:
@@ -303,13 +308,22 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                         operation.cancel()
                         return
                     if first_audio:
+                        if not self._commit_first_audio(tts_input):
+                            operation.cancel()
+                            return
                         self._log_first_audio_latency(tts_input, started_at_s)
                         first_audio = False
                     yield chunk
             else:
                 encoded = b"".join(operation.iter_bytes(cancel_check))
                 for chunk in self._decode_wav(encoded):
+                    if cancel_check():
+                        operation.cancel()
+                        return
                     if first_audio:
+                        if not self._commit_first_audio(tts_input):
+                            operation.cancel()
+                            return
                         self._log_first_audio_latency(tts_input, started_at_s)
                         first_audio = False
                     yield chunk
@@ -322,6 +336,15 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             with self._operation_lock:
                 if self._active_operation is operation:
                     self._active_operation = None
+
+    def _commit_first_audio(self, tts_input: TTSInput) -> bool:
+        tracker = self.speculative_turns
+        if tracker is None or tts_input.turn_id is None or tts_input.turn_revision is None:
+            return True
+        return tracker.commit_if_latest_after_reopen_grace(
+            tts_input.turn_id,
+            tts_input.turn_revision,
+        )
 
     def _request_payload(self, *, text: str, voice: str, language: str | None) -> dict[str, Any]:
         payload: dict[str, Any] = {
