@@ -160,8 +160,9 @@ def _make_unit(index: int = 0) -> PipelineUnit:
     )
 
 
-def _make_app(config: LLMProxyConfig | None):
-    return create_app(pool=[_make_unit()], stop_event=ThreadingEvent(), llm_proxy_config=config)
+def _make_app(config: LLMProxyConfig | None, pool_size: int = 1):
+    pool = [_make_unit(i) for i in range(pool_size)]
+    return create_app(pool=pool, stop_event=ThreadingEvent(), llm_proxy_config=config)
 
 
 def _proxy_config(upstream: FakeUpstream, **overrides: Any) -> LLMProxyConfig:
@@ -508,6 +509,73 @@ class TestResponsesPassthrough:
             with TestClient(app) as client:
                 r = client.post("/v1/responses", json=RESPONSES_BODY)
             assert r.status_code == 501
+
+
+class TestRateLimit:
+    def _post(self, client, session_id):
+        return client.post(
+            "/v1/chat/completions",
+            json=CHAT_BODY,
+            headers={"Authorization": f"Bearer {session_id}"},
+        )
+
+    def test_default_ceiling_is_20_per_minute_and_other_sessions_unaffected(self, upstream):
+        app = _make_app(_proxy_config(upstream), pool_size=2)
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws1:
+                session_1 = ws1.receive_json()["session"]["id"]
+                with client.websocket_connect("/v1/realtime") as ws2:
+                    session_2 = ws2.receive_json()["session"]["id"]
+                    for _ in range(20):
+                        assert self._post(client, session_1).status_code == 200
+                    r = self._post(client, session_1)
+                    assert r.status_code == 429
+                    assert "error" in r.json()
+                    # The other session still has its own budget.
+                    assert self._post(client, session_2).status_code == 200
+        # The 21st request never reached the upstream.
+        assert len(upstream.requests) == 21
+
+    def test_ceiling_is_configurable(self, upstream):
+        app = _make_app(_proxy_config(upstream, rate_limit_rpm=2))
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                session_id = ws.receive_json()["session"]["id"]
+                assert self._post(client, session_id).status_code == 200
+                assert self._post(client, session_id).status_code == 200
+                assert self._post(client, session_id).status_code == 429
+
+    def test_window_slides_and_recovers(self, upstream, monkeypatch):
+        import speech_to_speech.api.openai_realtime.llm_proxy as llm_proxy_module
+
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(llm_proxy_module, "_now", lambda: clock["now"])
+        app = _make_app(_proxy_config(upstream, rate_limit_rpm=2))
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                session_id = ws.receive_json()["session"]["id"]
+                assert self._post(client, session_id).status_code == 200
+                clock["now"] += 30.0
+                assert self._post(client, session_id).status_code == 200
+                assert self._post(client, session_id).status_code == 429
+                # 61s after the first hit, one slot has slid out of the window.
+                clock["now"] += 31.0
+                assert self._post(client, session_id).status_code == 200
+                assert self._post(client, session_id).status_code == 429
+
+    def test_unknown_bearer_is_401_and_consumes_no_budget(self, upstream):
+        app = _make_app(_proxy_config(upstream, rate_limit_rpm=1))
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                session_id = ws.receive_json()["session"]["id"]
+                for _ in range(3):
+                    r = client.post(
+                        "/v1/chat/completions",
+                        json=CHAT_BODY,
+                        headers={"Authorization": "Bearer sess_unknown"},
+                    )
+                    assert r.status_code == 401
+                assert self._post(client, session_id).status_code == 200
 
 
 class TestUpstreamErrorPassthrough:

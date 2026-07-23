@@ -11,6 +11,8 @@ never interrupted by new speech.
 """
 
 import logging
+import time
+from collections import defaultdict, deque
 
 import httpx
 from fastapi import FastAPI, Request, Response
@@ -36,6 +38,37 @@ class LLMProxyConfig(BaseModel):
     upstream_api_key: str | None = None
     model_name: str | None = None
     connect_timeout_s: float = 10.0
+    rate_limit_rpm: int = 20
+
+
+def _now() -> float:
+    # Module-level so tests can monkeypatch the clock instead of sleeping.
+    return time.monotonic()
+
+
+_RATE_LIMIT_WINDOW_S = 60.0
+
+
+class _SessionRateLimiter:
+    """In-memory sliding window, keyed by session id, replica-local."""
+
+    def __init__(self, limit_rpm: int):
+        self.limit_rpm = limit_rpm
+        self._hits: dict[str, deque[float]] = defaultdict(deque)
+
+    def allow(self, session_id: str) -> bool:
+        now = _now()
+        hits = self._hits[session_id]
+        while hits and now - hits[0] >= _RATE_LIMIT_WINDOW_S:
+            hits.popleft()
+        if len(hits) >= self.limit_rpm:
+            return False
+        hits.append(now)
+        # Sessions are short-lived relative to the process; drop fully expired
+        # entries so dead session ids don't accumulate forever.
+        if len(self._hits) > 1024:
+            self._hits = defaultdict(deque, {k: v for k, v in self._hits.items() if v})
+        return True
 
 
 class _ErrorDetail(BaseModel):
@@ -131,6 +164,7 @@ def _mount_unavailable(app: FastAPI, path: str, reason: str) -> None:
 def _mount_passthrough(app: FastAPI, path: str, pool: list[PipelineUnit], config: LLMProxyConfig) -> None:
     base_url = (config.upstream_base_url or DEFAULT_UPSTREAM_BASE_URL).rstrip("/")
     upstream_url = base_url + path.removeprefix("/v1")
+    rate_limiter = _SessionRateLimiter(config.rate_limit_rpm)
 
     @app.post(path)
     async def passthrough_endpoint(request: Request) -> Response:
@@ -141,6 +175,14 @@ def _mount_passthrough(app: FastAPI, path: str, pool: list[PipelineUnit], config
                 "Invalid bearer token: pass the realtime session id of an open session "
                 "(from the session.created event) as the API key.",
                 "invalid_session",
+            )
+
+        if not rate_limiter.allow(session_id):
+            return _error_response(
+                429,
+                f"Rate limit exceeded: this session may make {config.rate_limit_rpm} requests "
+                "per minute. Back off and retry.",
+                "rate_limit_exceeded",
             )
 
         try:

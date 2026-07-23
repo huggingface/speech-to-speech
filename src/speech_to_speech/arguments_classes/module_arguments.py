@@ -70,6 +70,13 @@ class ModuleArguments:
             "--mode realtime."
         },
     )
+    llm_proxy_requests_per_minute: int = field(
+        default=20,
+        metadata={
+            "help": "Per-session rate limit for LLM proxy requests, as a sliding window in requests per minute. "
+            "Exceeding it answers 429. Default is 20."
+        },
+    )
     llm_proxy_connect_timeout_s: float = field(
         default=10.0,
         metadata={
