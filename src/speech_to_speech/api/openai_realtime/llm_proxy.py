@@ -15,6 +15,8 @@ import logging
 import httpx
 from fastapi import FastAPI, Request, Response
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
+from starlette.responses import StreamingResponse
 
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 
@@ -33,6 +35,7 @@ class LLMProxyConfig(BaseModel):
     upstream_base_url: str | None = None
     upstream_api_key: str | None = None
     model_name: str | None = None
+    connect_timeout_s: float = 10.0
 
 
 class _ErrorDetail(BaseModel):
@@ -51,6 +54,19 @@ def _error_response(status_code: int, message: str, error_type: str) -> Response
         status_code=status_code,
         media_type="application/json",
     )
+
+
+def _verbatim_response(upstream: httpx.Response, content: bytes) -> Response:
+    return Response(
+        content=content,
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("content-type"),
+    )
+
+
+def _upstream_unreachable(error: httpx.HTTPError) -> Response:
+    logger.warning(f"LLM proxy: upstream request failed: {type(error).__name__}: {error}")
+    return _error_response(502, f"Upstream request failed: {type(error).__name__}", "upstream_unreachable")
 
 
 def _bearer_session_id(request: Request) -> str | None:
@@ -134,10 +150,46 @@ def _mount_passthrough(app: FastAPI, path: str, pool: list[PipelineUnit], config
         body["model"] = config.model_name
 
         headers = {"Authorization": f"Bearer {config.upstream_api_key}"}
-        async with httpx.AsyncClient() as client:
-            upstream = await client.post(upstream_url, json=body, headers=headers)
-        return Response(
-            content=upstream.content,
+        # Generation can legitimately take minutes, so only the connect
+        # phase gets a timeout; reads (streamed or not) have none.
+        timeout = httpx.Timeout(None, connect=config.connect_timeout_s)
+
+        if not body.get("stream"):
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    upstream = await client.post(upstream_url, json=body, headers=headers)
+            except httpx.HTTPError as e:
+                return _upstream_unreachable(e)
+            return _verbatim_response(upstream, upstream.content)
+
+        # Streaming: forward every upstream byte as it arrives. The client
+        # and upstream response stay open for the response's lifetime and are
+        # closed by the background task after the last byte is sent.
+        client = httpx.AsyncClient(timeout=timeout)
+        try:
+            upstream_request = client.build_request("POST", upstream_url, json=body, headers=headers)
+            upstream = await client.send(upstream_request, stream=True)
+        except httpx.HTTPError as e:
+            await client.aclose()
+            return _upstream_unreachable(e)
+        except Exception:
+            await client.aclose()
+            raise
+
+        async def _cleanup() -> None:
+            await upstream.aclose()
+            await client.aclose()
+
+        if upstream.status_code >= 400:
+            # Error before any frame: pass status and body through verbatim,
+            # buffered, exactly as a non-streaming answer would be.
+            content = await upstream.aread()
+            await _cleanup()
+            return _verbatim_response(upstream, content)
+
+        return StreamingResponse(
+            upstream.aiter_raw(),
             status_code=upstream.status_code,
             media_type=upstream.headers.get("content-type"),
+            background=BackgroundTask(_cleanup),
         )

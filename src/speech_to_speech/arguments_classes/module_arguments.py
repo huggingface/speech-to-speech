@@ -70,6 +70,13 @@ class ModuleArguments:
             "--mode realtime."
         },
     )
+    llm_proxy_connect_timeout_s: float = field(
+        default=10.0,
+        metadata={
+            "help": "Connect timeout in seconds for LLM proxy requests to the upstream provider. Reads have no "
+            "timeout (generation may take minutes). Default is 10.0."
+        },
+    )
     num_pipelines: int = field(
         default=1,
         metadata={

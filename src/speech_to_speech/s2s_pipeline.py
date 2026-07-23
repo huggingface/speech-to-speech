@@ -672,6 +672,7 @@ def build_pipeline(
             upstream_base_url=responses_api_language_model_handler_kwargs.responses_api_base_url,
             upstream_api_key=responses_api_language_model_handler_kwargs.responses_api_api_key,
             model_name=responses_api_language_model_handler_kwargs.model_name,
+            connect_timeout_s=module_kwargs.llm_proxy_connect_timeout_s,
         )
 
         realtime_server = RealtimeServer(

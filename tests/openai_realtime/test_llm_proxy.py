@@ -9,13 +9,18 @@ hooks in production code.
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from queue import Queue
 from threading import Event as ThreadingEvent
 from typing import Any
 
+import httpx
 import pytest
+import uvicorn
+from pydantic import BaseModel
 from starlette.testclient import TestClient
+from websockets.sync.client import connect as ws_connect
 
 from speech_to_speech.api.openai_realtime.llm_proxy import LLMProxyConfig
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
@@ -28,11 +33,19 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 # ---------------------------------------------------------------------------
 
 
+class SSEScript(BaseModel):
+    """Streamed answer for the fake upstream: raw frames with a delay before each."""
+
+    frames: list[tuple[float, bytes]]
+
+
 class FakeUpstream:
     """A real OpenAI-shaped HTTP server on an ephemeral port.
 
     Records every request (path, headers, parsed JSON body) and answers with
-    whatever ``responder`` returns: ``(status_code, json_payload)``.
+    whatever ``responder`` returns: ``(status_code, json_payload)`` for a
+    buffered JSON answer, or an ``SSEScript`` to stream raw frames with
+    delays between them.
     """
 
     def __init__(self):
@@ -54,7 +67,17 @@ class FakeUpstream:
                     "body": json.loads(raw) if raw else None,
                 }
                 upstream.requests.append(request)
-                status, payload = upstream.responder(request)
+                answer = upstream.responder(request)
+                if isinstance(answer, SSEScript):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    for delay, frame in answer.frames:
+                        time.sleep(delay)
+                        self.wfile.write(frame)
+                        self.wfile.flush()
+                    return
+                status, payload = answer
                 body = json.dumps(payload).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -83,6 +106,35 @@ def upstream():
     server = FakeUpstream()
     yield server
     server.close()
+
+
+class LiveApp:
+    """Run the app under a real uvicorn server on an ephemeral port.
+
+    Needed only where TestClient cannot observe the behavior under test:
+    it buffers the whole ASGI response, hiding streaming timing and
+    mid-stream lifecycle.
+    """
+
+    def __init__(self, app):
+        config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning")
+        self._server = uvicorn.Server(config)
+        self._server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
+        self._thread = threading.Thread(target=self._server.run, daemon=True)
+
+    def __enter__(self) -> "LiveApp":
+        self._thread.start()
+        deadline = time.monotonic() + 5
+        while not self._server.started:
+            if time.monotonic() > deadline:
+                raise RuntimeError("uvicorn did not start in time")
+            time.sleep(0.01)
+        self.port = self._server.servers[0].sockets[0].getsockname()[1]
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self._server.should_exit = True
+        self._thread.join(timeout=5)
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +288,116 @@ class TestUnavailableContract:
         r = self._post_with_session(app, "/v1/responses")
         assert r.status_code == 501
         assert "/v1/chat/completions" in r.json()["error"]["message"]
+
+
+SSE_FRAMES = [
+    b'data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"Hel"}}]}\n\n',
+    b'data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"lo"}}]}\n\n',
+    b"data: [DONE]\n\n",
+]
+
+STREAM_BODY = {**CHAT_BODY, "stream": True}
+
+
+class TestStreamingPassthrough:
+    def test_streamed_bytes_arrive_verbatim_in_order(self, upstream):
+        upstream.responder = lambda request: SSEScript(frames=[(0.0, f) for f in SSE_FRAMES])
+        app = _make_app(_proxy_config(upstream))
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                session_id = ws.receive_json()["session"]["id"]
+                with client.stream(
+                    "POST",
+                    "/v1/chat/completions",
+                    json=STREAM_BODY,
+                    headers={"Authorization": f"Bearer {session_id}"},
+                ) as r:
+                    assert r.status_code == 200
+                    received = b"".join(r.iter_raw())
+        assert received == b"".join(SSE_FRAMES)
+
+    def test_frames_forward_as_they_arrive_not_buffered(self, upstream):
+        # Starlette's TestClient buffers the whole ASGI response, so timing
+        # is only observable over a real server.
+        delay = 0.4
+        upstream.responder = lambda request: SSEScript(
+            frames=[(0.0, SSE_FRAMES[0]), (delay, SSE_FRAMES[1]), (0.0, SSE_FRAMES[2])]
+        )
+        with LiveApp(_make_app(_proxy_config(upstream))) as live:
+            with ws_connect(f"ws://127.0.0.1:{live.port}/v1/realtime") as ws:
+                session_id = json.loads(ws.recv())["session"]["id"]
+                arrivals: list[float] = []
+                with httpx.stream(
+                    "POST",
+                    f"http://127.0.0.1:{live.port}/v1/chat/completions",
+                    json=STREAM_BODY,
+                    headers={"Authorization": f"Bearer {session_id}"},
+                ) as r:
+                    for _ in r.iter_raw():
+                        arrivals.append(time.monotonic())
+        # If the proxy buffered the whole upstream response, every chunk
+        # would land at once and the spread would be ~0.
+        assert arrivals[-1] - arrivals[0] >= delay * 0.5
+
+    def test_in_flight_stream_survives_session_close(self, upstream):
+        upstream.responder = lambda request: SSEScript(
+            frames=[(0.0, SSE_FRAMES[0]), (0.5, SSE_FRAMES[1]), (0.0, SSE_FRAMES[2])]
+        )
+        with LiveApp(_make_app(_proxy_config(upstream))) as live:
+            with httpx.Client() as client:
+                ws = ws_connect(f"ws://127.0.0.1:{live.port}/v1/realtime")
+                session_id = json.loads(ws.recv())["session"]["id"]
+                with client.stream(
+                    "POST",
+                    f"http://127.0.0.1:{live.port}/v1/chat/completions",
+                    json=STREAM_BODY,
+                    headers={"Authorization": f"Bearer {session_id}"},
+                ) as r:
+                    iterator = r.iter_raw()
+                    first = next(iterator)
+                    assert first  # request authorized and streaming
+                    # Close the session mid-stream; delivery must continue.
+                    ws.close()
+                    rest = b"".join(iterator)
+        assert (first + rest) == b"".join(SSE_FRAMES)
+
+    def test_unreachable_upstream_fails_cleanly_within_connect_timeout(self):
+        config = LLMProxyConfig(
+            enabled=True,
+            llm_backend="chat-completions",
+            upstream_base_url="http://10.255.255.1:9/v1",  # blackhole address
+            upstream_api_key="sk-server-secret",
+            model_name="server-model",
+            connect_timeout_s=0.2,
+        )
+        app = _make_app(config)
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                session_id = ws.receive_json()["session"]["id"]
+                start = time.monotonic()
+                r = client.post(
+                    "/v1/chat/completions",
+                    json=STREAM_BODY,
+                    headers={"Authorization": f"Bearer {session_id}"},
+                )
+                elapsed = time.monotonic() - start
+        assert r.status_code == 502
+        assert "error" in r.json()
+        assert elapsed < 3
+
+    def test_upstream_error_before_stream_passes_through(self, upstream):
+        upstream.responder = lambda request: (429, {"error": {"message": "quota", "type": "rate_limit"}})
+        app = _make_app(_proxy_config(upstream))
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                session_id = ws.receive_json()["session"]["id"]
+                r = client.post(
+                    "/v1/chat/completions",
+                    json=STREAM_BODY,
+                    headers={"Authorization": f"Bearer {session_id}"},
+                )
+        assert r.status_code == 429
+        assert r.json() == {"error": {"message": "quota", "type": "rate_limit"}}
 
 
 class TestUpstreamErrorPassthrough:
