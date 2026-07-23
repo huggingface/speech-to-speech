@@ -400,6 +400,116 @@ class TestStreamingPassthrough:
         assert r.json() == {"error": {"message": "quota", "type": "rate_limit"}}
 
 
+RESPONSES_BODY = {
+    "model": "client-model",
+    "input": [{"role": "user", "content": "hello"}],
+    "store": True,
+}
+
+RESPONSES_SSE_FRAMES = [
+    b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+    b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hi"}\n\n',
+    b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1"}}\n\n',
+]
+
+
+class TestResponsesPassthrough:
+    def _config(self, upstream, **overrides):
+        return _proxy_config(upstream, llm_backend="responses-api", **overrides)
+
+    def test_non_streaming_passes_through_verbatim(self, upstream):
+        upstream.responder = lambda request: (200, {"id": "resp_1", "object": "response", "output": []})
+        app = _make_app(self._config(upstream))
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                session_id = ws.receive_json()["session"]["id"]
+                r = client.post(
+                    "/v1/responses",
+                    json=RESPONSES_BODY,
+                    headers={"Authorization": f"Bearer {session_id}"},
+                )
+        assert r.status_code == 200
+        assert r.json() == {"id": "resp_1", "object": "response", "output": []}
+
+    def test_upstream_receives_store_false_and_forced_model(self, upstream):
+        app = _make_app(self._config(upstream))
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                session_id = ws.receive_json()["session"]["id"]
+                client.post(
+                    "/v1/responses",
+                    json=RESPONSES_BODY,
+                    headers={"Authorization": f"Bearer {session_id}"},
+                )
+        (request,) = upstream.requests
+        assert request["path"] == "/v1/responses"
+        assert request["body"]["store"] is False
+        assert request["body"]["model"] == "server-model"
+        assert request["body"]["input"] == RESPONSES_BODY["input"]
+
+    def test_streaming_responses_grammar_passes_through_verbatim(self, upstream):
+        upstream.responder = lambda request: SSEScript(frames=[(0.0, f) for f in RESPONSES_SSE_FRAMES])
+        app = _make_app(self._config(upstream))
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                session_id = ws.receive_json()["session"]["id"]
+                with client.stream(
+                    "POST",
+                    "/v1/responses",
+                    json={**RESPONSES_BODY, "stream": True},
+                    headers={"Authorization": f"Bearer {session_id}"},
+                ) as r:
+                    assert r.status_code == 200
+                    received = b"".join(r.iter_raw())
+        assert received == b"".join(RESPONSES_SSE_FRAMES)
+        (request,) = upstream.requests
+        assert request["body"]["store"] is False
+
+    def test_chat_completions_path_is_501_under_responses_backend(self, upstream):
+        app = _make_app(self._config(upstream))
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                session_id = ws.receive_json()["session"]["id"]
+                r = client.post(
+                    "/v1/chat/completions",
+                    json=CHAT_BODY,
+                    headers={"Authorization": f"Bearer {session_id}"},
+                )
+        assert r.status_code == 501
+        assert "/v1/responses" in r.json()["error"]["message"]
+
+    def test_missing_bearer_is_401_on_responses_path(self, upstream):
+        app = _make_app(self._config(upstream))
+        with TestClient(app) as client:
+            r = client.post("/v1/responses", json=RESPONSES_BODY)
+        assert r.status_code == 401
+        assert upstream.requests == []
+
+    def test_unknown_session_is_401_on_responses_path(self, upstream):
+        app = _make_app(self._config(upstream))
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                r = client.post(
+                    "/v1/responses",
+                    json=RESPONSES_BODY,
+                    headers={"Authorization": "Bearer sess_deadbeef"},
+                )
+        assert r.status_code == 401
+        assert upstream.requests == []
+
+    @pytest.mark.parametrize("backend", ["transformers", "mlx-lm"])
+    def test_flag_off_and_local_backend_are_501_on_responses_path(self, upstream, backend):
+        for config in (
+            self._config(upstream, enabled=False),
+            _proxy_config(upstream, llm_backend=backend),
+        ):
+            app = _make_app(config)
+            with TestClient(app) as client:
+                r = client.post("/v1/responses", json=RESPONSES_BODY)
+            assert r.status_code == 501
+
+
 class TestUpstreamErrorPassthrough:
     @pytest.mark.parametrize("status", [400, 429, 500, 503])
     def test_upstream_errors_pass_through_verbatim(self, upstream, status):

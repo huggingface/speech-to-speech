@@ -148,6 +148,10 @@ def _mount_passthrough(app: FastAPI, path: str, pool: list[PipelineUnit], config
         except Exception:
             return _error_response(400, "Request body must be valid JSON.", "invalid_request_error")
         body["model"] = config.model_name
+        if path == _PATHS["responses-api"]:
+            # Session holders are anonymous; forcing store off keeps them from
+            # creating persistent state on the operator's provider account.
+            body["store"] = False
 
         headers = {"Authorization": f"Bearer {config.upstream_api_key}"}
         # Generation can legitimately take minutes, so only the connect
