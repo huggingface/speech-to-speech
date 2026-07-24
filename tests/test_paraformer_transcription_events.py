@@ -10,9 +10,10 @@ class _FakeParaformerModel:
         return [{"text": " 今 天 天 气 不 错 "}]
 
 
-def _handler():
+def _handler(device="mps"):
     handler = object.__new__(ParaformerSTTHandler)
     handler.model = _FakeParaformerModel()
+    handler.device = device
     return handler
 
 
@@ -60,3 +61,26 @@ def test_final_paraformer_transcription_is_final(monkeypatch):
     assert result[0].turn_id == "turn_1"
     assert result[0].turn_revision == 2
     assert result[0].speech_stopped_at_s == 123.0
+
+
+def test_process_does_not_touch_mps_cache_on_non_mps_device(monkeypatch):
+    monkeypatch.setattr(paraformer_handler.console, "print", lambda *args, **kwargs: None)
+
+    def _raise():
+        raise RuntimeError("Cannot execute emptyCache() without MPS backend.")
+
+    monkeypatch.setattr(paraformer_handler.torch.mps, "empty_cache", _raise)
+
+    result = list(
+        _handler(device="cuda").process(
+            VADAudio(
+                audio=np.zeros(16000, dtype=np.float32),
+                mode="final",
+                turn_id="turn_1",
+                turn_revision=2,
+                created_at_s=123.0,
+            )
+        )
+    )
+
+    assert len(result) == 1
