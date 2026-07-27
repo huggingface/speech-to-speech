@@ -238,7 +238,8 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
 
         self._owner_id = uuid4().hex
         self._session_generation = 0
-        self._generation_lock = Lock()
+        self._publication_lock = Lock()
+        self._progressive_hypotheses: dict[tuple[int, str, int], str] = {}
         self._completion_queue: Queue[_CompletedRequest | None] = Queue()
         self._delivery_thread = Thread(
             target=self._delivery_loop,
@@ -253,12 +254,13 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         turn_revision = vad_audio.turn_revision if vad_audio.turn_revision is not None else 0
         request_id = uuid4().hex
         started_at_s = perf_counter()
-        with self._generation_lock:
+        with self._publication_lock:
             session_generation = self._session_generation
+            owner_id = self._owner_id
 
         request = TranscriptionAdmissionRequest(
             request_id=request_id,
-            owner_id=self._owner_id,
+            owner_id=owner_id,
             turn_id=turn_id,
             turn_revision=turn_revision,
             mode=mode,
@@ -309,7 +311,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         return output.getvalue()
 
     def _is_request_relevant(self, source: VADAudio, session_generation: int) -> bool:
-        with self._generation_lock:
+        with self._publication_lock:
             if session_generation != self._session_generation:
                 return False
         tracker = self.speculative_turns
@@ -329,12 +331,37 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             source = completed.source
             try:
                 result = completed.future.result()
-            except (TranscriptionCancelled, AdmissionRejected):
+            except TranscriptionCancelled:
                 logger.debug(
                     "OpenAI-compatible STT request cancelled turn=%s rev=%s mode=%s",
                     source.turn_id,
                     source.turn_revision,
                     source.mode,
+                )
+                continue
+            except AdmissionRejected:
+                if not self._is_request_relevant(source, completed.session_generation):
+                    continue
+                if source.mode == "progressive":
+                    logger.debug(
+                        "Dropping progressive STT request because endpoint queue is full turn=%s rev=%s",
+                        source.turn_id,
+                        source.turn_revision,
+                    )
+                    continue
+                logger.error(
+                    "OpenAI-compatible final STT rejected because endpoint queue is full turn=%s rev=%s",
+                    source.turn_id,
+                    source.turn_revision,
+                )
+                self._publish_output(
+                    completed,
+                    TranscriptionFailure(
+                        message="transcription endpoint is overloaded",
+                        turn_id=source.turn_id,
+                        turn_revision=source.turn_revision,
+                        speech_stopped_at_s=source.created_at_s,
+                    ),
                 )
                 continue
             except Exception as exc:
@@ -361,13 +388,9 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
                     turn_revision=source.turn_revision,
                     speech_stopped_at_s=source.created_at_s,
                 )
-                if self.should_emit_output(failure):
-                    self.queue_out.put(failure)
+                self._publish_output(completed, failure)
                 continue
 
-            with self._generation_lock:
-                if completed.session_generation != self._session_generation:
-                    continue
             output: STTOut
             if source.mode == "progressive":
                 output = PartialTranscription(
@@ -384,7 +407,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
                     speech_stopped_at_s=source.created_at_s,
                 )
 
-            if not self.should_emit_output(output):
+            if not self._publish_output(completed, output):
                 continue
             elapsed_s = perf_counter() - completed.started_at_s
             logger.info(
@@ -394,17 +417,62 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
                 source.mode,
                 elapsed_s,
             )
-            self.before_emit_output(output)
-            self.queue_out.put(output)
+
+    def _publish_output(self, completed: _CompletedRequest, output: STTOut) -> bool:
+        """Atomically fence a completion against session teardown and publish it."""
+
+        with self._publication_lock:
+            if completed.session_generation != self._session_generation:
+                return False
+            prepared_output = self._prepare_output_locked(completed, output)
+            if prepared_output is None or not self.should_emit_output(prepared_output):
+                return False
+            self.before_emit_output(prepared_output)
+            self.queue_out.put(prepared_output)
+            return True
+
+    def _prepare_output_locked(self, completed: _CompletedRequest, output: STTOut) -> STTOut | None:
+        source = completed.source
+        if source.turn_id is None or source.turn_revision is None:
+            return output
+        key = (completed.session_generation, source.turn_id, source.turn_revision)
+        if isinstance(output, PartialTranscription):
+            # Stateless HTTP STT responses are complete snapshots, while the
+            # realtime protocol field is an append-only delta. Emit only a
+            # suffix extension; corrections cannot be represented safely and
+            # are therefore suppressed until the authoritative final result.
+            previous = self._progressive_hypotheses.get(key, "")
+            if output.text == previous:
+                return None
+            if previous and not output.text.startswith(previous):
+                logger.debug(
+                    "Suppressing rewritten progressive STT hypothesis turn=%s rev=%s",
+                    source.turn_id,
+                    source.turn_revision,
+                )
+                return None
+            self._progressive_hypotheses[key] = output.text
+            return PartialTranscription(
+                text=output.text[len(previous) :],
+                turn_id=output.turn_id,
+                turn_revision=output.turn_revision,
+            )
+        self._progressive_hypotheses.pop(key, None)
+        return output
 
     def on_session_end(self) -> None:
-        with self._generation_lock:
+        with self._publication_lock:
+            old_owner_id = self._owner_id
+            self._owner_id = uuid4().hex
             self._session_generation += 1
-        self.admission.cancel(CancelTranscription(owner_id=self._owner_id, reason="session_end"))
+            self._progressive_hypotheses.clear()
+        self.admission.cancel(CancelTranscription(owner_id=old_owner_id, reason="session_end"))
         super().on_session_end()
 
     def cleanup(self) -> None:
-        self.admission.cancel(CancelTranscription(owner_id=self._owner_id, reason="shutdown"))
+        with self._publication_lock:
+            owner_id = self._owner_id
+        self.admission.cancel(CancelTranscription(owner_id=owner_id, reason="shutdown"))
         self._completion_queue.put(None)
         self._delivery_thread.join(timeout=2.0)
         self.admission_lease.release()

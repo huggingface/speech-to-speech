@@ -127,6 +127,7 @@ class EndpointAdmissionController:
         future: Future[T] = Future()
         item = _AdmissionItem(request=request, future=future, sequence=0)
         cancelled: list[_AdmissionItem] = []
+        rejection: AdmissionRejected | None = None
 
         with self._condition:
             if self._closed:
@@ -154,14 +155,17 @@ class EndpointAdmissionController:
                         self._mark_cancelled_locked(progressive, "superseded")
                         cancelled.append(progressive)
                 if len(self._pending) >= self.settings.max_queue_size:
-                    item.cancelled_reason = "superseded"
-                    cancelled.append(item)
+                    rejection = AdmissionRejected(
+                        f"transcription endpoint queue is full (capacity={self.settings.max_queue_size})"
+                    )
 
-            if item.cancelled_reason is None:
+            if item.cancelled_reason is None and rejection is None:
                 self._pending.append(item)
                 self._condition.notify_all()
 
         self._complete_cancellations(cancelled)
+        if rejection is not None:
+            future.set_exception(rejection)
         return future
 
     def cancel(self, message: CancelTranscription) -> int:
@@ -261,6 +265,12 @@ class EndpointAdmissionController:
         item.cancelled_reason = reason
         if item in self._pending:
             self._pending.remove(item)
+        self._prune_progressive_dispatch_locked(item.request.supersession_key)
+
+    def _prune_progressive_dispatch_locked(self, key: tuple[str, str]) -> None:
+        if any(item.request.supersession_key == key for item in [*self._pending, *self._active.values()]):
+            return
+        self._last_progressive_dispatch.pop(key, None)
 
     def _complete_cancellations(self, items: list[_AdmissionItem]) -> None:
         seen: set[str] = set()
@@ -335,10 +345,15 @@ class EndpointAdmissionController:
         return max(item.submitted_at_s, last_dispatch + self.settings.progressive_min_interval_s)
 
     def _next_wait_s_locked(self) -> float:
-        if not self._pending:
+        if not self._pending or len(self._active) >= self.settings.max_concurrency:
             return self._RELEVANCE_POLL_S
         now = monotonic()
-        ready_times = [self._ready_at_locked(item) for item in self._pending if item.cancelled_reason is None]
+        active_keys = {item.request.supersession_key for item in self._active.values()}
+        ready_times = [
+            self._ready_at_locked(item)
+            for item in self._pending
+            if item.cancelled_reason is None and item.request.supersession_key not in active_keys
+        ]
         if not ready_times:
             return self._RELEVANCE_POLL_S
         return max(0.001, min(self._RELEVANCE_POLL_S, min(ready_times) - now))
@@ -375,6 +390,7 @@ class EndpointAdmissionController:
             with self._condition:
                 self._active.pop(item.request.request_id, None)
                 item.operation = None
+                self._prune_progressive_dispatch_locked(item.request.supersession_key)
                 cancelled_reason = item.cancelled_reason
                 self._condition.notify_all()
 

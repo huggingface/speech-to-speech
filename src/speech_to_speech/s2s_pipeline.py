@@ -484,6 +484,7 @@ def _build_pipeline_handlers(
         kokoro_tts_handler_kwargs,
         qwen3_tts_handler_kwargs,
         openai_tts_handler_kwargs,
+        text_output_queue,
     )
 
     return [vad, stt, transcription_notifier, lm, lm_processor, tts]
@@ -993,6 +994,7 @@ def get_tts_handler(
     kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
     openai_tts_handler_kwargs: OpenAICompatibleTTSHandlerArguments,
+    text_output_queue: Queue[TextEventItem] | None = None,
 ) -> BaseHandler[TTSIn, TTSOut]:
     if module_kwargs.tts == "chatTTS":
         try:
@@ -1063,7 +1065,7 @@ def get_tts_handler(
             queue_in=lm_response_queue,
             queue_out=send_audio_chunks_queue,
             setup_args=(should_listen,),
-            setup_kwargs=vars(openai_tts_handler_kwargs),
+            setup_kwargs={**vars(openai_tts_handler_kwargs), "text_output_queue": text_output_queue},
         )
     else:
         raise ValueError("The TTS should be either chatTTS, facebookMMS, pocket, kokoro, qwen3, or openai")

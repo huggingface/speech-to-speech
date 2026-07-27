@@ -7,6 +7,7 @@ from time import monotonic, sleep
 import pytest
 
 from speech_to_speech.STT.endpoint_admission import (
+    AdmissionRejected,
     CancelTranscription,
     EndpointAdmissionController,
     EndpointAdmissionRegistry,
@@ -36,6 +37,12 @@ class ControlledOperation:
         del reason
         self.cancelled.set()
         self.release.set()
+
+
+class UncooperativeOperation(ControlledOperation):
+    def cancel(self, reason: str) -> None:
+        del reason
+        self.cancelled.set()
 
 
 def _request(
@@ -184,4 +191,87 @@ def test_active_operation_is_cancelled_when_relevance_changes_without_new_submis
     with pytest.raises(TranscriptionCancelled):
         future.result(timeout=1)
     assert operation.cancelled.is_set()
+    controller.close()
+
+
+def test_full_queue_rejects_unrelated_final_instead_of_superseding_it():
+    starts: list[str] = []
+    lock = Lock()
+    active = ControlledOperation("active", starts, lock)
+    queued = ControlledOperation("queued", starts, lock)
+    rejected = ControlledOperation("rejected", starts, lock)
+    controller = EndpointAdmissionController(
+        "test",
+        EndpointAdmissionSettings(max_concurrency=1, max_queue_size=1, progressive_min_interval_s=0),
+    )
+
+    active_future = controller.submit(_request("active", "final", active, owner="owner-1", turn="turn-1"))
+    _wait_until(lambda: starts == ["active"])
+    queued_future = controller.submit(_request("queued", "final", queued, owner="owner-2", turn="turn-2"))
+    with controller._condition:
+        assert controller._next_wait_s_locked() == controller._RELEVANCE_POLL_S
+    rejected_future = controller.submit(_request("rejected", "final", rejected, owner="owner-3", turn="turn-3"))
+
+    with pytest.raises(AdmissionRejected, match="queue is full"):
+        rejected_future.result(timeout=1)
+    assert not rejected.cancelled.is_set()
+
+    active.release.set()
+    assert active_future.result(timeout=1) == "active"
+    _wait_until(lambda: starts == ["active", "queued"])
+    queued.release.set()
+    assert queued_future.result(timeout=1) == "queued"
+    controller.close()
+
+
+def test_new_session_owner_dispatches_while_cancelled_old_transport_is_still_active():
+    starts: list[str] = []
+    lock = Lock()
+    old = UncooperativeOperation("old", starts, lock)
+    new = ControlledOperation("new", starts, lock)
+    controller = EndpointAdmissionController(
+        "test",
+        EndpointAdmissionSettings(max_concurrency=2, max_queue_size=2, progressive_min_interval_s=0),
+    )
+
+    old_future = controller.submit(_request("old", "final", old, owner="session-1", turn="turn-1"))
+    _wait_until(lambda: starts == ["old"])
+    assert controller.cancel(CancelTranscription(owner_id="session-1", reason="session_end")) == 1
+    with pytest.raises(TranscriptionCancelled):
+        old_future.result(timeout=1)
+
+    new_future = controller.submit(_request("new", "final", new, owner="session-2", turn="turn-1"))
+    _wait_until(lambda: starts == ["old", "new"])
+    new.release.set()
+    assert new_future.result(timeout=1) == "new"
+
+    old.release.set()
+    _wait_until(lambda: controller.active_count == 0)
+    controller.close()
+
+
+def test_key_blocked_pending_request_uses_relevance_poll_wait():
+    starts: list[str] = []
+    lock = Lock()
+    active = ControlledOperation("active", starts, lock)
+    pending = ControlledOperation("pending", starts, lock)
+    controller = EndpointAdmissionController(
+        "test",
+        EndpointAdmissionSettings(max_concurrency=2, max_queue_size=2, progressive_min_interval_s=0),
+    )
+
+    active_future = controller.submit(_request("active", "progressive", active))
+    _wait_until(lambda: starts == ["active"])
+    pending_future = controller.submit(_request("pending", "progressive", pending))
+    _wait_until(lambda: controller.pending_count == 1)
+
+    with controller._condition:
+        assert controller._next_wait_s_locked() == controller._RELEVANCE_POLL_S
+
+    active.release.set()
+    assert active_future.result(timeout=1) == "active"
+    _wait_until(lambda: starts == ["active", "pending"])
+    pending.release.set()
+    assert pending_future.result(timeout=1) == "pending"
+    assert ("pipeline-1", "turn-1") not in controller._last_progressive_dispatch
     controller.close()

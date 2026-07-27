@@ -26,6 +26,7 @@ from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
     PartialTranscriptionEvent,
     PipelineEvent,
+    ResponseFailedEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TokenUsageEvent,
@@ -123,6 +124,7 @@ async def _drain_pending_response_events(
 
     preserved: list[Any] = []
     drained_assistant = 0
+    drained_failures = 0
     drained_usage = 0
     drain_assistant_events = True
     try:
@@ -144,6 +146,13 @@ async def _drain_pending_response_events(
                 events = unit.service.dispatch_pipeline_event(session_id, item)
                 if ws is not None and events:
                     await _send_events(ws, events)
+            elif isinstance(item, ResponseFailedEvent):
+                drained_failures += 1
+                if _generation_is_discardable(unit, item.cancel_generation):
+                    continue
+                events = unit.service.dispatch_pipeline_event(session_id, item)
+                if ws is not None and events:
+                    await _send_events(ws, events)
             else:
                 preserved.append(item)
                 drain_assistant_events = False
@@ -154,11 +163,13 @@ async def _drain_pending_response_events(
                     unit.text_output_queue.queue.appendleft(item)
                 unit.text_output_queue.not_empty.notify(len(preserved))
 
-    if drained_assistant or drained_usage:
+    if drained_assistant or drained_failures or drained_usage:
         logger.debug(
-            "Pipeline %d: drained %d assistant event(s) and %d token usage event(s) before response completion",
+            "Pipeline %d: drained %d assistant event(s), %d failure event(s), and "
+            "%d token usage event(s) before response completion",
             unit.index,
             drained_assistant,
+            drained_failures,
             drained_usage,
         )
 
@@ -475,7 +486,7 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                         was_in_response = st.in_response
                         was_response_pending = st.response_pending
 
-                    if isinstance(text_msg, AssistantTextEvent) and _generation_is_discardable(
+                    if isinstance(text_msg, (AssistantTextEvent, ResponseFailedEvent)) and _generation_is_discardable(
                         unit, text_msg.cancel_generation
                     ):
                         pass

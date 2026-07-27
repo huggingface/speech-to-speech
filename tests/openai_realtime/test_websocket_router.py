@@ -22,7 +22,12 @@ from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, Realt
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
-from speech_to_speech.pipeline.events import AssistantTextEvent, SpeechStartedEvent, TokenUsageEvent
+from speech_to_speech.pipeline.events import (
+    AssistantTextEvent,
+    ResponseFailedEvent,
+    SpeechStartedEvent,
+    TokenUsageEvent,
+)
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
 
 # ---------------------------------------------------------------------------
@@ -583,6 +588,38 @@ class TestSendLoop:
         assert done_events[1].response.id == response_id
         assert done_events[1].response.usage.input_tokens == 10
         assert done_events[1].response.usage.output_tokens == 5
+        assert text_output_queue.empty()
+
+    def test_response_completion_drain_marks_pending_tts_failure_as_failed(self, setup):
+        _, service, input_queue, output_queue, text_output_queue, should_listen, _, response_playing, cancel_scope = (
+            setup
+        )
+        unit = PipelineUnit(
+            index=0,
+            service=service,
+            cancel_scope=cancel_scope,
+            should_listen=should_listen,
+            response_playing=response_playing,
+            input_queue=input_queue,
+            output_queue=output_queue,
+            text_output_queue=text_output_queue,
+            text_prompt_queue=Queue(),
+            handlers=[],
+        )
+        conn_id = service.register()
+        service.response._ensure_response(conn_id)
+        text_output_queue.put(ResponseFailedEvent(message="speech server returned HTTP 500"))
+        ws = _FakeWebSocket()
+
+        asyncio.run(router_module._drain_pending_response_events(ws, unit, conn_id))
+
+        assert [payload["type"] for payload in ws.sent] == [
+            "error",
+            "response.output_audio.done",
+            "response.done",
+        ]
+        assert ws.sent[-1]["response"]["status"] == "failed"
+        assert service.finish_response(conn_id) == []
         assert text_output_queue.empty()
 
     def test_response_completion_drain_preserves_usage_across_non_response_boundary(self, setup):
