@@ -47,6 +47,7 @@ from speech_to_speech.arguments_classes.responses_api_language_model_arguments i
 from speech_to_speech.arguments_classes.socket_receiver_arguments import SocketReceiverArguments
 from speech_to_speech.arguments_classes.socket_sender_arguments import SocketSenderArguments
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
+from speech_to_speech.arguments_classes.voice_store_arguments import VoiceStoreArguments
 from speech_to_speech.arguments_classes.websocket_streamer_arguments import WebSocketStreamerArguments
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
 from speech_to_speech.baseHandler import BaseHandler
@@ -107,6 +108,7 @@ class ParsedArguments:
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments
     kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments
+    voice_store_kwargs: VoiceStoreArguments
 
 
 def rename_args(args: Any, prefix: str) -> None:
@@ -165,6 +167,7 @@ def parse_arguments() -> ParsedArguments:
             PocketTTSHandlerArguments,
             KokoroTTSHandlerArguments,
             Qwen3TTSHandlerArguments,
+            VoiceStoreArguments,
         )
     )
 
@@ -200,6 +203,7 @@ def parse_arguments() -> ParsedArguments:
         pocket_tts_handler_kwargs=by_type[PocketTTSHandlerArguments],
         kokoro_tts_handler_kwargs=by_type[KokoroTTSHandlerArguments],
         qwen3_tts_handler_kwargs=by_type[Qwen3TTSHandlerArguments],
+        voice_store_kwargs=by_type[VoiceStoreArguments],
     )
 
 
@@ -597,6 +601,7 @@ def build_pipeline(
     kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
     queues_and_events: dict[str, Any],
+    voice_store_kwargs: VoiceStoreArguments | None = None,
 ) -> ThreadManager:
     stop_event = queues_and_events["stop_event"]
     should_listen = queues_and_events["should_listen"]
@@ -639,6 +644,16 @@ def build_pipeline(
     elif module_kwargs.mode == "realtime":
         from speech_to_speech.api.openai_realtime.server import RealtimeServer
 
+        # The cloned-voice library only makes sense when the TTS can condition
+        # on a (ref_audio, ref_text) pair; without a store the voices routes
+        # answer 409, which is the capability-probe contract.
+        voice_store = None
+        if module_kwargs.tts == "qwen3":
+            from speech_to_speech.voice_store import DEFAULT_STORE_DIR, VoiceStore
+
+            store_args = voice_store_kwargs or VoiceStoreArguments()
+            voice_store = VoiceStore(store_args.voice_store_dir or DEFAULT_STORE_DIR)
+
         pool_size = max(1, module_kwargs.num_pipelines)
         pool = [
             _build_realtime_pipeline_unit(
@@ -667,6 +682,7 @@ def build_pipeline(
             pool=pool,
             host=websocket_streamer_kwargs.ws_host,
             port=websocket_streamer_kwargs.ws_port,
+            voice_store=voice_store,
         )
 
         all_handlers: list[Any] = [realtime_server]
@@ -1048,6 +1064,7 @@ def main() -> None:
         args.kokoro_tts_handler_kwargs,
         args.qwen3_tts_handler_kwargs,
         queues_and_events,
+        voice_store_kwargs=args.voice_store_kwargs,
     )
 
     # Set up graceful shutdown handler

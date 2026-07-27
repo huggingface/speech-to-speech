@@ -6,6 +6,7 @@ import uvicorn
 
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
+from speech_to_speech.voice_store import VoiceStore
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ class RealtimeServer:
         pool: list[PipelineUnit],
         host: str = "0.0.0.0",
         port: int = 8765,
+        voice_store: VoiceStore | None = None,
     ) -> None:
         if not pool:
             raise ValueError("RealtimeServer requires at least one PipelineUnit in the pool")
@@ -32,10 +34,11 @@ class RealtimeServer:
         self.pool = pool
         self.host = host
         self.port = port
+        self.voice_store = voice_store
 
     def run(self) -> None:
         """Start the FastAPI/uvicorn server (called from a ThreadManager thread)."""
-        app = create_app(pool=self.pool, stop_event=self.stop_event)
+        app = create_app(pool=self.pool, stop_event=self.stop_event, voice_store=self.voice_store)
 
         logger.info(
             f"OpenAI Realtime API starting on ws://{self.host}:{self.port}/v1/realtime (pool size {len(self.pool)})"

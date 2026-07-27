@@ -29,6 +29,7 @@ from speech_to_speech.api.openai_realtime.transports import (
     WebSocketTransport,
     send_ws_event,
 )
+from speech_to_speech.api.openai_realtime.voices_router import build_voices_router
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
@@ -41,6 +42,7 @@ from speech_to_speech.pipeline.events import (
 )
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
+from speech_to_speech.voice_store import VoiceStore
 
 # aiortc (the 'webrtc' extra) is optional. Import it here, at module load,
 # rather than lazily in the calls endpoint: the av/cryptography C extensions
@@ -403,7 +405,11 @@ async def _dispatch_client_event(
         unit.response_playing.clear()
 
 
-def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
+def create_app(
+    pool: list[PipelineUnit],
+    stop_event: ThreadingEvent,
+    voice_store: VoiceStore | None = None,
+) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # One send loop per pipeline unit; each polls its own queues and forwards
@@ -426,6 +432,7 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                     pass
 
     app = FastAPI(lifespan=lifespan)
+    app.include_router(build_voices_router(pool, voice_store))
 
     def _claim_unit(transport: SessionTransport | None) -> PipelineUnit | None:
         """Atomically (between asyncio yield points) reserve the first idle unit.

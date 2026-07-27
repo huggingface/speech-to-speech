@@ -18,6 +18,7 @@ from speech_to_speech.arguments_classes.responses_api_language_model_arguments i
 from speech_to_speech.arguments_classes.socket_receiver_arguments import SocketReceiverArguments
 from speech_to_speech.arguments_classes.socket_sender_arguments import SocketSenderArguments
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
+from speech_to_speech.arguments_classes.voice_store_arguments import VoiceStoreArguments
 from speech_to_speech.arguments_classes.websocket_streamer_arguments import WebSocketStreamerArguments
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
 from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments
@@ -74,6 +75,7 @@ EXPECTED_FIELD_TYPES = {
     "pocket_tts_handler_kwargs": PocketTTSHandlerArguments,
     "kokoro_tts_handler_kwargs": KokoroTTSHandlerArguments,
     "qwen3_tts_handler_kwargs": Qwen3TTSHandlerArguments,
+    "voice_store_kwargs": VoiceStoreArguments,
 }
 
 
@@ -103,6 +105,30 @@ def test_parse_arguments_default_backend_returns_openai_api():
     assert isinstance(args.language_model_handler_kwargs, LanguageModelHandlerArguments)
     assert args.responses_api_language_model_handler_kwargs.model_name == "gpt-5.4-mini"
     assert args.module_kwargs.llm_backend == "responses-api"
+
+
+def test_voice_store_defaults_are_local_only():
+    store_args = VoiceStoreArguments()
+    assert store_args.voice_store_dir is None
+    assert store_args.voice_store_hub_repo is None
+
+
+def test_parse_arguments_accepts_voice_store_overrides():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = [
+            "speech-to-speech",
+            "--voice_store_dir",
+            "/tmp/voices",
+            "--voice_store_hub_repo",
+            "org/voices-repo",
+        ]
+        args = parse_arguments()
+    finally:
+        sys.argv = original_argv
+
+    assert args.voice_store_kwargs.voice_store_dir == "/tmp/voices"
+    assert args.voice_store_kwargs.voice_store_hub_repo == "org/voices-repo"
 
 
 def test_parse_arguments_accepts_qwen3_tts_backend_override():
