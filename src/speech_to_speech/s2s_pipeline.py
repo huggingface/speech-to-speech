@@ -655,10 +655,11 @@ def build_pipeline(
         # answer 409, which is the capability-probe contract.
         voice_store = None
         if module_kwargs.tts == "qwen3":
-            from speech_to_speech.voice_store import DEFAULT_STORE_DIR, VoiceStore
+            from speech_to_speech.voice_store import DEFAULT_STORE_DIR, HubVoiceRepo, VoiceStore
 
             store_args = voice_store_kwargs or VoiceStoreArguments()
-            voice_store = VoiceStore(store_args.voice_store_dir or DEFAULT_STORE_DIR)
+            hub = HubVoiceRepo(store_args.voice_store_hub_repo) if store_args.voice_store_hub_repo else None
+            voice_store = VoiceStore(store_args.voice_store_dir or DEFAULT_STORE_DIR, hub=hub)
 
         pool_size = max(1, module_kwargs.num_pipelines)
         pool = [

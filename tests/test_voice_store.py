@@ -17,6 +17,7 @@ from speech_to_speech.voice_store import (
     MAX_UPLOAD_BYTES,
     STORE_SAMPLE_RATE,
     VoiceStore,
+    VoiceSyncError,
     VoiceValidationError,
 )
 
@@ -185,3 +186,159 @@ class TestValidation:
             store.add_voice(_wav_bytes(seconds=1.0), ref_text="ref", name="v")
         assert store.list_voices() == []
         assert [p for p in root.iterdir()] == []
+
+
+class FakeHubRepo:
+    """In-memory stand-in for the huggingface_hub adapter surface."""
+
+    def __init__(self):
+        self.voices: dict[str, dict[str, bytes]] = {}
+        self._rev = 0
+        self.revision_calls = 0
+        self.download_calls: list[str] = []
+        self.uploads: list[str] = []
+        self.upload_failures = 0
+
+    def bump(self):
+        self._rev += 1
+
+    def revision(self) -> str:
+        self.revision_calls += 1
+        return f"rev-{self._rev}"
+
+    def list_voice_ids(self, revision=None) -> set:
+        return set(self.voices)
+
+    def download_voice(self, voice_id, root, revision=None) -> None:
+        self.download_calls.append(voice_id)
+        voice_dir = root / voice_id
+        voice_dir.mkdir(parents=True, exist_ok=True)
+        for filename, data in self.voices[voice_id].items():
+            (voice_dir / filename).write_bytes(data)
+
+    def upload_voice(self, root, voice_id) -> None:
+        if self.upload_failures > 0:
+            self.upload_failures -= 1
+            raise RuntimeError("simulated optimistic-lock conflict")
+        folder = root / voice_id
+        self.voices[voice_id] = {p.name: p.read_bytes() for p in folder.iterdir()}
+        self.uploads.append(voice_id)
+        self.bump()
+
+
+class TestHubPersistence:
+    def test_startup_pull_materializes_hub_voices(self, tmp_path):
+        hub = FakeHubRepo()
+        writer = VoiceStore(tmp_path / "a", hub=hub)
+        record = writer.add_voice(_wav_bytes(), ref_text="ref", name="fleet voice")
+
+        fresh = VoiceStore(tmp_path / "b", hub=hub)
+
+        assert [v.voice_id for v in fresh.list_voices()] == [record.voice_id]
+        resolved = fresh.resolve(record.voice_id)
+        assert resolved is not None
+        assert (tmp_path / "b" / record.voice_id / "ref.wav").exists()
+
+    def test_upload_pushes_to_hub_before_returning(self, tmp_path):
+        hub = FakeHubRepo()
+        store = VoiceStore(tmp_path / "voices", hub=hub)
+
+        record = store.add_voice(_wav_bytes(), ref_text="ref", name="v")
+
+        assert hub.uploads == [record.voice_id]
+        assert set(hub.voices[record.voice_id]) == {"ref.wav", "voice.json"}
+
+    def test_persistent_push_failure_rolls_back_local_copy(self, tmp_path):
+        hub = FakeHubRepo()
+        root = tmp_path / "voices"
+        store = VoiceStore(root, hub=hub)
+        hub.upload_failures = 99
+
+        with pytest.raises(VoiceSyncError):
+            store.add_voice(_wav_bytes(), ref_text="ref", name="v")
+
+        assert store.list_voices() == []
+        assert [p for p in root.iterdir()] == []
+
+    def test_transient_push_conflict_is_retried(self, tmp_path):
+        hub = FakeHubRepo()
+        store = VoiceStore(tmp_path / "voices", hub=hub)
+        hub.upload_failures = 2
+
+        record = store.add_voice(_wav_bytes(), ref_text="ref", name="v")
+
+        assert hub.uploads == [record.voice_id]
+        assert len(store.list_voices()) == 1
+
+    def test_metadata_update_push_failure_restores_previous_transcript(self, tmp_path):
+        hub = FakeHubRepo()
+        store = VoiceStore(tmp_path / "voices", hub=hub)
+        audio = _wav_bytes()
+        store.add_voice(audio, ref_text="original", name="v")
+        hub.upload_failures = 99
+
+        with pytest.raises(VoiceSyncError):
+            store.add_voice(audio, ref_text="corrected", name="v")
+
+        assert [v.ref_text for v in store.list_voices()] == ["original"]
+
+    def test_unchanged_revision_short_circuits_to_one_repo_info_call(self, tmp_path):
+        hub = FakeHubRepo()
+        writer = VoiceStore(tmp_path / "a", hub=hub)
+        writer.add_voice(_wav_bytes(), ref_text="ref", name="v")
+        reader = VoiceStore(tmp_path / "b", hub=hub)
+
+        downloads_after_startup = list(hub.download_calls)
+        hub.revision_calls = 0
+        reader.list_voices()
+        reader.list_voices()
+
+        assert hub.revision_calls == 2
+        assert hub.download_calls == downloads_after_startup
+
+    def test_moved_revision_pulls_only_new_voice_folders(self, tmp_path):
+        hub = FakeHubRepo()
+        writer = VoiceStore(tmp_path / "a", hub=hub)
+        first = writer.add_voice(_wav_bytes(freq=440.0), ref_text="ref", name="one")
+        reader = VoiceStore(tmp_path / "b", hub=hub)
+        reader.list_voices()
+
+        second = writer.add_voice(_wav_bytes(freq=220.0), ref_text="ref", name="two")
+        hub.download_calls.clear()
+        listed = reader.list_voices()
+
+        assert {v.voice_id for v in listed} == {first.voice_id, second.voice_id}
+        assert hub.download_calls == [second.voice_id]
+
+    def test_hub_deletion_propagates_on_next_revision_check(self, tmp_path):
+        hub = FakeHubRepo()
+        writer = VoiceStore(tmp_path / "a", hub=hub)
+        record = writer.add_voice(_wav_bytes(), ref_text="ref", name="v")
+        reader = VoiceStore(tmp_path / "b", hub=hub)
+        assert len(reader.list_voices()) == 1
+
+        del hub.voices[record.voice_id]
+        hub.bump()
+
+        assert reader.list_voices() == []
+        assert reader.resolve(record.voice_id) is None
+        # The reference file is not unlinked out from under a live session; it
+        # is only evicted from the registry.
+        assert (tmp_path / "b" / record.voice_id / "ref.wav").exists()
+
+    def test_selection_miss_triggers_resync(self, tmp_path):
+        hub = FakeHubRepo()
+        reader = VoiceStore(tmp_path / "b", hub=hub)
+        reader.list_voices()
+
+        writer = VoiceStore(tmp_path / "a", hub=hub)
+        record = writer.add_voice(_wav_bytes(), ref_text="fleet transcript", name="v")
+
+        resolved = reader.resolve(record.voice_id)
+        assert resolved is not None
+        assert resolved.ref_text == "fleet transcript"
+
+    def test_local_mode_never_touches_hub(self, tmp_path):
+        store = VoiceStore(tmp_path / "voices")
+        store.add_voice(_wav_bytes(), ref_text="ref", name="v")
+        assert len(store.list_voices()) == 1

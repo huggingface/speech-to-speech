@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
-from speech_to_speech.voice_store import VoiceStore, VoiceValidationError
+from speech_to_speech.voice_store import VoiceStore, VoiceSyncError, VoiceValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,9 @@ def build_voices_router(pool: list[PipelineUnit], voice_store: Optional[VoiceSto
             record = await run_in_threadpool(voice_store.add_voice, audio_bytes, ref_text=ref_text, name=name)
         except VoiceValidationError as e:
             return _error_response(e.status_code, str(e), e.code)
+        except VoiceSyncError as e:
+            # The store rolled the local copy back; nothing was created.
+            return _error_response(502, str(e), "voice_store_sync_failed")
         body = VoiceInfo(voice_id=record.voice_id, name=record.name, created_at=record.created_at)
         return JSONResponse(content=body.model_dump(), status_code=201)
 

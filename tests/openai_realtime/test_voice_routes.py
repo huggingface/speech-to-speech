@@ -144,6 +144,33 @@ class TestVoicesRoutes:
                 assert r.status_code == 400
                 assert r.json()["error"]["code"] == "invalid_name"
 
+    def test_hub_push_failure_maps_to_502(self, tmp_path):
+        """A voice the fleet cannot see must fail the upload (rolled back store-side)."""
+
+        class _DownHub:
+            def revision(self):
+                return "rev-0"
+
+            def list_voice_ids(self, revision=None):
+                return set()
+
+            def download_voice(self, voice_id, root, revision=None):
+                raise AssertionError("nothing to download")
+
+            def upload_voice(self, root, voice_id):
+                raise RuntimeError("hub unreachable")
+
+        store = VoiceStore(tmp_path / "voices", hub=_DownHub())
+        app = create_app(pool=[_make_unit()], stop_event=ThreadingEvent(), voice_store=store)
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                session_id = ws.receive_json()["session"]["id"]
+                r = client.post(f"/v1/realtime/sessions/{session_id}/voices", **_upload())
+                assert r.status_code == 502
+                assert r.json()["error"]["code"] == "voice_store_sync_failed"
+                listed = client.get(f"/v1/realtime/sessions/{session_id}/voices").json()
+                assert listed["voices"] == []
+
     def test_post_to_released_session_answers_404(self, tmp_path):
         app, _ = self._client_and_session(tmp_path)
         with TestClient(app) as client:
