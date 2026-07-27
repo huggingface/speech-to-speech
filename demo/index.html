@@ -271,6 +271,11 @@
                   <option value="Vivian">Vivian</option>
                 </select>
               </label>
+              <!-- Voice cloning: revealed only after the capability probe
+                   (GET /api/voices) answers 200 on a connected call. -->
+              <button id="create-voice-btn" type="button" class="btn create-voice-btn" hidden>
+                Create voice
+              </button>
             </div>
 
             <!-- WS-only: the gate runs in the WebSocket capture worklet; the
@@ -322,6 +327,66 @@
           <button id="settings-save" type="submit" class="btn primary" value="save">Save</button>
         </footer>
       </form>
+    </dialog>
+
+    <!-- Create a cloned voice from a short reference clip. Opened from the
+         "Create voice" button in Settings; only reachable while a call is live
+         on a backend that answered the voice-cloning capability probe. -->
+    <dialog id="voice-modal" class="modal">
+      <div class="modal-content">
+        <header class="modal-header">
+          <h2>Create voice</h2>
+          <button id="voice-modal-close" class="icon-btn" aria-label="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </header>
+
+        <div class="voice-mode" role="tablist" aria-label="Voice source">
+          <button id="voice-mode-record" type="button" role="tab" aria-selected="true" class="voice-mode-btn active">Record</button>
+          <button id="voice-mode-upload" type="button" role="tab" aria-selected="false" class="voice-mode-btn">Upload</button>
+        </div>
+
+        <section id="voice-record-panel" class="voice-panel">
+          <div class="field">
+            <span>Read this aloud</span>
+            <p id="voice-script" class="voice-script">
+              Hi! I'm recording a short sample so the assistant can speak with my
+              voice. The quick brown fox jumps over the lazy dog, while soft music
+              plays in the background. Let me count: one, two, three, four, five.
+              That should be plenty — thank you for listening.
+            </p>
+            <small>The recording and this script become the voice's reference pair, so read it as written.</small>
+          </div>
+          <div class="voice-record-row">
+            <button id="voice-record-btn" type="button" class="btn voice-record-btn">Record</button>
+            <span id="voice-record-time" class="voice-record-time" hidden>0:00</span>
+            <audio id="voice-preview" class="voice-preview" controls hidden></audio>
+          </div>
+        </section>
+
+        <section id="voice-upload-panel" class="voice-panel" hidden>
+          <label class="field">
+            <span>Audio file</span>
+            <input id="voice-file" type="file" accept="audio/*" />
+            <small>3–60 seconds of clean speech. Any format your browser can decode (MP3, M4A, OGG, WAV…).</small>
+          </label>
+          <label class="field">
+            <span>Transcript</span>
+            <textarea id="voice-transcript" rows="3" placeholder="Exactly what is said in the clip…"></textarea>
+          </label>
+        </section>
+
+        <label class="field">
+          <span>Voice name</span>
+          <input id="voice-name" type="text" autocomplete="off" spellcheck="false" maxlength="80" placeholder="My voice" />
+        </label>
+
+        <p id="voice-error" class="voice-error" hidden></p>
+
+        <footer class="modal-footer">
+          <button id="voice-save" type="button" class="btn primary" disabled>Save voice</button>
+        </footer>
+      </div>
     </dialog>
 
     <dialog id="tools-modal" class="modal">

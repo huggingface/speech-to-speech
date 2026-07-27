@@ -119,6 +119,12 @@ export class S2sRtcRealtimeClient extends EventTarget {
     this._lastAudibleAt = 0;
     /** @type {RtcStatus} */
     this._status = "idle";
+    /** @type {string} Realtime session id from `session.created`; addresses the
+     * session-scoped voices routes (empty until the event arrives). */
+    this.realtimeSessionId = "";
+    /** @type {string} Always empty over WebRTC (env-pinned direct mode only);
+     * mirrors the WS client so callers can read it transport-agnostically. */
+    this.grantSessionId = "";
     this._aiSpeaking = false;
     /** @type {string} The response currently holding the backend slot (from
      * response.created), so RMS-detected audio can be attributed to it. */
@@ -420,6 +426,8 @@ export class S2sRtcRealtimeClient extends EventTarget {
 
     switch (type) {
       case "session.created":
+        // The session id addresses session-scoped HTTP routes (voice cloning).
+        this.realtimeSessionId = event.session?.id || "";
         // Server-side defaults are already what we want; push only the
         // user-tunable bits (voice, instructions, tools) — same as WS.
         this._sendSessionUpdate();

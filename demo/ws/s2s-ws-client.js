@@ -167,6 +167,12 @@ export class S2sWsRealtimeClient extends EventTarget {
     this._visualiser = null;
     /** @type {WsStatus} */
     this._status = "idle";
+    /** @type {string} Realtime session id from `session.created`; addresses the
+     * session-scoped voices routes (empty until the event arrives). */
+    this.realtimeSessionId = "";
+    /** @type {string} LB grant session id (LB mode only; empty in direct mode).
+     * The /api/voices proxy uses it to find the compute host it recorded. */
+    this.grantSessionId = "";
     this._aiSpeaking = false;
     /** @type {Set<string>} response_ids that have actually played audio, so the
      * UI can tell a barge-in cut (keep it) from a never-heard speculative
@@ -256,6 +262,7 @@ export class S2sWsRealtimeClient extends EventTarget {
         await this._awaitJoin(grant);
         if (this._closed) throw _codedError("connect aborted", "aborted");
       }
+      this.grantSessionId = grant.sessionId || "";
       this.dispatchEvent(new CustomEvent("session", { detail: { info: grant } }));
       connectUrl = grant.connectUrl;
       this._setStatus("connecting");
@@ -620,6 +627,8 @@ export class S2sWsRealtimeClient extends EventTarget {
 
     switch (type) {
       case "session.created":
+        // The session id addresses session-scoped HTTP routes (voice cloning).
+        this.realtimeSessionId = event.session?.id || "";
         // Server-side defaults for the s2s pipeline are already what we
         // want (server_vad, whisper-1 transcription, PCM16 16k in / 24k
         // out). We only push the user-tunable bits: voice + instructions.
