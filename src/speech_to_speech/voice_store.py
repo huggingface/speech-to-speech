@@ -281,9 +281,7 @@ class VoiceStore:
                 raise
 
             self._records[voice_id] = record
-            logger.info(
-                "Voice %s (%r) %s in store %s", voice_id, name, "updated" if existing else "created", self.root
-            )
+            logger.info("Voice %s (%r) %s in store %s", voice_id, name, "updated" if existing else "created", self.root)
             return record
 
     def list_voices(self) -> list[VoiceRecord]:
@@ -331,9 +329,7 @@ class VoiceStore:
                 return
             except Exception as e:  # noqa: BLE001 — any hub failure is retryable here
                 last_error = e
-                logger.warning(
-                    "Voice %s hub push attempt %d/%d failed: %s", voice_id, attempt, HUB_PUSH_ATTEMPTS, e
-                )
+                logger.warning("Voice %s hub push attempt %d/%d failed: %s", voice_id, attempt, HUB_PUSH_ATTEMPTS, e)
                 if attempt < HUB_PUSH_ATTEMPTS:
                     time.sleep(HUB_PUSH_RETRY_SLEEP_S)
         raise VoiceSyncError(
