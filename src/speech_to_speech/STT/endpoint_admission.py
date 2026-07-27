@@ -124,6 +124,12 @@ class EndpointAdmissionController:
         self._scheduler.start()
 
     def submit(self, request: TranscriptionAdmissionRequest[T]) -> Future[T]:
+        """Submit admission intent without materializing its HTTP operation.
+
+        The operation factory remains lazy until endpoint capacity is assigned
+        and relevance is checked. Pending progressive intents may therefore be
+        coalesced without creating transport work.
+        """
         future: Future[T] = Future()
         item = _AdmissionItem(request=request, future=future, sequence=0)
         cancelled: list[_AdmissionItem] = []

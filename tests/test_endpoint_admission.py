@@ -101,6 +101,51 @@ def test_progressive_burst_keeps_only_active_and_latest_pending():
     controller.close()
 
 
+def test_superseded_pending_progressive_is_never_materialized():
+    starts: list[str] = []
+    materialized: list[str] = []
+    lock = Lock()
+    active = ControlledOperation("active", starts, lock)
+    superseded = ControlledOperation("superseded", starts, lock)
+    latest = ControlledOperation("latest", starts, lock)
+    controller = EndpointAdmissionController(
+        "test",
+        EndpointAdmissionSettings(max_concurrency=1, max_queue_size=2, progressive_min_interval_s=0),
+    )
+
+    def request(name: str, operation: ControlledOperation) -> TranscriptionAdmissionRequest[str]:
+        def operation_factory() -> ControlledOperation:
+            materialized.append(name)
+            return operation
+
+        return TranscriptionAdmissionRequest(
+            request_id=name,
+            owner_id="pipeline-1",
+            turn_id="turn-1",
+            turn_revision=0,
+            mode="progressive",
+            operation_factory=operation_factory,
+        )
+
+    active_future = controller.submit(request("active", active))
+    _wait_until(lambda: starts == ["active"])
+    superseded_future = controller.submit(request("superseded", superseded))
+    latest_future = controller.submit(request("latest", latest))
+
+    with pytest.raises(TranscriptionCancelled) as cancelled:
+        superseded_future.result(timeout=1)
+    assert cancelled.value.reason == "superseded"
+    assert materialized == ["active"]
+
+    active.release.set()
+    assert active_future.result(timeout=1) == "active"
+    _wait_until(lambda: starts == ["active", "latest"])
+    latest.release.set()
+    assert latest_future.result(timeout=1) == "latest"
+    assert materialized == ["active", "latest"]
+    controller.close()
+
+
 def test_final_cancels_active_progressive_and_dispatches_next():
     starts: list[str] = []
     lock = Lock()
