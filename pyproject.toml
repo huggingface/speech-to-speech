@@ -89,6 +89,9 @@ paraformer = [
 pocket = [
     "pocket-tts>=0.1.0",
 ]
+webrtc = [
+    "aiortc>=1.9.0",
+]
 websocket = [
     "websockets>=12.0",
 ]
@@ -111,6 +114,7 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "websockets>=12.0",
+    "aiortc>=1.9.0",
 ]
 
 [tool.pytest.ini_options]

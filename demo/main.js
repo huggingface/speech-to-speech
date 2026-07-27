@@ -1,22 +1,24 @@
 // @ts-check
 /**
  * Minimal voice conversation app, talking to a Hugging Face speech-to-speech
- * backend over **WebSocket** (drop-in alternative to the WebRTC variant).
+ * backend over **WebSocket** or **WebRTC**.
  *
- * Click the orb -> we ask for the mic, POST a session on the LB, open a
- * WebSocket on the routed compute endpoint, push session.update + mic
- * audio, play back the TTS audio. The orb visually reflects the live
- * state (idle, connecting, listening, user-speaking, processing,
- * ai-speaking).
+ * Click the orb -> we ask for the mic, connect (WS dial, or SDP handshake via
+ * the /api/calls proxy), push session.update + mic audio, play back the TTS
+ * audio. The orb visually reflects the live state (idle, connecting,
+ * listening, user-speaking, processing, ai-speaking).
  *
- * The only meaningful difference vs. the WebRTC main.js is that the
- * client owns its own AudioContext (no `attachOutputTrack`), so we hand
- * it the MediaStream directly.
+ * The two client classes expose the same events and methods, so everything
+ * below except the constructor pick is transport-agnostic. WebRTC is offered
+ * only in env-pinned direct mode (the /api/calls proxy forwards exclusively
+ * to SPEECH_TO_SPEECH_URL); LB mode and user-typed URLs stay on WebSocket.
  *
  * @typedef {"idle" | "connecting" | "queued" | "your-turn" | "listening" | "user-speaking" | "processing" | "ai-speaking" | "error"} AppState
+ * @typedef {S2sWsRealtimeClient | S2sRtcRealtimeClient} RealtimeClient
  */
 
 import { S2sWsRealtimeClient } from "./ws/s2s-ws-client.js";
+import { S2sRtcRealtimeClient } from "./rtc/s2s-rtc-client.js";
 import { $, truncateError, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js";
 import { Account } from "./ui/account.js";
@@ -44,6 +46,9 @@ const STORAGE_KEYS = {
   tools: "s2s.ws.tools",
   searchKey: "s2s.ws.searchKey",
   noiseGate: "s2s.ws.noiseGate",
+  // "ws" | "webrtc". Not under the historical "s2s.ws." prefix — it selects
+  // between the transports rather than configuring the WS one.
+  transport: "s2s.transport",
 };
 
 // ── Noise gate ──────────────────────────────────────────────────────────────
@@ -95,6 +100,21 @@ const TOOL_DEFS = {
 /** Longest edge of the snapshot sent to the VLM, in px (keeps payload sane). */
 const SNAPSHOT_MAX_EDGE = 768;
 const SNAPSHOT_QUALITY = 0.7;
+// Over WebRTC the snapshot travels inside ONE data-channel message, and SCTP
+// messages above the negotiated max (64 KiB on the aiortc side) fail to send.
+// Budget for the data-URL portion, leaving headroom for the JSON envelope.
+const SNAPSHOT_DC_BUDGET_CHARS = 60_000;
+// Re-encode ladder walked until the frame fits the budget: quality first
+// (cheap wins), then resolution. The last rung is ~15–25 KB for any content,
+// so a frame that "fits" is deterministic, not content-dependent luck.
+const SNAPSHOT_LADDER = /** @type {[number, number][]} */ ([
+  [SNAPSHOT_MAX_EDGE, SNAPSHOT_QUALITY],
+  [SNAPSHOT_MAX_EDGE, 0.5],
+  [640, 0.45],
+  [512, 0.4],
+  [448, 0.35],
+  [384, 0.3],
+]);
 
 function loadSettings() {
   return {
@@ -102,6 +122,8 @@ function loadSettings() {
     voice: localStorage.getItem(STORAGE_KEYS.voice) || DEFAULT_VOICE,
     instructions: localStorage.getItem(STORAGE_KEYS.instructions) || DEFAULT_INSTRUCTIONS,
     noiseGate: loadGateThreshold(),
+    // Default WebSocket: the proven path stays the first-run experience.
+    transport: localStorage.getItem(STORAGE_KEYS.transport) === "webrtc" ? "webrtc" : "ws",
   };
 }
 
@@ -124,6 +146,7 @@ function saveSettings(s) {
   localStorage.setItem(STORAGE_KEYS.voice, s.voice);
   localStorage.setItem(STORAGE_KEYS.instructions, s.instructions);
   localStorage.setItem(STORAGE_KEYS.noiseGate, String(s.noiseGate));
+  localStorage.setItem(STORAGE_KEYS.transport, s.transport);
 }
 
 /** @returns {{ web_search: boolean, camera_snapshot: boolean }} */
@@ -236,6 +259,14 @@ const inputLbUrl = $("#lb-url");
 const connField = $("#conn-field");
 /** @type {HTMLElement} */
 const connHint = $("#conn-hint");
+/** @type {HTMLElement} */
+const transportField = $("#transport-field");
+/** @type {HTMLSelectElement} */
+const inputTransport = $("#transport");
+/** @type {HTMLElement} */
+const transportHint = $("#transport-hint");
+/** @type {HTMLElement} */
+const gateField = $("#gate-field");
 /** @type {HTMLSelectElement} */
 const inputVoice = $("#voice");
 /** @type {HTMLTextAreaElement} */
@@ -280,6 +311,17 @@ let allowDirect = true;
 // Deploy-pinned s2s URL (SPEECH_TO_SPEECH_URL). Non-empty -> locked direct
 // mode: the field displays it read-only and the saved user URL is untouched.
 let pinnedUrl = "";
+// Whether the deploy offers the WebRTC transport (/api/config `rtc`; true
+// exactly when the URL is env-pinned, since /api/calls only forwards there).
+let rtcAvailable = false;
+/** @type {RTCIceServer[]} STUN/TURN servers for the browser peer connection
+ * (deploy-provided via RTC_ICE_SERVERS; empty -> host candidates only). */
+let iceServers = [];
+// Transport of the LIVE (or starting) conversation — as opposed to
+// `settings.transport`, which is what the NEXT one will use. Drives the
+// camera-snapshot size budget while a call is running.
+/** @type {"ws" | "webrtc"} */
+let activeTransport = "ws";
 
 // ── Tool state ──────────────────────────────────────────────────────────────
 let toolsEnabled = loadTools();
@@ -336,7 +378,7 @@ let trackedTier = "";
 // queue on teardown / tab-close so we don't hold a phantom place.
 let queuedTicketId = "";
 
-/** @type {S2sWsRealtimeClient | null} */
+/** @type {RealtimeClient | null} */
 let client = null;
 /** @type {MediaStream | null} */
 let micStream = null;
@@ -709,22 +751,44 @@ async function watchCameraPermission() {
  * Grab the current webcam frame as a downscaled JPEG data URL. The preview is
  * mirrored in CSS for a natural self-view, but we draw the raw (un-mirrored)
  * video here so the model sees the scene in its true orientation.
+ *
+ * Over WebRTC the frame must fit one data-channel message, so it's re-encoded
+ * down the SNAPSHOT_LADDER until it's under SNAPSHOT_DC_BUDGET_CHARS; over
+ * WebSocket the first (full-quality) rung is used as before.
  * @returns {string | null}
  */
 function captureSnapshot() {
   if (!cameraStream || !camVideo.videoWidth) return null;
   const vw = camVideo.videoWidth;
   const vh = camVideo.videoHeight;
-  const scale = Math.min(1, SNAPSHOT_MAX_EDGE / Math.max(vw, vh));
-  const w = Math.max(1, Math.round(vw * scale));
-  const h = Math.max(1, Math.round(vh * scale));
-  const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return null;
-  ctx.drawImage(camVideo, 0, 0, w, h);
-  return canvas.toDataURL("image/jpeg", SNAPSHOT_QUALITY);
+
+  /** @param {number} maxEdge @param {number} quality @returns {string | null} */
+  const encode = (maxEdge, quality) => {
+    const scale = Math.min(1, maxEdge / Math.max(vw, vh));
+    const w = Math.max(1, Math.round(vw * scale));
+    const h = Math.max(1, Math.round(vh * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(camVideo, 0, 0, w, h);
+    return canvas.toDataURL("image/jpeg", quality);
+  };
+
+  if (activeTransport !== "webrtc") {
+    return encode(SNAPSHOT_MAX_EDGE, SNAPSHOT_QUALITY);
+  }
+  let dataUrl = null;
+  for (const [edge, quality] of SNAPSHOT_LADDER) {
+    dataUrl = encode(edge, quality);
+    if (!dataUrl) return null;
+    if (dataUrl.length <= SNAPSHOT_DC_BUDGET_CHARS) return dataUrl;
+  }
+  // Even the last rung overflowed (shouldn't happen in practice) — send it
+  // anyway; the client logs the failed send rather than killing the session.
+  console.warn(`[tool] snapshot exceeds the data-channel budget after the full ladder (${dataUrl?.length} chars)`);
+  return dataUrl;
 }
 
 /** Brief shutter flash on the preview so the user sees a snapshot was taken. */
@@ -837,6 +901,10 @@ async function fetchConfig() {
       allowDirect = json.allowDirect ?? !lbMode;
       // Deploy-pinned direct URL (overrides the LB server-side already).
       pinnedUrl = (json.s2sUrl || "").trim();
+      // WebRTC transport: offered only when the deploy pins the URL (the
+      // /api/calls proxy refuses to forward anywhere else).
+      rtcAvailable = !!json.rtc;
+      iceServers = Array.isArray(json.iceServers) ? json.iceServers : [];
       // The conversation-time limiter rides on the LB being present.
       limiterOn = lbMode;
     }
@@ -913,13 +981,20 @@ function createResumedAudioContext() {
 
 /** Read the editable settings out of the form. The URL field is only honoured
  *  in free direct mode — in LB mode it's hidden, and when the deploy pins a
- *  URL it's read-only, so the user's saved URL survives either way. */
+ *  URL it's read-only, so the user's saved URL survives either way. The
+ *  transport select is only honoured while selectable, so a saved "webrtc"
+ *  survives a visit to a deploy that can't offer it. */
 function readSettingsFromForm() {
   return {
     directUrl: allowDirect && !pinnedUrl ? inputLbUrl.value.trim() : settings.directUrl,
     voice: inputVoice.value || DEFAULT_VOICE,
     instructions: inputInstructions.value.trim() || DEFAULT_INSTRUCTIONS,
     noiseGate: readGateThreshold(),
+    transport: /** @type {"ws" | "webrtc"} */ (
+      transportSelectable()
+        ? (inputTransport.value === "webrtc" ? "webrtc" : "ws")
+        : settings.transport
+    ),
   };
 }
 
@@ -930,8 +1005,37 @@ function readGateThreshold() {
   return Math.min(GATE_MAX_DB, Math.max(GATE_OFF_DB, v));
 }
 
+/** Whether the transport picker is live: env-pinned direct mode only. The
+ *  /api/calls proxy forwards exclusively to SPEECH_TO_SPEECH_URL, so without
+ *  the pin there is nowhere safe to send a WebRTC offer. */
+function transportSelectable() {
+  return allowDirect && !!pinnedUrl && rtcAvailable;
+}
+
+/** The transport the next conversation will actually use. */
+function effectiveTransport() {
+  return transportSelectable() && settings.transport === "webrtc" ? "webrtc" : "ws";
+}
+
+/** Reflect transport availability + selection into Settings, and hide the
+ *  noise gate when WebRTC is picked (the gate lives in the WS capture
+ *  worklet; the WebRTC mic path sends the raw track). */
+function syncTransportUi() {
+  // Hidden in LB mode (nothing to choose); visible-but-locked in un-pinned
+  // direct mode so the option is discoverable along with what unlocks it.
+  transportField.hidden = !allowDirect;
+  const selectable = transportSelectable();
+  inputTransport.disabled = !selectable;
+  inputTransport.value = selectable && settings.transport === "webrtc" ? "webrtc" : "ws";
+  transportHint.textContent = selectable
+    ? "How audio travels to the server. Applies on the next conversation."
+    : "WebRTC needs a server URL pinned by the deployment (SPEECH_TO_SPEECH_URL).";
+  gateField.hidden = effectiveTransport() === "webrtc";
+}
+
 /** Adapt the connection field to the mode learned from /api/config. */
 function syncConnectionUi() {
+  syncTransportUi();
   if (pinnedUrl) {
     // Deploy-pinned URL: show it, but locked — the deployment owns it.
     connField.hidden = false;
@@ -988,6 +1092,15 @@ settingsForm.addEventListener("submit", (event) => {
 // update the label/marker, persist, and push straight to the running client.
 inputNoiseGate.addEventListener("input", () => {
   setGateThreshold(readGateThreshold());
+});
+
+// Transport persists on change (like the gate) and takes effect on the next
+// conversation; the gate field previews its WS-only availability right away.
+inputTransport.addEventListener("change", () => {
+  if (!transportSelectable()) return;
+  settings.transport = inputTransport.value === "webrtc" ? "webrtc" : "ws";
+  localStorage.setItem(STORAGE_KEYS.transport, settings.transport);
+  syncTransportUi();
 });
 
 restartBtn.addEventListener("click", async () => {
@@ -1150,9 +1263,16 @@ function stopJoinCountdown() {
  * @param {AudioContext | null} [audioContext]
  */
 async function doStart(audioContext = null) {
+  const transport = effectiveTransport();
   // Resolve the target before touching mic/audio so a misconfiguration (e.g.
-  // direct mode with no URL) fails fast with a clear message.
-  const target = connectionTarget();
+  // direct mode with no URL) fails fast with a clear message. Over WebRTC the
+  // browser never dials the s2s server itself — the offer goes to the
+  // same-origin /api/calls proxy — so there is no target to resolve.
+  const target = transport === "webrtc" ? null : connectionTarget();
+  activeTransport = transport;
+  // The radial gate arc (threshold handle around the mic button) is a WS
+  // feature; over WebRTC only the mute button remains.
+  document.body.classList.toggle("rtc-live", transport === "webrtc");
 
   chat.clear();
   chat.reset();
@@ -1179,15 +1299,24 @@ async function doStart(audioContext = null) {
   // The webcam is started on arrival (autoStartCamera), so nothing to do here;
   // a still-pending grant just means the snapshot tool isn't ready yet.
 
-  const c = new S2sWsRealtimeClient({
-    ...target,
+  const common = {
     voice: settings.voice,
     instructions: effectiveInstructions(),
     acquireMic: acquireMicStream,
     tools: activeToolDefs(),
-    noiseGate: gateParams(settings.noiseGate),
     ...(audioContext ? { audioContext } : {}),
-  });
+  };
+  const c = target === null
+    ? new S2sRtcRealtimeClient({
+        callsUrl: "api/calls",
+        iceServers,
+        ...common,
+      })
+    : new S2sWsRealtimeClient({
+        ...target,
+        noiseGate: gateParams(settings.noiseGate),
+        ...common,
+      });
   client = c;
 
   c.addEventListener("queue", (e) => {
@@ -1406,6 +1535,7 @@ async function teardown() {
   // on the page), so we leave it on here — only the camera toggle stops it.
   micMuted = false;
   micBtn.classList.remove("muted");
+  document.body.classList.remove("rtc-live");
   setState("idle");
   // Refresh the chip's remaining-today after the budget moved.
   if (limiterOn) void account.refresh();

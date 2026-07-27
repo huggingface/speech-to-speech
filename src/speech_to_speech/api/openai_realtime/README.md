@@ -83,6 +83,34 @@ flowchart LR
 
 ---
 
+## WebRTC Transport
+
+Alongside the WebSocket endpoint, the server supports the OpenAI GA WebRTC handshake (requires the `webrtc` extra: `pip install 'speech-to-speech[webrtc]'`):
+
+```
+POST /v1/realtime/calls        Content-Type: application/sdp
+```
+
+The client POSTs an SDP offer and receives an SDP answer (`201`, with a `Location: /v1/realtime/calls/{call_id}` header). Audio then flows over RTP media tracks (Opus at 48 kHz, resampled to and from the 16 kHz pipeline rate with a stateful resampler), while all JSON events use the same protocol as WebSocket mode, carried on the `oai-events` data channel.
+
+A WebRTC session claims a pipeline unit from the same pool as WebSocket clients; the per-unit send loop stays the sole consumer of the pipeline output queues and hands PCM to the transport, which paces it out as 20 ms RTP frames (silence when idle).
+
+Differences from WebSocket mode:
+
+- `input_audio_buffer.append` is rejected with `invalid_event_for_transport` — audio arrives on the media track.
+- `output_audio_buffer.clear` is supported (WebRTC only): unplayed audio buffers server-side, so barge-in and cancellation flush it there. The server also flushes it automatically on `response.cancel` and VAD interruption.
+- `session.created` is sent when the data channel opens rather than on connection.
+
+ICE servers (STUN/TURN) can be configured via the `SPEECH_TO_SPEECH_ICE_SERVERS` env var, a JSON list of server entries:
+
+```bash
+export SPEECH_TO_SPEECH_ICE_SERVERS='[{"urls": "stun:stun.example.com:3478"}, {"urls": "turn:turn.example.com", "username": "u", "credential": "c"}]'
+```
+
+Without it, aiortc defaults apply (host candidates + Google STUN). Deployments where clients cannot reach the server directly (symmetric NAT, containers without exposed UDP) need a TURN server.
+
+---
+
 ## Tool Calling Design
 
 Tool calling works through two distinct paths depending on the LLM backend, but both converge to the same wire protocol for the client.
