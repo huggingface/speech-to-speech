@@ -407,17 +407,11 @@ def test_apply_session_voice_override_accepts_supported_custom_voice_speaker():
 
 
 def _make_voice_store(tmp_path):
-    import io
-
-    import soundfile as sf
-
     from speech_to_speech.voice_store import VoiceStore
+    from tests.wav_utils import wav_bytes
 
-    t = np.linspace(0, 4.0, 4 * 16000, endpoint=False)
-    buf = io.BytesIO()
-    sf.write(buf, (0.3 * np.sin(2 * np.pi * 440 * t)).astype(np.float32), 16000, format="WAV", subtype="PCM_16")
     store = VoiceStore(tmp_path / "voices")
-    record = store.add_voice(buf.getvalue(), ref_text="stored transcript", name="mine")
+    record = store.add_voice(wav_bytes(), ref_text="stored transcript", name="mine")
     return store, record
 
 

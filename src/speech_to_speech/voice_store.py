@@ -109,7 +109,13 @@ class HubVoiceRepo:
 
         self.repo_id = repo_id
         self._api = HfApi()
-        self._api.create_repo(repo_id, repo_type="dataset", private=True, exist_ok=True)
+        # Operator convenience: create the repo (private) on first launch.
+        # Best-effort — a read-only token (or a repo someone else owns) can't
+        # create, and that must not block startup against an existing repo.
+        try:
+            self._api.create_repo(repo_id, repo_type="dataset", private=True, exist_ok=True)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Could not ensure hub repo %s exists (continuing): %s", repo_id, e)
 
     def revision(self) -> str:
         sha = self._api.repo_info(self.repo_id, repo_type="dataset").sha
@@ -274,10 +280,8 @@ class VoiceStore:
                 (voice_dir / METADATA_FILENAME).write_text(json.dumps(record.model_dump(), indent=2))
                 if self._hub is not None:
                     self._push_with_retry(voice_id)
-            except Exception as e:
+            except Exception:
                 self._rollback(voice_id, existing)
-                if isinstance(e, VoiceSyncError):
-                    raise
                 raise
 
             self._records[voice_id] = record
@@ -288,18 +292,27 @@ class VoiceStore:
         with self._lock:
             if self._hub is not None:
                 self._refresh_from_hub()
+            else:
+                # Local mode: the folder itself is the source of truth, so an
+                # operator adding or deleting a voice folder shows up on the
+                # next listing without a restart.
+                self._scan()
             return sorted(self._records.values(), key=lambda r: (r.created_at, r.voice_id))
 
     def resolve(self, voice_id: str) -> Optional[ResolvedVoice]:
         """Resolve a voice id to its (reference audio path, transcript) pair.
 
-        A miss triggers one hub re-sync before giving up, so a voice created
-        through another instance moments ago still resolves.
+        A miss triggers one re-sync before giving up, so a voice created
+        through another instance moments ago (hub mode) or dropped into the
+        local folder still resolves.
         """
         with self._lock:
             record = self._records.get(voice_id)
-            if record is None and self._hub is not None:
-                self._refresh_from_hub()
+            if record is None:
+                if self._hub is not None:
+                    self._refresh_from_hub()
+                else:
+                    self._scan()
                 record = self._records.get(voice_id)
             if record is None:
                 return None
@@ -322,7 +335,7 @@ class VoiceStore:
         copy back so the fleet never diverges.
         """
         assert self._hub is not None
-        last_error: Exception | None = None
+        last_error: Optional[Exception] = None
         for attempt in range(1, HUB_PUSH_ATTEMPTS + 1):
             try:
                 self._hub.upload_voice(self.root, voice_id)

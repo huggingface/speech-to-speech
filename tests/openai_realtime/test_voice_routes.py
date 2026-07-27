@@ -6,19 +6,17 @@ probe for voice cloning: they answer 200 when a voice store is wired
 (Qwen3-TTS backend), 409 otherwise, and 404 for unknown sessions.
 """
 
-import io
 from queue import Queue
 from threading import Event as ThreadingEvent
 
-import numpy as np
-import soundfile as sf
 from starlette.testclient import TestClient
 
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.voice_store import VoiceStore
+from speech_to_speech.voice_store import MAX_UPLOAD_BYTES, VoiceStore
+from tests.wav_utils import wav_bytes as _wav_bytes
 
 
 def _make_unit(index: int = 0) -> PipelineUnit:
@@ -37,13 +35,6 @@ def _make_unit(index: int = 0) -> PipelineUnit:
         text_prompt_queue=text_prompt_queue,
         handlers=[],
     )
-
-
-def _wav_bytes(seconds: float = 4.0, sr: int = 16000) -> bytes:
-    t = np.linspace(0, seconds, int(seconds * sr), endpoint=False)
-    buf = io.BytesIO()
-    sf.write(buf, (0.3 * np.sin(2 * np.pi * 440 * t)).astype(np.float32), sr, format="WAV", subtype="PCM_16")
-    return buf.getvalue()
 
 
 def _upload(name: str = "My Voice", ref_text: str = "hello reference", audio: bytes | None = None) -> dict:
@@ -124,6 +115,32 @@ class TestVoicesRoutes:
                 assert first.json()["voice_id"] == second.json()["voice_id"]
                 listed = client.get(f"/v1/realtime/sessions/{session_id}/voices").json()
                 assert len(listed["voices"]) == 1
+
+    def test_oversized_upload_rejected_with_413(self, tmp_path):
+        app, _ = self._client_and_session(tmp_path)
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                session_id = ws.receive_json()["session"]["id"]
+                r = client.post(
+                    f"/v1/realtime/sessions/{session_id}/voices",
+                    **_upload(audio=b"\x00" * (MAX_UPLOAD_BYTES + 1)),
+                )
+                assert r.status_code == 413
+                assert r.json()["error"]["code"] == "audio_too_large"
+
+    def test_reupload_with_corrected_transcript_overwrites_it(self, tmp_path):
+        app, store = self._client_and_session(tmp_path)
+        audio = _wav_bytes()
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                session_id = ws.receive_json()["session"]["id"]
+                url = f"/v1/realtime/sessions/{session_id}/voices"
+                first = client.post(url, **_upload(audio=audio, ref_text="typo transcript"))
+                second = client.post(url, **_upload(audio=audio, ref_text="fixed transcript"))
+                assert first.json()["voice_id"] == second.json()["voice_id"]
+                resolved = store.resolve(first.json()["voice_id"])
+                assert resolved is not None
+                assert resolved.ref_text == "fixed transcript"
 
     def test_validation_errors_map_to_status_codes(self, tmp_path):
         app, _ = self._client_and_session(tmp_path)

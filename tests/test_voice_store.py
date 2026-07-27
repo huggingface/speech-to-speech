@@ -8,6 +8,7 @@ reference WAV + metadata JSON). Tests run against temp directories.
 import hashlib
 import io
 import json
+import shutil
 
 import numpy as np
 import pytest
@@ -20,16 +21,7 @@ from speech_to_speech.voice_store import (
     VoiceSyncError,
     VoiceValidationError,
 )
-
-
-def _wav_bytes(seconds: float = 4.0, sr: int = 16000, channels: int = 1, freq: float = 440.0) -> bytes:
-    t = np.linspace(0, seconds, int(seconds * sr), endpoint=False)
-    data = (0.3 * np.sin(2 * np.pi * freq * t)).astype(np.float32)
-    if channels > 1:
-        data = np.stack([data] * channels, axis=1)
-    buf = io.BytesIO()
-    sf.write(buf, data, sr, format="WAV", subtype="PCM_16")
-    return buf.getvalue()
+from tests.wav_utils import wav_bytes as _wav_bytes
 
 
 class TestCreateAndList:
@@ -120,6 +112,30 @@ class TestNormalization:
         assert info.subtype == "PCM_16"
         assert info.format == "WAV"
         assert info.duration == pytest.approx(5.0, abs=0.05)
+
+
+class TestLocalDeletion:
+    def test_local_folder_deletion_propagates_on_next_listing(self, tmp_path):
+        """Story 22's local case: an operator removing a voice folder from the
+        local store is noticed on the next read, without a restart."""
+        root = tmp_path / "voices"
+        store = VoiceStore(root)
+        record = store.add_voice(_wav_bytes(), ref_text="ref", name="v")
+        assert len(store.list_voices()) == 1
+
+        shutil.rmtree(root / record.voice_id)
+
+        assert store.list_voices() == []
+        assert store.resolve(record.voice_id) is None
+
+    def test_manually_added_folder_appears_on_next_listing(self, tmp_path):
+        root = tmp_path / "voices"
+        writer = VoiceStore(root)
+        reader = VoiceStore(root)
+        record = writer.add_voice(_wav_bytes(), ref_text="ref", name="v")
+
+        assert [v.voice_id for v in reader.list_voices()] == [record.voice_id]
+        assert reader.resolve(record.voice_id) is not None
 
 
 class TestResolve:

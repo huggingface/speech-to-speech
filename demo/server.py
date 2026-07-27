@@ -150,7 +150,7 @@ VOICE_UPLOAD_MAX_BYTES = 12 * 1024 * 1024
 # cheap to retry and the cap only guards against scripting, so restarts may
 # forgive — unlike talk time there is no budget to protect across reboots).
 VOICE_CREATE_DAILY_CAP = int(os.environ.get("VOICE_CREATE_DAILY_CAP", "10"))
-_voice_creations: dict = {}
+_voice_creations: "dict[str, int]" = {}
 _voice_creations_day = ""
 # LB mode: session grant id -> compute-host origin, recorded when the grant is
 # relayed. Voices requests forward ONLY to a recorded host (or the pinned URL in
@@ -336,24 +336,36 @@ async def calls(request: Request):
     )
 
 
-def _voice_error(status_code: int, message: str, code: str) -> JSONResponse:
-    """Same error shape as the s2s voices routes, so the client handles one format."""
-    return JSONResponse({"error": {"message": message, "code": code}}, status_code=status_code)
+class VoiceProxyError(Exception):
+    """A proxy-side refusal, rendered in the s2s voices routes' error shape
+    (the app-level handler below) so the client handles one format."""
+
+    def __init__(self, status_code: int, message: str, code: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
 
 
-def _voices_backend_url(session_id: str, grant_id: str) -> "str | JSONResponse":
+@app.exception_handler(VoiceProxyError)
+async def _voice_proxy_error(_request: Request, exc: VoiceProxyError) -> JSONResponse:
+    return JSONResponse({"error": {"message": str(exc), "code": exc.code}}, status_code=exc.status_code)
+
+
+def _voices_backend_url(session_id: str, grant_id: str) -> str:
     """Resolve the only backend a voices request may go to.
 
     Direct mode: the env-pinned s2s URL. LB mode: the compute host recorded
     when this grant was relayed (the `grant` param is the LB session id the
     client already holds). A client-supplied target is never honoured —
     same SSRF stance as /api/calls."""
+    if not session_id:
+        raise VoiceProxyError(400, "Missing session id.", "missing_session")
     if SPEECH_TO_SPEECH_URL:
         base = _http_base_url(SPEECH_TO_SPEECH_URL)
     elif LOAD_BALANCER_URL:
         base = _grant_hosts.get(grant_id) if grant_id else None
         if not base:
-            return _voice_error(404, "Unknown session grant.", "unknown_grant")
+            raise VoiceProxyError(404, "Unknown session grant.", "unknown_grant")
     else:
         raise HTTPException(status_code=404, detail="Not found.")
     return f"{base}/v1/realtime/sessions/{session_id}/voices"
@@ -381,11 +393,7 @@ def _voice_creation_allowance(keys) -> int:
 async def voices_list(session: str = "", grant: str = ""):
     """Proxy the cloned-voice listing; doubles as the capability probe (200 vs
     409) the front-end uses to decide whether to show the voice-cloning UI."""
-    if not session:
-        return _voice_error(400, "Missing session id.", "missing_session")
     url = _voices_backend_url(session, grant)
-    if isinstance(url, JSONResponse):
-        return url
     try:
         async with httpx.AsyncClient(timeout=15.0) as http:
             resp = await http.get(url)
@@ -399,16 +407,12 @@ async def voices_list(session: str = "", grant: str = ""):
 async def voices_create(request: Request, session: str = "", grant: str = ""):
     """Proxy a cloned-voice upload, enforcing the size cap and a per-identity
     daily creation cap before anything reaches the compute fleet."""
-    if not session:
-        return _voice_error(400, "Missing session id.", "missing_session")
     url = _voices_backend_url(session, grant)
-    if isinstance(url, JSONResponse):
-        return url
 
     tier, keys, _set_cookie = auth.resolve_identity(request)
     metered = LIMITER_ENABLED and limiter.budget_for(tier) is not None
     if metered and _voice_creation_allowance(keys) >= VOICE_CREATE_DAILY_CAP:
-        return _voice_error(
+        raise VoiceProxyError(
             429,
             f"Daily voice-creation limit reached ({VOICE_CREATE_DAILY_CAP}).",
             "voice_creation_limit",
@@ -416,7 +420,7 @@ async def voices_create(request: Request, session: str = "", grant: str = ""):
 
     body = await request.body()
     if len(body) > VOICE_UPLOAD_MAX_BYTES:
-        return _voice_error(
+        raise VoiceProxyError(
             413,
             f"Upload is too large (max {VOICE_UPLOAD_MAX_BYTES // (1024 * 1024)} MB).",
             "upload_too_large",

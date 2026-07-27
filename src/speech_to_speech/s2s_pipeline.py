@@ -11,7 +11,7 @@ from queue import Queue
 from sys import platform
 from threading import Event
 from types import FrameType
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import nltk
 import torch
@@ -68,6 +68,9 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.utils.thread_manager import ThreadManager
 from speech_to_speech.VAD.vad_handler import VADHandler
+
+if TYPE_CHECKING:
+    from speech_to_speech.voice_store import VoiceStore
 
 # Ensure that the necessary NLTK resources are available
 try:
@@ -467,7 +470,7 @@ def _build_realtime_pipeline_unit(
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
     kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
-    voice_store: Any = None,
+    voice_store: "VoiceStore | None" = None,
 ) -> "PipelineUnit":
     """Build one isolated realtime pipeline (own queues, events, service, handlers).
 
