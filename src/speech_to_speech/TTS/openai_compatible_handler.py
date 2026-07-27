@@ -263,7 +263,9 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             tts_input.turn_id,
             tts_input.turn_revision,
         ):
-            logger.debug("Dropping stale remote TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
+            logger.debug(
+                "Dropping stale remote TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision
+            )
             return
 
         text, input_language = self._coalesce_pending_tts_input(tts_input)

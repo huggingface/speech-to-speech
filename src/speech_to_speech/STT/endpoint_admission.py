@@ -233,11 +233,7 @@ class EndpointAdmissionController:
             elif request.mode == "progressive" and existing.mode == "final":
                 new_item.cancelled_reason = "superseded"
                 break
-            elif (
-                request.mode == "progressive"
-                and existing.mode == "progressive"
-                and item in self._pending
-            ):
+            elif request.mode == "progressive" and existing.mode == "progressive" and item in self._pending:
                 reason = "superseded"
             elif request.mode == "final" and existing.mode == "final":
                 new_item.cancelled_reason = "superseded"
@@ -315,10 +311,7 @@ class EndpointAdmissionController:
 
     def _select_next_locked(self) -> _AdmissionItem | None:
         now = monotonic()
-        active_keys = {
-            item.request.supersession_key
-            for item in self._active.values()
-        }
+        active_keys = {item.request.supersession_key for item in self._active.values()}
         candidates = [
             item
             for item in self._pending
