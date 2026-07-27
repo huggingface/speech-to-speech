@@ -121,6 +121,22 @@ class TestNormalization:
         assert info.duration == pytest.approx(5.0, abs=0.05)
 
 
+class TestResolve:
+    def test_resolve_returns_reference_audio_path_and_transcript(self, tmp_path):
+        root = tmp_path / "voices"
+        store = VoiceStore(root)
+        record = store.add_voice(_wav_bytes(), ref_text="the reference transcript", name="v")
+
+        resolved = store.resolve(record.voice_id)
+
+        assert resolved is not None
+        assert resolved.ref_text == "the reference transcript"
+        assert resolved.ref_audio == str(root / record.voice_id / "ref.wav")
+
+    def test_resolve_unknown_id_returns_none(self, tmp_path):
+        assert VoiceStore(tmp_path / "voices").resolve("deadbeefdeadbeef") is None
+
+
 class TestValidation:
     def test_rejects_unreadable_audio(self, tmp_path):
         store = VoiceStore(tmp_path / "voices")

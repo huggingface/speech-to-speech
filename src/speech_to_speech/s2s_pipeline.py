@@ -467,6 +467,7 @@ def _build_realtime_pipeline_unit(
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
     kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
+    voice_store: Any = None,
 ) -> "PipelineUnit":
     """Build one isolated realtime pipeline (own queues, events, service, handlers).
 
@@ -517,6 +518,11 @@ def _build_realtime_pipeline_unit(
     ):
         vars(kw)["cancel_scope"] = cancel_scope
         vars(kw)["speculative_turns"] = speculative_turns
+
+    # Injected after the deepcopy above: the voice store is shared across the
+    # pool (one library, many pipelines), so it must not be per-unit copied.
+    if voice_store is not None:
+        vars(qwen3_tts_kw)["voice_store"] = voice_store
 
     if module_kwargs.llm_backend in ("responses-api", "chat-completions"):
         chat_size = vars(responses_api_kw).get("chat_size", 10)
@@ -673,6 +679,7 @@ def build_pipeline(
                 pocket_tts_handler_kwargs=pocket_tts_handler_kwargs,
                 kokoro_tts_handler_kwargs=kokoro_tts_handler_kwargs,
                 qwen3_tts_handler_kwargs=qwen3_tts_handler_kwargs,
+                voice_store=voice_store,
             )
             for i in range(pool_size)
         ]

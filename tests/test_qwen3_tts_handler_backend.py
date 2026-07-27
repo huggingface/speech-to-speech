@@ -406,6 +406,105 @@ def test_apply_session_voice_override_accepts_supported_custom_voice_speaker():
     assert handler.speaker == "vivian"
 
 
+def _make_voice_store(tmp_path):
+    import io
+
+    import soundfile as sf
+
+    from speech_to_speech.voice_store import VoiceStore
+
+    t = np.linspace(0, 4.0, 4 * 16000, endpoint=False)
+    buf = io.BytesIO()
+    sf.write(buf, (0.3 * np.sin(2 * np.pi * 440 * t)).astype(np.float32), 16000, format="WAV", subtype="PCM_16")
+    store = VoiceStore(tmp_path / "voices")
+    record = store.add_voice(buf.getvalue(), ref_text="stored transcript", name="mine")
+    return store, record
+
+
+def _fake_voice_cfg(voice: str):
+    return SimpleNamespace(session=SimpleNamespace(audio=SimpleNamespace(output=SimpleNamespace(voice=voice))))
+
+
+def test_apply_session_voice_override_resolves_store_voice_id(tmp_path):
+    store, record = _make_voice_store(tmp_path)
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.voice_store = store
+    handler.ref_audio = None
+    handler.ref_text = "launch transcript"
+    handler.speaker = None
+
+    handler._apply_session_voice_override("base", runtime_config=_fake_voice_cfg(record.voice_id))
+
+    assert handler.ref_audio == str(tmp_path / "voices" / record.voice_id / "ref.wav")
+    assert handler.ref_text == "stored transcript"
+
+
+def test_apply_session_voice_override_store_id_wins_over_speaker_matching(tmp_path):
+    store, record = _make_voice_store(tmp_path)
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.voice_store = store
+    handler.ref_audio = None
+    handler.ref_text = "launch transcript"
+    handler.speaker = "Aiden"
+    handler.model = SimpleNamespace(model=SimpleNamespace(get_supported_speakers=lambda: ["aiden", "vivian"]))
+
+    handler._apply_session_voice_override("custom_voice", runtime_config=_fake_voice_cfg(record.voice_id))
+
+    assert handler.ref_audio == str(tmp_path / "voices" / record.voice_id / "ref.wav")
+    assert handler.ref_text == "stored transcript"
+
+
+def test_apply_session_voice_override_falls_through_to_speaker_when_store_misses(tmp_path):
+    store, _record = _make_voice_store(tmp_path)
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.voice_store = store
+    handler.ref_audio = "TTS/ref_audio.wav"
+    handler.ref_text = "launch transcript"
+    handler.speaker = "Aiden"
+    handler.model = SimpleNamespace(model=SimpleNamespace(get_supported_speakers=lambda: ["aiden", "vivian"]))
+
+    handler._apply_session_voice_override("custom_voice", runtime_config=_fake_voice_cfg("Vivian"))
+
+    assert handler.ref_audio is None
+    assert handler.ref_text == "launch transcript"
+    assert handler.speaker == "vivian"
+
+
+def test_apply_session_voice_override_no_longer_resolves_filesystem_paths(tmp_path, caplog):
+    """Path-probe hardening: an API session voice naming a real server file must
+    not become ref_audio (the CLI launch argument is the only path-based input)."""
+    real_file = tmp_path / "probe.wav"
+    real_file.write_bytes(b"RIFF")
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.voice_store = None
+    handler.ref_audio = None
+    handler.ref_text = "launch transcript"
+    handler.speaker = None
+
+    with caplog.at_level("WARNING"):
+        handler._apply_session_voice_override("base", runtime_config=_fake_voice_cfg(str(real_file)))
+
+    assert handler.ref_audio is None
+    assert handler.ref_text == "launch transcript"
+    assert "Ignoring Qwen3-TTS session voice override" in caplog.text
+
+
+def test_on_session_end_resets_voice_state_to_launch_values():
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.speaker = "session speaker"
+    handler.ref_audio = "/store/abc/ref.wav"
+    handler.ref_text = "session transcript"
+    handler._initial_speaker = "Aiden"
+    handler._initial_ref_audio = None
+    handler._initial_ref_text = "launch transcript"
+
+    handler.on_session_end()
+
+    assert handler.speaker == "Aiden"
+    assert handler.ref_audio is None
+    assert handler.ref_text == "launch transcript"
+
+
 def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     handler = object.__new__(Qwen3TTSHandler)
     handler.should_listen = Event()

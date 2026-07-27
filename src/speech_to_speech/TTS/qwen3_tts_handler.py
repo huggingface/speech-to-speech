@@ -17,7 +17,7 @@ from pathlib import Path
 from sys import platform
 from threading import Event
 from time import perf_counter
-from typing import Any, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 import numpy as np
 import torch
@@ -32,6 +32,9 @@ from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.mlx_lock import MLXLockContext
+
+if TYPE_CHECKING:
+    from speech_to_speech.voice_store import VoiceStore
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -113,9 +116,11 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         gen_kwargs: dict[str, Any] | None = None,
         cancel_scope: CancelScope | None = None,
         speculative_turns: SpeculativeTurnTracker | None = None,
+        voice_store: "VoiceStore | None" = None,
     ) -> None:
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
+        self.voice_store = voice_store
         self.should_listen = should_listen
         self.requested_device = device
         self.ref_audio = ref_audio
@@ -179,6 +184,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         self._initial_speaker = self.speaker
         self._initial_ref_audio = self.ref_audio
+        self._initial_ref_text = self.ref_text
 
         self.warmup()
 
@@ -423,6 +429,17 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         if not session_voice:
             return
 
+        # A voice id from the cloned-voice registry resolves to a stored
+        # (reference audio, transcript) pair. Checked before preset-speaker
+        # matching: ids are hex strings that cannot collide with speaker names.
+        voice_store = getattr(self, "voice_store", None)
+        if voice_store is not None:
+            resolved = voice_store.resolve(session_voice)
+            if resolved is not None:
+                self.ref_audio = resolved.ref_audio
+                self.ref_text = resolved.ref_text
+                return
+
         if model_type == "custom_voice":
             supported_speakers = self._supported_speakers()
             if supported_speakers is not None:
@@ -443,12 +460,12 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             self.ref_audio = None
             return
 
-        if self._resolve_audio_path(session_voice) is not None:
-            self.ref_audio = session_voice
-            return
-
+        # Deliberately no filesystem-path fallback here: letting an API session
+        # point ref_audio at arbitrary server paths is a file-probe primitive.
+        # The CLI --qwen3_tts_ref_audio launch argument is the only path-based
+        # input; API sessions select voices by registry id or preset speaker.
         logger.warning(
-            "Ignoring Qwen3-TTS session voice override because it is not an audio file path: %r",
+            "Ignoring Qwen3-TTS session voice override because it is not a known voice id: %r",
             session_voice,
         )
 
@@ -876,6 +893,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
     def on_session_end(self) -> None:
         self.speaker = self._initial_speaker
         self.ref_audio = self._initial_ref_audio
+        self.ref_text = self._initial_ref_text
         logger.debug("Qwen3-TTS session state reset")
 
     def cleanup(self) -> None:

@@ -53,6 +53,14 @@ class VoiceRecord(BaseModel):
     created_at: str
 
 
+class ResolvedVoice(BaseModel):
+    """What a TTS handler needs to speak in a cloned voice."""
+
+    voice_id: str
+    ref_audio: str
+    ref_text: str
+
+
 class VoiceValidationError(Exception):
     """A client-side problem with an uploaded voice (bad audio, bad metadata)."""
 
@@ -189,6 +197,17 @@ class VoiceStore:
 
     def list_voices(self) -> list[VoiceRecord]:
         return sorted(self._records.values(), key=lambda r: (r.created_at, r.voice_id))
+
+    def resolve(self, voice_id: str) -> Optional[ResolvedVoice]:
+        """Resolve a voice id to its (reference audio path, transcript) pair."""
+        record = self._records.get(voice_id)
+        if record is None:
+            return None
+        return ResolvedVoice(
+            voice_id=record.voice_id,
+            ref_audio=str(self.root / record.voice_id / REF_AUDIO_FILENAME),
+            ref_text=record.ref_text,
+        )
 
     # ------------------------------------------------------------------
     # Internals
