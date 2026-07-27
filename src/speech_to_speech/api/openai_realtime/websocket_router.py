@@ -126,9 +126,11 @@ async def _drain_pending_response_events(
     transport: SessionTransport | None,
     unit: PipelineUnit,
     session_id: str | None,
+    session: SessionState | None = None,
 ) -> None:
     if session_id is None:
         return
+    session = session or unit.session
 
     preserved: list[Any] = []
     drained_assistant = 0
@@ -158,6 +160,7 @@ async def _drain_pending_response_events(
                 drained_failures += 1
                 if _generation_is_discardable(unit, item.cancel_generation):
                     continue
+                _discard_failed_response_audio(unit, session, transport)
                 events = unit.service.dispatch_pipeline_event(session_id, item)
                 if transport is not None and events:
                     await transport.send_events(events)
@@ -241,6 +244,36 @@ def _generation_is_discardable(unit: PipelineUnit, generation: int | None) -> bo
 
 def _should_discard_audio(unit: PipelineUnit, item: Any) -> bool:
     return _generation_is_discardable(unit, _audio_generation(item))
+
+
+def _discard_failed_response_audio(
+    unit: PipelineUnit,
+    session: SessionState | None,
+    transport: SessionTransport | None,
+) -> None:
+    """Fence a failed response before its terminal protocol events are sent.
+
+    Cancellation happens first so producer races become stale. Then queued,
+    send-loop-stashed, and transport-buffered audio is removed before the
+    client can observe ``response.done(status="failed")``.
+    """
+
+    unit.cancel_scope.cancel()
+
+    if session is not None and session.pending_output_item is not None:
+        pending = session.pending_output_item
+        if not _is_pipeline_end(pending) and not _keep_audio_sentinel(pending) and _should_discard_audio(unit, pending):
+            session.pending_output_item = None
+
+    _flush_queue(
+        unit.output_queue,
+        preserve=lambda item: (
+            _is_pipeline_end(item) or _keep_audio_sentinel(item) or not _should_discard_audio(unit, item)
+        ),
+    )
+    if transport is not None:
+        transport.discard_pending_audio()
+    unit.response_playing.clear()
 
 
 def _safe_unregister(unit: PipelineUnit, session_id: str) -> None:
@@ -745,6 +778,11 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                         unit, text_msg.cancel_generation
                     ):
                         pass
+                    elif isinstance(text_msg, ResponseFailedEvent) and session_id:
+                        _discard_failed_response_audio(unit, session, transport)
+                        events = unit.service.dispatch_pipeline_event(session_id, text_msg)
+                        if transport is not None and events:
+                            await transport.send_events(events)
                     elif transport is not None and isinstance(text_msg, PipelineEvent) and session_id:
                         events = unit.service.dispatch_pipeline_event(session_id, text_msg)
                         if events:
@@ -790,7 +828,7 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                         audio_chunk = unit.output_queue.get_nowait()
 
                     if _is_pipeline_end(audio_chunk):
-                        await _drain_pending_response_events(transport, unit, session_id)
+                        await _drain_pending_response_events(transport, unit, session_id, session)
                         if transport is not None and session_id:
                             await transport.send_events(unit.service.finish_response(session_id))
                         break
@@ -804,7 +842,7 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                             unit.should_listen.set()
                             logger.info(f"Pipeline {unit.index}: stale response complete, listening re-enabled")
                             continue
-                        await _drain_pending_response_events(transport, unit, session_id)
+                        await _drain_pending_response_events(transport, unit, session_id, session)
                         if transport is not None and session_id:
                             await transport.send_events(unit.service.finish_response(session_id))
                         if session_id:

@@ -17,7 +17,7 @@ from starlette.testclient import TestClient
 from starlette.websockets import WebSocketState
 
 import speech_to_speech.api.openai_realtime.websocket_router as router_module
-from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
+from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit, SessionState
 from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService
 from speech_to_speech.api.openai_realtime.transports import WebSocketTransport
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
@@ -27,6 +27,7 @@ from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
     ResponseFailedEvent,
     SpeechStartedEvent,
+    SpeechStoppedEvent,
     TokenUsageEvent,
 )
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
@@ -129,6 +130,15 @@ class _FakeWebSocket:
 
     async def send_json(self, payload: dict) -> None:
         self.sent.append(payload)
+
+
+class _RecordingWebSocketTransport(WebSocketTransport):
+    def __init__(self, websocket: _FakeWebSocket) -> None:
+        super().__init__(websocket)
+        self.discards = 0
+
+    def discard_pending_audio(self) -> None:
+        self.discards += 1
 
 
 # ===================================================================
@@ -343,6 +353,42 @@ class TestSendLoop:
                 assert msg2["type"] == "response.output_audio.delta"
                 assert "delta" in msg2
 
+    def test_failed_response_never_sends_buffered_audio_after_terminal(self, setup):
+        app, _, _, output_queue, text_output_queue, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                generation = cancel_scope.generation
+                output_queue.put(AudioOutput(audio=_pcm_bytes(256), cancel_generation=generation))
+                assert ws.receive_json()["type"] == "response.created"
+                assert ws.receive_json()["type"] == "response.output_audio.delta"
+
+                text_output_queue.put(
+                    ResponseFailedEvent(
+                        message="speech stream failed",
+                        cancel_generation=generation,
+                    )
+                )
+                for _ in range(12):
+                    output_queue.put(AudioOutput(audio=_pcm_bytes(512), cancel_generation=generation))
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=generation))
+
+                terminal_messages: list[dict] = []
+                for _ in range(8):
+                    message = ws.receive_json()
+                    terminal_messages.append(message)
+                    if message["type"] == "response.done":
+                        break
+
+                terminal_types = [message["type"] for message in terminal_messages]
+                assert "error" in terminal_types
+                assert "response.output_audio.done" in terminal_types
+                assert terminal_messages[-1]["type"] == "response.done"
+                assert terminal_messages[-1]["response"]["status"] == "failed"
+
+                text_output_queue.put(SpeechStoppedEvent())
+                assert ws.receive_json()["type"] == "input_audio_buffer.speech_stopped"
+
     def test_audio_output_batches_immediately_available_chunks(self, setup):
         app, _, _, output_queue, *_ = setup
         with TestClient(app) as client:
@@ -467,6 +513,29 @@ class TestSendLoop:
 
                 assert delta["type"] == "response.output_audio.delta"
                 assert len(base64.b64decode(delta["delta"])) == len(_pcm_bytes(512))
+
+    def test_stale_response_failure_does_not_fence_current_audio(self, setup):
+        app, service, _, output_queue, text_output_queue, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                stale_generation = cancel_scope.generation
+                cancel_scope.cancel()
+                current_generation = cancel_scope.generation
+
+                text_output_queue.put(
+                    ResponseFailedEvent(
+                        message="stale failure",
+                        cancel_generation=stale_generation,
+                    )
+                )
+                output_queue.put(AudioOutput(audio=_pcm_bytes(512), cancel_generation=current_generation))
+
+                assert ws.receive_json()["type"] == "response.created"
+                assert ws.receive_json()["type"] == "response.output_audio.delta"
+                assert cancel_scope.generation == current_generation
+                conn_id = next(iter(service._conns))
+                assert service._state(conn_id).in_response
 
     def test_current_generation_text_survives_stuck_discarding(self, setup):
         """Regression: a fresh response's transcript must survive a stuck discard guard.
@@ -611,10 +680,25 @@ class TestSendLoop:
         )
         conn_id = service.register()
         service.response._ensure_response(conn_id)
-        text_output_queue.put(ResponseFailedEvent(message="speech server returned HTTP 500"))
+        generation = cancel_scope.generation
+        output_queue.put(AudioOutput(audio=_pcm_bytes(512), cancel_generation=generation))
+        output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=generation))
+        text_output_queue.put(
+            ResponseFailedEvent(
+                message="speech server returned HTTP 500",
+                cancel_generation=generation,
+            )
+        )
         ws = _FakeWebSocket()
+        transport = _RecordingWebSocketTransport(ws)
+        session = SessionState(
+            transport=transport,
+            session_id=conn_id,
+            pending_output_item=AudioOutput(audio=_pcm_bytes(512), cancel_generation=generation),
+        )
+        unit.session = session
 
-        asyncio.run(router_module._drain_pending_response_events(WebSocketTransport(ws), unit, conn_id))
+        asyncio.run(router_module._drain_pending_response_events(transport, unit, conn_id, session))
 
         assert [payload["type"] for payload in ws.sent] == [
             "error",
@@ -624,6 +708,13 @@ class TestSendLoop:
         assert ws.sent[-1]["response"]["status"] == "failed"
         assert service.finish_response(conn_id) == []
         assert text_output_queue.empty()
+        assert transport.discards == 1
+        assert cancel_scope.generation == generation + 1
+        assert session.pending_output_item is None
+        remaining = output_queue.get_nowait()
+        assert isinstance(remaining, AudioOutput)
+        assert remaining.audio == AUDIO_RESPONSE_DONE
+        assert output_queue.empty()
 
     def test_response_completion_drain_preserves_usage_across_non_response_boundary(self, setup):
         _, service, input_queue, output_queue, text_output_queue, should_listen, _, response_playing, cancel_scope = (
