@@ -98,6 +98,10 @@ pocket = [
 supertonic = [
     "supertonic>=1.3.1",
 ]
+telnyx = [
+    "websocket-client",
+    "pydub",
+]
 webrtc = [
     "aiortc>=1.9.0",
 ]
