@@ -85,7 +85,7 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - Engine flag: `--telnyx_stt_engine` (default `Telnyx`)
 - Language flag: `--telnyx_stt_language` (default `en`)
 - Model flag: `--telnyx_stt_model` (engine-specific, e.g. `nova-3` for Deepgram)
-- Partial results flag: `--telnyx_stt_partial_results` (default `True`)
+- Partial results flag: `--telnyx_stt_partial_results` (default `True`, Deepgram only)
 - Supports live transcription via `--enable_live_transcription`
 
 Supported engines (one endpoint, swap with `--telnyx_stt_engine`):
@@ -93,13 +93,13 @@ Supported engines (one endpoint, swap with `--telnyx_stt_engine`):
 | Engine | Notes |
 |---|---|
 | `Telnyx` | Telnyx's managed Whisper-based engine (default) |
-| `Deepgram` | Set the variant with `--telnyx_stt_model`, e.g. `nova-3` |
+| `Deepgram` | Set the variant with `--telnyx_stt_model`, e.g. `nova-3`. The only engine that returns interim results |
 | `Google` | Google Cloud Speech |
 | `Azure` | Azure Speech Services |
 
-The STT WebSocket endpoint requires STT to be enabled on the Telnyx account.
-A key without that entitlement gets a `403` on the WebSocket handshake even
-though the same key works against other Telnyx APIs.
+Telnyx's edge rejects WebSocket handshakes that carry an `Origin` header with
+a `403`, so both clients connect with `suppress_origin=True`. Without it every
+connection fails before reaching the API.
 
 Install:
 

@@ -21,7 +21,10 @@ class TelnyxSTTHandlerArguments:
     )
     telnyx_stt_partial_results: bool = field(
         default=True,
-        metadata={"help": "Request partial transcript results for live transcription."},
+        metadata={
+            "help": "Request interim transcript results for live transcription. Deepgram only; "
+            "the Telnyx engine returns a single final result either way."
+        },
     )
     telnyx_stt_gen_kwargs: dict = field(
         default_factory=dict,

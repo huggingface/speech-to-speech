@@ -191,8 +191,14 @@ def test_stt_client_url_encodes_params():
     query = parse_qs(urlparse(TelnyxSTTClient(api_key="k", engine="Deepgram", model="nova-3").url()).query)
     assert query["transcription_engine"] == ["Deepgram"]
     assert query["input_format"] == ["wav"]
-    assert query["partial_results"] == ["true"]
     assert query["model"] == ["nova-3"]
+
+    # The endpoint accepts `partial_results` and ignores it, returning finals
+    # only. `interim_results` is the parameter that actually works.
+    assert query["interim_results"] == ["true"]
+    assert "partial_results" not in query
+    off = parse_qs(urlparse(TelnyxSTTClient(api_key="k", partial_results=False).url()).query)
+    assert off["interim_results"] == ["false"]
 
     assert "model" not in parse_qs(urlparse(TelnyxSTTClient(api_key="k").url()).query)
 
