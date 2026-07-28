@@ -10,6 +10,7 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - `faster-whisper` → `STT/faster_whisper_handler.py`
 - `parakeet-tdt` → `STT/parakeet_tdt_handler.py`
 - `paraformer` → `STT/paraformer_handler.py`
+- `telnyx` → `STT/telnyx_stt_handler.py`
 
 ## Language Support by Handler
 
@@ -74,6 +75,53 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - Practical support:
   - Depends on selected FunASR model checkpoint
   - Default setup is Chinese-oriented (`zh`)
+
+### 7) Telnyx (`--stt telnyx`)
+
+- Handler: `TelnyxSTTHandler`
+- Managed WebSocket STT backed by Telnyx's unified speech API
+- One WebSocket per VAD segment, audio sent as WAV (zero codec dep)
+- Auth: `--telnyx_stt_api_key` or `$TELNYX_API_KEY` env var
+- Engine flag: `--telnyx_stt_engine` (default `Telnyx`)
+- Language flag: `--telnyx_stt_language` (default `en`)
+- Model flag: `--telnyx_stt_model` (engine-specific, e.g. `nova-3` for Deepgram)
+- Input format flag: `--telnyx_stt_input_format` (`wav` or `mp3`, default `wav`)
+- Partial results flag: `--telnyx_stt_partial_results` (default `True`)
+- Supports live transcription via `--enable_live_transcription`
+
+Supported engines (one endpoint, swap with `--telnyx_stt_engine`):
+
+| Engine | Notes |
+|---|---|
+| `Telnyx` | Telnyx's managed Whisper-based engine (default) |
+| `Deepgram` | Nova-2, Nova-3, Flux; set `--telnyx_stt_model` |
+| `Google` | Google Cloud Speech |
+| `Azure` | Azure Speech Services |
+| `xAI` | xAI Grok speech |
+| `AssemblyAI` | AssemblyAI Universal |
+| `Speechmatics` | Speechmatics |
+| `Soniox` | Soniox |
+| `Parakeet` | NVIDIA Parakeet via Telnyx |
+
+Install:
+
+```bash
+pip install "speech-to-speech[telnyx]"
+export TELNYX_API_KEY=...
+```
+
+Usage:
+
+```bash
+# Default Telnyx engine
+python s2s_pipeline.py --stt telnyx --telnyx_stt_engine Telnyx
+
+# Deepgram Nova-3 through Telnyx's unified API
+python s2s_pipeline.py --stt telnyx --telnyx_stt_engine Deepgram --telnyx_stt_model nova-3
+
+# With live transcription
+python s2s_pipeline.py --stt telnyx --enable_live_transcription --live_transcription_update_interval 0.25
+```
 
 ## Language Abbreviations (ISO-style codes seen in STT handlers)
 

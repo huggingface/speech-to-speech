@@ -89,6 +89,10 @@ paraformer = [
 pocket = [
     "pocket-tts>=0.1.0",
 ]
+telnyx = [
+    "websocket-client",
+    "pydub",
+]
 webrtc = [
     "aiortc>=1.9.0",
 ]
