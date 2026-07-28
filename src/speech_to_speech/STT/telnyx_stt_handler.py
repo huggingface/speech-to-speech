@@ -3,9 +3,8 @@
 Streams each VAD segment to Telnyx's managed STT WebSocket API. One
 WebSocket per utterance, matching the existing handler lifecycle.
 
-Supports the full Telnyx engine catalog through one endpoint:
-Telnyx (Whisper-based), Deepgram Nova-2/3/Flux, Google, Azure, xAI,
-AssemblyAI, Speechmatics, Soniox, Parakeet.
+Engines are selected with ``--telnyx_stt_engine``: Telnyx (Whisper-based),
+Deepgram, Google, Azure.
 """
 
 from __future__ import annotations
@@ -32,34 +31,25 @@ class TelnyxSTTHandler(BaseSTTHandler):
 
     def setup(
         self,
-        should_listen: Any = None,
         api_key: str = "",
         engine: str = "Telnyx",
         language: str = "en",
         model: str = "",
-        input_format: str = "wav",
         partial_results: bool = True,
         gen_kwargs: dict[str, Any] | None = None,
-        cancel_scope: Any = None,
-        speculative_turns: Any = None,
         enable_live_transcription: bool = False,
         live_transcription_update_interval: float = 0.25,
     ) -> None:
         resolved_key = api_key or os.environ.get("TELNYX_API_KEY", "")
         if not resolved_key:
-            raise ValueError(
-                "Telnyx STT requires an API key. Set --telnyx_stt_api_key or the TELNYX_API_KEY env var."
-            )
+            raise ValueError("Telnyx STT requires an API key. Set --telnyx_stt_api_key or the TELNYX_API_KEY env var.")
 
         self.api_key = resolved_key
         self.engine = engine
         self.language = language
         self.model = model
-        self.input_format = input_format
         self.partial_results = partial_results
         self.gen_kwargs = gen_kwargs or {}
-        self.cancel_scope = cancel_scope
-        self.speculative_turns = speculative_turns
         self.enable_live_transcription = enable_live_transcription
         self.live_transcription_update_interval = live_transcription_update_interval
         self.sample_rate = 16000
@@ -68,10 +58,9 @@ class TelnyxSTTHandler(BaseSTTHandler):
         self._last_partial_text: str = ""
 
         logger.info(
-            "Telnyx STT ready: engine=%s language=%s input_format=%s partial_results=%s",
+            "Telnyx STT ready: engine=%s language=%s partial_results=%s",
             self.engine,
             self.language,
-            self.input_format,
             self.partial_results,
         )
 
@@ -85,13 +74,11 @@ class TelnyxSTTHandler(BaseSTTHandler):
             api_key=self.api_key,
             engine=self.engine,
             language=self.language,
-            input_format=self.input_format,
             partial_results=self.partial_results,
             model=self.model,
         )
 
         final_text = ""
-        partials_emitted = 0
         try:
             client.connect()
             client.send_audio(audio, sample_rate=self.sample_rate)
@@ -100,26 +87,17 @@ class TelnyxSTTHandler(BaseSTTHandler):
                 event = client.recv_transcript()
                 if event is None:
                     break
-
-                event_type = event.get("type")
-                if event_type == "error":
-                    logger.error("Telnyx STT error: %s", event.get("error"))
-                    break
-
-                if event_type != "transcript":
+                if "transcript" not in event:
                     continue
 
-                text = event.get("transcript", "") or ""
-                is_final = bool(event.get("is_final", False))
-
-                if is_final:
+                text = event.get("transcript") or ""
+                if bool(event.get("is_final", False)):
                     final_text = text
                     break
 
                 if self.enable_live_transcription and text:
                     partial = self._maybe_emit_partial(text, vad_audio)
                     if partial is not None:
-                        partials_emitted += 1
                         yield partial
         except Exception as e:
             logger.error("Telnyx STT request failed: %s", e, exc_info=True)

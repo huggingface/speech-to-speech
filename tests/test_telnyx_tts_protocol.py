@@ -1,26 +1,30 @@
 """Tests for the Telnyx TTS handler protocol.
 
-These tests mock the WebSocket client to verify the handler builds the right
-frames, decodes MP3 audio, and chunks it to the configured blocksize.
+The fake WebSocket replays frames the way Telnyx actually sends them: one
+continuous MP3 bitstream sliced across many small frames, terminated by an
+``isFinal`` frame with an empty audio payload.
 """
 
 from __future__ import annotations
 
 import base64
-import io
 import json
 from threading import Event
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import pytest
 
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
-from speech_to_speech.TTS.telnyx_tts_handler import TelnyxTTSHandler
+pytest.importorskip("websocket")
+
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput  # noqa: E402
+from speech_to_speech.TTS.telnyx_tts_handler import TelnyxTTSHandler  # noqa: E402
+from speech_to_speech.utils.telnyx_ws import TelnyxProtocolError, TelnyxTTSClient  # noqa: E402
+from tests.telnyx_helpers import mp3_to_pcm, pcm_to_mp3, require_ffmpeg, sine_pcm, slice_stream  # noqa: E402
 
 
 def _make_handler(**overrides):
-    """Build a TelnyxTTSHandler with a mocked WebSocket client."""
     kwargs = dict(
         should_listen=Event(),
         api_key="test-key",
@@ -37,87 +41,131 @@ def _make_handler(**overrides):
     return handler
 
 
-def _make_mp3_b64(duration_s: float = 0.1, sample_rate: int = 16000) -> str:
-    """Build a base64-encoded MP3 frame of a sine wave."""
-    pytest.importorskip("pydub")
-    import shutil
-
-    if shutil.which("ffmpeg") is None:
-        pytest.skip("ffmpeg not available")
-
-    from pydub import AudioSegment
-
-    t = np.linspace(0, duration_s, int(sample_rate * duration_s), endpoint=False)
-    sine = (np.sin(2 * np.pi * 440 * t) * 16000).astype(np.int16)
-    audio = AudioSegment(
-        data=sine.tobytes(),
-        sample_width=2,
-        frame_rate=sample_rate,
-        channels=1,
-    )
-    buf = io.BytesIO()
-    audio.export(buf, format="mp3")
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
-def test_tts_handler_yields_audio_chunks():
-    """Handler yields int16 numpy arrays of blocksize length."""
-    handler = _make_handler(blocksize=512)
-
-    mp3_b64 = _make_mp3_b64(duration_s=0.2)
-
-    sent_frames: list[str] = []
-    recv_frames = [
-        json.dumps({"audio": mp3_b64, "isFinal": False}),
-        json.dumps({"audio": mp3_b64, "isFinal": True}),
+def _audio_frames(mp3: bytes, slice_size: int = 480) -> list[str]:
+    """Build the frame sequence Telnyx sends for one synthesis request."""
+    frames = [
+        json.dumps({"audio": base64.b64encode(s).decode("ascii"), "isFinal": False, "text": None})
+        for s in slice_stream(mp3, size=slice_size)
     ]
+    frames.append(json.dumps({"audio": "", "isFinal": True, "text": None}))
+    return frames
 
-    fake_ws = MagicMock()
-    fake_ws.send = lambda payload, opcode=None: sent_frames.append(payload)
-    fake_ws.recv = lambda: recv_frames.pop(0) if recv_frames else ""
-    fake_ws.close = MagicMock()
 
-    fake_websocket_module = MagicMock()
-    fake_websocket_module.WebSocket = MagicMock(return_value=fake_ws)
+def _fake_ws(recv_frames, sent=None):
+    queue = list(recv_frames)
+    ws = MagicMock()
+    ws.send = (lambda payload, opcode=None: sent.append(payload)) if sent is not None else MagicMock()
+    ws.recv = lambda: queue.pop(0) if queue else ""
+    return ws
 
-    with patch.dict("sys.modules", {"websocket": fake_websocket_module}):
-        tts_input = TTSInput(text="Hello world.", turn_id="turn_1", turn_revision=1)
-        results = list(handler.process(tts_input))
 
-    # Init + content + stop frames
-    assert len(sent_frames) == 3
-    assert json.loads(sent_frames[0]) == {"text": " "}
-    assert json.loads(sent_frames[1]) == {"text": "Hello world."}
-    assert json.loads(sent_frames[2]) == {"text": ""}
+def test_tts_handler_reconstructs_the_full_stream():
+    """Sliced frames decode to the same audio as the original bitstream."""
+    require_ffmpeg()
+    mp3 = pcm_to_mp3(sine_pcm(duration_s=1.0))
+    expected = mp3_to_pcm(mp3)
 
-    # At least one audio chunk yielded
-    assert len(results) >= 1
-    for chunk in results:
+    handler = _make_handler(blocksize=512)
+    ws = _fake_ws(_audio_frames(mp3))
+
+    with patch("websocket.WebSocket", return_value=ws):
+        chunks = list(handler.process(TTSInput(text="Hello world.", turn_id="turn_1", turn_revision=1)))
+
+    assert chunks, "handler produced no audio"
+    for chunk in chunks:
         assert isinstance(chunk, np.ndarray)
         assert chunk.dtype == np.int16
         assert len(chunk) == 512
 
-    fake_ws.close.assert_called_once()
+    produced = np.concatenate(chunks)
+    # The last block is zero-padded up to blocksize.
+    assert len(produced) - len(expected) < 512
+    np.testing.assert_array_equal(produced[: len(expected)], expected)
+    ws.close.assert_called_once()
+
+
+def test_tts_handler_sends_init_content_stop():
+    """The client emits the documented three-frame sequence."""
+    require_ffmpeg()
+    sent: list[str] = []
+    ws = _fake_ws(_audio_frames(pcm_to_mp3(sine_pcm(duration_s=0.2))), sent)
+    handler = _make_handler()
+
+    with patch("websocket.WebSocket", return_value=ws):
+        list(handler.process(TTSInput(text="Hello world.", turn_id="turn_1", turn_revision=1)))
+
+    assert [json.loads(f) for f in sent] == [{"text": " "}, {"text": "Hello world."}, {"text": ""}]
+
+
+def test_tts_handler_stops_at_is_final():
+    """Frames after isFinal are never read."""
+    require_ffmpeg()
+    mp3 = pcm_to_mp3(sine_pcm(duration_s=0.2))
+    frames = _audio_frames(mp3)
+    frames.append(json.dumps({"audio": base64.b64encode(mp3).decode("ascii"), "isFinal": False}))
+
+    remaining = list(frames)
+    ws = MagicMock()
+    ws.recv = lambda: remaining.pop(0) if remaining else ""
+    handler = _make_handler()
+
+    with patch("websocket.WebSocket", return_value=ws):
+        list(handler.process(TTSInput(text="Hi.", turn_id="turn_1", turn_revision=1)))
+
+    assert len(remaining) == 1, "handler kept reading past the final frame"
+
+
+def test_tts_handler_yields_nothing_on_error_frame():
+    """An error frame aborts synthesis instead of being read as end-of-stream."""
+    ws = _fake_ws([json.dumps({"error": "voice not found"})])
+    handler = _make_handler()
+
+    with patch("websocket.WebSocket", return_value=ws):
+        chunks = list(handler.process(TTSInput(text="Hi.", turn_id="turn_1", turn_revision=1)))
+
+    assert chunks == []
+    ws.close.assert_called_once()
 
 
 def test_tts_handler_end_of_response_yields_done():
-    """EndOfResponse yields AUDIO_RESPONSE_DONE."""
+    """EndOfResponse yields AUDIO_RESPONSE_DONE and touches no socket."""
+    ws = _fake_ws([])
     handler = _make_handler()
 
-    fake_ws = MagicMock()
-    fake_ws.send = MagicMock()
-    fake_ws.recv = MagicMock()
-    fake_ws.close = MagicMock()
-
-    fake_websocket_module = MagicMock()
-    fake_websocket_module.WebSocket = MagicMock(return_value=fake_ws)
-
-    with patch.dict("sys.modules", {"websocket": fake_websocket_module}):
+    with patch("websocket.WebSocket", return_value=ws):
         results = list(handler.process(EndOfResponse(turn_id="turn_1", turn_revision=1)))
 
     assert results == [AUDIO_RESPONSE_DONE]
-    # No WS interaction for EndOfResponse
-    fake_ws.send.assert_not_called()
+    ws.send.assert_not_called()
+
+
+def test_tts_handler_stops_mid_stream_on_cancel():
+    """Cancelling during playback abandons the rest of the stream."""
+    require_ffmpeg()
+    from speech_to_speech.pipeline.cancel_scope import CancelScope
+
+    scope = CancelScope()
+    handler = _make_handler(cancel_scope=scope, blocksize=512)
+
+    frames = _audio_frames(pcm_to_mp3(sine_pcm(duration_s=3.0)))
+    remaining = list(frames)
+
+    def recv():
+        # Interrupt part-way through, the way a barge-in would.
+        if len(remaining) == len(frames) // 2:
+            scope.cancel()
+        return remaining.pop(0) if remaining else ""
+
+    ws = MagicMock()
+    ws.recv = recv
+
+    with patch("websocket.WebSocket", return_value=ws):
+        chunks = list(handler.process(TTSInput(text="Hello.", turn_id="turn_1", turn_revision=1)))
+
+    assert remaining, "handler drained the stream instead of bailing out on cancel"
+    # Whatever was already decoded may be yielded; the tail must not be.
+    assert len(np.concatenate(chunks)) < 3 * 16000 if chunks else True
+    ws.close.assert_called_once()
 
 
 def test_tts_handler_missing_api_key_raises(monkeypatch):
@@ -130,7 +178,7 @@ def test_tts_handler_missing_api_key_raises(monkeypatch):
 
 
 def test_tts_handler_reads_api_key_from_env(monkeypatch):
-    """Setup falls back to TELNYX_API_KEY env var when api_key is empty."""
+    """Setup falls back to TELNYX_API_KEY when api_key is empty."""
     monkeypatch.setenv("TELNYX_API_KEY", "env-key")
 
     handler = object.__new__(TelnyxTTSHandler)
@@ -138,33 +186,25 @@ def test_tts_handler_reads_api_key_from_env(monkeypatch):
     assert handler.api_key == "env-key"
 
 
-def test_tts_handler_breaks_on_cancel():
-    """Handler stops yielding when cancel_scope marks the generation stale."""
-    from speech_to_speech.pipeline.cancel_scope import CancelScope
+def test_tts_client_url_encodes_voice():
+    """Voice identifiers are URL-encoded."""
+    url = TelnyxTTSClient(api_key="k", voice="ElevenLabs.Voice Name&x").url()
+    assert " " not in url.split("?", 1)[1]
+    assert parse_qs(urlparse(url).query)["voice"] == ["ElevenLabs.Voice Name&x"]
 
-    scope = CancelScope()
-    handler = _make_handler(cancel_scope=scope, blocksize=512)
 
-    mp3_b64 = _make_mp3_b64(duration_s=0.1)
+def test_tts_client_reports_final_frame():
+    """The terminal frame decodes to empty audio with is_final set."""
+    client = TelnyxTTSClient(api_key="k", voice="v")
+    client._ws = _fake_ws([json.dumps({"audio": "", "isFinal": True, "text": None})])
 
-    # Many frames so the cancel check fires
-    recv_frames = [json.dumps({"audio": mp3_b64, "isFinal": False}) for _ in range(20)]
+    assert client.recv_audio() == (b"", True)
 
-    fake_ws = MagicMock()
-    fake_ws.send = MagicMock()
-    fake_ws.recv = lambda: recv_frames.pop(0) if recv_frames else ""
-    fake_ws.close = MagicMock()
 
-    fake_websocket_module = MagicMock()
-    fake_websocket_module.WebSocket = MagicMock(return_value=fake_ws)
+def test_tts_client_raises_on_error_frame():
+    """The client surfaces error frames instead of treating them as EOF."""
+    client = TelnyxTTSClient(api_key="k", voice="v")
+    client._ws = _fake_ws([json.dumps({"error": "voice not found"})])
 
-    # Cancel before processing
-    scope.cancel()
-
-    with patch.dict("sys.modules", {"websocket": fake_websocket_module}):
-        tts_input = TTSInput(text="Hello.", turn_id="turn_1", turn_revision=1)
-        results = list(handler.process(tts_input))
-
-    # Should bail out early; may yield zero or one chunk depending on timing
-    assert len(results) <= 1
-    fake_ws.close.assert_called_once()
+    with pytest.raises(TelnyxProtocolError, match="voice not found"):
+        client.recv_audio()
