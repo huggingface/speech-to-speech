@@ -80,12 +80,11 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 
 - Handler: `TelnyxSTTHandler`
 - Managed WebSocket STT backed by Telnyx's unified speech API
-- One WebSocket per VAD segment, audio sent as WAV (zero codec dep)
+- One WebSocket per VAD segment, audio sent as WAV in 2 KB binary frames (zero codec dep)
 - Auth: `--telnyx_stt_api_key` or `$TELNYX_API_KEY` env var
 - Engine flag: `--telnyx_stt_engine` (default `Telnyx`)
 - Language flag: `--telnyx_stt_language` (default `en`)
 - Model flag: `--telnyx_stt_model` (engine-specific, e.g. `nova-3` for Deepgram)
-- Input format flag: `--telnyx_stt_input_format` (`wav` or `mp3`, default `wav`)
 - Partial results flag: `--telnyx_stt_partial_results` (default `True`)
 - Supports live transcription via `--enable_live_transcription`
 
@@ -94,14 +93,13 @@ Supported engines (one endpoint, swap with `--telnyx_stt_engine`):
 | Engine | Notes |
 |---|---|
 | `Telnyx` | Telnyx's managed Whisper-based engine (default) |
-| `Deepgram` | Nova-2, Nova-3, Flux; set `--telnyx_stt_model` |
+| `Deepgram` | Set the variant with `--telnyx_stt_model`, e.g. `nova-3` |
 | `Google` | Google Cloud Speech |
 | `Azure` | Azure Speech Services |
-| `xAI` | xAI Grok speech |
-| `AssemblyAI` | AssemblyAI Universal |
-| `Speechmatics` | Speechmatics |
-| `Soniox` | Soniox |
-| `Parakeet` | NVIDIA Parakeet via Telnyx |
+
+The STT WebSocket endpoint requires STT to be enabled on the Telnyx account.
+A key without that entitlement gets a `403` on the WebSocket handshake even
+though the same key works against other Telnyx APIs.
 
 Install:
 

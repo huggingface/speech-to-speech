@@ -1,7 +1,9 @@
 """Telnyx managed Text-to-Speech handler.
 
-Streams each LLM response to Telnyx's managed TTS WebSocket API. One
-WebSocket per response, matching the existing handler lifecycle.
+Streams each sentence batch from the LLM to Telnyx's managed TTS WebSocket
+API. The protocol has no per-utterance boundary marker inside a session, so a
+session covers exactly one synthesis request and the handler opens one
+WebSocket per call to :meth:`process`.
 
 Supports the full Telnyx voice catalog through one endpoint:
 Telnyx NaturalHD, AWS Polly, Azure, ElevenLabs, MiniMax, ResembleAI,
@@ -23,7 +25,7 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.utils.telnyx_ws import TelnyxTTSClient, mp3_base64_to_pcm_int16
+from speech_to_speech.utils.telnyx_ws import Mp3StreamDecoder, TelnyxTTSClient
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -45,9 +47,7 @@ class TelnyxTTSHandler(BaseHandler[TTSIn, TTSOut]):
     ) -> None:
         resolved_key = api_key or os.environ.get("TELNYX_API_KEY", "")
         if not resolved_key:
-            raise ValueError(
-                "Telnyx TTS requires an API key. Set --telnyx_tts_api_key or the TELNYX_API_KEY env var."
-            )
+            raise ValueError("Telnyx TTS requires an API key. Set --telnyx_tts_api_key or the TELNYX_API_KEY env var.")
 
         self.should_listen = should_listen
         self.api_key = resolved_key
@@ -58,7 +58,12 @@ class TelnyxTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
 
-        logger.info("Telnyx TTS ready: voice=%s sample_rate=%d blocksize=%d", self.voice, self.sample_rate, self.blocksize)
+        logger.info(
+            "Telnyx TTS ready: voice=%s sample_rate=%d blocksize=%d",
+            self.voice,
+            self.sample_rate,
+            self.blocksize,
+        )
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         speculative_turns = getattr(self, "speculative_turns", None)
@@ -85,39 +90,40 @@ class TelnyxTTSHandler(BaseHandler[TTSIn, TTSOut]):
         console.print(f"[green]ASSISTANT: {text}")
 
         client = TelnyxTTSClient(api_key=self.api_key, voice=self.voice)
+        decoder = Mp3StreamDecoder(sample_rate=self.sample_rate)
+        audio_buffer = np.array([], dtype=np.int16)
         try:
             client.connect()
             client.send_init()
             client.send_text(text)
             client.send_stop()
 
-            audio_buffer = np.array([], dtype=np.int16)
-            for frame in self._iter_audio_frames(client):
+            while True:
                 if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
                     logger.info("TTS generation cancelled (interruption)")
                     return
 
-                mp3_bytes, _is_final = frame
-                pcm = mp3_base64_to_pcm_int16(mp3_bytes, target_sample_rate=self.sample_rate)
-                audio_buffer = np.concatenate([audio_buffer, pcm])
+                frame = client.recv_audio()
+                if frame is None:
+                    break
 
-                while len(audio_buffer) >= self.blocksize:
-                    chunk = audio_buffer[: self.blocksize]
-                    audio_buffer = audio_buffer[self.blocksize :]
-                    yield chunk
+                mp3_bytes, is_final = frame
+                if mp3_bytes:
+                    audio_buffer = np.concatenate([audio_buffer, decoder.feed(mp3_bytes)])
+                    while len(audio_buffer) >= self.blocksize:
+                        yield audio_buffer[: self.blocksize]
+                        audio_buffer = audio_buffer[self.blocksize :]
+                if is_final:
+                    break
 
+            audio_buffer = np.concatenate([audio_buffer, decoder.flush()])
+            while len(audio_buffer) >= self.blocksize:
+                yield audio_buffer[: self.blocksize]
+                audio_buffer = audio_buffer[self.blocksize :]
             if len(audio_buffer) > 0:
-                chunk = np.pad(audio_buffer, (0, self.blocksize - len(audio_buffer)))
-                yield chunk
+                yield np.pad(audio_buffer, (0, self.blocksize - len(audio_buffer)))
         except Exception as e:
             logger.error("Telnyx TTS request failed: %s", e, exc_info=True)
         finally:
+            decoder.close()
             client.close()
-
-    def _iter_audio_frames(self, client: TelnyxTTSClient) -> Iterator[tuple[bytes, bool]]:
-        """Yield audio frames until the server closes the stream."""
-        while True:
-            frame = client.recv_audio()
-            if frame is None:
-                return
-            yield frame

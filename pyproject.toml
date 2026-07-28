@@ -90,8 +90,7 @@ pocket = [
     "pocket-tts>=0.1.0",
 ]
 telnyx = [
-    "websocket-client",
-    "pydub",
+    "websocket-client>=1.7.0",
 ]
 webrtc = [
     "aiortc>=1.9.0",

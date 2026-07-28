@@ -1,37 +1,36 @@
 """Tests for the Telnyx STT handler protocol.
 
-These tests mock the WebSocket client to verify the handler builds the right
-frames, parses transcript events correctly, and surfaces errors gracefully.
+The fake WebSocket returns frames in the shape Telnyx documents for the
+transcription endpoint: ``{"transcript", "is_final", "confidence"}``, with
+errors carried in an ``error`` key. There is no ``type`` discriminator.
 """
 
 from __future__ import annotations
 
+import io
 import json
-import os
-from queue import Queue
-from threading import Event
+import wave
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import pytest
 
-from speech_to_speech.pipeline.messages import Transcription, VADAudio
-from speech_to_speech.STT.telnyx_stt_handler import TelnyxSTTHandler
+pytest.importorskip("websocket")
+
+from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, VADAudio  # noqa: E402
+from speech_to_speech.STT.telnyx_stt_handler import TelnyxSTTHandler  # noqa: E402
+from speech_to_speech.utils.telnyx_ws import TelnyxProtocolError, TelnyxSTTClient  # noqa: E402
 
 
 def _make_handler(**overrides):
-    """Build a TelnyxSTTHandler with a mocked WebSocket client."""
     kwargs = dict(
-        should_listen=Event(),
         api_key="test-key",
         engine="Telnyx",
         language="en",
         model="",
-        input_format="wav",
         partial_results=True,
         gen_kwargs={},
-        cancel_scope=None,
-        speculative_turns=None,
         enable_live_transcription=False,
         live_transcription_update_interval=0.25,
     )
@@ -41,33 +40,41 @@ def _make_handler(**overrides):
     return handler
 
 
+def _fake_ws(recv_frames, sent=None):
+    """A WebSocket stub that replays `recv_frames` then reports end-of-stream."""
+    queue = list(recv_frames)
+    ws = MagicMock()
+    ws.send = (lambda payload, opcode=None: sent.append(payload)) if sent is not None else MagicMock()
+    ws.recv = lambda: queue.pop(0) if queue else ""
+    return ws
+
+
+def _vad(**overrides):
+    kwargs = dict(
+        audio=np.zeros(16000, dtype=np.int16),
+        mode="final",
+        turn_id="turn_1",
+        turn_revision=1,
+        created_at_s=123.0,
+    )
+    kwargs.update(overrides)
+    return VADAudio(**kwargs)
+
+
 def test_stt_handler_yields_final_transcript():
-    """Handler yields one Transcription with the final text from the WS stream."""
+    """The handler yields one Transcription carrying the final text."""
     handler = _make_handler()
+    sent: list[bytes] = []
+    ws = _fake_ws(
+        [
+            json.dumps({"transcript": "hello ", "is_final": False, "confidence": 0.5}),
+            json.dumps({"transcript": "hello world", "is_final": True, "confidence": 0.95}),
+        ],
+        sent,
+    )
 
-    sent_frames: list[bytes] = []
-    recv_frames = [
-        json.dumps({"type": "transcript", "transcript": "hello ", "is_final": False, "confidence": 0.5}),
-        json.dumps({"type": "transcript", "transcript": "hello world", "is_final": True, "confidence": 0.95}),
-    ]
-
-    fake_ws = MagicMock()
-    fake_ws.send = lambda payload, opcode=None: sent_frames.append(payload)
-    fake_ws.recv = lambda: recv_frames.pop(0) if recv_frames else ""
-    fake_ws.close = MagicMock()
-
-    fake_websocket_module = MagicMock()
-    fake_websocket_module.WebSocket = MagicMock(return_value=fake_ws)
-
-    with patch.dict("sys.modules", {"websocket": fake_websocket_module}):
-        vad = VADAudio(
-            audio=np.zeros(16000, dtype=np.int16),
-            mode="final",
-            turn_id="turn_1",
-            turn_revision=1,
-            created_at_s=123.0,
-        )
-        results = list(handler.process(vad))
+    with patch("websocket.WebSocket", return_value=ws):
+        results = list(handler.process(_vad()))
 
     assert len(results) == 1
     assert isinstance(results[0], Transcription)
@@ -76,41 +83,89 @@ def test_stt_handler_yields_final_transcript():
     assert results[0].turn_id == "turn_1"
     assert results[0].turn_revision == 1
     assert results[0].speech_stopped_at_s == 123.0
-
-    # Exactly one binary audio frame was sent
-    assert len(sent_frames) == 1
-    assert sent_frames[0][:4] == b"RIFF"  # WAV container
-    fake_ws.close.assert_called_once()
+    ws.close.assert_called_once()
 
 
-def test_stt_handler_yields_empty_transcript_on_error():
-    """Handler yields an empty Transcription when the server reports an error."""
+def test_stt_handler_sends_chunked_wav():
+    """Audio goes out as a valid WAV split into 2 KB binary frames."""
     handler = _make_handler()
+    sent: list[bytes] = []
+    ws = _fake_ws([json.dumps({"transcript": "ok", "is_final": True})], sent)
 
-    recv_frames = [
-        json.dumps({"type": "error", "error": "boom"}),
-    ]
+    with patch("websocket.WebSocket", return_value=ws):
+        list(handler.process(_vad()))
 
-    fake_ws = MagicMock()
-    fake_ws.send = MagicMock()
-    fake_ws.recv = lambda: recv_frames.pop(0) if recv_frames else ""
-    fake_ws.close = MagicMock()
+    assert len(sent) > 1, "audio should be chunked, not sent as one frame"
+    assert all(len(frame) <= 2048 for frame in sent)
+    assert sent[0][:4] == b"RIFF"
 
-    fake_websocket_module = MagicMock()
-    fake_websocket_module.WebSocket = MagicMock(return_value=fake_ws)
+    with wave.open(io.BytesIO(b"".join(sent)), "rb") as wf:
+        assert wf.getnchannels() == 1
+        assert wf.getsampwidth() == 2
+        assert wf.getframerate() == 16000
+        assert wf.getnframes() == 16000
 
-    with patch.dict("sys.modules", {"websocket": fake_websocket_module}):
-        vad = VADAudio(
-            audio=np.zeros(16000, dtype=np.int16),
-            mode="final",
-            turn_id="turn_1",
-            turn_revision=1,
-        )
-        results = list(handler.process(vad))
+
+def test_stt_handler_yields_empty_transcript_on_error_frame():
+    """An `error` frame is logged and yields an empty Transcription."""
+    handler = _make_handler()
+    ws = _fake_ws([json.dumps({"error": "boom"})])
+
+    with patch("websocket.WebSocket", return_value=ws):
+        results = list(handler.process(_vad()))
+
+    assert len(results) == 1
+    assert results[0].text == ""
+
+
+def test_stt_handler_survives_stream_close_without_final():
+    """A stream that closes before is_final still yields a Transcription."""
+    handler = _make_handler()
+    ws = _fake_ws([json.dumps({"transcript": "partial only", "is_final": False})])
+
+    with patch("websocket.WebSocket", return_value=ws):
+        results = list(handler.process(_vad()))
+
+    assert len(results) == 1
+    assert results[0].text == ""
+
+
+def test_stt_handler_emits_partials_when_live_transcription_enabled():
+    """Interim transcripts surface as PartialTranscription."""
+    handler = _make_handler(enable_live_transcription=True, live_transcription_update_interval=0.0)
+    ws = _fake_ws(
+        [
+            json.dumps({"transcript": "hel", "is_final": False}),
+            json.dumps({"transcript": "hello", "is_final": False}),
+            json.dumps({"transcript": "hello world", "is_final": True}),
+        ]
+    )
+
+    with patch("websocket.WebSocket", return_value=ws):
+        results = list(handler.process(_vad()))
+
+    partials = [r for r in results if isinstance(r, PartialTranscription)]
+    finals = [r for r in results if isinstance(r, Transcription)]
+    assert [p.text for p in partials] == ["hel", "hello"]
+    assert len(finals) == 1
+    assert finals[0].text == "hello world"
+
+
+def test_stt_handler_suppresses_partials_when_disabled():
+    """Without live transcription only the final Transcription is emitted."""
+    handler = _make_handler(enable_live_transcription=False)
+    ws = _fake_ws(
+        [
+            json.dumps({"transcript": "hel", "is_final": False}),
+            json.dumps({"transcript": "hello world", "is_final": True}),
+        ]
+    )
+
+    with patch("websocket.WebSocket", return_value=ws):
+        results = list(handler.process(_vad()))
 
     assert len(results) == 1
     assert isinstance(results[0], Transcription)
-    assert results[0].text == ""
 
 
 def test_stt_handler_missing_api_key_raises(monkeypatch):
@@ -123,7 +178,7 @@ def test_stt_handler_missing_api_key_raises(monkeypatch):
 
 
 def test_stt_handler_reads_api_key_from_env(monkeypatch):
-    """Setup falls back to TELNYX_API_KEY env var when api_key is empty."""
+    """Setup falls back to TELNYX_API_KEY when api_key is empty."""
     monkeypatch.setenv("TELNYX_API_KEY", "env-key")
 
     handler = object.__new__(TelnyxSTTHandler)
@@ -131,33 +186,25 @@ def test_stt_handler_reads_api_key_from_env(monkeypatch):
     assert handler.api_key == "env-key"
 
 
-def test_stt_handler_emits_partial_when_live_transcription_enabled():
-    """Partial transcripts are yielded as PartialTranscription when enabled."""
-    handler = _make_handler(enable_live_transcription=True, live_transcription_update_interval=0.0)
+def test_stt_client_url_encodes_params():
+    """Query params are URL-encoded and the model is optional."""
+    query = parse_qs(urlparse(TelnyxSTTClient(api_key="k", engine="Deepgram", model="nova-3").url()).query)
+    assert query["transcription_engine"] == ["Deepgram"]
+    assert query["input_format"] == ["wav"]
+    assert query["partial_results"] == ["true"]
+    assert query["model"] == ["nova-3"]
 
-    recv_frames = [
-        json.dumps({"type": "transcript", "transcript": "hel", "is_final": False}),
-        json.dumps({"type": "transcript", "transcript": "hello", "is_final": False}),
-        json.dumps({"type": "transcript", "transcript": "hello world", "is_final": True}),
-    ]
+    assert "model" not in parse_qs(urlparse(TelnyxSTTClient(api_key="k").url()).query)
 
-    fake_ws = MagicMock()
-    fake_ws.send = MagicMock()
-    fake_ws.recv = lambda: recv_frames.pop(0) if recv_frames else ""
-    fake_ws.close = MagicMock()
+    encoded = TelnyxSTTClient(api_key="k", engine="Engine With Spaces&x").url()
+    assert " " not in encoded.split("?", 1)[1]
+    assert parse_qs(urlparse(encoded).query)["transcription_engine"] == ["Engine With Spaces&x"]
 
-    fake_websocket_module = MagicMock()
-    fake_websocket_module.WebSocket = MagicMock(return_value=fake_ws)
 
-    with patch.dict("sys.modules", {"websocket": fake_websocket_module}):
-        vad = VADAudio(
-            audio=np.zeros(16000, dtype=np.int16),
-            mode="final",
-            turn_id="turn_1",
-            turn_revision=1,
-        )
-        results = list(handler.process(vad))
+def test_stt_client_raises_on_error_frame():
+    """The client surfaces error frames instead of treating them as EOF."""
+    client = TelnyxSTTClient(api_key="k")
+    client._ws = _fake_ws([json.dumps({"error": "bad engine"})])
 
-    # At least one partial + one final
-    assert len(results) >= 2
-    assert any(r.text == "hello world" for r in results)
+    with pytest.raises(TelnyxProtocolError, match="bad engine"):
+        client.recv_transcript()

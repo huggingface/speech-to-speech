@@ -150,7 +150,8 @@ python s2s_pipeline.py \
 
 - Handler: `TelnyxTTSHandler`
 - Managed WebSocket TTS backed by Telnyx's unified speech API
-- One WebSocket per LLM response, audio returned as base64 MP3
+- One WebSocket per synthesis request (the LLM output processor emits sentence batches, so this is one connection per sentence batch, not per response)
+- Telnyx returns one continuous MP3 bitstream split across many small frames; individual frames are not independently decodable, so the handler pipes the stream through a long-lived `ffmpeg` process and emits PCM as it arrives
 - Auth: `--telnyx_tts_api_key` or `$TELNYX_API_KEY` env var
 - Voice flag: `--telnyx_tts_voice` (default `Telnyx.NaturalHD.astra`)
 - Sample rate flag: `--telnyx_tts_sample_rate` (default `16000`)
@@ -169,7 +170,7 @@ Supported voice providers (one endpoint, swap with `--telnyx_tts_voice`):
 | Inworld | `Inworld.*` |
 | Rime | `Rime.*` |
 
-System dependency: `ffmpeg` (required by `pydub` for MP3 decode). Install with `brew install ffmpeg` (macOS) or `apt install ffmpeg` (Debian/Ubuntu).
+System dependency: `ffmpeg`, used to decode the MP3 stream. Install with `brew install ffmpeg` (macOS) or `apt install ffmpeg` (Debian/Ubuntu).
 
 Install:
 
