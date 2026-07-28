@@ -51,6 +51,8 @@
  *   created inside the tap gesture so iOS lets it start.
  * @property {import("../ws/s2s-ws-client.js").ToolDef[]} [tools] Function tools
  *   declared in the initial `session.update`.
+ * @property {string} [audioOutputId] MediaDeviceInfo.deviceId for speakers
+ *   (AudioContext.setSinkId when supported).
  */
 
 import { extractResponseTranscript } from "../ws/codec.js";
@@ -334,8 +336,27 @@ export class S2sRtcRealtimeClient extends EventTarget {
     outAnalyser.connect(ctx.destination);
     this._outAnalyser = outAnalyser;
 
+    void this.setAudioOutputDevice(this.options.audioOutputId || "");
+
     this._visualiser = new OrbVisualiser(micAnalyser, outAnalyser, () => this._aiSpeaking);
     this._visualiser.start();
+  }
+
+  /**
+   * Route Web Audio playback to a specific output device (Chrome/Edge).
+   * @param {string} [deviceId]
+   * @returns {Promise<boolean>}
+   */
+  async setAudioOutputDevice(deviceId = "") {
+    const ctx = this._ctx;
+    if (!ctx || typeof /** @type {any} */ (ctx).setSinkId !== "function") return false;
+    try {
+      await /** @type {any} */ (ctx).setSinkId(deviceId || "");
+      return true;
+    } catch (err) {
+      console.warn("[rtc] setSinkId failed:", err);
+      return false;
+    }
   }
 
   /** @param {RTCTrackEvent} e */
