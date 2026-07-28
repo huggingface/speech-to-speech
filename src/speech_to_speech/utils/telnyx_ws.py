@@ -37,6 +37,12 @@ class TelnyxProtocolError(RuntimeError):
     """Raised when a Telnyx WebSocket endpoint reports an error frame."""
 
 
+# websocket-client attaches an ``Origin`` header to wss:// handshakes. Telnyx's
+# edge rejects those with a 403 before the request reaches the API, so the
+# handshake has to go out without one.
+SUPPRESS_ORIGIN = True
+
+
 # ── Audio format helpers ────────────────────────────────────────────────
 
 
@@ -221,7 +227,9 @@ class TelnyxSTTClient:
             "transcription_engine": self.engine,
             "input_format": "wav",
             "language": self.language,
-            "partial_results": "true" if self.partial_results else "false",
+            # The endpoint calls this `interim_results`; `partial_results` is
+            # accepted but ignored, and silently gives you finals only.
+            "interim_results": "true" if self.partial_results else "false",
         }
         if self.model:
             params["model"] = self.model
@@ -235,6 +243,7 @@ class TelnyxSTTClient:
             self.url(),
             header=[f"Authorization: Bearer {self.api_key}"],
             timeout=self.connect_timeout,
+            suppress_origin=SUPPRESS_ORIGIN,
         )
         self._ws.settimeout(self.recv_timeout)
 
@@ -329,6 +338,7 @@ class TelnyxTTSClient:
             self.url(),
             header=[f"Authorization: Bearer {self.api_key}"],
             timeout=self.connect_timeout,
+            suppress_origin=SUPPRESS_ORIGIN,
         )
         self._ws.settimeout(self.recv_timeout)
 
