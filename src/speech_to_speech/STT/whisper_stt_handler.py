@@ -49,7 +49,11 @@ class WhisperSTTHandler(BaseSTTHandler):
         self.device = device
         self.torch_dtype = getattr(torch, torch_dtype)
         self.compile_mode = compile_mode
-        self.gen_kwargs = gen_kwargs
+        # Copied, not aliased: `language` is written into this dict below, and
+        # `gen_kwargs` defaults to a single dict shared by every call to `setup`,
+        # so writing through the alias would leave the language of one handler in
+        # the default and hand it to the next handler built without one.
+        self.gen_kwargs = dict(gen_kwargs)
         self.start_language = language
         self.last_language = language if language != "auto" else None
         if self.last_language is not None:
