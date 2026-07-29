@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from copy import copy
+import re
 from typing import Any, Iterator, Optional
 
 import numpy as np
@@ -31,11 +31,24 @@ SUPPORTED_LANGUAGES = [
     "nl",
 ]
 
+DEFAULT_LANGUAGE = "en"
+
+# Whisper language special tokens look like "<|de|>" / "<|yue|>". No other Whisper
+# special token ("<|transcribe|>", "<|nospeech|>", "<|notimestamps|>", ...) is 2-3
+# letters long, so this pattern only ever matches language tokens.
+_LANGUAGE_TOKEN_RE = re.compile(r"^<\|([a-z]{2,3})\|>$")
+
+# The forced decoder prefix is "<|startoftranscript|><|xx|><|transcribe|><|notimestamps|>",
+# so the language token is always within the first few ids when it is present at all.
+_LANGUAGE_TOKEN_SCAN_DEPTH = 4
+
 
 class WhisperSTTHandler(BaseSTTHandler):
     """
     Handles the Speech To Text generation using a Whisper model.
     """
+
+    _language_token_id_map: Optional[dict[int, str]] = None
 
     def setup(
         self,
@@ -112,24 +125,90 @@ class WhisperSTTHandler(BaseSTTHandler):
                 f"{self.__class__.__name__}:  warmed up! time: {start_event.elapsed_time(end_event) * 1e-3:.3f} s"
             )
 
+    def _language_token_ids(self) -> dict[int, str]:
+        """Map the tokenizer's Whisper language special-token ids to their ISO codes."""
+        if self._language_token_id_map is not None:
+            return self._language_token_id_map
+
+        tokenizer = self.processor.tokenizer
+        mapping: dict[int, str] = {}
+        for token in getattr(tokenizer, "all_special_tokens", None) or []:
+            match = _LANGUAGE_TOKEN_RE.match(token)
+            if match is None:
+                continue
+            token_id = tokenizer.convert_tokens_to_ids(token)
+            if isinstance(token_id, int):
+                mapping[token_id] = match.group(1)
+
+        self._language_token_id_map = mapping
+        return mapping
+
+    def _detected_language(self, pred_ids: Any) -> Optional[str]:
+        """Read the language Whisper decoded, or ``None`` if it did not report one.
+
+        The language token is only in the returned sequence when ``generate()`` echoes the
+        forced decoder prefix. Recent ``transformers`` strips that prefix, so the leading ids
+        are ordinary text. Scanning for a real language token instead of slicing a fixed
+        position keeps this correct on both behaviours; guessing from position turns a text
+        token into a bogus "language" and silently discards a good transcription.
+        """
+        language_tokens = self._language_token_ids()
+        if not language_tokens:
+            return None
+
+        try:
+            row = pred_ids[0]
+            token_ids = row.tolist() if hasattr(row, "tolist") else list(row)
+        except (IndexError, TypeError):
+            return None
+
+        for token_id in token_ids[:_LANGUAGE_TOKEN_SCAN_DEPTH]:
+            try:
+                code = language_tokens.get(int(token_id))
+            except (TypeError, ValueError):
+                continue
+            if code is not None:
+                return code
+        return None
+
+    def _forced_language(self) -> Optional[str]:
+        """The language explicitly requested for generation, if any."""
+        forced = self.gen_kwargs.get("language")
+        return forced if isinstance(forced, str) and forced and forced != "auto" else None
+
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("infering whisper...")
 
         input_features = self.prepare_model_inputs(vad_audio.audio)
         pred_ids = self.model.generate(input_features, **self.gen_kwargs)
-        language_code = self.processor.tokenizer.decode(pred_ids[0, 1])[2:-2]  # remove "<|" and "|>"
 
-        if language_code not in SUPPORTED_LANGUAGES:  # reprocess with the last language
-            logger.warning("Whisper detected unsupported language: %s", language_code)
-            gen_kwargs = copy(self.gen_kwargs)
-            gen_kwargs["language"] = self.last_language
-            language_code = self.last_language
-            pred_ids = self.model.generate(input_features, **gen_kwargs)
-        else:
+        forced_language = self._forced_language()
+        detected_language = self._detected_language(pred_ids) or forced_language
+
+        if detected_language in SUPPORTED_LANGUAGES:
+            assert detected_language is not None
+            language_code = detected_language
             self.last_language = language_code
+        elif forced_language is not None:
+            # The first pass already ran with the requested language, so it is authoritative.
+            # Re-generating here would throw away a correct transcription.
+            language_code = forced_language
+        else:
+            if detected_language is not None:
+                logger.warning("Whisper detected unsupported language: %s", detected_language)
+            last_language = self.last_language
+            if last_language in SUPPORTED_LANGUAGES:
+                assert last_language is not None
+                # Auto-detection is unusable and we have a known-good language: retry with it.
+                logger.debug("Reprocessing with the last known language: %s", last_language)
+                pred_ids = self.model.generate(input_features, **{**self.gen_kwargs, "language": last_language})
+                language_code = last_language
+            else:
+                # Nothing better to fall back to. Keep this pass rather than re-generating
+                # with language=None, which would produce an identical result at double cost.
+                language_code = detected_language or DEFAULT_LANGUAGE
 
         pred_text = self.processor.batch_decode(pred_ids, skip_special_tokens=True, decode_with_timestamps=False)[0]
-        language_code = self.processor.tokenizer.decode(pred_ids[0, 1])[2:-2]  # remove "<|" and "|>"
 
         logger.debug("finished whisper inference")
         console.print(f"[yellow]USER: {pred_text}")
