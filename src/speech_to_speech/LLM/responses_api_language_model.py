@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import base64
-import io
 import logging
 import time
-import wave
 from collections.abc import Iterator
 from typing import Any
 
-import numpy as np
 from openai import Stream
 from openai.types.realtime.realtime_conversation_item_assistant_message import (
     Content as AssistantContent,
@@ -29,15 +25,8 @@ from speech_to_speech.LLM.base_openai_compatible_language_model import (
     TextDelta,
     ToolCall,
     Usage,
-    _Turn,
 )
-from speech_to_speech.LLM.chat import (
-    Chat,
-    ChatItemError,
-    build_active_chat,
-    make_user_audio_message,
-    make_user_message,
-)
+from speech_to_speech.LLM.chat import Chat
 from speech_to_speech.LLM.chat_completions_language_model import (
     _build_chat_optional_kwargs,
     _chat_messages,
@@ -46,14 +35,9 @@ from speech_to_speech.LLM.chat_completions_language_model import (
     _request_chat_completions,
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn
-from speech_to_speech.LLM.utils import resolve_auto_language
-from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
-from speech_to_speech.pipeline.messages import EndOfResponse
-from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
+from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
-
-AUDIO_INPUT_HISTORY_PLACEHOLDER = "[User audio input]"
 
 
 class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
@@ -104,32 +88,22 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
 
         return generate
 
-    @staticmethod
-    def _audio_to_wav_base64(audio: np.ndarray, sample_rate: int) -> str:
-        audio_array = np.asarray(audio)
-        if audio_array.ndim > 1:
-            audio_array = np.mean(audio_array, axis=1)
-        if np.issubdtype(audio_array.dtype, np.floating):
-            pcm = (np.clip(audio_array, -1.0, 1.0) * 32767.0).astype("<i2")
-        else:
-            pcm = np.clip(audio_array, -32768, 32767).astype("<i2")
-
-        with io.BytesIO() as wav_io:
-            with wave.open(wav_io, "wb") as wav_file:
-                wav_file.setnchannels(1)
-                wav_file.setsampwidth(2)
-                wav_file.setframerate(sample_rate)
-                wav_file.writeframes(pcm.tobytes())
-            return base64.b64encode(wav_io.getvalue()).decode("ascii")
-
-    def _audio_chat_kwargs(self, response: Any, optional_kwargs: dict[str, Any]) -> dict[str, Any]:
-        kwargs = dict(optional_kwargs)
+    def _build_audio_optional_kwargs(
+        self,
+        response: Any,
+        req_tools: Any,
+        req_tool_choice: Any,
+    ) -> dict[str, Any]:
+        kwargs = _build_chat_optional_kwargs(req_tools, req_tool_choice)
         max_tokens = getattr(response, "max_output_tokens", None) if response is not None else None
         kwargs.setdefault("max_tokens", max_tokens or self.audio_max_tokens)
         kwargs.setdefault("temperature", self.audio_temperature)
         return kwargs
 
-    def _request_audio_chat_completions(
+    def _serialize_audio(self, active_chat: Chat) -> list[dict[str, Any]]:
+        return _chat_messages(active_chat, audio_content_type=self.audio_content_type)
+
+    def _request_audio(
         self,
         api_input: list[dict[str, Any]],
         optional_kwargs: dict[str, Any],
@@ -143,6 +117,12 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
             timeout=self.request_timeout,
             optional_kwargs=optional_kwargs,
         )
+
+    def _iter_audio_events(self, api_response: Any) -> Iterator[ProviderEvent]:
+        if self.stream:
+            yield from _iter_chat_stream_events(api_response)
+        else:
+            yield from _iter_chat_response_events(api_response)
 
     # ── base hooks ──────────────────────────────────────────────────────────--
 
@@ -207,77 +187,6 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
                 yield TextDelta(text=raw)
             else:
                 logger.warning(f"Not supported message type: {message.type}")
-
-    def process(self, request: LLMIn) -> Iterator[LLMOut]:
-        if request.audio is None:
-            yield from super().process(request)
-            return
-
-        runtime_config = request.runtime_config
-        response = request.response
-        turn_id = request.turn_id
-        turn_revision = request.turn_revision
-        speech_stopped_at_s = request.speech_stopped_at_s
-        if not self._turn_is_latest(turn_id, turn_revision):
-            logger.info("Skipping stale LLM request for turn=%s rev=%s", turn_id, turn_revision)
-            yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision)
-            return
-
-        original_chat = runtime_config.chat
-        if is_out_of_band(response):
-            try:
-                active_chat = build_active_chat(original_chat, response)
-            except ChatItemError as exc:
-                logger.info("Out-of-band response rejected: %s", exc)
-                yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision, error=str(exc))
-                return
-        else:
-            active_chat = original_chat.copy()
-
-        language_code = request.language_code
-        instructions = (
-            response.instructions if response and response.instructions else runtime_config.session.instructions
-        ) or ""
-        req_tools = response.tools if response and response.tools else runtime_config.session.tools
-        req_tool_choice = (
-            response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
-        )
-        self._apply_config(active_chat, instructions, response_wants_audio(response))
-        language_code, lang_name = resolve_auto_language(language_code)
-        if lang_name and self.enable_lang_prompt:
-            active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
-
-        audio_message = active_chat.add_item(
-            make_user_audio_message(self._audio_to_wav_base64(request.audio, request.audio_sample_rate))
-        )
-        if not is_out_of_band(response):
-            history_message = make_user_message(AUDIO_INPUT_HISTORY_PLACEHOLDER)
-            history_message.id = audio_message.id
-            original_chat.add_item(history_message)
-
-        optional_kwargs = _build_chat_optional_kwargs(req_tools, req_tool_choice)
-        optional_kwargs = self._audio_chat_kwargs(response, optional_kwargs)
-        gen = self.cancel_scope.generation if self.cancel_scope else None
-        turn = _Turn(
-            language_code=language_code,
-            gen=gen,
-            runtime_config=runtime_config,
-            response=response,
-            turn_id=turn_id,
-            turn_revision=turn_revision,
-            speech_stopped_at_s=speech_stopped_at_s,
-            wants_audio=response_wants_audio(response),
-        )
-        event_iterator_fn = _iter_chat_stream_events if self.stream else _iter_chat_response_events
-        yield from self._generate(
-            active_chat,
-            original_chat,
-            turn,
-            optional_kwargs,
-            serialize_fn=_chat_messages,
-            request_fn=self._request_audio_chat_completions,
-            event_iterator_fn=event_iterator_fn,
-        )
 
     def on_session_end(self) -> None:
         logger.debug("OpenAI API language model session state reset")

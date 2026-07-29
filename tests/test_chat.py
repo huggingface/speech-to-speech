@@ -30,6 +30,7 @@ from openai.types.realtime.realtime_conversation_item_user_message import (
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
 from speech_to_speech.LLM.chat import (
+    AUDIO_INPUT_HISTORY_PLACEHOLDER,
     Chat,
     ChatItemError,
     CompactionResult,
@@ -550,6 +551,25 @@ class TestToResponseApiChat:
         assert content[0]["type"] == "input_text"
         assert content[1]["type"] == "input_image"
         assert content[1]["image_url"] == "http://img.png"
+
+    def test_user_audio_message_becomes_role_preserving_placeholder(self):
+        chat = Chat(size=5)
+        chat.add_item(make_user_audio_message("abc123"))
+
+        result = chat.to_responses_api_chat()
+
+        assert result == [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": AUDIO_INPUT_HISTORY_PLACEHOLDER,
+                    }
+                ],
+            }
+        ]
 
     def test_assistant_message(self):
         chat = Chat(size=5)

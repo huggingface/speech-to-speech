@@ -281,8 +281,10 @@ def prepare_module_args(module_kwargs: ModuleArguments, *handler_kwargs: Any) ->
     optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs, *handler_kwargs)
     if module_kwargs.tts is None:
         module_kwargs.tts = "qwen3"
-    if module_kwargs.stt == "none" and module_kwargs.llm_backend != "responses-api":
-        raise ValueError("--stt none requires --llm_backend responses-api for audio-input LLM requests.")
+    if module_kwargs.stt == "none" and module_kwargs.llm_backend not in ("responses-api", "chat-completions"):
+        raise ValueError(
+            "--stt none requires --llm_backend responses-api or chat-completions for audio-input LLM requests."
+        )
     if platform == "darwin":
         check_mac_settings(module_kwargs)
     overwrite_device_argument(module_kwargs.device, *handler_kwargs)

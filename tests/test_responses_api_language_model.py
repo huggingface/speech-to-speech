@@ -24,11 +24,12 @@ from openai.types.responses.response_output_text import ResponseOutputText
 import speech_to_speech.LLM.base_openai_compatible_language_model as base_openai_compatible_language_model
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.base_openai_compatible_language_model import WARMUP_MAX_RETRIES
-from speech_to_speech.LLM.chat import Chat, make_user_message
-from speech_to_speech.LLM.responses_api_language_model import (
+from speech_to_speech.LLM.chat import (
     AUDIO_INPUT_HISTORY_PLACEHOLDER,
-    ResponsesApiModelHandler,
+    Chat,
+    make_user_message,
 )
+from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.messages import EndOfResponse, GenerateResponseRequest, LLMResponseChunk, TokenUsage
 
@@ -146,6 +147,8 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler.compactor = None
     handler.audio_max_tokens = 80
     handler.audio_temperature = 0.0
+    handler.audio_content_type = "input_audio"
+    handler.audio_history_turns = 1
     return handler
 
 
@@ -636,7 +639,7 @@ def test_audio_request_uses_chat_completions_input_audio_payload():
     assert audio_part["data"]
 
 
-def test_audio_second_turn_keeps_complete_role_order_with_bounded_placeholder():
+def test_audio_second_turn_retains_recent_audio_then_compacts_older_turn():
     handler = _make_handler(stream=False)
     captured_calls = []
     responses = iter(
@@ -672,16 +675,13 @@ def test_audio_second_turn_keeps_complete_role_order_with_bounded_placeholder():
 
     second_messages = captured_calls[1]["messages"]
     assert [message["role"] for message in second_messages] == ["system", "user", "assistant", "user"]
-    assert second_messages[1] == {"role": "user", "content": AUDIO_INPUT_HISTORY_PLACEHOLDER}
+    assert second_messages[1]["content"][0]["type"] == "input_audio"
     assert second_messages[2] == {"role": "assistant", "content": "First answer."}
     assert second_messages[3]["content"][0]["type"] == "input_audio"
     assert cfg.chat._user_turn_count == 2
-    assert all(
-        part.type != "input_audio"
-        for item in cfg.chat.buffer
-        if getattr(item, "role", None) == "user"
-        for part in item.content
-    )
+    stored_users = [item for item in cfg.chat.buffer if getattr(item, "role", None) == "user"]
+    assert stored_users[0].content[0].text == AUDIO_INPUT_HISTORY_PLACEHOLDER
+    assert stored_users[1].content[0].type == "input_audio"
 
 
 def test_audio_nonstreaming_tool_call_uses_chat_protocol_and_survives_next_turn():
@@ -846,6 +846,66 @@ def test_audio_nonstreaming_refusal_is_emitted_and_stored():
         getattr(item, "role", None) == "assistant" and item.content[0].text == "I cannot help with that."
         for item in cfg.chat.buffer
     )
+
+
+def test_failed_audio_request_rolls_back_provisional_history():
+    handler = _make_handler(stream=False)
+    handler.client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("provider rejected audio"))
+            )
+        )
+    )
+    cfg = _make_runtime_config(chat_size=5)
+
+    generation = handler.process(_make_audio_request(cfg))
+    output = next(generation)
+
+    assert isinstance(output, EndOfResponse)
+    assert output.error is not None and "provider rejected audio" in output.error
+    assert cfg.chat.buffer == []
+    assert cfg.chat._user_turn_count == 0
+    with pytest.raises(StopIteration):
+        next(generation)
+
+
+def test_interrupted_audio_tool_turn_rolls_back_user_call_and_fast_output():
+    handler = _make_handler(stream=True)
+    stream = _make_stream(
+        [
+            _chat_chunk(
+                tool_calls=[
+                    _chat_tool_delta(
+                        0,
+                        tool_id="server_call",
+                        name="lookup",
+                        arguments="{}",
+                    )
+                ]
+            )
+        ]
+    )
+    handler.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kwargs: stream)))
+    cfg = _make_runtime_config(chat_size=5)
+    cfg.session.tools = [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}]
+
+    generation = handler.process(_make_audio_request(cfg))
+    tool_chunk = next(output for output in generation if isinstance(output, LLMResponseChunk) and output.tools)
+    call_id = tool_chunk.tools[0].call_id
+    cfg.chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id=call_id,
+            output='{"result": "ok"}',
+        )
+    )
+
+    generation.close()
+
+    assert cfg.chat.buffer == []
+    assert cfg.chat._pending_tool_calls == {}
+    assert cfg.chat._user_turn_count == 0
 
 
 # ── Out-of-band (conversation="none") responses ──────────────────────────

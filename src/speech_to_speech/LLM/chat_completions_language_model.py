@@ -93,7 +93,10 @@ def _build_chat_optional_kwargs(req_tools: Any, req_tool_choice: Any) -> dict[st
     return optional_kwargs
 
 
-def _to_chat_content_part(part: dict[str, Any]) -> ChatCompletionContentPartParam:
+def _to_chat_content_part(
+    part: dict[str, Any],
+    audio_content_type: str = "input_audio",
+) -> ChatCompletionContentPartParam:
     """Convert one Realtime/transformers content part to Chat Completions shape."""
     ptype = part.get("type")
     if ptype == "input_text":
@@ -109,12 +112,23 @@ def _to_chat_content_part(part: dict[str, Any]) -> ChatCompletionContentPartPara
                 image_url["detail"] = detail
         return ChatCompletionContentPartImageParam(type="image_url", image_url=image_url)
     if ptype == "input_audio":
+        audio_b64 = part.get("audio") or ""
+        if audio_content_type == "audio_url":
+            return cast(
+                "ChatCompletionContentPartParam",
+                {
+                    "type": "audio_url",
+                    "audio_url": {
+                        "url": f"data:audio/wav;base64,{audio_b64}",
+                    },
+                },
+            )
         return cast(
             "ChatCompletionContentPartParam",
             {
                 "type": "input_audio",
                 "input_audio": {
-                    "data": part.get("audio") or "",
+                    "data": audio_b64,
                     "format": "wav",
                 },
             },
@@ -122,7 +136,10 @@ def _to_chat_content_part(part: dict[str, Any]) -> ChatCompletionContentPartPara
     return cast("ChatCompletionContentPartParam", part)
 
 
-def _chat_messages(chat: Chat) -> list[dict[str, Any]]:
+def _chat_messages(
+    chat: Chat,
+    audio_content_type: str = "input_audio",
+) -> list[dict[str, Any]]:
     """Serialise chat history, including media and tool messages, for Chat Completions."""
     messages = chat.to_transformers_chat()
     for message in messages:
@@ -132,7 +149,9 @@ def _chat_messages(chat: Chat) -> list[dict[str, Any]]:
                 fn["arguments"] = json.dumps(fn.get("arguments") or {}, ensure_ascii=False)
         content = message.get("content")
         if isinstance(content, list):
-            message["content"] = [_to_chat_content_part(part) for part in content]
+            message["content"] = [
+                _to_chat_content_part(part, audio_content_type=audio_content_type) for part in content
+            ]
         if message.get("role") == "tool":
             message.pop("name", None)
     return messages
@@ -285,17 +304,24 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         return generate
 
     @staticmethod
-    def _to_chat_content_part(part: dict[str, Any]) -> ChatCompletionContentPartParam:
-        return _to_chat_content_part(part)
+    def _to_chat_content_part(
+        part: dict[str, Any],
+        audio_content_type: str = "input_audio",
+    ) -> ChatCompletionContentPartParam:
+        return _to_chat_content_part(part, audio_content_type=audio_content_type)
 
     @classmethod
-    def _chat_messages(cls, chat: Chat) -> list[dict[str, Any]]:
-        return _chat_messages(chat)
+    def _chat_messages(
+        cls,
+        chat: Chat,
+        audio_content_type: str = "input_audio",
+    ) -> list[dict[str, Any]]:
+        return _chat_messages(chat, audio_content_type=audio_content_type)
 
     # ── base hooks ──────────────────────────────────────────────────────────--
 
     def _serialize(self, active_chat: Chat) -> list[dict[str, Any]]:
-        return self._chat_messages(active_chat)
+        return self._chat_messages(active_chat, audio_content_type=self.audio_content_type)
 
     def _build_optional_kwargs(self, req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:
         return _build_chat_optional_kwargs(req_tools, req_tool_choice)
