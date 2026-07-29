@@ -97,10 +97,11 @@ def test_setup_preserves_faster_backend_off_darwin(monkeypatch):
     def _setup_mlx(self, *args, **kwargs):
         raise AssertionError("Non-Darwin setup should not use the mlx backend")
 
-    def _setup_faster(self, model_name, dtype, attn_implementation):
+    def _setup_faster(self, model_name, dtype, attn_implementation, backend):
         recorded["model_name"] = model_name
         recorded["dtype"] = dtype
         recorded["attn_implementation"] = attn_implementation
+        recorded["backend"] = backend
 
     monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
     monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
@@ -117,12 +118,36 @@ def test_setup_preserves_faster_backend_off_darwin(monkeypatch):
     )
 
     assert handler.backend == "faster_qwen3_tts"
+    assert handler.faster_backend == "ggml"
     assert handler.streaming_chunk_size == 8
     assert recorded == {
         "model_name": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
         "dtype": "float16",
         "attn_implementation": "sdpa",
+        "backend": "ggml",
     }
+
+
+def test_setup_passes_torch_backend_override_off_darwin(monkeypatch):
+    recorded = {}
+
+    def _setup_mlx(self, *args, **kwargs):
+        raise AssertionError("Non-Darwin setup should not use the mlx backend")
+
+    def _setup_faster(self, model_name, dtype, attn_implementation, backend):
+        recorded["backend"] = backend
+
+    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_faster", _setup_faster)
+    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.setup(Event(), backend="torch")
+
+    assert handler.backend == "faster_qwen3_tts"
+    assert handler.faster_backend == "torch"
+    assert recorded["backend"] == "torch"
 
 
 def test_setup_defaults_to_custom_voice_profile_off_darwin(monkeypatch):
@@ -131,10 +156,11 @@ def test_setup_defaults_to_custom_voice_profile_off_darwin(monkeypatch):
     def _setup_mlx(self, *args, **kwargs):
         raise AssertionError("Non-Darwin setup should not use the mlx backend")
 
-    def _setup_faster(self, model_name, dtype, attn_implementation):
+    def _setup_faster(self, model_name, dtype, attn_implementation, backend):
         recorded["model_name"] = model_name
         recorded["dtype"] = dtype
         recorded["attn_implementation"] = attn_implementation
+        recorded["backend"] = backend
 
     monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
     monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
@@ -145,11 +171,44 @@ def test_setup_defaults_to_custom_voice_profile_off_darwin(monkeypatch):
     handler.setup(Event())
 
     assert handler.backend == "faster_qwen3_tts"
+    assert handler.faster_backend == "ggml"
     assert recorded["model_name"] == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    assert recorded["backend"] == "ggml"
     assert handler.ref_audio is None
     assert handler.speaker == "Aiden"
     assert handler.language == "auto"
     assert handler.non_streaming_mode is True
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        ("zh", "chinese"),
+        ("zh-CN", "chinese"),
+        ("zh_Hans", "chinese"),
+        ("Chinese", "chinese"),
+        ("en-US", "english"),
+        ("English", "english"),
+        ("Auto", "auto"),
+        ("", "auto"),
+    ],
+)
+def test_setup_normalizes_qwen3_language_aliases(monkeypatch, language, expected):
+    def _setup_mlx(self, *args, **kwargs):
+        raise AssertionError("Non-Darwin setup should not use the mlx backend")
+
+    def _setup_faster(self, model_name, dtype, attn_implementation, backend):
+        return None
+
+    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_faster", _setup_faster)
+    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.setup(Event(), language=language)
+
+    assert handler.language == expected
 
 
 def test_setup_preserves_explicit_chunk_size_on_darwin(monkeypatch):
@@ -207,6 +266,53 @@ def test_setup_rejects_invalid_mlx_quantization(monkeypatch):
             model_name="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
             mlx_quantization="5bit",
         )
+
+
+def test_setup_rejects_invalid_faster_backend(monkeypatch):
+    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
+    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(Qwen3TTSHandler)
+
+    with pytest.raises(ValueError, match="Unsupported qwen3_tts_backend"):
+        handler.setup(Event(), backend="cuda")
+
+
+@pytest.mark.parametrize("faster_backend", ["ggml", "torch"])
+def test_warmup_uses_public_faster_backend_api(faster_backend):
+    calls = []
+    generated = []
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.backend = "faster_qwen3_tts"
+    handler.faster_backend = faster_backend
+    handler.parity_mode = False
+    handler.model = SimpleNamespace(
+        warmup=lambda **kwargs: calls.append(kwargs),
+    )
+    handler._warmup_process = lambda text: generated.append(text) or iter(())
+
+    handler.warmup()
+
+    assert calls == [{"prefill_len": 100}]
+    assert generated == ["Hello, this is a warmup."]
+
+
+def test_warmup_logs_backend_neutral_failure(caplog):
+    def fail_warmup(**_kwargs):
+        raise RuntimeError("boom")
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.backend = "faster_qwen3_tts"
+    handler.faster_backend = "ggml"
+    handler.parity_mode = False
+    handler.model = SimpleNamespace(warmup=fail_warmup)
+    handler._warmup_process = lambda _text: iter(())
+
+    with caplog.at_level(logging.WARNING):
+        handler.warmup()
+
+    assert "Qwen3-TTS backend warmup failed: boom" in caplog.text
+    assert "CUDA graph capture failed" not in caplog.text
 
 
 def test_mlx_helper_methods_use_model_config_and_streaming_conversion():

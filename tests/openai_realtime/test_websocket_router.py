@@ -6,6 +6,7 @@ PipelineUnit pool (size 1, matching the single-session semantics of the
 old tests) so there is no cross-test state.
 """
 
+import asyncio
 import base64
 import time
 from queue import Empty, Queue
@@ -13,10 +14,12 @@ from threading import Event as ThreadingEvent
 
 import pytest
 from starlette.testclient import TestClient
+from starlette.websockets import WebSocketState
 
 import speech_to_speech.api.openai_realtime.websocket_router as router_module
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService
+from speech_to_speech.api.openai_realtime.transports import WebSocketTransport
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
@@ -33,8 +36,10 @@ def short_drain_timeout(monkeypatch):
     """Shorten the SESSION_END drain warning threshold so tests don't wait 10s.
 
     The constant only controls when the release task logs a warning about a
-    slow-draining unit — there is no longer a release-anyway timeout, so the
-    unit stays unavailable until SESSION_END actually drains.
+    slow-draining unit. The quarantine timeout
+    (SESSION_END_QUARANTINE_TIMEOUT_S) is left at its real value so units
+    stay unavailable until SESSION_END actually drains; tests that exercise the
+    quarantine shorten it themselves.
     """
     monkeypatch.setattr(router_module, "SESSION_END_DRAIN_TIMEOUT_S", 0.1)
 
@@ -109,6 +114,16 @@ def _simulate_session_end_drain(input_queue: Queue, output_queue: Queue, timeout
 
 def _pcm_bytes(n_samples: int) -> bytes:
     return b"\x00" * (n_samples * 2)
+
+
+class _FakeWebSocket:
+    application_state = WebSocketState.CONNECTED
+
+    def __init__(self):
+        self.sent: list[dict] = []
+
+    async def send_json(self, payload: dict) -> None:
+        self.sent.append(payload)
 
 
 # ===================================================================
@@ -448,6 +463,41 @@ class TestSendLoop:
                 assert delta["type"] == "response.output_audio.delta"
                 assert len(base64.b64decode(delta["delta"])) == len(_pcm_bytes(512))
 
+    def test_current_generation_text_survives_stuck_discarding(self, setup):
+        """Regression: a fresh response's transcript must survive a stuck discard guard.
+
+        A superseded speculative turn can leave ``cancel_scope.discarding`` stuck True
+        (its TTS dropped the stale ``EndOfResponse`` without emitting AUDIO_RESPONSE_DONE,
+        so ``response_done()`` never cleared the flag). The next response's audio is tagged
+        with the current generation and streams fine, but the assistant text used to be
+        blanket-dropped while discarding — leaving audio + ``response.done`` with no
+        ``response.output_audio_transcript.done``. The text is now discarded by the same
+        generation-aware rule as audio, so a current-generation transcript is kept.
+        """
+        app, _, _, output_queue, text_output_queue, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                cancel_scope.cancel()  # discarding=True, generation bumped; sentinel never arrived
+                current_generation = cancel_scope.generation
+                assert cancel_scope.discarding
+
+                text_output_queue.put(AssistantTextEvent(text="hello there", cancel_generation=current_generation))
+                output_queue.put(AudioOutput(audio=_pcm_bytes(256), cancel_generation=current_generation))
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=current_generation))
+
+                types: list[str] = []
+                transcript = None
+                for _ in range(8):
+                    msg = ws.receive_json()
+                    types.append(msg["type"])
+                    if msg["type"] == "response.output_audio_transcript.done":
+                        transcript = msg["transcript"]
+                    if msg["type"] == "response.done":
+                        break
+                assert "response.output_audio_transcript.done" in types
+                assert transcript == "hello there"
+
     def test_stale_tagged_response_done_does_not_finish_current_response(self, setup):
         app, service, _, output_queue, _, _, _, _, cancel_scope = setup
         with TestClient(app) as client:
@@ -456,7 +506,7 @@ class TestSendLoop:
                 conn_id = list(service._conns.keys())[0]
                 stale_generation = cancel_scope.generation
                 service.response._ensure_response(conn_id)
-                service.finish_audio_response(conn_id, status="cancelled")
+                service.finish_response(conn_id, status="cancelled")
                 cancel_scope.cancel()
                 current_response_id, _ = service.response._ensure_response(conn_id)
 
@@ -492,6 +542,95 @@ class TestSendLoop:
                 assert service.total_usage.output_tokens == 5
                 assert service._state(conn_id).response_usage.input_tokens == 0
                 assert service._state(conn_id).response_usage.output_tokens == 0
+
+    def test_response_completion_drain_sends_pending_tool_before_done(self, setup):
+        _, service, input_queue, output_queue, text_output_queue, should_listen, _, response_playing, cancel_scope = (
+            setup
+        )
+        unit = PipelineUnit(
+            index=0,
+            service=service,
+            cancel_scope=cancel_scope,
+            should_listen=should_listen,
+            response_playing=response_playing,
+            input_queue=input_queue,
+            output_queue=output_queue,
+            text_output_queue=text_output_queue,
+            text_prompt_queue=Queue(),
+            handlers=[],
+        )
+        conn_id = service.register()
+        response_id, _ = service.response._ensure_response(conn_id)
+        text_output_queue.put(
+            AssistantTextEvent(
+                text="",
+                tools=[
+                    {
+                        "type": "function_call",
+                        "call_id": "c1",
+                        "name": "play_emotion",
+                        "arguments": '{"emotion":"loving"}',
+                    }
+                ],
+            )
+        )
+        text_output_queue.put(TokenUsageEvent(input_tokens=10, output_tokens=5))
+        ws = _FakeWebSocket()
+
+        asyncio.run(router_module._drain_pending_response_events(WebSocketTransport(ws), unit, conn_id))
+        done_events = service.finish_response(conn_id)
+
+        assert [payload["type"] for payload in ws.sent] == ["response.function_call_arguments.done"]
+        assert [event.type for event in done_events] == ["response.output_audio.done", "response.done"]
+        assert ws.sent[0]["response_id"] == response_id
+        assert done_events[1].response.id == response_id
+        assert done_events[1].response.usage.input_tokens == 10
+        assert done_events[1].response.usage.output_tokens == 5
+        assert text_output_queue.empty()
+
+    def test_response_completion_drain_preserves_usage_across_non_response_boundary(self, setup):
+        _, service, input_queue, output_queue, text_output_queue, should_listen, _, response_playing, cancel_scope = (
+            setup
+        )
+        unit = PipelineUnit(
+            index=0,
+            service=service,
+            cancel_scope=cancel_scope,
+            should_listen=should_listen,
+            response_playing=response_playing,
+            input_queue=input_queue,
+            output_queue=output_queue,
+            text_output_queue=text_output_queue,
+            text_prompt_queue=Queue(),
+            handlers=[],
+        )
+        conn_id = service.register()
+        response_id, _ = service.response._ensure_response(conn_id)
+        text_output_queue.put(
+            AssistantTextEvent(
+                text="",
+                tools=[{"type": "function_call", "call_id": "c1", "name": "play_emotion", "arguments": "{}"}],
+            )
+        )
+        text_output_queue.put(SpeechStartedEvent())
+        text_output_queue.put(TokenUsageEvent(input_tokens=10, output_tokens=5))
+        text_output_queue.put(AssistantTextEvent(text="queued after boundary"))
+        ws = _FakeWebSocket()
+
+        asyncio.run(router_module._drain_pending_response_events(WebSocketTransport(ws), unit, conn_id))
+        done_events = service.finish_response(conn_id)
+
+        assert [payload["type"] for payload in ws.sent] == ["response.function_call_arguments.done"]
+        assert ws.sent[0]["response_id"] == response_id
+        assert done_events[1].response.usage.input_tokens == 10
+        assert done_events[1].response.usage.output_tokens == 5
+
+        boundary = text_output_queue.get_nowait()
+        queued_assistant = text_output_queue.get_nowait()
+        assert isinstance(boundary, SpeechStartedEvent)
+        assert isinstance(queued_assistant, AssistantTextEvent)
+        assert queued_assistant.text == "queued after boundary"
+        assert text_output_queue.empty()
 
     def test_speech_started_does_not_cancel_when_interrupt_disabled(self, setup):
         """With interrupt_response=False, speech during playback should NOT cancel or flush."""
@@ -577,6 +716,97 @@ class TestCleanup:
         assert cancel_scope.generation == 2
         assert not response_playing.is_set()
         assert text_output_queue.empty()
+
+
+# ===================================================================
+# Drain / release robustness
+# ===================================================================
+
+
+class TestDrainRelease:
+    def test_barge_in_flush_preserves_session_end(self):
+        """The output_queue flush on barge-in must not swallow an in-flight
+        SESSION_END — losing it would leave the release task waiting forever."""
+        q: Queue = Queue()
+        q.put(_pcm_bytes(10))
+        q.put(PipelineControlMessage(SESSION_END.kind, session_id="sess_a"))
+        q.put(_pcm_bytes(10))
+        router_module._flush_queue(q, preserve=router_module._keep_audio_sentinel)
+        assert is_control_message(q.get_nowait(), SESSION_END.kind)
+        assert q.empty()
+
+    def test_quarantine_keeps_unit_unclaimable_when_session_end_never_drains(self, setup, monkeypatch):
+        """With no handler chain, SESSION_END never reaches output_queue; past
+        the quarantine timeout the session is unregistered (no more chat
+        mutation or billing) but the unit must NOT become claimable — its
+        handlers could still emit the old session's output."""
+        monkeypatch.setattr(router_module, "SESSION_END_QUARANTINE_TIMEOUT_S", 0.2)
+        app, service, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+            time.sleep(0.8)
+            assert len(service._conns) == 0
+            pool = client.get("/v1/pool").json()
+            assert pool["in_use"] == 1
+            assert pool["units"][0]["state"] == "stuck"
+            assert pool["units"][0]["stuck_for_s"] >= 0
+            with client.websocket_connect("/v1/realtime") as ws2:
+                msg = ws2.receive_json()
+                assert msg["type"] == "error"
+                assert msg["error"]["type"] == "session_limit_reached"
+
+    def test_quarantined_unit_returns_to_pool_after_late_drain(self, setup, monkeypatch):
+        """If SESSION_END eventually drains after the quarantine kicked in, the
+        chain has proven itself clean and the unit becomes claimable again."""
+        monkeypatch.setattr(router_module, "SESSION_END_QUARANTINE_TIMEOUT_S", 0.2)
+        app, service, input_queue, output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+            time.sleep(0.8)
+            assert client.get("/v1/pool").json()["units"][0]["state"] == "stuck"
+            # Late drain: the wedged "handler chain" finally forwards SESSION_END.
+            _simulate_session_end_drain(input_queue, output_queue)
+            time.sleep(0.3)
+            assert client.get("/v1/pool").json()["in_use"] == 0
+            with client.websocket_connect("/v1/realtime") as ws2:
+                assert ws2.receive_json()["type"] == "session.created"
+
+    def test_stale_session_end_does_not_satisfy_next_sessions_drain(self):
+        """A SESSION_END tagged with a force-released session's id must not set
+        `drained` for the session that claimed the unit afterwards."""
+        unit = _make_unit(0)
+        app = create_app(pool=[unit], stop_event=ThreadingEvent())
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                assert unit.session is not None
+                unit.output_queue.put(PipelineControlMessage(SESSION_END.kind, session_id="sess_stale"))
+                time.sleep(0.3)
+                assert not unit.session.drained.is_set()
+                unit.output_queue.put(PipelineControlMessage(SESSION_END.kind, session_id=unit.session.session_id))
+                time.sleep(0.3)
+                assert unit.session.drained.is_set()
+
+    def test_register_failure_still_releases_unit(self, setup, monkeypatch):
+        """An exception during session setup (after the claim) must not leak the
+        slot: the finally still enqueues SESSION_END and spawns the release task."""
+        app, service, input_queue, output_queue, *_ = setup
+
+        def _boom():
+            raise RuntimeError("register failed")
+
+        monkeypatch.setattr(service, "register", _boom)
+        with TestClient(app) as client:
+            try:
+                with client.websocket_connect("/v1/realtime"):
+                    pass
+            except Exception:
+                pass
+            _simulate_session_end_drain(input_queue, output_queue)
+            time.sleep(0.3)
+            assert client.get("/v1/pool").json()["in_use"] == 0
 
 
 # ===================================================================

@@ -173,6 +173,7 @@ def test_vad_direct_reopen_path_uses_tracker_candidate_protocol():
     handler._current_turn_revision = 0
     handler._last_final_audio_ms = 1000
     handler.speculative_reopen_ms = 1200
+    handler.unanswered_reopen_ms = 1200
     handler.speculative_turns = tracker
     handler._pending_reopen_candidate = None
 
@@ -194,6 +195,7 @@ def test_vad_reopens_speculative_turn_when_live_transcription_disabled():
     handler._current_turn_revision = 0
     handler._last_final_audio_ms = 1000
     handler.speculative_reopen_ms = 1200
+    handler.unanswered_reopen_ms = 1200
     handler.speculative_turns = tracker
     handler._pending_reopen_candidate = None
 
@@ -269,12 +271,14 @@ def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
     handler.sample_rate = 16000
     handler.min_silence_ms = 300
     handler.min_speech_ms = 384
+    handler.min_speech_continuation_ms = handler.min_speech_ms
     handler.max_speech_ms = float("inf")
     handler.enable_realtime_transcription = False
     handler.realtime_processing_pause = 0.5
     handler.text_output_queue = Queue()
     handler.speculative_turns = SpeculativeTurnTracker()
     handler.speculative_reopen_ms = 1000
+    handler.unanswered_reopen_ms = handler.speculative_reopen_ms
     handler._last_turn_detection = None
     handler.iterator = iterator
     handler.audio_enhancement = False
@@ -293,11 +297,18 @@ def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
     handler._last_final_wall_time = None
     handler._last_final_audio_ms = None
     handler._pending_reopen_candidate = None
+    handler.short_segment_merge_ms = 0
+    handler._pending_short_segment = None
     return handler
 
 
 def _audio_bytes(samples: int = 512) -> bytes:
     return np.zeros(samples, dtype=np.int16).tobytes()
+
+
+def _drain_text_events(handler: VADHandler) -> None:
+    while not handler.text_output_queue.empty():
+        handler.text_output_queue.get_nowait()
 
 
 def test_vad_interruption_uses_active_speech_duration_not_padded_segment():
@@ -392,6 +403,329 @@ def test_vad_discards_final_segment_when_active_speech_is_short():
 
     assert outputs == []
     assert handler.text_output_queue.empty()
+
+
+def _drive_final_segment(handler: VADHandler, active_chunks: int = 12, segment_chunks: int = 31) -> list:
+    handler.iterator = _StaticVADIterator(
+        triggered=False,
+        vad_output=[torch.zeros(512) for _ in range(segment_chunks)],
+        last_utterance_active_speech_samples=active_chunks * 512,
+    )
+    return list(handler.process(_audio_bytes()))
+
+
+def _handler_after_soft_ended_turn() -> VADHandler:
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    outputs = _drive_final_segment(handler, active_chunks=12, segment_chunks=12)
+    assert len(outputs) == 1
+    assert (outputs[0].turn_id, outputs[0].turn_revision) == ("turn_1", 0)
+    _drain_text_events(handler)
+    return handler
+
+
+def test_continuation_start_confirms_at_lower_bar():
+    handler = _handler_after_soft_ended_turn()
+    handler.min_speech_continuation_ms = 192
+    chunks = [torch.zeros(512) for _ in range(8)]
+    handler.iterator = _StaticVADIterator(
+        triggered=True,
+        vad_output=None,
+        buffer_chunks=chunks,
+        speech_chunks=chunks,
+        active_speech_samples=8 * 512,
+    )
+
+    assert list(handler.process(_audio_bytes())) == []
+
+    started = handler.text_output_queue.get_nowait()
+    assert isinstance(started, SpeechStartedEvent)
+    assert (started.turn_id, started.turn_revision, started.reopened) == ("turn_1", 1, True)
+    assert handler._speech_started_emitted is True
+
+
+def test_trailing_continuation_fragment_accepted_at_finalization():
+    handler = _handler_after_soft_ended_turn()
+    handler.min_speech_continuation_ms = 192
+
+    outputs = _drive_final_segment(handler, active_chunks=8, segment_chunks=8)
+
+    assert len(outputs) == 1
+    assert (outputs[0].turn_id, outputs[0].turn_revision) == ("turn_1", 1)
+    started = handler.text_output_queue.get_nowait()
+    assert isinstance(started, SpeechStartedEvent)
+    assert (started.turn_id, started.turn_revision, started.reopened) == ("turn_1", 1, True)
+
+
+def test_continuation_bar_inactive_when_turn_committed():
+    handler = _handler_after_soft_ended_turn()
+    handler.min_speech_continuation_ms = 192
+    tracker = handler.speculative_turns
+    tracker.commit("turn_1", 0)
+
+    outputs = _drive_final_segment(handler, active_chunks=8, segment_chunks=8)
+
+    assert outputs == []
+    assert handler.text_output_queue.empty()
+    assert handler._current_turn_id == "turn_1"
+    assert handler._current_turn_revision == 0
+    assert tracker.is_committed("turn_1", 0)
+
+
+def test_entry_bar_unchanged_for_new_speech():
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    handler.min_speech_continuation_ms = 192
+
+    outputs = _drive_final_segment(handler, active_chunks=8, segment_chunks=8)
+
+    assert outputs == []
+    assert handler.text_output_queue.empty()
+    assert handler._current_turn_id is None
+    assert handler._turn_counter == 0
+
+
+def test_confirmed_segment_not_discarded_at_finalization():
+    handler = _handler_after_soft_ended_turn()
+    handler.min_speech_continuation_ms = 192
+    chunks = [torch.zeros(512) for _ in range(8)]
+    handler.iterator = _StaticVADIterator(
+        triggered=True,
+        vad_output=None,
+        buffer_chunks=chunks,
+        speech_chunks=chunks,
+        active_speech_samples=8 * 512,
+    )
+
+    assert list(handler.process(_audio_bytes())) == []
+    started = handler.text_output_queue.get_nowait()
+    assert isinstance(started, SpeechStartedEvent)
+    assert (started.turn_id, started.turn_revision, started.reopened) == ("turn_1", 1, True)
+
+    handler.iterator = _StaticVADIterator(
+        triggered=False,
+        vad_output=chunks,
+        last_utterance_active_speech_samples=8 * 512,
+    )
+    outputs = list(handler.process(_audio_bytes()))
+
+    assert len(outputs) == 1
+    assert (outputs[0].turn_id, outputs[0].turn_revision) == ("turn_1", 1)
+
+
+def test_continuation_threshold_clamping():
+    assert VADHandler._resolve_min_speech_continuation_ms(384, 0) == 384
+    assert VADHandler._resolve_min_speech_continuation_ms(384, 50) == 100
+    assert VADHandler._resolve_min_speech_continuation_ms(384, 500) == 384
+    assert VADHandler._resolve_min_speech_continuation_ms(384, 192) == 192
+
+
+def test_vad_reopens_unanswered_turn_after_grace_window():
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    handler.unanswered_reopen_ms = 8000
+    tracker = handler.speculative_turns
+
+    outputs = _drive_final_segment(handler)
+    assert len(outputs) == 1
+    assert (outputs[0].turn_id, outputs[0].turn_revision) == ("turn_1", 0)
+    assert handler._last_final_audio_ms is not None
+    while not handler.text_output_queue.empty():
+        handler.text_output_queue.get_nowait()
+
+    # Advance the audio clock so the resumed speech starts well past
+    # speculative_reopen_ms (1000) but within unanswered_reopen_ms (8000).
+    handler._total_samples = 16000 * 3
+
+    outputs = _drive_final_segment(handler)
+
+    assert len(outputs) == 1
+    assert (outputs[0].turn_id, outputs[0].turn_revision) == ("turn_1", 1)
+    started = handler.text_output_queue.get_nowait()
+    assert isinstance(started, SpeechStartedEvent)
+    assert (started.turn_id, started.turn_revision, started.reopened) == ("turn_1", 1, True)
+    assert not tracker.is_latest("turn_1", 0)
+
+
+def test_vad_does_not_reopen_committed_turn():
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    handler.unanswered_reopen_ms = 8000
+    tracker = handler.speculative_turns
+
+    outputs = _drive_final_segment(handler)
+    assert len(outputs) == 1
+    assert (outputs[0].turn_id, outputs[0].turn_revision) == ("turn_1", 0)
+    while not handler.text_output_queue.empty():
+        handler.text_output_queue.get_nowait()
+
+    tracker.commit("turn_1", 0)
+    handler._total_samples = 16000 * 3
+
+    outputs = _drive_final_segment(handler)
+
+    assert len(outputs) == 1
+    assert (outputs[0].turn_id, outputs[0].turn_revision) == ("turn_2", 0)
+    started = handler.text_output_queue.get_nowait()
+    assert isinstance(started, SpeechStartedEvent)
+    assert started.reopened is False
+
+
+def test_vad_new_turn_after_unanswered_cap():
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    handler.unanswered_reopen_ms = 8000
+
+    outputs = _drive_final_segment(handler)
+    assert len(outputs) == 1
+    assert (outputs[0].turn_id, outputs[0].turn_revision) == ("turn_1", 0)
+    while not handler.text_output_queue.empty():
+        handler.text_output_queue.get_nowait()
+
+    # Advance the audio clock so the resumed speech starts past the cap.
+    handler._total_samples = 16000 * 12
+
+    outputs = _drive_final_segment(handler)
+
+    assert len(outputs) == 1
+    assert (outputs[0].turn_id, outputs[0].turn_revision) == ("turn_2", 0)
+    started = handler.text_output_queue.get_nowait()
+    assert isinstance(started, SpeechStartedEvent)
+    assert started.reopened is False
+
+
+def test_vad_does_not_hold_sub_floor_fragments():
+    handler = _vad_handler_for_iterator(
+        _StaticVADIterator(
+            triggered=False,
+            vad_output=[torch.zeros(512)],
+            last_utterance_active_speech_samples=512,
+        )
+    )
+    handler.short_segment_merge_ms = 384
+
+    outputs = list(handler.process(_audio_bytes()))
+
+    assert outputs == []
+    assert handler._pending_short_segment is None
+    assert handler.text_output_queue.empty()
+
+
+def test_vad_stitches_adjacent_short_segments_before_discarding():
+    first_chunks = [torch.zeros(512) for _ in range(7)]
+    second_chunks = [torch.zeros(512) for _ in range(8)]
+    handler = _vad_handler_for_iterator(
+        _StaticVADIterator(
+            triggered=False,
+            vad_output=first_chunks,
+            last_utterance_active_speech_samples=4 * 512,
+        )
+    )
+    handler.short_segment_merge_ms = 384
+
+    assert list(handler.process(_audio_bytes())) == []
+    assert handler.text_output_queue.empty()
+    assert handler._pending_short_segment is not None
+
+    handler.iterator = _StaticVADIterator(
+        triggered=False,
+        vad_output=second_chunks,
+        last_utterance_active_speech_samples=8 * 512,
+    )
+    outputs = list(handler.process(_audio_bytes()))
+
+    assert len(outputs) == 1
+    assert len(outputs[0].audio) == 15 * 512
+    started = handler.text_output_queue.get_nowait()
+    stopped = handler.text_output_queue.get_nowait()
+    assert isinstance(started, SpeechStartedEvent)
+    assert started.interrupt_response is False
+    assert isinstance(stopped, SpeechStoppedEvent)
+    assert handler._pending_short_segment is None
+
+
+def test_vad_pending_short_segment_contributes_to_early_speech_start():
+    first_chunks = [torch.zeros(512) for _ in range(7)]
+    current_chunks = [torch.zeros(512) for _ in range(8)]
+    handler = _vad_handler_for_iterator(
+        _StaticVADIterator(
+            triggered=False,
+            vad_output=first_chunks,
+            last_utterance_active_speech_samples=4 * 512,
+        )
+    )
+    handler.short_segment_merge_ms = 384
+
+    assert list(handler.process(_audio_bytes())) == []
+
+    handler.iterator = _StaticVADIterator(
+        triggered=True,
+        vad_output=None,
+        buffer_chunks=current_chunks,
+        speech_chunks=current_chunks,
+        active_speech_samples=8 * 512,
+    )
+
+    assert list(handler.process(_audio_bytes())) == []
+    event = handler.text_output_queue.get_nowait()
+    assert isinstance(event, SpeechStartedEvent)
+    assert event.interrupt_response is True
+    assert handler._speech_started_emitted is True
+
+
+def test_vad_pending_short_segment_does_not_start_on_sub_floor_current_fragment():
+    first_chunks = [torch.zeros(512) for _ in range(10)]
+    current_chunks = [torch.zeros(512) for _ in range(3)]
+    handler = _vad_handler_for_iterator(
+        _StaticVADIterator(
+            triggered=False,
+            vad_output=first_chunks,
+            last_utterance_active_speech_samples=9 * 512,
+        )
+    )
+    handler.short_segment_merge_ms = 384
+
+    assert list(handler.process(_audio_bytes())) == []
+    assert handler._pending_short_segment is not None
+
+    # Pending holds 288ms active speech; the live fragment has only 96ms,
+    # below the noise floor, so the combined 384ms must not start speech.
+    handler.iterator = _StaticVADIterator(
+        triggered=True,
+        vad_output=None,
+        buffer_chunks=current_chunks,
+        speech_chunks=current_chunks,
+        active_speech_samples=3 * 512,
+    )
+
+    assert list(handler.process(_audio_bytes())) == []
+    assert handler.text_output_queue.empty()
+    assert handler._speech_started_emitted is False
+
+
+def test_vad_stitching_preserves_silence_gap_between_segments():
+    first_chunks = [torch.zeros(512) for _ in range(7)]
+    second_chunks = [torch.zeros(512) for _ in range(8)]
+    handler = _vad_handler_for_iterator(
+        _StaticVADIterator(
+            triggered=False,
+            vad_output=first_chunks,
+            last_utterance_active_speech_samples=4 * 512,
+        )
+    )
+    handler.short_segment_merge_ms = 384
+
+    assert list(handler.process(_audio_bytes())) == []
+    assert handler._pending_short_segment is not None
+    assert handler._pending_short_segment.end_ms == 32
+
+    # Advance the audio clock so the second segment starts 32ms after the
+    # pending one ends; the stitched audio must include that silent gap.
+    handler._total_samples = 9 * 512
+    handler.iterator = _StaticVADIterator(
+        triggered=False,
+        vad_output=second_chunks,
+        last_utterance_active_speech_samples=8 * 512,
+    )
+    outputs = list(handler.process(_audio_bytes()))
+
+    assert len(outputs) == 1
+    assert len(outputs[0].audio) == 16 * 512
 
 
 def test_vad_final_synthetic_start_does_not_interrupt_response():
