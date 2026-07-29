@@ -522,13 +522,17 @@ class RealtimeService:
         the human-readable reason — ``response.done.status_details.error`` only
         has code/type, no message — then ``finish_response`` closes the slot.
 
-        Idempotent: gated on an active response, and ``finish_response`` is itself
-        a no-op once the slot is closed, so a later EndOfResponse-driven close does
+        Idempotent: gated on an active or pending response. Pending implicit
+        responses are promoted to active so ``finish_response`` can emit
+        ``response.done``; once closed, a later EndOfResponse-driven close does
         nothing.
         """
         logger.info("Response failed: %s", event.message)
-        if not self._state(conn_id).in_response:
+        st = self._state(conn_id)
+        if not (st.in_response or st.response_pending):
             return []
+        if st.response_pending:
+            self.response._ensure_response(conn_id)
         events: list[ServerEvent] = [self.make_error(event.message, "response_failed")]
         events.extend(self.response.finish_response(conn_id, status="failed"))
         return events

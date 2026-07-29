@@ -1,6 +1,8 @@
 import sys
 from dataclasses import fields
 
+import pytest
+
 from speech_to_speech.arguments_classes.chat_completions_language_model_arguments import (
     ChatCompletionsLanguageModelHandlerArguments,
 )
@@ -137,7 +139,7 @@ def test_parse_arguments_transformers_backend():
     assert args.responses_api_language_model_handler_kwargs.model_name == "gpt-5.4-mini"
 
 
-def test_parse_arguments_stt_none_uses_responses_api_audio_path():
+def test_prepare_module_args_rejects_responses_api_for_stt_none():
     original_argv = sys.argv[:]
     try:
         sys.argv = [
@@ -153,10 +155,11 @@ def test_parse_arguments_stt_none_uses_responses_api_audio_path():
     finally:
         sys.argv = original_argv
 
-    assert args.module_kwargs.stt == "none"
-    assert args.module_kwargs.llm_backend == "responses-api"
-    assert args.responses_api_language_model_handler_kwargs.responses_api_base_url == "http://127.0.0.1:8080/v1"
-    assert args.responses_api_language_model_handler_kwargs.model_name == "ggml-org/gemma-4-12B-it-GGUF"
+    with pytest.raises(
+        ValueError,
+        match="--stt none requires --llm_backend chat-completions",
+    ):
+        prepare_module_args(args.module_kwargs)
 
 
 def test_parse_arguments_stt_none_supports_chat_completions_audio_path():
@@ -168,6 +171,8 @@ def test_parse_arguments_stt_none_supports_chat_completions_audio_path():
             "none",
             "--llm_backend",
             "chat-completions",
+            "--model_name",
+            "gpt-audio-1.5",
             "--responses_api_audio_content_type",
             "audio_url",
             "--responses_api_audio_history_turns",
@@ -185,6 +190,7 @@ def test_parse_arguments_stt_none_supports_chat_completions_audio_path():
         args.responses_api_language_model_handler_kwargs,
         ChatCompletionsLanguageModelHandlerArguments,
     )
+    assert args.responses_api_language_model_handler_kwargs.model_name == "gpt-audio-1.5"
     assert args.responses_api_language_model_handler_kwargs.responses_api_audio_content_type == "audio_url"
     assert args.responses_api_language_model_handler_kwargs.responses_api_audio_history_turns == 2
 

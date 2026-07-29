@@ -332,15 +332,18 @@ Two API backends are available, sharing the same `--responses_api_*` connection 
 
 ### Direct Audio Input (No STT)
 
-Use `--stt none` to send each completed VAD audio segment directly to an
-audio-input model through either API backend. You must explicitly set
-`--model_name` to a model that accepts audio: the default `gpt-5.4-mini`
-accepts text and image input, but not audio. Check the provider's model
-documentation and endpoint support before enabling this mode. For OpenAI,
-see the [GPT-5.4 mini model card](https://developers.openai.com/api/docs/models/gpt-5.4-mini)
+Use `--stt none --llm_backend chat-completions` to send each completed VAD
+audio segment directly to an audio-input model. Direct audio mode is not
+supported with `--llm_backend responses-api`: a model may accept audio through
+`/v1/chat/completions` without supporting `/v1/responses`, including OpenAI's
+[`gpt-audio-1.5`](https://developers.openai.com/api/docs/models/gpt-audio-1.5).
+
+You must explicitly set `--model_name` to a model that accepts audio: the
+default `gpt-5.4-mini` accepts text and image input, but not audio. Check the
+provider's model documentation and endpoint support before enabling this mode.
+For OpenAI, see the
+[GPT-5.4 mini model card](https://developers.openai.com/api/docs/models/gpt-5.4-mini)
 and [audio-input guide](https://developers.openai.com/api/docs/guides/audio#add-audio-to-your-existing-application).
-Direct audio requests use `/v1/chat/completions` under both backend selections,
-so the configured provider must expose that endpoint.
 
 ```bash
 speech-to-speech \

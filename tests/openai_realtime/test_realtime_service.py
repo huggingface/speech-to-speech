@@ -1554,6 +1554,31 @@ class TestDispatchPipelineEvent:
         # Slot released so the next response is not locked out.
         assert service._state(conn_id).in_response is False
 
+    def test_response_failed_while_pending_emits_error_and_failed_done(self, service, conn_id):
+        service.dispatch_pipeline_event(
+            conn_id,
+            AudioInputCompletedEvent(
+                audio=np.zeros(1600, dtype=np.float32),
+                audio_duration_s=0.1,
+            ),
+        )
+        assert service._state(conn_id).response_pending is True
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            ResponseFailedEvent(message="provider rejected audio"),
+        )
+
+        err = events[0]
+        assert isinstance(err, RealtimeErrorEvent)
+        assert err.error.message == "provider rejected audio"
+        done = [event for event in events if isinstance(event, ResponseDoneEvent)]
+        assert len(done) == 1
+        assert done[0].response.status == "failed"
+        state = service._state(conn_id)
+        assert state.response_pending is False
+        assert state.in_response is False
+
     def test_response_failed_without_active_response_is_noop(self, service, conn_id):
         # No active response (e.g. already closed): nothing to fail, emit nothing.
         events = service.dispatch_pipeline_event(
