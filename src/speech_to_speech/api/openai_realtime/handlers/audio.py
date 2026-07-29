@@ -220,7 +220,7 @@ class AudioHandler(RealtimeBaseHandler):
             ResponseAudioDeltaEvent(
                 type="response.output_audio.delta",
                 event_id=self._next_event_id(),
-                content_index=response._next_content_index(conn_id),
+                content_index=0,
                 delta=b64,
                 item_id=assistant_item_id,
                 output_index=assistant_output_index,
