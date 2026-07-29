@@ -65,16 +65,9 @@ class ModuleArguments:
         default=False,
         metadata={
             "help": "Expose the configured remote LLM (--llm_backend chat-completions or responses-api) as an "
-            "OpenAI-compatible HTTP endpoint on the realtime server, gated by an open realtime session: clients "
-            "authenticate with their realtime session id as the bearer token. Off by default. Only valid for "
-            "--mode realtime."
-        },
-    )
-    llm_proxy_requests_per_minute: int = field(
-        default=20,
-        metadata={
-            "help": "Per-session rate limit for LLM proxy requests, as a sliding window in requests per minute. "
-            "Exceeding it answers 429. Default is 20."
+            "OpenAI-compatible HTTP endpoint on the realtime server. The server performs no authentication of "
+            "its own: enable it only on a trusted network or behind a gateway that owns access control. Off by "
+            "default. Only valid for --mode realtime."
         },
     )
     llm_proxy_connect_timeout_s: float = field(

@@ -432,7 +432,7 @@ def create_app(
 
     app = FastAPI(lifespan=lifespan)
 
-    llm_proxy_usage = mount_llm_proxy(app, pool, llm_proxy_config)
+    llm_proxy_usage = mount_llm_proxy(app, llm_proxy_config)
 
     def _claim_unit(transport: SessionTransport | None) -> PipelineUnit | None:
         """Atomically (between asyncio yield points) reserve the first idle unit.

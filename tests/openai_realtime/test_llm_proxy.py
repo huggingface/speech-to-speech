@@ -1,4 +1,4 @@
-"""Integration tests for the session-gated LLM proxy.
+"""Integration tests for the LLM proxy.
 
 Drives the full FastAPI app produced by ``create_app`` through its public
 HTTP surface (Starlette TestClient), exactly like the websocket lifecycle
@@ -20,7 +20,6 @@ import pytest
 import uvicorn
 from pydantic import BaseModel
 from starlette.testclient import TestClient
-from websockets.sync.client import connect as ws_connect
 
 from speech_to_speech.api.openai_realtime.llm_proxy import LLMProxyConfig
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
@@ -160,9 +159,8 @@ def _make_unit(index: int = 0) -> PipelineUnit:
     )
 
 
-def _make_app(config: LLMProxyConfig | None, pool_size: int = 1):
-    pool = [_make_unit(i) for i in range(pool_size)]
-    return create_app(pool=pool, stop_event=ThreadingEvent(), llm_proxy_config=config)
+def _make_app(config: LLMProxyConfig | None):
+    return create_app(pool=[_make_unit()], stop_event=ThreadingEvent(), llm_proxy_config=config)
 
 
 def _proxy_config(upstream: FakeUpstream, **overrides: Any) -> LLMProxyConfig:
@@ -189,83 +187,47 @@ CHAT_BODY = {
 
 
 class TestChatCompletionsPassthrough:
-    def test_valid_session_gets_upstream_response_verbatim(self, upstream):
+    def test_upstream_response_arrives_verbatim(self, upstream):
         app = _make_app(_proxy_config(upstream))
         with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                r = client.post(
-                    "/v1/chat/completions",
-                    json=CHAT_BODY,
-                    headers={"Authorization": f"Bearer {session_id}"},
-                )
+            r = client.post("/v1/chat/completions", json=CHAT_BODY)
         assert r.status_code == 200
         assert r.json() == {"id": "chatcmpl-1", "object": "chat.completion", "choices": []}
 
     def test_upstream_receives_forced_model_and_server_key(self, upstream):
         app = _make_app(_proxy_config(upstream))
         with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                client.post(
-                    "/v1/chat/completions",
-                    json=CHAT_BODY,
-                    headers={"Authorization": f"Bearer {session_id}"},
-                )
+            client.post("/v1/chat/completions", json=CHAT_BODY)
         (request,) = upstream.requests
         assert request["path"] == "/v1/chat/completions"
         assert request["body"]["model"] == "server-model"
         assert request["body"]["messages"] == CHAT_BODY["messages"]
         assert request["headers"]["Authorization"] == "Bearer sk-server-secret"
-        assert session_id not in json.dumps(request["headers"])
 
-
-class TestAuthentication:
-    def test_missing_bearer_is_401(self, upstream):
+    def test_client_bearer_is_ignored_and_never_forwarded(self, upstream):
+        # The server does no authentication: whatever api_key the SDK sends
+        # is accepted and replaced by the server-held upstream key.
         app = _make_app(_proxy_config(upstream))
         with TestClient(app) as client:
-            r = client.post("/v1/chat/completions", json=CHAT_BODY)
-        assert r.status_code == 401
-        assert "error" in r.json()
-        assert upstream.requests == []
-
-    def test_unknown_session_id_is_401(self, upstream):
-        app = _make_app(_proxy_config(upstream))
-        with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                ws.receive_json()
-                r = client.post(
-                    "/v1/chat/completions",
-                    json=CHAT_BODY,
-                    headers={"Authorization": "Bearer sess_deadbeef"},
-                )
-        assert r.status_code == 401
-        assert upstream.requests == []
-
-    def test_closed_session_is_401(self, upstream):
-        app = _make_app(_proxy_config(upstream))
-        with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
             r = client.post(
                 "/v1/chat/completions",
                 json=CHAT_BODY,
-                headers={"Authorization": f"Bearer {session_id}"},
+                headers={"Authorization": "Bearer client-credential"},
             )
-        assert r.status_code == 401
-        assert upstream.requests == []
+        assert r.status_code == 200
+        (request,) = upstream.requests
+        assert request["headers"]["Authorization"] == "Bearer sk-server-secret"
+        assert "client-credential" not in json.dumps(request["headers"])
 
 
 class TestUnavailableContract:
-    def _post_with_session(self, app, path: str):
+    def _post(self, app, path: str):
         with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                return client.post(path, json=CHAT_BODY, headers={"Authorization": f"Bearer {session_id}"})
+            return client.post(path, json=CHAT_BODY)
 
     def test_flag_off_is_501(self, upstream):
         app = _make_app(_proxy_config(upstream, enabled=False))
-        r = self._post_with_session(app, "/v1/chat/completions")
+        r = self._post(app, "/v1/chat/completions")
         assert r.status_code == 501
         assert "disabled" in r.json()["error"]["message"]
 
@@ -278,7 +240,7 @@ class TestUnavailableContract:
     @pytest.mark.parametrize("backend", ["transformers", "mlx-lm"])
     def test_local_backend_is_501_naming_remote_backends(self, upstream, backend):
         app = _make_app(_proxy_config(upstream, llm_backend=backend))
-        r = self._post_with_session(app, "/v1/chat/completions")
+        r = self._post(app, "/v1/chat/completions")
         assert r.status_code == 501
         message = r.json()["error"]["message"]
         assert "chat-completions" in message
@@ -286,7 +248,7 @@ class TestUnavailableContract:
 
     def test_responses_path_is_501_under_chat_completions_backend(self, upstream):
         app = _make_app(_proxy_config(upstream))
-        r = self._post_with_session(app, "/v1/responses")
+        r = self._post(app, "/v1/responses")
         assert r.status_code == 501
         assert "/v1/chat/completions" in r.json()["error"]["message"]
 
@@ -305,16 +267,9 @@ class TestStreamingPassthrough:
         upstream.responder = lambda request: SSEScript(frames=[(0.0, f) for f in SSE_FRAMES])
         app = _make_app(_proxy_config(upstream))
         with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                with client.stream(
-                    "POST",
-                    "/v1/chat/completions",
-                    json=STREAM_BODY,
-                    headers={"Authorization": f"Bearer {session_id}"},
-                ) as r:
-                    assert r.status_code == 200
-                    received = b"".join(r.iter_raw())
+            with client.stream("POST", "/v1/chat/completions", json=STREAM_BODY) as r:
+                assert r.status_code == 200
+                received = b"".join(r.iter_raw())
         assert received == b"".join(SSE_FRAMES)
 
     def test_frames_forward_as_they_arrive_not_buffered(self, upstream):
@@ -325,42 +280,17 @@ class TestStreamingPassthrough:
             frames=[(0.0, SSE_FRAMES[0]), (delay, SSE_FRAMES[1]), (0.0, SSE_FRAMES[2])]
         )
         with LiveApp(_make_app(_proxy_config(upstream))) as live:
-            with ws_connect(f"ws://127.0.0.1:{live.port}/v1/realtime") as ws:
-                session_id = json.loads(ws.recv())["session"]["id"]
-                arrivals: list[float] = []
-                with httpx.stream(
-                    "POST",
-                    f"http://127.0.0.1:{live.port}/v1/chat/completions",
-                    json=STREAM_BODY,
-                    headers={"Authorization": f"Bearer {session_id}"},
-                ) as r:
-                    for _ in r.iter_raw():
-                        arrivals.append(time.monotonic())
+            arrivals: list[float] = []
+            with httpx.stream(
+                "POST",
+                f"http://127.0.0.1:{live.port}/v1/chat/completions",
+                json=STREAM_BODY,
+            ) as r:
+                for _ in r.iter_raw():
+                    arrivals.append(time.monotonic())
         # If the proxy buffered the whole upstream response, every chunk
         # would land at once and the spread would be ~0.
         assert arrivals[-1] - arrivals[0] >= delay * 0.5
-
-    def test_in_flight_stream_survives_session_close(self, upstream):
-        upstream.responder = lambda request: SSEScript(
-            frames=[(0.0, SSE_FRAMES[0]), (0.5, SSE_FRAMES[1]), (0.0, SSE_FRAMES[2])]
-        )
-        with LiveApp(_make_app(_proxy_config(upstream))) as live:
-            with httpx.Client() as client:
-                ws = ws_connect(f"ws://127.0.0.1:{live.port}/v1/realtime")
-                session_id = json.loads(ws.recv())["session"]["id"]
-                with client.stream(
-                    "POST",
-                    f"http://127.0.0.1:{live.port}/v1/chat/completions",
-                    json=STREAM_BODY,
-                    headers={"Authorization": f"Bearer {session_id}"},
-                ) as r:
-                    iterator = r.iter_raw()
-                    first = next(iterator)
-                    assert first  # request authorized and streaming
-                    # Close the session mid-stream; delivery must continue.
-                    ws.close()
-                    rest = b"".join(iterator)
-        assert (first + rest) == b"".join(SSE_FRAMES)
 
     def test_unreachable_upstream_fails_cleanly_within_connect_timeout(self):
         config = LLMProxyConfig(
@@ -373,15 +303,9 @@ class TestStreamingPassthrough:
         )
         app = _make_app(config)
         with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                start = time.monotonic()
-                r = client.post(
-                    "/v1/chat/completions",
-                    json=STREAM_BODY,
-                    headers={"Authorization": f"Bearer {session_id}"},
-                )
-                elapsed = time.monotonic() - start
+            start = time.monotonic()
+            r = client.post("/v1/chat/completions", json=STREAM_BODY)
+            elapsed = time.monotonic() - start
         assert r.status_code == 502
         assert "error" in r.json()
         assert elapsed < 3
@@ -390,13 +314,7 @@ class TestStreamingPassthrough:
         upstream.responder = lambda request: (429, {"error": {"message": "quota", "type": "rate_limit"}})
         app = _make_app(_proxy_config(upstream))
         with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                r = client.post(
-                    "/v1/chat/completions",
-                    json=STREAM_BODY,
-                    headers={"Authorization": f"Bearer {session_id}"},
-                )
+            r = client.post("/v1/chat/completions", json=STREAM_BODY)
         assert r.status_code == 429
         assert r.json() == {"error": {"message": "quota", "type": "rate_limit"}}
 
@@ -422,26 +340,14 @@ class TestResponsesPassthrough:
         upstream.responder = lambda request: (200, {"id": "resp_1", "object": "response", "output": []})
         app = _make_app(self._config(upstream))
         with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                r = client.post(
-                    "/v1/responses",
-                    json=RESPONSES_BODY,
-                    headers={"Authorization": f"Bearer {session_id}"},
-                )
+            r = client.post("/v1/responses", json=RESPONSES_BODY)
         assert r.status_code == 200
         assert r.json() == {"id": "resp_1", "object": "response", "output": []}
 
     def test_upstream_receives_store_false_and_forced_model(self, upstream):
         app = _make_app(self._config(upstream))
         with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                client.post(
-                    "/v1/responses",
-                    json=RESPONSES_BODY,
-                    headers={"Authorization": f"Bearer {session_id}"},
-                )
+            client.post("/v1/responses", json=RESPONSES_BODY)
         (request,) = upstream.requests
         assert request["path"] == "/v1/responses"
         assert request["body"]["store"] is False
@@ -452,16 +358,9 @@ class TestResponsesPassthrough:
         upstream.responder = lambda request: SSEScript(frames=[(0.0, f) for f in RESPONSES_SSE_FRAMES])
         app = _make_app(self._config(upstream))
         with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                with client.stream(
-                    "POST",
-                    "/v1/responses",
-                    json={**RESPONSES_BODY, "stream": True},
-                    headers={"Authorization": f"Bearer {session_id}"},
-                ) as r:
-                    assert r.status_code == 200
-                    received = b"".join(r.iter_raw())
+            with client.stream("POST", "/v1/responses", json={**RESPONSES_BODY, "stream": True}) as r:
+                assert r.status_code == 200
+                received = b"".join(r.iter_raw())
         assert received == b"".join(RESPONSES_SSE_FRAMES)
         (request,) = upstream.requests
         assert request["body"]["store"] is False
@@ -469,35 +368,9 @@ class TestResponsesPassthrough:
     def test_chat_completions_path_is_501_under_responses_backend(self, upstream):
         app = _make_app(self._config(upstream))
         with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                r = client.post(
-                    "/v1/chat/completions",
-                    json=CHAT_BODY,
-                    headers={"Authorization": f"Bearer {session_id}"},
-                )
+            r = client.post("/v1/chat/completions", json=CHAT_BODY)
         assert r.status_code == 501
         assert "/v1/responses" in r.json()["error"]["message"]
-
-    def test_missing_bearer_is_401_on_responses_path(self, upstream):
-        app = _make_app(self._config(upstream))
-        with TestClient(app) as client:
-            r = client.post("/v1/responses", json=RESPONSES_BODY)
-        assert r.status_code == 401
-        assert upstream.requests == []
-
-    def test_unknown_session_is_401_on_responses_path(self, upstream):
-        app = _make_app(self._config(upstream))
-        with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                ws.receive_json()
-                r = client.post(
-                    "/v1/responses",
-                    json=RESPONSES_BODY,
-                    headers={"Authorization": "Bearer sess_deadbeef"},
-                )
-        assert r.status_code == 401
-        assert upstream.requests == []
 
     @pytest.mark.parametrize("backend", ["transformers", "mlx-lm"])
     def test_flag_off_and_local_backend_are_501_on_responses_path(self, upstream, backend):
@@ -511,80 +384,9 @@ class TestResponsesPassthrough:
             assert r.status_code == 501
 
 
-class TestRateLimit:
-    def _post(self, client, session_id):
-        return client.post(
-            "/v1/chat/completions",
-            json=CHAT_BODY,
-            headers={"Authorization": f"Bearer {session_id}"},
-        )
-
-    def test_default_ceiling_is_20_per_minute_and_other_sessions_unaffected(self, upstream):
-        app = _make_app(_proxy_config(upstream), pool_size=2)
-        with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws1:
-                session_1 = ws1.receive_json()["session"]["id"]
-                with client.websocket_connect("/v1/realtime") as ws2:
-                    session_2 = ws2.receive_json()["session"]["id"]
-                    for _ in range(20):
-                        assert self._post(client, session_1).status_code == 200
-                    r = self._post(client, session_1)
-                    assert r.status_code == 429
-                    assert "error" in r.json()
-                    # The other session still has its own budget.
-                    assert self._post(client, session_2).status_code == 200
-        # The 21st request never reached the upstream.
-        assert len(upstream.requests) == 21
-
-    def test_ceiling_is_configurable(self, upstream):
-        app = _make_app(_proxy_config(upstream, rate_limit_rpm=2))
-        with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                assert self._post(client, session_id).status_code == 200
-                assert self._post(client, session_id).status_code == 200
-                assert self._post(client, session_id).status_code == 429
-
-    def test_window_slides_and_recovers(self, upstream, monkeypatch):
-        import speech_to_speech.api.openai_realtime.llm_proxy as llm_proxy_module
-
-        clock = {"now": 1000.0}
-        monkeypatch.setattr(llm_proxy_module, "_now", lambda: clock["now"])
-        app = _make_app(_proxy_config(upstream, rate_limit_rpm=2))
-        with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                assert self._post(client, session_id).status_code == 200
-                clock["now"] += 30.0
-                assert self._post(client, session_id).status_code == 200
-                assert self._post(client, session_id).status_code == 429
-                # 61s after the first hit, one slot has slid out of the window.
-                clock["now"] += 31.0
-                assert self._post(client, session_id).status_code == 200
-                assert self._post(client, session_id).status_code == 429
-
-    def test_unknown_bearer_is_401_and_consumes_no_budget(self, upstream):
-        app = _make_app(_proxy_config(upstream, rate_limit_rpm=1))
-        with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                for _ in range(3):
-                    r = client.post(
-                        "/v1/chat/completions",
-                        json=CHAT_BODY,
-                        headers={"Authorization": "Bearer sess_unknown"},
-                    )
-                    assert r.status_code == 401
-                assert self._post(client, session_id).status_code == 200
-
-
 class TestUsageSection:
-    def _post(self, client, session_id, body=None, path="/v1/chat/completions"):
-        return client.post(
-            path,
-            json=body or CHAT_BODY,
-            headers={"Authorization": f"Bearer {session_id}"},
-        )
+    def _post(self, client, body=None, path="/v1/chat/completions"):
+        return client.post(path, json=body or CHAT_BODY)
 
     def test_counters_after_mixed_traffic(self, upstream):
         answers = iter(
@@ -592,19 +394,19 @@ class TestUsageSection:
                 (200, {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 3}}),
                 (200, {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 3}}),
                 (500, {"error": {"message": "boom", "type": "server_error"}}),
+                (429, {"error": {"message": "quota", "type": "rate_limit"}}),
+                (400, {"error": {"message": "bad", "type": "invalid_request_error"}}),
             ]
         )
         upstream.responder = lambda request: next(answers)
-        app = _make_app(_proxy_config(upstream, rate_limit_rpm=3))
+        app = _make_app(_proxy_config(upstream))
         with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                assert self._post(client, session_id).status_code == 200
-                assert self._post(client, session_id).status_code == 200
-                assert self._post(client, session_id).status_code == 500
-                assert self._post(client, session_id).status_code == 429
-                assert self._post(client, "sess_unknown").status_code == 401
-                usage = client.get("/v1/usage").json()["llm_proxy"]
+            assert self._post(client).status_code == 200
+            assert self._post(client).status_code == 200
+            assert self._post(client).status_code == 500
+            assert self._post(client).status_code == 429
+            assert self._post(client).status_code == 400
+            usage = client.get("/v1/usage").json()["llm_proxy"]
         assert usage["requests"] == 5
         assert usage["responses_2xx"] == 2
         assert usage["responses_5xx"] == 1
@@ -621,16 +423,9 @@ class TestUsageSection:
         upstream.responder = lambda request: SSEScript(frames=[(0.0, f) for f in frames])
         app = _make_app(_proxy_config(upstream))
         with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                with client.stream(
-                    "POST",
-                    "/v1/chat/completions",
-                    json=STREAM_BODY,
-                    headers={"Authorization": f"Bearer {session_id}"},
-                ) as r:
-                    received = b"".join(r.iter_raw())
-                usage = client.get("/v1/usage").json()["llm_proxy"]
+            with client.stream("POST", "/v1/chat/completions", json=STREAM_BODY) as r:
+                received = b"".join(r.iter_raw())
+            usage = client.get("/v1/usage").json()["llm_proxy"]
         # The client did not ask for usage, the server injected it upstream,
         # and the byte stream still arrives verbatim including the usage frame.
         (request,) = upstream.requests
@@ -647,16 +442,9 @@ class TestUsageSection:
         upstream.responder = lambda request: SSEScript(frames=[(0.0, f) for f in frames])
         app = _make_app(_proxy_config(upstream, llm_backend="responses-api"))
         with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                with client.stream(
-                    "POST",
-                    "/v1/responses",
-                    json={**RESPONSES_BODY, "stream": True},
-                    headers={"Authorization": f"Bearer {session_id}"},
-                ) as r:
-                    received = b"".join(r.iter_raw())
-                usage = client.get("/v1/usage").json()["llm_proxy"]
+            with client.stream("POST", "/v1/responses", json={**RESPONSES_BODY, "stream": True}) as r:
+                received = b"".join(r.iter_raw())
+            usage = client.get("/v1/usage").json()["llm_proxy"]
         (request,) = upstream.requests
         assert "stream_options" not in request["body"]  # no request mutation on Responses
         assert received == b"".join(frames)
@@ -675,16 +463,9 @@ class TestUsageSection:
         upstream.responder = lambda request: SSEScript(frames=[(0.0, f) for f in frames])
         app = _make_app(_proxy_config(upstream))
         with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                with client.stream(
-                    "POST",
-                    "/v1/chat/completions",
-                    json=STREAM_BODY,
-                    headers={"Authorization": f"Bearer {session_id}"},
-                ) as r:
-                    received = b"".join(r.iter_raw())
-                usage = client.get("/v1/usage").json()["llm_proxy"]
+            with client.stream("POST", "/v1/chat/completions", json=STREAM_BODY) as r:
+                received = b"".join(r.iter_raw())
+            usage = client.get("/v1/usage").json()["llm_proxy"]
         assert received == b"".join(frames)
         assert usage["input_tokens"] == 6
         assert usage["output_tokens"] == 2
@@ -696,19 +477,15 @@ class TestUsageSection:
         )
         app = _make_app(_proxy_config(upstream, llm_backend="responses-api"))
         with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                assert self._post(client, session_id, RESPONSES_BODY, "/v1/responses").status_code == 200
-                usage = client.get("/v1/usage").json()["llm_proxy"]
+            assert self._post(client, RESPONSES_BODY, "/v1/responses").status_code == 200
+            usage = client.get("/v1/usage").json()["llm_proxy"]
         assert usage["input_tokens"] == 21
         assert usage["output_tokens"] == 8
 
     def test_existing_usage_shape_keeps_its_keys(self, upstream):
         app = _make_app(_proxy_config(upstream))
         with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                ws.receive_json()
-                data = client.get("/v1/usage").json()
+            data = client.get("/v1/usage").json()
         # Pre-existing aggregate keys survive next to the additive section.
         assert "connections" in data
         assert "llm_proxy" in data
@@ -720,12 +497,6 @@ class TestUpstreamErrorPassthrough:
         upstream.responder = lambda request: (status, {"error": {"message": "upstream says no", "type": "boom"}})
         app = _make_app(_proxy_config(upstream))
         with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                session_id = ws.receive_json()["session"]["id"]
-                r = client.post(
-                    "/v1/chat/completions",
-                    json=CHAT_BODY,
-                    headers={"Authorization": f"Bearer {session_id}"},
-                )
+            r = client.post("/v1/chat/completions", json=CHAT_BODY)
         assert r.status_code == status
         assert r.json() == {"error": {"message": "upstream says no", "type": "boom"}}

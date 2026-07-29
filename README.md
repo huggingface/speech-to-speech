@@ -319,24 +319,24 @@ The server implements the core Realtime event set: `input_audio_buffer.append`, 
 
 ### LLM Proxy
 
-With `--enable_llm_proxy`, the realtime server also exposes the remote LLM it is configured with as a plain OpenAI compatible endpoint, so a client holding an open realtime session can run side tasks (summaries, titles, background agents) with tools and streaming, fully concurrent with the voice conversation and never interrupted by new speech:
+With `--enable_llm_proxy`, the realtime server also exposes the remote LLM it is configured with as a plain OpenAI compatible endpoint, so a client can run side tasks (summaries, titles, background agents) with tools and streaming, fully concurrent with the voice conversation and never interrupted by new speech:
 
 * `POST /v1/chat/completions` when running `--llm_backend chat-completions`
 * `POST /v1/responses` when running `--llm_backend responses-api`
 
-The bearer token is the realtime session id. **Read this twice: the session id arrives in the `session.created` event on the realtime connection** (behind a load balancer it is not the session id returned by the session creation call). Point the stock OpenAI SDK at the server and pass the session id as the API key:
+The server performs no authentication and no throttling of its own. Enable the proxy only on a trusted network, or deploy the server behind a gateway that owns access control. The s2s-endpoint compute replica is such a gateway: it opens these paths only to clients that created their session with an HF token, checks the API key against that token, and applies a rate limit per user. Point the stock OpenAI SDK at whichever host you talk to; this server ignores the API key (a gateway in front decides what it must be):
 
 ```python
 from openai import OpenAI
 
-llm = OpenAI(base_url="http://localhost:8765/v1", api_key=session_id)
+llm = OpenAI(base_url="http://localhost:8765/v1", api_key="unused")
 completion = llm.chat.completions.create(
     model="anything",  # ignored: the server forces its configured --model_name
     messages=[{"role": "user", "content": "Summarize the conversation so far: ..."}],
 )
 ```
 
-Requests are stateless (send the full message list each time) and are proxied to the configured upstream with the key held by the server, which never reaches clients. The `model` field is always overwritten with the server configured `--model_name`. The proxy is off by default, requires a remote backend (`chat-completions` or `responses-api`), and answers 501 with the reason otherwise; a missing or unknown session id answers 401.
+Requests are stateless (send the full message list each time) and are proxied to the configured upstream with the key held by the server, which never reaches clients. The `model` field is always overwritten with the server configured `--model_name`. The proxy is off by default, requires a remote backend (`chat-completions` or `responses-api`), and answers 501 with the reason otherwise.
 
 ## LLM Backends
 

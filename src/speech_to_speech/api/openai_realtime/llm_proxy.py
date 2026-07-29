@@ -1,20 +1,18 @@
-"""Session-gated LLM proxy: OpenAI-compatible passthrough for remote LLM backends.
+"""LLM proxy: OpenAI-compatible passthrough for remote LLM backends.
 
 Mounts ``POST /v1/chat/completions`` (backend ``chat-completions``) or
 ``POST /v1/responses`` (backend ``responses-api``) as a passthrough to the
-configured upstream provider. The ticket to use it is an open realtime
-session: the client presents its realtime session id as the bearer token,
-which is validated against the pipeline pool at request start and used for
-nothing else. Requests never touch pipeline units' queues or cancel scopes,
-so proxied generations run fully concurrent with the speech pipeline and are
-never interrupted by new speech.
+configured upstream provider. The server performs no authentication and no
+throttling of its own: it is designed to run on a trusted network or behind
+a gateway that owns access control (the s2s-endpoint compute replica gates
+these paths with the session's HF token). Requests never touch pipeline
+units' queues or cancel scopes, so proxied generations run fully concurrent
+with the speech pipeline and are never interrupted by new speech.
 """
 
 import json
 import logging
 import re
-import time
-from collections import defaultdict, deque
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -23,8 +21,6 @@ from fastapi import FastAPI, Request, Response
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 from starlette.responses import StreamingResponse
-
-from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +38,6 @@ class LLMProxyConfig(BaseModel):
     upstream_api_key: str | None = None
     model_name: str | None = None
     connect_timeout_s: float = 10.0
-    rate_limit_rpm: int = 20
 
 
 class LLMProxyUsage(BaseModel):
@@ -109,36 +104,6 @@ class LLMProxyUsage(BaseModel):
             self.record_token_payload(payload)
 
 
-def _now() -> float:
-    # Module-level so tests can monkeypatch the clock instead of sleeping.
-    return time.monotonic()
-
-
-_RATE_LIMIT_WINDOW_S = 60.0
-
-
-class _SessionRateLimiter:
-    """In-memory sliding window, keyed by session id, replica-local."""
-
-    def __init__(self, limit_rpm: int):
-        self.limit_rpm = limit_rpm
-        self._hits: dict[str, deque[float]] = defaultdict(deque)
-
-    def allow(self, session_id: str) -> bool:
-        now = _now()
-        hits = self._hits[session_id]
-        while hits and now - hits[0] >= _RATE_LIMIT_WINDOW_S:
-            hits.popleft()
-        if len(hits) >= self.limit_rpm:
-            return False
-        hits.append(now)
-        # Sessions are short-lived relative to the process; drop fully expired
-        # entries so dead session ids don't accumulate forever.
-        if len(self._hits) > 1024:
-            self._hits = defaultdict(deque, {k: v for k, v in self._hits.items() if v})
-        return True
-
-
 class _ErrorDetail(BaseModel):
     message: str
     type: str
@@ -170,23 +135,7 @@ def _upstream_unreachable(error: httpx.HTTPError) -> Response:
     return _error_response(502, f"Upstream request failed: {type(error).__name__}", "upstream_unreachable")
 
 
-def _bearer_session_id(request: Request) -> str | None:
-    auth = request.headers.get("authorization", "")
-    scheme, _, token = auth.partition(" ")
-    if scheme.lower() != "bearer" or not token.strip():
-        return None
-    return token.strip()
-
-
-def _session_is_active(pool: list[PipelineUnit], session_id: str) -> bool:
-    for unit in pool:
-        session = unit.session
-        if session is not None and session.session_id == session_id and session.released_at is None:
-            return True
-    return False
-
-
-def mount_llm_proxy(app: FastAPI, pool: list[PipelineUnit], config: LLMProxyConfig | None) -> LLMProxyUsage:
+def mount_llm_proxy(app: FastAPI, config: LLMProxyConfig | None) -> LLMProxyUsage:
     """Mount the proxy paths on *app* according to *config*.
 
     Both known paths always answer: the path matching an enabled remote
@@ -218,7 +167,7 @@ def mount_llm_proxy(app: FastAPI, pool: list[PipelineUnit], config: LLMProxyConf
     serving_path = _PATHS[config.llm_backend]
     for path in _PATHS.values():
         if path == serving_path:
-            _mount_passthrough(app, path, pool, config, usage)
+            _mount_passthrough(app, path, config, usage)
         else:
             _mount_unavailable(
                 app,
@@ -237,13 +186,11 @@ def _mount_unavailable(app: FastAPI, path: str, reason: str) -> None:
 def _mount_passthrough(
     app: FastAPI,
     path: str,
-    pool: list[PipelineUnit],
     config: LLMProxyConfig,
     usage: LLMProxyUsage,
 ) -> None:
     base_url = (config.upstream_base_url or DEFAULT_UPSTREAM_BASE_URL).rstrip("/")
     upstream_url = base_url + path.removeprefix("/v1")
-    rate_limiter = _SessionRateLimiter(config.rate_limit_rpm)
 
     @app.post(path)
     async def passthrough_endpoint(request: Request) -> Response:
@@ -252,23 +199,6 @@ def _mount_passthrough(
         return response
 
     async def _proxy(request: Request) -> Response:
-        session_id = _bearer_session_id(request)
-        if session_id is None or not _session_is_active(pool, session_id):
-            return _error_response(
-                401,
-                "Invalid bearer token: pass the realtime session id of an open session "
-                "(from the session.created event) as the API key.",
-                "invalid_session",
-            )
-
-        if not rate_limiter.allow(session_id):
-            return _error_response(
-                429,
-                f"Rate limit exceeded: this session may make {config.rate_limit_rpm} requests "
-                "per minute. Back off and retry.",
-                "rate_limit_exceeded",
-            )
-
         try:
             body = await request.json()
         except Exception:
