@@ -2,15 +2,20 @@
 
 The handler used to infer the detected language by slicing the *second* generated token
 (``pred_ids[0, 1]``), which assumes ``generate()`` echoes the forced decoder prefix
-``<|startoftranscript|><|de|><|transcribe|>``. Recent ``transformers`` releases strip that
-prefix, so index 1 is an ordinary text token; slicing it produced a word fragment that was
-never a valid language, which pushed every call down the "unsupported language" path and
-re-generated without a forced language, replacing a correct transcription with a
-mis-detected one (German returned as Italian).
+``<|startoftranscript|><|de|><|transcribe|>``. ``generate()`` excludes the decoder input ids
+from its output, and the language token is one of them, so index 1 is an ordinary text
+token; slicing it produced a word fragment that was never a valid language, which pushed
+every call down the "unsupported language" path and re-generated without a forced language,
+replacing a correct transcription with a mis-detected one (German returned as Italian).
 
-These tests drive the handler with a fake processor/model so they cover both the legacy
-prefix-echoing behaviour and the current prefix-stripping behaviour without downloading a
-model.
+Two properties are pinned here:
+
+* the reported language is the language actually transcribed, obtained from Whisper's
+  ``detect_language()`` rather than guessed from a token position, and
+* a correct transcription is never discarded because its language is outside
+  ``SUPPORTED_LANGUAGES`` -- that allowlist controls the sticky fallback only.
+
+The model is faked, so no download is needed.
 """
 
 from __future__ import annotations
@@ -37,8 +42,10 @@ SPECIAL_TOKENS = {
 _ID_TO_SPECIAL = {token_id: token for token, token_id in SPECIAL_TOKENS.items()}
 
 # Ordinary text tokens, so that decoding a *text* id yields a word piece rather than a
-# language token. This is what makes the position-based parse silently wrong.
+# language token. This is what made the position-based parse silently wrong.
 TEXT_TOKENS = {2626: " Der", 3021: " heiß", 4488: " Ball"}
+
+SENTINEL_ENCODER_OUTPUTS = object()
 
 
 class FakeTokenizer:
@@ -64,11 +71,7 @@ class FakeProcessor:
 
 
 class FakeSequences:
-    """A batch of one sequence, indexable like the tensor ``generate()`` returns.
-
-    Supports both ``pred_ids[0]`` (row) and ``pred_ids[0, 1]`` (scalar) so the fake behaves
-    like a real tensor for the position-based parse as well as the token scan.
-    """
+    """A batch of one sequence, indexable like the tensor ``generate()`` returns."""
 
     def __init__(self, token_ids, text: str) -> None:
         self._ids = np.array([list(token_ids)])
@@ -79,11 +82,36 @@ class FakeSequences:
 
 
 class FakeModel:
-    """Records every ``generate()`` call and returns scripted sequences."""
+    """Records ``generate()`` calls and optionally supports ``detect_language()``.
 
-    def __init__(self, responses):
+    ``detect_language_result`` is ``None`` to emulate a transformers version that does not
+    expose the API at all, or an exception instance to emulate detection failing.
+    """
+
+    def __init__(self, responses, detect_language_result=None):
         self._responses = list(responses)
+        self._detect_language_result = detect_language_result
         self.calls: list[dict] = []
+        self.detect_language_calls = 0
+        self.encoder_calls = 0
+
+        if detect_language_result is None:
+            # Emulate a model without the detect_language API at all.
+            self.detect_language = None  # type: ignore[assignment]
+
+    def get_encoder(self):
+        def encoder(input_features):
+            self.encoder_calls += 1
+            return SENTINEL_ENCODER_OUTPUTS
+
+        return encoder
+
+    def detect_language(self, encoder_outputs=None):  # type: ignore[no-redef]
+        self.detect_language_calls += 1
+        assert encoder_outputs is SENTINEL_ENCODER_OUTPUTS, "encoder output should be reused"
+        if isinstance(self._detect_language_result, Exception):
+            raise self._detect_language_result
+        return np.array([SPECIAL_TOKENS[self._detect_language_result]])
 
     def generate(self, input_features, **gen_kwargs):
         self.calls.append(gen_kwargs)
@@ -91,11 +119,11 @@ class FakeModel:
         return self._responses[index]
 
 
-def make_handler(*, start_language, last_language, gen_kwargs, responses):
+def make_handler(*, start_language, last_language, gen_kwargs, responses, detect_language_result=None):
     """Build a handler without loading any real model."""
     handler = object.__new__(WhisperSTTHandler)
     handler.processor = FakeProcessor()
-    handler.model = FakeModel(responses)
+    handler.model = FakeModel(responses, detect_language_result)
     handler.start_language = start_language
     handler.last_language = last_language
     handler.gen_kwargs = dict(gen_kwargs)
@@ -117,7 +145,7 @@ def run(handler):
     return outputs[0]
 
 
-# --- current transformers: no forced decoder prefix in the output -------------------------
+# --- forced language ----------------------------------------------------------------------
 
 
 def test_forced_language_survives_missing_decoder_prefix():
@@ -128,53 +156,117 @@ def test_forced_language_survives_missing_decoder_prefix():
         last_language="de",
         gen_kwargs={"language": "de", "task": "transcribe"},
         responses=[german],
+        detect_language_result="<|it|>",
     )
 
     result = run(handler)
 
     assert result.text == "Der blaue Ball liegt auf dem Tisch."
     assert result.language_code == "de"
-    # Exactly one generate() call: the first pass is authoritative when a language is forced.
+    # One generate() call, and no detection at all: the request is authoritative.
     assert len(handler.model.calls) == 1
+    assert handler.model.detect_language_calls == 0
 
 
-def test_auto_mode_without_prefix_keeps_first_pass_and_defaults_language():
-    """Auto mode, no prefix, no prior language: keep the transcription, don't re-generate."""
-    text = FakeSequences([2626, 3021, 4488], "Wie heisse ich?")
+# --- auto mode: detection via detect_language() -------------------------------------------
+
+
+def test_auto_mode_uses_detect_language_and_forces_the_result():
+    """`generate()` never exposes the language token, so detection must be explicit."""
+    german = FakeSequences([2626, 3021, 4488], "Wie heisse ich?")
     handler = make_handler(
         start_language="auto",
         last_language=None,
         gen_kwargs={"task": "transcribe"},
-        responses=[text],
+        responses=[german],
+        detect_language_result="<|de|>",
     )
 
     result = run(handler)
 
     assert result.text == "Wie heisse ich?"
-    assert result.language_code == "en-auto"
+    assert result.language_code == "de-auto"
+    assert handler.last_language == "de"
+    assert handler.model.detect_language_calls == 1
     assert len(handler.model.calls) == 1
+    # The detected language is forced, so generate() does not detect a second time.
+    assert handler.model.calls[0]["language"] == "de"
 
 
-def test_no_language_forced_and_no_prefix_does_not_regenerate_with_none():
-    """The old code re-ran generate() with language=None, doubling cost for the same result."""
-    text = FakeSequences([2626, 3021], "Hello there.")
+def test_auto_mode_reuses_the_encoder_output_instead_of_re_encoding():
+    """Detection and generation share one encoder pass, so detection is not extra cost."""
     handler = make_handler(
-        start_language=None,
+        start_language="auto",
         last_language=None,
-        gen_kwargs={},
-        responses=[text],
+        gen_kwargs={"task": "transcribe"},
+        responses=[FakeSequences([2626], "Hallo.")],
+        detect_language_result="<|de|>",
     )
 
     run(handler)
 
+    assert handler.model.encoder_calls == 1
+    assert handler.model.calls[0]["encoder_outputs"] is SENTINEL_ENCODER_OUTPUTS
+
+
+def test_detection_does_not_mutate_shared_gen_kwargs():
+    handler = make_handler(
+        start_language="auto",
+        last_language=None,
+        gen_kwargs={"task": "transcribe"},
+        responses=[FakeSequences([2626], "Hallo.")],
+        detect_language_result="<|de|>",
+    )
+
+    run(handler)
+
+    assert handler.gen_kwargs == {"task": "transcribe"}
+
+
+# --- auto mode: a real but unsupported language must be preserved -------------------------
+
+
+def test_unsupported_detected_language_is_reported_not_retranscribed():
+    """Russian audio must not be re-transcribed as German just because German was last."""
+    russian = FakeSequences([2626], "Privet, kak dela?")
+    handler = make_handler(
+        start_language="auto",
+        last_language="de",
+        gen_kwargs={"task": "transcribe"},
+        responses=[russian],
+        detect_language_result="<|ru|>",
+    )
+
+    result = run(handler)
+
+    assert result.text == "Privet, kak dela?"
+    assert result.language_code == "ru-auto"
+    # Exactly one generate(), forced to the detected language -- no destructive retry.
     assert len(handler.model.calls) == 1
-    assert "language" not in handler.model.calls[0]
+    assert handler.model.calls[0]["language"] == "ru"
+    # An unsupported code must not become the sticky fallback for later turns.
+    assert handler.last_language == "de"
 
 
-# --- legacy transformers: forced decoder prefix present ----------------------------------
+def test_unsupported_detected_language_without_any_fallback():
+    handler = make_handler(
+        start_language="auto",
+        last_language=None,
+        gen_kwargs={"task": "transcribe"},
+        responses=[FakeSequences([2626], "Privet.")],
+        detect_language_result="<|ru|>",
+    )
+
+    result = run(handler)
+
+    assert result.language_code == "ru-auto"
+    assert handler.last_language is None
 
 
-def test_language_token_read_from_decoder_prefix():
+# --- auto mode when detect_language() is unavailable or fails -----------------------------
+
+
+def test_falls_back_to_prefix_token_when_detect_language_is_unavailable():
     sequence = FakeSequences(
         [SPECIAL_TOKENS["<|startoftranscript|>"], SPECIAL_TOKENS["<|de|>"], SPECIAL_TOKENS["<|transcribe|>"], 2626],
         "Der blaue Ball liegt auf dem Tisch.",
@@ -184,6 +276,7 @@ def test_language_token_read_from_decoder_prefix():
         last_language=None,
         gen_kwargs={"task": "transcribe"},
         responses=[sequence],
+        detect_language_result=None,
     )
 
     result = run(handler)
@@ -193,8 +286,8 @@ def test_language_token_read_from_decoder_prefix():
     assert len(handler.model.calls) == 1
 
 
-def test_language_token_found_when_not_at_index_one():
-    """The token's position is not fixed, so detection must scan rather than index."""
+def test_prefix_token_is_found_when_not_at_index_one():
+    """The token's position is not fixed, so the fallback must scan rather than index."""
     sequence = FakeSequences(
         [
             SPECIAL_TOKENS["<|startofprev|>"],
@@ -209,80 +302,96 @@ def test_language_token_found_when_not_at_index_one():
         last_language=None,
         gen_kwargs={"task": "transcribe"},
         responses=[sequence],
+        detect_language_result=None,
     )
 
     assert run(handler).language_code == "de-auto"
 
 
-def test_unsupported_detected_language_retries_with_last_language():
-    unsupported = FakeSequences(
-        [SPECIAL_TOKENS["<|startoftranscript|>"], SPECIAL_TOKENS["<|ru|>"], SPECIAL_TOKENS["<|transcribe|>"]],
-        "mis-detected",
-    )
-    retried = FakeSequences(
-        [SPECIAL_TOKENS["<|startoftranscript|>"], SPECIAL_TOKENS["<|de|>"], SPECIAL_TOKENS["<|transcribe|>"]],
-        "Ich habe ein bisschen Angst vor morgen.",
-    )
+def test_no_detection_and_no_prefix_falls_back_to_last_language():
     handler = make_handler(
         start_language="auto",
         last_language="de",
         gen_kwargs={"task": "transcribe"},
-        responses=[unsupported, retried],
+        responses=[FakeSequences([2626, 3021], "Ich heisse Max.")],
+        detect_language_result=None,
     )
 
     result = run(handler)
 
-    assert result.text == "Ich habe ein bisschen Angst vor morgen."
+    assert result.text == "Ich heisse Max."
     assert result.language_code == "de-auto"
-    assert len(handler.model.calls) == 2
-    assert handler.model.calls[1]["language"] == "de"
-    # The retry must not mutate the handler's shared gen_kwargs.
-    assert "language" not in handler.gen_kwargs
+    assert len(handler.model.calls) == 1
 
 
-def test_unsupported_detected_language_is_kept_when_there_is_no_fallback():
-    """A real but unsupported language beats discarding a correct transcription."""
-    russian = FakeSequences(
-        [SPECIAL_TOKENS["<|startoftranscript|>"], SPECIAL_TOKENS["<|ru|>"], SPECIAL_TOKENS["<|transcribe|>"]],
-        "Privet.",
-    )
+def test_no_detection_and_no_fallback_defaults_to_english_without_regenerating():
+    """The old code re-ran generate() with language=None, doubling cost for the same result."""
     handler = make_handler(
         start_language="auto",
         last_language=None,
         gen_kwargs={"task": "transcribe"},
-        responses=[russian],
+        responses=[FakeSequences([2626, 3021], "Hello there.")],
+        detect_language_result=None,
     )
 
     result = run(handler)
 
-    assert result.text == "Privet."
-    assert result.language_code == "ru-auto"
+    assert result.text == "Hello there."
+    assert result.language_code == "en-auto"
     assert len(handler.model.calls) == 1
-    # An unsupported code must not become the sticky fallback for later turns.
-    assert handler.last_language is None
+
+
+def test_detect_language_failure_is_survivable():
+    handler = make_handler(
+        start_language="auto",
+        last_language="de",
+        gen_kwargs={"task": "transcribe"},
+        responses=[FakeSequences([2626], "Ich heisse Max.")],
+        detect_language_result=RuntimeError("no kernel"),
+    )
+
+    result = run(handler)
+
+    assert result.text == "Ich heisse Max."
+    assert result.language_code == "de-auto"
+    assert len(handler.model.calls) == 1
+    # Detection failed before producing a usable encoder output, so none is passed on.
+    assert "encoder_outputs" not in handler.model.calls[0]
+
+
+def test_language_code_has_no_auto_suffix_when_start_language_is_not_auto():
+    handler = make_handler(
+        start_language=None,
+        last_language=None,
+        gen_kwargs={},
+        responses=[FakeSequences([2626], "Hello.")],
+        detect_language_result="<|en|>",
+    )
+
+    assert run(handler).language_code == "en"
 
 
 # --- helper-level behaviour ---------------------------------------------------------------
 
 
-def test_detected_language_returns_none_for_plain_text_tokens():
+def test_prefix_scan_returns_none_for_plain_text_tokens():
     handler = make_handler(start_language=None, last_language=None, gen_kwargs={}, responses=[])
 
-    assert handler._detected_language(FakeSequences([2626, 3021, 4488], "")) is None
+    assert handler._language_from_prefix(FakeSequences([2626, 3021, 4488], "")) is None
 
 
-def test_detected_language_handles_numpy_and_tensor_like_rows():
+def test_prefix_scan_handles_numpy_rows():
     handler = make_handler(start_language=None, last_language=None, gen_kwargs={}, responses=[])
     pred_ids = np.array([[SPECIAL_TOKENS["<|startoftranscript|>"], SPECIAL_TOKENS["<|it|>"], 2626]])
 
-    assert handler._detected_language(pred_ids) == "it"
+    assert handler._language_from_prefix(pred_ids) == "it"
 
 
-def test_detected_language_ignores_tokens_past_the_prefix_window():
+def test_prefix_scan_ignores_tokens_past_the_prefix_window():
     handler = make_handler(start_language=None, last_language=None, gen_kwargs={}, responses=[])
     pred_ids = [[1, 2, 3, 4, SPECIAL_TOKENS["<|de|>"]]]
 
-    assert handler._detected_language(pred_ids) is None
+    assert handler._language_from_prefix(pred_ids) is None
 
 
 @pytest.mark.parametrize("forced", [None, "", "auto"])

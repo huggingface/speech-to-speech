@@ -143,14 +143,60 @@ class WhisperSTTHandler(BaseSTTHandler):
         self._language_token_id_map = mapping
         return mapping
 
-    def _detected_language(self, pred_ids: Any) -> Optional[str]:
-        """Read the language Whisper decoded, or ``None`` if it did not report one.
+    def _code_from_language_tokens(self, token_ids: Any) -> Optional[str]:
+        """Resolve the first Whisper language special token in ``token_ids`` to its code."""
+        language_tokens = self._language_token_ids()
+        if not language_tokens:
+            return None
 
-        The language token is only in the returned sequence when ``generate()`` echoes the
-        forced decoder prefix. Recent ``transformers`` strips that prefix, so the leading ids
-        are ordinary text. Scanning for a real language token instead of slicing a fixed
-        position keeps this correct on both behaviours; guessing from position turns a text
-        token into a bogus "language" and silently discards a good transcription.
+        try:
+            flat = token_ids.flatten().tolist() if hasattr(token_ids, "flatten") else list(token_ids)
+        except (IndexError, TypeError):
+            return None
+
+        for token_id in flat:
+            try:
+                code = language_tokens.get(int(token_id))
+            except (TypeError, ValueError):
+                continue
+            if code is not None:
+                return code
+        return None
+
+    def _detect_language(self, input_features: Any) -> tuple[Any, Optional[str]]:
+        """Detect the spoken language up front, returning ``(encoder_outputs, code)``.
+
+        ``generate()`` excludes the decoder input ids from its output, and the language token
+        is one of them, so the detected language is never observable in the generated
+        sequence on the ``transformers`` versions supported here. Whisper exposes
+        ``detect_language()`` for exactly this, so ask it directly.
+
+        The encoder output is computed once here and handed back so ``generate()`` can reuse
+        it instead of re-encoding. Forcing the detected language also stops ``generate()``
+        from running its own internal detection, so this is cheaper than the plain auto path
+        rather than an extra cost.
+        """
+        detect_language = getattr(self.model, "detect_language", None)
+        if detect_language is None:
+            return None, None
+
+        try:
+            encoder_outputs = self.model.get_encoder()(input_features)
+            token_ids = detect_language(encoder_outputs=encoder_outputs)
+        except Exception as e:  # pragma: no cover - depends on the installed transformers
+            logger.warning("Whisper language detection failed, falling back: %s", e)
+            return None, None
+
+        return encoder_outputs, self._code_from_language_tokens(token_ids)
+
+    def _language_from_prefix(self, pred_ids: Any) -> Optional[str]:
+        """Read a language token off the generated sequence, if this version emits one.
+
+        Older ``transformers`` echoed the forced decoder prefix
+        (``<|startoftranscript|><|de|><|transcribe|>``) in ``generate()`` output. Current
+        versions strip it, so this is only a fallback for when ``detect_language()`` is
+        unavailable. Scanning for a real language token rather than slicing a fixed position
+        is what keeps a *text* token from being mistaken for a language.
         """
         language_tokens = self._language_token_ids()
         if not language_tokens:
@@ -162,14 +208,7 @@ class WhisperSTTHandler(BaseSTTHandler):
         except (IndexError, TypeError):
             return None
 
-        for token_id in token_ids[:_LANGUAGE_TOKEN_SCAN_DEPTH]:
-            try:
-                code = language_tokens.get(int(token_id))
-            except (TypeError, ValueError):
-                continue
-            if code is not None:
-                return code
-        return None
+        return self._code_from_language_tokens(token_ids[:_LANGUAGE_TOKEN_SCAN_DEPTH])
 
     def _forced_language(self) -> Optional[str]:
         """The language explicitly requested for generation, if any."""
@@ -180,33 +219,35 @@ class WhisperSTTHandler(BaseSTTHandler):
         logger.debug("infering whisper...")
 
         input_features = self.prepare_model_inputs(vad_audio.audio)
-        pred_ids = self.model.generate(input_features, **self.gen_kwargs)
-
         forced_language = self._forced_language()
-        detected_language = self._detected_language(pred_ids) or forced_language
 
-        if detected_language in SUPPORTED_LANGUAGES:
-            assert detected_language is not None
-            language_code = detected_language
+        gen_kwargs: dict[str, Any] = dict(self.gen_kwargs)
+        language_code = forced_language
+        if forced_language is None:
+            # Auto-detect mode: ask Whisper which language this is, then force it so the
+            # transcription and the reported code cannot disagree.
+            encoder_outputs, detected = self._detect_language(input_features)
+            if encoder_outputs is not None:
+                gen_kwargs["encoder_outputs"] = encoder_outputs
+            if detected is not None:
+                gen_kwargs["language"] = detected
+                language_code = detected
+
+        pred_ids = self.model.generate(input_features, **gen_kwargs)
+
+        if language_code is None:
+            # detect_language() was unavailable. Fall back to a prefix token if this version
+            # emits one, then to the last known language, and only then to the default.
+            language_code = self._language_from_prefix(pred_ids) or self.last_language or DEFAULT_LANGUAGE
+
+        # Report whatever language was actually transcribed, even if it is outside
+        # SUPPORTED_LANGUAGES -- discarding a correct transcription because its language is
+        # not on a downstream allowlist is the bug this handler had. Only remember supported
+        # languages, so an unsupported one never becomes the sticky fallback.
+        if language_code in SUPPORTED_LANGUAGES:
             self.last_language = language_code
-        elif forced_language is not None:
-            # The first pass already ran with the requested language, so it is authoritative.
-            # Re-generating here would throw away a correct transcription.
-            language_code = forced_language
         else:
-            if detected_language is not None:
-                logger.warning("Whisper detected unsupported language: %s", detected_language)
-            last_language = self.last_language
-            if last_language in SUPPORTED_LANGUAGES:
-                assert last_language is not None
-                # Auto-detection is unusable and we have a known-good language: retry with it.
-                logger.debug("Reprocessing with the last known language: %s", last_language)
-                pred_ids = self.model.generate(input_features, **{**self.gen_kwargs, "language": last_language})
-                language_code = last_language
-            else:
-                # Nothing better to fall back to. Keep this pass rather than re-generating
-                # with language=None, which would produce an identical result at double cost.
-                language_code = detected_language or DEFAULT_LANGUAGE
+            logger.warning("Whisper detected unsupported language: %s", language_code)
 
         pred_text = self.processor.batch_decode(pred_ids, skip_special_tokens=True, decode_with_timestamps=False)[0]
 
