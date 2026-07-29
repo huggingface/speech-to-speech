@@ -65,6 +65,8 @@
  *   executes and replies via `sendToolOutput` + `requestResponse`.
  * @property {NoiseGate} [noiseGate] Client-side noise gate applied to the mic
  *   before it's sent. Tunable live via `setNoiseGate`.
+ * @property {string} [audioOutputId] MediaDeviceInfo.deviceId for speakers.
+ *   Applied via AudioContext.setSinkId when the browser supports it.
  *
  * @typedef {Object} NoiseGate
  * @property {boolean} enabled
@@ -526,8 +528,28 @@ export class S2sWsRealtimeClient extends EventTarget {
     this._outAnalyser = outAnalyser;
     this._playbackNode = playbackNode;
 
+    await this.setAudioOutputDevice(this.options.audioOutputId || "");
+
     this._visualiser = new OrbVisualiser(micAnalyser, outAnalyser, () => this._aiSpeaking);
     this._visualiser.start();
+  }
+
+  /**
+   * Route Web Audio playback to a specific output device (Chrome/Edge).
+   * Empty string restores the system default.
+   * @param {string} [deviceId]
+   * @returns {Promise<boolean>}
+   */
+  async setAudioOutputDevice(deviceId = "") {
+    const ctx = this._ctx;
+    if (!ctx || typeof /** @type {any} */ (ctx).setSinkId !== "function") return false;
+    try {
+      await /** @type {any} */ (ctx).setSinkId(deviceId || "");
+      return true;
+    } catch (err) {
+      console.warn("[ws] setSinkId failed:", err);
+      return false;
+    }
   }
 
   /** @param {string} connectUrl */
