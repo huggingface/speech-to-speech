@@ -1569,12 +1569,21 @@ class TestDispatchPipelineEvent:
             ResponseFailedEvent(message="provider rejected audio"),
         )
 
-        err = events[0]
+        assert [event.type for event in events] == [
+            "response.created",
+            "error",
+            "response.output_audio.done",
+            "response.done",
+        ]
+        created = events[0]
+        assert isinstance(created, ResponseCreatedEvent)
+        err = events[1]
         assert isinstance(err, RealtimeErrorEvent)
         assert err.error.message == "provider rejected audio"
         done = [event for event in events if isinstance(event, ResponseDoneEvent)]
         assert len(done) == 1
         assert done[0].response.status == "failed"
+        assert done[0].response.id == created.response.id
         state = service._state(conn_id)
         assert state.response_pending is False
         assert state.in_response is False

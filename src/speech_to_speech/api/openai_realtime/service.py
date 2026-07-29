@@ -523,17 +523,19 @@ class RealtimeService:
         has code/type, no message — then ``finish_response`` closes the slot.
 
         Idempotent: gated on an active or pending response. Pending implicit
-        responses are promoted to active so ``finish_response`` can emit
-        ``response.done``; once closed, a later EndOfResponse-driven close does
-        nothing.
+        responses are announced and promoted to active so ``finish_response``
+        can emit terminal events for a response the client already knows about.
+        Once closed, a later EndOfResponse-driven close does nothing.
         """
         logger.info("Response failed: %s", event.message)
         st = self._state(conn_id)
         if not (st.in_response or st.response_pending):
             return []
+        events: list[ServerEvent] = []
         if st.response_pending:
-            self.response._ensure_response(conn_id)
-        events: list[ServerEvent] = [self.make_error(event.message, "response_failed")]
+            _, _, created_events = self.audio.begin_audio_response(conn_id)
+            events.extend(created_events)
+        events.append(self.make_error(event.message, "response_failed"))
         events.extend(self.response.finish_response(conn_id, status="failed"))
         return events
 
