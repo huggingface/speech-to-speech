@@ -411,6 +411,7 @@ def _build_pipeline_handlers(
                     "should_listen": should_listen,
                     "sample_rate": vad_handler_kwargs.sample_rate,
                     "speculative_turns": speculative_turns,
+                    "text_output_queue": text_output_queue,
                 },
             )
         ]

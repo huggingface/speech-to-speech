@@ -43,6 +43,7 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
+    AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     PipelineEvent,
     ResponseFailedEvent,
@@ -221,6 +222,7 @@ class RealtimeService:
             TokenUsageEvent: self._on_token_usage,
             PartialTranscriptionEvent: self.conversation.on_partial_transcription,
             TranscriptionCompletedEvent: self._on_transcription_completed,
+            AudioInputCompletedEvent: self._on_audio_input_completed,
             ResponseFailedEvent: self._on_response_failed,
         }
 
@@ -378,7 +380,13 @@ class RealtimeService:
             return False
         if not isinstance(
             event,
-            (PartialTranscriptionEvent, TranscriptionCompletedEvent, AssistantTextEvent, TokenUsageEvent),
+            (
+                PartialTranscriptionEvent,
+                TranscriptionCompletedEvent,
+                AudioInputCompletedEvent,
+                AssistantTextEvent,
+                TokenUsageEvent,
+            ),
         ):
             return False
         turn_id = getattr(event, "turn_id", None)
@@ -453,6 +461,38 @@ class RealtimeService:
             )
 
         return events
+
+    def _on_audio_input_completed(self, conn_id: str, event: AudioInputCompletedEvent) -> list[ServerEvent]:
+        """Record final input audio and queue its realtime LM request."""
+        st = self._state(conn_id)
+        same_speculative_turn = event.turn_id is not None and event.turn_id == st.speculative_user_turn_id
+        if same_speculative_turn:
+            st.response_usage.audio_duration_s -= st.speculative_audio_duration_s
+        else:
+            st.speculative_audio_duration_s = 0.0
+
+        st.input_audio_duration_s = event.audio_duration_s
+        st.response_usage.audio_duration_s += event.audio_duration_s
+        if event.turn_id is not None:
+            st.speculative_audio_duration_s = event.audio_duration_s
+            st.speculative_user_turn_id = event.turn_id
+            st.speculative_user_turn_revision = event.turn_revision
+            st.speculative_user_speech_stopped_at_s = event.speech_stopped_at_s
+
+        queue = self.text_prompt_queue
+        if queue:
+            st.response_pending = True
+            queue.put(
+                GenerateResponseRequest(
+                    runtime_config=st.runtime_config,
+                    audio=event.audio,
+                    audio_sample_rate=event.audio_sample_rate,
+                    turn_id=event.turn_id,
+                    turn_revision=event.turn_revision,
+                    speech_stopped_at_s=event.speech_stopped_at_s,
+                )
+            )
+        return []
 
     # ── Metrics ────────────────────────────────────
 

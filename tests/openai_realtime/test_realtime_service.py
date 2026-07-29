@@ -10,6 +10,7 @@ from queue import Queue
 from threading import Event, Thread
 from time import sleep
 
+import numpy as np
 import pytest
 from openai.types.realtime import (
     ConversationItemCreatedEvent,
@@ -40,6 +41,7 @@ from speech_to_speech.api.openai_realtime.service import (
 )
 from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
+    AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     ResponseFailedEvent,
     SpeechStartedEvent,
@@ -1248,6 +1250,44 @@ class TestDispatchPipelineEvent:
         assert evt.usage.seconds == 3.2
         assert evt.usage.type == "duration"
         assert service._state(conn_id).response_pending is True
+
+    def test_audio_input_completed_marks_response_pending_and_preserves_duration(
+        self,
+        service,
+        conn_id,
+        runtime_config,
+        text_prompt_queue,
+    ):
+        audio = np.zeros(40000, dtype=np.float32)
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+        service.dispatch_pipeline_event(conn_id, SpeechStoppedEvent(duration_s=2.5))
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            AudioInputCompletedEvent(
+                audio=audio,
+                audio_sample_rate=16000,
+                audio_duration_s=2.5,
+                turn_id="turn_1",
+                turn_revision=0,
+            ),
+        )
+
+        assert events == []
+        state = service._state(conn_id)
+        assert state.response_pending is True
+        assert state.response_usage.audio_duration_s == 2.5
+        request = text_prompt_queue.get_nowait()
+        assert isinstance(request, GenerateResponseRequest)
+        assert request.runtime_config is runtime_config
+        assert np.array_equal(request.audio, audio)
+        assert request.audio_sample_rate == 16000
+        assert request.turn_id == "turn_1"
+        assert request.turn_revision == 0
+
+        service.response._ensure_response(conn_id)
+        assert state.input_audio_duration_s == 0.0
+        assert state.response_usage.audio_duration_s == 2.5
 
     def test_empty_transcription_completed_emits_event_without_response(
         self,
