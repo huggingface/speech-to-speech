@@ -292,8 +292,12 @@ const settingsForm = /** @type {HTMLFormElement} */ (settingsModal.querySelector
 
 /** @type {HTMLButtonElement} */
 const createVoiceBtn = $("#create-voice-btn");
+/** @type {HTMLButtonElement} */
+const createVoiceTopBtn = $("#create-voice-top-btn");
 /** @type {HTMLDialogElement} */
 const voiceModal = $("#voice-modal");
+/** @type {HTMLElement} */
+const voiceOfflineNote = $("#voice-offline-note");
 /** @type {HTMLButtonElement} */
 const voiceModalClose = $("#voice-modal-close");
 /** @type {HTMLButtonElement} */
@@ -1122,18 +1126,37 @@ settingsForm.addEventListener("submit", (event) => {
 });
 
 // ── Voice cloning ───────────────────────────────────────────────────────────
-// Revealed only when the live call's backend answers the capability probe
-// (GET /api/voices → 200; a non-Qwen backend answers 409 and the feature stays
-// invisible). The popup records a fixed script — the script IS the reference
-// transcript, never typed — or accepts an uploaded clip plus its transcript.
-// Whatever the source, the browser decodes it and re-encodes PCM16 mono WAV so
-// the server never needs a transcoder. On save the voice is stored in the
-// deployment's global library, auto-selected, and applied to the running
-// session via a plain session.update.
+// The popup records a fixed script — the script IS the reference transcript,
+// never typed — or accepts an uploaded clip plus its transcript. Whatever the
+// source, the browser decodes it and re-encodes PCM16 mono WAV so the server
+// never needs a transcoder.
+//
+// Two ways in: the top-bar button is always available; the Settings button is
+// revealed only when the live call's backend answers the capability probe
+// (GET /api/voices → 200; a non-Qwen backend answers 409). With a live
+// cloning-capable call, saving stores the voice in the deployment's global
+// library, auto-selects it, and applies it via a plain session.update.
+// Without one, the voice waits in this tab's pending store (memory only — a
+// reload drops it), is selectable immediately, and is uploaded automatically
+// right after the next successful capability probe.
 
 const PRESET_VOICES = new Set(Array.from(inputVoice.options).map((o) => o.value));
 const VOICE_RECORD_MIN_SEC = 3;
 const VOICE_RECORD_MAX_SEC = 60;
+// Ids of voices created outside a call, waiting for one to upload through.
+// Deliberately colliding with nothing the server hands out (16 hex chars).
+const PENDING_VOICE_PREFIX = "pending:";
+
+/** Voices saved without a live cloning-capable call, keyed by their temporary
+ *  id. Tab memory only: the encoded WAV can't reasonably go to localStorage.
+ *  @type {Map<string, { wav: Blob, name: string, refText: string }>} */
+const pendingVoices = new Map();
+let pendingVoiceSeq = 0;
+
+/** @param {string} voiceId */
+function isPendingVoiceId(voiceId) {
+  return voiceId.startsWith(PENDING_VOICE_PREFIX);
+}
 
 let voiceCloningAvailable = false;
 // One probe per conversation: the client status returns to "connected" after
@@ -1173,8 +1196,45 @@ async function probeVoiceCloning() {
     voiceCloningAvailable = true;
     createVoiceBtn.hidden = false;
     syncClonedVoiceOptions(Array.isArray(json.voices) ? json.voices : []);
+    await flushPendingVoices();
   } catch (err) {
     if (DEBUG) console.debug("[ui] voices probe failed:", err);
+  } finally {
+    syncVoiceOfflineNote();
+  }
+}
+
+/** Upload every voice created outside a call, now that one is up. Each 201
+ *  swaps the temporary option for the server's content-hash id; a failed
+ *  upload keeps its pending entry for the next conversation's flush. */
+async function flushPendingVoices() {
+  for (const [tempId, pending] of Array.from(pendingVoices)) {
+    const url = voicesApiUrl();
+    if (!url || !voiceCloningAvailable) return;
+    const form = new FormData();
+    form.append("audio", pending.wav, "voice.wav");
+    form.append("ref_text", pending.refText);
+    form.append("name", pending.name);
+    try {
+      const res = await fetch(url, { method: "POST", body: form });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.voice_id) {
+        if (DEBUG) console.debug("[ui] pending voice upload failed:", res.status, json);
+        continue;
+      }
+      pendingVoices.delete(tempId);
+      const group = clonedVoicesGroup();
+      Array.from(group.children)
+        .find((o) => /** @type {HTMLOptionElement} */ (o).value === tempId)
+        ?.remove();
+      if (settings.voice === tempId) {
+        applyClonedVoice(json.voice_id, json.name || pending.name);
+      } else {
+        upsertClonedOption(group, json.voice_id, json.name || pending.name);
+      }
+    } catch (err) {
+      if (DEBUG) console.debug("[ui] pending voice upload failed:", err);
+    }
   }
 }
 
@@ -1215,10 +1275,31 @@ function syncClonedVoiceOptions(voices) {
   for (const v of voices) {
     if (v && v.voice_id) upsertClonedOption(group, v.voice_id, v.name || "Cloned voice");
   }
-  if (!PRESET_VOICES.has(settings.voice) && !voices.some((v) => v && v.voice_id === settings.voice)) {
+  for (const [tempId, pending] of pendingVoices) {
+    upsertClonedOption(group, tempId, pendingVoiceLabel(pending.name));
+  }
+  if (
+    !PRESET_VOICES.has(settings.voice) &&
+    !isPendingVoiceId(settings.voice) &&
+    !voices.some((v) => v && v.voice_id === settings.voice)
+  ) {
     upsertClonedOption(group, settings.voice, "Cloned voice");
   }
   if (!group.childElementCount) group.remove();
+  inputVoice.value = settings.voice;
+}
+
+/** @param {string} name */
+function pendingVoiceLabel(name) {
+  return `${name} (pending)`;
+}
+
+// A pending voice never reached the server; its audio lived only in the
+// previous page's memory, so the persisted selection points at nothing.
+// Fall back to the first preset rather than sending a dead id.
+if (isPendingVoiceId(settings.voice)) {
+  settings.voice = /** @type {HTMLOptionElement} */ (inputVoice.options[0]).value;
+  saveSettings(settings);
   inputVoice.value = settings.voice;
 }
 
@@ -1404,17 +1485,28 @@ function applyClonedVoice(voiceId, name) {
   settings.voice = voiceId;
   saveSettings(settings);
   inputVoice.value = voiceId;
-  if (client && LIVE_STATES.has(currentState)) {
+  // A pending id means nothing to the backend; the flush after the next
+  // successful probe swaps it for the real id and re-applies.
+  if (client && LIVE_STATES.has(currentState) && !isPendingVoiceId(voiceId)) {
     client.updateSession({ voice: voiceId });
   }
 }
 
+/** Stash a voice created without a live cloning-capable call. It is selected
+ *  like a server voice and uploaded by the flush on the next connect. */
+function stashPendingVoice(/** @type {Blob} */ wav, /** @type {string} */ name, /** @type {string} */ refText) {
+  const tempId = `${PENDING_VOICE_PREFIX}${++pendingVoiceSeq}`;
+  pendingVoices.set(tempId, { wav, name, refText });
+  applyClonedVoice(tempId, pendingVoiceLabel(name));
+}
+
+/** The in-modal hint that a save will wait in the tab instead of uploading. */
+function syncVoiceOfflineNote() {
+  voiceOfflineNote.hidden = !!(voicesApiUrl() && voiceCloningAvailable);
+}
+
 async function saveVoice() {
   const url = voicesApiUrl();
-  if (!url || !voiceCloningAvailable) {
-    setVoiceError("The call ended — reconnect to create a voice.");
-    return;
-  }
   const name = voiceNameInput.value.trim();
   const source = voiceMode === "record" ? voiceRecordingBlob : (voiceFileInput.files?.[0] ?? null);
   const refText = voiceMode === "record" ? voiceScriptText() : voiceTranscriptInput.value.trim();
@@ -1430,6 +1522,11 @@ async function saveVoice() {
       wav = await encodeVoiceBlobToWav(source);
     } catch {
       setVoiceError("Couldn't decode that audio — try a different file or re-record.");
+      return;
+    }
+    if (!url || !voiceCloningAvailable) {
+      stashPendingVoice(wav, name, refText);
+      voiceModal.close();
       return;
     }
     const form = new FormData();
@@ -1452,11 +1549,17 @@ async function saveVoice() {
   }
 }
 
+function openVoiceModal() {
+  resetVoiceModal();
+  syncVoiceOfflineNote();
+  voiceModal.showModal();
+}
+
 createVoiceBtn.addEventListener("click", () => {
   if (!voiceCloningAvailable) return;
-  resetVoiceModal();
-  voiceModal.showModal();
+  openVoiceModal();
 });
+createVoiceTopBtn.addEventListener("click", openVoiceModal);
 voiceModalClose.addEventListener("click", () => voiceModal.close());
 voiceModal.addEventListener("close", () => stopVoiceRecording());
 voiceModeRecordBtn.addEventListener("click", () => setVoiceMode("record"));
@@ -1911,12 +2014,13 @@ async function teardown() {
   stopJoinCountdown();
   endTrackedSession();
   endQueueTicket();
-  // Voice cloning is session-scoped: the routes need a live session, so the
-  // affordance hides until the next call's probe. Cloned options stay in the
-  // select — the saved selection must survive reconnects.
+  // The voices routes need a live session, so the Settings affordance hides
+  // until the next call's probe. The popup itself survives (creation without
+  // a call stashes locally); only its hint changes. Cloned options stay in
+  // the select — the saved selection must survive reconnects.
   voiceCloningAvailable = false;
   createVoiceBtn.hidden = true;
-  if (voiceModal.open) voiceModal.close();
+  syncVoiceOfflineNote();
   chat.reset({ dismiss: true });
   if (client) {
     try {

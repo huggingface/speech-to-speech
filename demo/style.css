@@ -1735,6 +1735,15 @@ body.cam-on .footer {
   display: none;
 }
 
+.voice-offline-note {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.voice-offline-note[hidden] {
+  display: none;
+}
+
 /* ─── Chat button + badge ────────────────────────────────────────────── */
 
 #chat-btn {
