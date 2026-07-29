@@ -9,6 +9,7 @@ from rich.console import Console
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+from speech_to_speech.utils.mlx_lock import MLXLockContext
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,8 @@ class MLXAudioWhisperSTTHandler(BaseSTTHandler):
 
         try:
             # Pre-warm the model by running a transcription
-            _ = self.model.generate(dummy_audio, verbose=False)
+            with MLXLockContext(handler_name=self.__class__.__name__):
+                _ = self.model.generate(dummy_audio, verbose=False)
             logger.info("Model warmed up and ready")
         except Exception as e:
             logger.warning(f"Warmup failed: {e}")
@@ -110,7 +112,8 @@ class MLXAudioWhisperSTTHandler(BaseSTTHandler):
 
         try:
             # Generate transcription directly using model.generate
-            result = self.model.generate(audio_input, verbose=False, **gen_kwargs)
+            with MLXLockContext(handler_name=self.__class__.__name__):
+                result = self.model.generate(audio_input, verbose=False, **gen_kwargs)
 
             # Extract text from result
             pred_text = result.text.strip() if hasattr(result, "text") else str(result).strip()
