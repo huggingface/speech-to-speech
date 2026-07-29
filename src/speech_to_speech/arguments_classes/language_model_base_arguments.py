@@ -44,3 +44,28 @@ class LanguageModelBaseArguments:
             "instead of synchronously evicting them. Adds an extra LLM call per compaction. Default is True."
         },
     )
+    enable_filler_sentences: bool = field(
+        default=False,
+        metadata={
+            "help": "When True, yield a short filler sentence if the LLM takes longer than filler_sentence_delay_s to generate an initial response. Default is False."
+        },
+    )
+    filler_sentence_delay_s: float = field(
+        default=1.0,
+        metadata={
+            "help": "Delay in seconds before yielding a filler sentence if LLM has not started producing output. Default is 1.0."
+        },
+    )
+    filler_sentences: list[str] = field(
+        default_factory=lambda: [
+            "Hmm, let me see.",
+            "Let me check that for you.",
+            "Give me a moment.",
+            "Thinking about that.",
+            "Let me think about that for a second.",
+        ],
+        metadata={
+            "help": "List of filler sentences to choose from when LLM response generation takes too long."
+        },
+    )
+

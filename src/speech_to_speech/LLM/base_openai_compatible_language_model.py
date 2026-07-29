@@ -29,7 +29,7 @@ from speech_to_speech.LLM.chat import (
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
 from speech_to_speech.LLM.text_prompt import build_text_system_prompt
-from speech_to_speech.LLM.utils import remove_unspeechable, resolve_auto_language
+from speech_to_speech.LLM.utils import remove_unspeechable, resolve_auto_language, run_generator_with_filler_sentences
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
@@ -140,6 +140,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
         compact_history: bool = False,
+        enable_filler_sentences: bool = False,
+        filler_sentence_delay_s: float = 1.0,
+        filler_sentences: list[str] | tuple[str, ...] | None = None,
         **_kwargs: Any,
     ) -> None:
         self.cancel_scope = cancel_scope
@@ -148,6 +151,19 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.stream = stream
         self.stream_batch_sentences = max(1, stream_batch_sentences)
         self.enable_lang_prompt = enable_lang_prompt
+        self.enable_filler_sentences = enable_filler_sentences
+        self.filler_sentence_delay_s = float(filler_sentence_delay_s)
+        self.filler_sentences = (
+            list(filler_sentences)
+            if filler_sentences is not None
+            else [
+                "Hmm, let me see.",
+                "Let me check that for you.",
+                "Give me a moment.",
+                "Thinking about that.",
+                "Let me think about that for a second.",
+            ]
+        )
         self.gen_kwargs = dict(gen_kwargs)
         self.request_timeout_s = float(request_timeout_s)
         self.request_timeout = httpx.Timeout(
@@ -160,6 +176,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self._extra_body = self._build_extra_body(base_url, disable_thinking, reasoning_effort)
         self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
         self.warmup()
+
 
     @staticmethod
     def _is_official_openai(base_url: Optional[str]) -> bool:
@@ -578,7 +595,26 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             speech_stopped_at_s=speech_stopped_at_s,
             wants_audio=wants_audio,
         )
-        yield from self._generate(active_chat, original_chat, turn, optional_kwargs)
+        gen_fn = lambda: self._generate(active_chat, original_chat, turn, optional_kwargs)
+        def is_stale_fn() -> bool:
+            return self._generation_is_stale(turn.gen) or not self._turn_is_latest(turn.turn_id, turn.turn_revision)
+
+        yield from run_generator_with_filler_sentences(
+            gen_fn=gen_fn,
+            enable_filler_sentences=getattr(self, "enable_filler_sentences", False),
+            filler_sentence_delay_s=getattr(self, "filler_sentence_delay_s", 1.0),
+            filler_sentences=getattr(self, "filler_sentences", None),
+            language_code=language_code,
+            runtime_config=runtime_config,
+            response=response,
+            turn_id=turn_id,
+            turn_revision=turn_revision,
+            speech_stopped_at_s=speech_stopped_at_s,
+            gen=gen,
+            is_stale_fn=is_stale_fn,
+        )
+
+
 
     @property
     def timing_log_level(self) -> int:
