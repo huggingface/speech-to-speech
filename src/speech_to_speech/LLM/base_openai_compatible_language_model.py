@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import ipaddress
 import logging
+import os
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 from nltk import sent_tokenize
@@ -80,6 +83,9 @@ class Usage(BaseModel):
 
 
 ProviderEvent = TextDelta | AssistantMessage | ToolCall | Usage
+SerializeFn = Callable[[Chat], Any]
+RequestFn = Callable[[Any, dict[str, Any]], Any]
+EventIteratorFn = Callable[[Any], Iterator[ProviderEvent]]
 
 
 class _Turn(BaseModel):
@@ -160,7 +166,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         )
 
         self.user_role = user_role
-        if api_key is None and base_url is not None and not self._is_official_openai(base_url):
+        if (
+            api_key is None
+            and not os.environ.get("OPENAI_API_KEY")
+            and base_url is not None
+            and self._is_local_base_url(base_url)
+        ):
             api_key = "none"
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self._extra_body = self._build_extra_body(base_url, disable_thinking, reasoning_effort)
@@ -178,6 +189,19 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         if base_url is None:
             return False
         return base_url.rstrip("/") == "https://api.openai.com/v1"
+
+    @staticmethod
+    def _is_local_base_url(base_url: str) -> bool:
+        """Whether *base_url* points at localhost or a loopback IP address."""
+        host = urlparse(base_url).hostname
+        if host is None:
+            return False
+        if host.rstrip(".").lower() == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return False
 
     @classmethod
     def _build_extra_body(
@@ -451,11 +475,15 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         original_chat: Chat,
         turn: _Turn,
         optional_kwargs: dict[str, Any],
+        *,
+        serialize_fn: SerializeFn | None = None,
+        request_fn: RequestFn | None = None,
+        event_iterator_fn: EventIteratorFn | None = None,
     ) -> Iterator[LLMOut]:
         api_response: Any = None
         state = _GenState()
         error_message: str | None = None
-        api_input = self._serialize(active_chat)
+        api_input = (serialize_fn or self._serialize)(active_chat)
         # Images the model actually sees this turn; only these are stripped on
         # write-back, so an image a fast client injects mid-generation for the
         # next turn survives (it is not in this serialized snapshot).
@@ -468,9 +496,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         try:
             if error_message is None:
-                api_response = self._request(api_input, optional_kwargs)
+                api_response = (request_fn or self._request)(api_input, optional_kwargs)
             if api_response is not None:
-                events = self._iter_events(api_response)
+                events = (event_iterator_fn or self._iter_events)(api_response)
                 if self.stream:
                     yield from self._consume_streaming(events, state, turn)
                 else:

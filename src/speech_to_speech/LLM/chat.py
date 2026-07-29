@@ -382,8 +382,8 @@ class Chat:
                 messages.append(TransformersSystemMessage(content=text))
             for item in self.buffer:
                 if isinstance(item, RealtimeConversationItemUserMessage):
-                    has_images = any(p.type == "input_image" for p in item.content)
-                    if has_images:
+                    has_media = any(p.type in {"input_image", "input_audio"} for p in item.content)
+                    if has_media:
                         messages.append(
                             TransformersUserMessage(content=[p.model_dump(exclude_none=True) for p in item.content])
                         )
@@ -428,44 +428,6 @@ class Chat:
                         )
                     )
             return [m.model_dump() for m in messages]
-
-    def to_chat_completions_chat(self) -> list[dict[str, Any]]:
-        """Serialize the chat for OpenAI-compatible Chat Completions."""
-        with self._lock:
-            messages: list[dict[str, Any]] = []
-            if self.init_chat_message:
-                text = " ".join(p.text for p in self.init_chat_message.content if p.text)
-                if text:
-                    messages.append({"role": "system", "content": text})
-            for item in self.buffer:
-                if isinstance(item, RealtimeConversationItemUserMessage):
-                    content: list[dict[str, Any]] = []
-                    for user_part in item.content:
-                        if user_part.type == "input_text" and user_part.text is not None:
-                            content.append({"type": "text", "text": user_part.text})
-                        elif user_part.type == "input_image" and user_part.image_url is not None:
-                            content.append({"type": "image_url", "image_url": {"url": user_part.image_url}})
-                        elif user_part.type == "input_audio" and user_part.audio is not None:
-                            content.append(
-                                {
-                                    "type": "input_audio",
-                                    "input_audio": {
-                                        "data": user_part.audio,
-                                        "format": "wav",
-                                    },
-                                }
-                            )
-                    if content:
-                        messages.append({"role": "user", "content": content})
-                elif isinstance(item, RealtimeConversationItemAssistantMessage):
-                    text = " ".join(p.text for p in item.content if p.text)
-                    if text:
-                        messages.append({"role": "assistant", "content": text})
-                elif isinstance(item, RealtimeConversationItemFunctionCall):
-                    logger.debug("Skipping function_call in chat completions serialization")
-                elif isinstance(item, RealtimeConversationItemFunctionCallOutput):
-                    logger.debug("Skipping function_call_output in chat completions serialization")
-            return messages
 
     def copy(self) -> Chat:
         """Return a shallow snapshot safe for concurrent read access."""
@@ -525,13 +487,6 @@ class Chat:
                     if only_ids is not None and item.id not in only_ids:
                         continue
                     item.content = [p for p in item.content if p.type != "input_image"]
-
-    def strip_audio(self) -> None:
-        """Remove all audio content parts from user messages in the buffer."""
-        with self._lock:
-            for item in self.buffer:
-                if isinstance(item, RealtimeConversationItemUserMessage):
-                    item.content = [p for p in item.content if p.type != "input_audio"]
 
     # ── Compaction internals ──────────────────────────────────
 

@@ -82,6 +82,162 @@ def _to_chat_tool_choice(tool_choice: Any) -> ChatCompletionToolChoiceOptionPara
     return cast("ChatCompletionToolChoiceOptionParam", tool_choice)
 
 
+def _build_chat_optional_kwargs(req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:
+    """Build Chat Completions tool arguments from the Responses-style session config."""
+    optional_kwargs: dict[str, Any] = {}
+    chat_tools = _to_chat_tools(req_tools)
+    if chat_tools is not None:
+        optional_kwargs["tools"] = chat_tools
+    if req_tool_choice is not None:
+        optional_kwargs["tool_choice"] = _to_chat_tool_choice(req_tool_choice)
+    return optional_kwargs
+
+
+def _to_chat_content_part(part: dict[str, Any]) -> ChatCompletionContentPartParam:
+    """Convert one Realtime/transformers content part to Chat Completions shape."""
+    ptype = part.get("type")
+    if ptype == "input_text":
+        return ChatCompletionContentPartTextParam(type="text", text=part.get("text") or "")
+    if ptype == "input_image":
+        raw_url: Any = part.get("image_url")
+        if isinstance(raw_url, dict):
+            image_url = cast("ImageURL", raw_url)
+        else:
+            image_url = ImageURL(url=raw_url)
+            detail = part.get("detail")
+            if detail is not None:
+                image_url["detail"] = detail
+        return ChatCompletionContentPartImageParam(type="image_url", image_url=image_url)
+    if ptype == "input_audio":
+        return cast(
+            "ChatCompletionContentPartParam",
+            {
+                "type": "input_audio",
+                "input_audio": {
+                    "data": part.get("audio") or "",
+                    "format": "wav",
+                },
+            },
+        )
+    return cast("ChatCompletionContentPartParam", part)
+
+
+def _chat_messages(chat: Chat) -> list[dict[str, Any]]:
+    """Serialise chat history, including media and tool messages, for Chat Completions."""
+    messages = chat.to_transformers_chat()
+    for message in messages:
+        for tool_call in message.get("tool_calls") or []:
+            fn = tool_call.get("function")
+            if fn is not None and not isinstance(fn.get("arguments"), str):
+                fn["arguments"] = json.dumps(fn.get("arguments") or {}, ensure_ascii=False)
+        content = message.get("content")
+        if isinstance(content, list):
+            message["content"] = [_to_chat_content_part(part) for part in content]
+        if message.get("role") == "tool":
+            message.pop("name", None)
+    return messages
+
+
+def _request_chat_completions(
+    *,
+    client: Any,
+    model_name: str,
+    messages: list[dict[str, Any]],
+    stream: bool,
+    extra_body: dict[str, Any] | None,
+    timeout: Any,
+    optional_kwargs: dict[str, Any],
+) -> Any:
+    """Issue a Chat Completions request with consistent streaming usage accounting."""
+    create_kwargs = dict(optional_kwargs)
+    if stream:
+        create_kwargs["stream_options"] = {"include_usage": True}
+    return client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        stream=stream,
+        extra_body=extra_body,
+        timeout=timeout,
+        **create_kwargs,
+    )
+
+
+def _tool_calls_from_accum(tool_accum: dict[int, dict[str, str]]) -> Iterator[ToolCall]:
+    """Turn accumulated Chat Completions tool deltas into normalized tool-call events."""
+    for index in sorted(tool_accum):
+        entry = tool_accum[index]
+        if not entry["name"]:
+            continue
+        yield ToolCall(
+            item=ResponseFunctionToolCall(
+                type="function_call",
+                name=entry["name"],
+                arguments=entry["args"] or "{}",
+                call_id=_generate_id("call"),
+                id=_generate_id("fc"),
+                status="completed",
+            )
+        )
+
+
+def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Iterator[ProviderEvent]:
+    """Normalize a streaming Chat Completions response."""
+    tool_accum: dict[int, dict[str, str]] = {}
+    usage: Usage | None = None
+    raw_text = ""
+    for chunk in api_response:
+        if chunk.usage is not None:
+            usage = Usage(
+                input_tokens=chunk.usage.prompt_tokens or 0,
+                output_tokens=chunk.usage.completion_tokens or 0,
+            )
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if delta.tool_calls:
+            for tool_call in delta.tool_calls:
+                entry = tool_accum.setdefault(tool_call.index, {"name": "", "args": "", "id": ""})
+                if tool_call.id:
+                    entry["id"] = tool_call.id
+                if tool_call.function is not None:
+                    if tool_call.function.name:
+                        entry["name"] = tool_call.function.name
+                    if tool_call.function.arguments:
+                        entry["args"] += tool_call.function.arguments
+        text_piece = delta.content or getattr(delta, "refusal", None)
+        if text_piece:
+            raw_text += text_piece
+            yield TextDelta(text=text_piece)
+
+    if raw_text.strip():
+        yield AssistantMessage(content=[AssistantContent(type="output_text", text=raw_text)])
+    yield from _tool_calls_from_accum(tool_accum)
+    if usage is not None:
+        yield usage
+
+
+def _iter_chat_response_events(api_response: Any) -> Iterator[ProviderEvent]:
+    """Normalize a non-streaming Chat Completions response."""
+    usage = api_response.usage
+    if usage:
+        yield Usage(input_tokens=usage.prompt_tokens or 0, output_tokens=usage.completion_tokens or 0)
+    message = api_response.choices[0].message if api_response.choices else None
+    if message is None:
+        return
+    raw_content = message.content or getattr(message, "refusal", None)
+    if raw_content:
+        yield AssistantMessage(content=[AssistantContent(type="output_text", text=raw_content)])
+        yield TextDelta(text=raw_content)
+    tool_accum: dict[int, dict[str, str]] = {}
+    for tool_call in message.tool_calls or []:
+        tool_accum[len(tool_accum)] = {
+            "name": tool_call.function.name or "",
+            "args": tool_call.function.arguments or "",
+            "id": tool_call.id or "",
+        }
+    yield from _tool_calls_from_accum(tool_accum)
+
+
 class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
     """LLM handler that talks to an OpenAI-compatible ``/v1/chat/completions`` server.
 
@@ -130,51 +286,11 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
 
     @staticmethod
     def _to_chat_content_part(part: dict[str, Any]) -> ChatCompletionContentPartParam:
-        """Convert one transformers content part to Chat-Completions shape.
-
-        ``to_transformers_chat`` keeps Realtime-style parts (``input_text`` /
-        ``input_image`` with a bare-string ``image_url``). The Chat Completions
-        HTTP API instead wants ``{type:"text", text}`` and
-        ``{type:"image_url", image_url:{url, detail}}``. Unknown parts pass through.
-        """
-        ptype = part.get("type")
-        if ptype == "input_text":
-            return ChatCompletionContentPartTextParam(type="text", text=part.get("text") or "")
-        if ptype == "input_image":
-            raw_url: Any = part.get("image_url")
-            if isinstance(raw_url, dict):
-                image_url = cast("ImageURL", raw_url)
-            else:
-                image_url = ImageURL(url=raw_url)
-                detail = part.get("detail")
-                if detail is not None:
-                    image_url["detail"] = detail
-            return ChatCompletionContentPartImageParam(type="image_url", image_url=image_url)
-        return cast("ChatCompletionContentPartParam", part)
+        return _to_chat_content_part(part)
 
     @classmethod
     def _chat_messages(cls, chat: Chat) -> list[dict[str, Any]]:
-        """Serialise the chat for the Chat Completions API.
-
-        ``Chat.to_transformers_chat`` targets HuggingFace ``apply_chat_template``,
-        so two shapes need fixing up for the OpenAI Chat Completions HTTP API:
-        tool-call ``arguments`` must be a JSON *string* (not a parsed object), and
-        multimodal ``content`` parts must use the Chat Completions ``text`` /
-        ``image_url`` shape rather than the Realtime ``input_text`` /
-        ``input_image`` shape.
-        """
-        messages = chat.to_transformers_chat()
-        for message in messages:
-            for tool_call in message.get("tool_calls") or []:
-                fn = tool_call.get("function")
-                if fn is not None and not isinstance(fn.get("arguments"), str):
-                    fn["arguments"] = json.dumps(fn.get("arguments") or {}, ensure_ascii=False)
-            content = message.get("content")
-            if isinstance(content, list):
-                message["content"] = [cls._to_chat_content_part(p) for p in content]
-            if message.get("role") == "tool":
-                message.pop("name", None)
-        return messages
+        return _chat_messages(chat)
 
     # ── base hooks ──────────────────────────────────────────────────────────--
 
@@ -182,111 +298,28 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         return self._chat_messages(active_chat)
 
     def _build_optional_kwargs(self, req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:
-        optional_kwargs: dict[str, Any] = {}
-        chat_tools = _to_chat_tools(req_tools)
-        if chat_tools is not None:
-            optional_kwargs["tools"] = chat_tools
-        if req_tool_choice is not None:
-            optional_kwargs["tool_choice"] = _to_chat_tool_choice(req_tool_choice)
-        return optional_kwargs
+        return _build_chat_optional_kwargs(req_tools, req_tool_choice)
 
     def _request(self, api_input: list[dict[str, Any]], optional_kwargs: dict[str, Any]) -> Any:
-        create_kwargs: dict[str, Any] = dict(optional_kwargs)
-        if self.stream:
-            create_kwargs["stream_options"] = {"include_usage": True}
-        return self.client.chat.completions.create(
-            model=self.model_name,
-            messages=api_input,  # type: ignore[arg-type]  # runtime dicts match the Chat Completions message shape
+        return _request_chat_completions(
+            client=self.client,
+            model_name=self.model_name,
+            messages=api_input,
             stream=self.stream,
             extra_body=self._extra_body,
             timeout=self.request_timeout,
-            **create_kwargs,
+            optional_kwargs=optional_kwargs,
         )
 
     def _iter_stream_events(self, api_response: Stream[ChatCompletionChunk]) -> Iterator[ProviderEvent]:
-        # Accumulate streamed tool-call deltas, keyed by their stream index, and the
-        # raw assistant text, then emit assistant message + tool calls + usage once
-        # the stream is exhausted.
-        tool_accum: dict[int, dict[str, str]] = {}
-        usage: Usage | None = None
-        raw_text = ""
-        for chunk in api_response:
-            # Usage-only trailing chunk (choices == []) when include_usage is set.
-            if chunk.usage is not None:
-                usage = Usage(
-                    input_tokens=chunk.usage.prompt_tokens or 0, output_tokens=chunk.usage.completion_tokens or 0
-                )
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if delta.tool_calls:
-                for tc in delta.tool_calls:
-                    entry = tool_accum.setdefault(tc.index, {"name": "", "args": "", "id": ""})
-                    if tc.id:
-                        entry["id"] = tc.id
-                    if tc.function is not None:
-                        if tc.function.name:
-                            entry["name"] = tc.function.name
-                        if tc.function.arguments:
-                            entry["args"] += tc.function.arguments
-            # A refusal streams as `delta.refusal` with `delta.content` None;
-            # surface it as assistant text so it is spoken and stored.
-            text_piece = delta.content or getattr(delta, "refusal", None)
-            if text_piece:
-                raw_text += text_piece
-                yield TextDelta(text=text_piece)
-
-        if raw_text.strip():
-            yield AssistantMessage(content=[AssistantContent(type="output_text", text=raw_text)])
-        yield from self._tool_calls_from_accum(tool_accum)
-        if usage is not None:
-            yield usage
+        yield from _iter_chat_stream_events(api_response)
 
     def _iter_response_events(self, api_response: Any) -> Iterator[ProviderEvent]:
-        usage = api_response.usage
-        if usage:
-            yield Usage(input_tokens=usage.prompt_tokens or 0, output_tokens=usage.completion_tokens or 0)
-        # A valid-but-empty response (e.g. content filter) returns no choices;
-        # complete cleanly with no assistant text rather than raising IndexError.
-        message = api_response.choices[0].message if api_response.choices else None
-        if message is None:
-            return
-        # A refusal arrives as `message.refusal` with `message.content` None; treat
-        # it as assistant text so it is spoken and stored.
-        raw_content = message.content or getattr(message, "refusal", None)
-        if raw_content:
-            yield AssistantMessage(content=[AssistantContent(type="output_text", text=raw_content)])
-            yield TextDelta(text=raw_content)
-        tool_accum: dict[int, dict[str, str]] = {}
-        for tc in message.tool_calls or []:
-            tool_accum[len(tool_accum)] = {
-                "name": tc.function.name or "",
-                "args": tc.function.arguments or "",
-                "id": tc.id or "",
-            }
-        yield from self._tool_calls_from_accum(tool_accum)
+        yield from _iter_chat_response_events(api_response)
 
     @staticmethod
     def _tool_calls_from_accum(tool_accum: dict[int, dict[str, str]]) -> Iterator[ToolCall]:
-        """Turn accumulated tool-call deltas into ToolCall events.
-
-        IDs are regenerated (mirroring the Responses handler) so the rest of the
-        pipeline pairs each call_id with its function_call_output consistently.
-        """
-        for index in sorted(tool_accum):
-            entry = tool_accum[index]
-            if not entry["name"]:
-                continue
-            yield ToolCall(
-                item=ResponseFunctionToolCall(
-                    type="function_call",
-                    name=entry["name"],
-                    arguments=entry["args"] or "{}",
-                    call_id=_generate_id("call"),
-                    id=_generate_id("fc"),
-                    status="completed",
-                )
-            )
+        yield from _tool_calls_from_accum(tool_accum)
 
     def on_session_end(self) -> None:
         logger.debug("Chat Completions API language model session state reset")

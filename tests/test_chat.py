@@ -761,47 +761,7 @@ class TestToTransformersChat:
 
 
 # ===================================================================
-# 9. TestToChatCompletionsChat
-# ===================================================================
-
-
-class TestToChatCompletionsChat:
-    def test_audio_message_serializes_to_llama_cpp_shape(self):
-        chat = Chat(size=5)
-        chat.init_chat(_system("Be concise."))
-        chat.add_item(make_user_audio_message("abc123"))
-        chat.add_item(_assistant("Yes."))
-
-        result = chat.to_chat_completions_chat()
-
-        assert result == [
-            {"role": "system", "content": "Be concise."},
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_audio",
-                        "input_audio": {
-                            "data": "abc123",
-                            "format": "wav",
-                        },
-                    }
-                ],
-            },
-            {"role": "assistant", "content": "Yes."},
-        ]
-
-    def test_strip_audio_removes_audio_from_future_serialization(self):
-        chat = Chat(size=5)
-        chat.add_item(make_user_audio_message("abc123"))
-        chat.strip_audio()
-
-        assert chat.to_chat_completions_chat() == []
-        assert chat._user_turn_count == 1
-
-
-# ===================================================================
-# 10. TestCopyAndReset
+# 9. TestCopyAndReset
 # ===================================================================
 
 

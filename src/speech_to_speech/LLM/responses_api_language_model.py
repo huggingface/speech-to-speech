@@ -6,11 +6,9 @@ import logging
 import time
 import wave
 from collections.abc import Iterator
-from typing import Any, Optional, cast
+from typing import Any
 
-import httpx
 import numpy as np
-from nltk import sent_tokenize
 from openai import Stream
 from openai.types.realtime.realtime_conversation_item_assistant_message import (
     Content as AssistantContent,
@@ -31,22 +29,31 @@ from speech_to_speech.LLM.base_openai_compatible_language_model import (
     TextDelta,
     ToolCall,
     Usage,
+    _Turn,
 )
 from speech_to_speech.LLM.chat import (
     Chat,
     ChatItemError,
     build_active_chat,
-    make_assistant_message,
     make_user_audio_message,
     make_user_message,
 )
+from speech_to_speech.LLM.chat_completions_language_model import (
+    _build_chat_optional_kwargs,
+    _chat_messages,
+    _iter_chat_response_events,
+    _iter_chat_stream_events,
+    _request_chat_completions,
+)
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn
-from speech_to_speech.LLM.utils import remove_unspeechable, resolve_auto_language
+from speech_to_speech.LLM.utils import resolve_auto_language
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
-from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk, TokenUsage
+from speech_to_speech.pipeline.messages import EndOfResponse
 from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
 
 logger = logging.getLogger(__name__)
+
+AUDIO_INPUT_HISTORY_PLACEHOLDER = "[User audio input]"
 
 
 class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
@@ -115,18 +122,6 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
                 wav_file.writeframes(pcm.tobytes())
             return base64.b64encode(wav_io.getvalue()).decode("ascii")
 
-    @staticmethod
-    def _chat_usage_tokens(usage: Any) -> tuple[int, int]:
-        if usage is None:
-            return 0, 0
-        input_tokens = getattr(usage, "prompt_tokens", None)
-        if input_tokens is None:
-            input_tokens = getattr(usage, "input_tokens", 0)
-        output_tokens = getattr(usage, "completion_tokens", None)
-        if output_tokens is None:
-            output_tokens = getattr(usage, "output_tokens", 0)
-        return int(input_tokens or 0), int(output_tokens or 0)
-
     def _audio_chat_kwargs(self, response: Any, optional_kwargs: dict[str, Any]) -> dict[str, Any]:
         kwargs = dict(optional_kwargs)
         max_tokens = getattr(response, "max_output_tokens", None) if response is not None else None
@@ -134,172 +129,19 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         kwargs.setdefault("temperature", self.audio_temperature)
         return kwargs
 
-    def _generate_audio_chat_completions(
+    def _request_audio_chat_completions(
         self,
-        active_chat: Chat,
-        original_chat: Chat,
-        request_audio: np.ndarray,
-        audio_sample_rate: int,
-        language_code: Optional[str],
-        gen: int | None,
-        runtime_config: Any,
-        response: Any,
+        api_input: list[dict[str, Any]],
         optional_kwargs: dict[str, Any],
-        turn_id: str | None,
-        turn_revision: int | None,
-        speech_stopped_at_s: float | None,
-    ) -> Iterator[LLMOut]:
-        audio_message = make_user_audio_message(self._audio_to_wav_base64(request_audio, audio_sample_rate))
-        active_chat.add_item(audio_message)
-        consumed_image_ids = active_chat.image_message_ids()
-
-        api_response: Any = None
-        clean_text = ""
-        input_tokens = 0
-        output_tokens = 0
-        cancelled = False
-        error_message: str | None = None
-        try:
-            api_response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=cast(Any, active_chat.to_chat_completions_chat()),
-                stream=self.stream,
-                extra_body=self._extra_body,
-                timeout=self.request_timeout,
-                **self._audio_chat_kwargs(response, optional_kwargs),
-            )
-            if self.stream:
-                printable_text = ""
-                sentence_batch: list[str] = []
-                for raw_event in api_response:
-                    if self._generation_is_stale(gen) or not self._turn_is_latest(turn_id, turn_revision):
-                        logger.info("Audio LLM generation cancelled (interruption)")
-                        cancelled = True
-                        break
-                    usage = getattr(raw_event, "usage", None)
-                    if usage:
-                        input_tokens, output_tokens = self._chat_usage_tokens(usage)
-                    if not getattr(raw_event, "choices", None):
-                        continue
-                    delta = raw_event.choices[0].delta
-                    new_text = remove_unspeechable(getattr(delta, "content", None) or "")
-                    if not new_text:
-                        continue
-                    clean_text += new_text
-                    printable_text += new_text
-                    sentences = sent_tokenize(printable_text)
-                    if len(sentences) > 1:
-                        for sentence in sentences[:-1]:
-                            sentence_batch.append(sentence)
-                            if len(sentence_batch) >= self.stream_batch_sentences:
-                                if not self._turn_output_allowed(turn_id, turn_revision):
-                                    logger.info("Audio LLM generation cancelled (stale speculative turn)")
-                                    cancelled = True
-                                    break
-                                yield LLMResponseChunk(
-                                    text=" ".join(sentence_batch),
-                                    language_code=language_code,
-                                    runtime_config=runtime_config,
-                                    response=response,
-                                    turn_id=turn_id,
-                                    turn_revision=turn_revision,
-                                    speech_stopped_at_s=speech_stopped_at_s,
-                                    cancel_generation=gen,
-                                )
-                                sentence_batch = []
-                        if cancelled:
-                            break
-                        printable_text = sentences[-1]
-                if not cancelled:
-                    if printable_text.strip():
-                        sentence_batch.append(printable_text.strip())
-                    remaining = " ".join(sentence_batch)
-                    if (
-                        remaining
-                        and not self._generation_is_stale(gen)
-                        and self._turn_output_allowed(turn_id, turn_revision)
-                    ):
-                        yield LLMResponseChunk(
-                            text=remaining,
-                            language_code=language_code,
-                            runtime_config=runtime_config,
-                            response=response,
-                            turn_id=turn_id,
-                            turn_revision=turn_revision,
-                            speech_stopped_at_s=speech_stopped_at_s,
-                            cancel_generation=gen,
-                        )
-            else:
-                usage = getattr(api_response, "usage", None)
-                input_tokens, output_tokens = self._chat_usage_tokens(usage)
-                if self._generation_is_stale(gen) or not self._turn_is_latest(turn_id, turn_revision):
-                    logger.info("Audio LLM generation cancelled (interruption)")
-                    cancelled = True
-                elif getattr(api_response, "choices", None):
-                    content = api_response.choices[0].message.content or ""
-                    clean_text = remove_unspeechable(content).strip()
-                    if clean_text and self._turn_output_allowed(turn_id, turn_revision):
-                        yield LLMResponseChunk(
-                            text=clean_text,
-                            language_code=language_code,
-                            runtime_config=runtime_config,
-                            response=response,
-                            turn_id=turn_id,
-                            turn_revision=turn_revision,
-                            speech_stopped_at_s=speech_stopped_at_s,
-                            cancel_generation=gen,
-                        )
-        except httpx.ReadTimeout:
-            logger.warning(
-                "OpenAI-compatible audio chat read timed out after %.1fs; ending the current response",
-                self.request_timeout_s,
-            )
-            cancelled = True
-            if not self._generation_is_stale(gen) and self._turn_output_allowed(turn_id, turn_revision):
-                yield LLMResponseChunk(
-                    text="Wow I'm a bit slow today, could you repeat that?",
-                    runtime_config=runtime_config,
-                    response=response,
-                    turn_id=turn_id,
-                    turn_revision=turn_revision,
-                    speech_stopped_at_s=speech_stopped_at_s,
-                    cancel_generation=gen,
-                )
-        except Exception as exc:
-            logger.exception("Audio LLM generation failed; ending the current response")
-            error_message = f"Language model generation failed: {exc}"
-        finally:
-            if api_response is not None and hasattr(api_response, "close"):
-                try:
-                    api_response.close()
-                except Exception:
-                    pass
-
-        if (
-            error_message is None
-            and not cancelled
-            and not self._generation_is_stale(gen)
-            and self._turn_output_allowed(turn_id, turn_revision)
-        ):
-            if not is_out_of_band(response):
-                original_chat.add_item(audio_message)
-                if clean_text.strip():
-                    original_chat.add_item(make_assistant_message(clean_text.strip()))
-                original_chat.strip_audio()
-                original_chat.strip_images(consumed_image_ids)
-                original_chat.trim_if_needed(self.compactor)
-            if input_tokens or output_tokens:
-                yield TokenUsage(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    turn_id=turn_id,
-                    turn_revision=turn_revision,
-                )
-        yield EndOfResponse(
-            turn_id=turn_id,
-            turn_revision=turn_revision,
-            cancel_generation=gen,
-            error=error_message,
+    ) -> Any:
+        return _request_chat_completions(
+            client=self.client,
+            model_name=self.model_name,
+            messages=api_input,
+            stream=self.stream,
+            extra_body=self._extra_body,
+            timeout=self.request_timeout,
+            optional_kwargs=optional_kwargs,
         )
 
     # ── base hooks ──────────────────────────────────────────────────────────--
@@ -405,21 +247,36 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         if lang_name and self.enable_lang_prompt:
             active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
 
-        optional_kwargs = self._build_optional_kwargs(req_tools, req_tool_choice)
+        audio_message = active_chat.add_item(
+            make_user_audio_message(self._audio_to_wav_base64(request.audio, request.audio_sample_rate))
+        )
+        if not is_out_of_band(response):
+            history_message = make_user_message(AUDIO_INPUT_HISTORY_PLACEHOLDER)
+            history_message.id = audio_message.id
+            original_chat.add_item(history_message)
+
+        optional_kwargs = _build_chat_optional_kwargs(req_tools, req_tool_choice)
+        optional_kwargs = self._audio_chat_kwargs(response, optional_kwargs)
         gen = self.cancel_scope.generation if self.cancel_scope else None
-        yield from self._generate_audio_chat_completions(
+        turn = _Turn(
+            language_code=language_code,
+            gen=gen,
+            runtime_config=runtime_config,
+            response=response,
+            turn_id=turn_id,
+            turn_revision=turn_revision,
+            speech_stopped_at_s=speech_stopped_at_s,
+            wants_audio=response_wants_audio(response),
+        )
+        event_iterator_fn = _iter_chat_stream_events if self.stream else _iter_chat_response_events
+        yield from self._generate(
             active_chat,
             original_chat,
-            request.audio,
-            request.audio_sample_rate,
-            language_code,
-            gen,
-            runtime_config,
-            response,
+            turn,
             optional_kwargs,
-            turn_id,
-            turn_revision,
-            speech_stopped_at_s,
+            serialize_fn=_chat_messages,
+            request_fn=self._request_audio_chat_completions,
+            event_iterator_fn=event_iterator_fn,
         )
 
     def on_session_end(self) -> None:

@@ -27,7 +27,7 @@ from openai.types.responses import ResponseFunctionToolCall
 import speech_to_speech.LLM.base_openai_compatible_language_model as base_mod
 import speech_to_speech.LLM.chat_completions_language_model as ccm
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.LLM.chat import Chat, make_user_message
+from speech_to_speech.LLM.chat import Chat, make_user_audio_message, make_user_message
 from speech_to_speech.LLM.chat_completions_language_model import (
     ChatCompletionsApiModelHandler,
     _to_chat_tool_choice,
@@ -265,6 +265,28 @@ def test_chat_messages_converts_image_and_text_parts_to_chat_shape():
     assert parts["image_url"]["image_url"] == {"url": "https://example.com/img.png", "detail": "auto"}
     # No Realtime-shaped parts leak through.
     assert all(p["type"] not in ("input_text", "input_image") for p in user["content"])
+
+
+def test_chat_messages_converts_audio_to_llama_cpp_shape():
+    chat = Chat(10)
+    chat.add_item(make_user_audio_message("abc123"))
+
+    messages = ChatCompletionsApiModelHandler._chat_messages(chat)
+
+    assert messages == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": "abc123",
+                        "format": "wav",
+                    },
+                }
+            ],
+        }
+    ]
 
 
 # ── Streaming / non-streaming parse tests ─────────────────────────────────────
