@@ -149,3 +149,61 @@ if (JSON.stringify(turnEvents) !== JSON.stringify(expectedTurns)) {
 }
 """
     )
+
+
+def test_voice_bubble_reaper_reschedules_shortened_deadline():
+    _run_node(
+        """
+const { ChatView } = await import("./demo/ui/chat.js");
+const bubble = {};
+const view = Object.create(ChatView.prototype);
+view._bubbleExpiry = new WeakMap();
+view._reaperHandle = 0;
+view._bubbleStack = {
+  querySelector() { return bubble; },
+};
+let reapCount = 0;
+view._reapBubbles = () => {
+  view._reaperHandle = 0;
+  reapCount += 1;
+};
+
+// Reproduce the listening -> sending transition: the second, shorter deadline
+// must replace the already scheduled long fail-safe.
+view._bumpDismiss(bubble, 1000);
+await new Promise((resolve) => setTimeout(resolve, 10));
+view._bumpDismiss(bubble, 40);
+await new Promise((resolve) => setTimeout(resolve, 100));
+
+if (reapCount !== 1) {
+  throw new Error(`shortened deadline did not reschedule reaper: ${reapCount}`);
+}
+"""
+    )
+
+
+def test_assistant_activity_dismisses_pending_voice_bubble():
+    _run_node(
+        """
+const { ChatView } = await import("./demo/ui/chat.js");
+const view = Object.create(ChatView.prototype);
+const bubble = {
+  isConnected: true,
+  classList: {
+    contains(name) { return name === "voice"; },
+  },
+};
+view._activeUserBubble = bubble;
+view._bubbleExpiry = new WeakMap();
+view._reaperHandle = 0;
+view._bubbleStack = {
+  querySelector() { return null; },
+};
+let dismissed = null;
+view._dismissBubble = (element) => { dismissed = element; };
+
+view.onAssistantActivity();
+if (dismissed !== bubble) throw new Error("pending voice bubble was not dismissed");
+if (view._activeUserBubble !== null) throw new Error("active voice bubble was not released");
+"""
+    )

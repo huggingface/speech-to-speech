@@ -246,6 +246,25 @@ export class ChatView {
   }
 
   /**
+   * Point the shared reaper at the current oldest bubble. This must run when an
+   * expiry moves earlier as well as later: a listening bubble starts with a
+   * long fail-safe, then gets a much shorter deadline once speech stops.
+   */
+  _scheduleBubbleReaper() {
+    if (this._reaperHandle) clearTimeout(this._reaperHandle);
+    this._reaperHandle = 0;
+    const oldest = /** @type {HTMLElement | null} */ (
+      this._bubbleStack.querySelector(".bubble:not(.out)")
+    );
+    if (!oldest) return;
+    const expiry = this._bubbleExpiry.get(oldest) ?? Date.now();
+    this._reaperHandle = setTimeout(
+      () => this._reapBubbles(),
+      Math.max(50, expiry - Date.now()),
+    );
+  }
+
+  /**
    * (Re)arm a bubble's auto-dismiss by pushing its expiry out by `delay`.
    * Calling it again resets the countdown — so a bubble that keeps updating
    * stays on screen and only fades once it goes quiet. Removal is ordered by the
@@ -254,7 +273,20 @@ export class ChatView {
    */
   _bumpDismiss(el, delay = 4000) {
     this._bubbleExpiry.set(el, Date.now() + delay);
-    if (!this._reaperHandle) this._reaperHandle = setTimeout(() => this._reapBubbles(), delay);
+    this._scheduleBubbleReaper();
+  }
+
+  /**
+   * Remove a pending voice placeholder once the assistant has visibly started
+   * answering. A transcript can arrive before audible output, while direct
+   * audio models may only trigger the ai-speaking status, so both call here.
+   */
+  onAssistantActivity() {
+    const bubble = this._activeUserBubble;
+    if (!bubble?.isConnected || !bubble.classList.contains("voice")) return;
+    this._dismissBubble(bubble);
+    this._activeUserBubble = null;
+    this._scheduleBubbleReaper();
   }
 
   // ── History ───────────────────────────────────────────────────────────────
@@ -403,6 +435,9 @@ export class ChatView {
       && this._activeUserBubble?.isConnected
       && !this._activeUserBubble.classList.contains("out");
     if (!reusable) {
+      if (this._activeUserBubble?.classList.contains("voice")) {
+        this._dismissBubble(this._activeUserBubble);
+      }
       this._activeUserBubble = this._spawnVoiceBubble("listening");
       this._activeUserItemId = id;
     } else if (this._activeUserBubble.classList.contains("voice")) {
@@ -467,6 +502,7 @@ export class ChatView {
       this._bumpDismiss(this._activeUserBubble, 6000);
       this._markUnread();
     } else if (d.role === "assistant") {
+      this.onAssistantActivity();
       // Assistant transcript arrives once, as the full text, keyed by
       // response_id so a cancelled speculative response can be removed later. A
       // missing id gets a unique key so two id-less replies never collide.
@@ -557,6 +593,7 @@ export class ChatView {
   onResponseFinished(detail) {
     const { responseId, status, audible, transcript } = detail;
     if (DEBUG) console.debug(`[ui] response-finished resp=${responseId} status=${status} audible=${audible} known=${this._asstByResp.has(responseId)}`);
+    this.onAssistantActivity();
     // Without an id we can't target a specific response; the bubble will
     // auto-dismiss on its own timer regardless.
     if (!responseId) return;

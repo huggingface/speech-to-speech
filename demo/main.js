@@ -1478,6 +1478,7 @@ async function doStart(audioContext = null) {
   c.addEventListener("status", (e) => {
     const detail = /** @type {CustomEvent<{ status: string }>} */ (e).detail;
     onClientStatus(detail.status);
+    if (detail.status === "ai-speaking") chat.onAssistantActivity();
   });
   c.addEventListener("transcript", (e) => {
     const d = /** @type {CustomEvent<{ role: "user" | "assistant"; text: string; partial: boolean; itemId?: string; responseId?: string }>} */ (e).detail;
