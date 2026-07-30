@@ -84,6 +84,16 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - Language flag: `--qwen3_asr_language` (ISO 639-1 code, e.g. `en`, `vi`, `zh`; omit or set to `auto` for automatic language detection)
 - Supported language list (30 languages, `yue` = Cantonese): `zh`, `en`, `yue`, `ar`, `de`, `fr`, `es`, `pt`, `id`, `it`, `ko`, `ru`, `th`, `vi`, `ja`, `tr`, `hi`, `ms`, `nl`, `sv`, `da`, `fi`, `pl`, `cs`, `fil`, `fa`, `el`, `hu`, `mk`, `ro`
 - Backend: `qwen-asr` package (transformers backend), one VAD-segmented utterance per call
+- **Known limitation (as of `qwen-asr==0.0.6`): incompatible with `transformers==5.6.2`**, the version this
+  project pins on macOS (needed by Qwen3-TTS/mlx-audio). `qwen-asr` hard-pins `transformers==4.57.6` and its
+  vendored modeling/config code (`qwen_asr/core/transformers_backend/`) breaks under 5.x in more than one
+  place — e.g. `Qwen3ASRConfig.__init__` reads `self.thinker_config` during `super().__init__()`, before
+  that attribute is set, which transformers 5.x's new config validation now triggers eagerly. Confirmed by
+  installing `qwen-asr` with `--no-deps` on top of this project's macOS environment. Until `qwen-asr` adds
+  transformers 5.x support upstream, run it in a separate virtualenv pinned to `transformers==4.57.6`
+  (outside this project's macOS install) rather than in-process alongside the rest of the pipeline. On
+  Linux/CUDA, the base `transformers>=4.57.0` requirement is a range, so `transformers==4.57.6` may resolve
+  cleanly there instead — untested.
 
 ## Language Abbreviations (ISO-style codes seen in STT handlers)
 
