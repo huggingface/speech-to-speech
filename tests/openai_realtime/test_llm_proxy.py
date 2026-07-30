@@ -212,6 +212,33 @@ class TestChatCompletionsPassthrough:
         assert request["body"]["messages"] == CHAT_BODY["messages"]
         assert request["headers"]["Authorization"] == "Bearer sk-server-secret"
 
+    @pytest.mark.parametrize("raw_body", [b"[1, 2]", b'"a string"', b"42", b"null", b"true"])
+    def test_valid_json_that_is_not_an_object_is_400(self, upstream, raw_body):
+        # request.json() accepts any JSON value; only objects can carry the
+        # forced fields, and the contract allows 400, never 500.
+        app = _make_app(_proxy_config(upstream))
+        with TestClient(app) as client:
+            r = client.post(
+                "/v1/chat/completions",
+                content=raw_body,
+                headers={"Content-Type": "application/json"},
+            )
+        assert r.status_code == 400
+        assert r.json()["error"]["type"] == "invalid_request_error"
+        assert upstream.requests == []
+
+    def test_non_dict_stream_options_passes_through_for_upstream_to_reject(self, upstream):
+        upstream.responder = lambda request: (400, {"error": {"message": "bad stream_options", "type": "invalid_request_error"}})
+        app = _make_app(_proxy_config(upstream))
+        with TestClient(app) as client:
+            r = client.post(
+                "/v1/chat/completions",
+                json={**STREAM_BODY, "stream_options": [1, 2]},
+            )
+        assert r.status_code == 400  # upstream's answer, not a crash
+        (request,) = upstream.requests
+        assert request["body"]["stream_options"] == [1, 2]  # untouched
+
     def test_client_bearer_is_ignored_and_never_forwarded(self, upstream):
         # The server does no authentication: whatever api_key the SDK sends
         # is accepted and replaced by the server-held upstream key.

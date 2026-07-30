@@ -203,6 +203,10 @@ def _mount_passthrough(
             body = await request.json()
         except Exception:
             return _error_response(400, "Request body must be valid JSON.", "invalid_request_error")
+        if not isinstance(body, dict):
+            # Valid JSON is not necessarily an object; anything else cannot
+            # carry the mutations below and would be rejected upstream anyway.
+            return _error_response(400, "Request body must be a JSON object.", "invalid_request_error")
         body["model"] = config.model_name
         if path == _PATHS["responses-api"]:
             # Session holders are anonymous; forcing store off keeps them from
@@ -214,9 +218,11 @@ def _mount_passthrough(
             # every upstream frame verbatim, including the final usage chunk
             # it may not have requested (valid protocol). Responses streams
             # always carry usage on response.completed, so no mutation there.
-            stream_options = body.get("stream_options") or {}
-            stream_options["include_usage"] = True
-            body["stream_options"] = stream_options
+            # A non-dict stream_options is left alone for the upstream to
+            # reject with its own error.
+            stream_options = body.get("stream_options")
+            if stream_options is None or isinstance(stream_options, dict):
+                body["stream_options"] = {**(stream_options or {}), "include_usage": True}
 
         headers = {"Authorization": f"Bearer {config.upstream_api_key}"}
         # Generation can legitimately take minutes, so only the connect
@@ -261,8 +267,22 @@ def _mount_passthrough(
             await _cleanup()
             return _verbatim_response(upstream, content)
 
+        async def _stream_and_cleanup() -> AsyncIterator[bytes]:
+            # The generator owns the cleanup: Starlette only runs background
+            # tasks after a successful send, so an upstream failure or a
+            # client disconnect mid-stream would otherwise leak the httpx
+            # client and its connection. The finally runs on normal
+            # exhaustion, on upstream errors, and on cancellation alike; the
+            # BackgroundTask below is a harmless second aclose for the
+            # successful path.
+            try:
+                async for chunk in _forward_and_account(upstream, usage):
+                    yield chunk
+            finally:
+                await _cleanup()
+
         return StreamingResponse(
-            _forward_and_account(upstream, usage),
+            _stream_and_cleanup(),
             status_code=upstream.status_code,
             media_type=upstream.headers.get("content-type"),
             background=BackgroundTask(_cleanup),
