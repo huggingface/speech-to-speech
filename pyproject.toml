@@ -51,10 +51,10 @@ dependencies = [
     "faster-qwen3-tts>=0.3.2; platform_system == 'Windows'",
     "lingua-language-detector>=2.0.2",
     "miniaudio==1.61; platform_system == 'Darwin'",
-    "mlx==0.31.1; platform_system == 'Darwin'",
+    "mlx>=0.31.2,<0.33; platform_system == 'Darwin'",
     "mlx-audio==0.4.2; platform_system == 'Darwin'",
-    "mlx-lm==0.31.1; platform_system == 'Darwin'",
-    "mlx-metal==0.31.1; platform_system == 'Darwin'",
+    "mlx-lm>=0.31.2,<0.33; platform_system == 'Darwin'",
+    "mlx-metal>=0.31.2,<0.33; platform_system == 'Darwin'",
     "misaki>=0.9.4; platform_system == 'Darwin'",
     "espeakng-loader>=0.2.4; platform_system == 'Darwin'",
     "spacy>=3.8.4; platform_system == 'Darwin'",
@@ -78,7 +78,7 @@ language-detection = [
     "lingua-language-detector>=2.0.2",
 ]
 mlx-lm = [
-    "mlx-lm==0.31.1; platform_system == 'Darwin'",
+    "mlx-lm>=0.31.2,<0.33; platform_system == 'Darwin'",
     "mlx-vlm==0.4.1; platform_system == 'Darwin'",
 ]
 paraformer = [

@@ -122,24 +122,48 @@ def _validate_realtime_websocket_support() -> None:
     importlib.import_module("uvicorn.protocols.websockets.websockets_impl")
 
 
+def _parse_version(version_str: str) -> tuple[int, ...]:
+    try:
+        from packaging.version import Version
+        v = Version(version_str)
+        return (v.major, v.minor, v.micro)
+    except ImportError:
+        parts = []
+        for part in version_str.split("."):
+            digits = "".join(c for c in part if c.isdigit())
+            if digits:
+                parts.append(int(digits))
+        return tuple(parts[:3])
+
+
 def _validate_darwin_dependency_pins() -> None:
-    expected_versions = {
+    expected_exact_versions = {
         "miniaudio": "1.61",
-        "mlx": "0.31.1",
         "mlx-audio": "0.4.2",
-        "mlx-lm": "0.31.1",
-        "mlx-metal": "0.31.1",
         "sounddevice": "0.5.3",
         "transformers": "5.6.2",
     }
+    expected_version_ranges = {
+        "mlx": ((0, 31, 2), (0, 33, 0)),
+        "mlx-lm": ((0, 31, 2), (0, 33, 0)),
+        "mlx-metal": ((0, 31, 2), (0, 33, 0)),
+    }
     mismatches = []
-    for package_name, expected_version in expected_versions.items():
+    for package_name, expected_version in expected_exact_versions.items():
         actual_version = metadata.version(package_name)
         if actual_version != expected_version:
             mismatches.append(f"{package_name}=={actual_version} (expected {expected_version})")
 
+    for package_name, (min_ver, max_ver) in expected_version_ranges.items():
+        actual_version = metadata.version(package_name)
+        version_parts = _parse_version(actual_version)
+        if not (min_ver <= version_parts < max_ver):
+            min_str = ".".join(map(str, min_ver))
+            max_str = ".".join(map(str, max_ver))
+            mismatches.append(f"{package_name}=={actual_version} (expected >={min_str},<{max_str})")
+
     numpy_version = metadata.version("numpy")
-    numpy_version_parts = tuple(int(part) for part in numpy_version.split(".")[:3])
+    numpy_version_parts = _parse_version(numpy_version)
     if numpy_version_parts >= (2, 4, 4):
         mismatches.append(f"numpy=={numpy_version} (expected <2.4.4 on macOS)")
 
