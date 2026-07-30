@@ -158,10 +158,50 @@ export class ChatView {
     return el;
   }
 
+  /**
+   * Show an immediate placeholder for a user voice turn. It occupies the same
+   * bubble as a transcript would, so a late STT event can replace the animation
+   * in place instead of adding a second user message.
+   * @param {"listening"|"sending"} state
+   * @returns {HTMLElement}
+   */
+  _spawnVoiceBubble(state) {
+    const el = this._spawnBubble("user", "");
+    el.classList.add("voice");
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
+    const body = /** @type {HTMLElement | null} */ (el.querySelector(".bubble-body"));
+    if (body) {
+      body.hidden = false;
+      body.innerHTML = `
+        <span class="voice-turn-wave" aria-hidden="true">
+          <i></i><i></i><i></i><i></i><i></i>
+        </span>
+        <span class="voice-turn-state"></span>
+      `;
+    }
+    this._setVoiceBubbleState(el, state);
+    return el;
+  }
+
+  /** @param {HTMLElement} el @param {"listening"|"sending"} state */
+  _setVoiceBubbleState(el, state) {
+    el.classList.toggle("listening", state === "listening");
+    el.classList.toggle("sending", state === "sending");
+    const label = el.querySelector(".voice-turn-state");
+    if (label) label.textContent = state === "listening" ? "Listening…" : "Sending voice…";
+  }
+
   /** @param {HTMLElement} el @param {string} text */
   _updateBubbleText(el, text) {
-    const t = el.querySelector(".bubble-body");
-    if (t) t.textContent = text;
+    el.classList.remove("voice", "listening", "sending");
+    el.removeAttribute("role");
+    el.removeAttribute("aria-live");
+    const t = /** @type {HTMLElement | null} */ (el.querySelector(".bubble-body"));
+    if (t) {
+      t.textContent = text;
+      t.hidden = !text;
+    }
   }
 
   /** @param {HTMLElement} el */
@@ -354,6 +394,45 @@ export class ChatView {
   // ── Client event handlers ─────────────────────────────────────────────────
 
   /**
+   * Show a voice bubble as soon as backend VAD recognizes speech.
+   * @param {{ itemId?: string }} [detail]
+   */
+  onUserTurnStarted(detail = {}) {
+    const id = detail.itemId || `_u${++this._anonSeq}`;
+    const reusable = this._activeUserItemId === id
+      && this._activeUserBubble?.isConnected
+      && !this._activeUserBubble.classList.contains("out");
+    if (!reusable) {
+      this._activeUserBubble = this._spawnVoiceBubble("listening");
+      this._activeUserItemId = id;
+    } else if (this._activeUserBubble.classList.contains("voice")) {
+      this._setVoiceBubbleState(this._activeUserBubble, "listening");
+    }
+    // Fail-safe for a lost speech_stopped event; the normal stop path shortens
+    // this to a few seconds.
+    this._bumpDismiss(this._activeUserBubble, 30000);
+  }
+
+  /**
+   * Transition the active voice bubble while the closed turn is in flight.
+   * If speech_started was missed, create the sending state directly.
+   * @param {{ itemId?: string }} [detail]
+   */
+  onUserTurnStopped(detail = {}) {
+    const id = detail.itemId || this._activeUserItemId || `_u${++this._anonSeq}`;
+    const reusable = this._activeUserItemId === id
+      && this._activeUserBubble?.isConnected
+      && !this._activeUserBubble.classList.contains("out");
+    if (!reusable) {
+      this._activeUserBubble = this._spawnVoiceBubble("sending");
+      this._activeUserItemId = id;
+    } else if (this._activeUserBubble.classList.contains("voice")) {
+      this._setVoiceBubbleState(this._activeUserBubble, "sending");
+    }
+    this._bumpDismiss(this._activeUserBubble, 6000);
+  }
+
+  /**
    * A streamed transcript delta (user or assistant).
    * @param {{ role: "user" | "assistant"; text: string; partial: boolean; itemId?: string; responseId?: string }} d
    */
@@ -375,7 +454,11 @@ export class ChatView {
       // refreshed on every delta, so it stays while the user keeps talking and
       // fades a few seconds after they stop — no dependency on a response ever
       // arriving, so it can never get stuck.
-      if (this._activeUserItemId !== id || !this._activeUserBubble) {
+      if (
+        this._activeUserItemId !== id
+        || !this._activeUserBubble?.isConnected
+        || this._activeUserBubble.classList.contains("out")
+      ) {
         this._activeUserBubble = this._spawnBubble("user", text);
         this._activeUserItemId = id;
       } else {

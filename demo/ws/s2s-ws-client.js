@@ -682,18 +682,27 @@ export class S2sWsRealtimeClient extends EventTarget {
           itemId: typeof event.item_id === "string" ? event.item_id : "",
           audioStartMs: Number(event.audio_start_ms),
         });
+        this.dispatchEvent(new CustomEvent("user-turn-started", {
+          detail: {
+            itemId: typeof event.item_id === "string" ? event.item_id : "",
+          },
+        }));
         this._setStatus("user-speaking");
         break;
 
       case "input_audio_buffer.speech_stopped":
         {
+          const itemId = typeof event.item_id === "string" ? event.item_id : "";
           const recording = this._userAudioRecorder.speechStopped({
-            itemId: typeof event.item_id === "string" ? event.item_id : "",
+            itemId,
             audioEndMs: Number(event.audio_end_ms),
           });
           if (recording) {
             this.dispatchEvent(new CustomEvent("user-audio", { detail: recording }));
           }
+          this.dispatchEvent(new CustomEvent("user-turn-stopped", {
+            detail: { itemId },
+          }));
         }
         if (this._status === "user-speaking") this._setStatus("processing");
         break;

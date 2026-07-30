@@ -111,7 +111,14 @@ client._ws = { readyState: 1, send() {} };
 client._sessionConfigured = true;
 
 let recording = null;
+const turnEvents = [];
 client.addEventListener("user-audio", (event) => { recording = event.detail; });
+client.addEventListener("user-turn-started", (event) => {
+  turnEvents.push(["started", event.detail.itemId]);
+});
+client.addEventListener("user-turn-stopped", (event) => {
+  turnEvents.push(["stopped", event.detail.itemId]);
+});
 const frame = new Int16Array(640);
 frame.fill(123);
 for (let i = 0; i < 5; i++) client._onMicChunk(frame.buffer);
@@ -133,5 +140,12 @@ if (Math.abs(recording.durationMs - 240) > 0.001) {
   throw new Error(`unexpected emitted duration: ${recording.durationMs}`);
 }
 if (recording.audio.type !== "audio/wav") throw new Error("recording is not WAV");
+const expectedTurns = [
+  ["started", "item_audio_only"],
+  ["stopped", "item_audio_only"],
+];
+if (JSON.stringify(turnEvents) !== JSON.stringify(expectedTurns)) {
+  throw new Error(`unexpected turn events: ${JSON.stringify(turnEvents)}`);
+}
 """
     )

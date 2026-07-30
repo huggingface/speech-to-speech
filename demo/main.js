@@ -1483,6 +1483,14 @@ async function doStart(audioContext = null) {
     const d = /** @type {CustomEvent<{ role: "user" | "assistant"; text: string; partial: boolean; itemId?: string; responseId?: string }>} */ (e).detail;
     chat.onTranscript(d);
   });
+  c.addEventListener("user-turn-started", (e) => {
+    const detail = /** @type {CustomEvent<{ itemId?: string }>} */ (e).detail;
+    chat.onUserTurnStarted(detail);
+  });
+  c.addEventListener("user-turn-stopped", (e) => {
+    const detail = /** @type {CustomEvent<{ itemId?: string }>} */ (e).detail;
+    chat.onUserTurnStopped(detail);
+  });
   c.addEventListener("user-audio", (e) => {
     const detail = /** @type {CustomEvent<{ itemId?: string; audio: Blob; durationMs?: number; truncated?: boolean }>} */ (e).detail;
     chat.onUserAudio(detail);

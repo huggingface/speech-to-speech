@@ -470,10 +470,20 @@ export class S2sRtcRealtimeClient extends EventTarget {
         // the server flushes its track buffer — so this is UI state only.
         this._aiSpeaking = false;
         this._lastAudibleAt = 0;
+        this.dispatchEvent(new CustomEvent("user-turn-started", {
+          detail: {
+            itemId: typeof event.item_id === "string" ? event.item_id : "",
+          },
+        }));
         this._setStatus("user-speaking");
         break;
 
       case "input_audio_buffer.speech_stopped":
+        this.dispatchEvent(new CustomEvent("user-turn-stopped", {
+          detail: {
+            itemId: typeof event.item_id === "string" ? event.item_id : "",
+          },
+        }));
         if (this._status === "user-speaking") this._setStatus("processing");
         break;
 

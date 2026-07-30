@@ -143,3 +143,54 @@ if (JSON.stringify(timeline) !== JSON.stringify(expected)) {
         capture_output=True,
         text=True,
     )
+
+
+def test_rtc_client_emits_user_turn_lifecycle():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for demo client tests")
+
+    script = """
+globalThis.localStorage = { getItem() { return null; } };
+globalThis.CustomEvent = class CustomEvent extends Event {
+  constructor(type, init = {}) {
+    super(type);
+    this.detail = init.detail;
+  }
+};
+const { S2sRtcRealtimeClient } = await import("./demo/rtc/s2s-rtc-client.js");
+const client = new S2sRtcRealtimeClient({
+  voice: "Aiden",
+  instructions: "Be helpful.",
+  callsUrl: "api/calls",
+});
+const events = [];
+client.addEventListener("user-turn-started", (event) => {
+  events.push(["started", event.detail.itemId]);
+});
+client.addEventListener("user-turn-stopped", (event) => {
+  events.push(["stopped", event.detail.itemId]);
+});
+client._onDcMessage(JSON.stringify({
+  type: "input_audio_buffer.speech_started",
+  item_id: "item_voice",
+}));
+client._onDcMessage(JSON.stringify({
+  type: "input_audio_buffer.speech_stopped",
+  item_id: "item_voice",
+}));
+const expected = [
+  ["started", "item_voice"],
+  ["stopped", "item_voice"],
+];
+if (JSON.stringify(events) !== JSON.stringify(expected)) {
+  throw new Error(`unexpected lifecycle: ${JSON.stringify(events)}`);
+}
+"""
+    subprocess.run(
+        [node, "--input-type=module", "-e", script],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )

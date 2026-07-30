@@ -1755,6 +1755,52 @@ body.cam-on .footer {
 .bubble.user .bubble-role { color: var(--voice-user); }
 .bubble.assistant .bubble-role { color: var(--voice-assistant); }
 
+.bubble.user.voice .bubble-body {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 126px;
+  color: var(--text-dim);
+}
+.voice-turn-wave {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 16px;
+  color: var(--voice-user);
+}
+.voice-turn-wave i {
+  display: block;
+  width: 2px;
+  height: 12px;
+  border-radius: 999px;
+  background: currentColor;
+  transform-origin: center;
+  animation: user-turn-wave 0.85s ease-in-out infinite;
+}
+.voice-turn-wave i:nth-child(2),
+.voice-turn-wave i:nth-child(4) {
+  animation-delay: -0.22s;
+}
+.voice-turn-wave i:nth-child(3) {
+  animation-delay: -0.44s;
+}
+.voice-turn-wave i:nth-child(5) {
+  animation-delay: -0.11s;
+}
+.bubble.user.sending .voice-turn-wave i {
+  animation-duration: 1.15s;
+}
+.voice-turn-state {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+@keyframes user-turn-wave {
+  0%, 100% { transform: scaleY(0.28); opacity: 0.5; }
+  50% { transform: scaleY(1); opacity: 1; }
+}
+
 /* ─── Conversation history panel ─────────────────────────────────────── */
 
 .chat-panel {
@@ -2575,6 +2621,9 @@ body.cam-on .footer {
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .voice-turn-wave i {
+    animation: none;
+  }
   .cam-pip {
     transition: opacity 0.22s ease;
     transform: none;
