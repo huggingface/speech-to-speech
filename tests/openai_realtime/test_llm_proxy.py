@@ -7,6 +7,7 @@ port that the proxy reaches through its configured base URL — no injection
 hooks in production code.
 """
 
+import gzip
 import json
 import threading
 import time
@@ -33,9 +34,14 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 
 
 class SSEScript(BaseModel):
-    """Streamed answer for the fake upstream: raw frames with a delay before each."""
+    """Streamed answer for the fake upstream: raw frames with a delay before each.
+
+    ``content_encoding`` labels pre-encoded frames (e.g. gzip): the handler
+    advertises it so the proxy's HTTP client decodes what it reads.
+    """
 
     frames: list[tuple[float, bytes]]
+    content_encoding: str | None = None
 
 
 class FakeUpstream:
@@ -70,6 +76,8 @@ class FakeUpstream:
                 if isinstance(answer, SSEScript):
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
+                    if answer.content_encoding:
+                        self.send_header("Content-Encoding", answer.content_encoding)
                     self.end_headers()
                     for delay, frame in answer.frames:
                         time.sleep(delay)
@@ -309,6 +317,28 @@ class TestStreamingPassthrough:
         assert r.status_code == 502
         assert "error" in r.json()
         assert elapsed < 3
+
+    def test_gzip_compressed_upstream_stream_is_decoded_for_the_client(self, upstream):
+        # The upstream may honor the proxy's Accept-Encoding and compress the
+        # stream. The forwarded response carries no Content-Encoding header,
+        # so the proxy must forward decoded bytes — and account tokens on the
+        # decoded stream too.
+        frames = SSE_FRAMES[:2] + [
+            b'data: {"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":5}}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+        compressed = gzip.compress(b"".join(frames))
+        upstream.responder = lambda request: SSEScript(frames=[(0.0, compressed)], content_encoding="gzip")
+        app = _make_app(_proxy_config(upstream))
+        with TestClient(app) as client:
+            with client.stream("POST", "/v1/chat/completions", json=STREAM_BODY) as r:
+                assert r.status_code == 200
+                assert "content-encoding" not in r.headers
+                received = b"".join(r.iter_raw())
+            usage = client.get("/v1/usage").json()["llm_proxy"]
+        assert received == b"".join(frames)
+        assert usage["input_tokens"] == 11
+        assert usage["output_tokens"] == 5
 
     def test_upstream_error_before_stream_passes_through(self, upstream):
         upstream.responder = lambda request: (429, {"error": {"message": "quota", "type": "rate_limit"}})

@@ -274,13 +274,17 @@ _SSE_EVENT_END = re.compile(rb"\r\n\r\n|\n\n|\r\r")
 
 
 async def _forward_and_account(upstream: httpx.Response, usage: LLMProxyUsage) -> AsyncIterator[bytes]:
-    """Yield upstream bytes verbatim while parsing SSE events for token usage.
+    """Yield upstream bytes while parsing SSE events for token usage.
 
-    Accounting happens on a copy of the byte stream; nothing it does can
-    change what the client receives.
+    ``aiter_bytes`` (not ``aiter_raw``): the upstream may compress the
+    stream, and the forwarded response carries no Content-Encoding header,
+    so the bytes must be decoded here — for the client and for the SSE
+    accounting alike. An uncompressed stream passes through byte-identical.
+    Accounting happens on a copy of the stream; nothing it does can change
+    what the client receives.
     """
     buffer = b""
-    async for chunk in upstream.aiter_raw():
+    async for chunk in upstream.aiter_bytes():
         yield chunk
         buffer += chunk
         while True:
