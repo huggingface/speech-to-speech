@@ -228,7 +228,10 @@ class TestChatCompletionsPassthrough:
         assert upstream.requests == []
 
     def test_non_dict_stream_options_passes_through_for_upstream_to_reject(self, upstream):
-        upstream.responder = lambda request: (400, {"error": {"message": "bad stream_options", "type": "invalid_request_error"}})
+        upstream.responder = lambda request: (
+            400,
+            {"error": {"message": "bad stream_options", "type": "invalid_request_error"}},
+        )
         app = _make_app(_proxy_config(upstream))
         with TestClient(app) as client:
             r = client.post(
