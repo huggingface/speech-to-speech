@@ -2,8 +2,8 @@
 /**
  * ChatView — owns the whole conversation surface: the slide-in history panel,
  * the ephemeral on-orb bubbles, and all the transcript/tool/streaming
- * bookkeeping. main.js wires the realtime client's events straight to the
- * `on*` methods here and otherwise doesn't touch chat state.
+ * and user-audio bookkeeping. main.js wires the realtime client's events
+ * straight to the `on*` methods here and otherwise doesn't touch chat state.
  *
  * Two parallel surfaces share one shape (see `_buildMessageEl`):
  *   - ephemeral bubbles  (`.bubble` / `.bubble-*`)  fade on a timer
@@ -24,7 +24,10 @@ const CHAT_BUBBLE_SVG = `<svg width="28" height="28" viewBox="0 0 24 24" fill="n
 const EMPTY_STATE_HTML = `<div id="chat-empty" class="chat-empty">${CHAT_BUBBLE_SVG}<span class="chat-empty-title">No messages yet</span><span class="chat-empty-hint">Tap the orb and start talking</span></div>`;
 
 export class ChatView {
-  constructor() {
+  /**
+   * @param {{ onUserAudioPlaybackChange?: (playing: boolean) => void }} [options]
+   */
+  constructor(options = {}) {
     /** @type {HTMLButtonElement} */
     this._chatBtn = $("#chat-btn");
     /** @type {HTMLSpanElement} */
@@ -46,6 +49,13 @@ export class ChatView {
     // ── User transcript state (keyed by item_id) ───────────────────────────
     /** @type {Map<string, HTMLElement>} */
     this._userHistByItem = new Map();
+    /** @type {Map<string, { audio: HTMLAudioElement, url: string }>} */
+    this._userAudioByItem = new Map();
+    /** @type {Set<string>} */
+    this._audioUrls = new Set();
+    /** @type {HTMLAudioElement | null} */
+    this._activeUserAudio = null;
+    this._onUserAudioPlaybackChange = options.onUserAudioPlaybackChange ?? (() => {});
     /** @type {HTMLElement | null} */
     this._activeUserBubble = null;
     this._activeUserItemId = "";
@@ -121,7 +131,7 @@ export class ChatView {
     const el = document.createElement("div");
     el.className = `${container} ${role}`;
     const label = role === "user" ? "You" : "Assistant";
-    el.innerHTML = `<div class="${prefix}-role">${label}</div><div class="${prefix}-body${partial ? " partial" : ""}">${escHtml(text)}</div>`;
+    el.innerHTML = `<div class="${prefix}-role">${label}</div><div class="${prefix}-body${partial ? " partial" : ""}"${text ? "" : " hidden"}>${escHtml(text)}</div>`;
     return el;
   }
 
@@ -216,6 +226,11 @@ export class ChatView {
 
   /** Reset the panel to the empty state and clear the unread badge. */
   clear() {
+    this._stopUserAudioPlayback();
+    for (const url of this._audioUrls) URL.revokeObjectURL(url);
+    this._audioUrls.clear();
+    this._userAudioByItem.clear();
+    this._userHistByItem.clear();
     this.renderEmptyState();
     this._chatBadge.classList.remove("visible");
   }
@@ -236,8 +251,26 @@ export class ChatView {
     const body = /** @type {HTMLElement | null} */ (el.querySelector(".hist-body"));
     if (!body) return;
     body.textContent = text;
+    body.hidden = !text;
     body.classList.toggle("partial", partial);
     this._scrollToBottom();
+  }
+
+  /** @param {string} itemId */
+  _ensureUserHist(itemId) {
+    let hist = this._userHistByItem.get(itemId);
+    if (!hist) {
+      hist = this._appendHistMsg("user", "", false);
+      this._userHistByItem.set(itemId, hist);
+    }
+    return hist;
+  }
+
+  _stopUserAudioPlayback() {
+    const active = this._activeUserAudio;
+    this._activeUserAudio = null;
+    if (active && !active.paused) active.pause();
+    this._onUserAudioPlaybackChange(false);
   }
 
   /**
@@ -335,13 +368,8 @@ export class ChatView {
       const id = d.itemId || this._activeUserItemId || `_u${++this._anonSeq}`;
       const text = d.text;
 
-      let hist = this._userHistByItem.get(id);
-      if (!hist) {
-        hist = this._appendHistMsg("user", text, d.partial);
-        this._userHistByItem.set(id, hist);
-      } else {
-        this._updateHistMsg(hist, text, d.partial);
-      }
+      const hist = this._ensureUserHist(id);
+      this._updateHistMsg(hist, text, d.partial);
 
       // One ephemeral bubble per active item. Purely timer-based: the timer is
       // refreshed on every delta, so it stays while the user keeps talking and
@@ -372,6 +400,71 @@ export class ChatView {
       }
       this._markUnread();
     }
+  }
+
+  /**
+   * Attach the browser-local recording to its user turn. This also creates an
+   * audio-only row when STT is disabled and no transcript events arrive.
+   * Reopened VAD segments reuse item_id; the client sends a replacement WAV
+   * containing the accumulated utterance, so the row keeps one player.
+   * @param {{ itemId?: string, audio: Blob, durationMs?: number, truncated?: boolean }} detail
+   */
+  onUserAudio(detail) {
+    const id = detail.itemId || `_u${++this._anonSeq}`;
+    const hist = this._ensureUserHist(id);
+    let container = /** @type {HTMLElement | null} */ (hist.querySelector(".hist-audio"));
+    const isNewPlayer = !container;
+    if (!container) {
+      container = document.createElement("div");
+      container.className = "hist-audio";
+      container.innerHTML = `
+        <div class="hist-audio-label">Audio sent to the model</div>
+        <audio controls preload="metadata" aria-label="Replay your audio"></audio>
+      `;
+      hist.appendChild(container);
+    }
+
+    const audio = /** @type {HTMLAudioElement} */ (container.querySelector("audio"));
+    const previous = this._userAudioByItem.get(id);
+    if (previous) {
+      if (this._activeUserAudio === previous.audio) this._stopUserAudioPlayback();
+      URL.revokeObjectURL(previous.url);
+      this._audioUrls.delete(previous.url);
+    }
+
+    const url = URL.createObjectURL(detail.audio);
+    this._audioUrls.add(url);
+    this._userAudioByItem.set(id, { audio, url });
+    audio.src = url;
+    audio.title = detail.truncated
+      ? "Replay your audio (the beginning was no longer buffered)"
+      : "Replay the audio sent to the model";
+    const label = container.querySelector(".hist-audio-label");
+    if (label) {
+      label.textContent = detail.truncated
+        ? "Audio sent to the model · beginning unavailable"
+        : "Audio sent to the model";
+    }
+
+    if (isNewPlayer) {
+      audio.addEventListener("play", () => {
+        if (this._activeUserAudio && this._activeUserAudio !== audio) {
+          this._activeUserAudio.pause();
+        }
+        this._activeUserAudio = audio;
+        this._onUserAudioPlaybackChange(true);
+      });
+      const stopped = () => {
+        if (this._activeUserAudio !== audio) return;
+        this._activeUserAudio = null;
+        this._onUserAudioPlaybackChange(false);
+      };
+      audio.addEventListener("pause", stopped);
+      audio.addEventListener("ended", stopped);
+      audio.addEventListener("error", stopped);
+    }
+    this._scrollToBottom();
+    this._markUnread();
   }
 
   /**

@@ -1887,6 +1887,29 @@ body.cam-on .footer {
  * distinguishing, so the panel reads as one quiet column. */
 .hist-msg.user .hist-body.partial { opacity: 0.65; }
 
+.hist-audio {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--voice-user) 22%, var(--border));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--voice-user) 6%, var(--bg-elev-2));
+}
+.hist-audio-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--voice-user) 68%, var(--text-faint));
+}
+.hist-audio audio {
+  display: block;
+  width: min(260px, 100%);
+  height: 34px;
+  color-scheme: light dark;
+}
+
 /* ─── Tool call history item ─────────────────────────────────────────── */
 
 .hist-tool-header {

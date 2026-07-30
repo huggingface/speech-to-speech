@@ -378,7 +378,13 @@ function pushToolsToSession() {
 // ── Chat view ───────────────────────────────────────────────────────────────
 // Owns the history panel, the ephemeral bubbles, and all transcript/tool
 // streaming state. The client's events are forwarded to its on* methods.
-const chat = new ChatView();
+let userAudioReplaying = false;
+const chat = new ChatView({
+  onUserAudioPlaybackChange(playing) {
+    userAudioReplaying = playing;
+    syncMicMuteState();
+  },
+});
 
 // ── Account / limiter ─────────────────────────────────────────────────────
 // Login chip + daily-limit modal (inert unless the deploy is in LB mode). The
@@ -398,6 +404,15 @@ let client = null;
 /** @type {MediaStream | null} */
 let micStream = null;
 let micMuted = false;
+
+/** Apply both the user's mute choice and the temporary replay guard. */
+function syncMicMuteState() {
+  const muted = micMuted || userAudioReplaying;
+  for (const track of micStream?.getAudioTracks() ?? []) {
+    track.enabled = !muted;
+  }
+  client?.setMuted(muted);
+}
 
 /** @param {AppState} next */
 function setState(next) {
@@ -1194,10 +1209,7 @@ async function handleStartError(err) {
 micBtn.addEventListener("click", () => {
   if (!micStream || !client) return;
   micMuted = !micMuted;
-  for (const track of micStream.getAudioTracks()) {
-    track.enabled = !micMuted;
-  }
-  client.setMuted(micMuted);
+  syncMicMuteState();
   micBtn.classList.toggle("muted", micMuted);
   micBtn.setAttribute("aria-label", micMuted ? "Unmute" : "Mute");
   micBtn.title = micMuted ? "Unmute" : "Mute";
@@ -1442,6 +1454,7 @@ async function doStart(audioContext = null) {
         ...common,
       });
   client = c;
+  c.setMuted(micMuted || userAudioReplaying);
 
   c.addEventListener("queue", (e) => {
     const { position, queueId } = /** @type {CustomEvent<{ position: number; queueId: string }>} */ (e).detail;
@@ -1469,6 +1482,10 @@ async function doStart(audioContext = null) {
   c.addEventListener("transcript", (e) => {
     const d = /** @type {CustomEvent<{ role: "user" | "assistant"; text: string; partial: boolean; itemId?: string; responseId?: string }>} */ (e).detail;
     chat.onTranscript(d);
+  });
+  c.addEventListener("user-audio", (e) => {
+    const detail = /** @type {CustomEvent<{ itemId?: string; audio: Blob; durationMs?: number; truncated?: boolean }>} */ (e).detail;
+    chat.onUserAudio(detail);
   });
 
   c.addEventListener("response-finished", (e) => {

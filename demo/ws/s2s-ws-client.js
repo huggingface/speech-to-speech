@@ -93,6 +93,7 @@ import {
   trimTrailingSlash,
 } from "./codec.js";
 import { OrbVisualiser, VIS_FFT_SIZE } from "./orb-visualizer.js";
+import { SentAudioRecorder } from "./user-audio-recorder.js";
 
 /** Build an Error carrying a `code` (and optional extra fields) so callers can
  *  branch on the failure kind: "limit" | "queue-full" | "queue-expired" | "aborted".
@@ -204,6 +205,9 @@ export class S2sWsRealtimeClient extends EventTarget {
     this._sessionConfigured = false;
     this._startupGreeting = options.startupGreeting?.trim() ?? "";
     this._startupGreetingSent = false;
+    // Bounded, browser-local copy of the exact PCM frames sent over this
+    // socket. Backend VAD timestamps turn it into replayable user utterances.
+    this._userAudioRecorder = new SentAudioRecorder();
     this._debug = (() => { try { return localStorage.getItem("s2s.debug") === "1"; } catch { return false; } })();
   }
 
@@ -607,6 +611,9 @@ export class S2sWsRealtimeClient extends EventTarget {
     if (this._muted) return;
     const b64 = base64FromArrayBuffer(pcm16Buffer);
     this._send({ type: "input_audio_buffer.append", audio: b64 });
+    // Record only after the append is accepted for sending. This intentionally
+    // excludes pre-configuration and muted audio, just like the backend input.
+    this._userAudioRecorder.append(pcm16Buffer);
   }
 
   /**
@@ -671,10 +678,23 @@ export class S2sWsRealtimeClient extends EventTarget {
         // otherwise keep playing over the user's barge-in.
         this._playbackNode?.port.postMessage({ kind: "clear" });
         this._aiSpeaking = false;
+        this._userAudioRecorder.speechStarted({
+          itemId: typeof event.item_id === "string" ? event.item_id : "",
+          audioStartMs: Number(event.audio_start_ms),
+        });
         this._setStatus("user-speaking");
         break;
 
       case "input_audio_buffer.speech_stopped":
+        {
+          const recording = this._userAudioRecorder.speechStopped({
+            itemId: typeof event.item_id === "string" ? event.item_id : "",
+            audioEndMs: Number(event.audio_end_ms),
+          });
+          if (recording) {
+            this.dispatchEvent(new CustomEvent("user-audio", { detail: recording }));
+          }
+        }
         if (this._status === "user-speaking") this._setStatus("processing");
         break;
 
@@ -1086,6 +1106,7 @@ export class S2sWsRealtimeClient extends EventTarget {
     // Abort a queue wait in progress: flag it and wake the poll sleep so
     // `_pollQueue` throws "aborted" and connect() unwinds cleanly.
     this._closed = true;
+    this._userAudioRecorder.reset();
     if (this._queueWake) {
       clearTimeout(this._queueTimer);
       const wake = this._queueWake;
