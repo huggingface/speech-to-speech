@@ -107,13 +107,18 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         self,
         api_input: list[dict[str, Any]],
         optional_kwargs: dict[str, Any],
+        runtime_config: Any,
     ) -> Any:
+        extra_body = self._extra_body
+        session_reasoning_effort = getattr(runtime_config.session, "reasoning_effort", None)
+        if session_reasoning_effort:
+            extra_body = {"reasoning_effort": session_reasoning_effort}
         return _request_chat_completions(
             client=self.client,
             model_name=self.model_name,
             messages=api_input,
             stream=self.stream,
-            extra_body=self._extra_body,
+            extra_body=extra_body,
             timeout=self.request_timeout,
             optional_kwargs=optional_kwargs,
         )
@@ -137,12 +142,16 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
             optional_kwargs["tool_choice"] = req_tool_choice
         return optional_kwargs
 
-    def _request(self, api_input: Any, optional_kwargs: dict[str, Any]) -> Any:
+    def _request(self, api_input: Any, optional_kwargs: dict[str, Any], runtime_config: Any) -> Any:
+        extra_body = self._extra_body
+        session_reasoning_effort = getattr(runtime_config.session, "reasoning_effort", None)
+        if session_reasoning_effort:
+            extra_body = {"reasoning_effort": session_reasoning_effort}
         return self.client.responses.create(
             model=self.model_name,
             input=api_input,
             stream=self.stream,
-            extra_body=self._extra_body,
+            extra_body=extra_body,
             timeout=self.request_timeout,
             **optional_kwargs,
         )

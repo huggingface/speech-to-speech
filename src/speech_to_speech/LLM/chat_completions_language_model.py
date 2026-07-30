@@ -326,13 +326,22 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
     def _build_optional_kwargs(self, req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:
         return _build_chat_optional_kwargs(req_tools, req_tool_choice)
 
-    def _request(self, api_input: list[dict[str, Any]], optional_kwargs: dict[str, Any]) -> Any:
+    def _request(
+        self,
+        api_input: list[dict[str, Any]],
+        optional_kwargs: dict[str, Any],
+        runtime_config: Any,
+    ) -> Any:
+        extra_body = self._extra_body
+        session_reasoning_effort = getattr(runtime_config.session, "reasoning_effort", None)
+        if session_reasoning_effort:
+            extra_body = {"reasoning_effort": session_reasoning_effort}
         return _request_chat_completions(
             client=self.client,
             model_name=self.model_name,
             messages=api_input,
             stream=self.stream,
-            extra_body=self._extra_body,
+            extra_body=extra_body,
             timeout=self.request_timeout,
             optional_kwargs=optional_kwargs,
         )

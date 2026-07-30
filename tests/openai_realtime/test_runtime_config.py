@@ -93,6 +93,15 @@ class TestApplySessionUpdate:
         assert cfg.session.audio.output.voice == "alloy"
         assert cfg.session.tool_choice == "required"
 
+    def test_provider_reasoning_effort_extension_updates_live(self):
+        """Unknown top-level fields are retained as provider extensions."""
+        cfg = RuntimeConfig()
+        cfg.apply_session_update(_parse_session(reasoning_effort="none"))
+        assert cfg.session.reasoning_effort == "none"
+
+        cfg.apply_session_update(_parse_session(reasoning_effort="medium"))
+        assert cfg.session.reasoning_effort == "medium"
+
     def test_deep_nested_leaf_update(self):
         """Changing only turn_detection.threshold preserves the rest."""
         cfg = RuntimeConfig()

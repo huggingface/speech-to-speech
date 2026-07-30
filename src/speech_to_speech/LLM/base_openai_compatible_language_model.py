@@ -258,7 +258,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         ...
 
     @abstractmethod
-    def _request(self, api_input: Any, optional_kwargs: dict[str, Any]) -> Any:
+    def _request(self, api_input: Any, optional_kwargs: dict[str, Any], runtime_config: Any) -> Any:
         """Issue the create() call and return the response or stream."""
         ...
 
@@ -305,8 +305,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         kwargs.setdefault("temperature", self.audio_temperature)
         return kwargs
 
-    def _request_audio(self, api_input: Any, optional_kwargs: dict[str, Any]) -> Any:
-        return self._request(api_input, optional_kwargs)
+    def _request_audio(self, api_input: Any, optional_kwargs: dict[str, Any], runtime_config: Any) -> Any:
+        return self._request(api_input, optional_kwargs, runtime_config)
 
     def _iter_audio_events(self, api_response: Any) -> Iterator[ProviderEvent]:
         yield from self._iter_events(api_response)
@@ -597,7 +597,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     # would reject this; fail with a clear message instead of an opaque error.
                     error_message = "Cannot generate a response: no instructions and no input were provided."
                 else:
-                    api_response = (request_fn or self._request)(api_input, optional_kwargs)
+                    if request_fn is not None:
+                        api_response = request_fn(api_input, optional_kwargs)
+                    else:
+                        api_response = self._request(api_input, optional_kwargs, turn.runtime_config)
                 if api_response is not None:
                     events = (event_iterator_fn or self._iter_events)(api_response)
                     if self.stream:
@@ -757,7 +760,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             turn,
             optional_kwargs,
             serialize_fn=self._serialize_audio,
-            request_fn=self._request_audio,
+            request_fn=lambda api_input, kwargs: self._request_audio(api_input, kwargs, runtime_config),
             event_iterator_fn=self._iter_audio_events,
             transactional_user_message_id=transactional_user_message_id,
             history_commit_fn=history_commit_fn,

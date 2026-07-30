@@ -136,6 +136,7 @@ def _drive(
     *,
     tools=None,
     tool_choice=None,
+    reasoning_effort=None,
     user="Hallo",
     chat=None,
     response=None,
@@ -149,6 +150,8 @@ def _drive(
         session.tools = tools
     if tool_choice is not None:
         session.tool_choice = tool_choice
+    if reasoning_effort is not None:
+        session.reasoning_effort = reasoning_effort
     rc = RuntimeConfig(chat=chat, session=session)
     req = GenerateResponseRequest(
         runtime_config=rc, response=response, language_code="de", turn_id="t", turn_revision=0
@@ -348,6 +351,25 @@ def test_chat_completions_backend_processes_audio_without_responses_api():
     assert cfg.chat.buffer[0].content[0].type == "input_audio"
 
 
+def test_audio_turn_uses_session_reasoning_effort():
+    handler = _make_handler(stream=False)
+    session = RealtimeSessionCreateRequest(type="realtime", instructions="You are helpful.")
+    session.reasoning_effort = "medium"
+    cfg = RuntimeConfig(chat=Chat(5), session=session)
+
+    list(
+        handler.process(
+            GenerateResponseRequest(
+                runtime_config=cfg,
+                audio=np.zeros(1600, dtype=np.float32),
+                audio_sample_rate=16000,
+            )
+        )
+    )
+
+    assert handler.client.chat.completions.last_kwargs["extra_body"] == {"reasoning_effort": "medium"}
+
+
 def test_chat_completions_backend_uses_configured_audio_url_payload():
     handler = _make_handler(stream=False)
     handler.audio_content_type = "audio_url"
@@ -541,6 +563,35 @@ def test_tools_converted_to_chat_format_on_request():
     assert captured["tool_choice"] == "auto"
     assert captured["stream"] is True
     assert captured["stream_options"] == {"include_usage": True}
+
+
+def test_session_reasoning_effort_overrides_backend_default():
+    """A Realtime session can tune provider reasoning without restarting."""
+    h = _make_handler(stream=True)
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _FakeStream([_chunk(content="ok.")])
+
+    h.client.chat.completions.create = fake_create
+    _drive(h, reasoning_effort="low")
+
+    assert captured["extra_body"] == {"reasoning_effort": "low"}
+
+
+def test_missing_session_reasoning_effort_keeps_backend_default():
+    h = _make_handler(stream=True)
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _FakeStream([_chunk(content="ok.")])
+
+    h.client.chat.completions.create = fake_create
+    _drive(h)
+
+    assert captured["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
 
 
 # ── Text-only (output_modalities=["text"]) ────────────────────────────────────
