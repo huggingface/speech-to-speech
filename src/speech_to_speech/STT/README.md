@@ -10,6 +10,7 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - `faster-whisper` → `STT/faster_whisper_handler.py`
 - `parakeet-tdt` → `STT/parakeet_tdt_handler.py`
 - `paraformer` → `STT/paraformer_handler.py`
+- `qwen3-asr` → `STT/qwen3_asr_handler.py`
 
 ## Language Support by Handler
 
@@ -74,6 +75,15 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - Practical support:
   - Depends on selected FunASR model checkpoint
   - Default setup is Chinese-oriented (`zh`)
+
+### 7) Qwen3-ASR (`--stt qwen3-asr`)
+
+- Handler: `Qwen3ASRSTTHandler`
+- Requires the optional `qwen3-asr` extra: `pip install speech-to-speech[qwen3-asr]`
+- Model flag: `--qwen3_asr_model_name`, default `Qwen/Qwen3-ASR-1.7B` (`Qwen/Qwen3-ASR-0.6B` also available for lower latency)
+- Language flag: `--qwen3_asr_language` (ISO 639-1 code, e.g. `en`, `vi`, `zh`; omit or set to `auto` for automatic language detection)
+- Supported language list (30 languages, `yue` = Cantonese): `zh`, `en`, `yue`, `ar`, `de`, `fr`, `es`, `pt`, `id`, `it`, `ko`, `ru`, `th`, `vi`, `ja`, `tr`, `hi`, `ms`, `nl`, `sv`, `da`, `fi`, `pl`, `cs`, `fil`, `fa`, `el`, `hu`, `mk`, `ro`
+- Backend: `qwen-asr` package (transformers backend), one VAD-segmented utterance per call
 
 ## Language Abbreviations (ISO-style codes seen in STT handlers)
 
@@ -160,4 +170,12 @@ python s2s_pipeline.py --stt parakeet-tdt \
 
 ```bash
 python s2s_pipeline.py --stt paraformer --paraformer_stt_model_name paraformer-zh
+```
+
+### Qwen3-ASR
+
+```bash
+python s2s_pipeline.py --stt qwen3-asr --qwen3_asr_language en
+python s2s_pipeline.py --stt qwen3-asr --qwen3_asr_language auto
+python s2s_pipeline.py --stt qwen3-asr --qwen3_asr_model_name Qwen/Qwen3-ASR-0.6B
 ```
