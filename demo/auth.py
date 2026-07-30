@@ -106,6 +106,18 @@ def current_user(request):
     return _field(current_oauth(request), "user_info")
 
 
+def current_access_token(request) -> "str | None":
+    """The signed-in user's HF OAuth access token, or None.
+
+    Keep this server-side: the demo uses it to attribute load-balancer session
+    requests to the signed-in HF account, but never returns it to the browser.
+    """
+    token = _field(current_oauth(request), "access_token")
+    if token is None:
+        return None
+    return str(token).strip() or None
+
+
 def _user_org_names(user) -> "set[str]":
     """The user's organisations from the OAuth userinfo, by username/name/id."""
     names = set()
