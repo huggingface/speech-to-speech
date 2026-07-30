@@ -329,6 +329,9 @@ let rtcAvailable = false;
 /** @type {RTCIceServer[]} STUN/TURN servers for the browser peer connection
  * (deploy-provided via RTC_ICE_SERVERS; empty -> host candidates only). */
 let iceServers = [];
+// Optional hidden user prompt supplied by the deployment. When non-empty, the
+// client asks the model to greet once after the initial session configuration.
+let startupGreeting = "";
 // Transport of the LIVE (or starting) conversation — as opposed to
 // `settings.transport`, which is what the NEXT one will use. Drives the
 // camera-snapshot size budget while a call is running.
@@ -918,6 +921,9 @@ async function fetchConfig() {
       // /api/calls proxy refuses to forward anywhere else).
       rtcAvailable = !!json.rtc;
       iceServers = Array.isArray(json.iceServers) ? json.iceServers : [];
+      startupGreeting = typeof json.startupGreeting === "string"
+        ? json.startupGreeting.trim()
+        : "";
       // The conversation-time limiter rides on the LB being present.
       limiterOn = lbMode;
     }
@@ -1418,6 +1424,7 @@ async function doStart(audioContext = null) {
   const common = {
     voice: settings.voice,
     instructions: effectiveInstructions(),
+    startupGreeting,
     acquireMic: acquireMicStream,
     tools: activeToolDefs(),
     audioOutputId: settings.audioOutputId || "",

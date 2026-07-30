@@ -45,6 +45,7 @@ backend, speaking the OpenAI Realtime **GA** protocol over **WebSocket**
    uv pip install -r demo/requirements.txt
    export SPEECH_TO_SPEECH_URL=ws://localhost:8765/v1/realtime
    export SERPER_API_KEY=...   # optional; web search is disabled without it
+   export STARTUP_GREETING=... # optional; empty disables the automatic greeting
    uv run uvicorn --app-dir demo server:app --reload --port 7860
    ```
 
@@ -155,7 +156,10 @@ Three modes, picked by env (`/api/config` tells the client which one is active):
 - **`LOAD_BALANCER_URL` env** — multi-compute deployments only: the browser
   POSTs the same-origin `/api/session` proxy, the server forwards to the LB,
   and the browser dials the per-session compute URL the LB hands back. The LB
-  address never reaches the browser; the Settings URL field is hidden.
+  address never reaches the browser; the Settings URL field is hidden. On
+  OAuth-enabled Spaces, the proxy forwards the signed-in user's HF access token
+  to the LB through `X-Reachy-Mini-Authorization` so the backend can attribute
+  usage. The token stays server-side; anonymous requests include no credential.
 
 | `SPEECH_TO_SPEECH_URL` | `LOAD_BALANCER_URL` | `SPACE_ID` | Connection | URL field | Transport | Metering |
 |:---:|:---:|:---:|---|---|---|---|
@@ -165,6 +169,16 @@ Three modes, picked by env (`/api/config` tells the client which one is active):
 | – | ✅ | – | LB proxy | hidden | WS only | off |
 
 **Settings → Restart** reconnects with the current voice, instructions and URL.
+
+## Startup greeting
+
+By default, each new connection creates one hidden user item asking the model
+for a brief greeting, then requests a response. Besides opening the conversation
+naturally, this warms the same prompt prefix used by the first spoken turn.
+
+Set `STARTUP_GREETING` to customize the hidden prompt, or set it to an empty
+value to disable automatic generation. The WebSocket and WebRTC clients both
+guard the greeting so it is sent at most once per connection.
 
 ## Tools
 

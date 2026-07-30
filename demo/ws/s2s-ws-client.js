@@ -51,6 +51,8 @@
  *   session POST and dials it directly — no load balancer in between.
  * @property {string} voice
  * @property {string} instructions
+ * @property {string} [startupGreeting] Hidden user prompt that asks the model
+ *   to greet once after the initial session configuration is sent.
  * @property {MediaStream} [micStream] Live mic stream. Provide this OR `acquireMic`.
  * @property {() => Promise<MediaStream>} [acquireMic] Lazily obtain the mic stream,
  *   called only once a session is actually granted (after any queue wait). Lets the
@@ -200,6 +202,8 @@ export class S2sWsRealtimeClient extends EventTarget {
     /** @type {Promise<void> | null} */
     this._readyPromise = null;
     this._sessionConfigured = false;
+    this._startupGreeting = options.startupGreeting?.trim() ?? "";
+    this._startupGreetingSent = false;
     this._debug = (() => { try { return localStorage.getItem("s2s.debug") === "1"; } catch { return false; } })();
   }
 
@@ -647,11 +651,16 @@ export class S2sWsRealtimeClient extends EventTarget {
         // out). We only push the user-tunable bits: voice + instructions.
         this._sendSessionUpdate();
         this._sessionConfigured = true;
+        // The s2s server does not echo session.updated. WebSocket messages are
+        // ordered, so this hidden item and response.create are handled only
+        // after the session.update sent immediately above.
+        this._sendStartupGreeting();
         if (this._status === "connecting") this._setStatus("connected");
         break;
 
       case "session.updated":
-        // Acknowledged by server, nothing to do.
+        // Some Realtime servers acknowledge session.update; the greeting was
+        // already queued from session.created and is guarded against repeats.
         break;
 
       case "input_audio_buffer.speech_started":
@@ -985,6 +994,26 @@ export class S2sWsRealtimeClient extends EventTarget {
         content: [{ type: "input_image", image_url: dataUrl }],
       },
     });
+  }
+
+  /**
+   * Ask the model to open the conversation exactly once. The synthetic user
+   * prompt stays in conversation history, so the greeting warms the actual
+   * prompt prefix reused by the first spoken turn.
+   */
+  _sendStartupGreeting() {
+    if (!this._startupGreeting || this._startupGreetingSent) return;
+    this._startupGreetingSent = true;
+    this._send({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: this._startupGreeting }],
+      },
+    });
+    this.requestResponse();
+    if (this._debug) console.debug("[ws] startup greeting queued");
   }
 
   /**

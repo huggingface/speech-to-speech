@@ -44,6 +44,8 @@
  *   candidates only — fine locally, may not traverse NATs).
  * @property {string} voice
  * @property {string} instructions
+ * @property {string} [startupGreeting] Hidden user prompt that asks the model
+ *   to greet once after the initial session configuration is sent.
  * @property {MediaStream} [micStream] Live mic stream. Provide this OR `acquireMic`.
  * @property {() => Promise<MediaStream>} [acquireMic] Lazily obtain the mic
  *   stream once connect() actually runs (same contract as the WS client).
@@ -146,6 +148,8 @@ export class S2sRtcRealtimeClient extends EventTarget {
     /** @type {{ image?: string }[]} */
     this._createQueue = [];
     this._sessionConfigured = false;
+    this._startupGreeting = options.startupGreeting?.trim() ?? "";
+    this._startupGreetingSent = false;
     this._debug = (() => { try { return localStorage.getItem("s2s.debug") === "1"; } catch { return false; } })();
   }
 
@@ -445,6 +449,9 @@ export class S2sRtcRealtimeClient extends EventTarget {
         // user-tunable bits (voice, instructions, tools) — same as WS.
         this._sendSessionUpdate();
         this._sessionConfigured = true;
+        // Data-channel messages are ordered, so the hidden item and
+        // response.create are handled after the session.update above.
+        this._sendStartupGreeting();
         if (this._status === "connecting") this._setStatus("connected");
         break;
 
@@ -712,6 +719,26 @@ export class S2sRtcRealtimeClient extends EventTarget {
         content: [{ type: "input_image", image_url: dataUrl }],
       },
     });
+  }
+
+  /**
+   * Ask the model to open the conversation exactly once. The synthetic user
+   * prompt stays in conversation history, warming the prompt prefix reused by
+   * the first spoken turn.
+   */
+  _sendStartupGreeting() {
+    if (!this._startupGreeting || this._startupGreetingSent) return;
+    this._startupGreetingSent = true;
+    this._send({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: this._startupGreeting }],
+      },
+    });
+    this.requestResponse();
+    if (this._debug) console.debug("[rtc] startup greeting queued");
   }
 
   /** Ask the model to respond now (after tool results). Serialized behind the
