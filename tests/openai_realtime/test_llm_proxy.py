@@ -491,6 +491,37 @@ class TestUsageSection:
         assert "llm_proxy" in data
 
 
+class TestProxyConfigFollowsBackendSettings:
+    def test_config_reads_the_renamed_connection_fields(self):
+        # Regression: main() runs prepare_all_args() before the proxy config
+        # is built, and rename_args() pops responses_api_base_url/api_key
+        # into base_url/api_key. Reading the raw names afterwards silently
+        # returned the dataclass class defaults (None), so the proxy hit the
+        # OpenAI default upstream with no key regardless of the flags while
+        # the pipeline LM used the configured provider.
+        from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
+        from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
+            ResponsesApiLanguageModelHandlerArguments,
+        )
+        from speech_to_speech.s2s_pipeline import build_llm_proxy_config, rename_args
+
+        module_kwargs = ModuleArguments(enable_llm_proxy=True, llm_backend="chat-completions")
+        lm_kwargs = ResponsesApiLanguageModelHandlerArguments(
+            model_name="google/gemma-test",
+            responses_api_base_url="https://router.huggingface.co/v1",
+            responses_api_api_key="hf_secret",
+        )
+        rename_args(lm_kwargs, "responses_api")  # what prepare_all_args() does before the config is built
+
+        config = build_llm_proxy_config(module_kwargs, lm_kwargs)
+
+        assert config.enabled is True
+        assert config.llm_backend == "chat-completions"
+        assert config.upstream_base_url == "https://router.huggingface.co/v1"
+        assert config.upstream_api_key == "hf_secret"
+        assert config.model_name == "google/gemma-test"
+
+
 class TestUpstreamErrorPassthrough:
     @pytest.mark.parametrize("status", [400, 429, 500, 503])
     def test_upstream_errors_pass_through_verbatim(self, upstream, status):

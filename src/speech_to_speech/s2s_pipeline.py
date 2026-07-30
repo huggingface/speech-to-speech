@@ -126,6 +126,34 @@ def rename_args(args: Any, prefix: str) -> None:
     args.__dict__["gen_kwargs"] = gen_kwargs
 
 
+def build_llm_proxy_config(
+    module_kwargs: ModuleArguments,
+    responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
+) -> Any:
+    """Proxy upstream settings, read from the same fields the pipeline LM uses.
+
+    Both remote backends read their connection settings from the responses-api
+    argument class (see get_llm_handler), so the proxy reuses the upstream URL,
+    key, and model the pipeline LM runs with. Must be called after
+    prepare_all_args(): rename_args() has popped the raw ``responses_api_*``
+    fields into their handler names (``base_url``, ``api_key``), and reading
+    the raw names after that silently returns the dataclass class defaults
+    (None) — which pointed the proxy at the OpenAI default upstream with no
+    key, whatever the flags said. Indexing vars() keeps that failure loud.
+    """
+    from speech_to_speech.api.openai_realtime.llm_proxy import LLMProxyConfig
+
+    lm_vars = vars(responses_api_language_model_handler_kwargs)
+    return LLMProxyConfig(
+        enabled=module_kwargs.enable_llm_proxy,
+        llm_backend=module_kwargs.llm_backend,
+        upstream_base_url=lm_vars["base_url"],
+        upstream_api_key=lm_vars["api_key"],
+        model_name=lm_vars["model_name"],
+        connect_timeout_s=module_kwargs.llm_proxy_connect_timeout_s,
+    )
+
+
 def parse_arguments() -> ParsedArguments:
     # Pre-parse to determine which LM backend is selected, so only one of the
     # mutually exclusive LM argument classes is registered with HfArgumentParser
@@ -637,7 +665,6 @@ def build_pipeline(
         )
         comms_handlers = [websocket_streamer]
     elif module_kwargs.mode == "realtime":
-        from speech_to_speech.api.openai_realtime.llm_proxy import LLMProxyConfig
         from speech_to_speech.api.openai_realtime.server import RealtimeServer
 
         pool_size = max(1, module_kwargs.num_pipelines)
@@ -663,17 +690,7 @@ def build_pipeline(
             for i in range(pool_size)
         ]
 
-        # Both remote backends read their connection settings from the
-        # responses-api argument class (see get_llm_handler), so the proxy
-        # reuses the same upstream URL, key, and model the pipeline LM uses.
-        llm_proxy_config = LLMProxyConfig(
-            enabled=module_kwargs.enable_llm_proxy,
-            llm_backend=module_kwargs.llm_backend,
-            upstream_base_url=responses_api_language_model_handler_kwargs.responses_api_base_url,
-            upstream_api_key=responses_api_language_model_handler_kwargs.responses_api_api_key,
-            model_name=responses_api_language_model_handler_kwargs.model_name,
-            connect_timeout_s=module_kwargs.llm_proxy_connect_timeout_s,
-        )
+        llm_proxy_config = build_llm_proxy_config(module_kwargs, responses_api_language_model_handler_kwargs)
 
         realtime_server = RealtimeServer(
             stop_event=stop_event,
