@@ -1648,6 +1648,102 @@ body.cam-on .footer {
   gap: 12px;
 }
 
+/* ─── Create-voice button + modal ────────────────────────────────────── */
+
+/* Sits beside the voice select; hidden until the capability probe passes. */
+.create-voice-btn {
+  align-self: end;
+}
+.create-voice-btn[hidden] {
+  display: none;
+}
+
+/* Record / Upload segmented toggle. */
+.voice-mode {
+  display: flex;
+  width: fit-content;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.voice-mode-btn {
+  padding: 8px 18px;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.voice-mode-btn.active {
+  background: var(--bg-elev-2);
+  color: var(--text);
+}
+
+.voice-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.voice-panel[hidden] {
+  display: none;
+}
+
+/* The fixed script the user reads aloud — it IS the reference transcript. */
+.voice-script {
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.voice-record-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.voice-record-btn.recording {
+  border-color: var(--error);
+  color: var(--error);
+}
+.voice-record-time {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.voice-preview {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+}
+.voice-preview[hidden] {
+  display: none;
+}
+
+.voice-error {
+  margin: 0;
+  font-size: 13px;
+  color: var(--error);
+}
+.voice-error[hidden] {
+  display: none;
+}
+
+.voice-offline-note {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.voice-offline-note[hidden] {
+  display: none;
+}
+
 /* ─── Chat button + badge ────────────────────────────────────────────── */
 
 #chat-btn {

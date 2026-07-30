@@ -59,6 +59,7 @@ dependencies = [
     "espeakng-loader>=0.2.4; platform_system == 'Darwin'",
     "spacy>=3.8.4; platform_system == 'Darwin'",
     "phonemizer-fork>=3.3.2; platform_system == 'Darwin'",
+    "python-multipart>=0.0.18",
 ]
 
 [project.optional-dependencies]

@@ -302,6 +302,43 @@ const restartBtn = $("#restart-conversation");
 const restartHint = $("#restart-hint");
 const settingsForm = /** @type {HTMLFormElement} */ (settingsModal.querySelector("form"));
 
+/** @type {HTMLButtonElement} */
+const createVoiceBtn = $("#create-voice-btn");
+/** @type {HTMLButtonElement} */
+const createVoiceTopBtn = $("#create-voice-top-btn");
+/** @type {HTMLDialogElement} */
+const voiceModal = $("#voice-modal");
+/** @type {HTMLElement} */
+const voiceOfflineNote = $("#voice-offline-note");
+/** @type {HTMLButtonElement} */
+const voiceModalClose = $("#voice-modal-close");
+/** @type {HTMLButtonElement} */
+const voiceModeRecordBtn = $("#voice-mode-record");
+/** @type {HTMLButtonElement} */
+const voiceModeUploadBtn = $("#voice-mode-upload");
+/** @type {HTMLElement} */
+const voiceRecordPanel = $("#voice-record-panel");
+/** @type {HTMLElement} */
+const voiceUploadPanel = $("#voice-upload-panel");
+/** @type {HTMLElement} */
+const voiceScriptEl = $("#voice-script");
+/** @type {HTMLButtonElement} */
+const voiceRecordBtn = $("#voice-record-btn");
+/** @type {HTMLElement} */
+const voiceRecordTime = $("#voice-record-time");
+/** @type {HTMLAudioElement} */
+const voicePreview = $("#voice-preview");
+/** @type {HTMLInputElement} */
+const voiceFileInput = $("#voice-file");
+/** @type {HTMLTextAreaElement} */
+const voiceTranscriptInput = $("#voice-transcript");
+/** @type {HTMLInputElement} */
+const voiceNameInput = $("#voice-name");
+/** @type {HTMLElement} */
+const voiceErrorEl = $("#voice-error");
+/** @type {HTMLButtonElement} */
+const voiceSaveBtn = $("#voice-save");
+
 /** @type {AppState} */
 let currentState = "idle";
 let settings = loadSettings();
@@ -1114,6 +1151,457 @@ settingsForm.addEventListener("submit", (event) => {
   }
 });
 
+// ── Voice cloning ───────────────────────────────────────────────────────────
+// The popup records a fixed script — the script IS the reference transcript,
+// never typed — or accepts an uploaded clip plus its transcript. Whatever the
+// source, the browser decodes it and re-encodes PCM16 mono WAV so the server
+// never needs a transcoder.
+//
+// Two ways in: the top-bar button is always available; the Settings button is
+// revealed only when the live call's backend answers the capability probe
+// (GET /api/voices → 200; a non-Qwen backend answers 409). With a live
+// cloning-capable call, saving stores the voice in the deployment's global
+// library, auto-selects it, and applies it via a plain session.update.
+// Without one, the voice waits in this tab's pending store (memory only — a
+// reload drops it), is selectable immediately, and is uploaded automatically
+// right after the next successful capability probe.
+
+const PRESET_VOICES = new Set(Array.from(inputVoice.options).map((o) => o.value));
+const VOICE_RECORD_MIN_SEC = 3;
+const VOICE_RECORD_MAX_SEC = 60;
+// Ids of voices created outside a call, waiting for one to upload through.
+// Deliberately colliding with nothing the server hands out (16 hex chars).
+const PENDING_VOICE_PREFIX = "pending:";
+
+/** Voices saved without a live cloning-capable call, keyed by their temporary
+ *  id. Tab memory only: the encoded WAV can't reasonably go to localStorage.
+ *  @type {Map<string, { wav: Blob, name: string, refText: string }>} */
+const pendingVoices = new Map();
+let pendingVoiceSeq = 0;
+
+/** @param {string} voiceId */
+function isPendingVoiceId(voiceId) {
+  return voiceId.startsWith(PENDING_VOICE_PREFIX);
+}
+
+let voiceCloningAvailable = false;
+// One probe per conversation: the client status returns to "connected" after
+// every assistant turn, and re-probing on each would spam the proxy.
+let voiceProbeDone = false;
+/** @type {"record" | "upload"} */
+let voiceMode = "record";
+/** @type {MediaRecorder | null} */
+let voiceRecorder = null;
+/** @type {Blob | null} */
+let voiceRecordingBlob = null;
+let voiceRecordingSec = 0;
+let voiceRecordTimer = 0;
+let voiceRecordStartedAt = 0;
+
+/** Same-origin proxy URL for the live session's voices routes (null when no
+ *  call is up). Carries the realtime session id and, in LB mode, the grant id
+ *  the proxy uses to find the compute host it recorded. */
+function voicesApiUrl() {
+  if (!client || !client.realtimeSessionId) return null;
+  const params = new URLSearchParams({ session: client.realtimeSessionId });
+  if (client.grantSessionId) params.set("grant", client.grantSessionId);
+  return `api/voices?${params}`;
+}
+
+/** Capability probe, once per conversation: 200 reveals the UI and populates
+ *  the cloned-voices optgroup; anything else keeps the feature invisible. */
+async function probeVoiceCloning() {
+  voiceCloningAvailable = false;
+  createVoiceBtn.hidden = true;
+  const url = voicesApiUrl();
+  if (!url) return;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return;
+    const json = await res.json().catch(() => ({}));
+    voiceCloningAvailable = true;
+    createVoiceBtn.hidden = false;
+    syncClonedVoiceOptions(Array.isArray(json.voices) ? json.voices : []);
+    await flushPendingVoices();
+  } catch (err) {
+    if (DEBUG) console.debug("[ui] voices probe failed:", err);
+  } finally {
+    syncVoiceOfflineNote();
+  }
+}
+
+/** Upload every voice created outside a call, now that one is up. Each 201
+ *  swaps the temporary option for the server's content-hash id; a failed
+ *  upload keeps its pending entry for the next conversation's flush. */
+async function flushPendingVoices() {
+  for (const [tempId, pending] of Array.from(pendingVoices)) {
+    const url = voicesApiUrl();
+    if (!url || !voiceCloningAvailable) return;
+    const form = new FormData();
+    form.append("audio", pending.wav, "voice.wav");
+    form.append("ref_text", pending.refText);
+    form.append("name", pending.name);
+    try {
+      const res = await fetch(url, { method: "POST", body: form });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.voice_id) {
+        if (DEBUG) console.debug("[ui] pending voice upload failed:", res.status, json);
+        continue;
+      }
+      pendingVoices.delete(tempId);
+      const group = clonedVoicesGroup();
+      Array.from(group.children)
+        .find((o) => /** @type {HTMLOptionElement} */ (o).value === tempId)
+        ?.remove();
+      if (settings.voice === tempId) {
+        applyClonedVoice(json.voice_id, json.name || pending.name);
+      } else {
+        upsertClonedOption(group, json.voice_id, json.name || pending.name);
+      }
+    } catch (err) {
+      if (DEBUG) console.debug("[ui] pending voice upload failed:", err);
+    }
+  }
+}
+
+/** The "Cloned voices" optgroup in the voice select (created on demand). */
+function clonedVoicesGroup() {
+  let group = /** @type {HTMLOptGroupElement | null} */ (inputVoice.querySelector("optgroup[data-cloned]"));
+  if (!group) {
+    group = document.createElement("optgroup");
+    group.label = "Cloned voices";
+    group.dataset.cloned = "1";
+    inputVoice.appendChild(group);
+  }
+  return group;
+}
+
+/** @param {HTMLOptGroupElement} group @param {string} voiceId @param {string} name */
+function upsertClonedOption(group, voiceId, name) {
+  let opt = /** @type {HTMLOptionElement | null} */ (
+    Array.from(group.children).find((o) => /** @type {HTMLOptionElement} */ (o).value === voiceId) ?? null
+  );
+  if (!opt) {
+    opt = document.createElement("option");
+    opt.value = voiceId;
+    group.appendChild(opt);
+  }
+  opt.textContent = name;
+  return opt;
+}
+
+/** Rebuild the optgroup from a server listing, preserving the saved selection.
+ *  A persisted cloned id missing from the listing (deleted on the server)
+ *  keeps a placeholder so saving Settings can't silently fall back to a
+ *  preset; selecting it degrades to the backend's unsupported-voice warning.
+ *  @param {{ voice_id: string, name: string }[]} voices */
+function syncClonedVoiceOptions(voices) {
+  const group = clonedVoicesGroup();
+  group.textContent = "";
+  for (const v of voices) {
+    if (v && v.voice_id) upsertClonedOption(group, v.voice_id, v.name || "Cloned voice");
+  }
+  for (const [tempId, pending] of pendingVoices) {
+    upsertClonedOption(group, tempId, pendingVoiceLabel(pending.name));
+  }
+  if (
+    !PRESET_VOICES.has(settings.voice) &&
+    !isPendingVoiceId(settings.voice) &&
+    !voices.some((v) => v && v.voice_id === settings.voice)
+  ) {
+    upsertClonedOption(group, settings.voice, "Cloned voice");
+  }
+  if (!group.childElementCount) group.remove();
+  inputVoice.value = settings.voice;
+}
+
+/** @param {string} name */
+function pendingVoiceLabel(name) {
+  return `${name} (pending)`;
+}
+
+// A pending voice never reached the server; its audio lived only in the
+// previous page's memory, so the persisted selection points at nothing.
+// Fall back to the first preset rather than sending a dead id.
+if (isPendingVoiceId(settings.voice)) {
+  settings.voice = /** @type {HTMLOptionElement} */ (inputVoice.options[0]).value;
+  saveSettings(settings);
+  inputVoice.value = settings.voice;
+}
+
+// A cloned voice persisted from a previous visit must stay selectable before
+// any probe runs, or opening + saving Settings would overwrite it with the
+// select's first preset.
+if (!PRESET_VOICES.has(settings.voice)) {
+  upsertClonedOption(clonedVoicesGroup(), settings.voice, "Cloned voice");
+  inputVoice.value = settings.voice;
+}
+
+/** @param {string} message Empty string hides the error line. */
+function setVoiceError(message) {
+  voiceErrorEl.textContent = message;
+  voiceErrorEl.hidden = !message;
+}
+
+/** The fixed script shown in Record mode — it doubles as the transcript. */
+function voiceScriptText() {
+  return (voiceScriptEl.textContent || "").replace(/\s+/g, " ").trim();
+}
+
+function updateVoiceSaveEnabled() {
+  const named = !!voiceNameInput.value.trim();
+  const recording = !!(voiceRecorder && voiceRecorder.state === "recording");
+  const sourced =
+    voiceMode === "record"
+      ? !!voiceRecordingBlob && voiceRecordingSec >= VOICE_RECORD_MIN_SEC
+      : !!voiceFileInput.files?.[0] && !!voiceTranscriptInput.value.trim();
+  voiceSaveBtn.disabled = recording || !named || !sourced;
+}
+
+/** @param {"record" | "upload"} mode */
+function setVoiceMode(mode) {
+  voiceMode = mode;
+  const record = mode === "record";
+  if (!record) stopVoiceRecording();
+  voiceModeRecordBtn.classList.toggle("active", record);
+  voiceModeRecordBtn.setAttribute("aria-selected", String(record));
+  voiceModeUploadBtn.classList.toggle("active", !record);
+  voiceModeUploadBtn.setAttribute("aria-selected", String(!record));
+  voiceRecordPanel.hidden = !record;
+  voiceUploadPanel.hidden = record;
+  setVoiceError("");
+  updateVoiceSaveEnabled();
+}
+
+function resetVoiceModal() {
+  stopVoiceRecording();
+  discardVoiceRecording();
+  voiceFileInput.value = "";
+  voiceTranscriptInput.value = "";
+  voiceNameInput.value = "";
+  voiceSaveBtn.textContent = "Save voice";
+  setVoiceMode("record");
+}
+
+function discardVoiceRecording() {
+  voiceRecordingBlob = null;
+  voiceRecordingSec = 0;
+  if (voicePreview.src) URL.revokeObjectURL(voicePreview.src);
+  voicePreview.removeAttribute("src");
+  voicePreview.hidden = true;
+  voiceRecordTime.hidden = true;
+  voiceRecordBtn.textContent = "Record";
+  voiceRecordBtn.classList.remove("recording");
+}
+
+/** @param {number} sec */
+function paintVoiceRecordTime(sec) {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  voiceRecordTime.textContent = `${m}:${String(s).padStart(2, "0")}`;
+  voiceRecordTime.hidden = false;
+}
+
+async function startVoiceRecording() {
+  discardVoiceRecording();
+  setVoiceError("");
+  /** @type {MediaStream} */
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    setVoiceError("Microphone access is needed to record a voice sample.");
+    return;
+  }
+  const chunks = /** @type {Blob[]} */ ([]);
+  // Default container (WebM/Opus, or MP4 on Safari) — the Web Audio decode on
+  // save flattens the difference, so no mimeType negotiation is needed.
+  const recorder = new MediaRecorder(stream);
+  voiceRecorder = recorder;
+  voiceRecordStartedAt = performance.now();
+  recorder.addEventListener("dataavailable", (e) => {
+    if (e.data.size) chunks.push(e.data);
+  });
+  recorder.addEventListener("stop", () => {
+    for (const track of stream.getTracks()) track.stop();
+    if (voiceRecordTimer) clearInterval(voiceRecordTimer);
+    voiceRecordTimer = 0;
+    voiceRecorder = null;
+    voiceRecordingSec = (performance.now() - voiceRecordStartedAt) / 1000;
+    voiceRecordingBlob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+    voicePreview.src = URL.createObjectURL(voiceRecordingBlob);
+    voicePreview.hidden = false;
+    voiceRecordBtn.textContent = "Re-record";
+    voiceRecordBtn.classList.remove("recording");
+    paintVoiceRecordTime(voiceRecordingSec);
+    if (voiceRecordingSec < VOICE_RECORD_MIN_SEC) {
+      setVoiceError(`That was under ${VOICE_RECORD_MIN_SEC} seconds — please record the whole script.`);
+    }
+    updateVoiceSaveEnabled();
+  });
+  recorder.start();
+  voiceRecordBtn.textContent = "Stop";
+  voiceRecordBtn.classList.add("recording");
+  paintVoiceRecordTime(0);
+  voiceRecordTimer = window.setInterval(() => {
+    const sec = (performance.now() - voiceRecordStartedAt) / 1000;
+    paintVoiceRecordTime(sec);
+    // Server-side clamp is 60 s; stop for the user instead of failing later.
+    if (sec >= VOICE_RECORD_MAX_SEC) stopVoiceRecording();
+  }, 250);
+  updateVoiceSaveEnabled();
+}
+
+function stopVoiceRecording() {
+  if (voiceRecorder && voiceRecorder.state === "recording") voiceRecorder.stop();
+}
+
+/** Decode any browser-supported audio (MediaRecorder blob or picked file) and
+ *  re-encode PCM16 mono WAV, the one format the server accepts.
+ *  @param {Blob} blob */
+async function encodeVoiceBlobToWav(blob) {
+  const Ctx = window.AudioContext || /** @type {any} */ (window).webkitAudioContext;
+  const ctx = new Ctx();
+  try {
+    const decoded = await ctx.decodeAudioData(await blob.arrayBuffer());
+    const mono = new Float32Array(decoded.length);
+    for (let c = 0; c < decoded.numberOfChannels; c++) {
+      const channel = decoded.getChannelData(c);
+      for (let i = 0; i < channel.length; i++) mono[i] += channel[i] / decoded.numberOfChannels;
+    }
+    return wavFromFloat32(mono, decoded.sampleRate);
+  } finally {
+    void ctx.close().catch(() => {});
+  }
+}
+
+/** @param {Float32Array} samples @param {number} sampleRate */
+function wavFromFloat32(samples, sampleRate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buf);
+  const writeStr = (/** @type {number} */ off, /** @type {string} */ s) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+  };
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true); // PCM chunk size
+  view.setUint16(20, 1, true); // PCM format
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // byte rate
+  view.setUint16(32, 2, true); // block align
+  view.setUint16(34, 16, true); // bits per sample
+  writeStr(36, "data");
+  view.setUint32(40, samples.length * 2, true);
+  let off = 44;
+  for (let i = 0; i < samples.length; i++, off += 2) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+/** Add/refresh the option, persist the selection, and apply it to the live
+ *  session so the very next assistant reply speaks in the new voice.
+ *  @param {string} voiceId @param {string} name */
+function applyClonedVoice(voiceId, name) {
+  upsertClonedOption(clonedVoicesGroup(), voiceId, name);
+  settings.voice = voiceId;
+  saveSettings(settings);
+  inputVoice.value = voiceId;
+  // A pending id means nothing to the backend; the flush after the next
+  // successful probe swaps it for the real id and re-applies.
+  if (client && LIVE_STATES.has(currentState) && !isPendingVoiceId(voiceId)) {
+    client.updateSession({ voice: voiceId });
+  }
+}
+
+/** Stash a voice created without a live cloning-capable call. It is selected
+ *  like a server voice and uploaded by the flush on the next connect. */
+function stashPendingVoice(/** @type {Blob} */ wav, /** @type {string} */ name, /** @type {string} */ refText) {
+  const tempId = `${PENDING_VOICE_PREFIX}${++pendingVoiceSeq}`;
+  pendingVoices.set(tempId, { wav, name, refText });
+  applyClonedVoice(tempId, pendingVoiceLabel(name));
+}
+
+/** The in-modal hint that a save will wait in the tab instead of uploading. */
+function syncVoiceOfflineNote() {
+  voiceOfflineNote.hidden = !!(voicesApiUrl() && voiceCloningAvailable);
+}
+
+async function saveVoice() {
+  const url = voicesApiUrl();
+  const name = voiceNameInput.value.trim();
+  const source = voiceMode === "record" ? voiceRecordingBlob : (voiceFileInput.files?.[0] ?? null);
+  const refText = voiceMode === "record" ? voiceScriptText() : voiceTranscriptInput.value.trim();
+  if (!source || !name || !refText) return;
+
+  setVoiceError("");
+  voiceSaveBtn.disabled = true;
+  voiceSaveBtn.textContent = "Saving…";
+  try {
+    /** @type {Blob} */
+    let wav;
+    try {
+      wav = await encodeVoiceBlobToWav(source);
+    } catch {
+      setVoiceError("Couldn't decode that audio — try a different file or re-record.");
+      return;
+    }
+    if (!url || !voiceCloningAvailable) {
+      stashPendingVoice(wav, name, refText);
+      voiceModal.close();
+      return;
+    }
+    const form = new FormData();
+    form.append("audio", wav, "voice.wav");
+    form.append("ref_text", refText);
+    form.append("name", name);
+    const res = await fetch(url, { method: "POST", body: form });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setVoiceError(json?.error?.message || `Upload failed (${res.status}).`);
+      return;
+    }
+    applyClonedVoice(json.voice_id, json.name || name);
+    voiceModal.close();
+  } catch (err) {
+    setVoiceError(err instanceof Error ? err.message : String(err));
+  } finally {
+    voiceSaveBtn.textContent = "Save voice";
+    updateVoiceSaveEnabled();
+  }
+}
+
+function openVoiceModal() {
+  resetVoiceModal();
+  syncVoiceOfflineNote();
+  voiceModal.showModal();
+}
+
+createVoiceBtn.addEventListener("click", () => {
+  if (!voiceCloningAvailable) return;
+  openVoiceModal();
+});
+createVoiceTopBtn.addEventListener("click", openVoiceModal);
+voiceModalClose.addEventListener("click", () => voiceModal.close());
+voiceModal.addEventListener("close", () => stopVoiceRecording());
+voiceModeRecordBtn.addEventListener("click", () => setVoiceMode("record"));
+voiceModeUploadBtn.addEventListener("click", () => setVoiceMode("upload"));
+voiceRecordBtn.addEventListener("click", () => {
+  if (voiceRecorder && voiceRecorder.state === "recording") stopVoiceRecording();
+  else void startVoiceRecording();
+});
+voiceFileInput.addEventListener("change", () => {
+  setVoiceError("");
+  updateVoiceSaveEnabled();
+});
+voiceTranscriptInput.addEventListener("input", updateVoiceSaveEnabled);
+voiceNameInput.addEventListener("input", updateVoiceSaveEnabled);
+voiceSaveBtn.addEventListener("click", () => void saveVoice());
+
 // The noise gate applies live (worklet param), so tune it without a restart:
 // update the label/marker, persist, and push straight to the running client.
 inputNoiseGate.addEventListener("input", () => {
@@ -1398,6 +1886,7 @@ async function doStart(audioContext = null) {
 
   chat.clear();
   chat.reset();
+  voiceProbeDone = false;
   setState("connecting");
   setCaption("Asking for mic…", "muted");
 
@@ -1618,6 +2107,13 @@ function onClientStatus(status) {
       break;
     case "connected":
       setState("listening");
+      // First "connected" of the conversation: session.created has been
+      // handled (the client sets its realtimeSessionId before flipping the
+      // status), so the voices capability probe can run now.
+      if (!voiceProbeDone) {
+        voiceProbeDone = true;
+        void probeVoiceCloning();
+      }
       break;
     case "user-speaking":
       setState("user-speaking");
@@ -1642,6 +2138,13 @@ async function teardown() {
   stopJoinCountdown();
   endTrackedSession();
   endQueueTicket();
+  // The voices routes need a live session, so the Settings affordance hides
+  // until the next call's probe. The popup itself survives (creation without
+  // a call stashes locally); only its hint changes. Cloned options stay in
+  // the select — the saved selection must survive reconnects.
+  voiceCloningAvailable = false;
+  createVoiceBtn.hidden = true;
+  syncVoiceOfflineNote();
   chat.reset({ dismiss: true });
   if (client) {
     try {

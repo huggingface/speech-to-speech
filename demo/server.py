@@ -27,6 +27,8 @@ Endpoints:
   GET  /api/me               -> login + tier + remaining budget (LB mode only)
   POST /api/search           -> { results, answer }  Google via Serper.dev
   POST /api/calls            -> proxies the WebRTC SDP offer to <s2s>/v1/realtime/calls
+  GET  /api/voices           -> proxies the s2s cloned-voice listing (capability probe)
+  POST /api/voices           -> proxies a cloned-voice upload (rate-capped per identity)
   POST /api/session          -> proxies <LB>/session: a grant, or a queue ticket
   GET  /api/queue/{id}       -> proxies <LB>/queue/{id}: position, or a grant on claim
   DELETE /api/queue/{id}     -> leave the queue (explicit "Leave queue" button)
@@ -45,6 +47,8 @@ import asyncio
 import json
 import logging
 import os
+from collections import OrderedDict
+from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 
 import auth
@@ -128,11 +132,40 @@ def _webrtc_calls_url(s2s_url: str) -> str:
     return urlunsplit((scheme, parts.netloc, path.rstrip("/") + "/calls", parts.query, ""))
 
 
+def _http_base_url(url: str) -> str:
+    """Reduce any realtime/connect URL to its plain http(s) origin.
+
+    ``wss://host:port/v1/realtime?token=...`` -> ``https://host:port``"""
+    s = url.strip()
+    if not s.startswith(("ws://", "wss://", "http://", "https://")):
+        s = "http://" + s
+    parts = urlsplit(s)
+    scheme = {"ws": "http", "wss": "https"}.get(parts.scheme, parts.scheme)
+    return urlunsplit((scheme, parts.netloc, "", "", ""))
+
+
 SERPER_URL = "https://google.serper.dev/search"
 # Cap results so the tool output stays small enough to feed back to the model.
 MAX_RESULTS = 5
 HERE = os.path.dirname(os.path.abspath(__file__))
 LB_USER_AGENT = "speech-to-speech-demo"
+
+# ── Cloned-voice proxy ───────────────────────────────────────────────────────
+# The s2s server rejects reference audio over 10 MB; cap the whole multipart
+# body a little above that so oversized uploads die here instead of transiting.
+VOICE_UPLOAD_MAX_BYTES = 12 * 1024 * 1024
+# Modest per-identity daily cap on voice creations (in-memory: voice cloning is
+# cheap to retry and the cap only guards against scripting, so restarts may
+# forgive — unlike talk time there is no budget to protect across reboots).
+VOICE_CREATE_DAILY_CAP = int(os.environ.get("VOICE_CREATE_DAILY_CAP", "10"))
+_voice_creations: "dict[str, int]" = {}
+_voice_creations_day = ""
+# LB mode: session grant id -> compute-host origin, recorded when the grant is
+# relayed. Voices requests forward ONLY to a recorded host (or the pinned URL in
+# direct mode) — never to a client-supplied target. Bounded LRU so abandoned
+# grants can't grow it forever.
+_grant_hosts: "OrderedDict[str, str]" = OrderedDict()
+GRANT_HOSTS_MAX = 1024
 
 app = FastAPI(title="s2s-demo")
 
@@ -312,6 +345,115 @@ async def calls(request: Request):
     )
 
 
+class VoiceProxyError(Exception):
+    """A proxy-side refusal, rendered in the s2s voices routes' error shape
+    (the app-level handler below) so the client handles one format."""
+
+    def __init__(self, status_code: int, message: str, code: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+
+
+@app.exception_handler(VoiceProxyError)
+async def _voice_proxy_error(_request: Request, exc: VoiceProxyError) -> JSONResponse:
+    return JSONResponse({"error": {"message": str(exc), "code": exc.code}}, status_code=exc.status_code)
+
+
+def _voices_backend_url(session_id: str, grant_id: str) -> str:
+    """Resolve the only backend a voices request may go to.
+
+    Direct mode: the env-pinned s2s URL. LB mode: the compute host recorded
+    when this grant was relayed (the `grant` param is the LB session id the
+    client already holds). A client-supplied target is never honoured —
+    same SSRF stance as /api/calls."""
+    if not session_id:
+        raise VoiceProxyError(400, "Missing session id.", "missing_session")
+    if SPEECH_TO_SPEECH_URL:
+        base = _http_base_url(SPEECH_TO_SPEECH_URL)
+    elif LOAD_BALANCER_URL:
+        base = _grant_hosts.get(grant_id) if grant_id else None
+        if not base:
+            raise VoiceProxyError(404, "Unknown session grant.", "unknown_grant")
+    else:
+        raise HTTPException(status_code=404, detail="Not found.")
+    return f"{base}/v1/realtime/sessions/{session_id}/voices"
+
+
+def _relay_voices_response(resp: httpx.Response) -> Response:
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type=resp.headers.get("content-type", "application/json"),
+    )
+
+
+def _voice_creation_allowance(keys) -> int:
+    """Creations already burned today by any of the caller's identity keys."""
+    global _voice_creations_day
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if _voice_creations_day != today:
+        _voice_creations_day = today
+        _voice_creations.clear()
+    return max((_voice_creations.get(k, 0) for k in keys), default=0)
+
+
+@app.get("/api/voices")
+async def voices_list(session: str = "", grant: str = ""):
+    """Proxy the cloned-voice listing; doubles as the capability probe (200 vs
+    409) the front-end uses to decide whether to show the voice-cloning UI."""
+    url = _voices_backend_url(session, grant)
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            resp = await http.get(url)
+    except httpx.RequestError as exc:
+        logger.warning("s2s voices endpoint unreachable: %r", exc)
+        raise HTTPException(status_code=502, detail="Speech service unreachable.")
+    return _relay_voices_response(resp)
+
+
+@app.post("/api/voices")
+async def voices_create(request: Request, session: str = "", grant: str = ""):
+    """Proxy a cloned-voice upload, enforcing the size cap and a per-identity
+    daily creation cap before anything reaches the compute fleet."""
+    url = _voices_backend_url(session, grant)
+
+    tier, keys, _set_cookie = auth.resolve_identity(request)
+    metered = LIMITER_ENABLED and limiter.budget_for(tier) is not None
+    if metered and _voice_creation_allowance(keys) >= VOICE_CREATE_DAILY_CAP:
+        raise VoiceProxyError(
+            429,
+            f"Daily voice-creation limit reached ({VOICE_CREATE_DAILY_CAP}).",
+            "voice_creation_limit",
+        )
+
+    body = await request.body()
+    if len(body) > VOICE_UPLOAD_MAX_BYTES:
+        raise VoiceProxyError(
+            413,
+            f"Upload is too large (max {VOICE_UPLOAD_MAX_BYTES // (1024 * 1024)} MB).",
+            "upload_too_large",
+        )
+
+    try:
+        # Generous timeout: with a hub-backed voice store the s2s server pushes
+        # the voice to the Hub before answering 201.
+        async with httpx.AsyncClient(timeout=60.0) as http:
+            resp = await http.post(
+                url,
+                content=body,
+                headers={"Content-Type": request.headers.get("content-type", "")},
+            )
+    except httpx.RequestError as exc:
+        logger.warning("s2s voices endpoint unreachable: %r", exc)
+        raise HTTPException(status_code=502, detail="Speech service unreachable.")
+
+    if metered and resp.status_code == 201:
+        for k in keys:
+            _voice_creations[k] = _voice_creations.get(k, 0) + 1
+    return _relay_voices_response(resp)
+
+
 @app.post("/api/session")
 async def session(request: Request):
     """Proxy the session handshake to the load balancer, keeping its URL secret,
@@ -485,6 +627,14 @@ async def queue_end(request: Request):
 async def _finalize_grant(data, keys, tier, tracked, set_cookie):
     """Shared grant tail (fast path or queue claim): reserve the first chunk, attach
     the metering fields the client needs, and set the anon cookie."""
+    # Remember which compute host this grant points at so /api/voices can
+    # forward there without ever trusting a client-supplied target.
+    connect = data.get("connect_url") or data.get("websocket_url")
+    if data.get("session_id") and connect:
+        _grant_hosts[data["session_id"]] = _http_base_url(connect)
+        while len(_grant_hosts) > GRANT_HOSTS_MAX:
+            _grant_hosts.popitem(last=False)
+
     remaining = None
     if tracked and data.get("session_id"):
         await asyncio.to_thread(limiter.begin, data["session_id"], keys, tier)

@@ -141,6 +141,16 @@ class TestConnection:
                 assert msg["event_id"].startswith("event_")
                 assert "session" in msg
 
+    def test_session_created_carries_session_id(self, setup):
+        """The GA wire format exposes the session id on session.created; clients
+        need it to address the session-scoped voices routes (the WebSocket
+        transport has no Location header to learn it from)."""
+        app, service, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                msg = ws.receive_json()
+                assert msg["session"]["id"] == service.connection_ids[0]
+
     def test_second_connection_rejected(self, setup):
         app, *_ = setup
         with TestClient(app) as client:

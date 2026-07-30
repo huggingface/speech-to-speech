@@ -57,6 +57,9 @@
           <button id="about-btn-m" class="icon-btn about-btn-mobile" title="About this space" aria-label="About this space">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
           </button>
+          <button id="create-voice-top-btn" class="icon-btn" title="Create voice" aria-label="Create voice">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="3" width="6" height="11" rx="3"/><path d="M4 11a6 6 0 0 0 12 0"/><line x1="10" y1="19" x2="10" y2="22"/><line x1="19" y1="3" x2="19" y2="9"/><line x1="16" y1="6" x2="22" y2="6"/></svg>
+          </button>
           <button id="tools-btn" class="icon-btn" title="Tools" aria-label="Tools">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
           </button>
@@ -271,6 +274,11 @@
                   <option value="Vivian">Vivian</option>
                 </select>
               </label>
+              <!-- Voice cloning: revealed only after the capability probe
+                   (GET /api/voices) answers 200 on a connected call. -->
+              <button id="create-voice-btn" type="button" class="btn create-voice-btn" hidden>
+                Create voice
+              </button>
             </div>
 
             <label class="field">
@@ -340,6 +348,72 @@
           <button id="settings-save" type="submit" class="btn primary" value="save">Save</button>
         </footer>
       </form>
+    </dialog>
+
+    <!-- Create a cloned voice from a short reference clip. Always reachable
+         from the top-bar button; also from the Settings button that the
+         capability probe reveals during a call. Without a live cloning-capable
+         call, saves are kept in the tab and uploaded on the next connect. -->
+    <dialog id="voice-modal" class="modal">
+      <div class="modal-content">
+        <header class="modal-header">
+          <h2>Create voice</h2>
+          <button id="voice-modal-close" class="icon-btn" aria-label="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </header>
+
+        <p id="voice-offline-note" class="voice-offline-note" hidden>
+          No live call yet — the voice will be kept in this tab, selectable right
+          away, and uploaded automatically when your next call connects.
+        </p>
+
+        <div class="voice-mode" role="tablist" aria-label="Voice source">
+          <button id="voice-mode-record" type="button" role="tab" aria-selected="true" class="voice-mode-btn active">Record</button>
+          <button id="voice-mode-upload" type="button" role="tab" aria-selected="false" class="voice-mode-btn">Upload</button>
+        </div>
+
+        <section id="voice-record-panel" class="voice-panel">
+          <div class="field">
+            <span>Read this aloud</span>
+            <p id="voice-script" class="voice-script">
+              Hi! I'm recording a short sample so the assistant can speak with my
+              voice. The quick brown fox jumps over the lazy dog, while soft music
+              plays in the background. Let me count: one, two, three, four, five.
+              That should be plenty — thank you for listening.
+            </p>
+            <small>The recording and this script become the voice's reference pair, so read it as written.</small>
+          </div>
+          <div class="voice-record-row">
+            <button id="voice-record-btn" type="button" class="btn voice-record-btn">Record</button>
+            <span id="voice-record-time" class="voice-record-time" hidden>0:00</span>
+            <audio id="voice-preview" class="voice-preview" controls hidden></audio>
+          </div>
+        </section>
+
+        <section id="voice-upload-panel" class="voice-panel" hidden>
+          <label class="field">
+            <span>Audio file</span>
+            <input id="voice-file" type="file" accept="audio/*" />
+            <small>3–60 seconds of clean speech. Any format your browser can decode (MP3, M4A, OGG, WAV…).</small>
+          </label>
+          <label class="field">
+            <span>Transcript</span>
+            <textarea id="voice-transcript" rows="3" placeholder="Exactly what is said in the clip…"></textarea>
+          </label>
+        </section>
+
+        <label class="field">
+          <span>Voice name</span>
+          <input id="voice-name" type="text" autocomplete="off" spellcheck="false" maxlength="80" placeholder="My voice" />
+        </label>
+
+        <p id="voice-error" class="voice-error" hidden></p>
+
+        <footer class="modal-footer">
+          <button id="voice-save" type="button" class="btn primary" disabled>Save voice</button>
+        </footer>
+      </div>
     </dialog>
 
     <dialog id="tools-modal" class="modal">

@@ -54,7 +54,10 @@ class SessionHandler(RealtimeBaseHandler):
     def build_session_created(self, conn_id: str) -> SessionCreatedEvent:
         """Build a SessionCreatedEvent populated with the current config."""
         cfg = self._state(conn_id).runtime_config
-        session = cfg.session
+        # The GA wire format carries the session id on session.created (the SDK
+        # request model tolerates it via extra="allow"); WebSocket clients have
+        # no other way to learn the id that addresses session-scoped routes.
+        session = cfg.session.model_copy(update={"id": conn_id})
         return SessionCreatedEvent(
             type="session.created",
             event_id=self._next_event_id(),
