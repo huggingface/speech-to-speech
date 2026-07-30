@@ -205,7 +205,11 @@ export class S2sRtcRealtimeClient extends EventTarget {
 
     const micTrack = this.options.micStream?.getAudioTracks()[0];
     if (!micTrack) throw new Error("No microphone track available");
-    micTrack.enabled = !this._muted;
+    // Negotiate the audio track immediately, but transmit silence until the
+    // server has received session.update and the optional greeting sequence.
+    // Otherwise background noise during the WebRTC handshake can create the
+    // first user turn before the greeting is queued.
+    this._syncMicTransmission();
     pc.addTrack(micTrack, /** @type {MediaStream} */ (this.options.micStream));
 
     // The client opens the events channel (OpenAI convention); the server
@@ -452,6 +456,9 @@ export class S2sRtcRealtimeClient extends EventTarget {
         // Data-channel messages are ordered, so the hidden item and
         // response.create are handled after the session.update above.
         this._sendStartupGreeting();
+        // Only open the microphone after the configuration and greeting events
+        // above have been queued on the ordered data channel.
+        this._syncMicTransmission();
         if (this._status === "connecting") this._setStatus("connected");
         break;
 
@@ -777,10 +784,15 @@ export class S2sRtcRealtimeClient extends EventTarget {
   setMuted(muted) {
     this._muted = muted;
     // The caller (main.js) also toggles the shared micStream tracks; doing it
-    // here too keeps the client correct when driven standalone. A disabled
-    // track makes the browser transmit silence — the server VAD stays quiet.
+    // here too keeps the client correct when driven standalone. Before the
+    // session is configured, even an explicit unmute must continue sending
+    // silence so no user turn can race the startup greeting.
+    this._syncMicTransmission();
+  }
+
+  _syncMicTransmission() {
     for (const track of this.options.micStream?.getAudioTracks() ?? []) {
-      track.enabled = !muted;
+      track.enabled = this._sessionConfigured && !this._muted;
     }
   }
 

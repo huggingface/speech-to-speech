@@ -87,3 +87,59 @@ if (sends !== 0) throw new Error(`expected no events, got ${{sends}}`);
         capture_output=True,
         text=True,
     )
+
+
+def test_rtc_microphone_opens_after_startup_events_are_queued():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for demo client tests")
+
+    script = """
+globalThis.localStorage = { getItem() { return null; } };
+const { S2sRtcRealtimeClient } = await import("./demo/rtc/s2s-rtc-client.js");
+const timeline = [];
+let enabled = true;
+const track = {};
+Object.defineProperty(track, "enabled", {
+  get() { return enabled; },
+  set(value) {
+    enabled = value;
+    timeline.push(`mic:${value}`);
+  },
+});
+const client = new S2sRtcRealtimeClient({
+  voice: "Aiden",
+  instructions: "Be helpful.",
+  callsUrl: "api/calls",
+  startupGreeting: "Say hello.",
+  micStream: { getAudioTracks() { return [track]; } },
+});
+client._sendSessionUpdate = () => timeline.push("session.update");
+client._send = (event) => timeline.push(event.type);
+client.requestResponse = () => timeline.push("response.create");
+
+// This is the gate applied before addTrack() during connect().
+client._syncMicTransmission();
+// An unmute while connecting must not bypass the gate.
+client.setMuted(false);
+client._onDcMessage(JSON.stringify({ type: "session.created" }));
+
+const expected = [
+  "mic:false",
+  "mic:false",
+  "session.update",
+  "conversation.item.create",
+  "response.create",
+  "mic:true",
+];
+if (JSON.stringify(timeline) !== JSON.stringify(expected)) {
+  throw new Error(`unexpected ordering: ${JSON.stringify(timeline)}`);
+}
+"""
+    subprocess.run(
+        [node, "--input-type=module", "-e", script],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
