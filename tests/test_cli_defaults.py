@@ -20,7 +20,7 @@ from speech_to_speech.arguments_classes.socket_sender_arguments import SocketSen
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 from speech_to_speech.arguments_classes.websocket_streamer_arguments import WebSocketStreamerArguments
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
-from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments
+from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments, prepare_module_args
 
 
 def test_release_defaults_match_responses_api_parakeet_qwen3_realtime_profile():
@@ -114,6 +114,27 @@ def test_parse_arguments_accepts_qwen3_tts_backend_override():
         sys.argv = original_argv
 
     assert args.qwen3_tts_handler_kwargs.qwen3_tts_backend == "torch"
+
+
+def test_parse_arguments_accepts_raw_websocket_mode():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = ["speech-to-speech", "--mode", "raw-websocket"]
+        args = parse_arguments()
+    finally:
+        sys.argv = original_argv
+
+    assert args.module_kwargs.mode == "raw-websocket"
+
+
+def test_prepare_module_args_normalizes_deprecated_websocket_alias(caplog):
+    module_args = ModuleArguments(mode="websocket")
+
+    with caplog.at_level("WARNING"):
+        prepare_module_args(module_args)
+
+    assert module_args.mode == "raw-websocket"
+    assert "--mode websocket is deprecated; use --mode raw-websocket" in caplog.text
 
 
 def test_parse_arguments_transformers_backend():

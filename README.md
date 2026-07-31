@@ -176,9 +176,9 @@ Select implementations with `--stt`, `--llm_backend`, and `--tts`. Run `speech-t
 
 | Mode | Transport | Use it when |
 |---|---|---|
-| `realtime` (default) | WebSocket, OpenAI Realtime protocol at `/v1/realtime` | You are building an app or device against a standard voice API. |
+| `realtime` (default) | OpenAI Realtime protocol over WebSocket or WebRTC | You are building an app or device against a standard voice API. |
 | `local` | Your machine's microphone and speakers | You want to talk to the pipeline directly, no client needed. |
-| `websocket` | Raw PCM over WebSocket | You want a minimal custom client without the Realtime protocol. |
+| `raw-websocket` | Raw PCM over WebSocket | You want a minimal custom client without the Realtime protocol. |
 | `socket` | Raw PCM over TCP | Models run on a remote server, with a simple microphone/playback client. |
 
 ### Realtime Server
@@ -244,15 +244,17 @@ python scripts/benchmark_tts.py \
     --qwen3_mlx_quantizations bf16 4bit 6bit 8bit
 ```
 
-### WebSocket
+### Raw WebSocket
 
-1. Run the pipeline in WebSocket mode:
+1. Run the pipeline in raw WebSocket mode:
 
    ```bash
-   speech-to-speech --mode websocket --ws_host 0.0.0.0 --ws_port 8765
+   speech-to-speech --mode raw-websocket --ws_host 0.0.0.0 --ws_port 8765
    ```
 
 2. Connect from your client at `ws://<server-ip>:8765`. Send raw audio bytes as 16 kHz, int16, mono PCM and receive generated audio bytes back.
+
+The previous `--mode websocket` value remains available as a deprecated alias for backward compatibility.
 
 ### TCP Socket
 
@@ -282,7 +284,7 @@ The compose file starts a llama.cpp server with Gemma 4, starts the TCP socket s
 
 ## Realtime API
 
-Realtime mode streams audio over a WebSocket using the OpenAI Realtime protocol, with live transcription and low-latency turn-taking. The server exposes `/v1/realtime`, and any OpenAI Realtime-compatible client can connect:
+Realtime mode supports the OpenAI Realtime protocol over WebSocket and WebRTC, with live transcription and low-latency turn-taking. WebSocket clients connect at `/v1/realtime`:
 
 ```python
 from openai import OpenAI
@@ -533,7 +535,7 @@ References for all CLI arguments live in the [arguments classes](./src/speech_to
 See [ModuleArguments](./src/speech_to_speech/arguments_classes/module_arguments.py). It allows setting:
 
 - a common `--device`, if every part should run on the same device
-- `--mode`: `realtime` (default), `local`, `socket`, or `websocket`
+- `--mode`: `realtime` (default), `local`, `socket`, or `raw-websocket`
 - STT implementation (`--stt`)
 - LLM backend (`--llm_backend`: `transformers`, `mlx-lm`, `responses-api`, or `chat-completions`)
 - TTS implementation (`--tts`)
