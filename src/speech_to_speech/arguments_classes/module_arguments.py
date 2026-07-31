@@ -8,12 +8,11 @@ class ModuleArguments:
         default=None,
         metadata={"help": "If specified, overrides the device for all handlers."},
     )
-    mode: Optional[Literal["local", "socket", "raw-websocket", "websocket", "realtime"]] = field(
+    mode: Optional[Literal["local", "socket", "raw-websocket", "realtime"]] = field(
         default="realtime",
         metadata={
             "help": "The mode to run the pipeline in. Either 'local', 'socket', 'raw-websocket', or "
-            "'realtime'. The old 'websocket' value is a deprecated alias for 'raw-websocket'. Default is "
-            "'realtime'."
+            "'realtime'. Default is 'realtime'."
         },
     )
     local_mac_optimal_settings: bool = field(

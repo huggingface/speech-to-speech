@@ -307,9 +307,6 @@ def overwrite_device_argument(common_device: Optional[str], *handler_kwargs: Any
 
 def prepare_module_args(module_kwargs: ModuleArguments, *handler_kwargs: Any) -> None:
     optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs, *handler_kwargs)
-    if module_kwargs.mode == "websocket":
-        logger.warning("--mode websocket is deprecated; use --mode raw-websocket")
-        module_kwargs.mode = "raw-websocket"
     if module_kwargs.tts is None:
         module_kwargs.tts = "qwen3"
     if platform == "darwin":
@@ -653,7 +650,7 @@ def build_pipeline(
         )
         comms_handlers = [local_audio_streamer]
         should_listen.set()
-    elif module_kwargs.mode in ("raw-websocket", "websocket"):
+    elif module_kwargs.mode == "raw-websocket":
         from speech_to_speech.connections.websocket_streamer import WebSocketStreamer
 
         text_output_queue = queues_and_events["text_output_queue"]

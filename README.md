@@ -254,8 +254,6 @@ python scripts/benchmark_tts.py \
 
 2. Connect from your client at `ws://<server-ip>:8765`. Send raw audio bytes as 16 kHz, int16, mono PCM and receive generated audio bytes back.
 
-The previous `--mode websocket` value remains available as a deprecated alias for backward compatibility.
-
 ### TCP Socket
 
 TCP socket mode is intentionally minimal. It streams raw PCM audio, but does not provide the full Realtime API feature set, including interruption handling, live transcript events, or tool-call events.
