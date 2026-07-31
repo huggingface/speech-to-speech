@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import torch
 
 from speech_to_speech.pipeline.messages import VADAudio
 from speech_to_speech.STT.whisper_stt_handler import WhisperSTTHandler
@@ -94,6 +95,9 @@ class FakeModel:
         self.calls: list[dict] = []
         self.detect_language_calls = 0
         self.encoder_calls = 0
+        # Grad state observed *inside* each call, which is what actually matters.
+        self.encoder_grad_enabled: list[bool] = []
+        self.detect_grad_enabled: list[bool] = []
 
         if detect_language_result is None:
             # Emulate a model without the detect_language API at all.
@@ -102,12 +106,14 @@ class FakeModel:
     def get_encoder(self):
         def encoder(input_features):
             self.encoder_calls += 1
+            self.encoder_grad_enabled.append(torch.is_grad_enabled())
             return SENTINEL_ENCODER_OUTPUTS
 
         return encoder
 
     def detect_language(self, encoder_outputs=None):  # type: ignore[no-redef]
         self.detect_language_calls += 1
+        self.detect_grad_enabled.append(torch.is_grad_enabled())
         assert encoder_outputs is SENTINEL_ENCODER_OUTPUTS, "encoder output should be reused"
         if isinstance(self._detect_language_result, Exception):
             raise self._detect_language_result
@@ -207,6 +213,58 @@ def test_auto_mode_reuses_the_encoder_output_instead_of_re_encoding():
 
     assert handler.model.encoder_calls == 1
     assert handler.model.calls[0]["encoder_outputs"] is SENTINEL_ENCODER_OUTPUTS
+
+
+def test_detection_runs_with_gradients_disabled():
+    """Calling the encoder directly does not inherit generate()'s internal no-grad context.
+
+    Without an explicit `torch.no_grad()`, the encoder output keeps its autograd graph alive
+    for the whole of decoding -- pure waste in a forward-only pipeline, and enough to risk
+    OOM with a large Whisper checkpoint in auto-language mode.
+    """
+    handler = make_handler(
+        start_language="auto",
+        last_language=None,
+        gen_kwargs={"task": "transcribe"},
+        responses=[FakeSequences([2626], "Hallo.")],
+        detect_language_result="<|de|>",
+    )
+
+    run(handler)
+
+    assert handler.model.encoder_grad_enabled == [False]
+    assert handler.model.detect_grad_enabled == [False]
+
+
+def test_detection_restores_the_ambient_grad_mode():
+    """no_grad must be scoped to detection, not leak out and disable autograd globally."""
+    handler = make_handler(
+        start_language="auto",
+        last_language=None,
+        gen_kwargs={"task": "transcribe"},
+        responses=[FakeSequences([2626], "Hallo.")],
+        detect_language_result="<|de|>",
+    )
+
+    assert torch.is_grad_enabled()
+    run(handler)
+    assert torch.is_grad_enabled()
+
+
+def test_detection_runs_with_gradients_disabled_even_under_enabled_grad():
+    """Explicitly enabling grad around the call must not re-enable it inside detection."""
+    handler = make_handler(
+        start_language="auto",
+        last_language=None,
+        gen_kwargs={"task": "transcribe"},
+        responses=[FakeSequences([2626], "Hallo.")],
+        detect_language_result="<|de|>",
+    )
+
+    with torch.enable_grad():
+        run(handler)
+
+    assert handler.model.encoder_grad_enabled == [False]
 
 
 def test_detection_does_not_mutate_shared_gen_kwargs():

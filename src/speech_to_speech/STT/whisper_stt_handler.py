@@ -175,14 +175,21 @@ class WhisperSTTHandler(BaseSTTHandler):
         it instead of re-encoding. Forcing the detected language also stops ``generate()``
         from running its own internal detection, so this is cheaper than the plain auto path
         rather than an extra cost.
+
+        Both calls run under ``torch.no_grad()``. Calling the encoder directly does not
+        inherit the no-grad context that ``generate()`` applies internally, so without this
+        the encoder output would keep its autograd graph alive for the whole of decoding --
+        wasted memory for a forward-only pipeline, and enough to risk OOM with a large
+        Whisper checkpoint.
         """
         detect_language = getattr(self.model, "detect_language", None)
         if detect_language is None:
             return None, None
 
         try:
-            encoder_outputs = self.model.get_encoder()(input_features)
-            token_ids = detect_language(encoder_outputs=encoder_outputs)
+            with torch.no_grad():
+                encoder_outputs = self.model.get_encoder()(input_features)
+                token_ids = detect_language(encoder_outputs=encoder_outputs)
         except Exception as e:  # pragma: no cover - depends on the installed transformers
             logger.warning("Whisper language detection failed, falling back: %s", e)
             return None, None
