@@ -11,6 +11,7 @@ from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
 from speech_to_speech.arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
 from speech_to_speech.arguments_classes.parakeet_tdt_arguments import ParakeetTDTSTTHandlerArguments
 from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
+from speech_to_speech.arguments_classes.qwen3_asr_stt_arguments import Qwen3ASRSTTHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
     ResponsesApiLanguageModelHandlerArguments,
@@ -67,6 +68,7 @@ EXPECTED_FIELD_TYPES = {
     "faster_whisper_stt_handler_kwargs": FasterWhisperSTTHandlerArguments,
     "mlx_audio_whisper_stt_handler_kwargs": MLXAudioWhisperSTTHandlerArguments,
     "parakeet_tdt_stt_handler_kwargs": ParakeetTDTSTTHandlerArguments,
+    "qwen3_asr_stt_handler_kwargs": Qwen3ASRSTTHandlerArguments,
     "language_model_handler_kwargs": LanguageModelHandlerArguments,
     "responses_api_language_model_handler_kwargs": ResponsesApiLanguageModelHandlerArguments,
     "chat_tts_handler_kwargs": ChatTTSHandlerArguments,
@@ -114,6 +116,30 @@ def test_parse_arguments_accepts_qwen3_tts_backend_override():
         sys.argv = original_argv
 
     assert args.qwen3_tts_handler_kwargs.qwen3_tts_backend == "torch"
+
+
+def test_parse_arguments_accepts_qwen3_asr_stt_backend():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = [
+            "speech-to-speech",
+            "--stt",
+            "qwen3-asr",
+            "--qwen3_asr_model_name",
+            "Qwen/Qwen3-ASR-0.6B-hf",
+            "--qwen3_asr_language",
+            "en",
+            "--qwen3_asr_gen_max_new_tokens",
+            "64",
+        ]
+        args = parse_arguments()
+    finally:
+        sys.argv = original_argv
+
+    assert args.module_kwargs.stt == "qwen3-asr"
+    assert args.qwen3_asr_stt_handler_kwargs.qwen3_asr_model_name == "Qwen/Qwen3-ASR-0.6B-hf"
+    assert args.qwen3_asr_stt_handler_kwargs.qwen3_asr_language == "en"
+    assert args.qwen3_asr_stt_handler_kwargs.qwen3_asr_gen_max_new_tokens == 64
 
 
 def test_parse_arguments_transformers_backend():
