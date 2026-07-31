@@ -7,6 +7,7 @@
 [![PyPI](https://img.shields.io/pypi/v/speech-to-speech)](https://pypi.org/project/speech-to-speech/)
 [![Python](https://img.shields.io/pypi/pyversions/speech-to-speech)](https://pypi.org/project/speech-to-speech/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE)
+[![#1 Repository of the Day on GitHub Trending](https://trendshift.io/api/badge/repositories/20645)](https://trendshift.io/repositories/20645)
 
 </div>
 
