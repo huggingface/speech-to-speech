@@ -636,7 +636,7 @@ def build_pipeline(
     lm_response_queue = queues_and_events["lm_response_queue"]
     lm_processed_queue = queues_and_events["lm_processed_queue"]
     text_output_queue = (
-        None  # Only set for websocket/realtime modes; kept None otherwise to avoid unbounded queue growth
+        None  # Only set for raw WebSocket and Realtime modes; kept None otherwise to avoid unbounded queue growth
     )
 
     comms_handlers: list[Any] = []
@@ -650,7 +650,7 @@ def build_pipeline(
         )
         comms_handlers = [local_audio_streamer]
         should_listen.set()
-    elif module_kwargs.mode == "websocket":
+    elif module_kwargs.mode == "raw-websocket":
         from speech_to_speech.connections.websocket_streamer import WebSocketStreamer
 
         text_output_queue = queues_and_events["text_output_queue"]

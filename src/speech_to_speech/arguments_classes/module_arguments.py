@@ -8,10 +8,11 @@ class ModuleArguments:
         default=None,
         metadata={"help": "If specified, overrides the device for all handlers."},
     )
-    mode: Optional[Literal["local", "socket", "websocket", "realtime"]] = field(
+    mode: Optional[Literal["local", "socket", "raw-websocket", "realtime"]] = field(
         default="realtime",
         metadata={
-            "help": "The mode to run the pipeline in. Either 'local', 'socket', 'websocket', or 'realtime'. Default is 'realtime'."
+            "help": "The mode to run the pipeline in. Either 'local', 'socket', 'raw-websocket', or "
+            "'realtime'. Default is 'realtime'."
         },
     )
     local_mac_optimal_settings: bool = field(
@@ -81,8 +82,8 @@ class ModuleArguments:
         default=1,
         metadata={
             "help": "Number of isolated realtime pipelines in the pool. One uvicorn server listens on "
-            "--ws_port and routes each incoming websocket to the next free pipeline (each has its own "
-            "VAD/STT/LM/TTS handlers and conversation state). Max concurrent websocket sessions equals "
+            "--ws_port and routes each incoming WebSocket or WebRTC session to the next free pipeline (each "
+            "has its own VAD/STT/LM/TTS handlers and conversation state). Max concurrent Realtime sessions equals "
             "num_pipelines; further connections are rejected. Only valid for --mode realtime. Default is 1."
         },
     )
