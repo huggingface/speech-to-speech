@@ -4,6 +4,7 @@ from threading import Event, Thread
 from typing import Literal
 
 import numpy as np
+import pytest
 import torch
 
 from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
@@ -161,6 +162,60 @@ def test_is_latest_after_stability_window_catches_reopen_started_during_wait():
 
     assert not tracker.is_latest_after_stability_window("turn_1", 0, settle_s=0.2)
     thread.join(timeout=1.0)
+
+
+def test_commit_after_reset_does_not_resurrect_untracked_turn():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    tracker.reset()
+
+    tracker.commit("turn_1", 0)
+
+    assert tracker._committed_revision == {}
+    assert not tracker.is_committed("turn_1", 0)
+
+
+def test_commit_after_prune_does_not_resurrect_untracked_turn():
+    tracker = SpeculativeTurnTracker(max_tracked_turns=1)
+    tracker.observe("turn_1", 0)
+    tracker.observe("turn_2", 0)
+
+    tracker.commit("turn_1", 0)
+
+    assert list(tracker._latest_revision) == ["turn_2"]
+    assert tracker._committed_revision == {}
+
+
+@pytest.mark.parametrize(
+    "commit_method",
+    [
+        "commit_if_latest_after_pending_reopen",
+        "commit_if_latest_after_reopen_grace",
+        "try_commit_if_latest_after_pending_reopen",
+        "try_commit_if_latest_after_reopen_grace",
+    ],
+)
+def test_commit_if_latest_variants_keep_untracked_turn_out_of_committed_state(commit_method):
+    """An untracked turn still reports success -- callers treat `False` as "drop this
+    output" -- but it must not be written back into `_committed_revision`."""
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    tracker.reset()
+
+    assert getattr(tracker, commit_method)("turn_1", 0) is True
+    assert tracker._committed_revision == {}
+
+
+def test_reused_turn_id_after_reset_is_not_reported_as_committed():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    tracker.reset()
+    tracker.commit("turn_1", 0)
+
+    tracker.observe("turn_1", 0)
+
+    assert not tracker.is_committed("turn_1", 0)
+    assert tracker.begin_reopen_candidate("turn_1", 0) == 1
 
 
 def test_vad_direct_reopen_path_uses_tracker_candidate_protocol():
