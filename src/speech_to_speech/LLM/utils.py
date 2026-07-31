@@ -1,10 +1,18 @@
 import base64
 import io
+import logging
+import random
 import re
-from typing import Optional
+from queue import Empty, Queue
+from threading import Thread
+from time import perf_counter
+from typing import Any, Callable, Iterator, Optional, Sequence
 
 import requests  # type: ignore[import-untyped]
 from PIL import Image
+
+logger = logging.getLogger(__name__)
+
 
 SMART_PUNCT_TRANSLATION = str.maketrans(
     {
@@ -98,3 +106,94 @@ def image_url_to_pil(image_url: str) -> Image.Image:
     resp = requests.get(image_url, timeout=10)
     resp.raise_for_status()
     return Image.open(io.BytesIO(resp.content))
+
+
+def run_generator_with_filler_sentences(
+    gen_fn: Any,
+    enable_filler_sentences: bool,
+    filler_sentence_delay_s: float,
+    filler_sentences: Sequence[str],
+    language_code: Optional[str],
+    runtime_config: Any,
+    response: Any,
+    turn_id: str | None,
+    turn_revision: int | None,
+    speech_stopped_at_s: float | None,
+    gen: int | None,
+    is_stale_fn: Optional[Any] = None,
+) -> Iterator[Any]:
+    """Wrap a generator function ``gen_fn`` to emit a filler sentence if no output is produced within ``filler_sentence_delay_s``.
+
+    If ``enable_filler_sentences`` is False or ``filler_sentences`` is empty, yields directly from ``gen_fn()``.
+    Otherwise, runs ``gen_fn()`` in a worker thread and monitors output latency. If the delay threshold is exceeded before any spoken content is yielded,
+    a filler sentence chunk is emitted.
+    """
+    if not enable_filler_sentences or not filler_sentences:
+        yield from gen_fn()
+        return
+
+    out_queue: Queue[Any] = Queue()
+    _SENTINEL = object()
+
+    def worker() -> None:
+        try:
+            for item in gen_fn():
+                out_queue.put(item)
+        except Exception as exc:
+            out_queue.put(exc)
+        finally:
+            out_queue.put(_SENTINEL)
+
+    worker_thread = Thread(target=worker, daemon=True)
+    worker_thread.start()
+
+    start_time = perf_counter()
+    filler_emitted = False
+    first_chunk_yielded = False
+
+    while True:
+        try:
+            item = out_queue.get(timeout=0.05)
+            if item is _SENTINEL:
+                break
+            if isinstance(item, Exception):
+                raise item
+
+            from speech_to_speech.pipeline.messages import LLMResponseChunk
+
+            if isinstance(item, LLMResponseChunk) and (item.text.strip() or item.tools):
+                first_chunk_yielded = True
+
+            yield item
+
+        except Empty:
+            if not first_chunk_yielded and not filler_emitted:
+                elapsed = perf_counter() - start_time
+                if elapsed >= filler_sentence_delay_s:
+                    if is_stale_fn and is_stale_fn():
+                        filler_emitted = True
+                        continue
+
+                    filler_text = random.choice(list(filler_sentences))
+                    logger.info(
+                        "LLM response latency (%.2fs) exceeded threshold (%.2fs); emitting filler sentence: '%s'",
+                        elapsed,
+                        filler_sentence_delay_s,
+                        filler_text,
+                    )
+                    from speech_to_speech.pipeline.messages import LLMResponseChunk
+
+                    yield LLMResponseChunk(
+                        text=filler_text,
+                        language_code=language_code,
+                        runtime_config=runtime_config,
+                        response=response,
+                        turn_id=turn_id,
+                        turn_revision=turn_revision,
+                        speech_stopped_at_s=speech_stopped_at_s,
+                        cancel_generation=gen,
+                    )
+                    filler_emitted = True
+
+    worker_thread.join(timeout=1.0)
+

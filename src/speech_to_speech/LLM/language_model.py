@@ -44,7 +44,7 @@ from speech_to_speech.LLM.text_prompt import build_text_system_prompt
 from speech_to_speech.LLM.tool_call.function_call import extract_function_calls_from_text
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
-from speech_to_speech.LLM.utils import image_url_to_pil, remove_unspeechable, resolve_auto_language
+from speech_to_speech.LLM.utils import image_url_to_pil, remove_unspeechable, resolve_auto_language, run_generator_with_filler_sentences
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
@@ -168,6 +168,9 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
         compact_history: bool = False,
+        enable_filler_sentences: bool = False,
+        filler_sentence_delay_s: float = 1.0,
+        filler_sentences: list[str] | tuple[str, ...] | None = None,
         **_kwargs: Any,
     ) -> None:
         self.backend = backend
@@ -178,8 +181,22 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.enable_thinking = enable_thinking
         self.stream_batch_sentences = max(1, stream_batch_sentences)
         self.enable_lang_prompt = enable_lang_prompt
+        self.enable_filler_sentences = enable_filler_sentences
+        self.filler_sentence_delay_s = float(filler_sentence_delay_s)
+        self.filler_sentences = (
+            list(filler_sentences)
+            if filler_sentences is not None
+            else [
+                "Hmm, let me see.",
+                "Let me check that for you.",
+                "Give me a moment.",
+                "Thinking about that.",
+                "Let me think about that for a second.",
+            ]
+        )
 
         self._load_model(model_name, device, torch_dtype, gen_kwargs)
+
 
         self.user_role = user_role
         # Serializes transformers pipe/model.generate calls between the speech
@@ -548,9 +565,29 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         consumed_image_ids = active_chat.image_message_ids()
 
         try:
-            yield from self._generate(active_chat, language_code, gen, ctx, runtime_config, response)
+            gen_fn = lambda: self._generate(active_chat, language_code, gen, ctx, runtime_config, response)
+
+            def is_stale_fn() -> bool:
+                return ctx.cancelled or not self._turn_is_latest(ctx.turn_id, ctx.turn_revision)
+
+            yield from run_generator_with_filler_sentences(
+                gen_fn=gen_fn,
+                enable_filler_sentences=getattr(self, "enable_filler_sentences", False),
+                filler_sentence_delay_s=getattr(self, "filler_sentence_delay_s", 1.0),
+                filler_sentences=getattr(self, "filler_sentences", None),
+                language_code=language_code,
+                runtime_config=runtime_config,
+                response=response,
+                turn_id=ctx.turn_id,
+                turn_revision=ctx.turn_revision,
+                speech_stopped_at_s=ctx.speech_stopped_at_s,
+                gen=gen,
+                is_stale_fn=is_stale_fn,
+            )
+
 
             if ctx.stopped:
+
                 return
 
             turn_output_allowed = not ctx.cancelled and self._turn_output_allowed(ctx.turn_id, ctx.turn_revision)
