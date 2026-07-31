@@ -37,7 +37,9 @@ jobs:
       - uses: astral-sh/setup-uv@v8.3.2
         with:
           version: "latest"
-      - run: uv sync --group dev
+      - run: uv sync --group dev --extra telnyx
+      - name: ffmpeg (MP3 decode for the Telnyx TTS backend)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: NLTK data (punkt_tab for sent_tokenize)
         run: uv run python -c "import nltk; nltk.download('punkt_tab')"
       - name: Pytest
