@@ -168,11 +168,13 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
         compact_history: bool = False,
+        vision_resolver: Any = None,
         **_kwargs: Any,
     ) -> None:
         self.backend = backend
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
+        self.vision_resolver = vision_resolver
         self.device = device
         self.model_name = model_name
         self.enable_thinking = enable_thinking
@@ -512,6 +514,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         runtime_config = request.runtime_config
         response = request.response
         original_chat = runtime_config.chat
+        if getattr(self, "vision_resolver", None) is not None:
+            original_chat.resolve_images(self.vision_resolver, cancel_scope=self.cancel_scope)
         out_of_band = is_out_of_band(response)
         if out_of_band:
             try:

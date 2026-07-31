@@ -469,6 +469,61 @@ class Chat:
                 and any(p.type == "input_image" for p in item.content)
             }
 
+    def resolve_images(self, resolver: Any, cancel_scope: Any = None) -> None:
+        """Resolve any ``input_image`` parts in user messages using the VisionResolver.
+
+        Replaces each user message's ``input_image`` content part(s) with an
+        ``input_text`` part containing ``[Camera observation] {resolved_text}``.
+        The resolved text remains in the buffer across subsequent turns, so
+        follow-up questions about visual context work naturally.
+        """
+        with self._lock:
+            for item in self.buffer:
+                if not isinstance(item, RealtimeConversationItemUserMessage):
+                    continue
+
+                image_parts = [p for p in item.content if p.type == "input_image" and p.image_url]
+                if not image_parts:
+                    continue
+
+                image_urls = [p.image_url for p in image_parts if p.image_url]
+
+                # Question pairing:
+                # 1. input_text in same user message
+                text_parts = [p.text for p in item.content if p.type == "input_text" and p.text]
+                if text_parts:
+                    question = " ".join(text_parts)
+                else:
+                    # 2. Fallback: search pending camera function_calls for a question
+                    question = None
+                    for fc in self._pending_tool_calls.values():
+                        if fc.name == "camera":
+                            try:
+                                args = json.loads(fc.arguments)
+                                if isinstance(args, dict) and args.get("question"):
+                                    question = str(args["question"])
+                                    break
+                            except Exception:
+                                pass
+                    if not question:
+                        # 3. Last resort default
+                        question = "Describe what is relevant in this image."
+
+                resolved_text = resolver.resolve(image_urls, question, cancel_scope=cancel_scope)
+                obs_text = f"[Camera observation] {resolved_text}"
+
+                new_content = []
+                replaced = False
+                for p in item.content:
+                    if p.type == "input_image":
+                        if not replaced:
+                            # Use UserContent so item.content stays homogeneous
+                            new_content.append(UserContent(type="input_text", text=obs_text))
+                            replaced = True
+                    else:
+                        new_content.append(p)
+                item.content = new_content
+
     def strip_images(self, only_ids: set[str] | None = None) -> None:
         """Remove image content parts from user messages in the buffer.
 
