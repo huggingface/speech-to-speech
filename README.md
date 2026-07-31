@@ -161,7 +161,7 @@ This installs the package in editable mode and makes the `speech-to-speech` CLI 
 | STT | [Lightning Whisper MLX](https://github.com/mustafaaljadery/lightning-whisper-mlx) | Apple Silicon | `whisper-mlx` |
 | STT | [MLX Audio Whisper](https://github.com/huggingface/mlx-audio) | Apple Silicon | built-in on macOS |
 | STT | [Paraformer](https://github.com/modelscope/FunASR) | CUDA / CPU | `paraformer` |
-| STT | [Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) | CUDA / CPU / Apple Silicon | `qwen3-asr` |
+| STT | [Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) | CUDA / CPU; on macOS use `--stt qwen3-asr-http` instead, see [`STT/README.md`](./src/speech_to_speech/STT/README.md) | `qwen3-asr` |
 | LLM | OpenAI-compatible API (`responses-api`, `chat-completions`) | hosted providers or self-hosted servers | built-in |
 | LLM | [Transformers](https://huggingface.co/models?pipeline_tag=text-generation&sort=trending) | CUDA / CPU | built-in |
 | LLM | [mlx-lm](https://github.com/ml-explore/mlx-lm) | Apple Silicon | built-in on macOS |

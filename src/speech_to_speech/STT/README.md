@@ -11,6 +11,7 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - `parakeet-tdt` → `STT/parakeet_tdt_handler.py`
 - `paraformer` → `STT/paraformer_handler.py`
 - `qwen3-asr` → `STT/qwen3_asr_handler.py`
+- `qwen3-asr-http` → `STT/qwen3_asr_http_handler.py`
 
 ## Language Support by Handler
 
@@ -76,7 +77,7 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
   - Depends on selected FunASR model checkpoint
   - Default setup is Chinese-oriented (`zh`)
 
-### 7) Qwen3-ASR (`--stt qwen3-asr`)
+### 7) Qwen3-ASR (`--stt qwen3-asr`) — in-process, macOS: currently blocked
 
 - Handler: `Qwen3ASRSTTHandler`
 - Requires the optional `qwen3-asr` extra: `pip install speech-to-speech[qwen3-asr]`
@@ -84,19 +85,55 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - Language flag: `--qwen3_asr_language` (ISO 639-1 code, e.g. `en`, `vi`, `zh`; omit or set to `auto` for automatic language detection)
 - Supported language list (30 languages, `yue` = Cantonese): `zh`, `en`, `yue`, `ar`, `de`, `fr`, `es`, `pt`, `id`, `it`, `ko`, `ru`, `th`, `vi`, `ja`, `tr`, `hi`, `ms`, `nl`, `sv`, `da`, `fi`, `pl`, `cs`, `fil`, `fa`, `el`, `hu`, `mk`, `ro`
 - Backend: `qwen-asr` package (transformers backend), one VAD-segmented utterance per call
-- **`transformers` version note:** `qwen-asr==0.0.6` hard-pins `transformers==4.57.6`, which conflicts with
-  this project's `transformers==5.6.2` pin on macOS (needed by Qwen3-TTS/mlx-audio) — install the extra with
-  `pip install --no-deps qwen-asr==0.0.6` (plus its non-`transformers` deps: `nagisa`, `librosa`,
-  `soundfile`, `accelerate`) on top of the normal macOS install, rather than letting the resolver pull in
-  its own pinned `transformers`. On top of `transformers==5.6.2`, `qwen_asr`'s vendored modeling/config code
-  (`qwen_asr/core/transformers_backend/`) hits three separate transformers 4→5 breaking changes it hasn't
-  adapted to upstream yet — a deprecated `check_model_inputs()` call signature, `Qwen3ASRConfig.__init__`
-  reading `self.thinker_config` before it's assigned (transformers 5.x's config validation now runs eagerly
-  inside `super().__init__()`), and the removed `"default"` key in `ROPE_INIT_FUNCTIONS`. `qwen3_asr_handler.py`
-  applies runtime compatibility shims for all three (see `_apply_transformers_5x_compat` in that file); each
-  checks the current state first, so they no-op automatically once `qwen-asr` fixes them upstream. On
-  Linux/CUDA, the base `transformers>=4.57.0` requirement is a range, so `transformers==4.57.6` may resolve
-  cleanly there without needing `--no-deps` or the shims — untested.
+- **`transformers` version conflict, confirmed unresolved on macOS:** `qwen-asr==0.0.6` hard-pins
+  `transformers==4.57.6`, which conflicts with this project's `transformers==5.6.2` pin on macOS (needed by
+  Qwen3-TTS/mlx-audio) — installing the extra requires `pip install --no-deps qwen-asr==0.0.6` (plus its
+  non-`transformers` deps: `nagisa`, `librosa`, `soundfile`, `accelerate`) on top of the normal macOS install.
+  On top of `transformers==5.6.2`, `qwen_asr`'s vendored modeling/config code
+  (`qwen_asr/core/transformers_backend/`) hits **at least four** separate transformers 4→5 breaking changes
+  it hasn't adapted to upstream: a deprecated `check_model_inputs()` call signature, `Qwen3ASRConfig.__init__`
+  reading `self.thinker_config` before it's assigned (config validation now runs eagerly inside
+  `super().__init__()`), the removed `"default"` key in `ROPE_INIT_FUNCTIONS` (replaced by a
+  `rope_parameters`-based API — the replacement also drops `mrope_interleaved`/`mrope_section`, i.e. even a
+  correct-looking patch here risks silently wrong positional encoding rather than a crash), and
+  `Qwen3ASRThinkerConfig` similarly missing `pad_token_id` at model-build time. `qwen3_asr_handler.py` applies
+  runtime shims for the first three (see `_apply_transformers_5x_compat` in that file; each checks current
+  state first, so they no-op once `qwen-asr` fixes things upstream) but **model construction still fails** on
+  the fourth, confirmed live against a real macOS install (Python 3.12, Apple Silicon). Do not rely on this
+  handler on macOS until `qwen-asr` supports transformers 5.x upstream — use `--stt qwen3-asr-http` (below)
+  instead, which sidesteps the whole conflict.
+- On Linux/CUDA, the base `transformers>=4.57.0` requirement is a *range*, so `transformers==4.57.6` may
+  resolve and run cleanly there without any of the above — untested, would appreciate confirmation.
+
+### 8) Qwen3-ASR over HTTP (`--stt qwen3-asr-http`) — the actually-working path on macOS
+
+- Handler: `Qwen3ASRHTTPSTTHandler`
+- No extra needed in the main install — this handler only makes plain HTTP calls (via `httpx`, already a
+  base dependency) and never imports `qwen_asr` or cares which `transformers` version this project has.
+- Talks to a separately-running [`qwen-asr-serve`](https://github.com/QwenLM/Qwen3-ASR) process, started in
+  its **own** virtualenv pinned to `transformers==4.57.6` (the version `qwen-asr` actually needs — confirmed
+  working end-to-end, including on Apple Silicon MPS):
+
+  ```bash
+  # Terminal 1 — separate venv, only for Qwen3-ASR
+  uv venv --python 3.12 .venv-qwen3-asr
+  source .venv-qwen3-asr/bin/activate
+  uv pip install qwen-asr==0.0.6
+  qwen-asr-serve Qwen/Qwen3-ASR-1.7B --host 127.0.0.1 --port 8000
+  ```
+
+  ```bash
+  # Terminal 2 — the normal speech-to-speech venv (transformers==5.6.2 on macOS)
+  speech-to-speech --stt qwen3-asr-http --qwen3_asr_http_base_url http://127.0.0.1:8000
+  ```
+
+- Flags: `--qwen3_asr_http_base_url` (default `http://127.0.0.1:8000`), `--qwen3_asr_http_timeout_s`
+  (default `30.0`).
+- Both processes run on `localhost`, so the added latency is a local HTTP round-trip (single-digit
+  milliseconds), negligible next to model inference time.
+- Known gap: per-request language forcing (`--qwen3_asr_language`-equivalent) is not wired up for this path —
+  `qwen-asr-serve`'s `/v1/chat/completions` endpoint doesn't document a request-level language override, so
+  this handler always relies on Qwen3-ASR's own language auto-detection tag in the response.
 
 ## Language Abbreviations (ISO-style codes seen in STT handlers)
 
@@ -191,4 +228,11 @@ python s2s_pipeline.py --stt paraformer --paraformer_stt_model_name paraformer-z
 python s2s_pipeline.py --stt qwen3-asr --qwen3_asr_language en
 python s2s_pipeline.py --stt qwen3-asr --qwen3_asr_language auto
 python s2s_pipeline.py --stt qwen3-asr --qwen3_asr_model_name Qwen/Qwen3-ASR-0.6B
+```
+
+### Qwen3-ASR over HTTP (macOS-friendly)
+
+```bash
+# with qwen-asr-serve already running in its own venv, per section 8 above
+python s2s_pipeline.py --stt qwen3-asr-http --qwen3_asr_http_base_url http://127.0.0.1:8000
 ```

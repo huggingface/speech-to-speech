@@ -11,6 +11,7 @@ from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
 from speech_to_speech.arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
 from speech_to_speech.arguments_classes.parakeet_tdt_arguments import ParakeetTDTSTTHandlerArguments
 from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
+from speech_to_speech.arguments_classes.qwen3_asr_http_stt_arguments import Qwen3ASRHTTPSTTHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_asr_stt_arguments import Qwen3ASRSTTHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
@@ -69,6 +70,7 @@ EXPECTED_FIELD_TYPES = {
     "mlx_audio_whisper_stt_handler_kwargs": MLXAudioWhisperSTTHandlerArguments,
     "parakeet_tdt_stt_handler_kwargs": ParakeetTDTSTTHandlerArguments,
     "qwen3_asr_stt_handler_kwargs": Qwen3ASRSTTHandlerArguments,
+    "qwen3_asr_http_stt_handler_kwargs": Qwen3ASRHTTPSTTHandlerArguments,
     "language_model_handler_kwargs": LanguageModelHandlerArguments,
     "responses_api_language_model_handler_kwargs": ResponsesApiLanguageModelHandlerArguments,
     "chat_tts_handler_kwargs": ChatTTSHandlerArguments,

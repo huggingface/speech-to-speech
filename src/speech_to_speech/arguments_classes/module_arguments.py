@@ -22,13 +22,20 @@ class ModuleArguments:
     )
     stt: Optional[
         Literal[
-            "whisper", "whisper-mlx", "mlx-audio-whisper", "faster-whisper", "parakeet-tdt", "paraformer", "qwen3-asr"
+            "whisper",
+            "whisper-mlx",
+            "mlx-audio-whisper",
+            "faster-whisper",
+            "parakeet-tdt",
+            "paraformer",
+            "qwen3-asr",
+            "qwen3-asr-http",
         ]
     ] = field(
         default="parakeet-tdt",
         metadata={
             "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', "
-            "'parakeet-tdt', 'paraformer', or 'qwen3-asr'. Default is 'parakeet-tdt'."
+            "'parakeet-tdt', 'paraformer', 'qwen3-asr', or 'qwen3-asr-http'. Default is 'parakeet-tdt'."
         },
     )
     llm_backend: Optional[Literal["transformers", "mlx-lm", "responses-api", "chat-completions"]] = field(
