@@ -51,6 +51,8 @@
  *   session POST and dials it directly — no load balancer in between.
  * @property {string} voice
  * @property {string} instructions
+ * @property {string} [startupGreeting] Hidden user prompt that asks the model
+ *   to greet once after the initial session configuration is sent.
  * @property {MediaStream} [micStream] Live mic stream. Provide this OR `acquireMic`.
  * @property {() => Promise<MediaStream>} [acquireMic] Lazily obtain the mic stream,
  *   called only once a session is actually granted (after any queue wait). Lets the
@@ -91,6 +93,7 @@ import {
   trimTrailingSlash,
 } from "./codec.js";
 import { OrbVisualiser, VIS_FFT_SIZE } from "./orb-visualizer.js";
+import { SentAudioRecorder } from "./user-audio-recorder.js";
 
 /** Build an Error carrying a `code` (and optional extra fields) so callers can
  *  branch on the failure kind: "limit" | "queue-full" | "queue-expired" | "aborted".
@@ -200,6 +203,11 @@ export class S2sWsRealtimeClient extends EventTarget {
     /** @type {Promise<void> | null} */
     this._readyPromise = null;
     this._sessionConfigured = false;
+    this._startupGreeting = options.startupGreeting?.trim() ?? "";
+    this._startupGreetingSent = false;
+    // Bounded, browser-local copy of the exact PCM frames sent over this
+    // socket. Backend VAD timestamps turn it into replayable user utterances.
+    this._userAudioRecorder = new SentAudioRecorder();
     this._debug = (() => { try { return localStorage.getItem("s2s.debug") === "1"; } catch { return false; } })();
   }
 
@@ -603,6 +611,9 @@ export class S2sWsRealtimeClient extends EventTarget {
     if (this._muted) return;
     const b64 = base64FromArrayBuffer(pcm16Buffer);
     this._send({ type: "input_audio_buffer.append", audio: b64 });
+    // Record only after the append is accepted for sending. This intentionally
+    // excludes pre-configuration and muted audio, just like the backend input.
+    this._userAudioRecorder.append(pcm16Buffer);
   }
 
   /**
@@ -647,11 +658,16 @@ export class S2sWsRealtimeClient extends EventTarget {
         // out). We only push the user-tunable bits: voice + instructions.
         this._sendSessionUpdate();
         this._sessionConfigured = true;
+        // The s2s server does not echo session.updated. WebSocket messages are
+        // ordered, so this hidden item and response.create are handled only
+        // after the session.update sent immediately above.
+        this._sendStartupGreeting();
         if (this._status === "connecting") this._setStatus("connected");
         break;
 
       case "session.updated":
-        // Acknowledged by server, nothing to do.
+        // Some Realtime servers acknowledge session.update; the greeting was
+        // already queued from session.created and is guarded against repeats.
         break;
 
       case "input_audio_buffer.speech_started":
@@ -662,10 +678,32 @@ export class S2sWsRealtimeClient extends EventTarget {
         // otherwise keep playing over the user's barge-in.
         this._playbackNode?.port.postMessage({ kind: "clear" });
         this._aiSpeaking = false;
+        this._userAudioRecorder.speechStarted({
+          itemId: typeof event.item_id === "string" ? event.item_id : "",
+          audioStartMs: Number(event.audio_start_ms),
+        });
+        this.dispatchEvent(new CustomEvent("user-turn-started", {
+          detail: {
+            itemId: typeof event.item_id === "string" ? event.item_id : "",
+          },
+        }));
         this._setStatus("user-speaking");
         break;
 
       case "input_audio_buffer.speech_stopped":
+        {
+          const itemId = typeof event.item_id === "string" ? event.item_id : "";
+          const recording = this._userAudioRecorder.speechStopped({
+            itemId,
+            audioEndMs: Number(event.audio_end_ms),
+          });
+          if (recording) {
+            this.dispatchEvent(new CustomEvent("user-audio", { detail: recording }));
+          }
+          this.dispatchEvent(new CustomEvent("user-turn-stopped", {
+            detail: { itemId },
+          }));
+        }
         if (this._status === "user-speaking") this._setStatus("processing");
         break;
 
@@ -988,6 +1026,26 @@ export class S2sWsRealtimeClient extends EventTarget {
   }
 
   /**
+   * Ask the model to open the conversation exactly once. The synthetic user
+   * prompt stays in conversation history, so the greeting warms the actual
+   * prompt prefix reused by the first spoken turn.
+   */
+  _sendStartupGreeting() {
+    if (!this._startupGreeting || this._startupGreetingSent) return;
+    this._startupGreetingSent = true;
+    this._send({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: this._startupGreeting }],
+      },
+    });
+    this.requestResponse();
+    if (this._debug) console.debug("[ws] startup greeting queued");
+  }
+
+  /**
    * Ask the model to generate a response now (after feeding tool results).
    * Serialized: if a response is already in flight we queue this request and
    * replay it once the active response finishes, so we never trip the
@@ -1057,6 +1115,7 @@ export class S2sWsRealtimeClient extends EventTarget {
     // Abort a queue wait in progress: flag it and wake the poll sleep so
     // `_pollQueue` throws "aborted" and connect() unwinds cleanly.
     this._closed = true;
+    this._userAudioRecorder.reset();
     if (this._queueWake) {
       clearTimeout(this._queueTimer);
       const wake = this._queueWake;

@@ -29,6 +29,13 @@ def remove_unspeechable(text: str) -> str:
     return SPEECHABLE_PATTERN.sub("", text)
 
 
+# Maps an STT language code to the language name used in the "Please reply ... in {name}"
+# prompt. Every language any bundled STT backend can report needs an entry here, otherwise
+# `--enable_lang_prompt` silently emits no instruction for it. The names are lowercase
+# because they are interpolated mid-sentence.
+#
+# `tests/test_llm_utils.py` asserts this covers the SUPPORTED_LANGUAGES of every bundled STT
+# handler, so adding a language to a handler without adding it here fails CI.
 WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
     "en": "english",
     "fr": "french",
@@ -42,6 +49,24 @@ WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
     "pl": "polish",
     "it": "italian",
     "nl": "dutch",
+    # The remaining languages Parakeet TDT v3 (the default STT) detects and reports.
+    "ru": "russian",
+    "uk": "ukrainian",
+    "cs": "czech",
+    "sk": "slovak",
+    "hu": "hungarian",
+    "ro": "romanian",
+    "bg": "bulgarian",
+    "hr": "croatian",
+    "sl": "slovenian",
+    "sr": "serbian",
+    "da": "danish",
+    "no": "norwegian",
+    "sv": "swedish",
+    "fi": "finnish",
+    "et": "estonian",
+    "lv": "latvian",
+    "lt": "lithuanian",
 }
 
 

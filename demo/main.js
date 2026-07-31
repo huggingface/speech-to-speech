@@ -329,6 +329,9 @@ let rtcAvailable = false;
 /** @type {RTCIceServer[]} STUN/TURN servers for the browser peer connection
  * (deploy-provided via RTC_ICE_SERVERS; empty -> host candidates only). */
 let iceServers = [];
+// Optional hidden user prompt supplied by the deployment. When non-empty, the
+// client asks the model to greet once after the initial session configuration.
+let startupGreeting = "";
 // Transport of the LIVE (or starting) conversation — as opposed to
 // `settings.transport`, which is what the NEXT one will use. Drives the
 // camera-snapshot size budget while a call is running.
@@ -375,7 +378,13 @@ function pushToolsToSession() {
 // ── Chat view ───────────────────────────────────────────────────────────────
 // Owns the history panel, the ephemeral bubbles, and all transcript/tool
 // streaming state. The client's events are forwarded to its on* methods.
-const chat = new ChatView();
+let userAudioReplaying = false;
+const chat = new ChatView({
+  onUserAudioPlaybackChange(playing) {
+    userAudioReplaying = playing;
+    syncMicMuteState();
+  },
+});
 
 // ── Account / limiter ─────────────────────────────────────────────────────
 // Login chip + daily-limit modal (inert unless the deploy is in LB mode). The
@@ -395,6 +404,15 @@ let client = null;
 /** @type {MediaStream | null} */
 let micStream = null;
 let micMuted = false;
+
+/** Apply both the user's mute choice and the temporary replay guard. */
+function syncMicMuteState() {
+  const muted = micMuted || userAudioReplaying;
+  for (const track of micStream?.getAudioTracks() ?? []) {
+    track.enabled = !muted;
+  }
+  client?.setMuted(muted);
+}
 
 /** @param {AppState} next */
 function setState(next) {
@@ -918,6 +936,9 @@ async function fetchConfig() {
       // /api/calls proxy refuses to forward anywhere else).
       rtcAvailable = !!json.rtc;
       iceServers = Array.isArray(json.iceServers) ? json.iceServers : [];
+      startupGreeting = typeof json.startupGreeting === "string"
+        ? json.startupGreeting.trim()
+        : "";
       // The conversation-time limiter rides on the LB being present.
       limiterOn = lbMode;
     }
@@ -1188,10 +1209,7 @@ async function handleStartError(err) {
 micBtn.addEventListener("click", () => {
   if (!micStream || !client) return;
   micMuted = !micMuted;
-  for (const track of micStream.getAudioTracks()) {
-    track.enabled = !micMuted;
-  }
-  client.setMuted(micMuted);
+  syncMicMuteState();
   micBtn.classList.toggle("muted", micMuted);
   micBtn.setAttribute("aria-label", micMuted ? "Unmute" : "Mute");
   micBtn.title = micMuted ? "Unmute" : "Mute";
@@ -1418,6 +1436,7 @@ async function doStart(audioContext = null) {
   const common = {
     voice: settings.voice,
     instructions: effectiveInstructions(),
+    startupGreeting,
     acquireMic: acquireMicStream,
     tools: activeToolDefs(),
     audioOutputId: settings.audioOutputId || "",
@@ -1435,6 +1454,7 @@ async function doStart(audioContext = null) {
         ...common,
       });
   client = c;
+  c.setMuted(micMuted || userAudioReplaying);
 
   c.addEventListener("queue", (e) => {
     const { position, queueId } = /** @type {CustomEvent<{ position: number; queueId: string }>} */ (e).detail;
@@ -1458,10 +1478,23 @@ async function doStart(audioContext = null) {
   c.addEventListener("status", (e) => {
     const detail = /** @type {CustomEvent<{ status: string }>} */ (e).detail;
     onClientStatus(detail.status);
+    if (detail.status === "ai-speaking") chat.onAssistantActivity();
   });
   c.addEventListener("transcript", (e) => {
     const d = /** @type {CustomEvent<{ role: "user" | "assistant"; text: string; partial: boolean; itemId?: string; responseId?: string }>} */ (e).detail;
     chat.onTranscript(d);
+  });
+  c.addEventListener("user-turn-started", (e) => {
+    const detail = /** @type {CustomEvent<{ itemId?: string }>} */ (e).detail;
+    chat.onUserTurnStarted(detail);
+  });
+  c.addEventListener("user-turn-stopped", (e) => {
+    const detail = /** @type {CustomEvent<{ itemId?: string }>} */ (e).detail;
+    chat.onUserTurnStopped(detail);
+  });
+  c.addEventListener("user-audio", (e) => {
+    const detail = /** @type {CustomEvent<{ itemId?: string; audio: Blob; durationMs?: number; truncated?: boolean }>} */ (e).detail;
+    chat.onUserAudio(detail);
   });
 
   c.addEventListener("response-finished", (e) => {

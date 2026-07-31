@@ -44,6 +44,8 @@
  *   candidates only — fine locally, may not traverse NATs).
  * @property {string} voice
  * @property {string} instructions
+ * @property {string} [startupGreeting] Hidden user prompt that asks the model
+ *   to greet once after the initial session configuration is sent.
  * @property {MediaStream} [micStream] Live mic stream. Provide this OR `acquireMic`.
  * @property {() => Promise<MediaStream>} [acquireMic] Lazily obtain the mic
  *   stream once connect() actually runs (same contract as the WS client).
@@ -146,6 +148,8 @@ export class S2sRtcRealtimeClient extends EventTarget {
     /** @type {{ image?: string }[]} */
     this._createQueue = [];
     this._sessionConfigured = false;
+    this._startupGreeting = options.startupGreeting?.trim() ?? "";
+    this._startupGreetingSent = false;
     this._debug = (() => { try { return localStorage.getItem("s2s.debug") === "1"; } catch { return false; } })();
   }
 
@@ -201,7 +205,11 @@ export class S2sRtcRealtimeClient extends EventTarget {
 
     const micTrack = this.options.micStream?.getAudioTracks()[0];
     if (!micTrack) throw new Error("No microphone track available");
-    micTrack.enabled = !this._muted;
+    // Negotiate the audio track immediately, but transmit silence until the
+    // server has received session.update and the optional greeting sequence.
+    // Otherwise background noise during the WebRTC handshake can create the
+    // first user turn before the greeting is queued.
+    this._syncMicTransmission();
     pc.addTrack(micTrack, /** @type {MediaStream} */ (this.options.micStream));
 
     // The client opens the events channel (OpenAI convention); the server
@@ -445,6 +453,12 @@ export class S2sRtcRealtimeClient extends EventTarget {
         // user-tunable bits (voice, instructions, tools) — same as WS.
         this._sendSessionUpdate();
         this._sessionConfigured = true;
+        // Data-channel messages are ordered, so the hidden item and
+        // response.create are handled after the session.update above.
+        this._sendStartupGreeting();
+        // Only open the microphone after the configuration and greeting events
+        // above have been queued on the ordered data channel.
+        this._syncMicTransmission();
         if (this._status === "connecting") this._setStatus("connected");
         break;
 
@@ -456,10 +470,20 @@ export class S2sRtcRealtimeClient extends EventTarget {
         // the server flushes its track buffer — so this is UI state only.
         this._aiSpeaking = false;
         this._lastAudibleAt = 0;
+        this.dispatchEvent(new CustomEvent("user-turn-started", {
+          detail: {
+            itemId: typeof event.item_id === "string" ? event.item_id : "",
+          },
+        }));
         this._setStatus("user-speaking");
         break;
 
       case "input_audio_buffer.speech_stopped":
+        this.dispatchEvent(new CustomEvent("user-turn-stopped", {
+          detail: {
+            itemId: typeof event.item_id === "string" ? event.item_id : "",
+          },
+        }));
         if (this._status === "user-speaking") this._setStatus("processing");
         break;
 
@@ -714,6 +738,26 @@ export class S2sRtcRealtimeClient extends EventTarget {
     });
   }
 
+  /**
+   * Ask the model to open the conversation exactly once. The synthetic user
+   * prompt stays in conversation history, warming the prompt prefix reused by
+   * the first spoken turn.
+   */
+  _sendStartupGreeting() {
+    if (!this._startupGreeting || this._startupGreetingSent) return;
+    this._startupGreetingSent = true;
+    this._send({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: this._startupGreeting }],
+      },
+    });
+    this.requestResponse();
+    if (this._debug) console.debug("[rtc] startup greeting queued");
+  }
+
   /** Ask the model to respond now (after tool results). Serialized behind the
    *  single-response slot, same as the WS client.
    *  @param {{ image?: string }} [opts] */
@@ -750,10 +794,15 @@ export class S2sRtcRealtimeClient extends EventTarget {
   setMuted(muted) {
     this._muted = muted;
     // The caller (main.js) also toggles the shared micStream tracks; doing it
-    // here too keeps the client correct when driven standalone. A disabled
-    // track makes the browser transmit silence — the server VAD stays quiet.
+    // here too keeps the client correct when driven standalone. Before the
+    // session is configured, even an explicit unmute must continue sending
+    // silence so no user turn can race the startup greeting.
+    this._syncMicTransmission();
+  }
+
+  _syncMicTransmission() {
     for (const track of this.options.micStream?.getAudioTracks() ?? []) {
-      track.enabled = !muted;
+      track.enabled = this._sessionConfigured && !this._muted;
     }
   }
 

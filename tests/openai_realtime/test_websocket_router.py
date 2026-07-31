@@ -145,7 +145,7 @@ class TestConnection:
                 msg = ws.receive_json()
                 assert msg["type"] == "session.created"
                 assert msg["event_id"].startswith("event_")
-                assert "session" in msg
+                assert msg["session"]["id"].startswith("session_")
 
     def test_second_connection_rejected(self, setup):
         app, *_ = setup

@@ -58,6 +58,12 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_realtime_profile():
     assert qwen3_args.qwen3_tts_backend == "ggml"
     assert qwen3_args.qwen3_tts_non_streaming_mode is True
     assert qwen3_args.qwen3_tts_ref_audio is None
+    assert qwen3_args.qwen3_tts_ref_spk is None
+    assert qwen3_args.qwen3_tts_ref_rvq is None
+    assert qwen3_args.qwen3_tts_ggml_quantization == "BF16"
+    assert qwen3_args.qwen3_tts_gguf_talker_path is None
+    assert qwen3_args.qwen3_tts_gguf_codec_path is None
+    assert qwen3_args.qwen3_tts_ref_cache_dir is None
     assert qwen3_args.qwen3_tts_mlx_quantization == "6bit"
 
 
@@ -121,6 +127,58 @@ def test_parse_arguments_accepts_qwen3_tts_backend_override():
         sys.argv = original_argv
 
     assert args.qwen3_tts_handler_kwargs.qwen3_tts_backend == "torch"
+
+
+def test_parse_arguments_accepts_qwen3_tts_ggml_options():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = [
+            "speech-to-speech",
+            "--qwen3_tts_ggml_quantization",
+            "Q4_K_M",
+            "--qwen3_tts_gguf_talker_path",
+            "/models/talker.gguf",
+            "--qwen3_tts_gguf_codec_path",
+            "/models/codec.gguf",
+            "--qwen3_tts_ref_cache_dir",
+            "/voices/cache",
+            "--qwen3_tts_ref_spk",
+            "/voices/ref.spk",
+            "--qwen3_tts_ref_rvq",
+            "/voices/ref.rvq",
+        ]
+        args = parse_arguments()
+    finally:
+        sys.argv = original_argv
+
+    qwen3_args = args.qwen3_tts_handler_kwargs
+    assert qwen3_args.qwen3_tts_ggml_quantization == "Q4_K_M"
+    assert qwen3_args.qwen3_tts_gguf_talker_path == "/models/talker.gguf"
+    assert qwen3_args.qwen3_tts_gguf_codec_path == "/models/codec.gguf"
+    assert qwen3_args.qwen3_tts_ref_cache_dir == "/voices/cache"
+    assert qwen3_args.qwen3_tts_ref_spk == "/voices/ref.spk"
+    assert qwen3_args.qwen3_tts_ref_rvq == "/voices/ref.rvq"
+
+
+def test_parse_arguments_accepts_raw_websocket_mode():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = ["speech-to-speech", "--mode", "raw-websocket"]
+        args = parse_arguments()
+    finally:
+        sys.argv = original_argv
+
+    assert args.module_kwargs.mode == "raw-websocket"
+
+
+def test_parse_arguments_rejects_removed_websocket_mode():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = ["speech-to-speech", "--mode", "websocket"]
+        with pytest.raises(SystemExit):
+            parse_arguments()
+    finally:
+        sys.argv = original_argv
 
 
 def test_parse_arguments_transformers_backend():

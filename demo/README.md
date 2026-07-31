@@ -45,6 +45,7 @@ backend, speaking the OpenAI Realtime **GA** protocol over **WebSocket**
    uv pip install -r demo/requirements.txt
    export SPEECH_TO_SPEECH_URL=ws://localhost:8765/v1/realtime
    export SERPER_API_KEY=...   # optional; web search is disabled without it
+   export STARTUP_GREETING=... # optional; empty disables the automatic greeting
    uv run uvicorn --app-dir demo server:app --reload --port 7860
    ```
 
@@ -93,7 +94,10 @@ websocat ws://localhost:8765/v1/realtime
    `session.audio.output`, `session.output_modalities`).
 3. Client streams mic audio as PCM16 16 kHz mono base64 chunks
    (`input_audio_buffer.append`, one frame every ~40 ms).
-4. Server pushes `response.output_audio.delta` (PCM16 24 kHz mono base64)
+4. The browser keeps a bounded, in-memory copy of those sent frames and uses
+   the server VAD boundaries to add replayable user recordings to conversation
+   history. No recording is uploaded or persisted separately.
+5. Server pushes `response.output_audio.delta` (PCM16 24 kHz mono base64)
    and transcript deltas.
 
 The backend exposes one concurrent session per pipeline unit
@@ -126,6 +130,9 @@ answers 501 and the handshake fails with a clear message.
 
 Caveats vs. WebSocket:
 
+- **User recording replay**: conversation-history recordings currently use the
+  exact PCM frames sent through `input_audio_buffer.append`, so they are
+  available only on the WebSocket transport.
 - **NAT**: host ICE candidates only by default — fine when browser and backend
   are on the same machine/LAN. Across the internet, set `RTC_ICE_SERVERS` on
   *this* app (a JSON list of `RTCIceServer` dicts, or comma-separated
@@ -155,7 +162,10 @@ Three modes, picked by env (`/api/config` tells the client which one is active):
 - **`LOAD_BALANCER_URL` env** — multi-compute deployments only: the browser
   POSTs the same-origin `/api/session` proxy, the server forwards to the LB,
   and the browser dials the per-session compute URL the LB hands back. The LB
-  address never reaches the browser; the Settings URL field is hidden.
+  address never reaches the browser; the Settings URL field is hidden. On
+  OAuth-enabled Spaces, the proxy forwards the signed-in user's HF access token
+  to the LB through `X-Reachy-Mini-Authorization` so the backend can attribute
+  usage. The token stays server-side; anonymous requests include no credential.
 
 | `SPEECH_TO_SPEECH_URL` | `LOAD_BALANCER_URL` | `SPACE_ID` | Connection | URL field | Transport | Metering |
 |:---:|:---:|:---:|---|---|---|---|
@@ -165,6 +175,16 @@ Three modes, picked by env (`/api/config` tells the client which one is active):
 | – | ✅ | – | LB proxy | hidden | WS only | off |
 
 **Settings → Restart** reconnects with the current voice, instructions and URL.
+
+## Startup greeting
+
+By default, each new connection creates one hidden user item asking the model
+for a brief greeting, then requests a response. Besides opening the conversation
+naturally, this warms the same prompt prefix used by the first spoken turn.
+
+Set `STARTUP_GREETING` to customize the hidden prompt, or set it to an empty
+value to disable automatic generation. The WebSocket and WebRTC clients both
+guard the greeting so it is sent at most once per connection.
 
 ## Tools
 
@@ -219,7 +239,7 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
 |------|------|
 | `index.html` | Single page, orb + settings modal (identical UI to the WebRTC app) |
 | `main.js` | State machine, settings, tools, camera, noise-gate UI wiring |
-| `ui/chat.js` | `ChatView`: history panel, ephemeral bubbles, transcript/tool streaming |
+| `ui/chat.js` | `ChatView`: history panel, ephemeral bubbles, transcript/tool streaming, user recording replay |
 | `ui/account.js` | `Account`: HF login chip + popover, daily-limit modal |
 | `ui/dom.js` | Shared helpers: `$`, `escHtml`, `truncateError`, `DEBUG` |
 | `auth.py` | HF OAuth + per-request identity (tier, hashed keys) |
@@ -227,6 +247,7 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
 | `ws/s2s-ws-client.js` | WebSocket handshake + OpenAI Realtime GA protocol |
 | `rtc/s2s-rtc-client.js` | WebRTC sibling: SDP handshake via `/api/calls`, events over the data channel, track audio |
 | `ws/codec.js` | base64 <-> PCM helpers + transcript extraction (pure) |
+| `ws/user-audio-recorder.js` | Bounded sent-PCM buffer + VAD slicing + browser-playable WAV wrapping |
 | `ws/orb-visualizer.js` | `OrbVisualiser`: FFT bands -> orb CSS custom properties |
 | `worklets/mic-capture.js` | AudioWorklet: 48 kHz Float32 -> 16 kHz Int16 PCM, posts ~40 ms chunks |
 | `worklets/audio-playback.js` | AudioWorklet: 24 kHz Float32 ring buffer -> 48 kHz, linear interp, fade in/out |
@@ -238,6 +259,10 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
   feeds the `mic-capture` worklet at the `AudioContext` rate. The worklet
   resamples to 16 kHz (boxcar lowpass + decimation on the 48 -> 16 fast
   path, linear interpolation fallback for odd rates) and packs Int16 LE.
+- **User replay**: the WebSocket client retains only a bounded copy of PCM it
+  actually sends. `speech_started` / `speech_stopped` timestamps select each
+  utterance, which is wrapped as an in-memory WAV and attached to the user row.
+  Starting playback temporarily mutes outgoing mic audio to prevent feedback.
 - **Output**: `response.output_audio.delta` decodes to Int16 -> Float32
   and is posted to the `audio-playback` worklet. The worklet maintains a
   per-context ring buffer, linearly interpolates 24 -> 48, and applies
