@@ -140,10 +140,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
         compact_history: bool = False,
+        vision_resolver: Any = None,
         **_kwargs: Any,
     ) -> None:
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
+        self.vision_resolver = vision_resolver
         self.model_name = model_name
         self.stream = stream
         self.stream_batch_sentences = max(1, stream_batch_sentences)
@@ -538,6 +540,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return
 
         original_chat = runtime_config.chat
+        if getattr(self, "vision_resolver", None) is not None:
+            original_chat.resolve_images(self.vision_resolver, cancel_scope=self.cancel_scope)
         if is_out_of_band(response):
             try:
                 active_chat = build_active_chat(original_chat, response)
