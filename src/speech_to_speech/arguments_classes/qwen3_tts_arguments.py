@@ -34,10 +34,46 @@ class Qwen3TTSHandlerArguments:
             "help": "faster-qwen3-tts backend on non-macOS platforms. Options: 'ggml' or 'torch'. Default is 'ggml'. On Apple Silicon, mlx-audio is selected automatically and this option is ignored."
         },
     )
+    qwen3_tts_ggml_quantization: str = field(
+        default="BF16",
+        metadata={
+            "help": "GGUF quantization for the faster-qwen3-tts GGML backend. Supported values: 'BF16', 'Q8_0', 'Q4_K_M', 'F32'. Default is 'BF16'."
+        },
+    )
+    qwen3_tts_gguf_talker_path: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Optional local qwentts.cpp talker GGUF path. Must be provided together with qwen3_tts_gguf_codec_path and requires the GGML backend."
+        },
+    )
+    qwen3_tts_gguf_codec_path: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Optional local qwentts.cpp codec GGUF path. Must be provided together with qwen3_tts_gguf_talker_path and requires the GGML backend."
+        },
+    )
+    qwen3_tts_ref_cache_dir: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Optional directory for automatically cached GGML voice references (.spk/.rvq). The faster-qwen3-tts default cache is used when unset."
+        },
+    )
     qwen3_tts_ref_audio: Optional[str] = field(
         default=None,
         metadata={
             "help": "Optional path to reference audio file for voice cloning. Leave unset when using a CustomVoice model."
+        },
+    )
+    qwen3_tts_ref_spk: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Optional precomputed qwentts.cpp .spk speaker embedding for GGML voice cloning. Mutually exclusive with qwen3_tts_ref_audio."
+        },
+    )
+    qwen3_tts_ref_rvq: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Optional precomputed qwentts.cpp .rvq acoustic codes for GGML ICL voice cloning. Requires qwen3_tts_ref_spk and qwen3_tts_ref_text."
         },
     )
     qwen3_tts_ref_text: str = field(
