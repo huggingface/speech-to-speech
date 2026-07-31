@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import time
 import wave
 from typing import Any, Iterator
 
@@ -109,16 +110,20 @@ class Qwen3ASRHTTPSTTHandler(BaseSTTHandler):
             self._transcribe(dummy_audio)
         except Exception:
             logger.exception(
-                "%s: could not reach qwen-asr-serve at %s. Is it running? e.g. in a separate "
+                "%s: could not reach the Qwen3-ASR server at %s. Is it running? e.g. in a separate "
                 "virtualenv pinned to transformers==4.57.6: "
-                "`qwen-asr-serve Qwen/Qwen3-ASR-1.7B --host 127.0.0.1 --port 8000`",
+                "`python scripts/qwen3_asr_server.py --host 127.0.0.1 --port 8000`",
                 self.__class__.__name__,
                 self.base_url,
             )
             raise
 
     def _transcribe(self, audio: np.ndarray) -> tuple[str, str]:
+        encode_start = time.perf_counter()
         data_uri = _encode_wav_data_uri(audio)
+        encode_s = time.perf_counter() - encode_start
+
+        request_start = time.perf_counter()
         response = self.client.post(
             f"{self.base_url}/v1/chat/completions",
             json={
@@ -129,6 +134,13 @@ class Qwen3ASRHTTPSTTHandler(BaseSTTHandler):
                     }
                 ]
             },
+        )
+        request_s = time.perf_counter() - request_start
+        logger.info(
+            "%s: WAV encode %.3fs, HTTP round-trip (incl. server-side transcribe) %.3fs",
+            self.__class__.__name__,
+            encode_s,
+            request_s,
         )
         response.raise_for_status()
         content = response.json()["choices"][0]["message"]["content"]

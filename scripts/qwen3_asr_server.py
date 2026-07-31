@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import time
 
 import torch
 from flask import Flask, jsonify, request
@@ -35,10 +36,13 @@ def chat_completions():
 
     # qwen_asr.inference.utils.load_audio_any accepts this string directly (http(s) URL,
     # local path, or a "data:audio/..." base64 URI) -- no manual decoding needed here.
+    start = time.perf_counter()
     results = model.transcribe(audio=audio_url, language=None)
+    elapsed_s = time.perf_counter() - start
     result = results[0]
     content_text = f"language {result.language}<asr_text>{result.text}" if result.language else result.text
 
+    print(f"[qwen3_asr_server] transcribe took {elapsed_s:.3f}s -> {content_text!r}")
     return jsonify({"choices": [{"message": {"content": content_text}}]})
 
 
