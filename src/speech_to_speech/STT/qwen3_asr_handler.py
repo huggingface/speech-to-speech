@@ -197,6 +197,12 @@ class Qwen3ASRSTTHandler(BaseSTTHandler):
         self.model.transcribe(audio=(dummy_audio, 16000), language=self.language_name)
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
+        if vad_audio.mode == "progressive":
+            # Re-running full Qwen3-ASR inference on every progressive/partial VAD chunk while
+            # the user is still speaking would stall the pipeline for seconds at a time. Only
+            # transcribe once the turn is final.
+            return
+
         logger.debug("infering Qwen3-ASR...")
 
         results = self.model.transcribe(audio=(vad_audio.audio, 16000), language=self.language_name)

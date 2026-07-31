@@ -88,3 +88,17 @@ def test_qwen3_asr_http_transcription_is_final(monkeypatch):
     sent = handler.client.last_json
     assert sent["messages"][0]["content"][0]["type"] == "audio_url"
     assert sent["messages"][0]["content"][0]["audio_url"]["url"].startswith("data:audio/wav;base64,")
+
+
+def test_qwen3_asr_http_progressive_mode_yields_nothing_and_skips_request(monkeypatch):
+    monkeypatch.setattr(qwen3_asr_http_handler.console, "print", lambda *args, **kwargs: None)
+
+    handler = _handler()
+    result = list(
+        handler.process(
+            VADAudio(audio=np.zeros(16000, dtype=np.float32), mode="progressive", turn_id="turn_2", turn_revision=1)
+        )
+    )
+
+    assert result == []
+    assert handler.client.last_json is None

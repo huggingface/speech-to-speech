@@ -147,6 +147,13 @@ class Qwen3ASRHTTPSTTHandler(BaseSTTHandler):
         return _parse_asr_output(content)
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
+        if vad_audio.mode == "progressive":
+            # Qwen3-ASR-1.7B is too slow, and this Flask dev server too single-threaded, to
+            # re-transcribe every progressive/partial VAD chunk fired while the user is still
+            # speaking -- that floods the server with overlapping multi-second requests and
+            # stalls the pipeline. Only transcribe once the turn is final.
+            return
+
         logger.debug("infering Qwen3-ASR (HTTP)...")
 
         language, pred_text = self._transcribe(vad_audio.audio)

@@ -62,3 +62,15 @@ def test_qwen3_asr_auto_language_appends_suffix(monkeypatch):
     )
 
     assert result[0].language_code == "zh-auto"
+
+
+def test_qwen3_asr_progressive_mode_yields_nothing(monkeypatch):
+    monkeypatch.setattr(qwen3_asr_handler.console, "print", lambda *args, **kwargs: None)
+
+    result = list(
+        _handler().process(
+            VADAudio(audio=np.zeros(16000, dtype=np.float32), mode="progressive", turn_id="turn_3", turn_revision=1)
+        )
+    )
+
+    assert result == []

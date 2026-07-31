@@ -85,6 +85,11 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - Language flag: `--qwen3_asr_language` (ISO 639-1 code, e.g. `en`, `vi`, `zh`; omit or set to `auto` for automatic language detection)
 - Supported language list (30 languages, `yue` = Cantonese): `zh`, `en`, `yue`, `ar`, `de`, `fr`, `es`, `pt`, `id`, `it`, `ko`, `ru`, `th`, `vi`, `ja`, `tr`, `hi`, `ms`, `nl`, `sv`, `da`, `fi`, `pl`, `cs`, `fil`, `fa`, `el`, `hu`, `mk`, `ro`
 - Backend: `qwen-asr` package (transformers backend), one VAD-segmented utterance per call
+- Does not support `--enable_live_transcription` (progressive/partial transcripts while the user is still
+  speaking): `process()` skips `mode == "progressive"` VAD chunks outright rather than re-running full
+  Qwen3-ASR inference on every partial tick, which would stall the pipeline for seconds at a time (this hit
+  live, confirmed with a user testing this branch: speech would work once, then hang). Only the final
+  transcript, once the turn ends, gets transcribed.
 - **`transformers` version conflict, confirmed unresolved on macOS:** `qwen-asr==0.0.6` hard-pins
   `transformers==4.57.6`, which conflicts with this project's `transformers==5.6.2` pin on macOS (needed by
   Qwen3-TTS/mlx-audio) — installing the extra requires `pip install --no-deps qwen-asr==0.0.6` (plus its
@@ -136,8 +141,16 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 
 - Flags: `--qwen3_asr_http_base_url` (default `http://127.0.0.1:8000`), `--qwen3_asr_http_timeout_s`
   (default `30.0`).
-- Both processes run on `localhost`, so the added latency is a local HTTP round-trip (single-digit
-  milliseconds), negligible next to model inference time.
+- Both processes run on `localhost`, so the added HTTP round-trip itself is single-digit milliseconds —
+  end-to-end latency is dominated by Qwen3-ASR-1.7B's own transcribe time (multiple seconds on MPS via
+  plain PyTorch, not the optimized GGML/Metal path some benchmarks quote), not the HTTP hop. Both
+  `Qwen3ASRHTTPSTTHandler` and `scripts/qwen3_asr_server.py` log per-request timings (WAV encode / HTTP
+  round-trip on the client, `transcribe()` time on the server) to make this easy to verify directly rather
+  than guess at.
+- Does not support `--enable_live_transcription`, for the same reason as the in-process backend above, plus
+  `scripts/qwen3_asr_server.py`'s Flask dev server processes one request at a time by default — a flood of
+  overlapping progressive-chunk requests during a single utterance would queue up and stall the pipeline.
+  `process()` skips `mode == "progressive"` VAD chunks outright.
 - Known gap: per-request language forcing (`--qwen3_asr_language`-equivalent) isn't wired up for this path —
   `scripts/qwen3_asr_server.py` always calls `.transcribe(language=None)`, relying on Qwen3-ASR's own
   language auto-detection tag in the response. Easy to add if needed (a `language` field on the request
