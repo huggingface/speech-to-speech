@@ -1,0 +1,39 @@
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1
+ENV PATH="/usr/src/app/.venv/bin:${PATH}"
+
+WORKDIR /usr/src/app
+
+# No NVIDIA base image here: this variant is for machines with no GPU (or a GPU Docker
+# can't reach, e.g. Docker Desktop on Apple Silicon has no Metal/MPS passthrough), running
+# everything on CPU. Use Dockerfile / Dockerfile.arm64 instead on a CUDA-capable host.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+        libportaudio2 \
+        libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir uv
+
+# torch/torchaudio default to the CUDA-bundled wheel on Linux even with no GPU present;
+# pull from the CPU wheel index instead so `uv sync` doesn't download multiple GB it can't
+# use. index-strategy=unsafe-best-match lets uv pick torch from this extra index while still
+# resolving every other dependency from PyPI as usual.
+ENV UV_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+
+COPY pyproject.toml README.md LICENSE MANIFEST.in ./
+RUN uv sync --no-install-project --no-dev
+
+COPY . .
+RUN uv sync --no-dev
+
+# The default Qwen3-TTS GGML backend's qwentts-cpp-python wheel on PyPI targets CUDA 12.8;
+# this image has no GPU, so pull the CPU wheel instead (see README's "CUDA Note for
+# Qwen3-TTS" section).
+RUN uv pip install "qwentts-cpp-python==0.3.1+cpu" \
+    -f https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/tree/main/whl/cpu
+
+RUN python -c "import nltk; nltk.download('punkt_tab'); nltk.download('averaged_perceptron_tagger_eng')"

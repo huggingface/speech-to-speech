@@ -110,16 +110,23 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - Handler: `Qwen3ASRHTTPSTTHandler`
 - No extra needed in the main install — this handler only makes plain HTTP calls (via `httpx`, already a
   base dependency) and never imports `qwen_asr` or cares which `transformers` version this project has.
-- Talks to a separately-running [`qwen-asr-serve`](https://github.com/QwenLM/Qwen3-ASR) process, started in
-  its **own** virtualenv pinned to `transformers==4.57.6` (the version `qwen-asr` actually needs — confirmed
-  working end-to-end, including on Apple Silicon MPS):
+- Talks to a separately-running server, started in its **own** virtualenv pinned to
+  `transformers==4.57.6` (the version `qwen-asr` actually needs). That server is
+  [`scripts/qwen3_asr_server.py`](../../../scripts/qwen3_asr_server.py) — a small Flask wrapper around
+  `Qwen3ASRModel.from_pretrained(...).transcribe(...)`, **not** the `qwen-asr` package's own
+  `qwen-asr-serve` command, which wraps `vllm serve` and hard-requires the `vllm` package. `vllm` has no
+  wheels for macOS/Apple Silicon at all, so `qwen-asr-serve` cannot run there regardless of backend flag —
+  confirmed live (`ModuleNotFoundError: No module named 'vllm'` even with `--backend transformers`
+  requested). `scripts/qwen3_asr_server.py` calls the exact same in-process transformers-backend API
+  confirmed working end-to-end on Apple Silicon MPS, just wrapped in an HTTP endpoint instead of imported
+  in-process:
 
   ```bash
   # Terminal 1 — separate venv, only for Qwen3-ASR
   uv venv --python 3.12 .venv-qwen3-asr
   source .venv-qwen3-asr/bin/activate
   uv pip install qwen-asr==0.0.6
-  qwen-asr-serve Qwen/Qwen3-ASR-1.7B --host 127.0.0.1 --port 8000
+  python scripts/qwen3_asr_server.py --device mps --host 127.0.0.1 --port 8000
   ```
 
   ```bash
@@ -131,9 +138,16 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
   (default `30.0`).
 - Both processes run on `localhost`, so the added latency is a local HTTP round-trip (single-digit
   milliseconds), negligible next to model inference time.
-- Known gap: per-request language forcing (`--qwen3_asr_language`-equivalent) is not wired up for this path —
-  `qwen-asr-serve`'s `/v1/chat/completions` endpoint doesn't document a request-level language override, so
-  this handler always relies on Qwen3-ASR's own language auto-detection tag in the response.
+- Known gap: per-request language forcing (`--qwen3_asr_language`-equivalent) isn't wired up for this path —
+  `scripts/qwen3_asr_server.py` always calls `.transcribe(language=None)`, relying on Qwen3-ASR's own
+  language auto-detection tag in the response. Easy to add if needed (a `language` field on the request
+  JSON, threaded through to `.transcribe(language=...)`); not done here for lack of a concrete need yet.
+- On a CUDA host with `vllm` installed, `qwen-asr-serve` (the real one) would likely outperform this via
+  vLLM's batching — this handler's HTTP contract only assumes an OpenAI-chat-completions-shaped response, so
+  swapping the server side later doesn't require touching `qwen3_asr_http_handler.py`.
+- Prefer Docker over a native venv for the server side? See "CPU-only / Qwen3-ASR Docker setup" in
+  the top-level README's [Docker section](../../../README.md#docker) for a `docker compose` alternative that
+  runs both this and the pipeline as containers — CPU-only, no NVIDIA Container Toolkit required.
 
 ## Language Abbreviations (ISO-style codes seen in STT handlers)
 
@@ -233,6 +247,6 @@ python s2s_pipeline.py --stt qwen3-asr --qwen3_asr_model_name Qwen/Qwen3-ASR-0.6
 ### Qwen3-ASR over HTTP (macOS-friendly)
 
 ```bash
-# with qwen-asr-serve already running in its own venv, per section 8 above
+# with scripts/qwen3_asr_server.py already running in its own venv, per section 8 above
 python s2s_pipeline.py --stt qwen3-asr-http --qwen3_asr_http_base_url http://127.0.0.1:8000
 ```

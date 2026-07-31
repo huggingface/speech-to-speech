@@ -281,6 +281,27 @@ docker compose up
 
 The compose file starts a llama.cpp server with Gemma 4, starts the TCP socket server, and exposes ports `8080`, `12345`, and `12346`.
 
+#### CPU-only / Qwen3-ASR Docker setup
+
+`docker-compose.qwen3-asr.yml` runs the pipeline with `--stt qwen3-asr-http` against a standalone
+Qwen3-ASR container, entirely CPU-only — no NVIDIA Container Toolkit needed. Use this on a machine
+with no CUDA GPU Docker can reach, e.g. Docker Desktop on Apple Silicon (no Metal/MPS passthrough
+into containers), as an alternative to running `scripts/qwen3_asr_server.py` in a native virtualenv (see
+[`src/speech_to_speech/STT/README.md`](./src/speech_to_speech/STT/README.md)):
+
+```bash
+export OPENAI_API_KEY=...
+docker compose -f docker-compose.qwen3-asr.yml up
+```
+
+Then, on the host (for microphone/speaker access):
+
+```bash
+python scripts/listen_and_play.py --host 127.0.0.1
+```
+
+Being CPU-only, expect noticeably higher STT latency than the native MPS/CUDA path.
+
 ## Realtime API
 
 Realtime mode streams audio over a WebSocket using the OpenAI Realtime protocol, with live transcription and low-latency turn-taking. The server exposes `/v1/realtime`, and any OpenAI Realtime-compatible client can connect:
