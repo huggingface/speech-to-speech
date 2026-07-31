@@ -59,6 +59,10 @@ export class ChatView {
     /** @type {HTMLElement | null} */
     this._activeUserBubble = null;
     this._activeUserItemId = "";
+    // RTC media and data-channel events are not ordered relative to each other.
+    // Remember the item whose placeholder assistant activity dismissed so a
+    // later speech_stopped event cannot recreate it as "Sending voice...".
+    this._assistantDismissedUserItemId = "";
     // Monotonic counter for synthesizing unique keys when the server omits an
     // item_id / response_id, so id-less messages never collapse onto each other.
     this._anonSeq = 0;
@@ -284,6 +288,7 @@ export class ChatView {
   onAssistantActivity() {
     const bubble = this._activeUserBubble;
     if (!bubble?.isConnected || !bubble.classList.contains("voice")) return;
+    this._assistantDismissedUserItemId = this._activeUserItemId;
     this._dismissBubble(bubble);
     this._activeUserBubble = null;
     this._scheduleBubbleReaper();
@@ -420,6 +425,7 @@ export class ChatView {
     this._userHistByItem.clear();
     this._activeUserBubble = null;
     this._activeUserItemId = "";
+    this._assistantDismissedUserItemId = "";
     this._asstByResp.clear();
   }
 
@@ -431,6 +437,9 @@ export class ChatView {
    */
   onUserTurnStarted(detail = {}) {
     const id = detail.itemId || `_u${++this._anonSeq}`;
+    // A reopened turn may legitimately reuse the same item id, so a fresh start
+    // supersedes any tombstone left by the prior assistant activity.
+    this._assistantDismissedUserItemId = "";
     const reusable = this._activeUserItemId === id
       && this._activeUserBubble?.isConnected
       && !this._activeUserBubble.classList.contains("out");
@@ -458,6 +467,7 @@ export class ChatView {
     const reusable = this._activeUserItemId === id
       && this._activeUserBubble?.isConnected
       && !this._activeUserBubble.classList.contains("out");
+    if (!reusable && this._assistantDismissedUserItemId === id) return;
     if (!reusable) {
       this._activeUserBubble = this._spawnVoiceBubble("sending");
       this._activeUserItemId = id;

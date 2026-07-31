@@ -194,6 +194,8 @@ const bubble = {
   },
 };
 view._activeUserBubble = bubble;
+view._activeUserItemId = "item_voice";
+view._assistantDismissedUserItemId = "";
 view._bubbleExpiry = new WeakMap();
 view._reaperHandle = 0;
 view._bubbleStack = {
@@ -205,5 +207,56 @@ view._dismissBubble = (element) => { dismissed = element; };
 view.onAssistantActivity();
 if (dismissed !== bubble) throw new Error("pending voice bubble was not dismissed");
 if (view._activeUserBubble !== null) throw new Error("active voice bubble was not released");
+if (view._assistantDismissedUserItemId !== "item_voice") {
+  throw new Error("dismissed item was not remembered");
+}
+"""
+    )
+
+
+def test_late_user_turn_stop_does_not_recreate_dismissed_voice_bubble():
+    _run_node(
+        """
+const { ChatView } = await import("./demo/ui/chat.js");
+const view = Object.create(ChatView.prototype);
+const bubble = {
+  isConnected: true,
+  classList: {
+    contains(name) { return name === "voice"; },
+  },
+};
+view._activeUserBubble = bubble;
+view._activeUserItemId = "item_voice";
+view._assistantDismissedUserItemId = "";
+view._bubbleExpiry = new WeakMap();
+view._reaperHandle = 0;
+view._bubbleStack = {
+  querySelector() { return null; },
+};
+view._dismissBubble = () => {};
+view._scheduleBubbleReaper = () => {};
+let spawned = 0;
+view._spawnVoiceBubble = () => {
+  spawned += 1;
+  return bubble;
+};
+
+// RTC audio can become audible before the ordered data channel delivers the
+// speech_stopped event. The late stop must not recreate the dismissed bubble.
+view.onAssistantActivity();
+view.onUserTurnStopped({ itemId: "item_voice" });
+
+if (spawned !== 0) {
+  throw new Error(`late stop recreated ${spawned} voice bubble(s)`);
+}
+if (view._activeUserBubble !== null) {
+  throw new Error("late stop restored the active voice bubble");
+}
+
+// A genuine reopened turn may reuse the item id and must clear the tombstone.
+view.onUserTurnStarted({ itemId: "item_voice" });
+if (spawned !== 1 || view._activeUserBubble !== bubble) {
+  throw new Error("reopened turn did not create a fresh listening bubble");
+}
 """
     )
