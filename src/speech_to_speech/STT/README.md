@@ -10,6 +10,8 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - `faster-whisper` → `STT/faster_whisper_handler.py`
 - `parakeet-tdt` → `STT/parakeet_tdt_handler.py`
 - `paraformer` → `STT/paraformer_handler.py`
+- `qwen3-asr` → `STT/qwen3_asr_handler.py`
+- `qwen3-asr-http` → `STT/qwen3_asr_http_handler.py`
 
 ## Language Support by Handler
 
@@ -74,6 +76,91 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - Practical support:
   - Depends on selected FunASR model checkpoint
   - Default setup is Chinese-oriented (`zh`)
+
+### 7) Qwen3-ASR (`--stt qwen3-asr`) — in-process, macOS: currently blocked
+
+- Handler: `Qwen3ASRSTTHandler`
+- Requires the optional `qwen3-asr` extra: `pip install speech-to-speech[qwen3-asr]`
+- Model flag: `--qwen3_asr_model_name`, default `Qwen/Qwen3-ASR-1.7B` (`Qwen/Qwen3-ASR-0.6B` also available for lower latency)
+- Language flag: `--qwen3_asr_language` (ISO 639-1 code, e.g. `en`, `vi`, `zh`; omit or set to `auto` for automatic language detection)
+- Supported language list (30 languages, `yue` = Cantonese): `zh`, `en`, `yue`, `ar`, `de`, `fr`, `es`, `pt`, `id`, `it`, `ko`, `ru`, `th`, `vi`, `ja`, `tr`, `hi`, `ms`, `nl`, `sv`, `da`, `fi`, `pl`, `cs`, `fil`, `fa`, `el`, `hu`, `mk`, `ro`
+- Backend: `qwen-asr` package (transformers backend), one VAD-segmented utterance per call
+- Does not support `--enable_live_transcription` (progressive/partial transcripts while the user is still
+  speaking): `process()` skips `mode == "progressive"` VAD chunks outright rather than re-running full
+  Qwen3-ASR inference on every partial tick, which would stall the pipeline for seconds at a time (this hit
+  live, confirmed with a user testing this branch: speech would work once, then hang). Only the final
+  transcript, once the turn ends, gets transcribed.
+- **`transformers` version conflict, confirmed unresolved on macOS:** `qwen-asr==0.0.6` hard-pins
+  `transformers==4.57.6`, which conflicts with this project's `transformers==5.6.2` pin on macOS (needed by
+  Qwen3-TTS/mlx-audio) — installing the extra requires `pip install --no-deps qwen-asr==0.0.6` (plus its
+  non-`transformers` deps: `nagisa`, `librosa`, `soundfile`, `accelerate`) on top of the normal macOS install.
+  On top of `transformers==5.6.2`, `qwen_asr`'s vendored modeling/config code
+  (`qwen_asr/core/transformers_backend/`) hits **at least four** separate transformers 4→5 breaking changes
+  it hasn't adapted to upstream: a deprecated `check_model_inputs()` call signature, `Qwen3ASRConfig.__init__`
+  reading `self.thinker_config` before it's assigned (config validation now runs eagerly inside
+  `super().__init__()`), the removed `"default"` key in `ROPE_INIT_FUNCTIONS` (replaced by a
+  `rope_parameters`-based API — the replacement also drops `mrope_interleaved`/`mrope_section`, i.e. even a
+  correct-looking patch here risks silently wrong positional encoding rather than a crash), and
+  `Qwen3ASRThinkerConfig` similarly missing `pad_token_id` at model-build time. `qwen3_asr_handler.py` applies
+  runtime shims for the first three (see `_apply_transformers_5x_compat` in that file; each checks current
+  state first, so they no-op once `qwen-asr` fixes things upstream) but **model construction still fails** on
+  the fourth, confirmed live against a real macOS install (Python 3.12, Apple Silicon). Do not rely on this
+  handler on macOS until `qwen-asr` supports transformers 5.x upstream — use `--stt qwen3-asr-http` (below)
+  instead, which sidesteps the whole conflict.
+- On Linux/CUDA, the base `transformers>=4.57.0` requirement is a *range*, so `transformers==4.57.6` may
+  resolve and run cleanly there without any of the above — untested, would appreciate confirmation.
+
+### 8) Qwen3-ASR over HTTP (`--stt qwen3-asr-http`) — the actually-working path on macOS
+
+- Handler: `Qwen3ASRHTTPSTTHandler`
+- No extra needed in the main install — this handler only makes plain HTTP calls (via `httpx`, already a
+  base dependency) and never imports `qwen_asr` or cares which `transformers` version this project has.
+- Talks to a separately-running server, started in its **own** virtualenv pinned to
+  `transformers==4.57.6` (the version `qwen-asr` actually needs). That server is
+  [`scripts/qwen3_asr_server.py`](../../../scripts/qwen3_asr_server.py) — a small Flask wrapper around
+  `Qwen3ASRModel.from_pretrained(...).transcribe(...)`, **not** the `qwen-asr` package's own
+  `qwen-asr-serve` command, which wraps `vllm serve` and hard-requires the `vllm` package. `vllm` has no
+  wheels for macOS/Apple Silicon at all, so `qwen-asr-serve` cannot run there regardless of backend flag —
+  confirmed live (`ModuleNotFoundError: No module named 'vllm'` even with `--backend transformers`
+  requested). `scripts/qwen3_asr_server.py` calls the exact same in-process transformers-backend API
+  confirmed working end-to-end on Apple Silicon MPS, just wrapped in an HTTP endpoint instead of imported
+  in-process:
+
+  ```bash
+  # Terminal 1 — separate venv, only for Qwen3-ASR
+  uv venv --python 3.12 .venv-qwen3-asr
+  source .venv-qwen3-asr/bin/activate
+  uv pip install qwen-asr==0.0.6
+  python scripts/qwen3_asr_server.py --device mps --host 127.0.0.1 --port 8000
+  ```
+
+  ```bash
+  # Terminal 2 — the normal speech-to-speech venv (transformers==5.6.2 on macOS)
+  speech-to-speech --stt qwen3-asr-http --qwen3_asr_http_base_url http://127.0.0.1:8000
+  ```
+
+- Flags: `--qwen3_asr_http_base_url` (default `http://127.0.0.1:8000`), `--qwen3_asr_http_timeout_s`
+  (default `30.0`).
+- Both processes run on `localhost`, so the added HTTP round-trip itself is single-digit milliseconds —
+  end-to-end latency is dominated by Qwen3-ASR-1.7B's own transcribe time (multiple seconds on MPS via
+  plain PyTorch, not the optimized GGML/Metal path some benchmarks quote), not the HTTP hop. Both
+  `Qwen3ASRHTTPSTTHandler` and `scripts/qwen3_asr_server.py` log per-request timings (WAV encode / HTTP
+  round-trip on the client, `transcribe()` time on the server) to make this easy to verify directly rather
+  than guess at.
+- Does not support `--enable_live_transcription`, for the same reason as the in-process backend above, plus
+  `scripts/qwen3_asr_server.py`'s Flask dev server processes one request at a time by default — a flood of
+  overlapping progressive-chunk requests during a single utterance would queue up and stall the pipeline.
+  `process()` skips `mode == "progressive"` VAD chunks outright.
+- Known gap: per-request language forcing (`--qwen3_asr_language`-equivalent) isn't wired up for this path —
+  `scripts/qwen3_asr_server.py` always calls `.transcribe(language=None)`, relying on Qwen3-ASR's own
+  language auto-detection tag in the response. Easy to add if needed (a `language` field on the request
+  JSON, threaded through to `.transcribe(language=...)`); not done here for lack of a concrete need yet.
+- On a CUDA host with `vllm` installed, `qwen-asr-serve` (the real one) would likely outperform this via
+  vLLM's batching — this handler's HTTP contract only assumes an OpenAI-chat-completions-shaped response, so
+  swapping the server side later doesn't require touching `qwen3_asr_http_handler.py`.
+- Prefer Docker over a native venv for the server side? See "CPU-only / Qwen3-ASR Docker setup" in
+  the top-level README's [Docker section](../../../README.md#docker) for a `docker compose` alternative that
+  runs both this and the pipeline as containers — CPU-only, no NVIDIA Container Toolkit required.
 
 ## Language Abbreviations (ISO-style codes seen in STT handlers)
 
@@ -160,4 +247,19 @@ python s2s_pipeline.py --stt parakeet-tdt \
 
 ```bash
 python s2s_pipeline.py --stt paraformer --paraformer_stt_model_name paraformer-zh
+```
+
+### Qwen3-ASR
+
+```bash
+python s2s_pipeline.py --stt qwen3-asr --qwen3_asr_language en
+python s2s_pipeline.py --stt qwen3-asr --qwen3_asr_language auto
+python s2s_pipeline.py --stt qwen3-asr --qwen3_asr_model_name Qwen/Qwen3-ASR-0.6B
+```
+
+### Qwen3-ASR over HTTP (macOS-friendly)
+
+```bash
+# with scripts/qwen3_asr_server.py already running in its own venv, per section 8 above
+python s2s_pipeline.py --stt qwen3-asr-http --qwen3_asr_http_base_url http://127.0.0.1:8000
 ```

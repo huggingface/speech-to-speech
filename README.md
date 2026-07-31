@@ -133,6 +133,7 @@ pip install "speech-to-speech[facebook-mms]"    # MMS TTS
 pip install "speech-to-speech[faster-whisper]"  # Faster Whisper STT
 pip install "speech-to-speech[whisper-mlx]"     # Lightning Whisper MLX STT on macOS
 pip install "speech-to-speech[paraformer]"      # Paraformer STT through FunASR
+pip install "speech-to-speech[qwen3-asr]"       # Qwen3-ASR STT
 pip install "speech-to-speech[mlx-lm]"          # mlx-vlm support for vision models on macOS
 ```
 
@@ -161,6 +162,7 @@ This installs the package in editable mode and makes the `speech-to-speech` CLI 
 | STT | [Lightning Whisper MLX](https://github.com/mustafaaljadery/lightning-whisper-mlx) | Apple Silicon | `whisper-mlx` |
 | STT | [MLX Audio Whisper](https://github.com/huggingface/mlx-audio) | Apple Silicon | built-in on macOS |
 | STT | [Paraformer](https://github.com/modelscope/FunASR) | CUDA / CPU | `paraformer` |
+| STT | [Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) | CUDA / CPU; on macOS use `--stt qwen3-asr-http` instead, see [`STT/README.md`](./src/speech_to_speech/STT/README.md) | `qwen3-asr` |
 | LLM | OpenAI-compatible API (`responses-api`, `chat-completions`) | hosted providers or self-hosted servers | built-in |
 | LLM | [Transformers](https://huggingface.co/models?pipeline_tag=text-generation&sort=trending) | CUDA / CPU | built-in |
 | LLM | [mlx-lm](https://github.com/ml-explore/mlx-lm) | Apple Silicon | built-in on macOS |
@@ -279,6 +281,27 @@ docker compose up
 ```
 
 The compose file starts a llama.cpp server with Gemma 4, starts the TCP socket server, and exposes ports `8080`, `12345`, and `12346`.
+
+#### CPU-only / Qwen3-ASR Docker setup
+
+`docker-compose.qwen3-asr.yml` runs the pipeline with `--stt qwen3-asr-http` against a standalone
+Qwen3-ASR container, entirely CPU-only — no NVIDIA Container Toolkit needed. Use this on a machine
+with no CUDA GPU Docker can reach, e.g. Docker Desktop on Apple Silicon (no Metal/MPS passthrough
+into containers), as an alternative to running `scripts/qwen3_asr_server.py` in a native virtualenv (see
+[`src/speech_to_speech/STT/README.md`](./src/speech_to_speech/STT/README.md)):
+
+```bash
+export OPENAI_API_KEY=...
+docker compose -f docker-compose.qwen3-asr.yml up
+```
+
+Then, on the host (for microphone/speaker access):
+
+```bash
+python scripts/listen_and_play.py --host 127.0.0.1
+```
+
+Being CPU-only, expect noticeably higher STT latency than the native MPS/CUDA path.
 
 ## Realtime API
 
@@ -478,6 +501,7 @@ Language coverage depends on the STT and TTS backends you pick, not on the pipel
 | STT | Parakeet TDT (default) | 25 European languages |
 | STT | Whisper / Whisper MLX / Faster Whisper | Broad multilingual coverage, depending on the selected Whisper checkpoint |
 | STT | Paraformer | Depends on the selected FunASR checkpoint; the default is Chinese-oriented |
+| STT | Qwen3-ASR | 30 languages plus Cantonese and 22 Chinese dialects, with language identification |
 | TTS | Qwen3-TTS (default) | Multilingual, with `--qwen3_tts_language auto` by default |
 | TTS | Kokoro | Multiple language/voice mappings, depending on backend availability |
 | TTS | ChatTTS | English and Chinese |

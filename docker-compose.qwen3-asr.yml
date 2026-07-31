@@ -1,0 +1,57 @@
+---
+# CPU-only Docker setup pairing the speech-to-speech pipeline with a standalone Qwen3-ASR
+# STT server (--stt qwen3-asr-http). Use this instead of docker-compose.yml on machines with
+# no CUDA GPU Docker can reach, e.g. Docker Desktop on Apple Silicon Macs (no Metal/MPS
+# passthrough) -- see src/speech_to_speech/STT/README.md for why qwen-asr needs its own
+# process/venv here rather than running in-process with the rest of the pipeline.
+#
+# Requires OPENAI_API_KEY (or point --responses_api_base_url/--responses_api_api_key at
+# another OpenAI-compatible provider by editing the pipeline service's command below).
+#
+# Usage:
+#   docker compose -f docker-compose.qwen3-asr.yml up
+#   python scripts/listen_and_play.py --host 127.0.0.1   # run natively on the host for mic/speaker access
+
+services:
+
+  qwen3-asr:
+    build:
+      context: .
+      dockerfile: docker/qwen3-asr/Dockerfile
+    ports:
+      - 8000:8000/tcp
+    volumes:
+      - ./cache/:/root/.cache/
+
+  pipeline:
+    depends_on:
+      - qwen3-asr
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    command:
+      - speech-to-speech
+      - --mode
+      - socket
+      - --recv_host
+      - 0.0.0.0
+      - --send_host
+      - 0.0.0.0
+      - --stt
+      - qwen3-asr-http
+      - --qwen3_asr_http_base_url
+      - http://qwen3-asr:8000
+      - --llm_backend
+      - responses-api
+      - --model_name
+      - gpt-4o-mini
+    expose:
+      - 12345/tcp
+      - 12346/tcp
+    ports:
+      - 12345:12345/tcp
+      - 12346:12346/tcp
+    volumes:
+      - ./cache/:/root/.cache/
