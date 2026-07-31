@@ -49,6 +49,96 @@ LANGUAGE_NAME_BY_CODE = {
 CODE_BY_LANGUAGE_NAME = {name.lower(): code for code, name in LANGUAGE_NAME_BY_CODE.items()}
 
 
+def _patch_check_model_inputs() -> None:
+    """qwen_asr's vendored modeling code calls ``@check_model_inputs()`` (transformers==4.57.6's
+    optional-arg decorator factory). transformers>=5 made ``func`` a required positional arg,
+    raising ``TypeError: check_model_inputs() missing 1 required positional argument``.
+    """
+    import transformers.utils.generic as generic
+
+    if getattr(generic.check_model_inputs, "_qwen3_asr_compat", False):
+        return
+    original = generic.check_model_inputs
+
+    def compat(func=None, *, tie_last_hidden_states=True):
+        if func is None:
+            return lambda f: original(f)
+        return original(func)
+
+    compat._qwen3_asr_compat = True
+    generic.check_model_inputs = compat
+
+
+def _patch_rope_default() -> None:
+    """transformers>=5 dropped the "default" key from ROPE_INIT_FUNCTIONS (replaced by the
+    rope_parameters-based RotaryEmbeddingConfigMixin API), but qwen_asr's vendored rotary
+    embedding still looks it up by that key, raising ``KeyError: 'default'``. Re-register it
+    using the transformers==4.57.6 implementation qwen_asr was written against.
+    """
+    import torch
+    from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+
+    if "default" in ROPE_INIT_FUNCTIONS:
+        return
+
+    def compute_default_rope_parameters(config=None, device=None, seq_len=None):
+        base = config.rope_theta
+        partial_rotary_factor = getattr(config, "partial_rotary_factor", 1.0)
+        head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+        dim = int(head_dim * partial_rotary_factor)
+        attention_factor = 1.0
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, dim, 2, dtype=torch.int64).to(device=device, dtype=torch.float) / dim)
+        )
+        return inv_freq, attention_factor
+
+    ROPE_INIT_FUNCTIONS["default"] = compute_default_rope_parameters
+
+
+def _patch_qwen3_asr_config_init() -> None:
+    """qwen_asr's ``Qwen3ASRConfig.__init__`` assigns ``self.thinker_config`` *after* calling
+    ``super().__init__(**kwargs)``. transformers>=5's ``PretrainedConfig.__init__`` now eagerly
+    validates token ids via ``self.get_text_config()``, which qwen_asr overrides to read
+    ``self.thinker_config`` — raising ``AttributeError`` because it isn't set yet. Reorder so the
+    sub-config exists before the base class validates.
+    """
+    from qwen_asr.core.transformers_backend.configuration_qwen3_asr import (
+        Qwen3ASRConfig,
+        Qwen3ASRThinkerConfig,
+    )
+    from transformers.configuration_utils import PretrainedConfig
+
+    if getattr(Qwen3ASRConfig.__init__, "_qwen3_asr_compat", False):
+        return
+
+    def compat_init(self, thinker_config=None, support_languages=None, **kwargs):
+        if thinker_config is None:
+            thinker_config = {}
+        self.thinker_config = Qwen3ASRThinkerConfig(**thinker_config)
+        self.support_languages = support_languages
+        PretrainedConfig.__init__(self, **kwargs)
+
+    compat_init._qwen3_asr_compat = True
+    Qwen3ASRConfig.__init__ = compat_init
+
+
+def _apply_transformers_5x_compat() -> None:
+    """Best-effort compatibility shims for qwen-asr==0.0.6 running under transformers>=5.
+
+    qwen-asr hard-pins transformers==4.57.6; this project pins transformers==5.6.2 on macOS
+    (needed by Qwen3-TTS/mlx-audio), so both can't be installed together and qwen-asr must be
+    force-installed with --no-deps. These patch three independent transformers 4->5 breaking
+    changes qwen_asr hasn't adapted to yet. See src/speech_to_speech/STT/README.md for details.
+    Each patch checks the current state first, so it's a no-op once qwen-asr fixes it upstream.
+    """
+    _patch_check_model_inputs()
+    _patch_rope_default()
+
+    import qwen_asr  # noqa: F401  (loads the vendored modeling code check_model_inputs patches)
+
+    _patch_qwen3_asr_config_init()
+
+
 class Qwen3ASRSTTHandler(BaseSTTHandler):
     """
     Handles Speech To Text generation using Qwen3-ASR (an audio-LLM ASR model).
@@ -66,6 +156,8 @@ class Qwen3ASRSTTHandler(BaseSTTHandler):
     ) -> None:
         try:
             import torch
+
+            _apply_transformers_5x_compat()
             from qwen_asr import Qwen3ASRModel
         except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
