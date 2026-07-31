@@ -144,15 +144,15 @@ python s2s_pipeline.py \
   --qwen3_tts_ref_cache_dir /voices/cache
 ```
 
-You can then pass a cached `.spk` by itself for speaker-only conditioning, or pair it with `.rvq` codes and the matching transcript for ICL conditioning:
+Automatic cache entries use the same SHA-256 cache key for their `.spk`, `.rvq`, and `.json` filenames. Inspect the cache directory for the matching key and replace `CACHE_KEY` below with that filename stem. You can then pass its `.spk` by itself for speaker-only conditioning, or pair it with the corresponding `.rvq` codes and transcript for ICL conditioning:
 
 ```bash
 python s2s_pipeline.py \
   --tts qwen3 \
   --qwen3_tts_backend ggml \
   --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-Base \
-  --qwen3_tts_ref_spk /voices/cache/freeman.spk \
-  --qwen3_tts_ref_rvq /voices/cache/freeman.rvq \
+  --qwen3_tts_ref_spk /voices/cache/CACHE_KEY.spk \
+  --qwen3_tts_ref_rvq /voices/cache/CACHE_KEY.rvq \
   --qwen3_tts_ref_text "The transcript for the reference audio."
 ```
 

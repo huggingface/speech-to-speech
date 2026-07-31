@@ -419,6 +419,14 @@ def test_local_gguf_filename_takes_precedence_when_inferring_model_type():
     assert handler._infer_model_type_from_name() == "base"
 
 
+def test_local_gguf_parent_directory_does_not_affect_model_type_inference():
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    handler.gguf_talker_path = Path("/srv/database/qwen-talker-1.7b-Q4_K_M.gguf")
+
+    assert handler._infer_model_type_from_name() == "custom_voice"
+
+
 def test_prepare_mlx_ref_audio_normalizes_file_and_caches_result(monkeypatch, tmp_path):
     source = tmp_path / "source.wav"
     source.write_bytes(b"fake")

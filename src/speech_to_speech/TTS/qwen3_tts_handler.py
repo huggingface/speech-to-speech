@@ -388,7 +388,9 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         return QWEN3_LANGUAGE_ALIASES.get(normalized, normalized)
 
     def _infer_model_type_from_name(self) -> str:
-        names = [getattr(self, "gguf_talker_path", None), self.model_name]
+        gguf_talker_path = getattr(self, "gguf_talker_path", None)
+        gguf_talker_name = Path(gguf_talker_path).name if gguf_talker_path is not None else None
+        names = [gguf_talker_name, self.model_name]
         for value in names:
             name = str(value or "").lower()
             if "voicedesign" in name:
