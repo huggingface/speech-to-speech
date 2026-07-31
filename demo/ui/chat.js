@@ -2,8 +2,8 @@
 /**
  * ChatView — owns the whole conversation surface: the slide-in history panel,
  * the ephemeral on-orb bubbles, and all the transcript/tool/streaming
- * bookkeeping. main.js wires the realtime client's events straight to the
- * `on*` methods here and otherwise doesn't touch chat state.
+ * and user-audio bookkeeping. main.js wires the realtime client's events
+ * straight to the `on*` methods here and otherwise doesn't touch chat state.
  *
  * Two parallel surfaces share one shape (see `_buildMessageEl`):
  *   - ephemeral bubbles  (`.bubble` / `.bubble-*`)  fade on a timer
@@ -24,7 +24,10 @@ const CHAT_BUBBLE_SVG = `<svg width="28" height="28" viewBox="0 0 24 24" fill="n
 const EMPTY_STATE_HTML = `<div id="chat-empty" class="chat-empty">${CHAT_BUBBLE_SVG}<span class="chat-empty-title">No messages yet</span><span class="chat-empty-hint">Tap the orb and start talking</span></div>`;
 
 export class ChatView {
-  constructor() {
+  /**
+   * @param {{ onUserAudioPlaybackChange?: (playing: boolean) => void }} [options]
+   */
+  constructor(options = {}) {
     /** @type {HTMLButtonElement} */
     this._chatBtn = $("#chat-btn");
     /** @type {HTMLSpanElement} */
@@ -46,9 +49,20 @@ export class ChatView {
     // ── User transcript state (keyed by item_id) ───────────────────────────
     /** @type {Map<string, HTMLElement>} */
     this._userHistByItem = new Map();
+    /** @type {Map<string, { audio: HTMLAudioElement, url: string }>} */
+    this._userAudioByItem = new Map();
+    /** @type {Set<string>} */
+    this._audioUrls = new Set();
+    /** @type {HTMLAudioElement | null} */
+    this._activeUserAudio = null;
+    this._onUserAudioPlaybackChange = options.onUserAudioPlaybackChange ?? (() => {});
     /** @type {HTMLElement | null} */
     this._activeUserBubble = null;
     this._activeUserItemId = "";
+    // RTC media and data-channel events are not ordered relative to each other.
+    // Remember the item whose placeholder assistant activity dismissed so a
+    // later speech_stopped event cannot recreate it as "Sending voice...".
+    this._assistantDismissedUserItemId = "";
     // Monotonic counter for synthesizing unique keys when the server omits an
     // item_id / response_id, so id-less messages never collapse onto each other.
     this._anonSeq = 0;
@@ -121,7 +135,7 @@ export class ChatView {
     const el = document.createElement("div");
     el.className = `${container} ${role}`;
     const label = role === "user" ? "You" : "Assistant";
-    el.innerHTML = `<div class="${prefix}-role">${label}</div><div class="${prefix}-body${partial ? " partial" : ""}">${escHtml(text)}</div>`;
+    el.innerHTML = `<div class="${prefix}-role">${label}</div><div class="${prefix}-body${partial ? " partial" : ""}"${text ? "" : " hidden"}>${escHtml(text)}</div>`;
     return el;
   }
 
@@ -148,10 +162,50 @@ export class ChatView {
     return el;
   }
 
+  /**
+   * Show an immediate placeholder for a user voice turn. It occupies the same
+   * bubble as a transcript would, so a late STT event can replace the animation
+   * in place instead of adding a second user message.
+   * @param {"listening"|"sending"} state
+   * @returns {HTMLElement}
+   */
+  _spawnVoiceBubble(state) {
+    const el = this._spawnBubble("user", "");
+    el.classList.add("voice");
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
+    const body = /** @type {HTMLElement | null} */ (el.querySelector(".bubble-body"));
+    if (body) {
+      body.hidden = false;
+      body.innerHTML = `
+        <span class="voice-turn-wave" aria-hidden="true">
+          <i></i><i></i><i></i><i></i><i></i>
+        </span>
+        <span class="voice-turn-state"></span>
+      `;
+    }
+    this._setVoiceBubbleState(el, state);
+    return el;
+  }
+
+  /** @param {HTMLElement} el @param {"listening"|"sending"} state */
+  _setVoiceBubbleState(el, state) {
+    el.classList.toggle("listening", state === "listening");
+    el.classList.toggle("sending", state === "sending");
+    const label = el.querySelector(".voice-turn-state");
+    if (label) label.textContent = state === "listening" ? "Listening…" : "Sending voice…";
+  }
+
   /** @param {HTMLElement} el @param {string} text */
   _updateBubbleText(el, text) {
-    const t = el.querySelector(".bubble-body");
-    if (t) t.textContent = text;
+    el.classList.remove("voice", "listening", "sending");
+    el.removeAttribute("role");
+    el.removeAttribute("aria-live");
+    const t = /** @type {HTMLElement | null} */ (el.querySelector(".bubble-body"));
+    if (t) {
+      t.textContent = text;
+      t.hidden = !text;
+    }
   }
 
   /** @param {HTMLElement} el */
@@ -196,6 +250,25 @@ export class ChatView {
   }
 
   /**
+   * Point the shared reaper at the current oldest bubble. This must run when an
+   * expiry moves earlier as well as later: a listening bubble starts with a
+   * long fail-safe, then gets a much shorter deadline once speech stops.
+   */
+  _scheduleBubbleReaper() {
+    if (this._reaperHandle) clearTimeout(this._reaperHandle);
+    this._reaperHandle = 0;
+    const oldest = /** @type {HTMLElement | null} */ (
+      this._bubbleStack.querySelector(".bubble:not(.out)")
+    );
+    if (!oldest) return;
+    const expiry = this._bubbleExpiry.get(oldest) ?? Date.now();
+    this._reaperHandle = setTimeout(
+      () => this._reapBubbles(),
+      Math.max(50, expiry - Date.now()),
+    );
+  }
+
+  /**
    * (Re)arm a bubble's auto-dismiss by pushing its expiry out by `delay`.
    * Calling it again resets the countdown — so a bubble that keeps updating
    * stays on screen and only fades once it goes quiet. Removal is ordered by the
@@ -204,7 +277,21 @@ export class ChatView {
    */
   _bumpDismiss(el, delay = 4000) {
     this._bubbleExpiry.set(el, Date.now() + delay);
-    if (!this._reaperHandle) this._reaperHandle = setTimeout(() => this._reapBubbles(), delay);
+    this._scheduleBubbleReaper();
+  }
+
+  /**
+   * Remove a pending voice placeholder once the assistant has visibly started
+   * answering. A transcript can arrive before audible output, while direct
+   * audio models may only trigger the ai-speaking status, so both call here.
+   */
+  onAssistantActivity() {
+    const bubble = this._activeUserBubble;
+    if (!bubble?.isConnected || !bubble.classList.contains("voice")) return;
+    this._assistantDismissedUserItemId = this._activeUserItemId;
+    this._dismissBubble(bubble);
+    this._activeUserBubble = null;
+    this._scheduleBubbleReaper();
   }
 
   // ── History ───────────────────────────────────────────────────────────────
@@ -216,6 +303,11 @@ export class ChatView {
 
   /** Reset the panel to the empty state and clear the unread badge. */
   clear() {
+    this._stopUserAudioPlayback();
+    for (const url of this._audioUrls) URL.revokeObjectURL(url);
+    this._audioUrls.clear();
+    this._userAudioByItem.clear();
+    this._userHistByItem.clear();
     this.renderEmptyState();
     this._chatBadge.classList.remove("visible");
   }
@@ -236,8 +328,26 @@ export class ChatView {
     const body = /** @type {HTMLElement | null} */ (el.querySelector(".hist-body"));
     if (!body) return;
     body.textContent = text;
+    body.hidden = !text;
     body.classList.toggle("partial", partial);
     this._scrollToBottom();
+  }
+
+  /** @param {string} itemId */
+  _ensureUserHist(itemId) {
+    let hist = this._userHistByItem.get(itemId);
+    if (!hist) {
+      hist = this._appendHistMsg("user", "", false);
+      this._userHistByItem.set(itemId, hist);
+    }
+    return hist;
+  }
+
+  _stopUserAudioPlayback() {
+    const active = this._activeUserAudio;
+    this._activeUserAudio = null;
+    if (active && !active.paused) active.pause();
+    this._onUserAudioPlaybackChange(false);
   }
 
   /**
@@ -315,10 +425,57 @@ export class ChatView {
     this._userHistByItem.clear();
     this._activeUserBubble = null;
     this._activeUserItemId = "";
+    this._assistantDismissedUserItemId = "";
     this._asstByResp.clear();
   }
 
   // ── Client event handlers ─────────────────────────────────────────────────
+
+  /**
+   * Show a voice bubble as soon as backend VAD recognizes speech.
+   * @param {{ itemId?: string }} [detail]
+   */
+  onUserTurnStarted(detail = {}) {
+    const id = detail.itemId || `_u${++this._anonSeq}`;
+    // A reopened turn may legitimately reuse the same item id, so a fresh start
+    // supersedes any tombstone left by the prior assistant activity.
+    this._assistantDismissedUserItemId = "";
+    const reusable = this._activeUserItemId === id
+      && this._activeUserBubble?.isConnected
+      && !this._activeUserBubble.classList.contains("out");
+    if (!reusable) {
+      if (this._activeUserBubble?.classList.contains("voice")) {
+        this._dismissBubble(this._activeUserBubble);
+      }
+      this._activeUserBubble = this._spawnVoiceBubble("listening");
+      this._activeUserItemId = id;
+    } else if (this._activeUserBubble.classList.contains("voice")) {
+      this._setVoiceBubbleState(this._activeUserBubble, "listening");
+    }
+    // Fail-safe for a lost speech_stopped event; the normal stop path shortens
+    // this to a few seconds.
+    this._bumpDismiss(this._activeUserBubble, 30000);
+  }
+
+  /**
+   * Transition the active voice bubble while the closed turn is in flight.
+   * If speech_started was missed, create the sending state directly.
+   * @param {{ itemId?: string }} [detail]
+   */
+  onUserTurnStopped(detail = {}) {
+    const id = detail.itemId || this._activeUserItemId || `_u${++this._anonSeq}`;
+    const reusable = this._activeUserItemId === id
+      && this._activeUserBubble?.isConnected
+      && !this._activeUserBubble.classList.contains("out");
+    if (!reusable && this._assistantDismissedUserItemId === id) return;
+    if (!reusable) {
+      this._activeUserBubble = this._spawnVoiceBubble("sending");
+      this._activeUserItemId = id;
+    } else if (this._activeUserBubble.classList.contains("voice")) {
+      this._setVoiceBubbleState(this._activeUserBubble, "sending");
+    }
+    this._bumpDismiss(this._activeUserBubble, 6000);
+  }
 
   /**
    * A streamed transcript delta (user or assistant).
@@ -335,19 +492,18 @@ export class ChatView {
       const id = d.itemId || this._activeUserItemId || `_u${++this._anonSeq}`;
       const text = d.text;
 
-      let hist = this._userHistByItem.get(id);
-      if (!hist) {
-        hist = this._appendHistMsg("user", text, d.partial);
-        this._userHistByItem.set(id, hist);
-      } else {
-        this._updateHistMsg(hist, text, d.partial);
-      }
+      const hist = this._ensureUserHist(id);
+      this._updateHistMsg(hist, text, d.partial);
 
       // One ephemeral bubble per active item. Purely timer-based: the timer is
       // refreshed on every delta, so it stays while the user keeps talking and
       // fades a few seconds after they stop — no dependency on a response ever
       // arriving, so it can never get stuck.
-      if (this._activeUserItemId !== id || !this._activeUserBubble) {
+      if (
+        this._activeUserItemId !== id
+        || !this._activeUserBubble?.isConnected
+        || this._activeUserBubble.classList.contains("out")
+      ) {
         this._activeUserBubble = this._spawnBubble("user", text);
         this._activeUserItemId = id;
       } else {
@@ -356,6 +512,7 @@ export class ChatView {
       this._bumpDismiss(this._activeUserBubble, 6000);
       this._markUnread();
     } else if (d.role === "assistant") {
+      this.onAssistantActivity();
       // Assistant transcript arrives once, as the full text, keyed by
       // response_id so a cancelled speculative response can be removed later. A
       // missing id gets a unique key so two id-less replies never collide.
@@ -375,12 +532,78 @@ export class ChatView {
   }
 
   /**
+   * Attach the browser-local recording to its user turn. This also creates an
+   * audio-only row when STT is disabled and no transcript events arrive.
+   * Reopened VAD segments reuse item_id; the client sends a replacement WAV
+   * containing the accumulated utterance, so the row keeps one player.
+   * @param {{ itemId?: string, audio: Blob, durationMs?: number, truncated?: boolean }} detail
+   */
+  onUserAudio(detail) {
+    const id = detail.itemId || `_u${++this._anonSeq}`;
+    const hist = this._ensureUserHist(id);
+    let container = /** @type {HTMLElement | null} */ (hist.querySelector(".hist-audio"));
+    const isNewPlayer = !container;
+    if (!container) {
+      container = document.createElement("div");
+      container.className = "hist-audio";
+      container.innerHTML = `
+        <div class="hist-audio-label">Audio sent to the model</div>
+        <audio controls preload="metadata" aria-label="Replay your audio"></audio>
+      `;
+      hist.appendChild(container);
+    }
+
+    const audio = /** @type {HTMLAudioElement} */ (container.querySelector("audio"));
+    const previous = this._userAudioByItem.get(id);
+    if (previous) {
+      if (this._activeUserAudio === previous.audio) this._stopUserAudioPlayback();
+      URL.revokeObjectURL(previous.url);
+      this._audioUrls.delete(previous.url);
+    }
+
+    const url = URL.createObjectURL(detail.audio);
+    this._audioUrls.add(url);
+    this._userAudioByItem.set(id, { audio, url });
+    audio.src = url;
+    audio.title = detail.truncated
+      ? "Replay your audio (the beginning was no longer buffered)"
+      : "Replay the audio sent to the model";
+    const label = container.querySelector(".hist-audio-label");
+    if (label) {
+      label.textContent = detail.truncated
+        ? "Audio sent to the model · beginning unavailable"
+        : "Audio sent to the model";
+    }
+
+    if (isNewPlayer) {
+      audio.addEventListener("play", () => {
+        if (this._activeUserAudio && this._activeUserAudio !== audio) {
+          this._activeUserAudio.pause();
+        }
+        this._activeUserAudio = audio;
+        this._onUserAudioPlaybackChange(true);
+      });
+      const stopped = () => {
+        if (this._activeUserAudio !== audio) return;
+        this._activeUserAudio = null;
+        this._onUserAudioPlaybackChange(false);
+      };
+      audio.addEventListener("pause", stopped);
+      audio.addEventListener("ended", stopped);
+      audio.addEventListener("error", stopped);
+    }
+    this._scrollToBottom();
+    this._markUnread();
+  }
+
+  /**
    * A response closed (completed or cancelled).
    * @param {{ responseId: string; status: string; audible?: boolean; transcript?: string }} detail
    */
   onResponseFinished(detail) {
     const { responseId, status, audible, transcript } = detail;
     if (DEBUG) console.debug(`[ui] response-finished resp=${responseId} status=${status} audible=${audible} known=${this._asstByResp.has(responseId)}`);
+    this.onAssistantActivity();
     // Without an id we can't target a specific response; the bubble will
     // auto-dismiss on its own timer regardless.
     if (!responseId) return;
