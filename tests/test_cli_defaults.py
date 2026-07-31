@@ -1,6 +1,8 @@
 import sys
 from dataclasses import fields
 
+import pytest
+
 from speech_to_speech.arguments_classes.chat_tts_arguments import ChatTTSHandlerArguments
 from speech_to_speech.arguments_classes.facebookmms_tts_arguments import FacebookMMSTTSHandlerArguments
 from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import FasterWhisperSTTHandlerArguments
@@ -114,6 +116,27 @@ def test_parse_arguments_accepts_qwen3_tts_backend_override():
         sys.argv = original_argv
 
     assert args.qwen3_tts_handler_kwargs.qwen3_tts_backend == "torch"
+
+
+def test_parse_arguments_accepts_raw_websocket_mode():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = ["speech-to-speech", "--mode", "raw-websocket"]
+        args = parse_arguments()
+    finally:
+        sys.argv = original_argv
+
+    assert args.module_kwargs.mode == "raw-websocket"
+
+
+def test_parse_arguments_rejects_removed_websocket_mode():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = ["speech-to-speech", "--mode", "websocket"]
+        with pytest.raises(SystemExit):
+            parse_arguments()
+    finally:
+        sys.argv = original_argv
 
 
 def test_parse_arguments_transformers_backend():
