@@ -289,9 +289,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         has_talker = self.gguf_talker_path is not None
         has_codec = self.gguf_codec_path is not None
         if has_talker != has_codec:
-            raise ValueError(
-                "qwen3_tts_gguf_talker_path and qwen3_tts_gguf_codec_path must be provided together."
-            )
+            raise ValueError("qwen3_tts_gguf_talker_path and qwen3_tts_gguf_codec_path must be provided together.")
 
         has_cached_reference = self.ref_spk is not None or self.ref_rvq is not None
         if self.ref_audio is not None and has_cached_reference:
@@ -306,10 +304,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             raise ValueError("qwen3_tts_ref_rvq requires qwen3_tts_xvec_only=False.")
 
         explicit_ggml_loading_option = (
-            has_talker
-            or self.ref_cache_dir is not None
-            or has_cached_reference
-            or self.ggml_quantization != "BF16"
+            has_talker or self.ref_cache_dir is not None or has_cached_reference or self.ggml_quantization != "BF16"
         )
         if self.backend == "mlx" and explicit_ggml_loading_option:
             raise ValueError("GGML model and cached-reference options are unavailable with the mlx-audio backend.")
