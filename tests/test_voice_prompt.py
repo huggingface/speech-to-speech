@@ -17,7 +17,8 @@ def test_voice_prompt_makes_speech_the_default_and_handles_noisy_stt():
     prompt = build_voice_system_prompt("Be concise.")
 
     assert "Speech is the default." in prompt
-    assert "Use at most one tool" in prompt
+    assert "Use tools when they help" in prompt
+    assert "Use at most one tool" not in prompt
     assert "Treat transcripts as noisy." in prompt
     assert "Correct likely mishearings only if asked or meaning depends on it" in prompt
     assert "Reachy/Richie/Richy" not in prompt
@@ -37,7 +38,7 @@ def test_voice_prompt_requests_spoken_lead_in_and_sparing_expression_tools():
     assert "Use motion, dance, emotion, and similar tools sparingly" in prompt
 
 
-def test_local_tool_prompt_forbids_multiple_tool_calls():
+def test_local_tool_prompt_preserves_multiple_tool_call_order():
     prompt = build_tool_system_prompt(
         [
             FunctionTool(
@@ -49,8 +50,9 @@ def test_local_tool_prompt_forbids_multiple_tool_calls():
         ]
     )
 
-    assert "Only one tool call may appear in a response." in prompt
-    assert "Multiple tool calls can live" not in prompt
+    assert "each named-argument function call inside its own" in prompt
+    assert "preserve the intended text/tool order" in prompt
+    assert "Only one tool call may appear in a response." not in prompt
 
 
 def test_local_tool_prompt_allows_spoken_lead_in_before_code_block():
@@ -127,7 +129,11 @@ def test_local_tool_parser_flushes_pending_batch_before_tool_with_empty_before_t
     assert remaining == ""
 
 
-def test_local_tool_parser_skips_duplicate_tool_blocks_and_preserves_trailing_text():
+def test_local_tool_parser_preserves_repeated_tool_blocks(monkeypatch):
+    monkeypatch.setattr(
+        "speech_to_speech.LLM.language_model.sent_tokenize",
+        lambda value: [value.strip()] if value.strip() else [],
+    )
     handler = object.__new__(LanguageModelHandler)
     ctx = StreamContext(
         function_tools=[
@@ -146,7 +152,47 @@ def test_local_tool_parser_skips_duplicate_tool_blocks_and_preserves_trailing_te
 
     chunks, tools, remaining = handler._process_printable_text(text, None, [], ctx)
 
-    assert [chunk.text for chunk in chunks] == ["Watch this.", ""]
+    assert [chunk.text for chunk in chunks] == ["Watch this.", "", "Watch this.", ""]
     assert [tool.name for tool in chunks[1].tools] == ["dance"]
-    assert [tool.name for tool in tools] == ["dance"]
-    assert remaining.strip() == "Watch this."
+    assert [tool.name for tool in chunks[3].tools] == ["dance"]
+    assert [tool.name for tool in tools] == ["dance", "dance"]
+    assert remaining == ""
+
+
+def test_local_tool_parser_preserves_interleaved_text_and_tool_calls(monkeypatch):
+    monkeypatch.setattr(
+        "speech_to_speech.LLM.language_model.sent_tokenize",
+        lambda value: [value.strip()] if value.strip() else [],
+    )
+    handler = object.__new__(LanguageModelHandler)
+    ctx = StreamContext(
+        function_tools=[
+            FunctionTool(
+                type="function",
+                name="dance",
+                description="Dance once.",
+                parameters={"type": "object", "properties": {}},
+            ),
+            FunctionTool(
+                type="function",
+                name="camera",
+                description="Look through the camera.",
+                parameters={"type": "object", "properties": {}},
+            ),
+        ],
+        block_regex=build_block_regex(),
+        enter_code=ENTER_CODE,
+        end_code=END_CODE,
+    )
+    text = f"First. {ENTER_CODE}dance(){END_CODE} Middle. {ENTER_CODE}camera(){END_CODE} Last."
+
+    chunks, tools, remaining = handler._process_printable_text(text, None, [], ctx)
+
+    assert [(chunk.text, [tool.name for tool in chunk.tools]) for chunk in chunks] == [
+        ("First.", []),
+        ("", ["dance"]),
+        ("Middle.", []),
+        ("", ["camera"]),
+    ]
+    assert [tool.name for tool in tools] == ["dance", "camera"]
+    assert remaining.strip() == "Last."

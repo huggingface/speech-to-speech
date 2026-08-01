@@ -21,7 +21,7 @@ from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
 from speech_to_speech.LLM.chat import ChatItemError
 from speech_to_speech.pipeline.events import AssistantTextEvent
-from speech_to_speech.pipeline.messages import GenerateResponseRequest
+from speech_to_speech.pipeline.messages import AssistantTextPart, AssistantToolCallPart, GenerateResponseRequest
 from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
 
 if TYPE_CHECKING:
@@ -70,7 +70,12 @@ class ResponseHandler(RealtimeBaseHandler):
         st.in_response = False
         st.response_pending = False
         st.current_response_params = None
-        st.pending_output_text_parts = []
+        st.next_output_index = 0
+        st.current_output_index = None
+        st.current_output_kind = None
+        st.last_text_item_id = None
+        st.last_text_output_index = None
+        st.pending_text_outputs = []
 
     def _start_item(self, conn_id: str) -> str:
         """Generate a new item ID, reset content index, and store it."""
@@ -90,6 +95,29 @@ class ResponseHandler(RealtimeBaseHandler):
         idx = st.content_index
         st.content_index += 1
         return idx
+
+    def _output_part_context(self, conn_id: str, kind: str) -> tuple[int, str]:
+        """Return a stable output index and item id for an ordered part.
+
+        Consecutive text chunks share one assistant output item. Every tool
+        call starts a new item, and text after a tool starts a new assistant
+        item, preserving order even when parts arrive in separate events.
+        """
+        st = self._state(conn_id)
+        if (
+            kind == "text"
+            and st.current_output_kind == "text"
+            and st.current_output_index is not None
+            and st.current_item_id is not None
+        ):
+            return st.current_output_index, st.current_item_id
+
+        item_id = self._current_item_id(conn_id) if st.next_output_index == 0 else self._start_item(conn_id)
+        output_index = st.next_output_index
+        st.next_output_index += 1
+        st.current_output_index = output_index
+        st.current_output_kind = "text" if kind == "text" else "tool_call"
+        return output_index, item_id
 
     def _build_response(
         self,
@@ -227,23 +255,24 @@ class ResponseHandler(RealtimeBaseHandler):
                         type="response.output_audio.done",
                         event_id=self._next_event_id(),
                         content_index=0,
-                        item_id=item_id,
-                        output_index=0,
+                        item_id=st.last_text_item_id or item_id,
+                        output_index=st.last_text_output_index or 0,
                         response_id=resp_id,
                     )
                 )
-            elif status == "completed" and st.pending_output_text_parts:
-                events.append(
-                    ResponseTextDoneEvent(
-                        type="response.output_text.done",
-                        event_id=self._next_event_id(),
-                        content_index=0,
-                        item_id=item_id,
-                        output_index=0,
-                        response_id=resp_id,
-                        text="".join(st.pending_output_text_parts),
+            elif status == "completed":
+                for pending in st.pending_text_outputs:
+                    events.append(
+                        ResponseTextDoneEvent(
+                            type="response.output_text.done",
+                            event_id=self._next_event_id(),
+                            content_index=0,
+                            item_id=str(pending["item_id"]),
+                            output_index=int(pending["output_index"]),
+                            response_id=resp_id,
+                            text="".join(pending["parts"]),
+                        )
                     )
-                )
             events.append(
                 ResponseDoneEvent(
                     type="response.done",
@@ -287,42 +316,47 @@ class ResponseHandler(RealtimeBaseHandler):
                 return []
         st = self._state(conn_id)
         events: list[ServerEvent] = []
-        resp_id, item_id = self._ensure_response(conn_id)
-        st.last_item_id = item_id
-        output_idx = 0
-        if event.text:
-            if response_wants_audio(st.current_response_params):
-                events.append(
-                    ResponseAudioTranscriptDoneEvent(
-                        type="response.output_audio_transcript.done",
-                        event_id=self._next_event_id(),
-                        content_index=0,
-                        item_id=item_id,
-                        output_index=output_idx,
-                        response_id=resp_id,
-                        transcript=event.text,
+        resp_id, _ = self._ensure_response(conn_id)
+        for part in event.parts:
+            if isinstance(part, AssistantTextPart):
+                if not part.text:
+                    continue
+                output_idx, item_id = self._output_part_context(conn_id, "text")
+                st.last_text_item_id = item_id
+                st.last_text_output_index = output_idx
+                if response_wants_audio(st.current_response_params):
+                    events.append(
+                        ResponseAudioTranscriptDoneEvent(
+                            type="response.output_audio_transcript.done",
+                            event_id=self._next_event_id(),
+                            content_index=0,
+                            item_id=item_id,
+                            output_index=output_idx,
+                            response_id=resp_id,
+                            transcript=part.text,
+                        )
                     )
-                )
-            else:
-                # Stream the delta now; the matching response.output_text.done is
-                # emitted once at close in finish_response, carrying the per-chunk
-                # parts collected here, space-joined ("" when there were none).
-                st.pending_output_text_parts.append(event.text)
-                events.append(
-                    ResponseTextDeltaEvent(
-                        type="response.output_text.delta",
-                        event_id=self._next_event_id(),
-                        content_index=0,
-                        item_id=item_id,
-                        output_index=output_idx,
-                        response_id=resp_id,
-                        delta=event.text,
+                else:
+                    # Stream the delta now; finish_response emits one matching
+                    # done event for each contiguous text output item.
+                    if not st.pending_text_outputs or st.pending_text_outputs[-1]["output_index"] != output_idx:
+                        st.pending_text_outputs.append({"item_id": item_id, "output_index": output_idx, "parts": []})
+                    st.pending_text_outputs[-1]["parts"].append(part.text)
+                    events.append(
+                        ResponseTextDeltaEvent(
+                            type="response.output_text.delta",
+                            event_id=self._next_event_id(),
+                            content_index=0,
+                            item_id=item_id,
+                            output_index=output_idx,
+                            response_id=resp_id,
+                            delta=part.text,
+                        )
                     )
-                )
-            output_idx += 1
-        if event.tools:
-            st.response_usage.tool_calls += len(event.tools)
-            for tool in event.tools:
+            elif isinstance(part, AssistantToolCallPart):
+                tool = part.tool
+                output_idx, item_id = self._output_part_context(conn_id, "tool_call")
+                st.response_usage.tool_calls += 1
                 events.append(
                     ResponseFunctionCallArgumentsDoneEvent(
                         type="response.function_call_arguments.done",
@@ -335,5 +369,5 @@ class ResponseHandler(RealtimeBaseHandler):
                         response_id=resp_id,
                     )
                 )
-                output_idx += 1
+            st.last_item_id = item_id
         return events

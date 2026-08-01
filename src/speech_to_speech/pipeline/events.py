@@ -11,7 +11,13 @@ from __future__ import annotations
 from typing import Literal, Optional
 
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from speech_to_speech.pipeline.messages import (
+    AssistantOutputPart,
+    AssistantTextPart,
+    AssistantToolCallPart,
+)
 
 
 class PipelineEvent(BaseModel):
@@ -68,7 +74,8 @@ class TranscriptionCompletedEvent(PipelineEvent):
 
 class AssistantTextEvent(PipelineEvent):
     type: Literal["assistant_text"] = "assistant_text"
-    text: str
+    parts: list[AssistantOutputPart] = Field(default_factory=list)
+    text: str = ""
     tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
     turn_id: str | None = None
     turn_revision: int | None = None
@@ -76,6 +83,17 @@ class AssistantTextEvent(PipelineEvent):
     # send loop discard stale assistant text by the same generation-aware rule as
     # audio, instead of blanket-dropping while cancel_scope.discarding is set.
     cancel_generation: int | None = None
+
+    @model_validator(mode="after")
+    def _normalize_ordered_parts(self) -> "AssistantTextEvent":
+        if self.parts:
+            self.text = "".join(part.text for part in self.parts if isinstance(part, AssistantTextPart))
+            self.tools = [part.tool for part in self.parts if isinstance(part, AssistantToolCallPart)]
+        else:
+            if self.text:
+                self.parts.append(AssistantTextPart(text=self.text))
+            self.parts.extend(AssistantToolCallPart(tool=tool) for tool in self.tools)
+        return self
 
 
 class TokenUsageEvent(PipelineEvent):

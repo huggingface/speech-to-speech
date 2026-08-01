@@ -47,7 +47,7 @@ from speech_to_speech.pipeline.events import (
     TokenUsageEvent,
     TranscriptionCompletedEvent,
 )
-from speech_to_speech.pipeline.messages import GenerateResponseRequest
+from speech_to_speech.pipeline.messages import AssistantTextPart, AssistantToolCallPart, GenerateResponseRequest
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 # ---------------------------------------------------------------------------
@@ -968,6 +968,74 @@ class TestDispatchPipelineEvent:
         assert len(events) == 1
         assert isinstance(events[0], ResponseFunctionCallArgumentsDoneEvent)
         assert events[0].output_index == 0
+
+    def test_assistant_parts_preserve_tool_text_tool_text_order(self, service, conn_id):
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantTextEvent(
+                parts=[
+                    AssistantToolCallPart(
+                        tool={"type": "function_call", "call_id": "c1", "name": "first", "arguments": "{}"}
+                    ),
+                    AssistantTextPart(text="between"),
+                    AssistantToolCallPart(
+                        tool={"type": "function_call", "call_id": "c2", "name": "second", "arguments": "{}"}
+                    ),
+                    AssistantTextPart(text="after"),
+                ]
+            ),
+        )
+
+        assert [event.type for event in events] == [
+            "response.function_call_arguments.done",
+            "response.output_audio_transcript.done",
+            "response.function_call_arguments.done",
+            "response.output_audio_transcript.done",
+        ]
+        assert [event.output_index for event in events] == [0, 1, 2, 3]
+        assert len({event.item_id for event in events}) == 4
+
+    def test_assistant_part_indices_continue_across_pipeline_events(self, service, conn_id):
+        first = service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="before"))
+        second = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantTextEvent(tools=[{"type": "function_call", "call_id": "c1", "name": "tool", "arguments": "{}"}]),
+        )
+        third = service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="after"))
+
+        assert [first[0].output_index, second[0].output_index, third[0].output_index] == [0, 1, 2]
+        assert len({first[0].item_id, second[0].item_id, third[0].item_id}) == 3
+
+    def test_text_only_interleaving_closes_each_text_item_before_response_done(self, service, conn_id):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            output_modalities=["text"],
+        )
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantTextEvent(
+                parts=[
+                    AssistantTextPart(text="before"),
+                    AssistantToolCallPart(
+                        tool={"type": "function_call", "call_id": "c1", "name": "tool", "arguments": "{}"}
+                    ),
+                    AssistantTextPart(text="after"),
+                ]
+            ),
+        )
+
+        assert [event.type for event in events] == [
+            "response.output_text.delta",
+            "response.function_call_arguments.done",
+            "response.output_text.delta",
+        ]
+        assert [event.output_index for event in events] == [0, 1, 2]
+
+        done_events = service.finish_response(conn_id)
+        text_done = [event for event in done_events if isinstance(event, ResponseTextDoneEvent)]
+        assert [(event.output_index, event.text) for event in text_done] == [(0, "before"), (2, "after")]
+        assert isinstance(done_events[-1], ResponseDoneEvent)
 
     def test_assistant_text_text_only_emits_text_events(self, service, conn_id):
         from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
