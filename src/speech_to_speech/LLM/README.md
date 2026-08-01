@@ -74,6 +74,15 @@ Common options:
 - `--init_chat_prompt`
 - `--user_role`
 
+### Live web search (Keenable, OpenAI-compatible backends only)
+
+Both `responses-api` and `chat-completions` accept `--keenable_web_search`: the handler
+advertises `web_search` / `fetch_page` tools backed by [Keenable](https://docs.keenable.ai)
+and executes them server-side (see `LLM/server_tools.py` and the agentic loop in
+`base_openai_compatible_language_model.py`). Optional `--keenable_api_key` /
+`KEENABLE_API_KEY` for authenticated rate limits, `--tool_call_max_rounds` (default 3)
+to bound search rounds per turn. Client-registered tools with the same name win.
+
 ## LLM Behavior
 
 When STT is set to language auto-detection (`--language auto`), LLM handlers can receive `(text, language_code)` and prepend a language control instruction like:

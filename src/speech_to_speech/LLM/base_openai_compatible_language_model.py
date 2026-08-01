@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import httpx
 from nltk import sent_tokenize
@@ -11,6 +11,7 @@ from openai import OpenAI
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
+    RealtimeConversationItemFunctionCallOutput,
 )
 from openai.types.realtime.realtime_conversation_item_assistant_message import (
     Content as AssistantContent,
@@ -28,6 +29,7 @@ from speech_to_speech.LLM.chat import (
     make_user_message,
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
+from speech_to_speech.LLM.server_tools import KeenableWebTools
 from speech_to_speech.LLM.text_prompt import build_text_system_prompt
 from speech_to_speech.LLM.utils import remove_unspeechable, resolve_auto_language
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
@@ -95,6 +97,9 @@ class _Turn(BaseModel):
     turn_revision: int | None
     speech_stopped_at_s: float | None
     wants_audio: bool
+    # Names of server-executed tools active for this turn. A client-registered
+    # tool with the same name wins (its calls are forwarded, not intercepted).
+    server_tool_names: frozenset[str] = frozenset()
 
 
 class _GenState(BaseModel):
@@ -103,6 +108,9 @@ class _GenState(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
+    # Tool calls owned by the server-side executor (e.g. Keenable web search);
+    # they are run in-pipeline instead of being forwarded to the client.
+    server_calls: list[ResponseFunctionToolCall] = Field(default_factory=list)
     pending: list[SupportedItem] = Field(default_factory=list)
     clean_text: str = ""  # filtered text, kept only for the debug log
     input_tokens: int = 0
@@ -120,6 +128,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
     sentence batching, text-only vs audio handling, history write-back, token
     usage, out-of-band handling and error termination.
     """
+
+    # Class-level defaults so partially-initialised handlers (tests, subclasses
+    # overriding setup) behave as if server tools are disabled.
+    server_tools: KeenableWebTools | None = None
+    tool_call_max_rounds: int = 3
 
     # ── setup ─────────────────────────────────────────────────────────────────
 
@@ -140,6 +153,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
         compact_history: bool = False,
+        keenable_web_search: bool = False,
+        keenable_api_key: Optional[str] = None,
+        tool_call_max_rounds: int = 3,
         **_kwargs: Any,
     ) -> None:
         self.cancel_scope = cancel_scope
@@ -156,6 +172,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         )
 
         self.user_role = user_role
+        self.server_tools = KeenableWebTools(api_key=keenable_api_key) if keenable_web_search else None
+        self.tool_call_max_rounds = max(1, tool_call_max_rounds)
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self._extra_body = self._build_extra_body(base_url, disable_thinking, reasoning_effort)
         self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
@@ -347,8 +365,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 break
 
             if isinstance(event, Usage):
-                state.input_tokens = event.input_tokens
-                state.output_tokens = event.output_tokens
+                # += so usage accumulates across server-tool follow-up rounds.
+                state.input_tokens += event.input_tokens
+                state.output_tokens += event.output_tokens
             elif isinstance(event, AssistantMessage):
                 state.pending.append(
                     RealtimeConversationItemAssistantMessage(type="message", role="assistant", content=event.content)
@@ -365,7 +384,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         break
                     yield from _flush(sentence_batch)
                     sentence_batch = []
-                yield from self._record_tool_call(state, turn, event.item)
+                if event.item.name in turn.server_tool_names:
+                    state.server_calls.append(event.item)
+                else:
+                    yield from self._record_tool_call(state, turn, event.item)
             elif isinstance(event, TextDelta):
                 if not turn.wants_audio:
                     # Text-only: forward verbatim. Keep every character (no
@@ -414,14 +436,18 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return
         for event in events:
             if isinstance(event, Usage):
-                state.input_tokens = event.input_tokens
-                state.output_tokens = event.output_tokens
+                # += so usage accumulates across server-tool follow-up rounds.
+                state.input_tokens += event.input_tokens
+                state.output_tokens += event.output_tokens
             elif isinstance(event, AssistantMessage):
                 state.pending.append(
                     RealtimeConversationItemAssistantMessage(type="message", role="assistant", content=event.content)
                 )
             elif isinstance(event, ToolCall):
-                yield from self._record_tool_call(state, turn, event.item)
+                if event.item.name in turn.server_tool_names:
+                    state.server_calls.append(event.item)
+                else:
+                    yield from self._record_tool_call(state, turn, event.item)
             elif isinstance(event, TextDelta):
                 # Text-only keeps every character verbatim; audio strips
                 # TTS-unfriendly symbols via remove_unspeechable.
@@ -439,6 +465,50 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
     # ── orchestration ─────────────────────────────────────────────────────────
 
+    def _execute_server_tool_calls(
+        self,
+        state: _GenState,
+        turn: _Turn,
+        active_chat: Chat,
+        original_chat: Chat,
+    ) -> None:
+        """Run the round's server-owned tool calls and write the results to history.
+
+        Interim assistant text and each ``function_call``/``function_call_output``
+        pair go into the active chat (so the follow-up request sees them) and,
+        for regular turns, into the original chat (durable history). Out-of-band
+        turns never touch the default conversation.
+        """
+        assert self.server_tools is not None
+
+        def persist(item: SupportedItem) -> None:
+            active_chat.add_item(item)
+            if not is_out_of_band(turn.response):
+                original_chat.add_item(item.model_copy(deep=True))
+
+        for pending_item in state.pending:
+            persist(pending_item)
+        state.pending.clear()
+        for call in state.server_calls:
+            output = self.server_tools.execute(call.name, call.arguments)
+            persist(
+                RealtimeConversationItemFunctionCall(
+                    type="function_call",
+                    name=call.name,
+                    arguments=call.arguments,
+                    call_id=call.call_id,
+                    id=call.id,
+                    status="completed",
+                )
+            )
+            persist(
+                RealtimeConversationItemFunctionCallOutput(
+                    type="function_call_output",
+                    call_id=call.call_id,
+                    output=output,
+                )
+            )
+
     def _generate(
         self,
         active_chat: Chat,
@@ -446,59 +516,90 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         turn: _Turn,
         optional_kwargs: dict[str, Any],
     ) -> Iterator[LLMOut]:
-        api_response: Any = None
         state = _GenState()
         error_message: str | None = None
-        api_input = self._serialize(active_chat)
         # Images the model actually sees this turn; only these are stripped on
         # write-back, so an image a fast client injects mid-generation for the
         # next turn survives (it is not in this serialized snapshot).
         consumed_image_ids = active_chat.image_message_ids()
-        if not api_input:
-            # Nothing to send: empty `instructions` and no `input` (in the response,
-            # the default conversation, or the out-of-band context). The provider
-            # would reject this; fail with a clear message instead of an opaque error.
-            error_message = "Cannot generate a response: no instructions and no input were provided."
+        # With server tools enabled the turn becomes a bounded agentic loop:
+        # execute the model's server-owned tool calls in-pipeline, feed the
+        # outputs back, and re-request until the model answers in text.
+        max_rounds = self.tool_call_max_rounds if turn.server_tool_names else 1
 
-        try:
-            if error_message is None:
-                api_response = self._request(api_input, optional_kwargs)
-            if api_response is not None:
-                events = self._iter_events(api_response)
-                if self.stream:
-                    yield from self._consume_streaming(events, state, turn)
-                else:
-                    yield from self._consume_nonstreaming(events, state, turn)
-        except httpx.ReadTimeout:
-            logger.warning(
-                "OpenAI API read timed out after %.1fs; ending the current response",
-                self.request_timeout_s,
-            )
-            if not self._generation_is_stale(turn.gen) and self._turn_output_allowed(turn.turn_id, turn.turn_revision):
-                # Canned apology carries no language_code (mirrors the prior handlers).
-                yield LLMResponseChunk(
-                    text="Wow I'm a bit slow today, could you repeat that?",
-                    runtime_config=turn.runtime_config,
-                    response=turn.response,
-                    turn_id=turn.turn_id,
-                    turn_revision=turn.turn_revision,
-                    speech_stopped_at_s=turn.speech_stopped_at_s,
-                    cancel_generation=turn.gen,
+        for round_idx in range(max_rounds):
+            state.server_calls.clear()
+            round_kwargs = optional_kwargs
+            if turn.server_tool_names and max_rounds > 1 and round_idx == max_rounds - 1:
+                # Final permitted round: force a spoken answer over yet another call.
+                round_kwargs = {**optional_kwargs, "tool_choice": "none"}
+            api_response: Any = None
+            timed_out = False
+            api_input = self._serialize(active_chat)
+            if not api_input:
+                # Nothing to send: empty `instructions` and no `input` (in the response,
+                # the default conversation, or the out-of-band context). The provider
+                # would reject this; fail with a clear message instead of an opaque error.
+                error_message = "Cannot generate a response: no instructions and no input were provided."
+
+            try:
+                if error_message is None:
+                    api_response = self._request(api_input, round_kwargs)
+                if api_response is not None:
+                    events = self._iter_events(api_response)
+                    if self.stream:
+                        yield from self._consume_streaming(events, state, turn)
+                    else:
+                        yield from self._consume_nonstreaming(events, state, turn)
+            except httpx.ReadTimeout:
+                logger.warning(
+                    "OpenAI API read timed out after %.1fs; ending the current response",
+                    self.request_timeout_s,
                 )
-        except Exception as exc:
-            # Any other generation failure must still terminate the response: record
-            # the error and fall through to the EndOfResponse below. Without this the
-            # exception would escape process() and no EndOfResponse would be emitted,
-            # leaving st.in_response stuck and locking every subsequent response.
-            logger.exception("LLM generation failed; ending the current response")
-            if error_message is None:
-                error_message = f"Language model generation failed: {exc}"
-        finally:
-            if api_response is not None and hasattr(api_response, "close"):
-                try:
-                    api_response.close()
-                except Exception:
-                    pass
+                timed_out = True
+                if not self._generation_is_stale(turn.gen) and self._turn_output_allowed(
+                    turn.turn_id, turn.turn_revision
+                ):
+                    # Canned apology carries no language_code (mirrors the prior handlers).
+                    yield LLMResponseChunk(
+                        text="Wow I'm a bit slow today, could you repeat that?",
+                        runtime_config=turn.runtime_config,
+                        response=turn.response,
+                        turn_id=turn.turn_id,
+                        turn_revision=turn.turn_revision,
+                        speech_stopped_at_s=turn.speech_stopped_at_s,
+                        cancel_generation=turn.gen,
+                    )
+            except Exception as exc:
+                # Any other generation failure must still terminate the response: record
+                # the error and fall through to the EndOfResponse below. Without this the
+                # exception would escape process() and no EndOfResponse would be emitted,
+                # leaving st.in_response stuck and locking every subsequent response.
+                logger.exception("LLM generation failed; ending the current response")
+                if error_message is None:
+                    error_message = f"Language model generation failed: {exc}"
+            finally:
+                if api_response is not None and hasattr(api_response, "close"):
+                    try:
+                        api_response.close()
+                    except Exception:
+                        pass
+
+            if timed_out or error_message is not None or not state.server_calls or round_idx == max_rounds - 1:
+                # No follow-up request will happen after the final round, so a
+                # tool call the model insists on there is dropped, not executed.
+                break
+            if self._generation_is_stale(turn.gen) or not self._turn_is_latest(turn.turn_id, turn.turn_revision):
+                logger.info("Skipping server tool execution (turn cancelled)")
+                break
+            logger.info(
+                "Executing %d server tool call(s), round %d/%d: %s",
+                len(state.server_calls),
+                round_idx + 1,
+                max_rounds,
+                [c.name for c in state.server_calls],
+            )
+            self._execute_server_tool_calls(state, turn, active_chat, original_chat)
 
         if (
             error_message is None
@@ -555,6 +656,25 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         req_tool_choice = (
             response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
         )
+        server_tool_names: frozenset[str] = frozenset()
+        if self.server_tools is not None:
+            # Advertise the server-executed tools alongside any client tools. A
+            # client-registered tool with the same name wins: it is neither
+            # re-advertised nor intercepted, preserving existing client behaviour.
+            client_tool_names = set()
+            for t in req_tools or []:
+                d = t if isinstance(t, dict) else t.model_dump(exclude_none=True)
+                name = d.get("name") or (d.get("function") or {}).get("name")
+                if name:
+                    client_tool_names.add(name)
+            server_defs = [d for d in self.server_tools.tool_definitions if d["name"] not in client_tool_names]
+            if server_defs:
+                # The session's tool list is a realtime-typed union; the flat dicts
+                # are accepted by both backends' request builders.
+                req_tools = cast("Any", list(req_tools or []) + server_defs)
+                server_tool_names = frozenset(d["name"] for d in server_defs)
+                guidance = self.server_tools.voice_guidance()
+                instructions = f"{instructions}\n\n{guidance}" if instructions else guidance
         wants_audio = response_wants_audio(response)
         self._apply_config(active_chat, instructions, wants_audio)
         language_code, lang_name = resolve_auto_language(language_code)
@@ -577,6 +697,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             turn_revision=turn_revision,
             speech_stopped_at_s=speech_stopped_at_s,
             wants_audio=wants_audio,
+            server_tool_names=server_tool_names,
         )
         yield from self._generate(active_chat, original_chat, turn, optional_kwargs)
 
