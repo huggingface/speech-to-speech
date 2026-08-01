@@ -43,6 +43,9 @@ const STORAGE_KEYS = {
   directUrl: "s2s.ws.directUrl",
   voice: "s2s.ws.voice",
   instructions: "s2s.ws.instructions",
+  ttsInstruct: "s2s.ws.ttsInstruct",
+  ttsTemperature: "s2s.ws.ttsTemperature",
+  ttsTopP: "s2s.ws.ttsTopP",
   tools: "s2s.ws.tools",
   searchKey: "s2s.ws.searchKey",
   noiseGate: "s2s.ws.noiseGate",
@@ -123,12 +126,27 @@ function loadSettings() {
     directUrl: localStorage.getItem(STORAGE_KEYS.directUrl) || "",
     voice: localStorage.getItem(STORAGE_KEYS.voice) || DEFAULT_VOICE,
     instructions: localStorage.getItem(STORAGE_KEYS.instructions) || DEFAULT_INSTRUCTIONS,
+    ttsInstruct: localStorage.getItem(STORAGE_KEYS.ttsInstruct) || "",
+    ttsTemperature: loadTtsNumber(STORAGE_KEYS.ttsTemperature, 0.9, 0, 1.5),
+    ttsTopP: loadTtsNumber(STORAGE_KEYS.ttsTopP, 1.0, 0.1, 1),
     noiseGate: loadGateThreshold(),
     // Default WebSocket: the proven path stays the first-run experience.
     transport: localStorage.getItem(STORAGE_KEYS.transport) === "webrtc" ? "webrtc" : "ws",
     audioInputId: localStorage.getItem(STORAGE_KEYS.audioInputId) || "",
     audioOutputId: localStorage.getItem(STORAGE_KEYS.audioOutputId) || "",
   };
+}
+
+/** Load a numeric TTS setting, clamped to [min,max], with a default fallback.
+ * Mirrors loadGateThreshold's null/NaN guarding. When `rawValue` is passed it
+ * is used directly (for reading from a form control); otherwise the value is
+ * read from localStorage under `key`. */
+function loadTtsNumber(key, def, min, max, rawValue) {
+  const stored = rawValue !== undefined ? rawValue : localStorage.getItem(key);
+  if (stored === null || stored === "") return def;
+  const raw = Number(stored);
+  if (!Number.isFinite(raw)) return def;
+  return Math.min(max, Math.max(min, raw));
 }
 
 /** Stored gate threshold (dBFS), clamped to the slider range. Defaults to a
@@ -149,6 +167,9 @@ function saveSettings(s) {
   localStorage.setItem(STORAGE_KEYS.directUrl, s.directUrl);
   localStorage.setItem(STORAGE_KEYS.voice, s.voice);
   localStorage.setItem(STORAGE_KEYS.instructions, s.instructions);
+  localStorage.setItem(STORAGE_KEYS.ttsInstruct, s.ttsInstruct || "");
+  localStorage.setItem(STORAGE_KEYS.ttsTemperature, String(s.ttsTemperature));
+  localStorage.setItem(STORAGE_KEYS.ttsTopP, String(s.ttsTopP));
   localStorage.setItem(STORAGE_KEYS.noiseGate, String(s.noiseGate));
   localStorage.setItem(STORAGE_KEYS.transport, s.transport);
   localStorage.setItem(STORAGE_KEYS.audioInputId, s.audioInputId || "");
@@ -283,6 +304,16 @@ const inputAudioOutput = $("#audio-output");
 const audioOutputHint = $("#audio-output-hint");
 /** @type {HTMLTextAreaElement} */
 const inputInstructions = $("#instructions");
+/** @type {HTMLTextAreaElement} */
+const inputTtsInstruct = $("#tts-instruct");
+/** @type {HTMLInputElement} */
+const inputTtsTemperature = $("#tts-temperature");
+/** @type {HTMLElement} */
+const ttsTempValue = $("#tts-temp-value");
+/** @type {HTMLInputElement} */
+const inputTtsTopP = $("#tts-top-p");
+/** @type {HTMLElement} */
+const ttsTopPValue = $("#tts-topp-value");
 /** @type {HTMLInputElement} */
 const inputNoiseGate = $("#noise-gate");
 /** @type {HTMLElement} */
@@ -478,10 +509,20 @@ function openSettings() {
   syncConnectionUi();
   inputVoice.value = settings.voice;
   inputInstructions.value = settings.instructions;
+  syncTtsUi();
   syncGateUi();
   updateRestartAvailability();
   void refreshAudioDeviceLists();
   settingsModal.showModal();
+}
+
+/** Populate the TTS param controls from the current settings + wire live labels. */
+function syncTtsUi() {
+  inputTtsInstruct.value = settings.ttsInstruct;
+  inputTtsTemperature.value = String(settings.ttsTemperature);
+  inputTtsTopP.value = String(settings.ttsTopP);
+  ttsTempValue.textContent = Number(settings.ttsTemperature).toFixed(2);
+  ttsTopPValue.textContent = Number(settings.ttsTopP).toFixed(2);
 }
 
 /** dB position (clamped to the slider axis) as a 0..1 fraction of the track.
@@ -1023,6 +1064,9 @@ function readSettingsFromForm() {
     directUrl: allowDirect && !pinnedUrl ? inputLbUrl.value.trim() : settings.directUrl,
     voice: inputVoice.value || DEFAULT_VOICE,
     instructions: inputInstructions.value.trim() || DEFAULT_INSTRUCTIONS,
+    ttsInstruct: inputTtsInstruct.value.trim(),
+    ttsTemperature: loadTtsNumber("__inline__", 0.9, 0, 1.5, inputTtsTemperature.value),
+    ttsTopP: loadTtsNumber("__inline__", 1.0, 0.1, 1, inputTtsTopP.value),
     noiseGate: readGateThreshold(),
     transport: /** @type {"ws" | "webrtc"} */ (
       transportSelectable()
@@ -1122,7 +1166,13 @@ settingsForm.addEventListener("submit", (event) => {
   // output can switch live when the browser supports AudioContext.setSinkId;
   // mic device changes need a Restart (new getUserMedia stream).
   if (client && LIVE_STATES.has(currentState)) {
-    client.updateSession({ voice: settings.voice, instructions: effectiveInstructions() });
+    client.updateSession({
+    voice: settings.voice,
+    instructions: effectiveInstructions(),
+    ttsInstruct: settings.ttsInstruct,
+    ttsTemperature: settings.ttsTemperature,
+    ttsTopP: settings.ttsTopP,
+  });
     if (typeof client.setAudioOutputDevice === "function") {
       void client.setAudioOutputDevice(settings.audioOutputId);
     }
@@ -1133,6 +1183,14 @@ settingsForm.addEventListener("submit", (event) => {
 // update the label/marker, persist, and push straight to the running client.
 inputNoiseGate.addEventListener("input", () => {
   setGateThreshold(readGateThreshold());
+});
+
+// TTS param sliders: live-update the numeric readout next to each label.
+inputTtsTemperature.addEventListener("input", () => {
+  ttsTempValue.textContent = Number(inputTtsTemperature.value).toFixed(2);
+});
+inputTtsTopP.addEventListener("input", () => {
+  ttsTopPValue.textContent = Number(inputTtsTopP.value).toFixed(2);
 });
 
 // Transport persists on change (like the gate) and takes effect on the next
@@ -1436,6 +1494,9 @@ async function doStart(audioContext = null) {
   const common = {
     voice: settings.voice,
     instructions: effectiveInstructions(),
+    ttsInstruct: settings.ttsInstruct,
+    ttsTemperature: settings.ttsTemperature,
+    ttsTopP: settings.ttsTopP,
     startupGreeting,
     acquireMic: acquireMicStream,
     tools: activeToolDefs(),
