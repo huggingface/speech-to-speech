@@ -1,6 +1,7 @@
 import base64
 import io
 import re
+import unicodedata
 from typing import Optional
 
 import requests  # type: ignore[import-untyped]
@@ -20,13 +21,35 @@ SPEECHABLE_PATTERN = re.compile(
     flags=re.UNICODE,
 )
 
+# Unicode general categories kept in addition to the ASCII allow-list above:
+#   P*  every punctuation class (connector, dash, open/close, quotes, other)
+#   M*  combining marks, which are part of the preceding letter
+#   Sc  currency symbols
+# The allow-list only enumerates ASCII marks, so without this ``。、？「」``
+# (CJK), ``।`` (Devanagari), ``¿¡`` (Spanish), ``«»`` (French/German) and
+# ``،؟`` (Arabic) would be deleted. Marks matter even more: ``\w`` does not
+# match them, so Devanagari matras and the virama were being stripped out of
+# the middle of words (``नमस्ते`` -> ``नमसत``), as were Arabic/Hebrew
+# diacritics and any NFD-decomposed accent. Emoji and other symbols are
+# category ``So``/``Sm``/``Sk`` and stay excluded.
+SPEECHABLE_UNICODE_CATEGORIES = frozenset({"Pc", "Pd", "Pe", "Pf", "Pi", "Po", "Ps", "Mc", "Me", "Mn", "Sc"})
+
+
+def _strip_unspeechable(match: "re.Match[str]") -> str:
+    char = match.group()
+    return char if unicodedata.category(char) in SPEECHABLE_UNICODE_CATEGORIES else ""
+
 
 def remove_unspeechable(text: str) -> str:
     """Keep only speechable characters: letters, digits, punctuation, whitespace.
     support unicode characters (english, arabic, chinese, japanese, korean, etc.)
     """
     text = text.translate(SMART_PUNCT_TRANSLATION)
-    return SPEECHABLE_PATTERN.sub("", text)
+    # The regex is a fast pre-filter: ASCII-only text matches nothing and pays
+    # no per-character cost. Anything it does match is kept only when Unicode
+    # says it is punctuation or currency, so non-ASCII sentence marks survive
+    # while emoji and other symbols are still dropped.
+    return SPEECHABLE_PATTERN.sub(_strip_unspeechable, text)
 
 
 # Maps an STT language code to the language name used in the "Please reply ... in {name}"
