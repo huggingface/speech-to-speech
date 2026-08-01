@@ -36,7 +36,9 @@ def test_text_tool_prompt_drops_speak_first_but_keeps_structural_rules():
     prompt = build_tool_system_prompt([_dance_tool()], text_only=True)
 
     assert "no preamble sentence is required" in prompt
-    assert "Only one tool call may appear in a response." in prompt
+    assert "each named-argument function call inside its own" in prompt
+    assert "preserve the intended text/tool order" in prompt
+    assert "Only one tool call may appear in a response." not in prompt
     assert "Omit optional args instead of placeholder values" in prompt
     assert "do not claim tool results before a tool result is available" in prompt
     # Voice choreography must not appear in the text variant.

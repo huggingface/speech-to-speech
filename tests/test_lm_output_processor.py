@@ -2,9 +2,16 @@ from queue import Queue
 from threading import Event, Thread
 
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+from openai.types.responses import ResponseFunctionToolCall
 
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
-from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk, TTSInput
+from speech_to_speech.pipeline.messages import (
+    AssistantTextPart,
+    AssistantToolCallPart,
+    EndOfResponse,
+    LLMResponseChunk,
+    TTSInput,
+)
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 
@@ -97,6 +104,35 @@ def test_audio_chunk_is_forwarded_to_tts():
     assert len(outputs) == 1
     assert isinstance(outputs[0], TTSInput)
     assert outputs[0].text == "hello"
+
+
+def test_ordered_parts_reach_clients_and_only_text_reaches_tts():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    processor = _processor(tracker)
+    first_tool = ResponseFunctionToolCall(type="function_call", call_id="call_1", name="first", arguments="{}")
+    second_tool = ResponseFunctionToolCall(type="function_call", call_id="call_2", name="second", arguments="{}")
+
+    outputs = list(
+        processor.process(
+            LLMResponseChunk(
+                parts=[
+                    AssistantToolCallPart(tool=first_tool),
+                    AssistantTextPart(text="between"),
+                    AssistantToolCallPart(tool=second_tool),
+                    AssistantTextPart(text="after"),
+                ],
+                turn_id="turn_1",
+                turn_revision=0,
+            )
+        )
+    )
+
+    assert [output.text for output in outputs] == ["between", "after"]
+    event = processor.text_output_queue.get_nowait()
+    assert [part.type for part in event.parts] == ["tool_call", "text", "tool_call", "text"]
+    assert event.text == "betweenafter"
+    assert [tool.name for tool in event.tools] == ["first", "second"]
 
 
 def test_empty_modalities_is_forwarded_to_tts():

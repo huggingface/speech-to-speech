@@ -9,12 +9,12 @@ constants.
 from __future__ import annotations
 
 from time import perf_counter
-from typing import Final, Literal, Optional, TypeAlias
+from typing import Annotated, Final, Literal, Optional, TypeAlias
 
 import numpy as np
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 
@@ -73,11 +73,37 @@ class Transcription(PipelineMessage):
 # ── LLM → LMOutputProcessor ──────────────────────────────────────────
 
 
+class AssistantTextPart(BaseModel):
+    """One ordered assistant text part."""
+
+    type: Literal["text"] = "text"
+    text: str
+
+
+class AssistantToolCallPart(BaseModel):
+    """One ordered assistant function-call part."""
+
+    type: Literal["tool_call"] = "tool_call"
+    tool: ResponseFunctionToolCall
+
+
+AssistantOutputPart: TypeAlias = Annotated[
+    AssistantTextPart | AssistantToolCallPart,
+    Field(discriminator="type"),
+]
+
+
 class LLMResponseChunk(PipelineMessage):
-    """One sentence/chunk of the LLM response."""
+    """One ordered group of assistant output parts.
+
+    ``text`` and ``tools`` remain as compatibility views for callers that
+    still construct the legacy shape. New code can populate ``parts`` to
+    represent arbitrary text/tool interleaving without losing order.
+    """
 
     tag: Literal["llm_response_chunk"] = "llm_response_chunk"
-    text: str
+    parts: list[AssistantOutputPart] = Field(default_factory=list)
+    text: str = ""
     language_code: Optional[str] = None
     tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
     runtime_config: RuntimeConfig | None = None
@@ -86,6 +112,17 @@ class LLMResponseChunk(PipelineMessage):
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
     cancel_generation: int | None = None
+
+    @model_validator(mode="after")
+    def _normalize_ordered_parts(self) -> "LLMResponseChunk":
+        if self.parts:
+            self.text = "".join(part.text for part in self.parts if isinstance(part, AssistantTextPart))
+            self.tools = [part.tool for part in self.parts if isinstance(part, AssistantToolCallPart)]
+        else:
+            if self.text:
+                self.parts.append(AssistantTextPart(text=self.text))
+            self.parts.extend(AssistantToolCallPart(tool=tool) for tool in self.tools)
+        return self
 
 
 class TokenUsage(PipelineMessage):

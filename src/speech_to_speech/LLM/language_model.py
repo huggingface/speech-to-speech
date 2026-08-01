@@ -49,6 +49,7 @@ from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
 from speech_to_speech.pipeline.messages import (
+    AssistantToolCallPart,
     EndOfResponse,
     GenerateResponseRequest,
     LLMResponseChunk,
@@ -308,7 +309,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         """
         chunks: list[LLMResponseChunk] = []
 
-        if ctx.enter_code and ctx.enter_code in printable_text:
+        while ctx.enter_code and ctx.enter_code in printable_text:
             idx = printable_text.index(ctx.enter_code)
             before = printable_text[:idx]
             code_and_after = printable_text[idx:]
@@ -329,44 +330,36 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     )
                 )
                 ctx.sentence_batch = []
-            if ctx.block_regex and ctx.end_code and ctx.end_code in code_and_after:
-                stripped, func_calls = extract_function_calls_from_text(
-                    code_and_after,
-                    ctx.block_regex,
-                )
-                parsed_tools: list[ResponseFunctionToolCall] = []
-                for fc in func_calls:
-                    if tools:
-                        logger.warning(
-                            "Skipping extra tool call '%s'; only one tool call is allowed per response",
-                            fc.function_name,
-                        )
-                        continue
-                    try:
-                        tool_call = fc.to_realtime_function_tool_call(ctx.function_tools)
-                    except ValueError as e:
-                        logger.warning("Skipping invalid tool call: %s", e)
-                        continue
-                    tools.append(tool_call)
-                    parsed_tools.append(tool_call)
-                if parsed_tools:
-                    chunks.append(
-                        LLMResponseChunk(
-                            text="",
-                            language_code=language_code,
-                            tools=parsed_tools,
-                            runtime_config=runtime_config,
-                            response=response,
-                            turn_id=ctx.turn_id,
-                            turn_revision=ctx.turn_revision,
-                            speech_stopped_at_s=ctx.speech_stopped_at_s,
-                            cancel_generation=ctx.cancel_generation,
-                        )
+            if not ctx.block_regex or not ctx.end_code or ctx.end_code not in code_and_after:
+                # Preserve the incomplete block until more streamed text arrives.
+                return chunks, tools, code_and_after
+
+            block_end = code_and_after.index(ctx.end_code) + len(ctx.end_code)
+            complete_block = code_and_after[:block_end]
+            printable_text = code_and_after[block_end:]
+            _, func_calls = extract_function_calls_from_text(complete_block, ctx.block_regex)
+            parsed_tools: list[ResponseFunctionToolCall] = []
+            for fc in func_calls:
+                try:
+                    tool_call = fc.to_realtime_function_tool_call(ctx.function_tools)
+                except ValueError as e:
+                    logger.warning("Skipping invalid tool call: %s", e)
+                    continue
+                tools.append(tool_call)
+                parsed_tools.append(tool_call)
+            if parsed_tools:
+                chunks.append(
+                    LLMResponseChunk(
+                        parts=[AssistantToolCallPart(tool=tool_call) for tool_call in parsed_tools],
+                        language_code=language_code,
+                        runtime_config=runtime_config,
+                        response=response,
+                        turn_id=ctx.turn_id,
+                        turn_revision=ctx.turn_revision,
+                        speech_stopped_at_s=ctx.speech_stopped_at_s,
+                        cancel_generation=ctx.cancel_generation,
                     )
-                printable_text = stripped
-            else:
-                printable_text = code_and_after
-            return chunks, tools, printable_text
+                )
 
         if printable_text and not response_wants_audio(response) and ctx.enter_code is None:
             # Text-only with no tool block: stream the raw text immediately. No TTS
