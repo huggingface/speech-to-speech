@@ -274,6 +274,33 @@
             </div>
 
             <label class="field">
+              <span>TTS mood instruction</span>
+              <textarea id="tts-instruct" rows="2" placeholder="e.g. Speak in a calm, neutral tone"></textarea>
+              <small>Optional global instruction to the Qwen3-TTS voice (mood/tone). Leave empty for default.</small>
+            </label>
+
+            <div class="field-row">
+              <label class="field">
+                <span class="field-head">
+                  TTS temperature
+                  <span id="tts-temp-value" class="field-value">0.90</span>
+                </span>
+                <input id="tts-temperature" type="range" min="0" max="1.5" step="0.05" value="0.9"
+                       aria-label="TTS temperature" />
+                <small>Lower = steadier, less emotional speech. Higher = more expressive/varied.</small>
+              </label>
+              <label class="field">
+                <span class="field-head">
+                  TTS top_p
+                  <span id="tts-topp-value" class="field-value">1.00</span>
+                </span>
+                <input id="tts-top-p" type="range" min="0.1" max="1" step="0.05" value="1"
+                       aria-label="TTS top_p" />
+                <small>Lower = more conservative sampling. 1.0 = full range.</small>
+              </label>
+            </div>
+
+            <label class="field">
               <span>Microphone</span>
               <select id="audio-input">
                 <option value="">System default</option>
