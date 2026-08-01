@@ -51,6 +51,9 @@
  *   session POST and dials it directly — no load balancer in between.
  * @property {string} voice
  * @property {string} instructions
+ * @property {string} [ttsInstruct] Optional mood/tone instruction for Qwen3-TTS.
+ * @property {number} [ttsTemperature] Qwen3-TTS sampling temperature (0..1.5).
+ * @property {number} [ttsTopP] Qwen3-TTS top_p sampling (0.1..1).
  * @property {string} [startupGreeting] Hidden user prompt that asks the model
  *   to greet once after the initial session configuration is sent.
  * @property {MediaStream} [micStream] Live mic stream. Provide this OR `acquireMic`.
@@ -945,18 +948,23 @@ export class S2sWsRealtimeClient extends EventTarget {
     // Minimal payload: only the bits the user is allowed to configure.
     // The s2s server already defaults to server_vad, whisper-1
     // transcription, 16 kHz PCM input and 24 kHz PCM output, so we don't
-    // need (and must not send) `audio.input.format`, `audio.input.transcription`,
-    // `audio.input.turn_detection` or `audio.output.format`: the pydantic
-    // validator on the server rejects the whole event if any unknown or
-    // future-shaped sub-field shows up.
+    // need `audio.input.format`, `audio.input.transcription`,
+    // `audio.input.turn_detection` or `audio.output.format`.
+    // NOTE: the OpenAI SDK models use extra='allow', so extra keys under
+    // audio.output (temperature/top_p) and at the session top level
+    // (tts_instruct) are accepted as pydantic extras — they don't reject the
+    // event. The Qwen3-TTS handler reads them via __pydantic_extra__.
+    /** @type {Record<string, any>} */
+    const output = { voice: this.options.voice };
+    if (this.options.ttsTemperature !== undefined) output.temperature = this.options.ttsTemperature;
+    if (this.options.ttsTopP !== undefined) output.top_p = this.options.ttsTopP;
     /** @type {Record<string, any>} */
     const session = {
       type: "realtime",
       instructions: this.options.instructions,
-      audio: {
-        output: { voice: this.options.voice },
-      },
+      audio: { output },
     };
+    if (this.options.ttsInstruct) session.tts_instruct = this.options.ttsInstruct;
     // Tools are declared here; the backend already accepts them in
     // session.update and emits response.function_call_arguments.done when the
     // model decides to call one. Only include the keys when we actually have
@@ -974,7 +982,14 @@ export class S2sWsRealtimeClient extends EventTarget {
     /** @type {Record<string, any>} */
     const session = { type: "realtime" };
     if (patch.instructions) session.instructions = patch.instructions;
-    if (patch.voice) session.audio = { output: { voice: patch.voice } };
+    // Merge voice + ttsTemperature/top_p into one audio.output object so a
+    // partial update (e.g. only temperature) doesn't clobber the others.
+    const output = {};
+    if (patch.voice !== undefined) output.voice = patch.voice;
+    if (patch.ttsTemperature !== undefined) output.temperature = patch.ttsTemperature;
+    if (patch.ttsTopP !== undefined) output.top_p = patch.ttsTopP;
+    if (Object.keys(output).length) session.audio = { output };
+    if (patch.ttsInstruct !== undefined) session.tts_instruct = patch.ttsInstruct;
     if (Object.keys(session).length > 1) {
       this._send({ type: "session.update", session });
     }

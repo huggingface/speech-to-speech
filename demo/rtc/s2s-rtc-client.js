@@ -44,6 +44,9 @@
  *   candidates only — fine locally, may not traverse NATs).
  * @property {string} voice
  * @property {string} instructions
+ * @property {string} [ttsInstruct] Optional mood/tone instruction for Qwen3-TTS.
+ * @property {number} [ttsTemperature] Qwen3-TTS sampling temperature (0..1.5).
+ * @property {number} [ttsTopP] Qwen3-TTS top_p sampling (0.1..1).
  * @property {string} [startupGreeting] Hidden user prompt that asks the model
  *   to greet once after the initial session configuration is sent.
  * @property {MediaStream} [micStream] Live mic stream. Provide this OR `acquireMic`.
@@ -675,16 +678,20 @@ export class S2sRtcRealtimeClient extends EventTarget {
   }
 
   _sendSessionUpdate() {
-    // Minimal payload, exactly like the WS client: the server's pydantic
-    // validator rejects the whole event on unknown sub-field shapes.
+    // Minimal payload, like the WS client. Extra keys under audio.output
+    // (temperature/top_p) and at session top level (tts_instruct) are accepted
+    // as pydantic extras (OpenAI SDK models use extra='allow').
+    /** @type {Record<string, any>} */
+    const output = { voice: this.options.voice };
+    if (this.options.ttsTemperature !== undefined) output.temperature = this.options.ttsTemperature;
+    if (this.options.ttsTopP !== undefined) output.top_p = this.options.ttsTopP;
     /** @type {Record<string, any>} */
     const session = {
       type: "realtime",
       instructions: this.options.instructions,
-      audio: {
-        output: { voice: this.options.voice },
-      },
+      audio: { output },
     };
+    if (this.options.ttsInstruct) session.tts_instruct = this.options.ttsInstruct;
     if (this._tools.length) {
       session.tools = this._tools;
       session.tool_choice = "auto";
@@ -698,7 +705,12 @@ export class S2sRtcRealtimeClient extends EventTarget {
     /** @type {Record<string, any>} */
     const session = { type: "realtime" };
     if (patch.instructions) session.instructions = patch.instructions;
-    if (patch.voice) session.audio = { output: { voice: patch.voice } };
+    const output = {};
+    if (patch.voice !== undefined) output.voice = patch.voice;
+    if (patch.ttsTemperature !== undefined) output.temperature = patch.ttsTemperature;
+    if (patch.ttsTopP !== undefined) output.top_p = patch.ttsTopP;
+    if (Object.keys(output).length) session.audio = { output };
+    if (patch.ttsInstruct !== undefined) session.tts_instruct = patch.ttsInstruct;
     if (Object.keys(session).length > 1) {
       this._send({ type: "session.update", session });
     }
