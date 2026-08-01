@@ -132,6 +132,10 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.language = self._normalize_language(language)
         self.speaker = speaker
         self.instruct = instruct
+        # Generation sampling params. Defaults match faster-qwen3-tts; overridable
+        # per-session via _apply_session_tts_overrides (from session.update extras).
+        self.temperature: float = 0.9
+        self.top_p: float = 1.0
         self.xvec_only = xvec_only
         self.parity_mode = parity_mode
         self.non_streaming_mode = non_streaming_mode
@@ -540,6 +544,47 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             session_voice,
         )
 
+    def _apply_session_tts_overrides(
+        self,
+        runtime_config: RuntimeConfig | None = None,
+        response: RealtimeResponseCreateParams | None = None,
+    ) -> None:
+        """Apply per-session TTS generation overrides sent via session.update.
+
+        Mirrors _apply_session_voice_override: reads temperature/top_p from
+        audio.output (where they ride as pydantic extras, since the OpenAI SDK
+        models are extra='allow') and tts_instruct from the session top level.
+        Per-response values (response.create) take priority over the session
+        default. Only non-None values override; unset fields keep the current
+        value so partial updates are safe.
+        """
+        # Resolve audio.output from per-response override first, else session.
+        output = None
+        if response and response.audio and response.audio.output:
+            output = response.audio.output
+        elif runtime_config is not None:
+            audio = runtime_config.session.audio
+            output = audio.output if audio is not None else None
+
+        if output is not None:
+            # Extras set by extra='allow' are accessible as attributes.
+            temp = getattr(output, "temperature", None)
+            if isinstance(temp, (int, float)):
+                self.temperature = float(temp)
+            top_p = getattr(output, "top_p", None)
+            if isinstance(top_p, (int, float)):
+                self.top_p = float(top_p)
+
+        # tts_instruct lives at the session top level (it is a generation
+        # instruction, not an audio-output attribute).
+        sess_instruct: Optional[str] = None
+        if response is not None:
+            sess_instruct = getattr(response, "tts_instruct", None)
+        if not sess_instruct and runtime_config is not None:
+            sess_instruct = getattr(runtime_config.session, "tts_instruct", None)
+        if sess_instruct:
+            self.instruct = str(sess_instruct)
+
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
 
@@ -801,6 +846,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         model_type = self._model_type()
         self._apply_session_voice_override(model_type, runtime_config, response)
+        self._apply_session_tts_overrides(runtime_config, response)
 
         console.print(f"[green]ASSISTANT: {text}")
 
@@ -900,6 +946,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 max_new_tokens=utterance_max_new_tokens,
                 parity_mode=self.parity_mode,
                 non_streaming_mode=self.non_streaming_mode,
+                temperature=self.temperature,
+                top_p=self.top_p,
             ),
             label="voice_clone_parity" if self.parity_mode else "voice_clone",
         )
@@ -934,6 +982,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 chunk_size=self.streaming_chunk_size,
                 max_new_tokens=utterance_max_new_tokens,
                 non_streaming_mode=self.non_streaming_mode,
+                temperature=self.temperature,
+                top_p=self.top_p,
             ),
             label="custom_voice",
         )
@@ -959,6 +1009,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 chunk_size=self.streaming_chunk_size,
                 max_new_tokens=utterance_max_new_tokens,
                 non_streaming_mode=self.non_streaming_mode,
+                temperature=self.temperature,
+                top_p=self.top_p,
             ),
             label="voice_design",
         )
