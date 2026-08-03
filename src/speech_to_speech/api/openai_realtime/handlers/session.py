@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class SessionHandler(RealtimeBaseHandler):
-    """Owns session lifecycle: config updates and session.created events."""
+    """Owns session lifecycle: config updates and lifecycle events."""
 
     def handle_session_update(self, conn_id: str, event: SessionUpdateEvent) -> Optional[RealtimeErrorEvent]:
         """Apply session config changes.
