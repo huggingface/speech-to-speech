@@ -68,6 +68,7 @@ flowchart LR
 | Event | Description |
 |---|---|
 | `session.created` | Sent on connection with current session config. |
+| `session.updated` | Confirms a successful `session.update` with the effective session config. |
 | `error` | Protocol errors (`session_limit_reached`, `unknown_or_invalid_event`, `invalid_session_type`, `conversation_already_has_active_response`, etc.) |
 | `input_audio_buffer.speech_started` | VAD detected user speech. |
 | `input_audio_buffer.speech_stopped` | End of user speech segment. |

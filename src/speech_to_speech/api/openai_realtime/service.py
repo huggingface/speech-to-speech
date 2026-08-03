@@ -89,6 +89,7 @@ ClientEvent = Union[
 
 ServerEvent = Union[
     SessionCreatedEvent,
+    SessionUpdatedEvent,
     RealtimeErrorEvent,
     InputAudioBufferSpeechStartedEvent,
     InputAudioBufferSpeechStoppedEvent,
