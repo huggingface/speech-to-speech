@@ -79,6 +79,24 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Some chat templates (e.g. Qwen3.5's) hard-require at least one user-role
+# message and raise a jinja2 TemplateError otherwise. OpenAI's Realtime API
+# allows a response to be generated from system instructions alone (e.g. an
+# initial greeting before the caller has spoken), so we backfill a minimal
+# placeholder turn to keep locally-loaded models with that requirement working.
+_PLACEHOLDER_USER_TURN = "..."
+# Must match the role Chat.to_transformers_chat() emits for user messages
+# (TransformersUserMessage hardcodes "user"), not the configurable --user_role:
+# checking the latter would miss real turns and backfill on every call.
+_SERIALIZED_USER_ROLE = "user"
+
+
+def _ensure_user_turn(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Append a placeholder user turn if *messages* has no user-role message."""
+    if any(m.get("role") == _SERIALIZED_USER_ROLE for m in messages):
+        return messages
+    return messages + [{"role": _SERIALIZED_USER_ROLE, "content": _PLACEHOLDER_USER_TURN}]
+
 
 @runtime_checkable
 class _Tokenizer(Protocol):
@@ -680,7 +698,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
         runtime_config: RuntimeConfig | None = None,
         response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
-        chat_messages = chat.to_transformers_chat()
+        chat_messages = _ensure_user_turn(chat.to_transformers_chat())
         chat_input = self.tokenizer.apply_chat_template(chat_messages, tokenize=True)
         ctx.input_tokens += len(chat_input if isinstance(chat_input, list) else chat_input["input_ids"])  # type: ignore[index]
         logger.debug("Prompt token count: %d", ctx.input_tokens)
@@ -854,7 +872,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
         runtime_config: RuntimeConfig | None = None,
         response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
-        prepared = chat.to_transformers_chat()
+        prepared = _ensure_user_turn(chat.to_transformers_chat())
         if self.backend == "mlx":
             images, formatted_prompt = self._prepare_mlx_vlm_inputs(prepared)
             ctx.input_tokens += len(self.tokenizer.encode(formatted_prompt))
