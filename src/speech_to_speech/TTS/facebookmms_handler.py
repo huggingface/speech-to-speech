@@ -31,7 +31,7 @@ WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE = {
     "ar": "ara",  # Arabic
     "hy": "hyw",  # Armenian
     "az": "azb",  # Azerbaijani
-    "bu": "bul",  # Bulgarian
+    "bg": "bul",  # Bulgarian
     "ca": "cat",  # Catalan
     "nl": "nld",  # Dutch
     "fi": "fin",  # Finnish
@@ -41,22 +41,22 @@ WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE = {
     "hu": "hun",  # Hungarian
     "is": "isl",  # Icelandic
     "id": "ind",  # Indonesian
-    "ka": "kan",  # Kannada
+    "kn": "kan",  # Kannada (Whisper uses "kn"; "ka" is Georgian)
     "kk": "kaz",  # Kazakh
     "lv": "lav",  # Latvian
-    "zl": "zlm",  # Malay
-    "ma": "mar",  # Marathi
+    "ms": "zlm",  # Malay
+    "mr": "mar",  # Marathi
     "fa": "fas",  # Persian
-    "po": "pol",  # Polish
+    "pl": "pol",  # Polish
     "pt": "por",  # Portuguese
     "ro": "ron",  # Romanian
     "ru": "rus",  # Russian
     "sw": "swh",  # Swahili
     "sv": "swe",  # Swedish
-    "tg": "tgl",  # Tagalog
+    "tl": "tgl",  # Tagalog (Whisper uses "tl"; "tg" is Tajik)
     "ta": "tam",  # Tamil
     "th": "tha",  # Thai
-    "tu": "tur",  # Turkish
+    "tr": "tur",  # Turkish
     "uk": "ukr",  # Ukrainian
     "ur": "urd",  # Urdu
     "vi": "vie",  # Vietnamese
