@@ -478,6 +478,8 @@ speech-to-speech \
 
 Run the LLM in a separate llama.cpp process for the lowest-friction fully local setup, as shown in the [Reachy Mini local conversation guide](https://huggingface.co/blog/local-reachy-mini-conversation):
 
+For a fully local native-audio setup that bypasses STT while retaining Realtime turn revisions and barge-in, see the tested [Gemma 4 12B speech-to-speech example for Apple Silicon](./examples/gemma4-12b-macos/README.md).
+
 ```bash
 # Terminal 1: llama.cpp serving Gemma 4
 llama-server -hf ggml-org/gemma-4-E4B-it-GGUF -np 2 -c 65536 -fa on --swa-full
