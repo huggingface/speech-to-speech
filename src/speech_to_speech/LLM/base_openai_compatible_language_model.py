@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import base64
+import io
+import ipaddress
 import logging
+import os
+import wave
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
-from typing import Any, Optional
+from collections.abc import Callable, Generator, Iterator
+from typing import Any, Literal, Optional
+from urllib.parse import urlparse
 
 import httpx
+import numpy as np
 from nltk import sent_tokenize
 from openai import OpenAI
 from openai.types.realtime.conversation_item import (
@@ -25,6 +32,7 @@ from speech_to_speech.LLM.chat import (
     SupportedItem,
     build_active_chat,
     make_system_message,
+    make_user_audio_message,
     make_user_message,
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
@@ -80,6 +88,9 @@ class Usage(BaseModel):
 
 
 ProviderEvent = TextDelta | AssistantMessage | ToolCall | Usage
+SerializeFn = Callable[[Chat], Any]
+RequestFn = Callable[[Any, dict[str, Any]], Any]
+EventIteratorFn = Callable[[Any], Iterator[ProviderEvent]]
 
 
 class _Turn(BaseModel):
@@ -104,6 +115,8 @@ class _GenState(BaseModel):
 
     tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
     pending: list[SupportedItem] = Field(default_factory=list)
+    recorded_item_ids: set[str] = Field(default_factory=set)
+    recorded_call_ids: set[str] = Field(default_factory=set)
     clean_text: str = ""  # filtered text, kept only for the debug log
     input_tokens: int = 0
     output_tokens: int = 0
@@ -140,6 +153,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
         compact_history: bool = False,
+        audio_max_tokens: int = 256,
+        audio_temperature: float = 0.0,
+        audio_content_type: Literal["input_audio", "audio_url"] = "input_audio",
+        audio_history_turns: int = 1,
         **_kwargs: Any,
     ) -> None:
         self.cancel_scope = cancel_scope
@@ -149,6 +166,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.stream_batch_sentences = max(1, stream_batch_sentences)
         self.enable_lang_prompt = enable_lang_prompt
         self.gen_kwargs = dict(gen_kwargs)
+        self.audio_max_tokens = audio_max_tokens
+        self.audio_temperature = audio_temperature
+        if audio_content_type not in {"input_audio", "audio_url"}:
+            raise ValueError("audio_content_type must be either 'input_audio' or 'audio_url'.")
+        self.audio_content_type = audio_content_type
+        self.audio_history_turns = max(0, audio_history_turns)
         self.request_timeout_s = float(request_timeout_s)
         self.request_timeout = httpx.Timeout(
             self.request_timeout_s,
@@ -156,6 +179,13 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         )
 
         self.user_role = user_role
+        if (
+            api_key is None
+            and not os.environ.get("OPENAI_API_KEY")
+            and base_url is not None
+            and self._is_local_base_url(base_url)
+        ):
+            api_key = "none"
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self._extra_body = self._build_extra_body(base_url, disable_thinking, reasoning_effort)
         self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
@@ -172,6 +202,19 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         if base_url is None:
             return False
         return base_url.rstrip("/") == "https://api.openai.com/v1"
+
+    @staticmethod
+    def _is_local_base_url(base_url: str) -> bool:
+        """Whether *base_url* points at localhost or a loopback IP address."""
+        host = urlparse(base_url).hostname
+        if host is None:
+            return False
+        if host.rstrip(".").lower() == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return False
 
     @classmethod
     def _build_extra_body(
@@ -242,6 +285,50 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
     def _build_optional_kwargs(self, req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:
         """Build the per-request tools/tool_choice kwargs in the backend's shape."""
         ...
+
+    # ── audio-input protocol hooks ───────────────────────────────────────────
+
+    def _serialize_audio(self, active_chat: Chat) -> Any:
+        """Serialize an audio turn using the selected backend's native protocol."""
+        return self._serialize(active_chat)
+
+    def _build_audio_optional_kwargs(
+        self,
+        response: Any,
+        req_tools: Any,
+        req_tool_choice: Any,
+    ) -> dict[str, Any]:
+        """Build audio request parameters in the selected backend's shape."""
+        kwargs = self._build_optional_kwargs(req_tools, req_tool_choice)
+        max_tokens = getattr(response, "max_output_tokens", None) if response is not None else None
+        kwargs.setdefault("max_tokens", max_tokens or self.audio_max_tokens)
+        kwargs.setdefault("temperature", self.audio_temperature)
+        return kwargs
+
+    def _request_audio(self, api_input: Any, optional_kwargs: dict[str, Any]) -> Any:
+        return self._request(api_input, optional_kwargs)
+
+    def _iter_audio_events(self, api_response: Any) -> Iterator[ProviderEvent]:
+        yield from self._iter_events(api_response)
+
+    @staticmethod
+    def _audio_to_wav_base64(audio: np.ndarray, sample_rate: int) -> str:
+        """Encode a mono 16-bit WAV payload without touching the filesystem."""
+        audio_array = np.asarray(audio)
+        if audio_array.ndim > 1:
+            audio_array = np.mean(audio_array, axis=1)
+        if np.issubdtype(audio_array.dtype, np.floating):
+            pcm = (np.clip(audio_array, -1.0, 1.0) * 32767.0).astype("<i2")
+        else:
+            pcm = np.clip(audio_array, -32768, 32767).astype("<i2")
+
+        with io.BytesIO() as wav_io:
+            with wave.open(wav_io, "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(sample_rate)
+                wav_file.writeframes(pcm.tobytes())
+            return base64.b64encode(wav_io.getvalue()).decode("ascii")
 
     # ── speculative-turn / cancellation gating ─────────────────────────────────
 
@@ -320,14 +407,24 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             # all before the chunk leaves for the client.
             chat = turn.runtime_config.chat
             for pending_item in state.pending:
-                chat.add_item(pending_item)
+                recorded = chat.add_item(pending_item)
+                if recorded.id is not None:
+                    state.recorded_item_ids.add(recorded.id)
             state.pending.clear()
-            chat.add_item(fc_item)
+            recorded_call = chat.add_item(fc_item)
+            if recorded_call.id is not None:
+                state.recorded_item_ids.add(recorded_call.id)
+            state.recorded_call_ids.add(item.call_id)
         yield self._chunk(turn, tools=[item])
 
     # ── consumption ─────────────────────────────────────────────────────────--
 
-    def _consume_streaming(self, events: Iterator[ProviderEvent], state: _GenState, turn: _Turn) -> Iterator[LLMOut]:
+    def _consume_streaming(
+        self,
+        events: Iterator[ProviderEvent],
+        state: _GenState,
+        turn: _Turn,
+    ) -> Generator[LLMOut, None, bool]:
         cancelled = False
         printable_text = ""
         sentence_batch: list[str] = []
@@ -407,11 +504,22 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     logger.debug(f"Clean text: {state.clean_text}")
                     yield from _flush(sentence_batch)
             logger.info(f"Tools: {state.tools}")
+        return (
+            not cancelled
+            and not self._generation_is_stale(turn.gen)
+            and self._turn_is_latest(turn.turn_id, turn.turn_revision)
+            and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
+        )
 
-    def _consume_nonstreaming(self, events: Iterator[ProviderEvent], state: _GenState, turn: _Turn) -> Iterator[LLMOut]:
+    def _consume_nonstreaming(
+        self,
+        events: Iterator[ProviderEvent],
+        state: _GenState,
+        turn: _Turn,
+    ) -> Generator[LLMOut, None, bool]:
         if self._generation_is_stale(turn.gen) or not self._turn_is_latest(turn.turn_id, turn.turn_revision):
             logger.info("LLM generation cancelled (interruption)")
-            return
+            return False
         for event in events:
             if isinstance(event, Usage):
                 state.input_tokens = event.input_tokens
@@ -436,6 +544,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     yield self._chunk(turn, text=out)
         logger.debug(f"Clean text: {state.clean_text}")
         logger.info(f"Tools: {state.tools}")
+        return (
+            not self._generation_is_stale(turn.gen)
+            and self._turn_is_latest(turn.turn_id, turn.turn_revision)
+            and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
+        )
 
     # ── orchestration ─────────────────────────────────────────────────────────
 
@@ -445,88 +558,217 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         original_chat: Chat,
         turn: _Turn,
         optional_kwargs: dict[str, Any],
-    ) -> Iterator[LLMOut]:
+        *,
+        serialize_fn: SerializeFn | None = None,
+        request_fn: RequestFn | None = None,
+        event_iterator_fn: EventIteratorFn | None = None,
+        transactional_user_message_id: str | None = None,
+        history_commit_fn: Callable[[], None] | None = None,
+    ) -> Generator[LLMOut, None, bool]:
         api_response: Any = None
         state = _GenState()
         error_message: str | None = None
-        api_input = self._serialize(active_chat)
-        # Images the model actually sees this turn; only these are stripped on
-        # write-back, so an image a fast client injects mid-generation for the
-        # next turn survives (it is not in this serialized snapshot).
-        consumed_image_ids = active_chat.image_message_ids()
-        if not api_input:
-            # Nothing to send: empty `instructions` and no `input` (in the response,
-            # the default conversation, or the out-of-band context). The provider
-            # would reject this; fail with a clear message instead of an opaque error.
-            error_message = "Cannot generate a response: no instructions and no input were provided."
+        generation_completed = False
+        history_committed = False
+        transaction_rolled_back = False
+        consumed_image_ids: set[str] = set()
+
+        def rollback_transaction() -> None:
+            nonlocal transaction_rolled_back
+            if transactional_user_message_id is None or history_committed or transaction_rolled_back:
+                return
+            original_chat.rollback_generation(
+                transactional_user_message_id,
+                item_ids=state.recorded_item_ids,
+                call_ids=state.recorded_call_ids,
+            )
+            transaction_rolled_back = True
 
         try:
-            if error_message is None:
-                api_response = self._request(api_input, optional_kwargs)
-            if api_response is not None:
-                events = self._iter_events(api_response)
-                if self.stream:
-                    yield from self._consume_streaming(events, state, turn)
+            try:
+                api_input = (serialize_fn or self._serialize)(active_chat)
+                # Images the model actually sees this turn; only these are stripped on
+                # write-back, so an image a fast client injects mid-generation for the
+                # next turn survives (it is not in this serialized snapshot).
+                consumed_image_ids = active_chat.image_message_ids()
+                if not api_input:
+                    # Nothing to send: empty `instructions` and no `input` (in the response,
+                    # the default conversation, or the out-of-band context). The provider
+                    # would reject this; fail with a clear message instead of an opaque error.
+                    error_message = "Cannot generate a response: no instructions and no input were provided."
                 else:
-                    yield from self._consume_nonstreaming(events, state, turn)
-        except httpx.ReadTimeout:
-            logger.warning(
-                "OpenAI API read timed out after %.1fs; ending the current response",
-                self.request_timeout_s,
-            )
-            if not self._generation_is_stale(turn.gen) and self._turn_output_allowed(turn.turn_id, turn.turn_revision):
-                # Canned apology carries no language_code (mirrors the prior handlers).
-                yield LLMResponseChunk(
-                    text="Wow I'm a bit slow today, could you repeat that?",
-                    runtime_config=turn.runtime_config,
-                    response=turn.response,
-                    turn_id=turn.turn_id,
-                    turn_revision=turn.turn_revision,
-                    speech_stopped_at_s=turn.speech_stopped_at_s,
-                    cancel_generation=turn.gen,
+                    api_response = (request_fn or self._request)(api_input, optional_kwargs)
+                if api_response is not None:
+                    events = (event_iterator_fn or self._iter_events)(api_response)
+                    if self.stream:
+                        generation_completed = yield from self._consume_streaming(events, state, turn)
+                    else:
+                        generation_completed = yield from self._consume_nonstreaming(events, state, turn)
+            except httpx.ReadTimeout:
+                logger.warning(
+                    "OpenAI API read timed out after %.1fs; ending the current response",
+                    self.request_timeout_s,
                 )
-        except Exception as exc:
-            # Any other generation failure must still terminate the response: record
-            # the error and fall through to the EndOfResponse below. Without this the
-            # exception would escape process() and no EndOfResponse would be emitted,
-            # leaving st.in_response stuck and locking every subsequent response.
-            logger.exception("LLM generation failed; ending the current response")
-            if error_message is None:
-                error_message = f"Language model generation failed: {exc}"
-        finally:
-            if api_response is not None and hasattr(api_response, "close"):
-                try:
-                    api_response.close()
-                except Exception:
-                    pass
+                if not self._generation_is_stale(turn.gen) and self._turn_output_allowed(
+                    turn.turn_id, turn.turn_revision
+                ):
+                    # Canned apology carries no language_code (mirrors the prior handlers).
+                    yield LLMResponseChunk(
+                        text="Wow I'm a bit slow today, could you repeat that?",
+                        runtime_config=turn.runtime_config,
+                        response=turn.response,
+                        turn_id=turn.turn_id,
+                        turn_revision=turn.turn_revision,
+                        speech_stopped_at_s=turn.speech_stopped_at_s,
+                        cancel_generation=turn.gen,
+                    )
+            except Exception as exc:
+                # Any other generation failure must still terminate the response: record
+                # the error and fall through to the EndOfResponse below. Without this the
+                # exception would escape process() and no EndOfResponse would be emitted,
+                # leaving st.in_response stuck and locking every subsequent response.
+                logger.exception("LLM generation failed; ending the current response")
+                if error_message is None:
+                    error_message = f"Language model generation failed: {exc}"
 
-        if (
-            error_message is None
-            and not self._generation_is_stale(turn.gen)
-            and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
-        ):
-            # Out-of-band responses emit output and usage but never write back to the
-            # default conversation (their context was a throwaway chat).
-            if not is_out_of_band(turn.response):
-                # Tool calls (and any assistant text preceding them) were already
-                # written eagerly in _record_tool_call; only trailing items remain.
-                for item in state.pending:
-                    original_chat.add_item(item)
-                original_chat.strip_images(consumed_image_ids)
-                original_chat.trim_if_needed(self.compactor)
-            if state.input_tokens or state.output_tokens:
+            can_commit = (
+                error_message is None
+                and generation_completed
+                and not self._generation_is_stale(turn.gen)
+                and self._turn_is_latest(turn.turn_id, turn.turn_revision)
+                and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
+            )
+            if can_commit:
+                try:
+                    # Out-of-band responses emit output and usage but never write back to the
+                    # default conversation (their context was a throwaway chat).
+                    if not is_out_of_band(turn.response):
+                        # Tool calls (and any assistant text preceding them) were already
+                        # written eagerly in _record_tool_call; only trailing items remain.
+                        for item in state.pending:
+                            recorded = original_chat.add_item(item)
+                            if recorded.id is not None:
+                                state.recorded_item_ids.add(recorded.id)
+                        original_chat.strip_images(consumed_image_ids)
+                        if history_commit_fn is not None:
+                            history_commit_fn()
+                        original_chat.trim_if_needed(self.compactor)
+                    history_committed = True
+                except Exception as exc:
+                    logger.exception("LLM history commit failed; rolling back the current response")
+                    error_message = f"Language model history commit failed: {exc}"
+
+            rollback_transaction()
+            if history_committed and (state.input_tokens or state.output_tokens):
                 yield TokenUsage(
                     input_tokens=state.input_tokens,
                     output_tokens=state.output_tokens,
                     turn_id=turn.turn_id,
                     turn_revision=turn.turn_revision,
                 )
-        yield EndOfResponse(
-            turn_id=turn.turn_id, turn_revision=turn.turn_revision, cancel_generation=turn.gen, error=error_message
+            yield EndOfResponse(
+                turn_id=turn.turn_id,
+                turn_revision=turn.turn_revision,
+                cancel_generation=turn.gen,
+                error=error_message,
+            )
+            return history_committed
+        finally:
+            if api_response is not None and hasattr(api_response, "close"):
+                try:
+                    api_response.close()
+                except Exception:
+                    pass
+            rollback_transaction()
+
+    def _process_audio(self, request: LLMIn) -> Iterator[LLMOut]:
+        """Process an audio-input turn through the selected backend protocol."""
+        assert request.audio is not None
+        runtime_config = request.runtime_config
+        response = request.response
+        turn_id = request.turn_id
+        turn_revision = request.turn_revision
+        speech_stopped_at_s = request.speech_stopped_at_s
+        if not self._turn_is_latest(turn_id, turn_revision):
+            logger.info("Skipping stale LLM request for turn=%s rev=%s", turn_id, turn_revision)
+            yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision)
+            return
+
+        original_chat = runtime_config.chat
+        if is_out_of_band(response):
+            try:
+                active_chat = build_active_chat(original_chat, response)
+            except ChatItemError as exc:
+                logger.info("Out-of-band response rejected: %s", exc)
+                yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision, error=str(exc))
+                return
+        else:
+            active_chat = original_chat.copy()
+
+        language_code = request.language_code
+        instructions = (
+            response.instructions if response and response.instructions else runtime_config.session.instructions
+        ) or ""
+        req_tools = response.tools if response and response.tools else runtime_config.session.tools
+        req_tool_choice = (
+            response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
+        )
+        wants_audio = response_wants_audio(response)
+        self._apply_config(active_chat, instructions, wants_audio)
+        language_code, lang_name = resolve_auto_language(language_code)
+        if lang_name and self.enable_lang_prompt:
+            active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
+
+        audio_b64 = self._audio_to_wav_base64(request.audio, request.audio_sample_rate)
+        audio_message = active_chat.add_item(make_user_audio_message(audio_b64))
+        optional_kwargs = self._build_audio_optional_kwargs(response, req_tools, req_tool_choice)
+
+        transactional_user_message_id: str | None = None
+        history_commit_fn: Callable[[], None] | None = None
+        if not is_out_of_band(response):
+            provisional_message = make_user_audio_message(audio_b64)
+            provisional_message.id = audio_message.id
+            original_chat.add_item(provisional_message)
+            assert provisional_message.id is not None
+            transactional_user_message_id = provisional_message.id
+
+            def commit_audio_history() -> None:
+                original_chat.compact_audio_history(self.audio_history_turns)
+
+            history_commit_fn = commit_audio_history
+
+        # CancelScope.is_stale(gen) is checked when the stream iterator advances; a
+        # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from
+        # the websocket router. Mitigations: request_timeout_s / ReadTimeout.
+        gen = self.cancel_scope.generation if self.cancel_scope else None
+        turn = _Turn(
+            language_code=language_code,
+            gen=gen,
+            runtime_config=runtime_config,
+            response=response,
+            turn_id=turn_id,
+            turn_revision=turn_revision,
+            speech_stopped_at_s=speech_stopped_at_s,
+            wants_audio=wants_audio,
+        )
+        yield from self._generate(
+            active_chat,
+            original_chat,
+            turn,
+            optional_kwargs,
+            serialize_fn=self._serialize_audio,
+            request_fn=self._request_audio,
+            event_iterator_fn=self._iter_audio_events,
+            transactional_user_message_id=transactional_user_message_id,
+            history_commit_fn=history_commit_fn,
         )
 
     def process(self, request: LLMIn) -> Iterator[LLMOut]:
         """Process a language model request and yield LLMResponseChunks."""
+        if request.audio is not None:
+            yield from self._process_audio(request)
+            return
+
         runtime_config = request.runtime_config
         response = request.response
         turn_id = request.turn_id

@@ -561,12 +561,16 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         if self._uses_realtime_turn_handling():
             # Realtime mode keeps turns reopenable; live transcription additionally
             # emits progressive audio chunks while speaking.
-            yield from self._process_realtime(vad_output)
+            yield from self._process_realtime(vad_output, runtime_config)
         else:
             # Original mode: yield only when speech ends
-            yield from self._process_normal(vad_output)
+            yield from self._process_normal(vad_output, runtime_config)
 
-    def _process_realtime(self, vad_output: list[torch.Tensor] | None) -> Iterator[VADOut]:
+    def _process_realtime(
+        self,
+        vad_output: list[torch.Tensor] | None,
+        runtime_config: RuntimeConfig | None = None,
+    ) -> Iterator[VADOut]:
         """Process with real-time progressive audio release."""
         # Check if we're currently in a speech segment.
         if self.enable_realtime_transcription and hasattr(self.iterator, "buffer") and len(self.iterator.buffer) > 0:
@@ -592,6 +596,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     turn_id, turn_revision = self._current_turn_metadata()
                     yield VADAudio(
                         audio=self._combined_turn_audio(array),
+                        runtime_config=runtime_config,
                         mode="progressive",
                         turn_id=turn_id,
                         turn_revision=turn_revision,
@@ -719,7 +724,13 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     )
                 else:
                     self.should_listen.clear()
-                yield VADAudio(audio=output_array, mode="final", turn_id=turn_id, turn_revision=turn_revision)
+                yield VADAudio(
+                    audio=output_array,
+                    runtime_config=runtime_config,
+                    mode="final",
+                    turn_id=turn_id,
+                    turn_revision=turn_revision,
+                )
                 self.last_process_time = 0.0
                 self._speech_started_emitted = False
 
@@ -736,7 +747,11 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             multiplier = 6.0
         return min(base_pause * multiplier, 2.0)
 
-    def _process_normal(self, vad_output: list[torch.Tensor] | None) -> Iterator[VADOut]:
+    def _process_normal(
+        self,
+        vad_output: list[torch.Tensor] | None,
+        runtime_config: RuntimeConfig | None = None,
+    ) -> Iterator[VADOut]:
         """Original processing: yield only when speech ends."""
         if vad_output is not None:
             if len(vad_output) == 0:
@@ -804,7 +819,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     self.text_output_queue.put(SpeechStoppedEvent(duration_s=duration_ms / 1000.0, audio_end_ms=end_ms))
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
-                yield VADAudio(audio=array)
+                yield VADAudio(audio=array, runtime_config=runtime_config)
                 self._speech_started_emitted = False
 
     def _apply_audio_enhancement(self, array: np.ndarray) -> np.ndarray:

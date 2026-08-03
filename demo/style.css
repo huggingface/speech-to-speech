@@ -1009,6 +1009,9 @@ a:hover {
   transition: opacity 0.25s ease;
 }
 .orb-wrap.live .mic-gate-arc { opacity: 1; }
+/* The gate is a WebSocket-transport feature (it lives in the WS capture
+ * worklet). During a WebRTC call only the mute button remains. */
+body.rtc-live .mic-gate-arc { display: none; }
 .mga-track {
   stroke: rgba(255, 255, 255, 0.1); /* hairline; recedes until needed */
   stroke-width: 1.5;
@@ -1752,6 +1755,52 @@ body.cam-on .footer {
 .bubble.user .bubble-role { color: var(--voice-user); }
 .bubble.assistant .bubble-role { color: var(--voice-assistant); }
 
+.bubble.user.voice .bubble-body {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 126px;
+  color: var(--text-dim);
+}
+.voice-turn-wave {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 16px;
+  color: var(--voice-user);
+}
+.voice-turn-wave i {
+  display: block;
+  width: 2px;
+  height: 12px;
+  border-radius: 999px;
+  background: currentColor;
+  transform-origin: center;
+  animation: user-turn-wave 0.85s ease-in-out infinite;
+}
+.voice-turn-wave i:nth-child(2),
+.voice-turn-wave i:nth-child(4) {
+  animation-delay: -0.22s;
+}
+.voice-turn-wave i:nth-child(3) {
+  animation-delay: -0.44s;
+}
+.voice-turn-wave i:nth-child(5) {
+  animation-delay: -0.11s;
+}
+.bubble.user.sending .voice-turn-wave i {
+  animation-duration: 1.15s;
+}
+.voice-turn-state {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+@keyframes user-turn-wave {
+  0%, 100% { transform: scaleY(0.28); opacity: 0.5; }
+  50% { transform: scaleY(1); opacity: 1; }
+}
+
 /* ─── Conversation history panel ─────────────────────────────────────── */
 
 .chat-panel {
@@ -1883,6 +1932,29 @@ body.cam-on .footer {
 /* Bodies share one neutral surface; alignment + the mono role label do the
  * distinguishing, so the panel reads as one quiet column. */
 .hist-msg.user .hist-body.partial { opacity: 0.65; }
+
+.hist-audio {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--voice-user) 22%, var(--border));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--voice-user) 6%, var(--bg-elev-2));
+}
+.hist-audio-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--voice-user) 68%, var(--text-faint));
+}
+.hist-audio audio {
+  display: block;
+  width: min(260px, 100%);
+  height: 34px;
+  color-scheme: light dark;
+}
 
 /* ─── Tool call history item ─────────────────────────────────────────── */
 
@@ -2549,6 +2621,9 @@ body.cam-on .footer {
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .voice-turn-wave i {
+    animation: none;
+  }
   .cam-pip {
     transition: opacity 0.22s ease;
     transform: none;
