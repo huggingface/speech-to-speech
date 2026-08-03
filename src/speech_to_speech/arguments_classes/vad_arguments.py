@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Literal
 
 
 @dataclass
@@ -78,4 +79,38 @@ class VADHandlerArguments:
         metadata={
             "help": "When greater than 0, adjacent VAD segments below min_speech_ms are held and stitched for this many milliseconds before being discarded. Fragments shorter than 100 ms of active speech are never held. Useful with very low min_silence_ms values."
         },
+    )
+    smart_turn: bool = field(
+        default=False,
+        metadata={
+            "help": "Use Smart Turn v3.2 after Silero detects silence to avoid ending a turn during a mid-thought pause. Disabled by default."
+        },
+    )
+    smart_turn_model_path: str | None = field(
+        default=None,
+        metadata={
+            "help": "Optional path to a Smart Turn v3.x ONNX model. When omitted, the latest supported v3.2 CPU or GPU model is downloaded from pipecat-ai/smart-turn-v3."
+        },
+    )
+    smart_turn_device: Literal["cpu", "cuda"] = field(
+        default="cpu",
+        metadata={
+            "help": "ONNX Runtime provider and Smart Turn v3.2 checkpoint variant to use: cpu or cuda. Default is cpu."
+        },
+    )
+    smart_turn_threshold: float = field(
+        default=0.5,
+        metadata={
+            "help": "Smart Turn completion probability threshold. Higher values wait more readily on ambiguous pauses. Default is 0.5."
+        },
+    )
+    smart_turn_max_wait_ms: int = field(
+        default=3000,
+        metadata={
+            "help": "Maximum additional silence to wait after Smart Turn reports an incomplete turn. Default is 3000 ms."
+        },
+    )
+    smart_turn_cpu_count: int = field(
+        default=1,
+        metadata={"help": "Number of CPU threads ONNX Runtime may use for each Smart Turn inference. Default is 1."},
     )

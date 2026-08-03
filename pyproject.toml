@@ -89,6 +89,14 @@ paraformer = [
 pocket = [
     "pocket-tts>=0.1.0",
 ]
+smart-turn = [
+    "huggingface-hub>=0.34.0",
+    "onnxruntime>=1.17.0",
+]
+smart-turn-gpu = [
+    "huggingface-hub>=0.34.0",
+    "onnxruntime-gpu>=1.17.0; platform_system != 'Darwin'",
+]
 webrtc = [
     "aiortc>=1.9.0",
 ]

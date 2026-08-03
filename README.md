@@ -134,6 +134,8 @@ pip install "speech-to-speech[faster-whisper]"  # Faster Whisper STT
 pip install "speech-to-speech[whisper-mlx]"     # Lightning Whisper MLX STT on macOS
 pip install "speech-to-speech[paraformer]"      # Paraformer STT through FunASR
 pip install "speech-to-speech[mlx-lm]"          # mlx-vlm support for vision models on macOS
+pip install "speech-to-speech[smart-turn]"      # Smart Turn v3.2 endpointing on CPU
+pip install "speech-to-speech[smart-turn-gpu]"  # Smart Turn v3.2 endpointing on CUDA
 ```
 
 Deprecated implementations, including MeloTTS, live in [`archive/`](./archive) and are no longer wired into the CLI.
@@ -582,6 +584,31 @@ See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments
 - `--min_silence_ms`: minimum length of silence intervals for segmenting speech. Default is 64 ms.
 - `--short_segment_merge_ms`: optional merge window for stitching adjacent VAD segments that are each shorter than `--min_speech_ms`.
 - `--unanswered_reopen_ms`: sanity cap on how long a soft-ended speculative turn that has not yet received any assistant output stays reopenable.
+
+### Smart Turn endpointing
+
+[Smart Turn v3.2](https://huggingface.co/pipecat-ai/smart-turn-v3) can validate Silero's end-of-speech
+decisions using the content and prosody of the current turn. When it detects a mid-thought pause, the VAD keeps
+the same utterance open instead of sending a premature final segment to STT. If no more speech arrives, the
+turn is finalized after `--smart_turn_max_wait_ms` (3 seconds by default), so endpointing cannot wait forever.
+
+Install the CPU extra and enable it:
+
+```bash
+pip install "speech-to-speech[smart-turn]"
+speech-to-speech --smart_turn
+```
+
+The latest supported v3.2 CPU checkpoint downloads from the Hugging Face Hub on first use. Pass
+`--smart_turn_model_path /path/to/model.onnx` to use a local model. CUDA inference uses the v3.2 GPU checkpoint:
+
+```bash
+pip install "speech-to-speech[smart-turn-gpu]"
+speech-to-speech --smart_turn --smart_turn_device cuda
+```
+
+Tune the completion cutoff with `--smart_turn_threshold` (default `0.5`). A higher threshold makes ambiguous
+pauses more likely to stay open.
 
 ### STT, LLM, and TTS Parameters
 

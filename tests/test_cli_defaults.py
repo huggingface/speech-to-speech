@@ -116,6 +116,41 @@ def test_parse_arguments_default_backend_returns_openai_api():
     assert isinstance(args.language_model_handler_kwargs, LanguageModelHandlerArguments)
     assert args.responses_api_language_model_handler_kwargs.model_name == "gpt-5.4-mini"
     assert args.module_kwargs.llm_backend == "responses-api"
+    assert args.vad_handler_kwargs.smart_turn is False
+    assert args.vad_handler_kwargs.smart_turn_model_path is None
+    assert args.vad_handler_kwargs.smart_turn_device == "cpu"
+    assert args.vad_handler_kwargs.smart_turn_threshold == 0.5
+    assert args.vad_handler_kwargs.smart_turn_max_wait_ms == 3000
+
+
+def test_parse_arguments_accepts_smart_turn_options():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = [
+            "speech-to-speech",
+            "--smart_turn",
+            "--smart_turn_model_path",
+            "/models/smart-turn.onnx",
+            "--smart_turn_device",
+            "cuda",
+            "--smart_turn_threshold",
+            "0.7",
+            "--smart_turn_max_wait_ms",
+            "2500",
+            "--smart_turn_cpu_count",
+            "2",
+        ]
+        args = parse_arguments()
+    finally:
+        sys.argv = original_argv
+
+    vad_args = args.vad_handler_kwargs
+    assert vad_args.smart_turn is True
+    assert vad_args.smart_turn_model_path == "/models/smart-turn.onnx"
+    assert vad_args.smart_turn_device == "cuda"
+    assert vad_args.smart_turn_threshold == 0.7
+    assert vad_args.smart_turn_max_wait_ms == 2500
+    assert vad_args.smart_turn_cpu_count == 2
 
 
 def test_parse_arguments_accepts_qwen3_tts_backend_override():
