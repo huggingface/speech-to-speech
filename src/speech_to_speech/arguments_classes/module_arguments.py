@@ -1,0 +1,101 @@
+from dataclasses import dataclass, field
+from typing import Literal, Optional
+
+
+@dataclass
+class ModuleArguments:
+    device: Optional[str] = field(
+        default=None,
+        metadata={"help": "If specified, overrides the device for all handlers."},
+    )
+    mode: Optional[Literal["local", "socket", "raw-websocket", "realtime"]] = field(
+        default="realtime",
+        metadata={
+            "help": "The mode to run the pipeline in. Either 'local', 'socket', 'raw-websocket', or "
+            "'realtime'. Default is 'realtime'."
+        },
+    )
+    local_mac_optimal_settings: bool = field(
+        default=False,
+        metadata={
+            "help": "If specified, sets the optimal settings for Mac OS. Sets Parakeet TDT for STT, MLX LM for language model, and Qwen3-TTS for TTS, with MPS device and local mode."
+        },
+    )
+    stt: Optional[
+        Literal[
+            "none",
+            "whisper",
+            "whisper-mlx",
+            "mlx-audio-whisper",
+            "faster-whisper",
+            "parakeet-tdt",
+            "paraformer",
+        ]
+    ] = field(
+        default="parakeet-tdt",
+        metadata={
+            "help": "The STT to use. Use 'none' to send VAD audio directly to an audio-input LLM. "
+            "This requires --llm_backend chat-completions and an explicitly selected audio-capable "
+            "API model with --model_name. "
+            "Otherwise choose 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', "
+            "'parakeet-tdt', or 'paraformer'. Default is 'parakeet-tdt'."
+        },
+    )
+    llm_backend: Optional[Literal["transformers", "mlx-lm", "responses-api", "chat-completions"]] = field(
+        default="responses-api",
+        metadata={
+            "help": "The LLM backend to use. Either 'transformers', 'mlx-lm', 'responses-api', or "
+            "'chat-completions' (OpenAI-compatible /v1/chat/completions). Default is 'responses-api'."
+        },
+    )
+    tts: Optional[Literal["chatTTS", "facebookMMS", "pocket", "kokoro", "qwen3"]] = field(
+        default="qwen3",
+        metadata={
+            "help": "The TTS to use. Either 'chatTTS', 'facebookMMS', 'pocket', 'kokoro', or 'qwen3'. Default is 'qwen3'."
+        },
+    )
+    log_level: str = field(
+        default="info",
+        metadata={"help": "Provide logging level. Example --log_level debug, default=info."},
+    )
+    enable_live_transcription: bool = field(
+        default=True,
+        metadata={
+            "help": "Enable live transcription display while user is speaking (works with parakeet-tdt). Default is true."
+        },
+    )
+    live_transcription_update_interval: float = field(
+        default=0.5,
+        metadata={"help": "Update interval for live transcription in seconds (default: 0.5s = 500ms)"},
+    )
+    live_transcription_min_silence_ms: int = field(
+        default=500,
+        metadata={
+            "help": "Minimum silence duration (ms) before ending speech when live transcription is enabled (default: 500ms)"
+        },
+    )
+    enable_llm_proxy: bool = field(
+        default=False,
+        metadata={
+            "help": "Expose the configured remote LLM (--llm_backend chat-completions or responses-api) as an "
+            "OpenAI-compatible HTTP endpoint on the realtime server. The server performs no authentication of "
+            "its own: enable it only on a trusted network or behind a gateway that owns access control. Off by "
+            "default. Only valid for --mode realtime."
+        },
+    )
+    llm_proxy_connect_timeout_s: float = field(
+        default=10.0,
+        metadata={
+            "help": "Connect timeout in seconds for LLM proxy requests to the upstream provider. Reads have no "
+            "timeout (generation may take minutes). Default is 10.0."
+        },
+    )
+    num_pipelines: int = field(
+        default=1,
+        metadata={
+            "help": "Number of isolated realtime pipelines in the pool. One uvicorn server listens on "
+            "--ws_port and routes each incoming WebSocket or WebRTC session to the next free pipeline (each "
+            "has its own VAD/STT/LM/TTS handlers and conversation state). Max concurrent Realtime sessions equals "
+            "num_pipelines; further connections are rejected. Only valid for --mode realtime. Default is 1."
+        },
+    )
