@@ -197,6 +197,29 @@ class TestClientEventDispatch:
                 cid = service.connection_ids[0]
                 assert service._state(cid).runtime_config.session.audio.output.voice == "coral"
 
+    def test_session_update_receives_session_updated_confirmation(self, setup):
+        """The OpenAI Realtime protocol requires a session.updated reply to
+        every successful session.update, unless there is an error:
+        https://platform.openai.com/docs/api-reference/realtime-server-events/session/updated
+        """
+        app, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                ws.send_json(
+                    {
+                        "type": "session.update",
+                        "session": {
+                            "type": "realtime",
+                            "audio": {"output": {"voice": "coral"}},
+                        },
+                    }
+                )
+                msg = ws.receive_json()
+                assert msg["type"] == "session.updated"
+                assert msg["event_id"].startswith("event_")
+                assert msg["session"]["audio"]["output"]["voice"] == "coral"
+
     def test_conversation_item_create_returns_events(self, setup):
         app, *_ = setup
         with TestClient(app) as client:
