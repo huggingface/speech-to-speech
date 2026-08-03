@@ -42,6 +42,8 @@ from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
 
+AUDIO_INPUT_HISTORY_PLACEHOLDER = "[User audio input]"
+
 
 class ChatItemError(Exception):
     """Raised when a conversation item fails validation in :meth:`Chat.add_item`."""
@@ -193,11 +195,13 @@ class Chat:
                 item.content = [
                     p
                     for p in item.content
-                    if (p.type == "input_text" and p.text) or (p.type == "input_image" and p.image_url)
+                    if (p.type == "input_text" and p.text)
+                    or (p.type == "input_image" and p.image_url)
+                    or (p.type == "input_audio" and p.audio)
                 ]
                 if not item.content:
                     raise ChatItemError(
-                        "Message has no supported content. Supported modalities: input_text, input_image."
+                        "Message has no supported content. Supported modalities: input_text, input_image, input_audio."
                     )
                 self.buffer.append(item)
                 self._user_turn_count += 1
@@ -284,6 +288,63 @@ class Chat:
                 return True
         return False
 
+    def rollback_generation(
+        self,
+        user_message_id: str,
+        *,
+        item_ids: set[str],
+        call_ids: set[str],
+    ) -> None:
+        """Remove only the provisional state written by one failed generation.
+
+        A tool output may be appended by a fast client while generation is still
+        streaming, so rollback matches both item IDs and tool ``call_id`` values.
+        Unrelated messages injected concurrently for a later turn are preserved.
+        """
+
+        with self._lock:
+            kept: list[SupportedItem] = []
+            for item in self.buffer:
+                remove = item.id == user_message_id or item.id in item_ids
+                if isinstance(item, (RealtimeConversationItemFunctionCall, RealtimeConversationItemFunctionCallOutput)):
+                    remove = remove or item.call_id in call_ids
+                if not remove:
+                    kept.append(item)
+            self.buffer = kept
+            for call_id in call_ids:
+                self._pending_tool_calls.pop(call_id, None)
+            self._user_turn_count = sum(isinstance(item, RealtimeConversationItemUserMessage) for item in self.buffer)
+            logger.debug("Rolled back failed generation for user message %s", user_message_id)
+
+    def compact_audio_history(self, max_audio_turns: int) -> None:
+        """Retain only the newest bounded set of audio turns.
+
+        Older audio parts are replaced with a textual placeholder so the user
+        role and its paired assistant response remain valid in serialized
+        history. The newest turns keep their audio semantics for subsequent
+        Chat Completions requests.
+        """
+
+        with self._lock:
+            remaining = max(0, max_audio_turns)
+            for item in reversed(self.buffer):
+                if not isinstance(item, RealtimeConversationItemUserMessage):
+                    continue
+                if not any(part.type == "input_audio" for part in item.content):
+                    continue
+                if remaining:
+                    remaining -= 1
+                    continue
+                replacement_added = False
+                compacted: list[UserContent] = []
+                for part in item.content:
+                    if part.type != "input_audio":
+                        compacted.append(part)
+                    elif not replacement_added:
+                        compacted.append(UserContent(type="input_text", text=AUDIO_INPUT_HISTORY_PLACEHOLDER))
+                        replacement_added = True
+                item.content = compacted
+
     def to_responses_api_chat(self, items: list[SupportedItem] | None = None) -> ResponseInputParam:
         """Serialize the chat (system prompt + buffer) for the OpenAI Responses API.
 
@@ -312,6 +373,7 @@ class Chat:
             assert item.id is not None and item.id != "", f"item.id is {item.id}"
             if isinstance(item, RealtimeConversationItemUserMessage):
                 content: ResponseInputMessageContentListParam = []
+                audio_placeholder_added = False
                 for user_part in item.content:
                     if user_part.type == "input_text" and user_part.text is not None:
                         content.append(ResponseInputTextParam(text=user_part.text or "", type="input_text"))
@@ -320,6 +382,9 @@ class Chat:
                         if user_part.image_url is not None:
                             img["image_url"] = user_part.image_url
                         content.append(img)
+                    elif user_part.type == "input_audio" and not audio_placeholder_added:
+                        content.append(ResponseInputTextParam(text=AUDIO_INPUT_HISTORY_PLACEHOLDER, type="input_text"))
+                        audio_placeholder_added = True
                 if content:
                     result.append(ResponseMessage(content=content, role="user", type="message"))
             elif isinstance(item, RealtimeConversationItemAssistantMessage):
@@ -380,8 +445,8 @@ class Chat:
                 messages.append(TransformersSystemMessage(content=text))
             for item in self.buffer:
                 if isinstance(item, RealtimeConversationItemUserMessage):
-                    has_images = any(p.type == "input_image" for p in item.content)
-                    if has_images:
+                    has_media = any(p.type in {"input_image", "input_audio"} for p in item.content)
+                    if has_media:
                         messages.append(
                             TransformersUserMessage(content=[p.model_dump(exclude_none=True) for p in item.content])
                         )
@@ -516,14 +581,16 @@ class Chat:
         items_to_compact = self.buffer[:end_idx]
         marker_ids = {entry.id for entry in items_to_compact if entry.id is not None}
         snapshot = self._to_responses_api_chat_locked(items=items_to_compact)
-        # Strip image parts so the summarizer doesn't have to handle them.
+        # Strip media parts so the summarizer doesn't have to handle them.
         for raw in snapshot:
             if not isinstance(raw, dict) or raw.get("role") != "user":
                 continue
             msg: dict[str, Any] = raw  # type: ignore[assignment]
             content = msg.get("content")
             if isinstance(content, list):
-                msg["content"] = [c for c in content if not (isinstance(c, dict) and c.get("type") == "input_image")]
+                msg["content"] = [
+                    c for c in content if not (isinstance(c, dict) and c.get("type") in {"input_image", "input_audio"})
+                ]
         return snapshot, marker_ids, n_turns
 
     def _maybe_trigger_compaction(self, compactor: CompactFn) -> None:
@@ -690,6 +757,14 @@ def make_user_message(text: str) -> RealtimeConversationItemUserMessage:
         type="message",
         role="user",
         content=[UserContent(type="input_text", text=text)],
+    )
+
+
+def make_user_audio_message(audio_b64: str) -> RealtimeConversationItemUserMessage:
+    return RealtimeConversationItemUserMessage(
+        type="message",
+        role="user",
+        content=[UserContent(type="input_audio", audio=audio_b64)],
     )
 
 

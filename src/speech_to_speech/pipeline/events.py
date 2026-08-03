@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
+import numpy as np
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PipelineEvent(BaseModel):
@@ -58,6 +59,23 @@ class TranscriptionCompletedEvent(PipelineEvent):
     type: Literal["transcription_completed"] = "transcription_completed"
     transcript: str
     language_code: Optional[str] = None
+    turn_id: str | None = None
+    turn_revision: int | None = None
+    speech_stopped_at_s: float | None = Field(default=None, exclude=True)
+
+
+# ── Direct audio events (AudioInputNotifier) ─────────────────────────
+
+
+class AudioInputCompletedEvent(PipelineEvent):
+    """Final VAD audio awaiting realtime response bookkeeping."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    type: Literal["audio_input_completed"] = "audio_input_completed"
+    audio: np.ndarray = Field(exclude=True)
+    audio_sample_rate: int = 16000
+    audio_duration_s: float = 0.0
     turn_id: str | None = None
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = Field(default=None, exclude=True)

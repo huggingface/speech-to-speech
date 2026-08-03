@@ -30,12 +30,14 @@ from openai.types.realtime.realtime_conversation_item_user_message import (
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
 from speech_to_speech.LLM.chat import (
+    AUDIO_INPUT_HISTORY_PLACEHOLDER,
     Chat,
     ChatItemError,
     CompactionResult,
     build_active_chat,
     make_assistant_message,
     make_system_message,
+    make_user_audio_message,
     make_user_message,
 )
 
@@ -140,6 +142,15 @@ class TestFactoryHelpers:
         assert len(msg.content) == 1
         assert msg.content[0].type == "input_text"
         assert msg.content[0].text == "hello"
+
+    def test_make_user_audio_message(self):
+        msg = make_user_audio_message("abc123")
+        assert isinstance(msg, RealtimeConversationItemUserMessage)
+        assert msg.role == "user"
+        assert msg.type == "message"
+        assert len(msg.content) == 1
+        assert msg.content[0].type == "input_audio"
+        assert msg.content[0].audio == "abc123"
 
     def test_make_assistant_message(self):
         msg = make_assistant_message("world")
@@ -369,6 +380,14 @@ class TestAddItem:
         assert len(chat.buffer[0].content) == 1
         assert chat.buffer[0].content[0].type == "input_text"
 
+    def test_user_message_keeps_audio_content_with_base64_audio(self):
+        chat = Chat(size=5)
+        msg = make_user_audio_message("abc123")
+        chat.add_item(msg)
+        assert len(chat.buffer[0].content) == 1
+        assert chat.buffer[0].content[0].type == "input_audio"
+        assert chat.buffer[0].content[0].audio == "abc123"
+
     def test_user_message_keeps_image_content(self):
         chat = Chat(size=5)
         msg = _user_msg_with_parts(("text", "look"), ("image", "http://img.png"))
@@ -532,6 +551,25 @@ class TestToResponseApiChat:
         assert content[0]["type"] == "input_text"
         assert content[1]["type"] == "input_image"
         assert content[1]["image_url"] == "http://img.png"
+
+    def test_user_audio_message_becomes_role_preserving_placeholder(self):
+        chat = Chat(size=5)
+        chat.add_item(make_user_audio_message("abc123"))
+
+        result = chat.to_responses_api_chat()
+
+        assert result == [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": AUDIO_INPUT_HISTORY_PLACEHOLDER,
+                    }
+                ],
+            }
+        ]
 
     def test_assistant_message(self):
         chat = Chat(size=5)
