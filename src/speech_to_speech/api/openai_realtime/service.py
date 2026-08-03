@@ -28,6 +28,7 @@ from openai.types.realtime import (
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
     SessionCreatedEvent,
+    SessionUpdatedEvent,
     SessionUpdateEvent,
 )
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
@@ -89,6 +90,7 @@ ClientEvent = Union[
 
 ServerEvent = Union[
     SessionCreatedEvent,
+    SessionUpdatedEvent,
     RealtimeErrorEvent,
     InputAudioBufferSpeechStartedEvent,
     InputAudioBufferSpeechStoppedEvent,
@@ -286,6 +288,9 @@ class RealtimeService:
 
     def build_session_created(self, conn_id: str) -> SessionCreatedEvent:
         return self.session.build_session_created(conn_id)
+
+    def build_session_updated(self, conn_id: str) -> SessionUpdatedEvent:
+        return self.session.build_session_updated(conn_id)
 
     def handle_session_update(self, conn_id: str, event: SessionUpdateEvent) -> Optional[RealtimeErrorEvent]:
         return self.session.handle_session_update(conn_id, event)

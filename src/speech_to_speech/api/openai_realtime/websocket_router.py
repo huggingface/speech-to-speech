@@ -385,6 +385,8 @@ async def _dispatch_client_event(
         err = service.handle_session_update(session_id, event)
         if err:
             await transport.send_events([err])
+        else:
+            await transport.send_events([service.build_session_updated(session_id)])
 
     elif isinstance(event, ConversationItemCreateEvent):
         events = service.handle_conversation_item_create(session_id, event)

@@ -32,6 +32,7 @@ from openai.types.realtime import (
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
     SessionCreatedEvent,
+    SessionUpdatedEvent,
     SessionUpdateEvent,
 )
 
@@ -118,6 +119,21 @@ class TestConnectionLifecycle:
         assert evt.session.tool_choice == "auto"
         assert evt.session.audio.output.voice == "echo"
         assert evt.session.audio.input.turn_detection.type == "server_vad"
+
+    def test_build_session_updated(self, service, conn_id, runtime_config):
+        service.handle_session_update(
+            conn_id,
+            SessionUpdateEvent(
+                type="session.update",
+                session={"type": "realtime", "instructions": "Be concise"},
+            ),
+        )
+
+        evt = service.build_session_updated(conn_id)
+        assert isinstance(evt, SessionUpdatedEvent)
+        assert evt.event_id.startswith("event_")
+        assert evt.session is not None
+        assert evt.session.instructions == "Be concise"
 
 
 # ===================================================================
