@@ -352,6 +352,36 @@ Two API backends are available, sharing the same `--responses_api_*` connection 
 - `--llm_backend responses-api` (default) targets `/v1/responses`.
 - `--llm_backend chat-completions` targets `/v1/chat/completions`.
 
+### Direct Audio Input (No STT)
+
+Use `--stt none --llm_backend chat-completions` to send each completed VAD
+audio segment directly to an audio-input model. Direct audio mode is not
+supported with `--llm_backend responses-api`: a model may accept audio through
+`/v1/chat/completions` without supporting `/v1/responses`, including OpenAI's
+[`gpt-audio-1.5`](https://developers.openai.com/api/docs/models/gpt-audio-1.5).
+
+You must explicitly set `--model_name` to a model that accepts audio: the
+default `gpt-5.4-mini` accepts text and image input, but not audio. Check the
+provider's model documentation and endpoint support before enabling this mode.
+For OpenAI, see the
+[GPT-5.4 mini model card](https://developers.openai.com/api/docs/models/gpt-5.4-mini)
+and [audio-input guide](https://developers.openai.com/api/docs/guides/audio#add-audio-to-your-existing-application).
+
+```bash
+speech-to-speech \
+    --mode realtime \
+    --stt none \
+    --llm_backend chat-completions \
+    --model_name "YOUR_AUDIO_CAPABLE_MODEL" \
+    --responses_api_base_url "https://provider.example/v1" \
+    --responses_api_api_key "$PROVIDER_API_KEY"
+```
+
+OpenAI-compatible servers represent input audio differently. Use
+`--responses_api_audio_content_type input_audio` (the default) for embedded
+WAV base64, or `--responses_api_audio_content_type audio_url` for a base64
+data URL.
+
 The examples below pair Parakeet TDT for local STT and Qwen3-TTS for local TTS with different LLM backends.
 
 ### Responses API Backend

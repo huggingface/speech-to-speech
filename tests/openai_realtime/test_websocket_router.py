@@ -12,6 +12,7 @@ import time
 from queue import Empty, Queue
 from threading import Event as ThreadingEvent
 
+import numpy as np
 import pytest
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketState
@@ -23,7 +24,12 @@ from speech_to_speech.api.openai_realtime.transports import WebSocketTransport
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
-from speech_to_speech.pipeline.events import AssistantTextEvent, SpeechStartedEvent, TokenUsageEvent
+from speech_to_speech.pipeline.events import (
+    AssistantTextEvent,
+    AudioInputCompletedEvent,
+    SpeechStartedEvent,
+    TokenUsageEvent,
+)
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
 
 # ---------------------------------------------------------------------------
@@ -747,6 +753,17 @@ class TestCleanup:
 
 
 class TestDrainRelease:
+    def test_barge_in_flush_preserves_completed_audio_input(self):
+        q: Queue = Queue()
+        audio_event = AudioInputCompletedEvent(audio=np.zeros(1600, dtype=np.float32), audio_duration_s=0.1)
+        q.put(AssistantTextEvent(text="stale"))
+        q.put(audio_event)
+
+        router_module._flush_queue(q, preserve=router_module._keep_user_text_event)
+
+        assert q.get_nowait() is audio_event
+        assert q.empty()
+
     def test_barge_in_flush_preserves_session_end(self):
         """The output_queue flush on barge-in must not swallow an in-flight
         SESSION_END — losing it would leave the release task waiting forever."""
