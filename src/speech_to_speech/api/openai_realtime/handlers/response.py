@@ -146,16 +146,17 @@ class ResponseHandler(RealtimeBaseHandler):
         ("response.done will also have the complete data we need to call our function").
         """
         st = self._state(conn_id)
+        # Nothing in a non-completed response finished generating, so its items
+        # must not claim otherwise - that includes the function calls.
         item_status: Literal["completed", "incomplete"] = "completed" if status == "completed" else "incomplete"
         output: list[RealtimeConversationItemAssistantMessage | RealtimeConversationItemFunctionCall] = []
 
         text = "".join(st.pending_output_text_parts)
         if text:
-            content_type = "output_audio" if response_wants_audio(st.current_response_params) else "output_text"
-            content = Content(
-                type=content_type,
-                **({"transcript": text} if content_type == "output_audio" else {"text": text}),
-            )
+            if response_wants_audio(st.current_response_params):
+                content = Content(type="output_audio", transcript=text)
+            else:
+                content = Content(type="output_text", text=text)
             output.append(
                 RealtimeConversationItemAssistantMessage(
                     type="message",
@@ -166,7 +167,9 @@ class ResponseHandler(RealtimeBaseHandler):
                 )
             )
 
-        output.extend(st.pending_function_calls)
+        # Status is only known now, at close, so it is stamped on here rather
+        # than when the call was collected mid-generation.
+        output.extend(call.model_copy(update={"status": item_status}) for call in st.pending_function_calls)
         return output
 
     # ── Public handlers ───────────────────────────
@@ -375,14 +378,16 @@ class ResponseHandler(RealtimeBaseHandler):
                         response_id=resp_id,
                     )
                 )
+                # Same item_id as the event above, so a client can correlate the
+                # streamed arguments with the item that lands in response.output.
+                # Status is stamped on at close, once the outcome is known.
                 st.pending_function_calls.append(
                     RealtimeConversationItemFunctionCall(
                         type="function_call",
-                        id=_generate_id("item"),
+                        id=item_id,
                         call_id=tool.call_id,
                         name=tool.name,
                         arguments=tool.arguments,
-                        status="completed",
                     )
                 )
                 output_idx += 1
