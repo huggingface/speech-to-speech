@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 from openai.types.realtime import (
+    RealtimeConversationItemFunctionCall,
     RealtimeResponse,
     ResponseAudioDoneEvent,
     ResponseAudioTranscriptDoneEvent,
@@ -14,6 +15,8 @@ from openai.types.realtime import (
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
 )
+from openai.types.realtime.conversation_item import RealtimeConversationItemAssistantMessage
+from openai.types.realtime.realtime_conversation_item_assistant_message import Content
 from openai.types.realtime.realtime_response import Audio, AudioOutput
 from openai.types.realtime.realtime_response_status import RealtimeResponseStatus
 from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
@@ -71,6 +74,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.response_pending = False
         st.current_response_params = None
         st.pending_output_text_parts = []
+        st.pending_function_calls = []
 
     def _start_item(self, conn_id: str) -> str:
         """Generate a new item ID, reset content index, and store it."""
@@ -125,12 +129,45 @@ class ResponseHandler(RealtimeBaseHandler):
             audio=Audio(output=AudioOutput(voice=str(voice) if voice else None)),  # type: ignore[arg-type]
             conversation_id=conversation_id,
             metadata=metadata,
+            output=self._build_output_items(conn_id, status),
             usage=RealtimeResponseUsage(
                 input_tokens=st.response_usage.input_tokens,
                 output_tokens=st.response_usage.output_tokens,
                 total_tokens=st.response_usage.input_tokens + st.response_usage.output_tokens,
             ),
         )
+
+    def _build_output_items(
+        self, conn_id: str, status: _ResponseStatus
+    ) -> list[RealtimeConversationItemAssistantMessage | RealtimeConversationItemFunctionCall]:
+        """Build response.output: the assistant message (if any text/audio was
+        generated) followed by any function calls, per the OpenAI Realtime
+        protocol - see https://platform.openai.com/docs/api-reference/realtime-server-events/session/updated
+        ("response.done will also have the complete data we need to call our function").
+        """
+        st = self._state(conn_id)
+        item_status: Literal["completed", "incomplete"] = "completed" if status == "completed" else "incomplete"
+        output: list[RealtimeConversationItemAssistantMessage | RealtimeConversationItemFunctionCall] = []
+
+        text = "".join(st.pending_output_text_parts)
+        if text:
+            content_type = "output_audio" if response_wants_audio(st.current_response_params) else "output_text"
+            content = Content(
+                type=content_type,
+                **({"transcript": text} if content_type == "output_audio" else {"text": text}),
+            )
+            output.append(
+                RealtimeConversationItemAssistantMessage(
+                    type="message",
+                    role="assistant",
+                    id=st.last_item_id,
+                    status=item_status,
+                    content=[content],
+                )
+            )
+
+        output.extend(st.pending_function_calls)
+        return output
 
     # ── Public handlers ───────────────────────────
 
@@ -292,6 +329,9 @@ class ResponseHandler(RealtimeBaseHandler):
         output_idx = 0
         if event.text:
             if response_wants_audio(st.current_response_params):
+                # Accumulated (not just streamed) so response.done's output can
+                # carry the full transcript as an assistant message item.
+                st.pending_output_text_parts.append(event.text)
                 events.append(
                     ResponseAudioTranscriptDoneEvent(
                         type="response.output_audio_transcript.done",
@@ -333,6 +373,16 @@ class ResponseHandler(RealtimeBaseHandler):
                         item_id=item_id,
                         output_index=output_idx,
                         response_id=resp_id,
+                    )
+                )
+                st.pending_function_calls.append(
+                    RealtimeConversationItemFunctionCall(
+                        type="function_call",
+                        id=_generate_id("item"),
+                        call_id=tool.call_id,
+                        name=tool.name,
+                        arguments=tool.arguments,
+                        status="completed",
                     )
                 )
                 output_idx += 1
