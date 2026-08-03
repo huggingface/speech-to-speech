@@ -130,6 +130,34 @@ def rename_args(args: Any, prefix: str) -> None:
     args.__dict__["gen_kwargs"] = gen_kwargs
 
 
+def build_llm_proxy_config(
+    module_kwargs: ModuleArguments,
+    responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
+) -> Any:
+    """Proxy upstream settings, read from the same fields the pipeline LM uses.
+
+    Both remote backends read their connection settings from the responses-api
+    argument class (see get_llm_handler), so the proxy reuses the upstream URL,
+    key, and model the pipeline LM runs with. Must be called after
+    prepare_all_args(): rename_args() has popped the raw ``responses_api_*``
+    fields into their handler names (``base_url``, ``api_key``), and reading
+    the raw names after that silently returns the dataclass class defaults
+    (None) — which pointed the proxy at the OpenAI default upstream with no
+    key, whatever the flags said. Indexing vars() keeps that failure loud.
+    """
+    from speech_to_speech.api.openai_realtime.llm_proxy import LLMProxyConfig
+
+    lm_vars = vars(responses_api_language_model_handler_kwargs)
+    return LLMProxyConfig(
+        enabled=module_kwargs.enable_llm_proxy,
+        llm_backend=module_kwargs.llm_backend,
+        upstream_base_url=lm_vars["base_url"],
+        upstream_api_key=lm_vars["api_key"],
+        model_name=lm_vars["model_name"],
+        connect_timeout_s=module_kwargs.llm_proxy_connect_timeout_s,
+    )
+
+
 def parse_arguments() -> ParsedArguments:
     # Pre-parse to determine which LM backend is selected, so only one of the
     # mutually exclusive LM argument classes is registered with HfArgumentParser
@@ -289,6 +317,8 @@ def prepare_module_args(module_kwargs: ModuleArguments, *handler_kwargs: Any) ->
     optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs, *handler_kwargs)
     if module_kwargs.tts is None:
         module_kwargs.tts = "qwen3"
+    if module_kwargs.stt == "none" and module_kwargs.llm_backend != "chat-completions":
+        raise ValueError("--stt none requires --llm_backend chat-completions for audio-input LLM requests.")
     if platform == "darwin":
         check_mac_settings(module_kwargs)
     overwrite_device_argument(module_kwargs.device, *handler_kwargs)
@@ -393,7 +423,7 @@ def _build_pipeline_handlers(
     openai_tts_handler_kwargs: OpenAICompatibleTTSHandlerArguments,
     speculative_turns: SpeculativeTurnTracker | None = None,
 ) -> list[Any]:
-    """Build the shared handler chain: VAD → STT → TranscriptionNotifier → LM → LMOutputProcessor → TTS.
+    """Build the shared handler chain: VAD → STT/AudioInput → LM → LMOutputProcessor → TTS.
 
     Callers own the queues, events, and any per-mode mutations to handler kwargs (cancel_scope,
     text_output_queue, live transcription flags). `transcription_notifier_setup` differs by mode:
@@ -409,13 +439,7 @@ def _build_pipeline_handlers(
         setup_kwargs=vars(vad_handler_kwargs),
     )
 
-    transcription_notifier = TranscriptionNotifier(
-        stop_event,
-        queue_in=stt_output_queue,
-        queue_out=text_prompt_queue,  # type: ignore[arg-type]
-        setup_kwargs=transcription_notifier_setup,
-    )
-
+    speech_input_handlers: list[Any]
     admission_lease = None
     if module_kwargs.stt == "openai":
         from speech_to_speech.STT.endpoint_admission import (
@@ -437,20 +461,46 @@ def _build_pipeline_handlers(
         )
 
     try:
-        stt = get_stt_handler(
-            module_kwargs,
-            stop_event,
-            spoken_prompt_queue,
-            stt_output_queue,
-            speculative_turns,
-            whisper_stt_handler_kwargs,
-            faster_whisper_stt_handler_kwargs,
-            paraformer_stt_handler_kwargs,
-            mlx_audio_whisper_stt_handler_kwargs,
-            parakeet_tdt_stt_handler_kwargs,
-            openai_stt_handler_kwargs,
-            admission_lease,
-        )
+        if module_kwargs.stt == "none":
+            from speech_to_speech.LLM.audio_input_notifier import AudioInputNotifier
+
+            speech_input_handlers = [
+                AudioInputNotifier(
+                    stop_event,
+                    queue_in=spoken_prompt_queue,
+                    queue_out=text_prompt_queue,
+                    setup_kwargs={
+                        "runtime_config": transcription_notifier_setup.get("runtime_config"),
+                        "should_listen": should_listen,
+                        "sample_rate": vad_handler_kwargs.sample_rate,
+                        "speculative_turns": speculative_turns,
+                        "text_output_queue": text_output_queue,
+                    },
+                )
+            ]
+        else:
+            transcription_notifier = TranscriptionNotifier(
+                stop_event,
+                queue_in=stt_output_queue,
+                queue_out=text_prompt_queue,  # type: ignore[arg-type]
+                setup_kwargs=transcription_notifier_setup,
+            )
+
+            stt = get_stt_handler(
+                module_kwargs,
+                stop_event,
+                spoken_prompt_queue,
+                stt_output_queue,
+                speculative_turns,
+                whisper_stt_handler_kwargs,
+                faster_whisper_stt_handler_kwargs,
+                paraformer_stt_handler_kwargs,
+                mlx_audio_whisper_stt_handler_kwargs,
+                parakeet_tdt_stt_handler_kwargs,
+                openai_stt_handler_kwargs,
+                admission_lease,
+            )
+            speech_input_handlers = [stt, transcription_notifier]
     except Exception:
         if admission_lease is not None:
             admission_lease.release()
@@ -487,7 +537,7 @@ def _build_pipeline_handlers(
         text_output_queue,
     )
 
-    return [vad, stt, transcription_notifier, lm, lm_processor, tts]
+    return [vad, *speech_input_handlers, lm, lm_processor, tts]
 
 
 def _build_realtime_pipeline_unit(
@@ -662,7 +712,7 @@ def build_pipeline(
     lm_response_queue = queues_and_events["lm_response_queue"]
     lm_processed_queue = queues_and_events["lm_processed_queue"]
     text_output_queue = (
-        None  # Only set for websocket/realtime modes; kept None otherwise to avoid unbounded queue growth
+        None  # Only set for raw WebSocket and Realtime modes; kept None otherwise to avoid unbounded queue growth
     )
 
     comms_handlers: list[Any] = []
@@ -676,7 +726,7 @@ def build_pipeline(
         )
         comms_handlers = [local_audio_streamer]
         should_listen.set()
-    elif module_kwargs.mode == "websocket":
+    elif module_kwargs.mode == "raw-websocket":
         from speech_to_speech.connections.websocket_streamer import WebSocketStreamer
 
         text_output_queue = queues_and_events["text_output_queue"]
@@ -718,11 +768,14 @@ def build_pipeline(
             for i in range(pool_size)
         ]
 
+        llm_proxy_config = build_llm_proxy_config(module_kwargs, responses_api_language_model_handler_kwargs)
+
         realtime_server = RealtimeServer(
             stop_event=stop_event,
             pool=pool,
             host=websocket_streamer_kwargs.ws_host,
             port=websocket_streamer_kwargs.ws_port,
+            llm_proxy_config=llm_proxy_config,
         )
 
         all_handlers: list[Any] = [realtime_server]
@@ -920,7 +973,7 @@ def get_stt_handler(
         )
     else:
         raise ValueError(
-            "The STT should be either whisper, whisper-mlx, mlx-audio-whisper, faster-whisper, "
+            "The STT should be either none, whisper, whisper-mlx, mlx-audio-whisper, faster-whisper, "
             "parakeet-tdt, paraformer, or openai."
         )
 

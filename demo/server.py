@@ -104,6 +104,13 @@ def _parse_ice_servers(raw: str) -> list:
 
 
 RTC_ICE_SERVERS = _parse_ice_servers(os.environ.get("RTC_ICE_SERVERS", ""))
+DEFAULT_STARTUP_GREETING = (
+    "Start the conversation now with a brief, spontaneous greeting in character. "
+    "Keep it to one sentence, invite the user in naturally, and vary the wording each time."
+)
+# Exposed to the browser through /api/config. Set an empty value to disable the
+# automatic greeting without changing the client bundle.
+STARTUP_GREETING = os.environ.get("STARTUP_GREETING", DEFAULT_STARTUP_GREETING).strip()
 
 
 def _webrtc_calls_url(s2s_url: str) -> str:
@@ -125,6 +132,7 @@ SERPER_URL = "https://google.serper.dev/search"
 # Cap results so the tool output stays small enough to feed back to the model.
 MAX_RESULTS = 5
 HERE = os.path.dirname(os.path.abspath(__file__))
+LB_USER_AGENT = "speech-to-speech-demo"
 
 app = FastAPI(title="s2s-demo")
 
@@ -176,6 +184,7 @@ def config():
         # offered exactly when that URL exists.
         "rtc": bool(SPEECH_TO_SPEECH_URL),
         "iceServers": RTC_ICE_SERVERS,
+        "startupGreeting": STARTUP_GREETING,
         "auth": AUTH_ENABLED,
     }
 
@@ -339,7 +348,11 @@ async def session(request: Request):
     url = f"{LOAD_BALANCER_URL.rstrip('/')}/session"
     try:
         async with httpx.AsyncClient(timeout=15.0) as http:
-            lb = await http.post(url, headers={"Content-Type": "application/json"}, content="{}")
+            lb = await http.post(
+                url,
+                headers=_load_balancer_headers(request),
+                content="{}",
+            )
     except httpx.RequestError as exc:
         logger.warning("Load balancer unreachable: %r", exc)
         raise HTTPException(status_code=502, detail="Speech service unreachable.")
@@ -373,6 +386,23 @@ async def session(request: Request):
 
     # A slot was free: reserve the first chunk now and return the grant.
     return await _finalize_grant(data, keys, tier, tracked, set_cookie)
+
+
+def _load_balancer_headers(request: Request) -> dict[str, str]:
+    """Headers for the server-to-server session allocation request.
+
+    The dedicated authorization header matches the Reachy Mini client and lets
+    the load balancer validate and attribute an optional HF user token without
+    exposing it to browser JavaScript. Anonymous visitors send no credential.
+    """
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": LB_USER_AGENT,
+    }
+    token = auth.current_access_token(request)
+    if token:
+        headers["X-Reachy-Mini-Authorization"] = f"Bearer {token}"
+    return headers
 
 
 @app.get("/api/queue/{queue_id}")

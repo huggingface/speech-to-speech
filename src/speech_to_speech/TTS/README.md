@@ -89,6 +89,10 @@ python s2s_pipeline.py \
 
 Behavior:
 - Uses `faster-qwen3-tts` on non-macOS platforms, defaulting to the GGML backend. Pass `--qwen3_tts_backend torch` to use the CUDA-graphs backend instead.
+- Supports GGML quantization selection via `--qwen3_tts_ggml_quantization BF16|Q8_0|Q4_K_M|F32`.
+- Accepts a local talker/codec GGUF pair via `--qwen3_tts_gguf_talker_path` and `--qwen3_tts_gguf_codec_path`.
+- Automatically caches `.spk` and `.rvq` voice references when GGML voice cloning uses raw reference audio. Set `--qwen3_tts_ref_cache_dir` to override the default `~/.cache/faster-qwen3-tts/qwentts_refs` location.
+- Reuses precomputed GGML references via `--qwen3_tts_ref_spk` and the optional `--qwen3_tts_ref_rvq`.
 - Uses `mlx-audio` on Apple Silicon and auto-maps `Qwen/...` model IDs to `mlx-community/...`, defaulting to the `6bit` MLX variant unless the model name already pins a suffix.
 - Supports MLX quantization overrides on Apple Silicon via `--qwen3_tts_mlx_quantization bf16|4bit|6bit|8bit`.
 - Keeps the existing voice-clone/custom-voice/voice-design handler flow intact.
@@ -105,6 +109,55 @@ pip install speech-to-speech
 ```
 
 Available wheelhouse directories include `cu124`, `cu128`, `cu130`, and `cpu`.
+
+Select a quantized GGUF from the public model resolver:
+
+```bash
+python s2s_pipeline.py \
+  --tts qwen3 \
+  --qwen3_tts_backend ggml \
+  --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+  --qwen3_tts_ggml_quantization Q4_K_M \
+  --qwen3_tts_speaker Aiden
+```
+
+Load local GGUF files by providing both the talker and codec paths. Keep the model name aligned with the local talker's model type so the handler selects the correct generation mode:
+
+```bash
+python s2s_pipeline.py \
+  --tts qwen3 \
+  --qwen3_tts_backend ggml \
+  --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign \
+  --qwen3_tts_gguf_talker_path /models/qwen-talker-1.7b-voicedesign-Q4_K_M.gguf \
+  --qwen3_tts_gguf_codec_path /models/qwen-tokenizer-12hz-BF16.gguf \
+  --qwen3_tts_instruct "Warm, confident narrator"
+```
+
+For GGML voice cloning, a raw reference is cached on its first use:
+
+```bash
+python s2s_pipeline.py \
+  --tts qwen3 \
+  --qwen3_tts_backend ggml \
+  --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-Base \
+  --qwen3_tts_ref_audio /voices/freeman.wav \
+  --qwen3_tts_ref_text "The transcript for the reference audio." \
+  --qwen3_tts_ref_cache_dir /voices/cache
+```
+
+Automatic cache entries use the same SHA-256 cache key for their `.spk`, `.rvq`, and `.json` filenames. Inspect the cache directory for the matching key and replace `CACHE_KEY` below with that filename stem. You can then pass its `.spk` by itself for speaker-only conditioning, or pair it with the corresponding `.rvq` codes and transcript for ICL conditioning:
+
+```bash
+python s2s_pipeline.py \
+  --tts qwen3 \
+  --qwen3_tts_backend ggml \
+  --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-Base \
+  --qwen3_tts_ref_spk /voices/cache/CACHE_KEY.spk \
+  --qwen3_tts_ref_rvq /voices/cache/CACHE_KEY.rvq \
+  --qwen3_tts_ref_text "The transcript for the reference audio."
+```
+
+Raw `--qwen3_tts_ref_audio` and cached `--qwen3_tts_ref_spk`/`--qwen3_tts_ref_rvq` inputs are mutually exclusive. `.rvq` input requires both `.spk` and reference text.
 
 Example for Apple Silicon using the default 6-bit MLX variant:
 

@@ -8,10 +8,11 @@ class ModuleArguments:
         default=None,
         metadata={"help": "If specified, overrides the device for all handlers."},
     )
-    mode: Optional[Literal["local", "socket", "websocket", "realtime"]] = field(
+    mode: Optional[Literal["local", "socket", "raw-websocket", "realtime"]] = field(
         default="realtime",
         metadata={
-            "help": "The mode to run the pipeline in. Either 'local', 'socket', 'websocket', or 'realtime'. Default is 'realtime'."
+            "help": "The mode to run the pipeline in. Either 'local', 'socket', 'raw-websocket', or "
+            "'realtime'. Default is 'realtime'."
         },
     )
     local_mac_optimal_settings: bool = field(
@@ -22,6 +23,7 @@ class ModuleArguments:
     )
     stt: Optional[
         Literal[
+            "none",
             "whisper",
             "whisper-mlx",
             "mlx-audio-whisper",
@@ -33,8 +35,11 @@ class ModuleArguments:
     ] = field(
         default="parakeet-tdt",
         metadata={
-            "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'mlx-audio-whisper', "
-            "'faster-whisper', 'parakeet-tdt', 'paraformer', or 'openai'. Default is 'parakeet-tdt'."
+            "help": "The STT to use. Use 'none' to send VAD audio directly to an audio-input LLM. "
+            "This requires --llm_backend chat-completions and an explicitly selected audio-capable "
+            "API model with --model_name. "
+            "Otherwise choose 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', "
+            "'parakeet-tdt', 'paraformer', or 'openai'. Default is 'parakeet-tdt'."
         },
     )
     llm_backend: Optional[Literal["transformers", "mlx-lm", "responses-api", "chat-completions"]] = field(
@@ -71,12 +76,28 @@ class ModuleArguments:
             "help": "Minimum silence duration (ms) before ending speech when live transcription is enabled (default: 500ms)"
         },
     )
+    enable_llm_proxy: bool = field(
+        default=False,
+        metadata={
+            "help": "Expose the configured remote LLM (--llm_backend chat-completions or responses-api) as an "
+            "OpenAI-compatible HTTP endpoint on the realtime server. The server performs no authentication of "
+            "its own: enable it only on a trusted network or behind a gateway that owns access control. Off by "
+            "default. Only valid for --mode realtime."
+        },
+    )
+    llm_proxy_connect_timeout_s: float = field(
+        default=10.0,
+        metadata={
+            "help": "Connect timeout in seconds for LLM proxy requests to the upstream provider. Reads have no "
+            "timeout (generation may take minutes). Default is 10.0."
+        },
+    )
     num_pipelines: int = field(
         default=1,
         metadata={
             "help": "Number of isolated realtime pipelines in the pool. One uvicorn server listens on "
-            "--ws_port and routes each incoming websocket to the next free pipeline (each has its own "
-            "VAD/STT/LM/TTS handlers and conversation state). Max concurrent websocket sessions equals "
+            "--ws_port and routes each incoming WebSocket or WebRTC session to the next free pipeline (each "
+            "has its own VAD/STT/LM/TTS handlers and conversation state). Max concurrent Realtime sessions equals "
             "num_pipelines; further connections are rejected. Only valid for --mode realtime. Default is 1."
         },
     )

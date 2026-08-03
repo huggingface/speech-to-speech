@@ -19,6 +19,7 @@ from openai.types.realtime import (
     SessionUpdateEvent,
 )
 
+from speech_to_speech.api.openai_realtime.llm_proxy import LLMProxyConfig, mount_llm_proxy
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit, SessionState
 from speech_to_speech.api.openai_realtime.service import (
     PIPELINE_SAMPLE_RATE,
@@ -32,6 +33,7 @@ from speech_to_speech.api.openai_realtime.transports import (
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
+    AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     PipelineEvent,
     ResponseFailedEvent,
@@ -88,7 +90,13 @@ def _keep_audio_sentinel(item: Any) -> bool:
 def _keep_user_text_event(item: Any) -> bool:
     return isinstance(
         item,
-        (SpeechStoppedEvent, PartialTranscriptionEvent, TranscriptionCompletedEvent, TokenUsageEvent),
+        (
+            SpeechStoppedEvent,
+            PartialTranscriptionEvent,
+            TranscriptionCompletedEvent,
+            AudioInputCompletedEvent,
+            TokenUsageEvent,
+        ),
     )
 
 
@@ -421,6 +429,8 @@ async def _dispatch_client_event(
         err = service.handle_session_update(session_id, event)
         if err:
             await transport.send_events([err])
+        else:
+            await transport.send_events([service.build_session_updated(session_id)])
 
     elif isinstance(event, ConversationItemCreateEvent):
         events = service.handle_conversation_item_create(session_id, event)
@@ -447,7 +457,11 @@ async def _dispatch_client_event(
         unit.response_playing.clear()
 
 
-def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
+def create_app(
+    pool: list[PipelineUnit],
+    stop_event: ThreadingEvent,
+    llm_proxy_config: LLMProxyConfig | None = None,
+) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # One send loop per pipeline unit; each polls its own queues and forwards
@@ -470,6 +484,8 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
                     pass
 
     app = FastAPI(lifespan=lifespan)
+
+    llm_proxy_usage = mount_llm_proxy(app, llm_proxy_config)
 
     def _claim_unit(transport: SessionTransport | None) -> PipelineUnit | None:
         """Atomically (between asyncio yield points) reserve the first idle unit.
@@ -562,6 +578,9 @@ def create_app(pool: list[PipelineUnit], stop_event: ThreadingEvent) -> FastAPI:
         total: dict[str, Any] = {}
         for unit in pool:
             _merge(total, unit.service.get_usage())
+        # Additive section: proxy traffic is app-level, not per-unit, so it
+        # lands after the per-unit merge and never collides with unit keys.
+        total["llm_proxy"] = llm_proxy_usage.model_dump()
         return total
 
     @app.get("/v1/pool")

@@ -11,9 +11,6 @@ from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 console = Console()
@@ -32,7 +29,7 @@ class ParaformerSTTHandler(BaseSTTHandler):
         device: str = "cuda",
         gen_kwargs: dict[str, Any] = {},
     ) -> None:
-        print(model_name)
+        logger.info("Loading Paraformer STT model: %s", model_name)
         if len(model_name.split("/")) > 1:
             model_name = model_name.split("/")[-1]
         self.device = device

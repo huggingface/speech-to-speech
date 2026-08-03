@@ -49,6 +49,8 @@ const STORAGE_KEYS = {
   // "ws" | "webrtc". Not under the historical "s2s.ws." prefix — it selects
   // between the transports rather than configuring the WS one.
   transport: "s2s.transport",
+  audioInputId: "s2s.audio.inputId",
+  audioOutputId: "s2s.audio.outputId",
 };
 
 // ── Noise gate ──────────────────────────────────────────────────────────────
@@ -124,6 +126,8 @@ function loadSettings() {
     noiseGate: loadGateThreshold(),
     // Default WebSocket: the proven path stays the first-run experience.
     transport: localStorage.getItem(STORAGE_KEYS.transport) === "webrtc" ? "webrtc" : "ws",
+    audioInputId: localStorage.getItem(STORAGE_KEYS.audioInputId) || "",
+    audioOutputId: localStorage.getItem(STORAGE_KEYS.audioOutputId) || "",
   };
 }
 
@@ -147,6 +151,8 @@ function saveSettings(s) {
   localStorage.setItem(STORAGE_KEYS.instructions, s.instructions);
   localStorage.setItem(STORAGE_KEYS.noiseGate, String(s.noiseGate));
   localStorage.setItem(STORAGE_KEYS.transport, s.transport);
+  localStorage.setItem(STORAGE_KEYS.audioInputId, s.audioInputId || "");
+  localStorage.setItem(STORAGE_KEYS.audioOutputId, s.audioOutputId || "");
 }
 
 /** @returns {{ web_search: boolean, camera_snapshot: boolean }} */
@@ -269,6 +275,12 @@ const transportHint = $("#transport-hint");
 const gateField = $("#gate-field");
 /** @type {HTMLSelectElement} */
 const inputVoice = $("#voice");
+/** @type {HTMLSelectElement} */
+const inputAudioInput = $("#audio-input");
+/** @type {HTMLSelectElement} */
+const inputAudioOutput = $("#audio-output");
+/** @type {HTMLElement} */
+const audioOutputHint = $("#audio-output-hint");
 /** @type {HTMLTextAreaElement} */
 const inputInstructions = $("#instructions");
 /** @type {HTMLInputElement} */
@@ -317,6 +329,9 @@ let rtcAvailable = false;
 /** @type {RTCIceServer[]} STUN/TURN servers for the browser peer connection
  * (deploy-provided via RTC_ICE_SERVERS; empty -> host candidates only). */
 let iceServers = [];
+// Optional hidden user prompt supplied by the deployment. When non-empty, the
+// client asks the model to greet once after the initial session configuration.
+let startupGreeting = "";
 // Transport of the LIVE (or starting) conversation — as opposed to
 // `settings.transport`, which is what the NEXT one will use. Drives the
 // camera-snapshot size budget while a call is running.
@@ -363,7 +378,13 @@ function pushToolsToSession() {
 // ── Chat view ───────────────────────────────────────────────────────────────
 // Owns the history panel, the ephemeral bubbles, and all transcript/tool
 // streaming state. The client's events are forwarded to its on* methods.
-const chat = new ChatView();
+let userAudioReplaying = false;
+const chat = new ChatView({
+  onUserAudioPlaybackChange(playing) {
+    userAudioReplaying = playing;
+    syncMicMuteState();
+  },
+});
 
 // ── Account / limiter ─────────────────────────────────────────────────────
 // Login chip + daily-limit modal (inert unless the deploy is in LB mode). The
@@ -383,6 +404,15 @@ let client = null;
 /** @type {MediaStream | null} */
 let micStream = null;
 let micMuted = false;
+
+/** Apply both the user's mute choice and the temporary replay guard. */
+function syncMicMuteState() {
+  const muted = micMuted || userAudioReplaying;
+  for (const track of micStream?.getAudioTracks() ?? []) {
+    track.enabled = !muted;
+  }
+  client?.setMuted(muted);
+}
 
 /** @param {AppState} next */
 function setState(next) {
@@ -450,6 +480,7 @@ function openSettings() {
   inputInstructions.value = settings.instructions;
   syncGateUi();
   updateRestartAvailability();
+  void refreshAudioDeviceLists();
   settingsModal.showModal();
 }
 
@@ -905,6 +936,9 @@ async function fetchConfig() {
       // /api/calls proxy refuses to forward anywhere else).
       rtcAvailable = !!json.rtc;
       iceServers = Array.isArray(json.iceServers) ? json.iceServers : [];
+      startupGreeting = typeof json.startupGreeting === "string"
+        ? json.startupGreeting.trim()
+        : "";
       // The conversation-time limiter rides on the LB being present.
       limiterOn = lbMode;
     }
@@ -995,6 +1029,8 @@ function readSettingsFromForm() {
         ? (inputTransport.value === "webrtc" ? "webrtc" : "ws")
         : settings.transport
     ),
+    audioInputId: inputAudioInput.value || "",
+    audioOutputId: inputAudioOutput.value || "",
   };
 }
 
@@ -1082,9 +1118,14 @@ settingsForm.addEventListener("submit", (event) => {
   saveSettings(settings);
 
   // Voice + instructions can apply to a live session without reconnecting; a
-  // changed connection URL only takes effect on the next restart.
+  // changed connection URL only takes effect on the next restart. Speaker
+  // output can switch live when the browser supports AudioContext.setSinkId;
+  // mic device changes need a Restart (new getUserMedia stream).
   if (client && LIVE_STATES.has(currentState)) {
     client.updateSession({ voice: settings.voice, instructions: effectiveInstructions() });
+    if (typeof client.setAudioOutputDevice === "function") {
+      void client.setAudioOutputDevice(settings.audioOutputId);
+    }
   }
 });
 
@@ -1168,10 +1209,7 @@ async function handleStartError(err) {
 micBtn.addEventListener("click", () => {
   if (!micStream || !client) return;
   micMuted = !micMuted;
-  for (const track of micStream.getAudioTracks()) {
-    track.enabled = !micMuted;
-  }
-  client.setMuted(micMuted);
+  syncMicMuteState();
   micBtn.classList.toggle("muted", micMuted);
   micBtn.setAttribute("aria-label", micMuted ? "Unmute" : "Mute");
   micBtn.title = micMuted ? "Unmute" : "Mute";
@@ -1194,16 +1232,112 @@ joinQueueBtn.addEventListener("click", () => {
   if (client) client.join();
 });
 
-const MIC_CONSTRAINTS = {
-  audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+const MIC_CONSTRAINTS_BASE = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
 };
+
+/** @returns {MediaStreamConstraints} */
+function micConstraints() {
+  /** @type {MediaTrackConstraints} */
+  const audio = { ...MIC_CONSTRAINTS_BASE };
+  if (settings.audioInputId) {
+    // ideal (not exact): if the saved device was unplugged, fall back quietly.
+    audio.deviceId = { ideal: settings.audioInputId };
+  }
+  return { audio };
+}
+
+/** True when Web Audio can route playback to a chosen output device. */
+function supportsAudioOutputSelection() {
+  const Ctx = window.AudioContext || /** @type {any} */ (window).webkitAudioContext;
+  return typeof Ctx?.prototype?.setSinkId === "function";
+}
+
+/**
+ * Rebuild the mic/speaker <select>s from enumerateDevices. Labels are blank
+ * until mic permission has been granted at least once.
+ */
+async function refreshAudioDeviceLists() {
+  const canPickOutput = supportsAudioOutputSelection();
+  inputAudioOutput.disabled = !canPickOutput;
+  audioOutputHint.textContent = canPickOutput
+    ? "Where assistant audio plays. Can change live while connected."
+    : "Speaker selection needs a browser with AudioContext.setSinkId (Chrome/Edge).";
+
+  /** @type {MediaDeviceInfo[]} */
+  let devices = [];
+  try {
+    devices = await navigator.mediaDevices.enumerateDevices();
+  } catch (err) {
+    console.warn("[main] enumerateDevices failed:", err);
+  }
+
+  const inputs = devices.filter((d) => d.kind === "audioinput");
+  const outputs = devices.filter((d) => d.kind === "audiooutput");
+  const labelsReady = devices.some((d) => d.label);
+
+  fillDeviceSelect(inputAudioInput, inputs, settings.audioInputId, "Microphone");
+  fillDeviceSelect(inputAudioOutput, outputs, settings.audioOutputId, "Speaker");
+
+  if (!labelsReady) {
+    // Permission unlocks real device names; keep it quiet — user can tap Start
+    // or we unlock when they already connected once this session.
+    const hint = inputAudioInput.parentElement?.querySelector("small");
+    if (hint) {
+      hint.textContent =
+        "Allow microphone access (tap Start once) to see device names. Mic changes apply on Restart.";
+    }
+  } else {
+    const hint = inputAudioInput.parentElement?.querySelector("small");
+    if (hint) hint.textContent = "Applies on the next conversation (or Restart).";
+  }
+}
+
+/**
+ * @param {HTMLSelectElement} select
+ * @param {MediaDeviceInfo[]} devices
+ * @param {string} selectedId
+ * @param {string} fallbackLabel
+ */
+function fillDeviceSelect(select, devices, selectedId, fallbackLabel) {
+  const prev = selectedId || select.value || "";
+  select.replaceChildren();
+  const def = document.createElement("option");
+  def.value = "";
+  def.textContent = "System default";
+  select.appendChild(def);
+  devices.forEach((d, i) => {
+    const opt = document.createElement("option");
+    opt.value = d.deviceId;
+    opt.textContent = d.label || `${fallbackLabel} ${i + 1}`;
+    select.appendChild(opt);
+  });
+  // Keep a saved id even if it isn't currently listed (unplugged); browser
+  // will fall back via ideal constraints / setSinkId errors.
+  if (prev && ![...select.options].some((o) => o.value === prev)) {
+    const missing = document.createElement("option");
+    missing.value = prev;
+    missing.textContent = `${fallbackLabel} (saved, not found)`;
+    select.appendChild(missing);
+  }
+  select.value = prev;
+  if (select.value !== prev) select.value = "";
+}
+
+if (navigator.mediaDevices?.addEventListener) {
+  navigator.mediaDevices.addEventListener("devicechange", () => {
+    if (settingsModal.open) void refreshAudioDeviceLists();
+  });
+}
 
 /** Prompt for mic permission up front, then immediately release the tracks so no
  *  recording indicator lingers during a queue wait. Throws a friendly error if the
  *  user denies. */
 async function primeMicPermission() {
   try {
-    const s = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
+    const s = await navigator.mediaDevices.getUserMedia(micConstraints());
     for (const track of s.getTracks()) track.stop();
   } catch (err) {
     throw new Error(
@@ -1215,7 +1349,7 @@ async function primeMicPermission() {
 /** Acquire the live capture stream once a slot is granted. Permission was primed
  *  in the tap gesture, so this is silent. Stored module-side for mute + teardown. */
 async function acquireMicStream() {
-  micStream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
+  micStream = await navigator.mediaDevices.getUserMedia(micConstraints());
   return micStream;
 }
 
@@ -1302,8 +1436,10 @@ async function doStart(audioContext = null) {
   const common = {
     voice: settings.voice,
     instructions: effectiveInstructions(),
+    startupGreeting,
     acquireMic: acquireMicStream,
     tools: activeToolDefs(),
+    audioOutputId: settings.audioOutputId || "",
     ...(audioContext ? { audioContext } : {}),
   };
   const c = target === null
@@ -1318,6 +1454,7 @@ async function doStart(audioContext = null) {
         ...common,
       });
   client = c;
+  c.setMuted(micMuted || userAudioReplaying);
 
   c.addEventListener("queue", (e) => {
     const { position, queueId } = /** @type {CustomEvent<{ position: number; queueId: string }>} */ (e).detail;
@@ -1341,10 +1478,23 @@ async function doStart(audioContext = null) {
   c.addEventListener("status", (e) => {
     const detail = /** @type {CustomEvent<{ status: string }>} */ (e).detail;
     onClientStatus(detail.status);
+    if (detail.status === "ai-speaking") chat.onAssistantActivity();
   });
   c.addEventListener("transcript", (e) => {
     const d = /** @type {CustomEvent<{ role: "user" | "assistant"; text: string; partial: boolean; itemId?: string; responseId?: string }>} */ (e).detail;
     chat.onTranscript(d);
+  });
+  c.addEventListener("user-turn-started", (e) => {
+    const detail = /** @type {CustomEvent<{ itemId?: string }>} */ (e).detail;
+    chat.onUserTurnStarted(detail);
+  });
+  c.addEventListener("user-turn-stopped", (e) => {
+    const detail = /** @type {CustomEvent<{ itemId?: string }>} */ (e).detail;
+    chat.onUserTurnStopped(detail);
+  });
+  c.addEventListener("user-audio", (e) => {
+    const detail = /** @type {CustomEvent<{ itemId?: string; audio: Blob; durationMs?: number; truncated?: boolean }>} */ (e).detail;
+    chat.onUserAudio(detail);
   });
 
   c.addEventListener("response-finished", (e) => {

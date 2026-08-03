@@ -60,6 +60,12 @@ def _validate_package_defaults() -> None:
     assert qwen3_args.qwen3_tts_backend == "ggml"
     assert qwen3_args.qwen3_tts_non_streaming_mode is True
     assert qwen3_args.qwen3_tts_ref_audio is None
+    assert qwen3_args.qwen3_tts_ref_spk is None
+    assert qwen3_args.qwen3_tts_ref_rvq is None
+    assert qwen3_args.qwen3_tts_ggml_quantization == "BF16"
+    assert qwen3_args.qwen3_tts_gguf_talker_path is None
+    assert qwen3_args.qwen3_tts_gguf_codec_path is None
+    assert qwen3_args.qwen3_tts_ref_cache_dir is None
     assert qwen3_args.qwen3_tts_mlx_quantization == "6bit"
     assert vad_args.thresh == 0.6
     assert vad_args.min_silence_ms == 64

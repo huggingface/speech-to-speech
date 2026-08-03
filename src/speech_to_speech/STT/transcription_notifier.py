@@ -32,7 +32,7 @@ class TranscriptionNotifier(BaseHandler[STTOut, Union[STTOut, LLMIn]]):
     on ``text_output_queue`` for protocol translation but yields nothing -- the
     ``RealtimeService`` builds ``GenerateResponseRequest`` directly.
 
-    For **legacy mode** (``runtime_config`` provided): appends the user
+    For **non-Realtime pipeline modes** (``runtime_config`` provided): appends the user
     message to ``runtime_config.chat`` and yields a
     ``GenerateResponseRequest`` so the LLM handler receives a uniform input
     type regardless of pipeline mode.

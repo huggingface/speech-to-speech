@@ -28,6 +28,7 @@ from openai.types.realtime import (
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
     SessionCreatedEvent,
+    SessionUpdatedEvent,
     SessionUpdateEvent,
 )
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
@@ -43,6 +44,7 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
+    AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     PipelineEvent,
     ResponseFailedEvent,
@@ -89,6 +91,7 @@ ClientEvent = Union[
 
 ServerEvent = Union[
     SessionCreatedEvent,
+    SessionUpdatedEvent,
     RealtimeErrorEvent,
     InputAudioBufferSpeechStartedEvent,
     InputAudioBufferSpeechStoppedEvent,
@@ -223,6 +226,7 @@ class RealtimeService:
             PartialTranscriptionEvent: self.conversation.on_partial_transcription,
             TranscriptionCompletedEvent: self._on_transcription_completed,
             TranscriptionFailedEvent: self._on_transcription_failed,
+            AudioInputCompletedEvent: self._on_audio_input_completed,
             ResponseFailedEvent: self._on_response_failed,
         }
 
@@ -286,6 +290,9 @@ class RealtimeService:
 
     def build_session_created(self, conn_id: str) -> SessionCreatedEvent:
         return self.session.build_session_created(conn_id)
+
+    def build_session_updated(self, conn_id: str) -> SessionUpdatedEvent:
+        return self.session.build_session_updated(conn_id)
 
     def handle_session_update(self, conn_id: str, event: SessionUpdateEvent) -> Optional[RealtimeErrorEvent]:
         return self.session.handle_session_update(conn_id, event)
@@ -384,6 +391,7 @@ class RealtimeService:
                 PartialTranscriptionEvent,
                 TranscriptionCompletedEvent,
                 TranscriptionFailedEvent,
+                AudioInputCompletedEvent,
                 AssistantTextEvent,
                 TokenUsageEvent,
             ),
@@ -467,6 +475,38 @@ class RealtimeService:
         self._state(conn_id).response_pending = False
         return [self.make_error(event.message, "transcription_failed")]
 
+    def _on_audio_input_completed(self, conn_id: str, event: AudioInputCompletedEvent) -> list[ServerEvent]:
+        """Record final input audio and queue its realtime LM request."""
+        st = self._state(conn_id)
+        same_speculative_turn = event.turn_id is not None and event.turn_id == st.speculative_user_turn_id
+        if same_speculative_turn:
+            st.response_usage.audio_duration_s -= st.speculative_audio_duration_s
+        else:
+            st.speculative_audio_duration_s = 0.0
+
+        st.input_audio_duration_s = event.audio_duration_s
+        st.response_usage.audio_duration_s += event.audio_duration_s
+        if event.turn_id is not None:
+            st.speculative_audio_duration_s = event.audio_duration_s
+            st.speculative_user_turn_id = event.turn_id
+            st.speculative_user_turn_revision = event.turn_revision
+            st.speculative_user_speech_stopped_at_s = event.speech_stopped_at_s
+
+        queue = self.text_prompt_queue
+        if queue:
+            st.response_pending = True
+            queue.put(
+                GenerateResponseRequest(
+                    runtime_config=st.runtime_config,
+                    audio=event.audio,
+                    audio_sample_rate=event.audio_sample_rate,
+                    turn_id=event.turn_id,
+                    turn_revision=event.turn_revision,
+                    speech_stopped_at_s=event.speech_stopped_at_s,
+                )
+            )
+        return []
+
     # ── Metrics ────────────────────────────────────
 
     def _on_token_usage(self, conn_id: str, event: TokenUsageEvent) -> list[ServerEvent]:
@@ -495,14 +535,20 @@ class RealtimeService:
         the human-readable reason — ``response.done.status_details.error`` only
         has code/type, no message — then ``finish_response`` closes the slot.
 
-        Idempotent: gated on an active response, and ``finish_response`` is itself
-        a no-op once the slot is closed, so a later EndOfResponse-driven close does
-        nothing.
+        Idempotent: gated on an active or pending response. Pending implicit
+        responses are announced and promoted to active so ``finish_response``
+        can emit terminal events for a response the client already knows about.
+        Once closed, a later EndOfResponse-driven close does nothing.
         """
         logger.info("Response failed: %s", event.message)
-        if not self._state(conn_id).in_response:
+        st = self._state(conn_id)
+        if not (st.in_response or st.response_pending):
             return []
-        events: list[ServerEvent] = [self.make_error(event.message, "response_failed")]
+        events: list[ServerEvent] = []
+        if st.response_pending:
+            _, _, created_events = self.audio.begin_audio_response(conn_id)
+            events.extend(created_events)
+        events.append(self.make_error(event.message, "response_failed"))
         events.extend(self.response.finish_response(conn_id, status="failed"))
         return events
 
