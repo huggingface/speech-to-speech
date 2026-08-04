@@ -16,9 +16,9 @@ class VADHandlerArguments:
         },
     )
     min_silence_ms: int = field(
-        default=64,
+        default=192,
         metadata={
-            "help": "Minimum length of silence intervals to be used for segmenting speech. Measured in milliseconds. Default is 64 ms."
+            "help": "Minimum length of silence intervals to be used for segmenting speech. Measured in milliseconds. Default is 192 ms."
         },
     )
     min_speech_ms: int = field(
@@ -62,9 +62,9 @@ class VADHandlerArguments:
         },
     )
     speculative_reopen_ms: int = field(
-        default=800,
+        default=600,
         metadata={
-            "help": "In realtime mode, keep a soft-ended turn reopenable for this many milliseconds unless a response commits it. Default is 800 ms."
+            "help": "In realtime mode, keep a soft-ended turn reopenable for this many milliseconds unless a response commits it. Default is 600 ms."
         },
     )
     unanswered_reopen_ms: int = field(
@@ -98,9 +98,9 @@ class VADHandlerArguments:
         },
     )
     smart_turn_max_wait_ms: int = field(
-        default=2000,
+        default=1800,
         metadata={
-            "help": "Speculative reopen grace used when Smart Turn reports an incomplete turn. Resumed speech creates a newer turn revision; otherwise output may commit after this delay. Default is 2000 ms."
+            "help": "Speculative reopen grace used when Smart Turn reports an incomplete turn. Resumed speech creates a newer turn revision; otherwise output may commit after this delay. Default is 1800 ms."
         },
     )
     smart_turn_cpu_count: int = field(

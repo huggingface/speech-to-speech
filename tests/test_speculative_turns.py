@@ -336,7 +336,7 @@ def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
     handler.should_listen = Event()
     handler.should_listen.set()
     handler.sample_rate = 16000
-    handler.min_silence_ms = 300
+    handler.min_silence_ms = 192
     handler.min_speech_ms = 384
     handler.min_speech_continuation_ms = handler.min_speech_ms
     handler.max_speech_ms = float("inf")
@@ -344,11 +344,11 @@ def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
     handler.realtime_processing_pause = 0.5
     handler.text_output_queue = Queue()
     handler.speculative_turns = SpeculativeTurnTracker()
-    handler.speculative_reopen_ms = 800
+    handler.speculative_reopen_ms = 600
     handler.unanswered_reopen_ms = 7000
     handler._last_turn_detection = None
     handler.smart_turn_analyzer = None
-    handler.smart_turn_max_wait_ms = 2000
+    handler.smart_turn_max_wait_ms = 1800
     handler.iterator = iterator
     handler.audio_enhancement = False
     handler.last_process_time = 0.0
@@ -494,7 +494,7 @@ def test_vad_complete_smart_turn_selects_shorter_speculative_grace():
     assert len(outputs) == 1
     grace = handler.speculative_turns._reopen_grace["turn_1"]
     assert grace.revision == 0
-    assert 0.6 < grace.deadline - time.monotonic() <= 0.8
+    assert 0.4 < grace.deadline - time.monotonic() <= 0.6
 
 
 def test_vad_incomplete_smart_turn_selects_longer_speculative_grace():
@@ -507,7 +507,7 @@ def test_vad_incomplete_smart_turn_selects_longer_speculative_grace():
     assert len(outputs) == 1
     grace = handler.speculative_turns._reopen_grace["turn_1"]
     assert grace.revision == 0
-    assert 1.8 < grace.deadline - time.monotonic() <= 2.0
+    assert 1.6 < grace.deadline - time.monotonic() <= 1.8
     np.testing.assert_array_equal(analyzer.calls[0], outputs[0].audio)
 
 
@@ -540,7 +540,7 @@ def test_vad_resumed_speech_during_smart_turn_grace_creates_new_revision():
     assert (first_outputs[0].turn_id, first_outputs[0].turn_revision) == ("turn_1", 0)
     _drain_text_events(handler)
 
-    # Resume after the normal 800ms grace but before Smart Turn's 2000ms
+    # Resume after the normal 600ms grace but before Smart Turn's 1800ms
     # incomplete-turn grace has elapsed.
     handler._total_samples = int(1.5 * handler.sample_rate)
     resumed_outputs = _drive_final_segment(handler, active_chunks=12, segment_chunks=12)
@@ -680,7 +680,7 @@ def test_vad_reopens_unanswered_turn_after_grace_window():
         handler.text_output_queue.get_nowait()
 
     # Advance the audio clock so the resumed speech starts well past
-    # speculative_reopen_ms (800) but within unanswered_reopen_ms (8000).
+    # speculative_reopen_ms (600) but within unanswered_reopen_ms (8000).
     handler._total_samples = 16000 * 3
 
     outputs = _drive_final_segment(handler)
