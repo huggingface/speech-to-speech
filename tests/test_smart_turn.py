@@ -84,7 +84,7 @@ def test_prepare_audio_resamples_to_model_rate() -> None:
     assert np.count_nonzero(prepared[-MODEL_SAMPLE_RATE:]) > 0
 
 
-def test_default_model_download_uses_v32_variant(monkeypatch, tmp_path: Path) -> None:
+def test_default_model_download_uses_v32_cpu_variant(monkeypatch, tmp_path: Path) -> None:
     downloaded = tmp_path / "model.onnx"
     calls = []
 
@@ -94,13 +94,51 @@ def test_default_model_download_uses_v32_variant(monkeypatch, tmp_path: Path) ->
 
     monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(hf_hub_download=fake_download))
 
-    assert SmartTurnAnalyzer._download_model("cpu") == downloaded
+    assert SmartTurnAnalyzer._download_model() == downloaded
     assert calls == [
         {
             "repo_id": "pipecat-ai/smart-turn-v3",
             "filename": "smart-turn-v3.2-cpu.onnx",
         }
     ]
+
+
+def test_analyzer_always_uses_cpu_execution_provider(monkeypatch, tmp_path: Path) -> None:
+    model_path = tmp_path / "model.onnx"
+    model_path.touch()
+    calls = []
+
+    class FakeSessionOptions:
+        pass
+
+    class FakeSession:
+        def get_inputs(self):
+            return [SimpleNamespace(name="input_features")]
+
+    def fake_inference_session(path, *, sess_options, providers):
+        calls.append((path, sess_options, providers))
+        return FakeSession()
+
+    fake_ort = SimpleNamespace(
+        SessionOptions=FakeSessionOptions,
+        ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL="sequential"),
+        GraphOptimizationLevel=SimpleNamespace(ORT_ENABLE_ALL="all"),
+        InferenceSession=fake_inference_session,
+    )
+    fake_transformers = SimpleNamespace(WhisperFeatureExtractor=lambda **_kwargs: object())
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    SmartTurnAnalyzer(model_path=str(model_path), cpu_count=3, warmup=False)
+
+    assert len(calls) == 1
+    path, options, providers = calls[0]
+    assert path == str(model_path)
+    assert providers == ["CPUExecutionProvider"]
+    assert options.execution_mode == "sequential"
+    assert options.inter_op_num_threads == 1
+    assert options.intra_op_num_threads == 3
+    assert options.graph_optimization_level == "all"
 
 
 def test_predict_passes_whisper_features_to_onnx_session() -> None:

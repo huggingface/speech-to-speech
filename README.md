@@ -604,16 +604,9 @@ speech-to-speech
 The latest supported v3.2 CPU checkpoint downloads from the Hugging Face Hub on first use. Pass
 `--smart_turn_model_path /path/to/model.onnx` to use a local model, or `--no_smart_turn` to disable Smart Turn.
 Smart Turn is supported only with `--mode realtime`; pass `--no_smart_turn` when selecting another mode.
-CUDA inference uses the v3.2 GPU checkpoint:
-
-```bash
-pip uninstall onnxruntime
-pip install "onnxruntime-gpu>=1.21.0,<1.27"
-speech-to-speech --smart_turn_device cuda
-```
 
 Tune the completion cutoff with `--smart_turn_threshold` (default `0.5`). A higher threshold makes ambiguous
-pauses more likely to stay open.
+pauses more likely to use the longer speculative response grace.
 
 ### STT, LLM, and TTS Parameters
 

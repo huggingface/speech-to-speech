@@ -48,7 +48,6 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_realtime_profile():
     assert vad_args.min_speech_continuation_ms == 192
     assert vad_args.realtime_processing_pause == 0.5
     assert vad_args.smart_turn is True
-    assert vad_args.smart_turn_device == "cpu"
     assert responses_api_args.model_name == "gpt-5.4-mini"
     assert responses_api_args.chat_size == 30
     assert responses_api_args.responses_api_stream is True
@@ -120,7 +119,6 @@ def test_parse_arguments_default_backend_returns_openai_api():
     assert args.module_kwargs.llm_backend == "responses-api"
     assert args.vad_handler_kwargs.smart_turn is True
     assert args.vad_handler_kwargs.smart_turn_model_path is None
-    assert args.vad_handler_kwargs.smart_turn_device == "cpu"
     assert args.vad_handler_kwargs.smart_turn_threshold == 0.5
     assert args.vad_handler_kwargs.smart_turn_max_wait_ms == 2000
     assert args.vad_handler_kwargs.speculative_reopen_ms == 800
@@ -134,8 +132,6 @@ def test_parse_arguments_accepts_smart_turn_options():
             "--smart_turn",
             "--smart_turn_model_path",
             "/models/smart-turn.onnx",
-            "--smart_turn_device",
-            "cuda",
             "--smart_turn_threshold",
             "0.7",
             "--smart_turn_max_wait_ms",
@@ -150,7 +146,6 @@ def test_parse_arguments_accepts_smart_turn_options():
     vad_args = args.vad_handler_kwargs
     assert vad_args.smart_turn is True
     assert vad_args.smart_turn_model_path == "/models/smart-turn.onnx"
-    assert vad_args.smart_turn_device == "cuda"
     assert vad_args.smart_turn_threshold == 0.7
     assert vad_args.smart_turn_max_wait_ms == 2500
     assert vad_args.smart_turn_cpu_count == 2
@@ -165,7 +160,16 @@ def test_parse_arguments_can_disable_smart_turn():
         sys.argv = original_argv
 
     assert args.vad_handler_kwargs.smart_turn is False
-    assert args.vad_handler_kwargs.smart_turn_device == "cpu"
+
+
+def test_parse_arguments_rejects_removed_smart_turn_device_option():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = ["speech-to-speech", "--smart_turn_device", "cuda"]
+        with pytest.raises(ValueError, match="--smart_turn_device"):
+            parse_arguments()
+    finally:
+        sys.argv = original_argv
 
 
 def test_parse_arguments_accepts_qwen3_tts_backend_override():

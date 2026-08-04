@@ -12,7 +12,6 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 
@@ -22,10 +21,7 @@ MODEL_REPO_ID = "pipecat-ai/smart-turn-v3"
 MODEL_VERSION = "v3.2"
 MODEL_SAMPLE_RATE = 16000
 MAX_AUDIO_SECONDS = 8
-_MODEL_FILENAMES = {
-    "cpu": f"smart-turn-{MODEL_VERSION}-cpu.onnx",
-    "cuda": f"smart-turn-{MODEL_VERSION}-gpu.onnx",
-}
+MODEL_FILENAME = f"smart-turn-{MODEL_VERSION}-cpu.onnx"
 
 
 @dataclass(frozen=True)
@@ -44,13 +40,10 @@ class SmartTurnAnalyzer:
         self,
         *,
         model_path: str | None = None,
-        device: Literal["cpu", "cuda"] = "cpu",
         threshold: float = 0.5,
         cpu_count: int = 1,
         warmup: bool = True,
     ) -> None:
-        if device not in _MODEL_FILENAMES:
-            raise ValueError(f"Unsupported Smart Turn device {device!r}; choose 'cpu' or 'cuda'")
         if not 0.0 <= threshold <= 1.0:
             raise ValueError(f"Smart Turn threshold must be between 0 and 1, got {threshold}")
         if cpu_count < 1:
@@ -59,29 +52,14 @@ class SmartTurnAnalyzer:
         try:
             import onnxruntime as ort
         except ImportError as exc:
-            raise ImportError(
-                "Smart Turn requires ONNX Runtime. Install `onnxruntime` for CPU inference or "
-                "`onnxruntime-gpu` for CUDA inference."
-            ) from exc
+            raise ImportError("Smart Turn requires the `onnxruntime` package for CPU inference.") from exc
 
         from transformers import WhisperFeatureExtractor
 
-        self.device = device
         self.threshold = threshold
-        self.model_path = Path(model_path).expanduser() if model_path else self._download_model(device)
+        self.model_path = Path(model_path).expanduser() if model_path else self._download_model()
         if not self.model_path.is_file():
             raise FileNotFoundError(f"Smart Turn model not found: {self.model_path}")
-
-        available_providers = ort.get_available_providers()
-        if device == "cuda":
-            if "CUDAExecutionProvider" not in available_providers:
-                raise RuntimeError(
-                    "Smart Turn was configured for CUDA, but ONNX Runtime's CUDAExecutionProvider is unavailable. "
-                    "Install `onnxruntime-gpu` and verify the CUDA runtime."
-                )
-            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        else:
-            providers = ["CPUExecutionProvider"]
 
         session_options = ort.SessionOptions()
         session_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
@@ -91,7 +69,7 @@ class SmartTurnAnalyzer:
         self.session = ort.InferenceSession(
             str(self.model_path),
             sess_options=session_options,
-            providers=providers,
+            providers=["CPUExecutionProvider"],
         )
         self.input_name = self.session.get_inputs()[0].name
         self.feature_extractor = WhisperFeatureExtractor(chunk_length=MAX_AUDIO_SECONDS)
@@ -100,14 +78,14 @@ class SmartTurnAnalyzer:
             "Loaded Smart Turn %s from %s using %s (threshold=%.2f)",
             MODEL_VERSION,
             self.model_path,
-            device,
+            "CPUExecutionProvider",
             threshold,
         )
         if warmup:
             self.predict(np.zeros(MODEL_SAMPLE_RATE, dtype=np.float32))
 
     @staticmethod
-    def _download_model(device: Literal["cpu", "cuda"]) -> Path:
+    def _download_model() -> Path:
         try:
             from huggingface_hub import hf_hub_download
         except ImportError as exc:
@@ -118,7 +96,7 @@ class SmartTurnAnalyzer:
         return Path(
             hf_hub_download(
                 repo_id=MODEL_REPO_ID,
-                filename=_MODEL_FILENAMES[device],
+                filename=MODEL_FILENAME,
             )
         )
 

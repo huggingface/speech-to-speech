@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-from typing import Literal
 
 
 @dataclass
@@ -89,13 +88,7 @@ class VADHandlerArguments:
     smart_turn_model_path: str | None = field(
         default=None,
         metadata={
-            "help": "Optional path to a Smart Turn v3.x ONNX model. When omitted, the latest supported v3.2 CPU or GPU model is downloaded from pipecat-ai/smart-turn-v3."
-        },
-    )
-    smart_turn_device: Literal["cpu", "cuda"] = field(
-        default="cpu",
-        metadata={
-            "help": "ONNX Runtime provider and Smart Turn v3.2 checkpoint variant to use: cpu or cuda. Default is cpu."
+            "help": "Optional path to a Smart Turn v3.x CPU ONNX model. When omitted, the latest supported v3.2 CPU model is downloaded from pipecat-ai/smart-turn-v3."
         },
     )
     smart_turn_threshold: float = field(

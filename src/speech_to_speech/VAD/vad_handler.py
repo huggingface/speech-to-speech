@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from queue import Queue
 from threading import Event
-from typing import Any, Literal, TypeAlias
+from typing import Any, TypeAlias
 
 import numpy as np
 import torch
@@ -76,7 +76,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         short_segment_merge_ms: int = 0,
         smart_turn: bool = True,
         smart_turn_model_path: str | None = None,
-        smart_turn_device: Literal["cpu", "cuda"] = "cpu",
         smart_turn_threshold: float = 0.5,
         smart_turn_max_wait_ms: int = 2000,
         smart_turn_cpu_count: int = 1,
@@ -109,7 +108,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
             self.smart_turn_analyzer = SmartTurnAnalyzer(
                 model_path=smart_turn_model_path,
-                device=smart_turn_device,
                 threshold=smart_turn_threshold,
                 cpu_count=smart_turn_cpu_count,
             )

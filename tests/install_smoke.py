@@ -73,7 +73,6 @@ def _validate_package_defaults() -> None:
     assert vad_args.min_speech_continuation_ms == 192
     assert vad_args.realtime_processing_pause == 0.5
     assert vad_args.smart_turn is True
-    assert vad_args.smart_turn_device == "cpu"
 
     package_root = Path(speech_to_speech.__file__).resolve().parent
     ref_audio = package_root / "TTS" / "ref_audio.wav"
