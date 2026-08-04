@@ -4,7 +4,6 @@ import logging
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from enum import Enum
 from queue import Queue
 from threading import Event
 from typing import Any, Literal, TypeAlias
@@ -33,12 +32,6 @@ class _PendingShortSegment:
     active_ms: float
     start_ms: int
     end_ms: int
-
-
-class _SmartTurnDecision(Enum):
-    CONTINUE = "continue"
-    COMPLETE = "complete"
-    MAX_WAIT = "max_wait"
 
 
 # Fragments with less active speech than this are treated as noise and never
@@ -106,10 +99,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.short_segment_merge_ms = max(0, short_segment_merge_ms)
         self._last_turn_detection: dict | None = None
         self.smart_turn_analyzer = None
-        self.smart_turn_max_wait_samples = int(self.sample_rate * smart_turn_max_wait_ms / 1000)
-        self._smart_turn_pending_since_sample: int | None = None
-        self._smart_turn_last_active_samples = 0
+        self.smart_turn_max_wait_ms = smart_turn_max_wait_ms
         if smart_turn:
+            if speculative_turns is None:
+                raise ValueError("Smart Turn requires realtime mode with speculative turn tracking")
             if smart_turn_max_wait_ms <= 0:
                 raise ValueError(f"smart_turn_max_wait_ms must be greater than 0, got {smart_turn_max_wait_ms}")
             from speech_to_speech.VAD.smart_turn import SmartTurnAnalyzer
@@ -517,75 +510,36 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             and queued_item.turn_revision == latest.turn_revision
         )
 
-    def _reset_smart_turn_state(self) -> None:
-        self._smart_turn_pending_since_sample = None
-        self._smart_turn_last_active_samples = 0
-
-    def _resume_smart_turn_utterance(self, audio: np.ndarray, active_speech_samples: int) -> None:
-        """Put a Smart Turn-incomplete utterance back into the streaming VAD."""
-        self.iterator.triggered = True
-        self.iterator.temp_end = 0
-        self.iterator.buffer = [torch.from_numpy(audio)]
-        self.iterator.prefix_buffer = []
-        self.iterator.active_speech_samples = active_speech_samples
-        self.iterator.last_utterance_active_speech_samples = 0
-
-    def _smart_turn_should_finalize(
-        self,
-        audio: np.ndarray,
-        active_speech_samples: int,
-        *,
-        analysis_audio: np.ndarray | None = None,
-    ) -> _SmartTurnDecision:
-        """Classify how a Silero-ended segment should proceed."""
+    def _smart_turn_reopen_grace_ms(self, audio: np.ndarray) -> int:
+        """Choose how long speculative output should wait for resumed speech."""
         analyzer = getattr(self, "smart_turn_analyzer", None)
         if analyzer is None:
-            return _SmartTurnDecision.COMPLETE
-
-        pending_since = self._smart_turn_pending_since_sample
-        if pending_since is not None and active_speech_samples <= self._smart_turn_last_active_samples:
-            waited_samples = self._total_samples - pending_since
-            if waited_samples < self.smart_turn_max_wait_samples:
-                self._resume_smart_turn_utterance(audio, active_speech_samples)
-                return _SmartTurnDecision.CONTINUE
-
-            logger.info(
-                "Smart Turn: max wait reached after %.0fms; completing the turn",
-                waited_samples / self.sample_rate * 1000,
-            )
-            self._reset_smart_turn_state()
-            return _SmartTurnDecision.MAX_WAIT
+            return self.speculative_reopen_ms
 
         try:
-            result = analyzer.predict(
-                analysis_audio if analysis_audio is not None else audio,
-                sample_rate=self.sample_rate,
-            )
+            result = analyzer.predict(audio, sample_rate=self.sample_rate)
         except Exception:
-            # A transient classifier failure must never strand a live audio session.
-            logger.exception("Smart Turn inference failed; completing the turn")
-            self._reset_smart_turn_state()
-            return _SmartTurnDecision.COMPLETE
+            # A transient classifier failure falls back to the ordinary short
+            # speculative window instead of delaying the response for seconds.
+            logger.exception("Smart Turn inference failed; using the default speculative reopen grace")
+            return self.speculative_reopen_ms
 
         if result.complete:
             logger.info(
-                "Smart Turn: complete (p=%.3f, %.1fms)",
+                "Smart Turn: complete (p=%.3f, %.1fms); using %dms speculative reopen grace",
                 result.probability,
                 result.inference_ms,
+                self.speculative_reopen_ms,
             )
-            self._reset_smart_turn_state()
-            return _SmartTurnDecision.COMPLETE
+            return self.speculative_reopen_ms
 
         logger.info(
-            "Smart Turn: incomplete (p=%.3f, %.1fms); continuing to listen for up to %dms",
+            "Smart Turn: incomplete (p=%.3f, %.1fms); using %dms speculative reopen grace",
             result.probability,
             result.inference_ms,
-            int(self.smart_turn_max_wait_samples / self.sample_rate * 1000),
+            self.smart_turn_max_wait_ms,
         )
-        self._smart_turn_pending_since_sample = self._total_samples
-        self._smart_turn_last_active_samples = active_speech_samples
-        self._resume_smart_turn_utterance(audio, active_speech_samples)
-        return _SmartTurnDecision.CONTINUE
+        return self.smart_turn_max_wait_ms
 
     def process(self, audio_chunk: VADIn) -> Iterator[VADOut]:
         runtime_config = None
@@ -738,23 +692,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             duration_ms = self._segment_duration_ms(array)
             min_active_ms = 0.0 if self._speech_started_emitted else self._active_speech_min_ms(start_ms)
 
-            # A restored Smart Turn buffer includes silence accumulated while
-            # waiting for the bounded timeout. Let the pending decision consume
-            # that buffer before applying max_speech_ms, or valid speech can be
-            # discarded solely because its waiting silence crossed the limit.
-            smart_turn_decision: _SmartTurnDecision | None = None
-            if self._smart_turn_pending_since_sample is not None:
-                smart_turn_decision = self._smart_turn_should_finalize(
-                    array,
-                    int(active_speech_duration_ms * self.sample_rate / 1000),
-                    analysis_audio=self._combined_turn_audio(array),
-                )
-                if smart_turn_decision is _SmartTurnDecision.CONTINUE:
-                    return
-
-            duration_exceeds_limit = (
-                duration_ms > self.max_speech_ms and smart_turn_decision is not _SmartTurnDecision.MAX_WAIT
-            )
+            duration_exceeds_limit = duration_ms > self.max_speech_ms
             if active_speech_duration_ms < min_active_ms or duration_exceeds_limit:
                 if (
                     self._short_segment_merge_window_ms() > 0
@@ -783,7 +721,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 if not self._speech_started_emitted:
                     self._cancel_pending_reopen()
                 self._speech_started_emitted = False
-                self._reset_smart_turn_state()
             else:
                 if stitched_short_segment:
                     logger.info(
@@ -791,14 +728,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         duration_ms,
                         active_speech_duration_ms,
                     )
-                if smart_turn_decision is None:
-                    smart_turn_decision = self._smart_turn_should_finalize(
-                        array,
-                        int(active_speech_duration_ms * self.sample_rate / 1000),
-                        analysis_audio=self._combined_turn_audio(array),
-                    )
-                if smart_turn_decision is _SmartTurnDecision.CONTINUE:
-                    return
                 if not self._speech_started_emitted:
                     turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start(start_ms)
                     if self.text_output_queue:
@@ -821,6 +750,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     turn_id,
                     turn_revision,
                 )
+                analysis_audio = self._combined_turn_audio(array)
+                reopen_grace_ms = self._smart_turn_reopen_grace_ms(analysis_audio)
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
                 output_array = self._combined_turn_audio(array)
@@ -838,17 +769,14 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 self._last_final_wall_time = time.time()
                 self._last_final_audio_ms = end_ms
                 if self.speculative_turns:
-                    if smart_turn_decision is _SmartTurnDecision.MAX_WAIT:
-                        logger.info("Skipping speculative reopen grace after Smart Turn max wait")
-                    else:
-                        # The grace window only delays response commits; reopen
-                        # eligibility for unanswered turns is extended separately
-                        # via unanswered_reopen_ms in _should_reopen_current_turn.
-                        self.speculative_turns.start_reopen_grace(
-                            turn_id,
-                            turn_revision,
-                            self.speculative_reopen_ms / 1000.0,
-                        )
+                    # The grace only delays response commits. Resumed speech
+                    # follows the existing candidate/revision flow and makes
+                    # this revision stale before assistant output is released.
+                    self.speculative_turns.start_reopen_grace(
+                        turn_id,
+                        turn_revision,
+                        reopen_grace_ms / 1000.0,
+                    )
                 else:
                     self.should_listen.clear()
                 yield VADAudio(
@@ -906,23 +834,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 start_ms = self._segment_start_ms(array, end_ms)
             duration_ms = self._segment_duration_ms(array)
             min_active_ms = 0.0 if self._speech_started_emitted else self._active_speech_min_ms(start_ms)
-            # A restored Smart Turn buffer includes silence accumulated while
-            # waiting for the bounded timeout. Let the pending decision consume
-            # that buffer before applying max_speech_ms, or valid speech can be
-            # discarded solely because its waiting silence crossed the limit.
-            smart_turn_decision: _SmartTurnDecision | None = None
-            if self._smart_turn_pending_since_sample is not None:
-                smart_turn_decision = self._smart_turn_should_finalize(
-                    array,
-                    int(active_speech_duration_ms * self.sample_rate / 1000),
-                    analysis_audio=self._combined_turn_audio(array),
-                )
-                if smart_turn_decision is _SmartTurnDecision.CONTINUE:
-                    return
-
-            duration_exceeds_limit = (
-                duration_ms > self.max_speech_ms and smart_turn_decision is not _SmartTurnDecision.MAX_WAIT
-            )
+            duration_exceeds_limit = duration_ms > self.max_speech_ms
             if active_speech_duration_ms < min_active_ms or duration_exceeds_limit:
                 if (
                     self._short_segment_merge_window_ms() > 0
@@ -942,7 +854,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 if self._speech_started_emitted and self.text_output_queue:
                     self.text_output_queue.put(SpeechStoppedEvent(audio_end_ms=self._audio_ms))
                 self._speech_started_emitted = False
-                self._reset_smart_turn_state()
             else:
                 if stitched_short_segment:
                     logger.info(
@@ -950,14 +861,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         duration_ms,
                         active_speech_duration_ms,
                     )
-                if smart_turn_decision is None:
-                    smart_turn_decision = self._smart_turn_should_finalize(
-                        array,
-                        int(active_speech_duration_ms * self.sample_rate / 1000),
-                        analysis_audio=self._combined_turn_audio(array),
-                    )
-                if smart_turn_decision is _SmartTurnDecision.CONTINUE:
-                    return
                 if not self._speech_started_emitted and self.text_output_queue:
                     self.text_output_queue.put(
                         SpeechStartedEvent(
@@ -1001,7 +904,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
     def on_session_end(self):
         self.iterator.reset_states()
-        self._reset_smart_turn_state()
         self._pending_short_segment = None
         self.iterator.buffer = []
         self.last_process_time = 0.0

@@ -323,9 +323,11 @@ class _StaticVADIterator:
 class _StaticSmartTurnAnalyzer:
     def __init__(self, *results: SmartTurnResult) -> None:
         self._results = iter(results)
+        self.calls: list[np.ndarray] = []
 
-    def predict(self, _audio: np.ndarray, *, sample_rate: int) -> SmartTurnResult:
+    def predict(self, audio: np.ndarray, *, sample_rate: int) -> SmartTurnResult:
         assert sample_rate == 16000
+        self.calls.append(audio.copy())
         return next(self._results)
 
 
@@ -343,12 +345,10 @@ def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
     handler.text_output_queue = Queue()
     handler.speculative_turns = SpeculativeTurnTracker()
     handler.speculative_reopen_ms = 800
-    handler.unanswered_reopen_ms = handler.speculative_reopen_ms
+    handler.unanswered_reopen_ms = 7000
     handler._last_turn_detection = None
     handler.smart_turn_analyzer = None
-    handler.smart_turn_max_wait_samples = 2 * handler.sample_rate
-    handler._smart_turn_pending_since_sample = None
-    handler._smart_turn_last_active_samples = 0
+    handler.smart_turn_max_wait_ms = 2000
     handler.iterator = iterator
     handler.audio_enhancement = False
     handler.last_process_time = 0.0
@@ -483,7 +483,7 @@ def _drive_final_segment(handler: VADHandler, active_chunks: int = 12, segment_c
     return list(handler.process(_audio_bytes()))
 
 
-def test_vad_keeps_speculative_grace_after_smart_turn_completion():
+def test_vad_complete_smart_turn_selects_shorter_speculative_grace():
     handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
     handler.smart_turn_analyzer = _StaticSmartTurnAnalyzer(
         SmartTurnResult(complete=True, probability=0.98, inference_ms=12.5)
@@ -492,75 +492,75 @@ def test_vad_keeps_speculative_grace_after_smart_turn_completion():
     outputs = _drive_final_segment(handler)
 
     assert len(outputs) == 1
-    assert handler.speculative_turns.has_pending_reopen_or_grace("turn_1", 0)
+    grace = handler.speculative_turns._reopen_grace["turn_1"]
+    assert grace.revision == 0
+    assert 0.6 < grace.deadline - time.monotonic() <= 0.8
 
 
-def test_vad_skips_speculative_grace_after_smart_turn_max_wait():
+def test_vad_incomplete_smart_turn_selects_longer_speculative_grace():
     handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
-    handler.smart_turn_analyzer = _StaticSmartTurnAnalyzer(
-        SmartTurnResult(complete=False, probability=0.2, inference_ms=12.5)
-    )
-
-    assert _drive_final_segment(handler) == []
-    handler._total_samples += handler.smart_turn_max_wait_samples
+    analyzer = _StaticSmartTurnAnalyzer(SmartTurnResult(complete=False, probability=0.2, inference_ms=12.5))
+    handler.smart_turn_analyzer = analyzer
 
     outputs = _drive_final_segment(handler)
 
     assert len(outputs) == 1
-    assert not handler.speculative_turns.has_pending_reopen_or_grace("turn_1", 0)
+    grace = handler.speculative_turns._reopen_grace["turn_1"]
+    assert grace.revision == 0
+    assert 1.8 < grace.deadline - time.monotonic() <= 2.0
+    np.testing.assert_array_equal(analyzer.calls[0], outputs[0].audio)
 
 
-@pytest.mark.parametrize("realtime", [False, True])
-def test_vad_smart_turn_max_wait_finalizes_buffer_past_max_speech(realtime: bool):
+def test_vad_incomplete_smart_turn_commits_after_longer_grace_without_resumed_speech():
     handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    handler.smart_turn_max_wait_ms = 50
     handler.smart_turn_analyzer = _StaticSmartTurnAnalyzer(
         SmartTurnResult(complete=False, probability=0.2, inference_ms=12.5)
     )
-    handler.max_speech_ms = 1500
-    if not realtime:
-        handler.speculative_turns = None
 
-    assert _drive_final_segment(handler, segment_chunks=31) == []
-    assert handler._smart_turn_pending_since_sample is not None
-
-    handler._total_samples += handler.smart_turn_max_wait_samples
-    outputs = _drive_final_segment(handler, segment_chunks=63)
+    outputs = _drive_final_segment(handler)
 
     assert len(outputs) == 1
-    assert len(outputs[0].audio) == 63 * 512
-    assert handler._smart_turn_pending_since_sample is None
+    assert handler.speculative_turns.try_commit_if_latest_after_reopen_grace("turn_1", 0) is None
+    time.sleep(0.06)
+    assert handler.speculative_turns.try_commit_if_latest_after_reopen_grace("turn_1", 0) is True
+    assert handler.speculative_turns.is_committed("turn_1", 0)
 
 
-@pytest.mark.parametrize("realtime", [False, True])
-def test_vad_resumed_speech_still_enforces_max_speech(realtime: bool):
+def test_vad_resumed_speech_during_smart_turn_grace_creates_new_revision():
     handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
-    handler.smart_turn_analyzer = _StaticSmartTurnAnalyzer(
+    analyzer = _StaticSmartTurnAnalyzer(
         SmartTurnResult(complete=False, probability=0.2, inference_ms=12.5),
         SmartTurnResult(complete=True, probability=0.9, inference_ms=12.5),
     )
-    handler.max_speech_ms = 1500
-    if not realtime:
-        handler.speculative_turns = None
+    handler.smart_turn_analyzer = analyzer
 
-    assert _drive_final_segment(handler, segment_chunks=31) == []
-    assert handler._smart_turn_pending_since_sample is not None
+    first_outputs = _drive_final_segment(handler)
+    assert len(first_outputs) == 1
+    assert (first_outputs[0].turn_id, first_outputs[0].turn_revision) == ("turn_1", 0)
+    _drain_text_events(handler)
 
-    assert _drive_final_segment(handler, active_chunks=60, segment_chunks=63) == []
-    assert handler._smart_turn_pending_since_sample is None
+    # Resume after the normal 800ms grace but before Smart Turn's 2000ms
+    # incomplete-turn grace has elapsed.
+    handler._total_samples = int(1.5 * handler.sample_rate)
+    resumed_outputs = _drive_final_segment(handler, active_chunks=12, segment_chunks=12)
+
+    assert len(resumed_outputs) == 1
+    assert (resumed_outputs[0].turn_id, resumed_outputs[0].turn_revision) == ("turn_1", 1)
+    assert not handler.speculative_turns.is_latest("turn_1", 0)
+    assert handler.speculative_turns.is_latest("turn_1", 1)
+    assert len(analyzer.calls) == 2
+    assert len(analyzer.calls[1]) == len(first_outputs[0].audio) + 12 * 512
 
 
-@pytest.mark.parametrize("realtime", [False, True])
-def test_vad_max_speech_still_discards_non_pending_smart_turn_segment(realtime: bool):
+def test_vad_max_speech_is_enforced_before_smart_turn():
     handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
-    handler.smart_turn_analyzer = _StaticSmartTurnAnalyzer(
-        SmartTurnResult(complete=True, probability=0.9, inference_ms=12.5)
-    )
+    analyzer = _StaticSmartTurnAnalyzer(SmartTurnResult(complete=False, probability=0.2, inference_ms=12.5))
+    handler.smart_turn_analyzer = analyzer
     handler.max_speech_ms = 1500
-    if not realtime:
-        handler.speculative_turns = None
 
     assert _drive_final_segment(handler, segment_chunks=63) == []
-    assert handler._smart_turn_pending_since_sample is None
+    assert analyzer.calls == []
 
 
 def _handler_after_soft_ended_turn() -> VADHandler:

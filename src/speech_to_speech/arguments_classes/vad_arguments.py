@@ -83,7 +83,7 @@ class VADHandlerArguments:
     smart_turn: bool = field(
         default=True,
         metadata={
-            "help": "Use Smart Turn v3.2 after Silero detects silence to avoid ending a turn during a mid-thought pause. Enabled by default; pass --no_smart_turn to disable it."
+            "help": "In realtime mode, use Smart Turn v3.2 after Silero finalizes a segment to choose how long assistant output remains speculative. Enabled by default; pass --no_smart_turn to disable it."
         },
     )
     smart_turn_model_path: str | None = field(
@@ -107,7 +107,7 @@ class VADHandlerArguments:
     smart_turn_max_wait_ms: int = field(
         default=2000,
         metadata={
-            "help": "Maximum additional silence to wait after Smart Turn reports an incomplete turn. Default is 2000 ms."
+            "help": "Speculative reopen grace used when Smart Turn reports an incomplete turn. Resumed speech creates a newer turn revision; otherwise output may commit after this delay. Default is 2000 ms."
         },
     )
     smart_turn_cpu_count: int = field(

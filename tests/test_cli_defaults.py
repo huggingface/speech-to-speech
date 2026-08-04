@@ -213,12 +213,23 @@ def test_parse_arguments_accepts_qwen3_tts_ggml_options():
 def test_parse_arguments_accepts_raw_websocket_mode():
     original_argv = sys.argv[:]
     try:
-        sys.argv = ["speech-to-speech", "--mode", "raw-websocket"]
+        sys.argv = ["speech-to-speech", "--mode", "raw-websocket", "--no_smart_turn"]
         args = parse_arguments()
     finally:
         sys.argv = original_argv
 
     assert args.module_kwargs.mode == "raw-websocket"
+    assert args.vad_handler_kwargs.smart_turn is False
+
+
+def test_parse_arguments_rejects_smart_turn_outside_realtime_mode():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = ["speech-to-speech", "--mode", "local", "--smart_turn"]
+        with pytest.raises(ValueError, match="--smart_turn is only supported with --mode realtime"):
+            parse_arguments()
+    finally:
+        sys.argv = original_argv
 
 
 def test_parse_arguments_rejects_removed_websocket_mode():

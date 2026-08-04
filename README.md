@@ -587,9 +587,12 @@ See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments
 ### Smart Turn endpointing
 
 [Smart Turn v3.2](https://huggingface.co/pipecat-ai/smart-turn-v3) can validate Silero's end-of-speech
-decisions using the content and prosody of the current turn. When it detects a mid-thought pause, the VAD keeps
-the same utterance open instead of sending a premature final segment to STT. If no more speech arrives, the
-turn is finalized after `--smart_turn_max_wait_ms` (2 seconds by default), so endpointing cannot wait forever.
+decisions using the content and prosody of the current turn. In realtime mode, Silero still finalizes the segment
+and STT/LLM work may begin speculatively. Smart Turn then chooses how long assistant output remains gated: a
+complete turn uses `--speculative_reopen_ms` (800 ms by default), while an incomplete turn uses
+`--smart_turn_max_wait_ms` (2 seconds by default). If speech resumes during that grace, the existing turn is
+reopened as a newer revision, the accumulated audio is re-emitted, and work from the previous revision is
+discarded before it reaches the user.
 
 The base package includes the quantized CPU runtime and enables Smart Turn by default:
 
@@ -600,6 +603,7 @@ speech-to-speech
 
 The latest supported v3.2 CPU checkpoint downloads from the Hugging Face Hub on first use. Pass
 `--smart_turn_model_path /path/to/model.onnx` to use a local model, or `--no_smart_turn` to disable Smart Turn.
+Smart Turn is supported only with `--mode realtime`; pass `--no_smart_turn` when selecting another mode.
 CUDA inference uses the v3.2 GPU checkpoint:
 
 ```bash
