@@ -532,6 +532,24 @@ def test_vad_smart_turn_max_wait_finalizes_buffer_past_max_speech(realtime: bool
 
 
 @pytest.mark.parametrize("realtime", [False, True])
+def test_vad_resumed_speech_still_enforces_max_speech(realtime: bool):
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    handler.smart_turn_analyzer = _StaticSmartTurnAnalyzer(
+        SmartTurnResult(complete=False, probability=0.2, inference_ms=12.5),
+        SmartTurnResult(complete=True, probability=0.9, inference_ms=12.5),
+    )
+    handler.max_speech_ms = 1500
+    if not realtime:
+        handler.speculative_turns = None
+
+    assert _drive_final_segment(handler, segment_chunks=31) == []
+    assert handler._smart_turn_pending_since_sample is not None
+
+    assert _drive_final_segment(handler, active_chunks=60, segment_chunks=63) == []
+    assert handler._smart_turn_pending_since_sample is None
+
+
+@pytest.mark.parametrize("realtime", [False, True])
 def test_vad_max_speech_still_discards_non_pending_smart_turn_segment(realtime: bool):
     handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
     handler.smart_turn_analyzer = _StaticSmartTurnAnalyzer(

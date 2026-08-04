@@ -752,7 +752,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 if smart_turn_decision is _SmartTurnDecision.CONTINUE:
                     return
 
-            duration_exceeds_limit = duration_ms > self.max_speech_ms and smart_turn_decision is None
+            duration_exceeds_limit = (
+                duration_ms > self.max_speech_ms and smart_turn_decision is not _SmartTurnDecision.MAX_WAIT
+            )
             if active_speech_duration_ms < min_active_ms or duration_exceeds_limit:
                 if (
                     self._short_segment_merge_window_ms() > 0
@@ -918,7 +920,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 if smart_turn_decision is _SmartTurnDecision.CONTINUE:
                     return
 
-            duration_exceeds_limit = duration_ms > self.max_speech_ms and smart_turn_decision is None
+            duration_exceeds_limit = (
+                duration_ms > self.max_speech_ms and smart_turn_decision is not _SmartTurnDecision.MAX_WAIT
+            )
             if active_speech_duration_ms < min_active_ms or duration_exceeds_limit:
                 if (
                     self._short_segment_merge_window_ms() > 0
