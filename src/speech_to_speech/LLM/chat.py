@@ -728,6 +728,9 @@ class TransformersAssistantMessage(BaseModel):
 
 class TransformersFunctionCallMessage(BaseModel):
     role: Literal["assistant"] = "assistant"
+    # Chat templates read `message.content` on every assistant message, tool-call
+    # turns included, so the key must be present even with no text of its own.
+    content: str = ""
     tool_calls: list[TransformersToolCall]
 
 
