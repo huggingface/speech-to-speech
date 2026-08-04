@@ -583,6 +583,7 @@ See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments
 - `--min_speech_continuation_ms`: sustain-bar hysteresis threshold for speech that continues a reopenable soft-ended, uncommitted turn within the reopen window. The default and recommended pairing is `--min_speech_ms 384 --min_speech_continuation_ms 192`.
 - `--min_silence_ms`: minimum length of silence intervals for segmenting speech. Default is 64 ms.
 - `--short_segment_merge_ms`: optional merge window for stitching adjacent VAD segments that are each shorter than `--min_speech_ms`.
+- `--speculative_reopen_ms`: delay response commitment for 800 ms after a soft-ended turn so immediately resumed speech can reopen it.
 - `--unanswered_reopen_ms`: sanity cap on how long a soft-ended speculative turn that has not yet received any assistant output stays reopenable.
 
 ### Smart Turn endpointing
@@ -590,7 +591,7 @@ See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments
 [Smart Turn v3.2](https://huggingface.co/pipecat-ai/smart-turn-v3) can validate Silero's end-of-speech
 decisions using the content and prosody of the current turn. When it detects a mid-thought pause, the VAD keeps
 the same utterance open instead of sending a premature final segment to STT. If no more speech arrives, the
-turn is finalized after `--smart_turn_max_wait_ms` (3 seconds by default), so endpointing cannot wait forever.
+turn is finalized after `--smart_turn_max_wait_ms` (2 seconds by default), so endpointing cannot wait forever.
 
 Install the CPU extra and enable it:
 

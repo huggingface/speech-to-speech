@@ -63,9 +63,9 @@ class VADHandlerArguments:
         },
     )
     speculative_reopen_ms: int = field(
-        default=1000,
+        default=800,
         metadata={
-            "help": "In realtime mode, keep a soft-ended turn reopenable for this many milliseconds unless a response commits it."
+            "help": "In realtime mode, keep a soft-ended turn reopenable for this many milliseconds unless a response commits it. Default is 800 ms."
         },
     )
     unanswered_reopen_ms: int = field(
@@ -105,9 +105,9 @@ class VADHandlerArguments:
         },
     )
     smart_turn_max_wait_ms: int = field(
-        default=3000,
+        default=2000,
         metadata={
-            "help": "Maximum additional silence to wait after Smart Turn reports an incomplete turn. Default is 3000 ms."
+            "help": "Maximum additional silence to wait after Smart Turn reports an incomplete turn. Default is 2000 ms."
         },
     )
     smart_turn_cpu_count: int = field(

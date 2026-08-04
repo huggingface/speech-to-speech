@@ -78,14 +78,14 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         realtime_processing_pause: float = 0.5,
         text_output_queue: Queue[TextEventItem] | None = None,
         speculative_turns: SpeculativeTurnTracker | None = None,
-        speculative_reopen_ms: int = 1000,
+        speculative_reopen_ms: int = 800,
         unanswered_reopen_ms: int = 7000,
         short_segment_merge_ms: int = 0,
         smart_turn: bool = False,
         smart_turn_model_path: str | None = None,
         smart_turn_device: Literal["cpu", "cuda"] = "cpu",
         smart_turn_threshold: float = 0.5,
-        smart_turn_max_wait_ms: int = 3000,
+        smart_turn_max_wait_ms: int = 2000,
         smart_turn_cpu_count: int = 1,
     ) -> None:
         self.should_listen = should_listen

@@ -39,7 +39,7 @@ def _handler_with_smart_turn(analyzer: _FakeAnalyzer) -> VADHandler:
     handler.sample_rate = MODEL_SAMPLE_RATE
     handler.iterator = _FakeIterator()
     handler.smart_turn_analyzer = analyzer
-    handler.smart_turn_max_wait_samples = 3 * MODEL_SAMPLE_RATE
+    handler.smart_turn_max_wait_samples = 2 * MODEL_SAMPLE_RATE
     handler._smart_turn_pending_since_sample = None
     handler._smart_turn_last_active_samples = 0
     handler._total_samples = MODEL_SAMPLE_RATE

@@ -120,7 +120,8 @@ def test_parse_arguments_default_backend_returns_openai_api():
     assert args.vad_handler_kwargs.smart_turn_model_path is None
     assert args.vad_handler_kwargs.smart_turn_device == "cpu"
     assert args.vad_handler_kwargs.smart_turn_threshold == 0.5
-    assert args.vad_handler_kwargs.smart_turn_max_wait_ms == 3000
+    assert args.vad_handler_kwargs.smart_turn_max_wait_ms == 2000
+    assert args.vad_handler_kwargs.speculative_reopen_ms == 800
 
 
 def test_parse_arguments_accepts_smart_turn_options():

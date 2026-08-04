@@ -342,11 +342,11 @@ def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
     handler.realtime_processing_pause = 0.5
     handler.text_output_queue = Queue()
     handler.speculative_turns = SpeculativeTurnTracker()
-    handler.speculative_reopen_ms = 1000
+    handler.speculative_reopen_ms = 800
     handler.unanswered_reopen_ms = handler.speculative_reopen_ms
     handler._last_turn_detection = None
     handler.smart_turn_analyzer = None
-    handler.smart_turn_max_wait_samples = 3 * handler.sample_rate
+    handler.smart_turn_max_wait_samples = 2 * handler.sample_rate
     handler._smart_turn_pending_since_sample = None
     handler._smart_turn_last_active_samples = 0
     handler.iterator = iterator
@@ -627,7 +627,7 @@ def test_vad_reopens_unanswered_turn_after_grace_window():
         handler.text_output_queue.get_nowait()
 
     # Advance the audio clock so the resumed speech starts well past
-    # speculative_reopen_ms (1000) but within unanswered_reopen_ms (8000).
+    # speculative_reopen_ms (800) but within unanswered_reopen_ms (8000).
     handler._total_samples = 16000 * 3
 
     outputs = _drive_final_segment(handler)
