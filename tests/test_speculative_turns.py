@@ -363,6 +363,7 @@ def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
     handler._current_turn_id = None
     handler._current_turn_revision = None
     handler._speculative_audio_prefix = None
+    handler._speculative_raw_audio_prefix = None
     handler._last_final_wall_time = None
     handler._last_final_audio_ms = None
     handler._pending_reopen_candidate = None
@@ -551,6 +552,35 @@ def test_vad_resumed_speech_during_smart_turn_grace_creates_new_revision():
     assert handler.speculative_turns.is_latest("turn_1", 1)
     assert len(analyzer.calls) == 2
     assert len(analyzer.calls[1]) == len(first_outputs[0].audio) + 12 * 512
+
+
+def test_vad_reanalyzes_resumed_turn_with_raw_audio_after_enhancement():
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    analyzer = _StaticSmartTurnAnalyzer(
+        SmartTurnResult(complete=False, probability=0.2, inference_ms=12.5),
+        SmartTurnResult(complete=True, probability=0.9, inference_ms=12.5),
+    )
+    handler.smart_turn_analyzer = analyzer
+    handler.audio_enhancement = True
+
+    def enhance_audio(audio: np.ndarray) -> np.ndarray:
+        audio += 1.0
+        return audio
+
+    handler._apply_audio_enhancement = enhance_audio
+
+    first_outputs = _drive_final_segment(handler)
+    assert len(first_outputs) == 1
+    np.testing.assert_array_equal(first_outputs[0].audio, np.ones(31 * 512, dtype=np.float32))
+
+    handler._total_samples = int(1.5 * handler.sample_rate)
+    resumed_outputs = _drive_final_segment(handler, active_chunks=12, segment_chunks=12)
+
+    assert len(resumed_outputs) == 1
+    assert len(analyzer.calls) == 2
+    np.testing.assert_array_equal(analyzer.calls[0], np.zeros(31 * 512, dtype=np.float32))
+    np.testing.assert_array_equal(analyzer.calls[1], np.zeros(43 * 512, dtype=np.float32))
+    np.testing.assert_array_equal(resumed_outputs[0].audio, np.ones(43 * 512, dtype=np.float32))
 
 
 def test_vad_max_speech_is_enforced_before_smart_turn():

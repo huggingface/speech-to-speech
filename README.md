@@ -582,7 +582,7 @@ See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments
 - `--min_silence_ms`: minimum length of silence intervals for segmenting speech. Default is 64 ms.
 - `--short_segment_merge_ms`: optional merge window for stitching adjacent VAD segments that are each shorter than `--min_speech_ms`.
 - `--speculative_reopen_ms`: delay response commitment for 800 ms after a soft-ended turn so immediately resumed speech can reopen it.
-- `--unanswered_reopen_ms`: sanity cap on how long a soft-ended speculative turn that has not yet received any assistant output stays reopenable.
+- `--unanswered_reopen_ms`: sanity cap on how long a soft-ended speculative turn that has not yet received any assistant output stays reopenable. With Smart Turn enabled, this is clamped to at least `--smart_turn_max_wait_ms` so a turn remains reopenable for its full grace.
 
 ### Smart Turn endpointing
 

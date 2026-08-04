@@ -70,7 +70,7 @@ class VADHandlerArguments:
     unanswered_reopen_ms: int = field(
         default=7000,
         metadata={
-            "help": "Sanity cap (ms) for reopening a soft-ended speculative turn that has not yet been answered by any assistant output. While a turn is uncommitted, resumed speech within this window reopens the same turn instead of starting a new one. Has no effect below speculative_reopen_ms."
+            "help": "Sanity cap (ms) for reopening a soft-ended speculative turn that has not yet been answered by any assistant output. While a turn is uncommitted, resumed speech within this window reopens the same turn instead of starting a new one. Has no effect below speculative_reopen_ms and is clamped to smart_turn_max_wait_ms when Smart Turn is enabled."
         },
     )
     short_segment_merge_ms: int = field(

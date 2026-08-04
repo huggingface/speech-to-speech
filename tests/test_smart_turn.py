@@ -1,9 +1,13 @@
 import sys
 from pathlib import Path
+from queue import Queue
+from threading import Event
 from types import SimpleNamespace
 
 import numpy as np
+import torch
 
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.VAD.smart_turn import (
     MAX_AUDIO_SECONDS,
     MODEL_SAMPLE_RATE,
@@ -62,6 +66,36 @@ def test_inference_failure_uses_default_speculative_grace() -> None:
 
     assert handler._smart_turn_reopen_grace_ms(audio) == 800
     assert len(analyzer.calls) == 1
+
+
+def test_unanswered_reopen_cap_covers_smart_turn_wait(monkeypatch) -> None:
+    class FakeSileroModel:
+        def reset_states(self) -> None:
+            pass
+
+    monkeypatch.setattr(torch.hub, "load", lambda *_args, **_kwargs: (FakeSileroModel(), None))
+    monkeypatch.setattr(
+        "speech_to_speech.VAD.smart_turn.SmartTurnAnalyzer",
+        lambda **_kwargs: object(),
+    )
+    tracker = SpeculativeTurnTracker()
+    handler = object.__new__(VADHandler)
+
+    handler.setup(
+        Event(),
+        text_output_queue=Queue(),
+        speculative_turns=tracker,
+        unanswered_reopen_ms=1000,
+        smart_turn_max_wait_ms=2000,
+    )
+
+    assert handler.unanswered_reopen_ms == 2000
+    tracker.observe("turn_1", 0)
+    handler._current_turn_id = "turn_1"
+    handler._current_turn_revision = 0
+    handler._last_final_audio_ms = 0
+    assert handler._should_reopen_current_turn(1500)
+    assert not handler._should_reopen_current_turn(2001)
 
 
 def test_prepare_audio_keeps_latest_eight_seconds_and_left_pads() -> None:

@@ -94,7 +94,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.text_output_queue = text_output_queue
         self.speculative_turns = speculative_turns
         self.speculative_reopen_ms = speculative_reopen_ms
-        self.unanswered_reopen_ms = max(self.speculative_reopen_ms, unanswered_reopen_ms)
         self.short_segment_merge_ms = max(0, short_segment_merge_ms)
         self._last_turn_detection: dict | None = None
         self.smart_turn_analyzer = None
@@ -111,6 +110,11 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 threshold=smart_turn_threshold,
                 cpu_count=smart_turn_cpu_count,
             )
+        self.unanswered_reopen_ms = max(
+            self.speculative_reopen_ms,
+            unanswered_reopen_ms,
+            self.smart_turn_max_wait_ms if smart_turn else 0,
+        )
         self.model, _ = torch.hub.load(
             "snakers4/silero-vad",
             "silero_vad",
@@ -151,6 +155,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._current_turn_id: str | None = None
         self._current_turn_revision: int | None = None
         self._speculative_audio_prefix: np.ndarray | None = None
+        self._speculative_raw_audio_prefix: np.ndarray | None = None
         self._last_final_wall_time: float | None = None
         self._last_final_audio_ms: int | None = None
         self._pending_reopen_candidate: tuple[str, int, int] | None = None
@@ -198,6 +203,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._current_turn_id = f"turn_{self._turn_counter}"
         self._current_turn_revision = 0
         self._speculative_audio_prefix = None
+        self._speculative_raw_audio_prefix = None
         self._last_final_wall_time = None
         self._last_final_audio_ms = None
         if self.speculative_turns:
@@ -367,6 +373,11 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         if self._speculative_audio_prefix is None:
             return current_segment
         return np.concatenate((self._speculative_audio_prefix, current_segment))
+
+    def _combined_raw_turn_audio(self, current_segment: np.ndarray) -> np.ndarray:
+        if self._speculative_raw_audio_prefix is None:
+            return current_segment.copy()
+        return np.concatenate((self._speculative_raw_audio_prefix, current_segment))
 
     def _short_segment_merge_window_ms(self) -> int:
         return int(getattr(self, "short_segment_merge_ms", 0))
@@ -748,7 +759,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     turn_id,
                     turn_revision,
                 )
-                analysis_audio = self._combined_turn_audio(array)
+                analysis_audio = self._combined_raw_turn_audio(array)
                 reopen_grace_ms = self._smart_turn_reopen_grace_ms(analysis_audio)
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
@@ -764,6 +775,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         )
                     )
                 self._speculative_audio_prefix = output_array
+                self._speculative_raw_audio_prefix = analysis_audio
                 self._last_final_wall_time = time.time()
                 self._last_final_audio_ms = end_ms
                 if self.speculative_turns:
@@ -911,6 +923,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._current_turn_id = None
         self._current_turn_revision = None
         self._speculative_audio_prefix = None
+        self._speculative_raw_audio_prefix = None
         self._last_final_wall_time = None
         self._last_final_audio_ms = None
         self._pending_reopen_candidate = None
