@@ -134,7 +134,6 @@ pip install "speech-to-speech[faster-whisper]"  # Faster Whisper STT
 pip install "speech-to-speech[whisper-mlx]"     # Lightning Whisper MLX STT on macOS
 pip install "speech-to-speech[paraformer]"      # Paraformer STT through FunASR
 pip install "speech-to-speech[mlx-lm]"          # mlx-vlm support for vision models on macOS
-pip install "speech-to-speech[smart-turn-gpu]"  # Smart Turn v3.2 endpointing on CUDA
 ```
 
 Deprecated implementations, including MeloTTS, live in [`archive/`](./archive) and are no longer wired into the CLI.
@@ -604,7 +603,8 @@ The latest supported v3.2 CPU checkpoint downloads from the Hugging Face Hub on 
 CUDA inference uses the v3.2 GPU checkpoint:
 
 ```bash
-pip install "speech-to-speech[smart-turn-gpu]"
+pip uninstall onnxruntime
+pip install "onnxruntime-gpu>=1.21.0,<1.27"
 speech-to-speech --smart_turn_device cuda
 ```
 

@@ -59,9 +59,9 @@ class SmartTurnAnalyzer:
         try:
             import onnxruntime as ort
         except ImportError as exc:
-            extra = "smart-turn-gpu" if device == "cuda" else "smart-turn"
             raise ImportError(
-                f'Smart Turn requires ONNX Runtime. Install it with `pip install "speech-to-speech[{extra}]"`.'
+                "Smart Turn requires ONNX Runtime. Install `onnxruntime` for CPU inference or "
+                "`onnxruntime-gpu` for CUDA inference."
             ) from exc
 
         from transformers import WhisperFeatureExtractor
@@ -77,7 +77,7 @@ class SmartTurnAnalyzer:
             if "CUDAExecutionProvider" not in available_providers:
                 raise RuntimeError(
                     "Smart Turn was configured for CUDA, but ONNX Runtime's CUDAExecutionProvider is unavailable. "
-                    "Install `speech-to-speech[smart-turn-gpu]` and verify the CUDA runtime."
+                    "Install `onnxruntime-gpu` and verify the CUDA runtime."
                 )
             providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
         else:
@@ -112,8 +112,7 @@ class SmartTurnAnalyzer:
             from huggingface_hub import hf_hub_download
         except ImportError as exc:
             raise ImportError(
-                "Smart Turn model download requires huggingface-hub. "
-                'Install it with `pip install "speech-to-speech[smart-turn]"`.'
+                "Smart Turn model download requires huggingface-hub. Install it with `pip install huggingface-hub`."
             ) from exc
 
         return Path(
