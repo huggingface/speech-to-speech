@@ -349,6 +349,7 @@ def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
     handler._last_turn_detection = None
     handler.smart_turn_analyzer = None
     handler.smart_turn_max_wait_ms = 2000
+    handler.smart_turn_incomplete_delay_ms = 600
     handler.iterator = iterator
     handler.audio_enhancement = False
     handler.last_process_time = 0.0
@@ -493,6 +494,7 @@ def test_vad_complete_smart_turn_selects_shorter_speculative_grace():
     outputs = _drive_final_segment(handler)
 
     assert len(outputs) == 1
+    assert outputs[0].processing_delay_s == 0.0
     grace = handler.speculative_turns._reopen_grace["turn_1"]
     assert grace.revision == 0
     assert 0.6 < grace.deadline - time.monotonic() <= 0.8
@@ -506,6 +508,7 @@ def test_vad_incomplete_smart_turn_selects_longer_speculative_grace():
     outputs = _drive_final_segment(handler)
 
     assert len(outputs) == 1
+    assert outputs[0].processing_delay_s == 0.6
     grace = handler.speculative_turns._reopen_grace["turn_1"]
     assert grace.revision == 0
     assert 1.8 < grace.deadline - time.monotonic() <= 2.0

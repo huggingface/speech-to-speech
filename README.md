@@ -588,9 +588,10 @@ See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments
 
 [Smart Turn v3.2](https://huggingface.co/pipecat-ai/smart-turn-v3) can validate Silero's end-of-speech
 decisions using the content and prosody of the current turn. In realtime mode, Silero still finalizes the segment
-and STT/LLM work may begin speculatively. Smart Turn then chooses how long assistant output remains gated: a
-complete turn uses `--speculative_reopen_ms` (800 ms by default), while an incomplete turn uses
-`--smart_turn_max_wait_ms` (2 seconds by default). If speech resumes during that grace, the existing turn is
+and STT/LLM work may begin speculatively. Complete turns start processing immediately and use
+`--speculative_reopen_ms` (800 ms by default) before committing output. Incomplete turns wait
+`--smart_turn_incomplete_delay_ms` (600 ms by default) before starting STT/LLM work, while their output remains
+gated by `--smart_turn_max_wait_ms` (2 seconds by default). If speech resumes during either delay, the existing turn is
 reopened as a newer revision, the accumulated audio is re-emitted, and work from the previous revision is
 discarded before it reaches the user.
 

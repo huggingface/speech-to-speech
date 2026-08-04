@@ -121,6 +121,7 @@ def test_parse_arguments_default_backend_returns_openai_api():
     assert args.vad_handler_kwargs.smart_turn_model_path is None
     assert args.vad_handler_kwargs.smart_turn_threshold == 0.5
     assert args.vad_handler_kwargs.smart_turn_max_wait_ms == 2000
+    assert args.vad_handler_kwargs.smart_turn_incomplete_delay_ms == 600
     assert args.vad_handler_kwargs.speculative_reopen_ms == 800
 
 
@@ -136,6 +137,8 @@ def test_parse_arguments_accepts_smart_turn_options():
             "0.7",
             "--smart_turn_max_wait_ms",
             "2500",
+            "--smart_turn_incomplete_delay_ms",
+            "700",
             "--smart_turn_cpu_count",
             "2",
         ]
@@ -148,6 +151,7 @@ def test_parse_arguments_accepts_smart_turn_options():
     assert vad_args.smart_turn_model_path == "/models/smart-turn.onnx"
     assert vad_args.smart_turn_threshold == 0.7
     assert vad_args.smart_turn_max_wait_ms == 2500
+    assert vad_args.smart_turn_incomplete_delay_ms == 700
     assert vad_args.smart_turn_cpu_count == 2
 
 

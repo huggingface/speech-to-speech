@@ -78,6 +78,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         smart_turn_model_path: str | None = None,
         smart_turn_threshold: float = 0.5,
         smart_turn_max_wait_ms: int = 2000,
+        smart_turn_incomplete_delay_ms: int = 600,
         smart_turn_cpu_count: int = 1,
     ) -> None:
         self.should_listen = should_listen
@@ -98,11 +99,16 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._last_turn_detection: dict | None = None
         self.smart_turn_analyzer = None
         self.smart_turn_max_wait_ms = smart_turn_max_wait_ms
+        self.smart_turn_incomplete_delay_ms = smart_turn_incomplete_delay_ms
         if smart_turn:
             if speculative_turns is None:
                 raise ValueError("Smart Turn requires realtime mode with speculative turn tracking")
             if smart_turn_max_wait_ms <= 0:
                 raise ValueError(f"smart_turn_max_wait_ms must be greater than 0, got {smart_turn_max_wait_ms}")
+            if smart_turn_incomplete_delay_ms < 0:
+                raise ValueError(
+                    f"smart_turn_incomplete_delay_ms must be at least 0, got {smart_turn_incomplete_delay_ms}"
+                )
             from speech_to_speech.VAD.smart_turn import SmartTurnAnalyzer
 
             self.smart_turn_analyzer = SmartTurnAnalyzer(
@@ -519,11 +525,11 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             and queued_item.turn_revision == latest.turn_revision
         )
 
-    def _smart_turn_reopen_grace_ms(self, audio: np.ndarray) -> int:
-        """Choose how long speculative output should wait for resumed speech."""
+    def _smart_turn_timing_ms(self, audio: np.ndarray) -> tuple[int, int]:
+        """Return the response grace and pre-processing delay for this endpoint."""
         analyzer = getattr(self, "smart_turn_analyzer", None)
         if analyzer is None:
-            return self.speculative_reopen_ms
+            return self.speculative_reopen_ms, 0
 
         try:
             result = analyzer.predict(audio, sample_rate=self.sample_rate)
@@ -531,7 +537,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             # A transient classifier failure falls back to the ordinary short
             # speculative window instead of delaying the response for seconds.
             logger.exception("Smart Turn inference failed; using the default speculative reopen grace")
-            return self.speculative_reopen_ms
+            return self.speculative_reopen_ms, 0
 
         if result.complete:
             logger.info(
@@ -540,15 +546,18 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 result.inference_ms,
                 self.speculative_reopen_ms,
             )
-            return self.speculative_reopen_ms
+            return self.speculative_reopen_ms, 0
 
+        processing_delay_ms = min(self.smart_turn_incomplete_delay_ms, self.smart_turn_max_wait_ms)
         logger.info(
-            "Smart Turn: incomplete (p=%.3f, %.1fms); using %dms speculative reopen grace",
+            "Smart Turn: incomplete (p=%.3f, %.1fms); using %dms speculative reopen grace "
+            "and delaying processing by %dms",
             result.probability,
             result.inference_ms,
             self.smart_turn_max_wait_ms,
+            processing_delay_ms,
         )
-        return self.smart_turn_max_wait_ms
+        return self.smart_turn_max_wait_ms, processing_delay_ms
 
     def process(self, audio_chunk: VADIn) -> Iterator[VADOut]:
         runtime_config = None
@@ -760,7 +769,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     turn_revision,
                 )
                 analysis_audio = self._combined_raw_turn_audio(array)
-                reopen_grace_ms = self._smart_turn_reopen_grace_ms(analysis_audio)
+                reopen_grace_ms, processing_delay_ms = self._smart_turn_timing_ms(analysis_audio)
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
                 output_array = self._combined_turn_audio(array)
@@ -795,6 +804,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     mode="final",
                     turn_id=turn_id,
                     turn_revision=turn_revision,
+                    processing_delay_s=processing_delay_ms / 1000.0,
                 )
                 self.last_process_time = 0.0
                 self._speech_started_emitted = False

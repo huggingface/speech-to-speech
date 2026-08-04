@@ -103,6 +103,12 @@ class VADHandlerArguments:
             "help": "Speculative reopen grace used when Smart Turn reports an incomplete turn. Resumed speech creates a newer turn revision; otherwise output may commit after this delay. Default is 2000 ms."
         },
     )
+    smart_turn_incomplete_delay_ms: int = field(
+        default=600,
+        metadata={
+            "help": "Delay STT and LLM processing after Smart Turn reports an incomplete turn, allowing resumed speech to invalidate the revision before expensive work begins. This delay runs within smart_turn_max_wait_ms. Default is 600 ms."
+        },
+    )
     smart_turn_cpu_count: int = field(
         default=1,
         metadata={"help": "Number of CPU threads ONNX Runtime may use for each Smart Turn inference. Default is 1."},
