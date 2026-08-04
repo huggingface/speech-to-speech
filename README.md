@@ -579,9 +579,9 @@ See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments
 - `--thresh`: threshold value to trigger voice activity detection.
 - `--min_speech_ms`: minimum duration of detected voice activity to be considered speech.
 - `--min_speech_continuation_ms`: sustain-bar hysteresis threshold for speech that continues a reopenable soft-ended, uncommitted turn within the reopen window. The default and recommended pairing is `--min_speech_ms 384 --min_speech_continuation_ms 192`.
-- `--min_silence_ms`: minimum length of silence intervals for segmenting speech. Default is 192 ms.
+- `--min_silence_ms`: minimum length of silence intervals for segmenting speech. Default is 64 ms.
 - `--short_segment_merge_ms`: optional merge window for stitching adjacent VAD segments that are each shorter than `--min_speech_ms`.
-- `--speculative_reopen_ms`: delay response commitment for 600 ms after a soft-ended turn so immediately resumed speech can reopen it.
+- `--speculative_reopen_ms`: delay response commitment for 800 ms after a soft-ended turn so immediately resumed speech can reopen it.
 - `--unanswered_reopen_ms`: sanity cap on how long a soft-ended speculative turn that has not yet received any assistant output stays reopenable.
 
 ### Smart Turn endpointing
@@ -589,8 +589,8 @@ See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments
 [Smart Turn v3.2](https://huggingface.co/pipecat-ai/smart-turn-v3) can validate Silero's end-of-speech
 decisions using the content and prosody of the current turn. In realtime mode, Silero still finalizes the segment
 and STT/LLM work may begin speculatively. Smart Turn then chooses how long assistant output remains gated: a
-complete turn uses `--speculative_reopen_ms` (600 ms by default), while an incomplete turn uses
-`--smart_turn_max_wait_ms` (1.8 seconds by default). If speech resumes during that grace, the existing turn is
+complete turn uses `--speculative_reopen_ms` (800 ms by default), while an incomplete turn uses
+`--smart_turn_max_wait_ms` (2 seconds by default). If speech resumes during that grace, the existing turn is
 reopened as a newer revision, the accumulated audio is re-emitted, and work from the previous revision is
 discarded before it reaches the user.
 

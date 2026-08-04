@@ -43,7 +43,7 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_realtime_profile():
     assert module_args.live_transcription_update_interval == 0.5
 
     assert vad_args.thresh == 0.6
-    assert vad_args.min_silence_ms == 192
+    assert vad_args.min_silence_ms == 64
     assert vad_args.min_speech_ms == 384
     assert vad_args.min_speech_continuation_ms == 192
     assert vad_args.realtime_processing_pause == 0.5
@@ -120,8 +120,8 @@ def test_parse_arguments_default_backend_returns_openai_api():
     assert args.vad_handler_kwargs.smart_turn is True
     assert args.vad_handler_kwargs.smart_turn_model_path is None
     assert args.vad_handler_kwargs.smart_turn_threshold == 0.5
-    assert args.vad_handler_kwargs.smart_turn_max_wait_ms == 1800
-    assert args.vad_handler_kwargs.speculative_reopen_ms == 600
+    assert args.vad_handler_kwargs.smart_turn_max_wait_ms == 2000
+    assert args.vad_handler_kwargs.speculative_reopen_ms == 800
 
 
 def test_parse_arguments_accepts_smart_turn_options():
