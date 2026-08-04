@@ -738,7 +738,22 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             duration_ms = self._segment_duration_ms(array)
             min_active_ms = 0.0 if self._speech_started_emitted else self._active_speech_min_ms(start_ms)
 
-            if active_speech_duration_ms < min_active_ms or duration_ms > self.max_speech_ms:
+            # A restored Smart Turn buffer includes silence accumulated while
+            # waiting for the bounded timeout. Let the pending decision consume
+            # that buffer before applying max_speech_ms, or valid speech can be
+            # discarded solely because its waiting silence crossed the limit.
+            smart_turn_decision: _SmartTurnDecision | None = None
+            if self._smart_turn_pending_since_sample is not None:
+                smart_turn_decision = self._smart_turn_should_finalize(
+                    array,
+                    int(active_speech_duration_ms * self.sample_rate / 1000),
+                    analysis_audio=self._combined_turn_audio(array),
+                )
+                if smart_turn_decision is _SmartTurnDecision.CONTINUE:
+                    return
+
+            duration_exceeds_limit = duration_ms > self.max_speech_ms and smart_turn_decision is None
+            if active_speech_duration_ms < min_active_ms or duration_exceeds_limit:
                 if (
                     self._short_segment_merge_window_ms() > 0
                     and raw_active_ms >= _SHORT_SEGMENT_MIN_FRAGMENT_MS
@@ -766,6 +781,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 if not self._speech_started_emitted:
                     self._cancel_pending_reopen()
                 self._speech_started_emitted = False
+                self._reset_smart_turn_state()
             else:
                 if stitched_short_segment:
                     logger.info(
@@ -773,11 +789,12 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         duration_ms,
                         active_speech_duration_ms,
                     )
-                smart_turn_decision = self._smart_turn_should_finalize(
-                    array,
-                    int(active_speech_duration_ms * self.sample_rate / 1000),
-                    analysis_audio=self._combined_turn_audio(array),
-                )
+                if smart_turn_decision is None:
+                    smart_turn_decision = self._smart_turn_should_finalize(
+                        array,
+                        int(active_speech_duration_ms * self.sample_rate / 1000),
+                        analysis_audio=self._combined_turn_audio(array),
+                    )
                 if smart_turn_decision is _SmartTurnDecision.CONTINUE:
                     return
                 if not self._speech_started_emitted:
@@ -887,7 +904,22 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 start_ms = self._segment_start_ms(array, end_ms)
             duration_ms = self._segment_duration_ms(array)
             min_active_ms = 0.0 if self._speech_started_emitted else self._active_speech_min_ms(start_ms)
-            if active_speech_duration_ms < min_active_ms or duration_ms > self.max_speech_ms:
+            # A restored Smart Turn buffer includes silence accumulated while
+            # waiting for the bounded timeout. Let the pending decision consume
+            # that buffer before applying max_speech_ms, or valid speech can be
+            # discarded solely because its waiting silence crossed the limit.
+            smart_turn_decision: _SmartTurnDecision | None = None
+            if self._smart_turn_pending_since_sample is not None:
+                smart_turn_decision = self._smart_turn_should_finalize(
+                    array,
+                    int(active_speech_duration_ms * self.sample_rate / 1000),
+                    analysis_audio=self._combined_turn_audio(array),
+                )
+                if smart_turn_decision is _SmartTurnDecision.CONTINUE:
+                    return
+
+            duration_exceeds_limit = duration_ms > self.max_speech_ms and smart_turn_decision is None
+            if active_speech_duration_ms < min_active_ms or duration_exceeds_limit:
                 if (
                     self._short_segment_merge_window_ms() > 0
                     and raw_active_ms >= _SHORT_SEGMENT_MIN_FRAGMENT_MS
@@ -906,6 +938,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 if self._speech_started_emitted and self.text_output_queue:
                     self.text_output_queue.put(SpeechStoppedEvent(audio_end_ms=self._audio_ms))
                 self._speech_started_emitted = False
+                self._reset_smart_turn_state()
             else:
                 if stitched_short_segment:
                     logger.info(
@@ -913,11 +946,12 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         duration_ms,
                         active_speech_duration_ms,
                     )
-                smart_turn_decision = self._smart_turn_should_finalize(
-                    array,
-                    int(active_speech_duration_ms * self.sample_rate / 1000),
-                    analysis_audio=self._combined_turn_audio(array),
-                )
+                if smart_turn_decision is None:
+                    smart_turn_decision = self._smart_turn_should_finalize(
+                        array,
+                        int(active_speech_duration_ms * self.sample_rate / 1000),
+                        analysis_audio=self._combined_turn_audio(array),
+                    )
                 if smart_turn_decision is _SmartTurnDecision.CONTINUE:
                     return
                 if not self._speech_started_emitted and self.text_output_queue:
