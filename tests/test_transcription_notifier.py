@@ -19,7 +19,7 @@ def _notifier(
 
 
 def test_empty_final_transcription_still_emits_completion_after_partial():
-    # sample comment
+    # sample commen
     text_output_queue = Queue()
     notifier = _notifier(text_output_queue=text_output_queue)
 
