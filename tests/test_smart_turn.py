@@ -11,7 +11,7 @@ from speech_to_speech.VAD.smart_turn import (
     SmartTurnAnalyzer,
     SmartTurnResult,
 )
-from speech_to_speech.VAD.vad_handler import VADHandler
+from speech_to_speech.VAD.vad_handler import VADHandler, _SmartTurnDecision
 
 
 class _FakeIterator:
@@ -55,7 +55,7 @@ def test_incomplete_turn_is_restored_to_streaming_vad() -> None:
     handler = _handler_with_smart_turn(analyzer)
     audio = np.arange(32, dtype=np.float32)
 
-    assert not handler._smart_turn_should_finalize(audio, active_speech_samples=800)
+    assert handler._smart_turn_should_finalize(audio, active_speech_samples=800) is _SmartTurnDecision.CONTINUE
     assert len(analyzer.calls) == 1
     assert handler._smart_turn_pending_since_sample == MODEL_SAMPLE_RATE
     assert handler.iterator.triggered is True
@@ -72,10 +72,13 @@ def test_analysis_can_include_prior_turn_audio_without_restoring_it() -> None:
     current_segment = np.arange(4, dtype=np.float32)
     full_turn = np.arange(10, dtype=np.float32)
 
-    assert not handler._smart_turn_should_finalize(
-        current_segment,
-        active_speech_samples=800,
-        analysis_audio=full_turn,
+    assert (
+        handler._smart_turn_should_finalize(
+            current_segment,
+            active_speech_samples=800,
+            analysis_audio=full_turn,
+        )
+        is _SmartTurnDecision.CONTINUE
     )
 
     np.testing.assert_array_equal(analyzer.calls[0][0], full_turn)
@@ -87,13 +90,13 @@ def test_pending_turn_only_runs_inference_again_after_more_speech() -> None:
     handler = _handler_with_smart_turn(analyzer)
     audio = np.ones(32, dtype=np.float32)
 
-    assert not handler._smart_turn_should_finalize(audio, active_speech_samples=800)
+    assert handler._smart_turn_should_finalize(audio, active_speech_samples=800) is _SmartTurnDecision.CONTINUE
     handler._total_samples += 512
-    assert not handler._smart_turn_should_finalize(audio, active_speech_samples=800)
+    assert handler._smart_turn_should_finalize(audio, active_speech_samples=800) is _SmartTurnDecision.CONTINUE
     assert len(analyzer.calls) == 1
 
     handler._total_samples += 512
-    assert handler._smart_turn_should_finalize(audio, active_speech_samples=1312)
+    assert handler._smart_turn_should_finalize(audio, active_speech_samples=1312) is _SmartTurnDecision.COMPLETE
     assert len(analyzer.calls) == 2
     assert handler._smart_turn_pending_since_sample is None
 
@@ -103,10 +106,10 @@ def test_pending_turn_finalizes_at_bounded_silence_timeout() -> None:
     handler = _handler_with_smart_turn(analyzer)
     audio = np.ones(32, dtype=np.float32)
 
-    assert not handler._smart_turn_should_finalize(audio, active_speech_samples=800)
+    assert handler._smart_turn_should_finalize(audio, active_speech_samples=800) is _SmartTurnDecision.CONTINUE
     handler._total_samples += handler.smart_turn_max_wait_samples
 
-    assert handler._smart_turn_should_finalize(audio, active_speech_samples=800)
+    assert handler._smart_turn_should_finalize(audio, active_speech_samples=800) is _SmartTurnDecision.MAX_WAIT
     assert len(analyzer.calls) == 1
     assert handler._smart_turn_pending_since_sample is None
 
