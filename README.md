@@ -134,7 +134,6 @@ pip install "speech-to-speech[faster-whisper]"  # Faster Whisper STT
 pip install "speech-to-speech[whisper-mlx]"     # Lightning Whisper MLX STT on macOS
 pip install "speech-to-speech[paraformer]"      # Paraformer STT through FunASR
 pip install "speech-to-speech[mlx-lm]"          # mlx-vlm support for vision models on macOS
-pip install "speech-to-speech[smart-turn]"      # Smart Turn v3.2 endpointing on CPU
 pip install "speech-to-speech[smart-turn-gpu]"  # Smart Turn v3.2 endpointing on CUDA
 ```
 
@@ -593,19 +592,20 @@ decisions using the content and prosody of the current turn. When it detects a m
 the same utterance open instead of sending a premature final segment to STT. If no more speech arrives, the
 turn is finalized after `--smart_turn_max_wait_ms` (2 seconds by default), so endpointing cannot wait forever.
 
-Install the CPU extra and enable it:
+The base package includes the quantized CPU runtime and enables Smart Turn by default:
 
 ```bash
-pip install "speech-to-speech[smart-turn]"
-speech-to-speech --smart_turn
+pip install speech-to-speech
+speech-to-speech
 ```
 
 The latest supported v3.2 CPU checkpoint downloads from the Hugging Face Hub on first use. Pass
-`--smart_turn_model_path /path/to/model.onnx` to use a local model. CUDA inference uses the v3.2 GPU checkpoint:
+`--smart_turn_model_path /path/to/model.onnx` to use a local model, or `--no_smart_turn` to disable Smart Turn.
+CUDA inference uses the v3.2 GPU checkpoint:
 
 ```bash
 pip install "speech-to-speech[smart-turn-gpu]"
-speech-to-speech --smart_turn --smart_turn_device cuda
+speech-to-speech --smart_turn_device cuda
 ```
 
 Tune the completion cutoff with `--smart_turn_threshold` (default `0.5`). A higher threshold makes ambiguous

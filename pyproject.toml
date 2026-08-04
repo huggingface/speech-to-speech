@@ -26,11 +26,13 @@ classifiers = [
 ]
 dependencies = [
     "fastapi>=0.115.0",
+    "huggingface-hub>=0.34.0",
     "httpx>=0.28.0",
     "nltk==3.10.0",
     "numpy>=1.26.0,<2.4.4; platform_system == 'Darwin'",
     "numpy>=1.26.0; platform_system != 'Darwin'",
     "openai==2.28.0",
+    "onnxruntime>=1.17.0; extra != 'smart-turn-gpu' or platform_system == 'Darwin'",
     "pillow>=10.0.0",
     "pydantic>=2.0",
     "rich>=13.0",
@@ -89,12 +91,9 @@ paraformer = [
 pocket = [
     "pocket-tts>=0.1.0",
 ]
-smart-turn = [
-    "huggingface-hub>=0.34.0",
-    "onnxruntime>=1.17.0",
-]
+# Backwards-compatible alias: CPU Smart Turn is included in the base install.
+smart-turn = []
 smart-turn-gpu = [
-    "huggingface-hub>=0.34.0",
     "onnxruntime-gpu>=1.21.0,<1.27; platform_system != 'Darwin'",
 ]
 webrtc = [

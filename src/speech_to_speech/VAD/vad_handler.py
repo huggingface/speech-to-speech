@@ -81,7 +81,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         speculative_reopen_ms: int = 800,
         unanswered_reopen_ms: int = 7000,
         short_segment_merge_ms: int = 0,
-        smart_turn: bool = False,
+        smart_turn: bool = True,
         smart_turn_model_path: str | None = None,
         smart_turn_device: Literal["cpu", "cuda"] = "cpu",
         smart_turn_threshold: float = 0.5,

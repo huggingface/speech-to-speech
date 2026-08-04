@@ -81,9 +81,9 @@ class VADHandlerArguments:
         },
     )
     smart_turn: bool = field(
-        default=False,
+        default=True,
         metadata={
-            "help": "Use Smart Turn v3.2 after Silero detects silence to avoid ending a turn during a mid-thought pause. Disabled by default."
+            "help": "Use Smart Turn v3.2 after Silero detects silence to avoid ending a turn during a mid-thought pause. Enabled by default; pass --no_smart_turn to disable it."
         },
     )
     smart_turn_model_path: str | None = field(

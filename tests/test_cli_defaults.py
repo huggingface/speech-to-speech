@@ -47,6 +47,8 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_realtime_profile():
     assert vad_args.min_speech_ms == 384
     assert vad_args.min_speech_continuation_ms == 192
     assert vad_args.realtime_processing_pause == 0.5
+    assert vad_args.smart_turn is True
+    assert vad_args.smart_turn_device == "cpu"
     assert responses_api_args.model_name == "gpt-5.4-mini"
     assert responses_api_args.chat_size == 30
     assert responses_api_args.responses_api_stream is True
@@ -116,7 +118,7 @@ def test_parse_arguments_default_backend_returns_openai_api():
     assert isinstance(args.language_model_handler_kwargs, LanguageModelHandlerArguments)
     assert args.responses_api_language_model_handler_kwargs.model_name == "gpt-5.4-mini"
     assert args.module_kwargs.llm_backend == "responses-api"
-    assert args.vad_handler_kwargs.smart_turn is False
+    assert args.vad_handler_kwargs.smart_turn is True
     assert args.vad_handler_kwargs.smart_turn_model_path is None
     assert args.vad_handler_kwargs.smart_turn_device == "cpu"
     assert args.vad_handler_kwargs.smart_turn_threshold == 0.5
@@ -152,6 +154,18 @@ def test_parse_arguments_accepts_smart_turn_options():
     assert vad_args.smart_turn_threshold == 0.7
     assert vad_args.smart_turn_max_wait_ms == 2500
     assert vad_args.smart_turn_cpu_count == 2
+
+
+def test_parse_arguments_can_disable_smart_turn():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = ["speech-to-speech", "--no_smart_turn"]
+        args = parse_arguments()
+    finally:
+        sys.argv = original_argv
+
+    assert args.vad_handler_kwargs.smart_turn is False
+    assert args.vad_handler_kwargs.smart_turn_device == "cpu"
 
 
 def test_parse_arguments_accepts_qwen3_tts_backend_override():
