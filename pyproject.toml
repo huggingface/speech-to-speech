@@ -95,7 +95,7 @@ smart-turn = [
 ]
 smart-turn-gpu = [
     "huggingface-hub>=0.34.0",
-    "onnxruntime-gpu>=1.17.0; platform_system != 'Darwin'",
+    "onnxruntime-gpu>=1.21.0,<1.27; platform_system != 'Darwin'",
 ]
 webrtc = [
     "aiortc>=1.9.0",
