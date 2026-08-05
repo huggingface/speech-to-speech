@@ -39,6 +39,12 @@ From a source checkout, talk to it from a second terminal:
 python scripts/listen_and_play_realtime.py --host 127.0.0.1 --port 8765
 ```
 
+For the same engine and protocol in one command, use the packaged loopback client:
+
+```bash
+speech-to-speech --mode local
+```
+
 Prefer to keep the LLM on your own machine? Serve Gemma 4 with llama.cpp:
 
 ```bash
@@ -176,10 +182,11 @@ Select implementations with `--stt`, `--llm_backend`, and `--tts`. Run `speech-t
 
 | Mode | Transport | Use it when |
 |---|---|---|
-| `realtime` (default) | OpenAI Realtime protocol over WebSocket or WebRTC | You are building an app or device against a standard voice API. |
-| `local` | Your machine's microphone and speakers | You want to talk to the pipeline directly, no client needed. |
-| `raw-websocket` | Raw PCM over WebSocket | You want a minimal custom client without the Realtime protocol. |
-| `socket` | Raw PCM over TCP | Models run on a remote server, with a simple microphone/playback client. |
+| `realtime` (default) | OpenAI Realtime over WebSocket or WebRTC | You are building an app or device against the public API. |
+| `local` | Packaged microphone/speaker client over loopback Realtime WebSocket | You want the same engine and protocol from one command. |
+
+Both modes build the same `RealtimeService` pipeline units. `local` only adds a client connected to
+`ws://127.0.0.1:<port>/v1/realtime`, so revisions, interruption, tools, usage, and session behavior are identical.
 
 ### Realtime Server
 
@@ -244,32 +251,6 @@ python scripts/benchmark_tts.py \
     --qwen3_mlx_quantizations bf16 4bit 6bit 8bit
 ```
 
-### Raw WebSocket
-
-1. Run the pipeline in raw WebSocket mode:
-
-   ```bash
-   speech-to-speech --mode raw-websocket --ws_host 0.0.0.0 --ws_port 8765
-   ```
-
-2. Connect from your client at `ws://<server-ip>:8765`. Send raw audio bytes as 16 kHz, int16, mono PCM and receive generated audio bytes back.
-
-### TCP Socket
-
-TCP socket mode is intentionally minimal. It streams raw PCM audio, but does not provide the full Realtime API feature set, including interruption handling, live transcript events, or tool-call events.
-
-1. Run the pipeline on the server:
-
-   ```bash
-   speech-to-speech --mode socket --recv_host 0.0.0.0 --send_host 0.0.0.0
-   ```
-
-2. Run the client locally to handle microphone input and playback:
-
-   ```bash
-   python scripts/listen_and_play.py --host <IP address of your server>
-   ```
-
 ### Docker
 
 Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html), then:
@@ -278,7 +259,7 @@ Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-
 docker compose up
 ```
 
-The compose file starts a llama.cpp server with Gemma 4, starts the TCP socket server, and exposes ports `8080`, `12345`, and `12346`.
+The compose file starts a llama.cpp server with Gemma 4 and the Realtime server, exposing ports `8080` and `8765`.
 
 ## Realtime API
 
@@ -565,7 +546,7 @@ References for all CLI arguments live in the [arguments classes](./src/speech_to
 See [ModuleArguments](./src/speech_to_speech/arguments_classes/module_arguments.py). It allows setting:
 
 - a common `--device`, if every part should run on the same device
-- `--mode`: `realtime` (default), `local`, `socket`, or `raw-websocket`
+- `--mode`: `realtime` (default) or `local`; both use the same Realtime engine
 - STT implementation (`--stt`)
 - LLM backend (`--llm_backend`: `transformers`, `mlx-lm`, `responses-api`, or `chat-completions`)
 - TTS implementation (`--tts`)
@@ -587,7 +568,7 @@ See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments
 ### Smart Turn endpointing
 
 [Smart Turn v3.2](https://huggingface.co/pipecat-ai/smart-turn-v3) can validate Silero's end-of-speech
-decisions using the content and prosody of the current turn. In realtime mode, Silero still finalizes the segment
+decisions using the content and prosody of the current turn. In the Realtime engine, Silero still finalizes the segment
 and STT/LLM work may begin speculatively. Complete turns start processing immediately and use
 `--speculative_reopen_ms` (800 ms by default) before committing output. Incomplete turns wait
 `--smart_turn_incomplete_delay_ms` (600 ms by default) before starting STT/LLM work, while their output remains
@@ -604,7 +585,7 @@ speech-to-speech
 
 The latest supported v3.2 CPU checkpoint downloads from the Hugging Face Hub on first use. Pass
 `--smart_turn_model_path /path/to/model.onnx` to use a local model, or `--no_smart_turn` to disable Smart Turn.
-Smart Turn is supported only with `--mode realtime`; pass `--no_smart_turn` when selecting another mode.
+Smart Turn works identically in `realtime` and `local` modes because both use the same Realtime turn lifecycle.
 
 Tune the completion cutoff with `--smart_turn_threshold` (default `0.5`). A higher threshold makes ambiguous
 pauses more likely to use the longer speculative response grace.

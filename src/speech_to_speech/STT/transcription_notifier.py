@@ -3,43 +3,34 @@ from __future__ import annotations
 import logging
 from queue import Queue
 from threading import Event
-from typing import Iterator, Union
+from typing import Iterator
 
-from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.LLM.chat import make_user_message
 from speech_to_speech.pipeline.events import PartialTranscriptionEvent, TranscriptionCompletedEvent
 from speech_to_speech.pipeline.handler_types import LLMIn, STTOut
-from speech_to_speech.pipeline.messages import GenerateResponseRequest, PartialTranscription, Transcription
+from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.pipeline.queue_types import TextEventItem
 
 logger = logging.getLogger(__name__)
 
 
-class TranscriptionNotifier(BaseHandler[STTOut, Union[STTOut, LLMIn]]):
+class TranscriptionNotifier(BaseHandler[STTOut, LLMIn]):
     """Sits between STT and LLM.
 
-    For **realtime mode** (no ``runtime_config``): emits transcription events
-    on ``text_output_queue`` for protocol translation but yields nothing -- the
-    ``RealtimeService`` builds ``GenerateResponseRequest`` directly.
-
-    For **non-Realtime pipeline modes** (``runtime_config`` provided): appends the user
-    message to ``runtime_config.chat`` and yields a
-    ``GenerateResponseRequest`` so the LLM handler receives a uniform input
-    type regardless of pipeline mode.
+    It emits protocol-neutral transcription events on ``text_output_queue``.
+    ``RealtimeService`` owns conversation state and creates LLM requests, so
+    this handler never constructs a second session or conversation lifecycle.
     """
 
     def setup(
         self,
         text_output_queue: Queue[TextEventItem] | None = None,
-        runtime_config: RuntimeConfig | None = None,
         should_listen: Event | None = None,
     ) -> None:
         self.text_output_queue = text_output_queue
-        self.runtime_config = runtime_config
         self.should_listen = should_listen
 
-    def process(self, transcription: STTOut) -> Iterator[Union[STTOut, LLMIn]]:
+    def process(self, transcription: STTOut) -> Iterator[LLMIn]:
         if isinstance(transcription, PartialTranscription):
             if self.text_output_queue and transcription.text:
                 self.text_output_queue.put(
@@ -92,12 +83,4 @@ class TranscriptionNotifier(BaseHandler[STTOut, Union[STTOut, LLMIn]]):
         else:
             logger.info("Transcription completed: %s", transcript)
 
-        if self.runtime_config is not None:
-            self.runtime_config.chat.add_item(make_user_message(transcript))
-            yield GenerateResponseRequest(
-                runtime_config=self.runtime_config,
-                language_code=language_code,
-                turn_id=turn_id,
-                turn_revision=turn_revision,
-                speech_stopped_at_s=speech_stopped_at_s,
-            )
+        yield from ()

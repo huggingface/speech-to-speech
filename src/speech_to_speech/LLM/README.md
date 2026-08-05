@@ -112,8 +112,8 @@ python s2s_pipeline.py \
   --mode realtime \
   --llm_backend mlx-lm \
   --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16 \
-  --ws_host 0.0.0.0 \
-  --ws_port 8765
+  --host 0.0.0.0 \
+  --port 8765
 
 # 2. Connect with the realtime client
 python listen_and_play_realtime.py --host 127.0.0.1 --port 8765
@@ -125,8 +125,8 @@ Or with `--local_mac_optimal_settings` on Apple Silicon:
 python s2s_pipeline.py \
   --local_mac_optimal_settings \
   --mode realtime \
-  --ws_host 0.0.0.0 \
-  --ws_port 8765
+  --host 0.0.0.0 \
+  --port 8765
 ```
 
 ### Remote API setup

@@ -11,19 +11,18 @@ from speech_to_speech.arguments_classes.facebookmms_tts_arguments import Faceboo
 from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import FasterWhisperSTTHandlerArguments
 from speech_to_speech.arguments_classes.kokoro_tts_arguments import KokoroTTSHandlerArguments
 from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
+from speech_to_speech.arguments_classes.local_audio_arguments import LocalAudioArguments
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import MLXAudioWhisperSTTHandlerArguments
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
 from speech_to_speech.arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
 from speech_to_speech.arguments_classes.parakeet_tdt_arguments import ParakeetTDTSTTHandlerArguments
 from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
+from speech_to_speech.arguments_classes.realtime_server_arguments import RealtimeServerArguments
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
     ResponsesApiLanguageModelHandlerArguments,
 )
-from speech_to_speech.arguments_classes.socket_receiver_arguments import SocketReceiverArguments
-from speech_to_speech.arguments_classes.socket_sender_arguments import SocketSenderArguments
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
-from speech_to_speech.arguments_classes.websocket_streamer_arguments import WebSocketStreamerArguments
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
 from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments, prepare_module_args
 
@@ -72,9 +71,8 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_realtime_profile():
 
 EXPECTED_FIELD_TYPES = {
     "module_kwargs": ModuleArguments,
-    "socket_receiver_kwargs": SocketReceiverArguments,
-    "socket_sender_kwargs": SocketSenderArguments,
-    "websocket_streamer_kwargs": WebSocketStreamerArguments,
+    "realtime_server_kwargs": RealtimeServerArguments,
+    "local_audio_kwargs": LocalAudioArguments,
     "vad_handler_kwargs": VADHandlerArguments,
     "whisper_stt_handler_kwargs": WhisperSTTHandlerArguments,
     "paraformer_stt_handler_kwargs": ParaformerSTTHandlerArguments,
@@ -218,32 +216,33 @@ def test_parse_arguments_accepts_qwen3_tts_ggml_options():
     assert qwen3_args.qwen3_tts_ref_rvq == "/voices/ref.rvq"
 
 
-def test_parse_arguments_accepts_raw_websocket_mode():
+def test_cli_exposes_only_realtime_and_local_modes():
     original_argv = sys.argv[:]
     try:
-        sys.argv = ["speech-to-speech", "--mode", "raw-websocket", "--no_smart_turn"]
+        for mode in ("realtime", "local"):
+            sys.argv = ["speech-to-speech", "--mode", mode]
+            assert parse_arguments().module_kwargs.mode == mode
+    finally:
+        sys.argv = original_argv
+
+
+def test_parse_arguments_supports_smart_turn_in_local_mode():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = ["speech-to-speech", "--mode", "local", "--smart_turn"]
         args = parse_arguments()
     finally:
         sys.argv = original_argv
 
-    assert args.module_kwargs.mode == "raw-websocket"
-    assert args.vad_handler_kwargs.smart_turn is False
+    assert args.module_kwargs.mode == "local"
+    assert args.vad_handler_kwargs.smart_turn is True
 
 
-def test_parse_arguments_rejects_smart_turn_outside_realtime_mode():
+@pytest.mark.parametrize("mode", ["socket", "raw-websocket", "websocket"])
+def test_parse_arguments_rejects_removed_legacy_modes(mode):
     original_argv = sys.argv[:]
     try:
-        sys.argv = ["speech-to-speech", "--mode", "local", "--smart_turn"]
-        with pytest.raises(ValueError, match="--smart_turn is only supported with --mode realtime"):
-            parse_arguments()
-    finally:
-        sys.argv = original_argv
-
-
-def test_parse_arguments_rejects_removed_websocket_mode():
-    original_argv = sys.argv[:]
-    try:
-        sys.argv = ["speech-to-speech", "--mode", "websocket"]
+        sys.argv = ["speech-to-speech", "--mode", mode]
         with pytest.raises(SystemExit):
             parse_arguments()
     finally:

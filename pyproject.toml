@@ -94,9 +94,6 @@ pocket = [
 webrtc = [
     "aiortc>=1.9.0",
 ]
-websocket = [
-    "websockets>=12.0",
-]
 whisper-mlx = [
     "lightning-whisper-mlx>=0.0.10; platform_system == 'Darwin'",
 ]

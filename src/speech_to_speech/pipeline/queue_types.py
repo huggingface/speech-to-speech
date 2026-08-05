@@ -21,7 +21,7 @@ from speech_to_speech.pipeline.messages import AudioOutput
 # ``Queue`` is invariant; ``Literal[b"END"]`` is not accepted where ``bytes`` is required.
 PipelineInternalItem: TypeAlias = PipelineControlMessage | bytes
 
-# Audio chunks coming from IO (socket/websocket/mic) into VAD.
+# Audio chunks decoded from Realtime transports into VAD.
 AudioInItem: TypeAlias = VADIn | PipelineControlMessage
 
 # Audio segments flowing from VAD to STT.
@@ -42,5 +42,5 @@ TTSInItem: TypeAlias = TTSIn | PipelineInternalItem
 # Audio outputs flowing to speakers / client (includes sentinels as bytes).
 AudioOutItem: TypeAlias = bytes | np.ndarray | AudioOutput | PipelineControlMessage
 
-# Side-channel text events sent to websocket/realtime clients.
+# Side-channel text events translated into Realtime protocol events.
 TextEventItem: TypeAlias = PipelineEvent | PipelineInternalItem

@@ -1,15 +1,17 @@
 ## Realtime Engine -- High-Level Architecture
 
-The server runs as a handler thread inside the existing pipeline. A FastAPI/uvicorn instance serves the WebSocket endpoint at `/v1/realtime`, while the same queue-driven handler chain (VAD, STT, LLM, TTS) processes audio in parallel threads.
+Realtime is the only pipeline engine. A FastAPI/uvicorn server exposes WebSocket and WebRTC transports, and every client—including `--mode local`—drives the same queue-backed `PipelineUnit`, `RealtimeService`, turn tracker, and cancellation lifecycle. Local mode simply starts the packaged microphone/speaker client against the loopback WebSocket endpoint.
 
 ```mermaid
 flowchart LR
     subgraph client [Client]
-        WS["WebSocket /v1/realtime"]
+        Local["Packaged local audio client"]
+        WS["External WebSocket client"]
+        RTC["WebRTC client"]
     end
 
     subgraph server [Realtime Server]
-        Router["WebSocket Router"]
+        Router["Realtime transports"]
         Service["RealtimeService"]
         Config["RuntimeConfig"]
     end
@@ -23,14 +25,17 @@ flowchart LR
         TTS["TTS"]
     end
 
-    WS -- "client events (JSON)" --> Router
+    Local --> WS
+    WS -- "client events + audio" --> Router
+    RTC -- "data channel + RTP audio" --> Router
     Router -- "parse / dispatch" --> Service
     Service -- "PCM chunks" --> VAD
     Service -- "session config" --> Config
     Config -. "read by" .-> VAD & LLM & TTS
     VAD -- "speech segments" --> STT
     STT -- "transcript" --> TN
-    TN -- "transcript + notify" --> LLM
+    TN -- "transcription event" --> Router
+    Service -- "GenerateResponseRequest" --> LLM
     LLM -- "text + tools" --> Proc
     Proc -- "clean text" --> TTS
     TTS -- "PCM audio" --> Router
@@ -38,13 +43,14 @@ flowchart LR
     VAD -- "speech_started/stopped" --> Router
     TN -- "transcription events" --> Router
     Router -- "server events (JSON)" --> WS
+    Router -- "events + RTP audio" --> RTC
 ```
 
 **Key flow:**
 
 1. **Inbound audio**: Client sends `input_audio_buffer.append` with base64 PCM. `RealtimeService` decodes, resamples to 16 kHz, splits into 512-sample chunks, and puts them on the `recv_audio_chunks_queue` for VAD.
 2. **Speech detection**: VAD detects speech boundaries and emits `speech_started` / `speech_stopped` events on the `text_output_queue`. Full utterance audio goes to STT.
-3. **Transcription**: STT output passes through `TranscriptionNotifier`, which taps the transcript for `transcription.delta` / `transcription.completed` events before forwarding to the LLM.
+3. **Transcription**: STT output passes through `TranscriptionNotifier`, which emits `transcription.delta` / `transcription.completed` events. `RealtimeService` commits the current revision to conversation state and creates the LLM request; there is no alternate conversation path.
 4. **Generation**: The LLM generates text (and optional tool calls). `LMOutputProcessor` splits the output: clean text goes to TTS, and `assistant_text` + tool call dicts go to the `text_output_queue`.
 5. **Outbound audio**: TTS writes PCM chunks to `send_audio_chunks_queue`. The router's async `_send_loop` drains both queues, encoding PCM as `response.output_audio.delta` events and translating internal messages into protocol events.
 6. **Session config**: `session.update` events deep-merge into `RuntimeConfig`, which is a shared Pydantic model read by VAD (turn detection thresholds), LLM (instructions, tools), and TTS (voice) at processing time.

@@ -25,10 +25,14 @@ def _run_installed_cli_help() -> None:
         stderr=subprocess.STDOUT,
         text=True,
     )
-    expected_flags = ("--mode", "--stt", "--llm_backend", "--tts")
+    expected_flags = ("--mode", "--host", "--port", "--stt", "--llm_backend", "--tts")
     missing_flags = [flag for flag in expected_flags if flag not in result.stdout]
     if missing_flags:
         raise RuntimeError(f"Installed CLI help is missing expected flags: {', '.join(missing_flags)}")
+    removed_flags = ("--recv_host", "--send_host", "--ws_host", "--ws_port")
+    unexpected_flags = [flag for flag in removed_flags if flag in result.stdout]
+    if unexpected_flags:
+        raise RuntimeError(f"Installed CLI help still exposes removed transport flags: {', '.join(unexpected_flags)}")
 
 
 def _validate_package_defaults() -> None:
@@ -95,23 +99,12 @@ def _validate_empty_qwen_ref_audio_arg() -> None:
     assert qwen3_args.qwen3_tts_speaker == "Aiden"
 
 
-def _validate_pipeline_startup_primitives() -> None:
-    from speech_to_speech.s2s_pipeline import initialize_queues_and_events
+def _validate_realtime_engine_imports() -> None:
+    from speech_to_speech.api.openai_realtime.local_client import LocalRealtimeAudioClient
+    from speech_to_speech.api.openai_realtime.server import RealtimeServer
 
-    queues_and_events = initialize_queues_and_events()
-    expected_keys = {
-        "recv_audio_chunks_queue",
-        "send_audio_chunks_queue",
-        "spoken_prompt_queue",
-        "stt_output_queue",
-        "text_prompt_queue",
-        "lm_response_queue",
-        "lm_processed_queue",
-        "text_output_queue",
-    }
-    missing_keys = expected_keys.difference(queues_and_events)
-    if missing_keys:
-        raise RuntimeError(f"Pipeline startup primitives are missing: {', '.join(sorted(missing_keys))}")
+    assert LocalRealtimeAudioClient is not None
+    assert RealtimeServer is not None
 
 
 def _validate_default_handler_imports() -> None:
@@ -181,7 +174,7 @@ def main() -> None:
     _run_installed_cli_help()
     _validate_package_defaults()
     _validate_empty_qwen_ref_audio_arg()
-    _validate_pipeline_startup_primitives()
+    _validate_realtime_engine_imports()
     _validate_default_handler_imports()
     _validate_realtime_websocket_support()
     print("speech-to-speech installed package smoke test passed")

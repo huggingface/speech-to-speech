@@ -8,11 +8,11 @@ class ModuleArguments:
         default=None,
         metadata={"help": "If specified, overrides the device for all handlers."},
     )
-    mode: Optional[Literal["local", "socket", "raw-websocket", "realtime"]] = field(
+    mode: Optional[Literal["local", "realtime"]] = field(
         default="realtime",
         metadata={
-            "help": "The mode to run the pipeline in. Either 'local', 'socket', 'raw-websocket', or "
-            "'realtime'. Default is 'realtime'."
+            "help": "How to expose the Realtime pipeline: 'realtime' starts the server, while 'local' also "
+            "connects the packaged microphone/speaker client over loopback. Default is 'realtime'."
         },
     )
     local_mac_optimal_settings: bool = field(
@@ -80,7 +80,7 @@ class ModuleArguments:
             "help": "Expose the configured remote LLM (--llm_backend chat-completions or responses-api) as an "
             "OpenAI-compatible HTTP endpoint on the realtime server. The server performs no authentication of "
             "its own: enable it only on a trusted network or behind a gateway that owns access control. Off by "
-            "default. Only valid for --mode realtime."
+            "default."
         },
     )
     llm_proxy_connect_timeout_s: float = field(
@@ -93,9 +93,9 @@ class ModuleArguments:
     num_pipelines: int = field(
         default=1,
         metadata={
-            "help": "Number of isolated realtime pipelines in the pool. One uvicorn server listens on "
-            "--ws_port and routes each incoming WebSocket or WebRTC session to the next free pipeline (each "
-            "has its own VAD/STT/LM/TTS handlers and conversation state). Max concurrent Realtime sessions equals "
-            "num_pipelines; further connections are rejected. Only valid for --mode realtime. Default is 1."
+            "help": "Number of isolated Realtime pipelines in the pool. One uvicorn server listens on "
+            "--port and routes each incoming client to the next free pipeline (each has its own "
+            "VAD/STT/LM/TTS handlers and conversation state). Max concurrent websocket sessions equals "
+            "num_pipelines; further connections are rejected. Default is 1."
         },
     )

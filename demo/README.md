@@ -37,7 +37,7 @@ backend, speaking the OpenAI Realtime **GA** protocol over **WebSocket**
    ```
 
    The realtime server listens on `ws://localhost:8765/v1/realtime` by default
-   (`--ws_host` / `--ws_port` to change).
+   (`--host` / `--port` to change).
 
 2. **Start this app**, pointing it at the backend with `SPEECH_TO_SPEECH_URL`:
 
