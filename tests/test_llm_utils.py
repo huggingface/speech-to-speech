@@ -17,6 +17,11 @@ def test_remove_unspeechable_keeps_text_and_drops_emoji() -> None:
     assert remove_unspeechable("Hello 👋 lobster 🦞") == "Hello  lobster "
 
 
+def test_remove_unspeechable_keeps_chinese_punctuation() -> None:
+    text = "你好，今天怎么样？很好！停顿；说明：一、二。"
+    assert remove_unspeechable(text) == text
+
+
 # --- language name coverage ---------------------------------------------------------------
 #
 # A language code with no entry in WHISPER_LANGUAGE_TO_LLM_LANGUAGE resolves to a `None`
