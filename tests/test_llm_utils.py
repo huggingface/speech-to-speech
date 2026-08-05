@@ -1,4 +1,5 @@
 import importlib
+import unicodedata
 
 import pytest
 
@@ -15,6 +16,37 @@ def test_remove_unspeechable_normalizes_smart_apostrophes() -> None:
 
 def test_remove_unspeechable_keeps_text_and_drops_emoji() -> None:
     assert remove_unspeechable("Hello 👋 lobster 🦞") == "Hello  lobster "
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "你好。今天天气怎么样？",  # zh — ideographic full stop / fullwidth question mark
+        "こんにちは。元気ですか？",  # ja
+        "안녕하세요。「반갑습니다」",  # ko — corner brackets
+        "नमस्ते। आप कैसे हैं?",  # hi — devanagari danda
+        "¿Cómo estás? ¡Bien!",  # es — inverted marks
+        "Er sagte: «Guten Tag»",  # de/fr — guillemets
+        "مرحبا، كيف حالك؟",  # ar — arabic comma / question mark
+    ],
+)
+def test_remove_unspeechable_keeps_non_ascii_sentence_punctuation(text: str) -> None:
+    """Sentence punctuation outside ASCII must survive: it reaches the TTS, the
+    client transcript and the chat history, so dropping it flattens prosody and
+    corrupts the conversation for every non-English language we support."""
+    assert remove_unspeechable(text) == text
+
+
+def test_remove_unspeechable_keeps_combining_marks() -> None:
+    """``\\w`` does not match combining marks, so they were stripped from the
+    middle of words: Devanagari matras/virama, Arabic and Hebrew diacritics, and
+    NFD-decomposed Latin accents."""
+    assert remove_unspeechable("नमस्ते") == "नमस्ते"
+    assert remove_unspeechable(unicodedata.normalize("NFD", "café")) == unicodedata.normalize("NFD", "café")
+
+
+def test_remove_unspeechable_drops_symbols_but_keeps_punctuation() -> None:
+    assert remove_unspeechable("100 % ✅ done。") == "100 %  done。"
 
 
 # --- language name coverage ---------------------------------------------------------------
