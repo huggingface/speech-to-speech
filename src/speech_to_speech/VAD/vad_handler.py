@@ -609,8 +609,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             self._log_progressive_yields = 0
             self._last_log_time = now
 
-        # Every client uses the Realtime turn/revision lifecycle. Live
-        # transcription only controls progressive STT work within that lifecycle.
+        # Live transcription controls whether progressive STT work is emitted
+        # before the final segment.
         yield from self._process_realtime(vad_output, runtime_config)
 
     def _process_realtime(

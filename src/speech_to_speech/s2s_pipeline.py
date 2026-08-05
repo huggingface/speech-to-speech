@@ -383,7 +383,7 @@ def _build_handlers(
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
     speculative_turns: SpeculativeTurnTracker,
 ) -> list[Any]:
-    """Build the canonical Realtime handler chain: VAD → STT/AudioInput → LM → TTS."""
+    """Build a handler chain: VAD → STT/AudioInput → LM → TTS."""
     from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 
     vad = VADHandler(
@@ -486,7 +486,7 @@ def _build_pipeline_unit(
     kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
 ) -> "PipelineUnit":
-    """Build one isolated Realtime pipeline with its own state and queues.
+    """Build one isolated pipeline with its own state and queues.
 
     Returns a PipelineUnit that lives inside RealtimeServer's pool. Handler instances
     are returned in `unit.handlers`; the caller threads them via ThreadManager. No uvicorn
@@ -603,7 +603,7 @@ def build_pipeline(
     args: ParsedArguments,
     stop_event: Event,
 ) -> ThreadManager:
-    """Build the only engine: a pool of Realtime pipeline units behind one server."""
+    """Build a pool of pipeline units behind one server."""
     from speech_to_speech.api.openai_realtime.server import RealtimeServer
 
     module_kwargs = args.module_kwargs

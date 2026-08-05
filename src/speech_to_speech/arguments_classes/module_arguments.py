@@ -11,7 +11,7 @@ class ModuleArguments:
     mode: Optional[Literal["local", "realtime"]] = field(
         default="realtime",
         metadata={
-            "help": "How to expose the Realtime pipeline: 'realtime' starts the server, while 'local' also "
+            "help": "How to run the service: 'realtime' starts the server, while 'local' also "
             "connects the packaged microphone/speaker client over loopback. Default is 'realtime'."
         },
     )
@@ -93,7 +93,7 @@ class ModuleArguments:
     num_pipelines: int = field(
         default=1,
         metadata={
-            "help": "Number of isolated Realtime pipelines in the pool. One uvicorn server listens on "
+            "help": "Number of isolated pipeline instances in the pool. One uvicorn server listens on "
             "--port and routes each incoming client to the next free pipeline (each has its own "
             "VAD/STT/LM/TTS handlers and conversation state). Max concurrent websocket sessions equals "
             "num_pipelines; further connections are rejected. Default is 1."

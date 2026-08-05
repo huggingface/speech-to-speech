@@ -1,6 +1,8 @@
 ## Realtime Engine -- High-Level Architecture
 
-Realtime is the only pipeline engine. A FastAPI/uvicorn server exposes WebSocket and WebRTC transports, and every client—including `--mode local`—drives the same queue-backed `PipelineUnit`, `RealtimeService`, turn tracker, and cancellation lifecycle. Local mode simply starts the packaged microphone/speaker client against the loopback WebSocket endpoint.
+A FastAPI/uvicorn server exposes WebSocket and WebRTC transports. Each session claims a queue-backed
+`PipelineUnit` containing its `RealtimeService`, turn tracker, and cancellation state. `--mode local` starts the
+packaged microphone/speaker client against the loopback WebSocket endpoint.
 
 ```mermaid
 flowchart LR
@@ -50,7 +52,7 @@ flowchart LR
 
 1. **Inbound audio**: Client sends `input_audio_buffer.append` with base64 PCM. `RealtimeService` decodes, resamples to 16 kHz, splits into 512-sample chunks, and puts them on the `recv_audio_chunks_queue` for VAD.
 2. **Speech detection**: VAD detects speech boundaries and emits `speech_started` / `speech_stopped` events on the `text_output_queue`. Full utterance audio goes to STT.
-3. **Transcription**: STT output passes through `TranscriptionNotifier`, which emits `transcription.delta` / `transcription.completed` events. `RealtimeService` commits the current revision to conversation state and creates the LLM request; there is no alternate conversation path.
+3. **Transcription**: STT output passes through `TranscriptionNotifier`, which emits `transcription.delta` / `transcription.completed` events. `RealtimeService` commits the current revision to conversation state and creates the LLM request.
 4. **Generation**: The LLM generates text (and optional tool calls). `LMOutputProcessor` splits the output: clean text goes to TTS, and `assistant_text` + tool call dicts go to the `text_output_queue`.
 5. **Outbound audio**: TTS writes PCM chunks to `send_audio_chunks_queue`. The router's async `_send_loop` drains both queues, encoding PCM as `response.output_audio.delta` events and translating internal messages into protocol events.
 6. **Session config**: `session.update` events deep-merge into `RuntimeConfig`, which is a shared Pydantic model read by VAD (turn detection thresholds), LLM (instructions, tools), and TTS (voice) at processing time.

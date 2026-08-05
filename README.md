@@ -39,7 +39,7 @@ From a source checkout, talk to it from a second terminal:
 python scripts/listen_and_play_realtime.py --host 127.0.0.1 --port 8765
 ```
 
-For the same engine and protocol in one command, use the packaged loopback client:
+To start the server and packaged microphone/speaker client in one command:
 
 ```bash
 speech-to-speech --mode local
@@ -183,10 +183,10 @@ Select implementations with `--stt`, `--llm_backend`, and `--tts`. Run `speech-t
 | Mode | Transport | Use it when |
 |---|---|---|
 | `realtime` (default) | OpenAI Realtime over WebSocket or WebRTC | You are building an app or device against the public API. |
-| `local` | Packaged microphone/speaker client over loopback Realtime WebSocket | You want the same engine and protocol from one command. |
+| `local` | Packaged microphone/speaker client over loopback Realtime WebSocket | You want to run the server and talk to it from one command. |
 
-Both modes build the same `RealtimeService` pipeline units. `local` only adds a client connected to
-`ws://127.0.0.1:<port>/v1/realtime`, so revisions, interruption, tools, usage, and session behavior are identical.
+`local` binds the server to `127.0.0.1` and connects the packaged client at
+`ws://127.0.0.1:<port>/v1/realtime`.
 
 ### Realtime Server
 
@@ -546,7 +546,7 @@ References for all CLI arguments live in the [arguments classes](./src/speech_to
 See [ModuleArguments](./src/speech_to_speech/arguments_classes/module_arguments.py). It allows setting:
 
 - a common `--device`, if every part should run on the same device
-- `--mode`: `realtime` (default) or `local`; both use the same Realtime engine
+- `--mode`: `realtime` (default) starts the server; `local` also starts the packaged microphone/speaker client
 - STT implementation (`--stt`)
 - LLM backend (`--llm_backend`: `transformers`, `mlx-lm`, `responses-api`, or `chat-completions`)
 - TTS implementation (`--tts`)
@@ -568,7 +568,7 @@ See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments
 ### Smart Turn endpointing
 
 [Smart Turn v3.2](https://huggingface.co/pipecat-ai/smart-turn-v3) can validate Silero's end-of-speech
-decisions using the content and prosody of the current turn. In the Realtime engine, Silero still finalizes the segment
+decisions using the content and prosody of the current turn. Silero finalizes the segment
 and STT/LLM work may begin speculatively. Complete turns start processing immediately and use
 `--speculative_reopen_ms` (800 ms by default) before committing output. Incomplete turns wait
 `--smart_turn_incomplete_delay_ms` (600 ms by default) before starting STT/LLM work, while their output remains
@@ -585,7 +585,7 @@ speech-to-speech
 
 The latest supported v3.2 CPU checkpoint downloads from the Hugging Face Hub on first use. Pass
 `--smart_turn_model_path /path/to/model.onnx` to use a local model, or `--no_smart_turn` to disable Smart Turn.
-Smart Turn works identically in `realtime` and `local` modes because both use the same Realtime turn lifecycle.
+Smart Turn is enabled by default for server sessions and the packaged local client.
 
 Tune the completion cutoff with `--smart_turn_threshold` (default `0.5`). A higher threshold makes ambiguous
 pauses more likely to use the longer speculative response grace.

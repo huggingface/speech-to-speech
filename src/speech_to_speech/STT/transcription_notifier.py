@@ -18,8 +18,8 @@ class TranscriptionNotifier(BaseHandler[STTOut, LLMIn]):
     """Sits between STT and LLM.
 
     It emits protocol-neutral transcription events on ``text_output_queue``.
-    ``RealtimeService`` owns conversation state and creates LLM requests, so
-    this handler never constructs a second session or conversation lifecycle.
+    ``RealtimeService`` consumes those events, updates conversation state, and
+    creates LLM requests.
     """
 
     def setup(

@@ -616,9 +616,8 @@ def _handler_after_soft_ended_turn() -> VADHandler:
     return handler
 
 
-def test_local_regression_soft_ended_direct_audio_turn_reopens_at_revision_one():
-    # Local audio now reaches this exact Realtime engine over loopback. Keeping
-    # the turn uncommitted models generation still being in flight for #298.
+def test_soft_ended_direct_audio_turn_reopens_at_revision_one():
+    # Keep the turn uncommitted to model generation still being in flight.
     handler = _handler_after_soft_ended_turn()
     handler.min_speech_continuation_ms = 192
     chunks = [torch.zeros(512) for _ in range(8)]

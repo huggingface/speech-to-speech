@@ -16,7 +16,7 @@ def _default_args():
         sys.argv = original_argv
 
 
-def test_realtime_mode_builds_only_canonical_pipeline_units(monkeypatch):
+def test_realtime_mode_builds_pipeline_unit_pool(monkeypatch):
     args = _default_args()
     args.module_kwargs.num_pipelines = 2
     unit_handlers = [object(), object()]
