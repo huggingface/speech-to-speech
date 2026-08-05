@@ -4,6 +4,7 @@ import logging
 from typing import TYPE_CHECKING, Literal, Optional
 
 from openai.types.realtime import (
+    ConversationItem,
     RealtimeConversationItemFunctionCall,
     RealtimeResponse,
     ResponseAudioDoneEvent,
@@ -137,9 +138,10 @@ class ResponseHandler(RealtimeBaseHandler):
             ),
         )
 
-    def _build_output_items(
-        self, conn_id: str, status: _ResponseStatus
-    ) -> list[RealtimeConversationItemAssistantMessage | RealtimeConversationItemFunctionCall]:
+    # Annotated with ConversationItem (the SDK's own 9-type item union) rather
+    # than the two types actually produced: list is invariant, so a narrower
+    # element type is rejected where RealtimeResponse.output is assigned.
+    def _build_output_items(self, conn_id: str, status: _ResponseStatus) -> list[ConversationItem]:
         """Build response.output: the assistant message (if any text/audio was
         generated) followed by any function calls, per the OpenAI Realtime
         protocol - see https://platform.openai.com/docs/api-reference/realtime-server-events/session/updated
@@ -149,7 +151,7 @@ class ResponseHandler(RealtimeBaseHandler):
         # Nothing in a non-completed response finished generating, so its items
         # must not claim otherwise - that includes the function calls.
         item_status: Literal["completed", "incomplete"] = "completed" if status == "completed" else "incomplete"
-        output: list[RealtimeConversationItemAssistantMessage | RealtimeConversationItemFunctionCall] = []
+        output: list[ConversationItem] = []
 
         text = "".join(st.pending_output_text_parts)
         if text:
