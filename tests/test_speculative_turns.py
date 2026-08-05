@@ -165,6 +165,34 @@ def test_is_latest_after_stability_window_catches_reopen_started_during_wait():
     thread.join(timeout=1.0)
 
 
+def test_is_latest_after_stability_window_survives_cancelled_reopen_candidate():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    started = Event()
+    result: list[bool] = []
+
+    def wait_for_stability():
+        started.set()
+        result.append(tracker.is_latest_after_stability_window("turn_1", 0, settle_s=0.2))
+
+    thread = Thread(target=wait_for_stability)
+    thread.start()
+    assert started.wait(timeout=1.0)
+
+    time.sleep(0.02)
+    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+    time.sleep(0.02)
+    tracker.cancel_reopen_candidate("turn_1", candidate_revision)
+
+    time.sleep(0.03)
+    assert thread.is_alive()
+    assert result == []
+
+    thread.join(timeout=1.0)
+    assert not thread.is_alive()
+    assert result == [True]
+
+
 def test_commit_after_reset_does_not_resurrect_untracked_turn():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
