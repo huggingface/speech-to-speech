@@ -4,6 +4,7 @@ import logging
 from collections.abc import Iterator
 from queue import Queue
 from threading import Event
+from time import perf_counter
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
@@ -38,7 +39,12 @@ class AudioInputNotifier(BaseHandler[VADAudio, LLMIn]):
             return False
         if self.speculative_turns is None or item.turn_id is None or item.turn_revision is None:
             return True
-        return self.speculative_turns.is_latest_after_pending_reopen(item.turn_id, item.turn_revision)
+        remaining_delay_s = max(0.0, item.processing_delay_s - (perf_counter() - item.created_at_s))
+        return self.speculative_turns.is_latest_after_stability_window(
+            item.turn_id,
+            item.turn_revision,
+            remaining_delay_s,
+        )
 
     def process(self, vad_audio: VADAudio) -> Iterator[LLMIn]:
         audio_duration_s = len(vad_audio.audio) / self.sample_rate if self.sample_rate else 0.0

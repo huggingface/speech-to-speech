@@ -1,5 +1,6 @@
 from queue import Queue
-from threading import Event
+from threading import Event, Thread
+from time import sleep
 
 import numpy as np
 
@@ -7,21 +8,47 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.audio_input_notifier import AudioInputNotifier
 from speech_to_speech.pipeline.events import AudioInputCompletedEvent
 from speech_to_speech.pipeline.messages import GenerateResponseRequest, VADAudio
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 
 def _notifier(
     runtime_config: RuntimeConfig | None = None,
     text_output_queue: Queue | None = None,
+    speculative_turns: SpeculativeTurnTracker | None = None,
 ) -> AudioInputNotifier:
     notifier = object.__new__(AudioInputNotifier)
     notifier.setup(
         runtime_config=runtime_config,
         should_listen=Event(),
         sample_rate=16000,
-        speculative_turns=None,
+        speculative_turns=speculative_turns,
         text_output_queue=text_output_queue,
     )
     return notifier
+
+
+def test_audio_input_notifier_uses_per_endpoint_processing_delay():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    notifier = _notifier(RuntimeConfig(), speculative_turns=tracker)
+    item = VADAudio(
+        audio=np.zeros(1600, dtype=np.float32),
+        mode="final",
+        turn_id="turn_1",
+        turn_revision=0,
+        processing_delay_s=0.2,
+    )
+    result: list[bool] = []
+    thread = Thread(target=lambda: result.append(notifier.should_process_input(item)))
+    thread.start()
+
+    sleep(0.05)
+    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert result == [False]
 
 
 def test_audio_input_notifier_ignores_progressive_audio():

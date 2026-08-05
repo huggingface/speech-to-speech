@@ -190,12 +190,16 @@ class SpeculativeTurnTracker:
             deadline = time.monotonic() + settle_s
             while self._latest_revision.get(turn_id, revision) == revision:
                 if self._has_pending_reopen_locked(turn_id, revision):
-                    break
+                    self._wait_for_pending_reopen_locked(
+                        turn_id,
+                        revision,
+                        self._PENDING_REOPEN_WAIT_TIMEOUT_S,
+                    )
+                    continue
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 self._condition.wait(remaining)
-            self._wait_for_pending_reopen_locked(turn_id, revision, self._PENDING_REOPEN_WAIT_TIMEOUT_S)
             return self._latest_revision.get(turn_id, revision) == revision
 
     def commit(self, turn_id: str | None, revision: int | None) -> None:

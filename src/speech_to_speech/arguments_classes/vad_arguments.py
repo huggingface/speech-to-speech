@@ -62,15 +62,15 @@ class VADHandlerArguments:
         },
     )
     speculative_reopen_ms: int = field(
-        default=1000,
+        default=800,
         metadata={
-            "help": "In realtime mode, keep a soft-ended turn reopenable for this many milliseconds unless a response commits it."
+            "help": "In realtime mode, keep a soft-ended turn reopenable for this many milliseconds unless a response commits it. Default is 800 ms."
         },
     )
     unanswered_reopen_ms: int = field(
         default=7000,
         metadata={
-            "help": "Sanity cap (ms) for reopening a soft-ended speculative turn that has not yet been answered by any assistant output. While a turn is uncommitted, resumed speech within this window reopens the same turn instead of starting a new one. Has no effect below speculative_reopen_ms."
+            "help": "Sanity cap (ms) for reopening a soft-ended speculative turn that has not yet been answered by any assistant output. While a turn is uncommitted, resumed speech within this window reopens the same turn instead of starting a new one. Has no effect below speculative_reopen_ms and is clamped to smart_turn_max_wait_ms when Smart Turn is enabled."
         },
     )
     short_segment_merge_ms: int = field(
@@ -78,4 +78,38 @@ class VADHandlerArguments:
         metadata={
             "help": "When greater than 0, adjacent VAD segments below min_speech_ms are held and stitched for this many milliseconds before being discarded. Fragments shorter than 100 ms of active speech are never held. Useful with very low min_silence_ms values."
         },
+    )
+    smart_turn: bool = field(
+        default=True,
+        metadata={
+            "help": "In realtime mode, use Smart Turn v3.2 after Silero finalizes a segment to choose how long assistant output remains speculative. Enabled by default; pass --no_smart_turn to disable it."
+        },
+    )
+    smart_turn_model_path: str | None = field(
+        default=None,
+        metadata={
+            "help": "Optional path to a Smart Turn v3.x CPU ONNX model. When omitted, the latest supported v3.2 CPU model is downloaded from pipecat-ai/smart-turn-v3."
+        },
+    )
+    smart_turn_threshold: float = field(
+        default=0.5,
+        metadata={
+            "help": "Smart Turn completion probability threshold. Higher values wait more readily on ambiguous pauses. Default is 0.5."
+        },
+    )
+    smart_turn_max_wait_ms: int = field(
+        default=2000,
+        metadata={
+            "help": "Speculative reopen grace used when Smart Turn reports an incomplete turn. Resumed speech creates a newer turn revision; otherwise output may commit after this delay. Default is 2000 ms."
+        },
+    )
+    smart_turn_incomplete_delay_ms: int = field(
+        default=600,
+        metadata={
+            "help": "Delay STT and LLM processing after Smart Turn reports an incomplete turn, allowing resumed speech to invalidate the revision before expensive work begins. This delay runs within smart_turn_max_wait_ms. Default is 600 ms."
+        },
+    )
+    smart_turn_cpu_count: int = field(
+        default=1,
+        metadata={"help": "Number of CPU threads ONNX Runtime may use for each Smart Turn inference. Default is 1."},
     )

@@ -45,6 +45,7 @@ class VADAudio(PipelineMessage):
     mode: Literal["progressive", "final"] | None = None
     turn_id: str | None = None
     turn_revision: int | None = None
+    processing_delay_s: float = 0.0
     created_at_s: float = Field(default_factory=perf_counter)
 
 

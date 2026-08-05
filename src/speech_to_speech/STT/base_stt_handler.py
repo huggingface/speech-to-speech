@@ -89,10 +89,11 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             return True
 
         if wait_for_stability:
+            item_delay_s = max(0.0, getattr(item, "processing_delay_s", 0.0) - self._item_age_s(item))
             is_latest = self.speculative_turns.is_latest_after_stability_window(
                 turn_id,
                 turn_revision,
-                self.final_revision_settle_s,
+                max(self.final_revision_settle_s, item_delay_s),
             )
         elif wait_for_pending_reopen:
             is_latest = self.speculative_turns.is_latest_after_pending_reopen(turn_id, turn_revision)

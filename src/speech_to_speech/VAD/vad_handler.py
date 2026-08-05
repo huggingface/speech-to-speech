@@ -71,9 +71,15 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         realtime_processing_pause: float = 0.5,
         text_output_queue: Queue[TextEventItem] | None = None,
         speculative_turns: SpeculativeTurnTracker | None = None,
-        speculative_reopen_ms: int = 1000,
+        speculative_reopen_ms: int = 800,
         unanswered_reopen_ms: int = 7000,
         short_segment_merge_ms: int = 0,
+        smart_turn: bool = True,
+        smart_turn_model_path: str | None = None,
+        smart_turn_threshold: float = 0.5,
+        smart_turn_max_wait_ms: int = 2000,
+        smart_turn_incomplete_delay_ms: int = 600,
+        smart_turn_cpu_count: int = 1,
     ) -> None:
         self.should_listen = should_listen
         self.sample_rate = sample_rate
@@ -89,9 +95,32 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.text_output_queue = text_output_queue
         self.speculative_turns = speculative_turns
         self.speculative_reopen_ms = speculative_reopen_ms
-        self.unanswered_reopen_ms = max(self.speculative_reopen_ms, unanswered_reopen_ms)
         self.short_segment_merge_ms = max(0, short_segment_merge_ms)
         self._last_turn_detection: dict | None = None
+        self.smart_turn_analyzer = None
+        self.smart_turn_max_wait_ms = smart_turn_max_wait_ms
+        self.smart_turn_incomplete_delay_ms = smart_turn_incomplete_delay_ms
+        if smart_turn:
+            if speculative_turns is None:
+                raise ValueError("Smart Turn requires realtime mode with speculative turn tracking")
+            if smart_turn_max_wait_ms <= 0:
+                raise ValueError(f"smart_turn_max_wait_ms must be greater than 0, got {smart_turn_max_wait_ms}")
+            if smart_turn_incomplete_delay_ms < 0:
+                raise ValueError(
+                    f"smart_turn_incomplete_delay_ms must be at least 0, got {smart_turn_incomplete_delay_ms}"
+                )
+            from speech_to_speech.VAD.smart_turn import SmartTurnAnalyzer
+
+            self.smart_turn_analyzer = SmartTurnAnalyzer(
+                model_path=smart_turn_model_path,
+                threshold=smart_turn_threshold,
+                cpu_count=smart_turn_cpu_count,
+            )
+        self.unanswered_reopen_ms = max(
+            self.speculative_reopen_ms,
+            unanswered_reopen_ms,
+            self.smart_turn_max_wait_ms if smart_turn else 0,
+        )
         self.model, _ = torch.hub.load(
             "snakers4/silero-vad",
             "silero_vad",
@@ -132,6 +161,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._current_turn_id: str | None = None
         self._current_turn_revision: int | None = None
         self._speculative_audio_prefix: np.ndarray | None = None
+        self._speculative_raw_audio_prefix: np.ndarray | None = None
         self._last_final_wall_time: float | None = None
         self._last_final_audio_ms: int | None = None
         self._pending_reopen_candidate: tuple[str, int, int] | None = None
@@ -179,6 +209,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._current_turn_id = f"turn_{self._turn_counter}"
         self._current_turn_revision = 0
         self._speculative_audio_prefix = None
+        self._speculative_raw_audio_prefix = None
         self._last_final_wall_time = None
         self._last_final_audio_ms = None
         if self.speculative_turns:
@@ -349,6 +380,11 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             return current_segment
         return np.concatenate((self._speculative_audio_prefix, current_segment))
 
+    def _combined_raw_turn_audio(self, current_segment: np.ndarray) -> np.ndarray:
+        if self._speculative_raw_audio_prefix is None:
+            return current_segment.copy()
+        return np.concatenate((self._speculative_raw_audio_prefix, current_segment))
+
     def _short_segment_merge_window_ms(self) -> int:
         return int(getattr(self, "short_segment_merge_ms", 0))
 
@@ -488,6 +524,40 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             and queued_item.turn_id == latest.turn_id
             and queued_item.turn_revision == latest.turn_revision
         )
+
+    def _smart_turn_timing_ms(self, audio: np.ndarray) -> tuple[int, int]:
+        """Return the response grace and pre-processing delay for this endpoint."""
+        analyzer = getattr(self, "smart_turn_analyzer", None)
+        if analyzer is None:
+            return self.speculative_reopen_ms, 0
+
+        try:
+            result = analyzer.predict(audio, sample_rate=self.sample_rate)
+        except Exception:
+            # A transient classifier failure falls back to the ordinary short
+            # speculative window instead of delaying the response for seconds.
+            logger.exception("Smart Turn inference failed; using the default speculative reopen grace")
+            return self.speculative_reopen_ms, 0
+
+        if result.complete:
+            logger.info(
+                "Smart Turn: complete (p=%.3f, %.1fms); using %dms speculative reopen grace",
+                result.probability,
+                result.inference_ms,
+                self.speculative_reopen_ms,
+            )
+            return self.speculative_reopen_ms, 0
+
+        processing_delay_ms = min(self.smart_turn_incomplete_delay_ms, self.smart_turn_max_wait_ms)
+        logger.info(
+            "Smart Turn: incomplete (p=%.3f, %.1fms); using %dms speculative reopen grace "
+            "and delaying processing by %dms",
+            result.probability,
+            result.inference_ms,
+            self.smart_turn_max_wait_ms,
+            processing_delay_ms,
+        )
+        return self.smart_turn_max_wait_ms, processing_delay_ms
 
     def process(self, audio_chunk: VADIn) -> Iterator[VADOut]:
         runtime_config = None
@@ -640,7 +710,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             duration_ms = self._segment_duration_ms(array)
             min_active_ms = 0.0 if self._speech_started_emitted else self._active_speech_min_ms(start_ms)
 
-            if active_speech_duration_ms < min_active_ms or duration_ms > self.max_speech_ms:
+            duration_exceeds_limit = duration_ms > self.max_speech_ms
+            if active_speech_duration_ms < min_active_ms or duration_exceeds_limit:
                 if (
                     self._short_segment_merge_window_ms() > 0
                     and raw_active_ms >= _SHORT_SEGMENT_MIN_FRAGMENT_MS
@@ -697,6 +768,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     turn_id,
                     turn_revision,
                 )
+                analysis_audio = self._combined_raw_turn_audio(array)
+                reopen_grace_ms, processing_delay_ms = self._smart_turn_timing_ms(analysis_audio)
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
                 output_array = self._combined_turn_audio(array)
@@ -711,16 +784,17 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         )
                     )
                 self._speculative_audio_prefix = output_array
+                self._speculative_raw_audio_prefix = analysis_audio
                 self._last_final_wall_time = time.time()
                 self._last_final_audio_ms = end_ms
                 if self.speculative_turns:
-                    # The grace window only delays response commits; reopen
-                    # eligibility for unanswered turns is extended separately
-                    # via unanswered_reopen_ms in _should_reopen_current_turn.
+                    # The grace only delays response commits. Resumed speech
+                    # follows the existing candidate/revision flow and makes
+                    # this revision stale before assistant output is released.
                     self.speculative_turns.start_reopen_grace(
                         turn_id,
                         turn_revision,
-                        self.speculative_reopen_ms / 1000.0,
+                        reopen_grace_ms / 1000.0,
                     )
                 else:
                     self.should_listen.clear()
@@ -730,6 +804,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     mode="final",
                     turn_id=turn_id,
                     turn_revision=turn_revision,
+                    processing_delay_s=processing_delay_ms / 1000.0,
                 )
                 self.last_process_time = 0.0
                 self._speech_started_emitted = False
@@ -779,7 +854,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 start_ms = self._segment_start_ms(array, end_ms)
             duration_ms = self._segment_duration_ms(array)
             min_active_ms = 0.0 if self._speech_started_emitted else self._active_speech_min_ms(start_ms)
-            if active_speech_duration_ms < min_active_ms or duration_ms > self.max_speech_ms:
+            duration_exceeds_limit = duration_ms > self.max_speech_ms
+            if active_speech_duration_ms < min_active_ms or duration_exceeds_limit:
                 if (
                     self._short_segment_merge_window_ms() > 0
                     and raw_active_ms >= _SHORT_SEGMENT_MIN_FRAGMENT_MS
@@ -857,6 +933,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._current_turn_id = None
         self._current_turn_revision = None
         self._speculative_audio_prefix = None
+        self._speculative_raw_audio_prefix = None
         self._last_final_wall_time = None
         self._last_final_audio_ms = None
         self._pending_reopen_candidate = None
