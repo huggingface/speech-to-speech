@@ -132,7 +132,7 @@ pip install "speech-to-speech[chattts]"         # ChatTTS
 pip install "speech-to-speech[faster-whisper]"  # Faster Whisper STT
 pip install "speech-to-speech[whisper-mlx]"     # Lightning Whisper MLX STT on macOS
 pip install "speech-to-speech[paraformer]"      # Paraformer STT through FunASR
-pip install "speech-to-speech[mlx-vlm]"         # mlx-vlm support for vision models on macOS
+pip install "speech-to-speech[mlx-lm]"          # mlx-vlm support for vision models on macOS
 ```
 
 Deprecated implementations, including MeloTTS, live in [`archive/`](./archive) and are no longer wired into the CLI.

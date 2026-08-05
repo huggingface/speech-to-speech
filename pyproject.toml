@@ -73,7 +73,8 @@ faster-whisper = [
 kokoro = [
     "kokoro>=0.9.2; platform_system != 'Darwin'",
 ]
-mlx-vlm = [
+mlx-lm = [
+    "mlx-lm==0.31.1; platform_system == 'Darwin'",
     "mlx-vlm==0.4.1; platform_system == 'Darwin'",
 ]
 paraformer = [
