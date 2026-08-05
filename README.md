@@ -121,19 +121,18 @@ pip install speech-to-speech
 
 To use the previous CUDA-graphs implementation instead of GGML, pass `--qwen3_tts_backend torch`.
 
-### Optional Backends
+### Optional Components
 
-Extra backends are installed with pip extras:
+Optional components are installed with pip extras:
 
 ```bash
 pip install "speech-to-speech[kokoro]"          # Kokoro-82M TTS on non-macOS
 pip install "speech-to-speech[pocket]"          # Pocket TTS
 pip install "speech-to-speech[chattts]"         # ChatTTS
-pip install "speech-to-speech[facebook-mms]"    # MMS TTS
 pip install "speech-to-speech[faster-whisper]"  # Faster Whisper STT
 pip install "speech-to-speech[whisper-mlx]"     # Lightning Whisper MLX STT on macOS
 pip install "speech-to-speech[paraformer]"      # Paraformer STT through FunASR
-pip install "speech-to-speech[mlx-lm]"          # mlx-vlm support for vision models on macOS
+pip install "speech-to-speech[mlx-vlm]"         # mlx-vlm support for vision models on macOS
 ```
 
 Deprecated implementations, including MeloTTS, live in [`archive/`](./archive) and are no longer wired into the CLI.
@@ -168,7 +167,7 @@ This installs the package in editable mode and makes the `speech-to-speech` CLI 
 | TTS | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | CUDA / CPU, Apple Silicon | `kokoro` on non-macOS; built-in on macOS |
 | TTS | [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) | CPU / CUDA | `pocket` |
 | TTS | [ChatTTS](https://github.com/2noise/ChatTTS) | CUDA / CPU | `chattts` |
-| TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | `facebook-mms` |
+| TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | built-in |
 
 Select implementations with `--stt`, `--llm_backend`, and `--tts`. Run `speech-to-speech -h` for exact values and backend-specific flags.
 
