@@ -622,9 +622,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         punctuation_count = sum(unicodedata.category(ch).startswith("P") for ch in text)
         punctuation_seconds = punctuation_count * QWEN3_PUNCTUATION_PAUSE_SECONDS
         estimated_seconds = (
-            max(word_seconds, char_seconds, cjk_seconds)
-            + punctuation_seconds
-            + QWEN3_BASE_PROMPT_SECONDS
+            max(word_seconds, char_seconds, cjk_seconds) + punctuation_seconds + QWEN3_BASE_PROMPT_SECONDS
         )
         estimated_tokens = math.ceil(estimated_seconds * MLX_STREAMING_TOKENS_PER_SECOND * QWEN3_TOKEN_SAFETY_MARGIN)
         aligned_tokens = max(
