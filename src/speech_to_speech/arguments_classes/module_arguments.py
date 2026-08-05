@@ -30,6 +30,7 @@ class ModuleArguments:
             "faster-whisper",
             "parakeet-tdt",
             "paraformer",
+            "sense-voice",
         ]
     ] = field(
         default="parakeet-tdt",
@@ -38,7 +39,7 @@ class ModuleArguments:
             "This requires --llm_backend chat-completions and an explicitly selected audio-capable "
             "API model with --model_name. "
             "Otherwise choose 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', "
-            "'parakeet-tdt', or 'paraformer'. Default is 'parakeet-tdt'."
+            "'parakeet-tdt', 'paraformer', or 'sense-voice'. Default is 'parakeet-tdt'."
         },
     )
     llm_backend: Optional[Literal["transformers", "mlx-lm", "responses-api", "chat-completions"]] = field(
