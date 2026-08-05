@@ -903,6 +903,23 @@ def test_estimate_max_new_tokens_scales_with_utterance_length():
     assert long_budget <= handler.max_new_tokens
 
 
+def test_estimate_max_new_tokens_uses_cjk_speaking_rate():
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.streaming_chunk_size = 8
+    handler.max_new_tokens = 1536
+
+    short_text = "我懂，心情不好时会让人特别疲惫。"
+    long_text = (
+        "上海是一座充满活力的现代化大都市，既有繁华的金融中心和摩天大楼，也有老城厢的弄堂风情"
+        "和江南水乡的韵味。这里交通便利，餐饮选择丰富，从精致西餐到地道小馆应有尽有。同时，上海"
+        "还是文化与创新的交汇点，艺术展览、科技展会和国际活动频繁。如果你喜欢快节奏的生活和多元"
+        "的氛围，上海会是个很吸引人的地方。你想了解哪方面的具体信息呢？"
+    )
+
+    assert handler._estimate_max_new_tokens(short_text) == 360
+    assert handler._estimate_max_new_tokens(long_text) == 576
+
+
 def test_estimate_max_new_tokens_respects_configured_cap():
     handler = object.__new__(Qwen3TTSHandler)
     handler.streaming_chunk_size = 8
