@@ -12,7 +12,7 @@ class ThreadManager:
     """
 
     def __init__(self, handlers: Sequence[Any], cleanup_callbacks: Sequence[Callable[[], None]] = ()) -> None:
-        self.handlers = handlers
+        self.handlers = list(handlers)
         self.threads: list[threading.Thread] = []
         self.cleanup_callbacks = list(cleanup_callbacks)
         self._cleanup_lock = threading.Lock()
@@ -20,6 +20,7 @@ class ThreadManager:
         self._cleanup_deferred = False
         self._thread_state_lock = threading.Lock()
         self._thread_states: dict[threading.Thread, str] = {}
+        self._unstarted_handlers = list(self.handlers)
         self._lifecycle_lock = threading.Lock()
         self._lifecycle_state = "new"
 
@@ -29,6 +30,18 @@ class ThreadManager:
                 return
             self._cleaned_up = True
         first_error: BaseException | None = None
+        with self._thread_state_lock:
+            unstarted_handlers = list(reversed(self._unstarted_handlers))
+            self._unstarted_handlers.clear()
+        for handler in unstarted_handlers:
+            cleanup = getattr(handler, "cleanup", None)
+            if cleanup is None:
+                continue
+            try:
+                cleanup()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
         for callback in reversed(self.cleanup_callbacks):
             try:
                 callback()
@@ -62,6 +75,7 @@ class ThreadManager:
             if self._thread_states[thread] == "cancelled":
                 return
             self._thread_states[thread] = "started"
+            self._unstarted_handlers.remove(handler)
         handler.run()
 
     def start(self) -> None:

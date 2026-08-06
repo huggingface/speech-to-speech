@@ -658,8 +658,10 @@ def run_pipeline_command(command: Literal["serve", "local"], argv: Sequence[str]
         if not shutdown_requested[0]:
             shutdown_requested[0] = True
             console.print("\n[yellow]Shutting down gracefully...[/yellow]")
-            pipeline_manager.stop()
-            console.print("[green]✓ Pipeline stopped successfully[/green]")
+            # Python signal handlers run synchronously on the main thread and must not
+            # acquire manager locks that startup may already hold. The normal wait path
+            # joins handlers and closes resources after this event asks them to stop.
+            stop_event.set()
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -667,6 +669,8 @@ def run_pipeline_command(command: Literal["serve", "local"], argv: Sequence[str]
     try:
         pipeline_manager.start()
         pipeline_manager.wait()
+        if shutdown_requested[0]:
+            console.print("[green]✓ Pipeline stopped successfully[/green]")
     except KeyboardInterrupt:
         if not shutdown_requested[0]:
             console.print("\n[yellow]Shutting down gracefully...[/yellow]")

@@ -1,3 +1,4 @@
+import signal
 import sys
 import threading
 from copy import deepcopy
@@ -30,6 +31,7 @@ from speech_to_speech.s2s_pipeline import (
     parse_arguments,
     prepare_all_args,
     prepare_module_args,
+    run_pipeline_command,
 )
 from speech_to_speech.utils.thread_manager import ThreadManager
 
@@ -290,6 +292,28 @@ def test_dependency_error_names_backend_and_required_extra():
         create_backend_handler(selection, _context())
 
 
+@pytest.mark.parametrize("error_type", [ImportError, RuntimeError])
+def test_shared_dependency_error_names_backend_and_required_extra(error_type):
+    def missing(_config):
+        raise error_type("missing shared package")
+
+    spec = BackendSpec(
+        "optional-shared",
+        "llm",
+        FakeArguments,
+        _factory,
+        create_shared=missing,
+        required_extra="shared-extra",
+    )
+    selection = BackendSelection(spec, spec.normalize(FakeArguments()))
+
+    with pytest.raises(
+        ImportError,
+        match=r"optional-shared.*llm.*speech-to-speech\[shared-extra\].*missing shared package",
+    ):
+        SharedBackendResources.create([selection])
+
+
 def test_shared_resource_is_reused_and_cleanup_is_idempotent():
     seen = []
 
@@ -450,6 +474,20 @@ def test_thread_manager_runs_all_cleanup_callbacks_once():
     assert cleaned == ["second", "first"]
 
 
+def test_thread_manager_cleanup_before_start_cleans_handlers_before_resources():
+    cleaned = []
+
+    class Handler:
+        def cleanup(self):
+            cleaned.append("handler")
+
+    manager = ThreadManager([Handler()], cleanup_callbacks=[lambda: cleaned.append("shared")])
+
+    manager.cleanup()
+
+    assert cleaned == ["handler", "shared"]
+
+
 def test_thread_manager_rejects_duplicate_start():
     class Handler:
         def __init__(self):
@@ -503,9 +541,16 @@ def test_thread_manager_cleans_up_after_partial_start_failure(monkeypatch):
     class Handler:
         def __init__(self):
             self.stop_event = Event()
+            self.entered_run = Event()
+            self.cleanup_calls = 0
 
         def run(self):
+            self.entered_run.set()
             self.stop_event.wait()
+            self.cleanup()
+
+        def cleanup(self):
+            self.cleanup_calls += 1
 
     handlers = [Handler(), Handler()]
     cleaned = []
@@ -526,6 +571,9 @@ def test_thread_manager_cleans_up_after_partial_start_failure(monkeypatch):
         manager.start()
 
     assert all(handler.stop_event.is_set() for handler in handlers)
+    assert handlers[0].entered_run.is_set()
+    assert not handlers[1].entered_run.is_set()
+    assert [handler.cleanup_calls for handler in handlers] == [1, 1]
     assert len(manager.threads) == 1
     assert all(not thread.is_alive() for thread in manager.threads)
     assert cleaned == ["closed"]
@@ -708,3 +756,34 @@ def test_thread_manager_stop_logs_cleanup_errors(caplog):
     manager.stop()
 
     assert "Failed to clean up resources while stopping threads" in caplog.text
+
+
+def test_pipeline_signal_handler_defers_shutdown_until_wait(monkeypatch):
+    installed_handlers = {}
+    stop_event_seen = None
+    stop_called = False
+
+    class Manager:
+        def start(self):
+            installed_handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        def wait(self):
+            assert stop_event_seen is not None
+            assert stop_event_seen.is_set()
+
+        def stop(self):
+            nonlocal stop_called
+            stop_called = True
+
+    def build(_args, stop_event):
+        nonlocal stop_event_seen
+        stop_event_seen = stop_event
+        return Manager()
+
+    monkeypatch.setattr("speech_to_speech.s2s_pipeline.build_pipeline", build)
+    monkeypatch.setattr("speech_to_speech.s2s_pipeline.setup_logger", lambda _level: None)
+    monkeypatch.setattr(signal, "signal", installed_handlers.__setitem__)
+
+    run_pipeline_command("serve", [])
+
+    assert not stop_called

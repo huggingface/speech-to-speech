@@ -166,20 +166,27 @@ def select_backend(registry: Mapping[str, BackendSpec], name: str, config: Any) 
     return BackendSelection(spec, spec.normalize(config))
 
 
+def _optional_dependency_error(selection: BackendSelection, exc: BaseException) -> ImportError | None:
+    extra = selection.spec.required_extra
+    if extra is None:
+        return None
+    return ImportError(
+        f"Backend {selection.name!r} ({selection.kind}) requires optional dependencies. "
+        f'Install them with `pip install "speech-to-speech[{extra}]"`. '
+        f"Original import error: {exc}"
+    )
+
+
 def create_backend_handler(selection: BackendSelection, context: HandlerContext, shared: Any = None) -> Any:
     """Construct a handler and turn lazy dependency failures into actionable errors."""
 
     try:
         return selection.spec.create_handler(context, selection.config, shared)
     except ImportError as exc:
-        extra = selection.spec.required_extra
-        if extra is None:
+        dependency_error = _optional_dependency_error(selection, exc)
+        if dependency_error is None:
             raise
-        raise ImportError(
-            f"Backend {selection.name!r} ({selection.kind}) requires optional dependencies. "
-            f'Install them with `pip install "speech-to-speech[{extra}]"`. '
-            f"Original import error: {exc}"
-        ) from exc
+        raise dependency_error from exc
 
 
 def _load_handler(module_name: str, class_name: str) -> type[Any]:
@@ -483,7 +490,14 @@ class SharedBackendResources:
             for selection in selections:
                 factory = selection.spec.create_shared
                 if factory is not None:
-                    owner._resources[selection.kind] = (selection.spec, factory(selection.config))
+                    try:
+                        resource = factory(selection.config)
+                    except (ImportError, RuntimeError) as exc:
+                        dependency_error = _optional_dependency_error(selection, exc)
+                        if dependency_error is None:
+                            raise
+                        raise dependency_error from exc
+                    owner._resources[selection.kind] = (selection.spec, resource)
         except BaseException:
             try:
                 owner.close()
