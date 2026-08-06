@@ -806,8 +806,6 @@ def create_app(
                     if _is_audio_done(audio_chunk):
                         audio_generation = _audio_generation(audio_chunk)
                         if audio_generation is not None and unit.cancel_scope.is_stale(audio_generation):
-                            if session_id:
-                                unit.service._state(session_id).response_pending = False
                             unit.cancel_scope.response_done(audio_generation)
                             unit.should_listen.set()
                             logger.info(f"Pipeline {unit.index}: stale response complete, listening re-enabled")

@@ -10,7 +10,6 @@ from openai.types.realtime import (
     InputAudioBufferSpeechStoppedEvent,
     RealtimeErrorEvent,
     ResponseAudioDeltaEvent,
-    ResponseCreatedEvent,
 )
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
@@ -38,10 +37,8 @@ class AudioHandler(RealtimeBaseHandler):
             item_id = response._start_item(conn_id)
         else:
             response_item_id = st.current_item_id
-            response_content_index = st.content_index
             item_id = response._start_item(conn_id)
             st.current_item_id = response_item_id
-            st.content_index = response_content_index
         st.input_content_index = 0
         return item_id
 
@@ -124,7 +121,6 @@ class AudioHandler(RealtimeBaseHandler):
                 st.speculative_input_item_id = input_item_id
             elif not preserve_active_response:
                 st.current_item_id = input_item_id
-                st.content_index = 0
             st.input_audio_duration_s = 0.0
             st.input_content_index = 0
         else:
@@ -176,21 +172,7 @@ class AudioHandler(RealtimeBaseHandler):
         returned events, the WebRTC path sends only the bookkeeping events
         over the data channel while audio travels on the media track.
         """
-        response = self._service.response
-        st = self._state(conn_id)
-
-        events: list[ServerEvent] = []
-        need_created = st.current_response_id is None
-        resp_id, item_id = response._ensure_response(conn_id)
-        if need_created:
-            events.append(
-                ResponseCreatedEvent(
-                    type="response.created",
-                    event_id=self._next_event_id(),
-                    response=response._build_response(conn_id, "in_progress"),
-                )
-            )
-        return resp_id, item_id, events
+        return self._service.response.begin_response(conn_id)
 
     def begin_audio_output(self, conn_id: str) -> tuple[str, str, int, list[ServerEvent]]:
         """Ensure an audio response and reserve its assistant output identity."""
@@ -200,7 +182,6 @@ class AudioHandler(RealtimeBaseHandler):
 
     def encode_audio_chunk(self, conn_id: str, audio: bytes) -> list[ServerEvent]:
         """Encode a raw PCM audio chunk as a base64 delta event for the WebSocket transport."""
-        response = self._service.response
         st = self._state(conn_id)
 
         resp_id, assistant_item_id, assistant_output_index, events = self.begin_audio_output(conn_id)
@@ -220,7 +201,7 @@ class AudioHandler(RealtimeBaseHandler):
             ResponseAudioDeltaEvent(
                 type="response.output_audio.delta",
                 event_id=self._next_event_id(),
-                content_index=response._next_content_index(conn_id),
+                content_index=0,
                 delta=b64,
                 item_id=assistant_item_id,
                 output_index=assistant_output_index,

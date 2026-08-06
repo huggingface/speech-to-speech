@@ -20,6 +20,7 @@ from openai.types.realtime import (
     RealtimeErrorEvent,
     ResponseAudioDeltaEvent,
     ResponseAudioDoneEvent,
+    ResponseAudioTranscriptDeltaEvent,
     ResponseAudioTranscriptDoneEvent,
     ResponseCancelEvent,
     ResponseCreatedEvent,
@@ -103,6 +104,7 @@ ServerEvent = Union[
     ResponseDoneEvent,
     ResponseAudioDeltaEvent,
     ResponseAudioDoneEvent,
+    ResponseAudioTranscriptDeltaEvent,
     ResponseAudioTranscriptDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseTextDeltaEvent,
@@ -171,7 +173,6 @@ class ConnState(BaseModel):
     audio_remainder: bytes = b""
     current_response_id: Optional[str] = None
     current_item_id: Optional[str] = None
-    content_index: int = 0
     input_content_index: int = 0
     input_audio_duration_s: float = 0.0
     last_item_id: Optional[str] = None

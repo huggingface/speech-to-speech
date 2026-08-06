@@ -23,6 +23,7 @@ from openai.types.realtime import (
     RealtimeErrorEvent,
     ResponseAudioDeltaEvent,
     ResponseAudioDoneEvent,
+    ResponseAudioTranscriptDeltaEvent,
     ResponseAudioTranscriptDoneEvent,
     ResponseCancelEvent,
     ResponseCreatedEvent,
@@ -743,12 +744,12 @@ class TestEncodeAudioChunk:
         assert events[1].output_index == 0
         assert events[1].delta == base64.b64encode(audio).decode("ascii")
 
-    def test_subsequent_chunks_increment_content_index(self, service, conn_id):
+    def test_subsequent_chunks_reuse_audio_content_index(self, service, conn_id):
         service.encode_audio_chunk(conn_id, _pcm_bytes(256))  # first
         events = service.encode_audio_chunk(conn_id, _pcm_bytes(256))  # second
         assert len(events) == 1
         assert isinstance(events[0], ResponseAudioDeltaEvent)
-        assert events[0].content_index == 1
+        assert events[0].content_index == 0
 
     def test_response_created_includes_metadata(self, service, conn_id):
         from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
@@ -770,11 +771,14 @@ class TestFinishAudioResponse:
     def test_finish_emits_audio_done_and_response_done(self, service, conn_id):
         service.begin_audio_output(conn_id)
         events = service.finish_response(conn_id)
-        assert len(events) == 2
-        assert isinstance(events[0], ResponseAudioDoneEvent)
+        assert len(events) == 3
+        assert isinstance(events[0], ResponseAudioTranscriptDoneEvent)
         assert events[0].content_index == 0
-        assert isinstance(events[1], ResponseDoneEvent)
-        assert events[1].response.status == "completed"
+        assert events[0].transcript == ""
+        assert isinstance(events[1], ResponseAudioDoneEvent)
+        assert events[1].content_index == 0
+        assert isinstance(events[2], ResponseDoneEvent)
+        assert events[2].response.status == "completed"
 
     def test_finish_text_only_skips_audio_done(self, service, conn_id):
         from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
@@ -894,6 +898,19 @@ class TestResponseDoneOutputItems:
         assert not any(isinstance(e, ResponseAudioDoneEvent) for e in events)
         assert not done.response.output
 
+    def test_pending_implicit_empty_response_is_created_and_completed(self, service, conn_id):
+        state = service._state(conn_id)
+        state.response_pending = True
+
+        events = service.finish_response(conn_id)
+
+        assert [event.type for event in events] == ["response.created", "response.done"]
+        done = events[1]
+        assert isinstance(done, ResponseDoneEvent)
+        assert not done.response.output
+        assert state.response_pending is False
+        assert state.in_response is False
+
     def test_completed_response_completes_upstream_in_progress_call(self, service, conn_id):
         service.dispatch_pipeline_event(
             conn_id,
@@ -938,15 +955,21 @@ class TestResponseDoneOutputItems:
 
         assert [item.object for item in done.response.output] == ["realtime.item", "realtime.item"]
 
-    def test_audio_transcript_parts_are_separated(self, service, conn_id):
-        service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="Hello there."))
-        service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="How are you?"))
+    def test_audio_transcript_streams_deltas_then_one_complete_done(self, service, conn_id):
+        first = service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="Hello there."))
+        second = service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="How are you?"))
 
-        done = next(e for e in service.finish_response(conn_id) if isinstance(e, ResponseDoneEvent))
+        terminal_events = service.finish_response(conn_id)
+        transcript_done = [e for e in terminal_events if isinstance(e, ResponseAudioTranscriptDoneEvent)]
+        done = next(e for e in terminal_events if isinstance(e, ResponseDoneEvent))
         assistant = next(
             item for item in done.response.output if isinstance(item, RealtimeConversationItemAssistantMessage)
         )
 
+        deltas = [e.delta for e in [*first, *second] if isinstance(e, ResponseAudioTranscriptDeltaEvent)]
+        assert deltas == ["Hello there.", " How are you?"]
+        assert len(transcript_done) == 1
+        assert transcript_done[0].transcript == "".join(deltas)
         assert assistant.content[0].transcript == "Hello there. How are you?"
 
     def test_text_parts_preserve_exact_delta_concatenation(self, service, conn_id):
@@ -999,6 +1022,51 @@ class TestResponseDoneOutputItems:
         created = service.handle_conversation_item_create(conn_id, create_event)
 
         assert created[0].previous_item_id == tool_event.item_id
+
+    def test_out_of_band_output_does_not_change_conversation_tail(self, service, conn_id):
+        before = ConversationItemCreateEvent(
+            type="conversation.item.create",
+            item={
+                "id": "msg_before",
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "before"}],
+            },
+        )
+        service.handle_conversation_item_create(conn_id, before)
+        service.handle_response_create(
+            conn_id,
+            ResponseCreateEvent(type="response.create", response={"conversation": "none"}),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            AssistantTextEvent(
+                text="out of band",
+                tools=[
+                    {
+                        "type": "function_call",
+                        "id": "fc_oob",
+                        "call_id": "call_oob",
+                        "name": "outside",
+                        "arguments": "{}",
+                    }
+                ],
+            ),
+        )
+        service.finish_response(conn_id)
+
+        after = ConversationItemCreateEvent(
+            type="conversation.item.create",
+            item={
+                "id": "msg_after",
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "after"}],
+            },
+        )
+        created = service.handle_conversation_item_create(conn_id, after)
+
+        assert created[0].previous_item_id == "msg_before"
 
     def test_function_call_item_id_matches_its_arguments_done_event(self, service, conn_id):
         """A client correlating the streamed arguments event with the item in
@@ -1080,7 +1148,7 @@ class TestResponseDoneOutputItems:
         output_events = [
             e
             for e in [*text_events, *tool_events]
-            if isinstance(e, (ResponseAudioTranscriptDoneEvent, ResponseFunctionCallArgumentsDoneEvent))
+            if isinstance(e, (ResponseAudioTranscriptDeltaEvent, ResponseFunctionCallArgumentsDoneEvent))
         ]
 
         assert [event.output_index for event in output_events] == [0, 1, 2]
@@ -1110,7 +1178,7 @@ class TestResponseDoneOutputItems:
         text_event = next(
             e
             for e in service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="After the call."))
-            if isinstance(e, ResponseAudioTranscriptDoneEvent)
+            if isinstance(e, ResponseAudioTranscriptDeltaEvent)
         )
         terminal_events = service.finish_response(conn_id)
         audio_done = next(e for e in terminal_events if isinstance(e, ResponseAudioDoneEvent))
@@ -1144,7 +1212,7 @@ class TestResponseDoneOutputItems:
         text_event = next(
             e
             for e in service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="After the call."))
-            if isinstance(e, ResponseAudioTranscriptDoneEvent)
+            if isinstance(e, ResponseAudioTranscriptDeltaEvent)
         )
 
         audio_delta = next(
@@ -1183,7 +1251,7 @@ class TestResponseDoneOutputItems:
         text_event = next(
             e
             for e in service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="After the call."))
-            if isinstance(e, ResponseAudioTranscriptDoneEvent)
+            if isinstance(e, ResponseAudioTranscriptDeltaEvent)
         )
         terminal_events = service.finish_response(conn_id)
         audio_done = next(e for e in terminal_events if isinstance(e, ResponseAudioDoneEvent))
@@ -1238,7 +1306,7 @@ class TestResponseDoneOutputItems:
         transcript_event = next(
             e
             for e in service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="Still speaking."))
-            if isinstance(e, ResponseAudioTranscriptDoneEvent)
+            if isinstance(e, ResponseAudioTranscriptDeltaEvent)
         )
         speech_event = next(
             e
@@ -1413,17 +1481,18 @@ class TestDispatchPipelineEvent:
 
     # -- assistant_text --
 
-    def test_assistant_text_emits_transcript_done(self, service, conn_id):
+    def test_implicit_assistant_text_emits_created_then_transcript_delta(self, service, conn_id):
         events = service.dispatch_pipeline_event(
             conn_id,
             AssistantTextEvent(text="Hello there"),
         )
-        assert len(events) == 1
-        evt = events[0]
-        assert isinstance(evt, ResponseAudioTranscriptDoneEvent)
+        assert len(events) == 2
+        assert isinstance(events[0], ResponseCreatedEvent)
+        evt = events[1]
+        assert isinstance(evt, ResponseAudioTranscriptDeltaEvent)
         assert evt.content_index == 0
         assert evt.output_index == 0
-        assert evt.transcript == "Hello there"
+        assert evt.delta == "Hello there"
 
     def test_assistant_text_with_tools(self, service, conn_id):
         events = service.dispatch_pipeline_event(
@@ -1436,16 +1505,17 @@ class TestDispatchPipelineEvent:
                 ],
             ),
         )
-        assert len(events) == 3
-        assert isinstance(events[0], ResponseAudioTranscriptDoneEvent)
-        assert events[0].output_index == 0
-        assert isinstance(events[1], ResponseFunctionCallArgumentsDoneEvent)
-        assert events[1].output_index == 1
-        assert events[1].name == "get_weather"
-        assert events[1].call_id == "c1"
-        assert json.loads(events[1].arguments) == {"city": "Paris"}
+        assert len(events) == 4
+        assert isinstance(events[0], ResponseCreatedEvent)
+        assert isinstance(events[1], ResponseAudioTranscriptDeltaEvent)
+        assert events[1].output_index == 0
         assert isinstance(events[2], ResponseFunctionCallArgumentsDoneEvent)
-        assert events[2].output_index == 2
+        assert events[2].output_index == 1
+        assert events[2].name == "get_weather"
+        assert events[2].call_id == "c1"
+        assert json.loads(events[2].arguments) == {"city": "Paris"}
+        assert isinstance(events[3], ResponseFunctionCallArgumentsDoneEvent)
+        assert events[3].output_index == 2
 
     def test_assistant_text_tools_only(self, service, conn_id):
         events = service.dispatch_pipeline_event(
@@ -1455,9 +1525,10 @@ class TestDispatchPipelineEvent:
                 tools=[{"type": "function_call", "call_id": "c1", "name": "f1", "arguments": "{}"}],
             ),
         )
-        assert len(events) == 1
-        assert isinstance(events[0], ResponseFunctionCallArgumentsDoneEvent)
-        assert events[0].output_index == 0
+        assert len(events) == 2
+        assert isinstance(events[0], ResponseCreatedEvent)
+        assert isinstance(events[1], ResponseFunctionCallArgumentsDoneEvent)
+        assert events[1].output_index == 0
 
     def test_assistant_text_text_only_emits_text_events(self, service, conn_id):
         from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
@@ -1471,11 +1542,12 @@ class TestDispatchPipelineEvent:
         )
         # on_assistant_text streams only the delta now; the matching done is
         # emitted once at close in finish_response.
-        assert len(events) == 1
-        assert isinstance(events[0], ResponseTextDeltaEvent)
-        assert events[0].content_index == 0
-        assert events[0].output_index == 0
-        assert events[0].delta == "Hello there"
+        assert len(events) == 2
+        assert isinstance(events[0], ResponseCreatedEvent)
+        assert isinstance(events[1], ResponseTextDeltaEvent)
+        assert events[1].content_index == 0
+        assert events[1].output_index == 0
+        assert events[1].delta == "Hello there"
         assert not any(isinstance(e, ResponseTextDoneEvent) for e in events)
         assert not any(isinstance(e, ResponseAudioTranscriptDoneEvent) for e in events)
 
@@ -1500,7 +1572,7 @@ class TestDispatchPipelineEvent:
         # done.text concatenates the raw streamed parts verbatim (== sum of deltas).
         assert text_done[0].text == "Hello there. How are you?"
 
-    def test_text_only_no_text_done_on_cancel(self, service, conn_id):
+    def test_text_only_emits_text_done_on_cancel(self, service, conn_id):
         from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
         service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
@@ -1508,7 +1580,8 @@ class TestDispatchPipelineEvent:
         )
         service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="partial"))
         done_events = service.finish_response(conn_id, status="cancelled", reason="client_cancelled")
-        assert not any(isinstance(e, ResponseTextDoneEvent) for e in done_events)
+        text_done = next(e for e in done_events if isinstance(e, ResponseTextDoneEvent))
+        assert text_done.text == "partial"
         assert any(isinstance(e, ResponseDoneEvent) for e in done_events)
 
     def test_assistant_text_text_only_keeps_tool_events(self, service, conn_id):
@@ -1525,9 +1598,10 @@ class TestDispatchPipelineEvent:
             ),
         )
         # No per-chunk done anymore: delta, then the tool event at output_index 1.
-        assert isinstance(events[0], ResponseTextDeltaEvent)
+        assert isinstance(events[0], ResponseCreatedEvent)
+        assert isinstance(events[1], ResponseTextDeltaEvent)
         assert not any(isinstance(e, ResponseTextDoneEvent) for e in events)
-        tool_event = events[1]
+        tool_event = events[2]
         assert isinstance(tool_event, ResponseFunctionCallArgumentsDoneEvent)
         assert tool_event.output_index == 1
         assert tool_event.name == "get_weather"
@@ -1594,9 +1668,10 @@ class TestDispatchPipelineEvent:
         assert done.wait(1.0)
         thread.join(timeout=1.0)
 
-        assert len(result["events"]) == 1
-        assert isinstance(result["events"][0], ResponseAudioTranscriptDoneEvent)
-        assert result["events"][0].transcript == "latest"
+        assert len(result["events"]) == 2
+        assert isinstance(result["events"][0], ResponseCreatedEvent)
+        assert isinstance(result["events"][1], ResponseAudioTranscriptDeltaEvent)
+        assert result["events"][1].delta == "latest"
         assert tracker.is_committed("turn_1", 0)
         service.unregister(conn_id)
 
@@ -1651,9 +1726,10 @@ class TestDispatchPipelineEvent:
         events = service.try_dispatch_pipeline_event(conn_id, event)
 
         assert events is not None
-        assert len(events) == 1
-        assert isinstance(events[0], ResponseAudioTranscriptDoneEvent)
-        assert events[0].transcript == "latest"
+        assert len(events) == 2
+        assert isinstance(events[0], ResponseCreatedEvent)
+        assert isinstance(events[1], ResponseAudioTranscriptDeltaEvent)
+        assert events[1].delta == "latest"
         assert tracker.is_committed("turn_1", 0)
         service.unregister(conn_id)
 
@@ -1675,9 +1751,10 @@ class TestDispatchPipelineEvent:
         events = service.try_dispatch_pipeline_event(conn_id, event)
 
         assert events is not None
-        assert len(events) == 1
-        assert isinstance(events[0], ResponseAudioTranscriptDoneEvent)
-        assert events[0].transcript == "latest"
+        assert len(events) == 2
+        assert isinstance(events[0], ResponseCreatedEvent)
+        assert isinstance(events[1], ResponseAudioTranscriptDeltaEvent)
+        assert events[1].delta == "latest"
         assert tracker.is_committed("turn_1", 0)
         service.unregister(conn_id)
 
@@ -2136,22 +2213,6 @@ class TestIdAndStateManagement:
         events = service.handle_conversation_item_create(conn_id, evt)
         assert st.last_item_id == events[0].item.id
         assert events[0].previous_item_id == output_id
-
-    def test_content_index_resets_on_new_item(self, service, conn_id):
-        service.response._start_item(conn_id)
-        assert service.response._next_content_index(conn_id) == 0
-        assert service.response._next_content_index(conn_id) == 1
-
-        service.response._start_item(conn_id)
-        assert service.response._next_content_index(conn_id) == 0
-
-        service.response._ensure_response(conn_id)
-        assert service.response._next_content_index(conn_id) == 0
-        assert service.response._next_content_index(conn_id) == 1
-
-        service.response._end_response(conn_id)
-        service.response._ensure_response(conn_id)
-        assert service.response._next_content_index(conn_id) == 0
 
 
 # ===================================================================

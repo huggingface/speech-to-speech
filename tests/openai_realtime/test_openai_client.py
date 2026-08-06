@@ -148,6 +148,7 @@ RESPONSE_CREATED = "response.created"
 RESPONSE_DONE = "response.done"
 AUDIO_DELTA = "response.output_audio.delta"
 AUDIO_DONE = "response.output_audio.done"
+TRANSCRIPT_DELTA = "response.output_audio_transcript.delta"
 TRANSCRIPT_DONE = "response.output_audio_transcript.done"
 FUNCTION_CALL_DONE = "response.function_call_arguments.done"
 ERROR = "error"
@@ -274,10 +275,14 @@ class TestSDKVoiceTurn:
 
             server_env.text_output_queue.put(AssistantTextEvent(text="Hi there!"))
             event = await _recv(conn)
+            assert event.type == TRANSCRIPT_DELTA
+            assert event.delta == "Hi there!"
+
+            server_env.output_queue.put(PIPELINE_END)
+            event = await _recv(conn)
             assert event.type == TRANSCRIPT_DONE
             assert event.transcript == "Hi there!"
 
-            server_env.output_queue.put(PIPELINE_END)
             event = await _recv(conn)
             assert event.type == AUDIO_DONE
 
@@ -308,10 +313,11 @@ class TestSDKBargeIn:
             server_env.text_output_queue.put(SpeechStartedEvent())
 
             events = []
-            for _ in range(3):
+            for _ in range(4):
                 events.append(await _recv(conn))
 
             types = [e.type for e in events]
+            assert TRANSCRIPT_DONE in types
             assert AUDIO_DONE in types
             assert RESPONSE_DONE in types
             assert SPEECH_STARTED in types
@@ -336,10 +342,11 @@ class TestSDKBargeIn:
             server_env.text_output_queue.put(AssistantTextEvent(text="stale response text"))
 
             events = []
-            for _ in range(3):
+            for _ in range(4):
                 events.append(await _recv(conn))
 
             types = [e.type for e in events]
+            assert TRANSCRIPT_DONE in types
             assert AUDIO_DONE in types
             assert RESPONSE_DONE in types
             assert SPEECH_STARTED in types
@@ -387,6 +394,8 @@ class TestSDKPhantomSpeech:
 
             server_env.output_queue.put(AUDIO_RESPONSE_DONE)
             event = await _recv(conn)
+            assert event.type == TRANSCRIPT_DONE
+            event = await _recv(conn)
             assert event.type == AUDIO_DONE
             event = await _recv(conn)
             assert event.type == RESPONSE_DONE
@@ -412,10 +421,11 @@ class TestSDKInterruptionState:
 
             server_env.text_output_queue.put(SpeechStartedEvent())
             events = []
-            for _ in range(3):
+            for _ in range(4):
                 events.append(await _recv(conn))
 
             types = [e.type for e in events]
+            assert TRANSCRIPT_DONE in types
             assert SPEECH_STARTED in types
             assert RESPONSE_DONE in types
 
@@ -452,8 +462,11 @@ class TestSDKToolCalling:
             )
 
             event = await _recv(conn)
-            assert event.type == TRANSCRIPT_DONE
-            assert event.transcript == "Checking weather"
+            assert event.type == RESPONSE_CREATED
+
+            event = await _recv(conn)
+            assert event.type == TRANSCRIPT_DELTA
+            assert event.delta == "Checking weather"
 
             event = await _recv(conn)
             assert event.type == FUNCTION_CALL_DONE
@@ -478,8 +491,10 @@ class TestSDKToolCalling:
                 )
             )
 
+            created = await _recv(conn)
             e1 = await _recv(conn)
             e2 = await _recv(conn)
+            assert created.type == RESPONSE_CREATED
             assert e1.type == FUNCTION_CALL_DONE
             assert e2.type == FUNCTION_CALL_DONE
             assert e1.output_index == 0
@@ -608,6 +623,9 @@ class TestSDKResponseCancel:
             await conn.send({"type": "response.cancel"})
 
             event = await _recv(conn)
+            assert event.type == TRANSCRIPT_DONE
+
+            event = await _recv(conn)
             assert event.type == AUDIO_DONE
 
             event = await _recv(conn)
@@ -647,7 +665,7 @@ class TestSDKMultiTurn:
             # Barge-in
             server_env.text_output_queue.put(SpeechStartedEvent())
             events = []
-            for _ in range(3):
+            for _ in range(4):
                 events.append(await _recv(conn))
 
             t1_done = next(e for e in events if e.type == RESPONSE_DONE)
@@ -669,6 +687,7 @@ class TestSDKMultiTurn:
             await _recv(conn)  # audio delta
 
             server_env.output_queue.put(PIPELINE_END)
+            await _recv(conn)  # transcript done
             await _recv(conn)  # audio done
             t2_done = await _recv(conn)
             assert t2_done.type == RESPONSE_DONE
