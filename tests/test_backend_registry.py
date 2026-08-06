@@ -494,21 +494,52 @@ def test_thread_manager_tracks_thread_when_start_raises_after_launch(monkeypatch
 
     handler = Handler()
     cleaned = []
+    wrapper_launched = Event()
+    allow_wrapper = Event()
+    cleanup_finished = Event()
     real_start = threading.Thread.start
+    real_join = threading.Thread.join
+    start_calls = 0
+
+    def cleanup():
+        cleaned.append("closed")
+        cleanup_finished.set()
+
+    manager = ThreadManager([handler], cleanup_callbacks=[cleanup])
+    run_handler = manager._run_handler
+
+    def delay_handler_wrapper(selected_handler):
+        wrapper_launched.set()
+        allow_wrapper.wait()
+        run_handler(selected_handler)
+
+    monkeypatch.setattr(manager, "_run_handler", delay_handler_wrapper)
 
     def start_then_raise(thread):
+        nonlocal start_calls
+        start_calls += 1
         real_start(thread)
-        raise KeyboardInterrupt("interrupted after launch")
+        if start_calls == 1:
+            assert wrapper_launched.wait(timeout=1.0)
+            raise KeyboardInterrupt("interrupted after launch")
 
+    def fast_timed_join(thread, timeout=None):
+        if timeout is None:
+            real_join(thread)
+
+    monkeypatch.setattr(threading.Thread, "join", fast_timed_join)
     monkeypatch.setattr(threading.Thread, "start", start_then_raise)
-    manager = ThreadManager([handler], cleanup_callbacks=[lambda: cleaned.append("closed")])
 
     with pytest.raises(KeyboardInterrupt, match="interrupted after launch"):
         manager.start()
 
-    assert handler.entered_run.is_set()
     assert handler.stop_event.is_set()
     assert len(manager.threads) == 1
+
+    assert cleaned == []
+    allow_wrapper.set()
+    assert cleanup_finished.wait(timeout=1.0)
+    assert handler.entered_run.is_set()
     assert not manager.threads[0].is_alive()
     assert cleaned == ["closed"]
 
@@ -584,6 +615,39 @@ def test_thread_manager_defers_cleanup_until_slow_thread_finishes():
     release_thread.set()
     assert cleanup_finished.wait(timeout=1.0)
     assert cleaned == ["closed"]
+
+
+def test_thread_manager_falls_back_when_cleanup_reaper_cannot_start(monkeypatch, caplog):
+    cleaned = []
+
+    class SlowThread:
+        name = "slow-thread"
+
+        def __init__(self):
+            self.alive = True
+
+        def join(self, timeout=None):
+            if timeout is None:
+                self.alive = False
+
+        def is_alive(self):
+            return self.alive
+
+    class Handler:
+        def __init__(self):
+            self.stop_event = Event()
+
+    def fail_reaper_start(_thread):
+        raise RuntimeError("cannot start reaper")
+
+    monkeypatch.setattr(threading.Thread, "start", fail_reaper_start)
+    manager = ThreadManager([Handler()], cleanup_callbacks=[lambda: cleaned.append("closed")])
+    manager.threads = [SlowThread()]  # type: ignore[list-item]
+
+    manager.stop()
+
+    assert cleaned == ["closed"]
+    assert "waiting for handler threads synchronously" in caplog.text
 
 
 def test_thread_manager_stop_logs_cleanup_errors(caplog):

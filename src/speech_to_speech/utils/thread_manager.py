@@ -67,9 +67,11 @@ class ThreadManager:
                     thread.start()
                 except BaseException:
                     with self._thread_state_lock:
-                        cancelled = self._thread_states[thread] == "pending"
-                        if cancelled:
-                            self._thread_states[thread] = "cancelled"
+                        pending = self._thread_states[thread] == "pending"
+                        launched = thread.ident is not None
+                        cancelled = pending and not launched
+                        if pending:
+                            self._thread_states[thread] = "cancelled" if cancelled else "started"
                     if cancelled:
                         self.threads.remove(thread)
                     raise
@@ -100,8 +102,8 @@ class ThreadManager:
                 with self._thread_state_lock:
                     state = self._thread_states.get(thread, "started")
                     if state == "pending":
-                        self._thread_states[thread] = "cancelled"
-                        state = "cancelled"
+                        state = "started" if thread.ident is not None else "cancelled"
+                        self._thread_states[thread] = state
                 if state == "cancelled":
                     continue
                 if thread.is_alive():
@@ -120,31 +122,31 @@ class ThreadManager:
                 return
             self._cleanup_deferred = True
 
-        def wait_then_cleanup() -> None:
-            try:
-                for thread in self.threads:
-                    with self._thread_state_lock:
-                        if self._thread_states.get(thread, "started") == "cancelled":
-                            continue
-                    thread.join()
-            except BaseException:
-                with self._cleanup_lock:
-                    self._cleanup_deferred = False
-                logger.exception("Unable to wait for handler threads; shared resources remain open")
-                return
-            self._cleanup_safely(message)
-
         reaper = threading.Thread(
-            target=wait_then_cleanup,
+            target=self._wait_for_threads_and_cleanup,
+            args=(message,),
             name="speech-to-speech-cleanup",
             daemon=False,
         )
         try:
             reaper.start()
         except BaseException:
+            logger.exception("Unable to start cleanup reaper; waiting for handler threads synchronously")
+            self._wait_for_threads_and_cleanup(message)
+
+    def _wait_for_threads_and_cleanup(self, message: str) -> None:
+        try:
+            for thread in self.threads:
+                with self._thread_state_lock:
+                    if self._thread_states.get(thread, "started") == "cancelled":
+                        continue
+                thread.join()
+        except BaseException:
             with self._cleanup_lock:
                 self._cleanup_deferred = False
-            logger.exception("Unable to defer cleanup; shared resources remain open")
+            logger.exception("Unable to wait for handler threads; shared resources remain open")
+            return
+        self._cleanup_safely(message)
 
     def _stop_and_cleanup(self, message: str) -> None:
         if self._stop_handlers_and_join():
