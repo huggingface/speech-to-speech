@@ -265,11 +265,8 @@ class TestClientEventDispatch:
                 conn_id = list(service._conns.keys())[0]
                 service.response._ensure_response(conn_id)
                 ws.send_json({"type": "response.cancel"})
-                msg1 = ws.receive_json()
-                msg2 = ws.receive_json()
-                types = {msg1["type"], msg2["type"]}
-                assert "response.output_audio.done" in types
-                assert "response.done" in types
+                msg = ws.receive_json()
+                assert msg["type"] == "response.done"
 
     def test_response_cancel_flushes_queues(self, setup):
         app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
@@ -283,7 +280,6 @@ class TestClientEventDispatch:
                 output_queue.put(_pcm_bytes(256))
                 text_output_queue.put(AssistantTextEvent(text="stale"))
                 ws.send_json({"type": "response.cancel"})
-                ws.receive_json()  # response.output_audio.done
                 ws.receive_json()  # response.done
                 time.sleep(0.1)
                 assert output_queue.empty()
@@ -313,7 +309,6 @@ class TestClientEventDispatch:
                 service.response._ensure_response(conn_id)
                 response_playing.set()
                 ws.send_json({"type": "response.cancel"})
-                ws.receive_json()  # response.output_audio.done
                 ws.receive_json()  # response.done
                 time.sleep(0.1)
                 assert cancel_scope.discarding
@@ -426,9 +421,11 @@ class TestSendLoop:
                 response_playing.set()
                 # Trigger barge-in
                 text_output_queue.put(SpeechStartedEvent())
-                ws.receive_json()  # input_audio_buffer.speech_started
-                ws.receive_json()  # response.output_audio.done
-                ws.receive_json()  # response.done
+                messages = [ws.receive_json(), ws.receive_json()]
+                assert {message["type"] for message in messages} == {
+                    "input_audio_buffer.speech_started",
+                    "response.done",
+                }
                 time.sleep(0.1)
                 assert cancel_scope.discarding
                 output_queue.put(AUDIO_RESPONSE_DONE)

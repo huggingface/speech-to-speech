@@ -441,8 +441,13 @@ class TestWebRTCLoopback:
             server_env.output_queue.put(AUDIO_RESPONSE_DONE)
 
             await inbox.wait_for("response.created", timeout=10.0)
+            audio_done = await inbox.wait_for("response.output_audio.done", timeout=10.0)
             done = await inbox.wait_for("response.done", timeout=10.0)
             assert done["response"]["status"] == "completed"
+            assert len(done["response"]["output"]) == 1
+            assert done["response"]["output"][0]["id"] == audio_done["item_id"]
+            assert done["response"]["output"][0]["object"] == "realtime.item"
+            assert done["response"]["output"][0]["content"][0]["transcript"] == ""
 
             await asyncio.wait_for(track_ready.wait(), timeout=10.0)
             assert received_frames[0].sample_rate == WEBRTC_SAMPLE_RATE
