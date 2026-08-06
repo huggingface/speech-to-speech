@@ -1,4 +1,5 @@
 import sys
+import threading
 from copy import deepcopy
 from dataclasses import dataclass, fields
 from queue import Queue
@@ -400,6 +401,37 @@ def test_thread_manager_runs_all_cleanup_callbacks_once():
     manager.stop()
 
     assert cleaned == ["second", "first"]
+
+
+def test_thread_manager_cleans_up_after_partial_start_failure(monkeypatch):
+    class Handler:
+        def __init__(self):
+            self.stop_event = Event()
+
+        def run(self):
+            self.stop_event.wait()
+
+    handlers = [Handler(), Handler()]
+    cleaned = []
+    real_start = threading.Thread.start
+    start_calls = 0
+
+    def fail_second_start(thread):
+        nonlocal start_calls
+        start_calls += 1
+        if start_calls == 2:
+            raise RuntimeError("thread startup failed")
+        real_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_second_start)
+    manager = ThreadManager(handlers, cleanup_callbacks=[lambda: cleaned.append("closed")])
+
+    with pytest.raises(RuntimeError, match="thread startup failed"):
+        manager.start()
+
+    assert all(handler.stop_event.is_set() for handler in handlers)
+    assert all(not thread.is_alive() for thread in manager.threads)
+    assert cleaned == ["closed"]
 
 
 def test_thread_manager_wait_preserves_join_error_when_cleanup_fails(caplog):

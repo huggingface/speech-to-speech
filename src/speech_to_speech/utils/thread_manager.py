@@ -45,11 +45,16 @@ class ThreadManager:
             logger.exception(message)
 
     def start(self) -> None:
-        for handler in self.handlers:
-            thread = threading.Thread(target=handler.run)
-            thread.daemon = False  # Ensure threads are waited for on shutdown
-            self.threads.append(thread)
-            thread.start()
+        try:
+            for handler in self.handlers:
+                thread = threading.Thread(target=handler.run)
+                thread.daemon = False  # Ensure threads are waited for on shutdown
+                self.threads.append(thread)
+                thread.start()
+        except BaseException:
+            self._stop_handlers_and_join()
+            self._cleanup_safely("Failed to clean up resources after thread startup failed")
+            raise
 
     def wait(self) -> None:
         try:
@@ -60,15 +65,22 @@ class ThreadManager:
             raise
         self._cleanup()
 
-    def stop(self) -> None:
-        # Signal all handlers to stop
+    def _stop_handlers_and_join(self) -> None:
         for handler in self.handlers:
-            handler.stop_event.set()
+            try:
+                handler.stop_event.set()
+            except BaseException:
+                logger.exception("Failed to signal handler to stop")
 
-        # Wait for all threads to finish with timeout
         for i, thread in enumerate(self.threads):
-            if thread.is_alive():
-                thread.join(timeout=5.0)
+            try:
                 if thread.is_alive():
-                    logger.warning(f"Thread {i} ({thread.name}) did not terminate within timeout")
+                    thread.join(timeout=5.0)
+                    if thread.is_alive():
+                        logger.warning(f"Thread {i} ({thread.name}) did not terminate within timeout")
+            except BaseException:
+                logger.exception("Failed while waiting for thread %d (%s) to stop", i, thread.name)
+
+    def stop(self) -> None:
+        self._stop_handlers_and_join()
         self._cleanup_safely("Failed to clean up resources while stopping threads")
