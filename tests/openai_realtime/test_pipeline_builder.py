@@ -2,9 +2,9 @@ import sys
 from threading import Event
 from types import SimpleNamespace
 
-from speech_to_speech.api.openai_realtime.local_client import LocalRealtimeAudioClient
+from speech_to_speech.api.openai_realtime.audio_client import RealtimeAudioClient
 from speech_to_speech.api.openai_realtime.server import RealtimeServer
-from speech_to_speech.s2s_pipeline import build_pipeline, parse_arguments
+from speech_to_speech.s2s_pipeline import build_local_pipeline, build_pipeline, parse_arguments
 
 
 def _default_args():
@@ -16,7 +16,7 @@ def _default_args():
         sys.argv = original_argv
 
 
-def test_realtime_mode_builds_pipeline_unit_pool(monkeypatch):
+def test_serve_builds_pipeline_unit_pool(monkeypatch):
     args = _default_args()
     args.module_kwargs.num_pipelines = 2
     unit_handlers = [object(), object()]
@@ -39,24 +39,22 @@ def test_realtime_mode_builds_pipeline_unit_pool(monkeypatch):
     assert [call["index"] for call in calls] == [0, 1]
 
 
-def test_local_mode_adds_loopback_client_to_same_realtime_engine(monkeypatch):
+def test_local_composes_loopback_client_with_same_server_builder(monkeypatch):
     args = _default_args()
-    args.module_kwargs.mode = "local"
     args.realtime_server_kwargs.host = "192.0.2.10"
     args.realtime_server_kwargs.port = 9876
     pipeline_handler = object()
     unit = SimpleNamespace(handlers=[pipeline_handler])
     monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", lambda **_kwargs: unit)
 
-    manager = build_pipeline(args, Event())
+    manager = build_local_pipeline(args, Event())
 
     assert manager.handlers[0] is pipeline_handler
     server = manager.handlers[1]
     client = manager.handlers[2]
     assert isinstance(server, RealtimeServer)
-    assert isinstance(client, LocalRealtimeAudioClient)
+    assert isinstance(client, RealtimeAudioClient)
     assert server.pool == [unit]
     assert server.host == "127.0.0.1"
     assert server.port == 9876
-    assert client.config.host == "127.0.0.1"
-    assert client.config.port == server.port
+    assert client.config.url == f"ws://127.0.0.1:{server.port}/v1/realtime"

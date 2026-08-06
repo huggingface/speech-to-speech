@@ -11,7 +11,7 @@ from queue import Queue
 from sys import platform
 from threading import Event
 from types import FrameType
-from typing import Any, Optional
+from typing import Any, Literal, Optional, Sequence
 
 import nltk
 import torch
@@ -40,7 +40,10 @@ from speech_to_speech.arguments_classes.parakeet_tdt_arguments import (
 )
 from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
-from speech_to_speech.arguments_classes.realtime_server_arguments import RealtimeServerArguments
+from speech_to_speech.arguments_classes.realtime_server_arguments import (
+    LocalRealtimeServerArguments,
+    RealtimeServerArguments,
+)
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
     ResponsesApiLanguageModelHandlerArguments,
 )
@@ -149,7 +152,11 @@ def build_llm_proxy_config(
     )
 
 
-def parse_arguments() -> ParsedArguments:
+def parse_arguments(
+    argv: Sequence[str] | None = None,
+    *,
+    command: Literal["serve", "local"] = "serve",
+) -> ParsedArguments:
     # Pre-parse to determine which LM backend is selected, so only one of the
     # mutually exclusive LM argument classes is registered with HfArgumentParser
     # (avoids duplicate field names from the shared LanguageModelBaseArguments base).
@@ -158,23 +165,28 @@ def parse_arguments() -> ParsedArguments:
         "responses-api": ResponsesApiLanguageModelHandlerArguments,
         "chat-completions": ChatCompletionsLanguageModelHandlerArguments,
     }
-    _is_json = len(sys.argv) == 2 and sys.argv[1].endswith(".json")
+    pipeline_args = list(sys.argv[1:] if argv is None else argv)
+    _is_json = len(pipeline_args) == 1 and pipeline_args[0].endswith(".json")
     if _is_json:
-        with open(sys.argv[1]) as _f:
+        with open(pipeline_args[0]) as _f:
             _backend = json.load(_f).get("llm_backend")
     else:
         _pre = argparse.ArgumentParser(add_help=False)
         _pre.add_argument("--llm_backend", default="responses-api")
-        _backend = _pre.parse_known_args()[0].llm_backend
+        _backend = _pre.parse_known_args(pipeline_args)[0].llm_backend
 
     _lm_class = _backend_lm_class.get(_backend, LanguageModelHandlerArguments)
     logger.debug("LLM backend pre-parse: backend=%s, registering %s", _backend, _lm_class.__name__)
 
-    parser = HfArgumentParser(
-        (  # type: ignore[arg-type]
-            ModuleArguments,
-            RealtimeServerArguments,
-            LocalAudioArguments,
+    server_arguments_class = RealtimeServerArguments if command == "serve" else LocalRealtimeServerArguments
+    argument_classes: list[type[Any]] = [
+        ModuleArguments,
+        server_arguments_class,
+    ]
+    if command == "local":
+        argument_classes.append(LocalAudioArguments)
+    argument_classes.extend(
+        [
             VADHandlerArguments,
             WhisperSTTHandlerArguments,
             ParaformerSTTHandlerArguments,
@@ -187,22 +199,32 @@ def parse_arguments() -> ParsedArguments:
             PocketTTSHandlerArguments,
             KokoroTTSHandlerArguments,
             Qwen3TTSHandlerArguments,
-        )
+        ]
     )
+    parser = HfArgumentParser(tuple(argument_classes), prog=f"speech-to-speech {command}")  # type: ignore[arg-type]
+    mac_action = parser._option_string_actions.pop("--mac_optimal_settings")
+    mac_action.option_strings = [option for option in mac_action.option_strings if option != "--mac_optimal_settings"]
 
     if _is_json:
-        parsed = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]), allow_extra_keys=True)
+        parsed = parser.parse_json_file(json_file=os.path.abspath(pipeline_args[0]), allow_extra_keys=True)
     else:
-        parsed = parser.parse_args_into_dataclasses()
+        parsed = parser.parse_args_into_dataclasses(args=pipeline_args)
 
     # Build a {type: instance} lookup so field assignment is order-independent.
     by_type: dict[type, Any] = {type(obj): obj for obj in parsed}
     logger.debug("Parsed %d argument classes: %s", len(by_type), [t.__name__ for t in by_type])
+    if command == "serve":
+        realtime_server_kwargs = by_type[RealtimeServerArguments]
+    else:
+        realtime_server_kwargs = RealtimeServerArguments(
+            host="127.0.0.1",
+            port=by_type[LocalRealtimeServerArguments].port,
+        )
 
     args = ParsedArguments(
         module_kwargs=by_type[ModuleArguments],
-        realtime_server_kwargs=by_type[RealtimeServerArguments],
-        local_audio_kwargs=by_type[LocalAudioArguments],
+        realtime_server_kwargs=realtime_server_kwargs,
+        local_audio_kwargs=by_type.get(LocalAudioArguments, LocalAudioArguments()),
         vad_handler_kwargs=by_type[VADHandlerArguments],
         whisper_stt_handler_kwargs=by_type[WhisperSTTHandlerArguments],
         paraformer_stt_handler_kwargs=by_type[ParaformerSTTHandlerArguments],
@@ -255,8 +277,6 @@ def optimal_mac_settings(mac_optimal_settings: bool, *handler_kwargs: Any) -> No
         for kwargs in handler_kwargs:
             if hasattr(kwargs, "device"):
                 kwargs.device = "mps"
-            if hasattr(kwargs, "mode"):
-                kwargs.mode = "local"
             if hasattr(kwargs, "stt"):
                 kwargs.stt = "parakeet-tdt"
             if hasattr(kwargs, "llm_backend"):
@@ -300,7 +320,7 @@ def overwrite_device_argument(common_device: Optional[str], *handler_kwargs: Any
 
 
 def prepare_module_args(module_kwargs: ModuleArguments, *handler_kwargs: Any) -> None:
-    optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs, *handler_kwargs)
+    optimal_mac_settings(module_kwargs.mac_optimal_settings, module_kwargs, *handler_kwargs)
     if module_kwargs.tts is None:
         module_kwargs.tts = "qwen3"
     if module_kwargs.stt == "none" and module_kwargs.llm_backend != "chat-completions":
@@ -602,6 +622,8 @@ def _build_pipeline_unit(
 def build_pipeline(
     args: ParsedArguments,
     stop_event: Event,
+    *,
+    host: str | None = None,
 ) -> ThreadManager:
     """Build a pool of pipeline units behind one server."""
     from speech_to_speech.api.openai_realtime.server import RealtimeServer
@@ -629,11 +651,10 @@ def build_pipeline(
         for index in range(module_kwargs.num_pipelines)
     ]
 
-    server_host = "127.0.0.1" if module_kwargs.mode == "local" else args.realtime_server_kwargs.host
     server = RealtimeServer(
         stop_event=stop_event,
         pool=pool,
-        host=server_host,
+        host=host or args.realtime_server_kwargs.host,
         port=args.realtime_server_kwargs.port,
         llm_proxy_config=(
             build_llm_proxy_config(
@@ -649,30 +670,31 @@ def build_pipeline(
     for unit in pool:
         handlers.extend(unit.handlers)
     handlers.append(server)
-
-    if module_kwargs.mode == "local":
-        from speech_to_speech.api.openai_realtime.local_client import (
-            LocalRealtimeAudioClient,
-            RealtimeAudioClientConfig,
-        )
-
-        local_audio = args.local_audio_kwargs
-        handlers.append(
-            LocalRealtimeAudioClient(
-                stop_event,
-                RealtimeAudioClientConfig(
-                    host="127.0.0.1",
-                    port=args.realtime_server_kwargs.port,
-                    chunk_size=local_audio.local_audio_chunk_size,
-                    input_device=local_audio.local_audio_input_device,
-                    output_device=local_audio.local_audio_output_device,
-                    print_json=local_audio.local_audio_print_json,
-                    block_mic_during_playback=local_audio.local_audio_block_mic_during_playback,
-                ),
-            )
-        )
-
     return ThreadManager(handlers)
+
+
+def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadManager:
+    """Compose the canonical server and audio client over a forced loopback URL."""
+
+    from speech_to_speech.api.openai_realtime.audio_client import (
+        RealtimeAudioClient,
+        RealtimeAudioClientConfig,
+    )
+
+    server_manager = build_pipeline(args, stop_event, host="127.0.0.1")
+    local_audio = args.local_audio_kwargs
+    client = RealtimeAudioClient(
+        stop_event,
+        RealtimeAudioClientConfig(
+            url=f"ws://127.0.0.1:{args.realtime_server_kwargs.port}/v1/realtime",
+            chunk_size=local_audio.local_audio_chunk_size,
+            input_device=local_audio.local_audio_input_device,
+            output_device=local_audio.local_audio_output_device,
+            print_json=local_audio.local_audio_print_json,
+            block_mic_during_playback=local_audio.local_audio_block_mic_during_playback,
+        ),
+    )
+    return ThreadManager([*server_manager.handlers, client])
 
 
 def get_stt_handler(
@@ -908,8 +930,10 @@ def get_tts_handler(
         raise ValueError("The TTS should be either chatTTS, facebookMMS, pocket, kokoro, or qwen3")
 
 
-def main() -> None:
-    args = parse_arguments()
+def run_pipeline_command(command: Literal["serve", "local"], argv: Sequence[str]) -> None:
+    """Run the server alone or compose it with the loopback audio client."""
+
+    args = parse_arguments(argv, command=command)
 
     setup_logger(args.module_kwargs.log_level)
 
@@ -945,7 +969,9 @@ def main() -> None:
         args.module_kwargs.enable_live_transcription = False
 
     stop_event = Event()
-    pipeline_manager = build_pipeline(args, stop_event)
+    pipeline_manager = (
+        build_local_pipeline(args, stop_event) if command == "local" else build_pipeline(args, stop_event)
+    )
 
     # Set up graceful shutdown handler
     shutdown_requested = [False]  # Use list for nonlocal mutation
@@ -968,6 +994,14 @@ def main() -> None:
             console.print("\n[yellow]Shutting down gracefully...[/yellow]")
             pipeline_manager.stop()
             console.print("[green]✓ Pipeline stopped successfully[/green]")
+
+
+def main() -> None:
+    """Compatibility entry point for direct module execution."""
+
+    from speech_to_speech.cli import main as cli_main
+
+    cli_main()
 
 
 if __name__ == "__main__":

@@ -30,8 +30,8 @@ import pytest
 import uvicorn
 from openai import AsyncOpenAI
 
-import speech_to_speech.api.openai_realtime.local_client as local_client_module
-from speech_to_speech.api.openai_realtime.local_client import (
+import speech_to_speech.api.openai_realtime.audio_client as audio_client_module
+from speech_to_speech.api.openai_realtime.audio_client import (
     RealtimeAudioClientConfig,
     listen_and_play_realtime,
 )
@@ -302,7 +302,7 @@ class TestSDKVoiceTurn:
 # ===================================================================
 
 
-class TestPackagedLocalClient:
+class TestPackagedAudioClient:
     @pytest.mark.asyncio
     async def test_direct_audio_reopen_cancels_revision_zero_over_loopback(
         self,
@@ -352,7 +352,7 @@ class TestPackagedLocalClient:
             SimpleNamespace(RawInputStream=FakeInputStream, RawOutputStream=FakeOutputStream),
         )
 
-        original_handle_server_event = local_client_module.handle_server_event
+        original_handle_server_event = audio_client_module.handle_server_event
 
         def record_server_event(event, **kwargs):
             received_events.append(event)
@@ -360,7 +360,7 @@ class TestPackagedLocalClient:
             if event.type == TRANSCRIPT_DONE and event.transcript == "fresh revision one":
                 client_stop.set()
 
-        monkeypatch.setattr(local_client_module, "handle_server_event", record_server_event)
+        monkeypatch.setattr(audio_client_module, "handle_server_event", record_server_event)
 
         async def queue_get(queue: Queue, timeout: float = 3.0):
             deadline = asyncio.get_running_loop().time() + timeout
@@ -458,9 +458,8 @@ class TestPackagedLocalClient:
         pipeline_task = asyncio.create_task(drive_direct_audio_reopen())
         client_task = asyncio.create_task(
             listen_and_play_realtime(
-                RealtimeAudioClientConfig(host="127.0.0.1", port=server_env.port),
+                RealtimeAudioClientConfig(url=f"ws://127.0.0.1:{server_env.port}/v1/realtime"),
                 stop_event=client_stop,
-                prompt_for_stop=False,
             )
         )
         pipeline_result, _ = await asyncio.wait_for(

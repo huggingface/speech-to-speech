@@ -1,8 +1,8 @@
 ## Realtime Engine -- High-Level Architecture
 
 A FastAPI/uvicorn server exposes WebSocket and WebRTC transports. Each session claims a queue-backed
-`PipelineUnit` containing its `RealtimeService`, turn tracker, and cancellation state. `--mode local` starts the
-packaged microphone/speaker client against the loopback WebSocket endpoint.
+`PipelineUnit` containing its `RealtimeService`, turn tracker, and cancellation state. The `local` command composes
+that server with the packaged microphone/speaker client against the loopback WebSocket endpoint.
 
 ```mermaid
 flowchart LR
@@ -212,8 +212,7 @@ sequenceDiagram
 ### Local LLM with Transformers
 
 ```bash
-uv run speech-to-speech \
-  --mode realtime \
+uv run speech-to-speech serve \
   --stt parakeet-tdt \
   --llm_backend transformers \
   --tts kokoro \
@@ -226,8 +225,7 @@ uv run speech-to-speech \
 ### Local LLM with MLX-LM
 
 ```bash
-uv run speech-to-speech \
-  --mode realtime \
+uv run speech-to-speech serve \
   --stt parakeet-tdt \
   --llm_backend mlx-lm \
   --tts kokoro \
@@ -240,8 +238,7 @@ uv run speech-to-speech \
 ### Remote LLM with OpenAI-compatible API
 
 ```bash
-uv run speech-to-speech \
-  --mode realtime \
+uv run speech-to-speech serve \
   --stt parakeet-tdt \
   --llm_backend responses-api \
   --tts kokoro \

@@ -37,8 +37,7 @@ services:
       dockerfile: ${DOCKERFILE:-Dockerfile}
     command:
       - speech-to-speech
-      - --mode
-      - realtime
+      - serve
       - --host
       - 0.0.0.0
       - --port

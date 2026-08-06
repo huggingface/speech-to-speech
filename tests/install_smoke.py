@@ -17,7 +17,7 @@ def _require_modules(modules: list[str]) -> None:
 
 def _run_installed_cli_help() -> None:
     env = {**os.environ, "OPENAI_API_KEY": ""}
-    result = subprocess.run(
+    root_help = subprocess.run(
         ["speech-to-speech", "--help"],
         check=True,
         env=env,
@@ -25,14 +25,45 @@ def _run_installed_cli_help() -> None:
         stderr=subprocess.STDOUT,
         text=True,
     )
-    expected_flags = ("--mode", "--host", "--port", "--stt", "--llm_backend", "--tts")
-    missing_flags = [flag for flag in expected_flags if flag not in result.stdout]
+    expected_commands = ("serve", "talk", "local")
+    missing_commands = [command for command in expected_commands if command not in root_help.stdout]
+    if missing_commands:
+        raise RuntimeError(f"Installed CLI help is missing expected commands: {', '.join(missing_commands)}")
+
+    serve_help = subprocess.run(
+        ["speech-to-speech", "serve", "--help"],
+        check=True,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    ).stdout
+    expected_server_flags = ("--host", "--port", "--stt", "--llm_backend", "--tts")
+    missing_flags = [flag for flag in expected_server_flags if flag not in serve_help]
     if missing_flags:
-        raise RuntimeError(f"Installed CLI help is missing expected flags: {', '.join(missing_flags)}")
-    removed_flags = ("--recv_host", "--send_host", "--ws_host", "--ws_port")
-    unexpected_flags = [flag for flag in removed_flags if flag in result.stdout]
+        raise RuntimeError(f"Installed serve help is missing expected flags: {', '.join(missing_flags)}")
+
+    talk_help = subprocess.run(
+        ["speech-to-speech", "talk", "--help"],
+        check=True,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    ).stdout
+    if "--url" not in talk_help:
+        raise RuntimeError("Installed talk help is missing --url")
+
+    removed_flags = ("--mode", "--recv_host", "--send_host", "--ws_host", "--ws_port")
+    unexpected_flags = [flag for flag in removed_flags if flag in root_help.stdout or flag in serve_help]
     if unexpected_flags:
         raise RuntimeError(f"Installed CLI help still exposes removed transport flags: {', '.join(unexpected_flags)}")
+    overlapping_client_flags = ("--host", "--port", "--base-url", "--websocket-base-url")
+    unexpected_client_flags = [flag for flag in overlapping_client_flags if flag in talk_help]
+    if unexpected_client_flags:
+        raise RuntimeError(
+            f"Installed talk help exposes overlapping connection flags: {', '.join(unexpected_client_flags)}"
+        )
 
 
 def _validate_package_defaults() -> None:
@@ -49,7 +80,6 @@ def _validate_package_defaults() -> None:
     qwen3_args = Qwen3TTSHandlerArguments()
     vad_args = VADHandlerArguments()
 
-    assert module_args.mode == "realtime"
     assert module_args.stt == "parakeet-tdt"
     assert module_args.llm_backend == "responses-api"
     assert module_args.tts == "qwen3"
@@ -100,10 +130,10 @@ def _validate_empty_qwen_ref_audio_arg() -> None:
 
 
 def _validate_realtime_engine_imports() -> None:
-    from speech_to_speech.api.openai_realtime.local_client import LocalRealtimeAudioClient
+    from speech_to_speech.api.openai_realtime.audio_client import RealtimeAudioClient
     from speech_to_speech.api.openai_realtime.server import RealtimeServer
 
-    assert LocalRealtimeAudioClient is not None
+    assert RealtimeAudioClient is not None
     assert RealtimeServer is not None
 
 

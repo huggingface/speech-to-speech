@@ -20,13 +20,12 @@ backend, speaking the OpenAI Realtime **GA** protocol over **WebSocket**
 
 ## Quick start (local)
 
-1. **Start the speech-to-speech backend** in realtime mode (from the repo root;
+1. **Start the speech-to-speech backend** (from the repo root;
    see the [backend README](https://github.com/huggingface/speech-to-speech/blob/main/src/speech_to_speech/api/openai_realtime/README.md)
    for more model combinations):
 
    ```bash
-   uv run speech-to-speech \
-     --mode realtime \
+   uv run speech-to-speech serve \
      --stt parakeet-tdt \
      --llm_backend transformers \
      --tts kokoro \

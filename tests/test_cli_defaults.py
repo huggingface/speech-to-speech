@@ -24,17 +24,18 @@ from speech_to_speech.arguments_classes.responses_api_language_model_arguments i
 )
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
+from speech_to_speech.cli import parse_command, parse_talk_arguments
 from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments, prepare_module_args
 
 
-def test_release_defaults_match_responses_api_parakeet_qwen3_realtime_profile():
+def test_release_defaults_match_responses_api_parakeet_qwen3_profile():
     module_args = ModuleArguments()
     vad_args = VADHandlerArguments()
     responses_api_args = ResponsesApiLanguageModelHandlerArguments()
     qwen3_args = Qwen3TTSHandlerArguments()
 
-    assert module_args.mode == "realtime"
     assert module_args.stt == "parakeet-tdt"
+    assert module_args.mac_optimal_settings is False
     assert module_args.llm_backend == "responses-api"
     assert module_args.tts == "qwen3"
     assert module_args.log_level == "info"
@@ -65,6 +66,23 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_realtime_profile():
     assert qwen3_args.qwen3_tts_gguf_codec_path is None
     assert qwen3_args.qwen3_tts_ref_cache_dir is None
     assert qwen3_args.qwen3_tts_mlx_quantization == "6bit"
+
+
+def test_server_defaults_to_loopback():
+    assert RealtimeServerArguments().host == "127.0.0.1"
+
+
+def test_mac_optimal_settings_flag_does_not_select_a_command():
+    args = parse_arguments(["--mac-optimal-settings"])
+
+    assert args.module_kwargs.mac_optimal_settings is True
+    assert not hasattr(args.module_kwargs, "mode")
+
+
+@pytest.mark.parametrize("flag", ["--local_mac_optimal_settings", "--mac_optimal_settings"])
+def test_noncanonical_mac_optimal_settings_flags_are_rejected(flag):
+    with pytest.raises(ValueError, match=flag):
+        parse_arguments([flag])
 
 
 # -- ParsedArguments dataclass tests ------------------------------------------
@@ -216,37 +234,57 @@ def test_parse_arguments_accepts_qwen3_tts_ggml_options():
     assert qwen3_args.qwen3_tts_ref_rvq == "/voices/ref.rvq"
 
 
-def test_cli_exposes_only_realtime_and_local_modes():
-    original_argv = sys.argv[:]
-    try:
-        for mode in ("realtime", "local"):
-            sys.argv = ["speech-to-speech", "--mode", mode]
-            assert parse_arguments().module_kwargs.mode == mode
-    finally:
-        sys.argv = original_argv
+@pytest.mark.parametrize("command", ["serve", "talk", "local"])
+def test_cli_exposes_command_family(command):
+    assert parse_command([command]) == (command, [])
 
 
-def test_parse_arguments_supports_smart_turn_in_local_mode():
-    original_argv = sys.argv[:]
-    try:
-        sys.argv = ["speech-to-speech", "--mode", "local", "--smart_turn"]
-        args = parse_arguments()
-    finally:
-        sys.argv = original_argv
+def test_local_pipeline_arguments_support_smart_turn():
+    command, command_args = parse_command(["local", "--smart_turn"])
+    args = parse_arguments(command_args, command=command)
 
-    assert args.module_kwargs.mode == "local"
+    assert command == "local"
     assert args.vad_handler_kwargs.smart_turn is True
 
 
-@pytest.mark.parametrize("mode", ["socket", "raw-websocket", "websocket"])
-def test_parse_arguments_rejects_removed_legacy_modes(mode):
-    original_argv = sys.argv[:]
-    try:
-        sys.argv = ["speech-to-speech", "--mode", mode]
-        with pytest.raises(SystemExit):
-            parse_arguments()
-    finally:
-        sys.argv = original_argv
+@pytest.mark.parametrize("mode", ["realtime", "local", "socket", "raw-websocket", "websocket"])
+def test_cli_rejects_removed_mode_flag(mode):
+    with pytest.raises(SystemExit):
+        parse_command(["--mode", mode])
+
+
+def test_talk_accepts_one_full_url_connection_option():
+    config = parse_talk_arguments(["--url", "wss://voice.example/v1/realtime"])
+
+    assert config.url == "wss://voice.example/v1/realtime"
+
+
+@pytest.mark.parametrize("flag", ["--host", "--port", "--base-url", "--websocket-base-url", "--stt"])
+def test_talk_rejects_server_and_overlapping_connection_flags(flag):
+    with pytest.raises(SystemExit):
+        parse_talk_arguments([flag, "value"])
+
+
+@pytest.mark.parametrize("command", ["serve", "local"])
+def test_pipeline_commands_reject_talk_url(command):
+    _, command_args = parse_command([command, "--url", "ws://127.0.0.1:8765/v1/realtime"])
+    with pytest.raises(ValueError, match="--url"):
+        parse_arguments(command_args, command=command)
+
+
+def test_serve_rejects_local_audio_flags():
+    with pytest.raises(ValueError, match="--local_audio_input_device"):
+        parse_arguments(["--local_audio_input_device", "2"], command="serve")
+
+
+def test_local_accepts_audio_flags_but_rejects_host():
+    args = parse_arguments(["--port", "9876", "--local_audio_input_device", "2"], command="local")
+
+    assert args.realtime_server_kwargs.host == "127.0.0.1"
+    assert args.realtime_server_kwargs.port == 9876
+    assert args.local_audio_kwargs.local_audio_input_device == 2
+    with pytest.raises(ValueError, match="--host"):
+        parse_arguments(["--host", "0.0.0.0"], command="local")
 
 
 def test_parse_arguments_transformers_backend():

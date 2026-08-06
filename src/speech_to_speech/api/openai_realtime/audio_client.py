@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import signal
 import time
 from dataclasses import dataclass
 from queue import Empty, Full, Queue
 from threading import Event, Lock
 from typing import Any, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from openai import AsyncOpenAI
 
@@ -18,12 +20,9 @@ logger = logging.getLogger(__name__)
 class RealtimeAudioClientConfig:
     """Configuration for the packaged microphone/speaker Realtime client."""
 
-    host: str = "127.0.0.1"
-    port: int = 8765
+    url: str = "ws://127.0.0.1:8765/v1/realtime"
     model: str = "local"
     api_key: str = "test-key"
-    base_url: Optional[str] = None
-    websocket_base_url: Optional[str] = None
     send_rate: int = 16000
     recv_rate: int = 16000
     chunk_size: int = 1024
@@ -36,9 +35,29 @@ class RealtimeAudioClientConfig:
     connection_retry_timeout_s: float = 30.0
 
 
+def normalize_realtime_url(url: str) -> tuple[str, str]:
+    """Convert a full Realtime endpoint into the base URLs expected by the SDK."""
+
+    parsed = urlsplit(url.strip())
+    if parsed.scheme not in {"ws", "wss", "http", "https"} or not parsed.netloc:
+        raise ValueError("--url must be an absolute ws://, wss://, http://, or https:// URL")
+    if parsed.query or parsed.fragment:
+        raise ValueError("--url must not include a query string or fragment")
+
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/realtime"):
+        raise ValueError("--url must be the full Realtime endpoint ending in /realtime")
+
+    sdk_path = path[: -len("/realtime")]
+    websocket_scheme = "wss" if parsed.scheme in {"wss", "https"} else "ws"
+    http_scheme = "https" if websocket_scheme == "wss" else "http"
+    websocket_base_url = urlunsplit((websocket_scheme, parsed.netloc, sdk_path, "", ""))
+    base_url = urlunsplit((http_scheme, parsed.netloc, sdk_path, "", ""))
+    return base_url, websocket_base_url
+
+
 def _make_client(config: RealtimeAudioClientConfig) -> AsyncOpenAI:
-    base_url = config.base_url or f"http://{config.host}:{config.port}/v1"
-    websocket_base_url = config.websocket_base_url or f"ws://{config.host}:{config.port}/v1"
+    base_url, websocket_base_url = normalize_realtime_url(config.url)
     return AsyncOpenAI(
         api_key=config.api_key,
         base_url=base_url,
@@ -219,8 +238,6 @@ async def _run_audio_session(
     conn: Any,
     config: RealtimeAudioClientConfig,
     stop_event: Event,
-    *,
-    prompt_for_stop: bool,
 ) -> None:
     import sounddevice as sd
 
@@ -266,10 +283,6 @@ async def _run_audio_session(
                 print_json=config.print_json,
             )
 
-    async def wait_for_console_stop() -> None:
-        await asyncio.to_thread(input, "Press Enter to stop...\n")
-        stop_event.set()
-
     input_stream = sd.RawInputStream(
         samplerate=config.send_rate,
         channels=1,
@@ -295,8 +308,6 @@ async def _run_audio_session(
             asyncio.create_task(receive_events()),
             asyncio.create_task(_wait_for_stop(stop_event)),
         }
-        if prompt_for_stop:
-            tasks.add(asyncio.create_task(wait_for_console_stop()))
 
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         stop_event.set()
@@ -319,7 +330,6 @@ async def listen_and_play_realtime(
     config: RealtimeAudioClientConfig,
     *,
     stop_event: Event | None = None,
-    prompt_for_stop: bool = True,
 ) -> None:
     """Connect microphone/speaker audio to a Realtime server over WebSocket."""
 
@@ -339,7 +349,6 @@ async def listen_and_play_realtime(
                         conn,
                         config,
                         stop_event,
-                        prompt_for_stop=prompt_for_stop,
                     )
                     return
             except asyncio.CancelledError:
@@ -357,8 +366,30 @@ async def listen_and_play_realtime(
         await client.close()
 
 
-class LocalRealtimeAudioClient:
-    """ThreadManager handler that embeds the packaged client for ``--mode local``."""
+def run_realtime_audio_client(config: RealtimeAudioClientConfig) -> None:
+    """Run the audio client until SIGINT, SIGTERM, disconnect, or an error."""
+
+    stop_event = Event()
+    previous_handlers: dict[signal.Signals, Any] = {}
+
+    def request_shutdown(_sig: int, _frame: Any) -> None:
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        previous_handlers[sig] = signal.getsignal(sig)
+        signal.signal(sig, request_shutdown)
+
+    try:
+        asyncio.run(listen_and_play_realtime(config, stop_event=stop_event))
+    except KeyboardInterrupt:
+        stop_event.set()
+    finally:
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
+
+
+class RealtimeAudioClient:
+    """ThreadManager handler that embeds the packaged client for ``local``."""
 
     def __init__(self, stop_event: Event, config: RealtimeAudioClientConfig) -> None:
         self.stop_event = stop_event
@@ -370,7 +401,6 @@ class LocalRealtimeAudioClient:
                 listen_and_play_realtime(
                     self.config,
                     stop_event=self.stop_event,
-                    prompt_for_stop=False,
                 )
             )
         except Exception:

@@ -8,17 +8,11 @@ class ModuleArguments:
         default=None,
         metadata={"help": "If specified, overrides the device for all handlers."},
     )
-    mode: Optional[Literal["local", "realtime"]] = field(
-        default="realtime",
-        metadata={
-            "help": "How to run the service: 'realtime' starts the server, while 'local' also "
-            "connects the packaged microphone/speaker client over loopback. Default is 'realtime'."
-        },
-    )
-    local_mac_optimal_settings: bool = field(
+    mac_optimal_settings: bool = field(
         default=False,
         metadata={
-            "help": "If specified, sets the optimal settings for Mac OS. Sets Parakeet TDT for STT, MLX LM for language model, and Qwen3-TTS for TTS, with MPS device and local mode."
+            "help": "If specified, sets the optimal settings for macOS: Parakeet TDT for STT, MLX LM for "
+            "the language model, Qwen3-TTS for TTS, and MPS as the device. It does not select a command.",
         },
     )
     stt: Optional[

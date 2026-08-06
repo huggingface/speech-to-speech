@@ -6,11 +6,11 @@ from typing import Optional
 class LocalAudioArguments:
     local_audio_input_device: Optional[int] = field(
         default=None,
-        metadata={"help": "Optional sounddevice input device index used by --mode local."},
+        metadata={"help": "Optional sounddevice input device index used by the local command."},
     )
     local_audio_output_device: Optional[int] = field(
         default=None,
-        metadata={"help": "Optional sounddevice output device index used by --mode local."},
+        metadata={"help": "Optional sounddevice output device index used by the local command."},
     )
     local_audio_chunk_size: int = field(
         default=1024,

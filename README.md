@@ -28,21 +28,21 @@ This pipeline runs in production as the conversation backend for thousands of [R
 ```bash
 pip install speech-to-speech
 export OPENAI_API_KEY=...
-speech-to-speech
+speech-to-speech serve
 ```
 
 This starts an OpenAI Realtime-compatible server at `ws://localhost:8765/v1/realtime` using Parakeet TDT for local STT, an OpenAI-compatible LLM, and Qwen3-TTS for local speech output.
 
-From a source checkout, talk to it from a second terminal:
+Talk to it from a second terminal:
 
 ```bash
-python scripts/listen_and_play_realtime.py --host 127.0.0.1 --port 8765
+speech-to-speech talk --url ws://127.0.0.1:8765/v1/realtime
 ```
 
 To start the server and packaged microphone/speaker client in one command:
 
 ```bash
-speech-to-speech --mode local
+speech-to-speech local
 ```
 
 Prefer to keep the LLM on your own machine? Serve Gemma 4 with llama.cpp:
@@ -54,7 +54,7 @@ llama-server -hf ggml-org/gemma-4-E4B-it-GGUF -np 2 -c 65536 -fa on --swa-full
 Then point the OpenAI-compatible LLM backend at it:
 
 ```bash
-speech-to-speech \
+speech-to-speech serve \
     --model_name "ggml-org/gemma-4-E4B-it-GGUF" \
     --responses_api_base_url "http://127.0.0.1:8080/v1" \
     --responses_api_api_key ""
@@ -67,7 +67,7 @@ Any OpenAI Realtime-compatible client can connect. See [Realtime API](#realtime-
 * [How it works](#how-it-works)
 * [Installation](#installation)
 * [Supported components](#supported-components)
-* [Run modes](#run-modes)
+* [Commands](#commands)
 * [Realtime API](#realtime-api)
 * [LLM backends](#llm-backends)
 * [Multi-language support](#multi-language-support)
@@ -176,29 +176,29 @@ This installs the package in editable mode and makes the `speech-to-speech` CLI 
 | TTS | [ChatTTS](https://github.com/2noise/ChatTTS) | CUDA / CPU | `chattts` |
 | TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | `facebook-mms` |
 
-Select implementations with `--stt`, `--llm_backend`, and `--tts`. Run `speech-to-speech -h` for exact values and backend-specific flags.
+Select implementations with `--stt`, `--llm_backend`, and `--tts`. Run `speech-to-speech serve -h` for exact values and backend-specific flags.
 
-## Run Modes
+## Commands
 
-| Mode | Transport | Use it when |
+| Command | Behavior | Use it when |
 |---|---|---|
-| `realtime` (default) | OpenAI Realtime over WebSocket or WebRTC | You are building an app or device against the public API. |
-| `local` | Packaged microphone/speaker client over loopback Realtime WebSocket | You want to run the server and talk to it from one command. |
+| `serve` | Runs the pipeline server over OpenAI Realtime WebSocket and WebRTC. | You are building an app or device against the API. |
+| `talk --url <full-realtime-url>` | Runs the packaged microphone/speaker client. | You want to talk to an existing Realtime server. |
+| `local` | Composes `serve` and `talk` in-process over loopback. | You want to run the server and talk to it from one command. |
 
-`local` binds the server to `127.0.0.1` and connects the packaged client at
-`ws://127.0.0.1:<port>/v1/realtime`.
+`serve` binds to `127.0.0.1` by default; pass `--host 0.0.0.0` explicitly for network exposure. `local` always binds to loopback and connects the same packaged client at `ws://127.0.0.1:<port>/v1/realtime`.
 
 ### Realtime Server
 
 ```bash
 export OPENAI_API_KEY=...
-speech-to-speech
+speech-to-speech serve
 ```
 
 This is equivalent to:
 
 ```bash
-speech-to-speech \
+speech-to-speech serve \
     --thresh 0.6 \
     --stt parakeet-tdt \
     --llm_backend responses-api \
@@ -212,8 +212,7 @@ speech-to-speech \
     --model_name gpt-5.4-mini \
     --chat_size 30 \
     --responses_api_stream \
-    --enable_live_transcription \
-    --mode realtime
+    --enable_live_transcription
 ```
 
 The default model is `gpt-5.4-mini` through the OpenAI Responses API. Override it with `--model_name`, and set `--responses_api_base_url` for another OpenAI-compatible provider or server.
@@ -221,14 +220,14 @@ The default model is `gpt-5.4-mini` through the OpenAI Responses API. Override i
 ### Local Mac
 
 ```bash
-speech-to-speech --local_mac_optimal_settings
+speech-to-speech local --mac-optimal-settings
 ```
 
 Optionally with a specific LLM:
 
 ```bash
-speech-to-speech \
-    --local_mac_optimal_settings \
+speech-to-speech local \
+    --mac-optimal-settings \
     --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
 ```
 
@@ -238,7 +237,8 @@ This setting:
 - Sets Parakeet TDT for STT.
 - Sets MLX LM as the LLM backend.
 - Sets Qwen3-TTS for TTS, using `mlx-audio` with the `6bit` MLX variant by default.
-- Sets `--mode local`.
+
+The preset selects model and device defaults only. Use it with `serve` instead of `local` when you want to expose the server without starting the microphone/speaker client.
 
 `--tts pocket` and `--tts kokoro` are also valid on macOS.
 
@@ -349,8 +349,7 @@ For OpenAI, see the
 and [audio-input guide](https://developers.openai.com/api/docs/guides/audio#add-audio-to-your-existing-application).
 
 ```bash
-speech-to-speech \
-    --mode realtime \
+speech-to-speech serve \
     --stt none \
     --llm_backend chat-completions \
     --model_name "YOUR_AUDIO_CAPABLE_MODEL" \
@@ -379,8 +378,7 @@ Works with any provider or server that implements the OpenAI Responses API. Poin
 
 ```bash
 # OpenAI
-speech-to-speech \
-    --mode local \
+speech-to-speech local \
     --stt parakeet-tdt \
     --llm_backend responses-api \
     --tts qwen3 \
@@ -393,8 +391,7 @@ speech-to-speech \
 
 ```bash
 # HF Inference Providers: Qwen3.5-9B via Together
-speech-to-speech \
-    --mode local \
+speech-to-speech local \
     --stt parakeet-tdt \
     --llm_backend responses-api \
     --tts qwen3 \
@@ -408,7 +405,7 @@ speech-to-speech \
 
 ```bash
 # HF Inference Providers: GPT-oss-20B via Groq
-speech-to-speech \
+speech-to-speech serve \
     --stt parakeet-tdt \
     --llm_backend responses-api \
     --tts qwen3 \
@@ -431,8 +428,7 @@ Add `--responses_api_reasoning_effort none` to disable reasoning on providers wh
 
 ```bash
 # vLLM serving a Qwen model with tool calling
-speech-to-speech \
-    --mode realtime \
+speech-to-speech serve \
     --stt parakeet-tdt \
     --llm_backend chat-completions \
     --tts qwen3 \
@@ -443,8 +439,7 @@ speech-to-speech \
 
 ```bash
 # Gemma 4 31B via the HF router on Cerebras, with reasoning disabled for low voice latency
-speech-to-speech \
-    --mode realtime \
+speech-to-speech serve \
     --stt parakeet-tdt \
     --llm_backend chat-completions \
     --tts qwen3 \
@@ -468,8 +463,7 @@ llama-server -hf ggml-org/gemma-4-E4B-it-GGUF -np 2 -c 65536 -fa on --swa-full
 
 ```bash
 # Terminal 2: speech-to-speech using that local LLM server
-speech-to-speech \
-    --mode realtime \
+speech-to-speech serve \
     --stt parakeet-tdt \
     --llm_backend responses-api \
     --tts qwen3 \
@@ -480,7 +474,7 @@ speech-to-speech \
     --enable_live_transcription
 ```
 
-You can use `--mode local` instead of `--mode realtime` when you want to talk through the machine running the server directly. In-process local backends are still available with `--llm_backend mlx-lm` on Apple Silicon or `--llm_backend transformers` on CUDA / CPU.
+Use `speech-to-speech local` when you want to run the same server and talk through the machine hosting it. In-process local backends are available with `--llm_backend mlx-lm` on Apple Silicon or `--llm_backend transformers` on CUDA / CPU.
 
 ## Multi-Language Support
 
@@ -504,7 +498,7 @@ Make sure the STT, LLM, and TTS you pair all cover your target language(s). Two 
 Automatic language detection:
 
 ```bash
-speech-to-speech \
+speech-to-speech serve \
     --stt parakeet-tdt \
     --language auto \
     --llm_backend mlx-lm \
@@ -514,7 +508,7 @@ speech-to-speech \
 A single non-English language, Chinese in this example:
 
 ```bash
-speech-to-speech \
+speech-to-speech serve \
     --stt whisper-mlx \
     --stt_model_name large-v3 \
     --language zh \
@@ -522,14 +516,14 @@ speech-to-speech \
     --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
 ```
 
-Both commands also work on top of `--local_mac_optimal_settings`; explicit `--stt` flags override the defaults it sets.
+Both commands also work with `--mac-optimal-settings`; explicit `--stt` flags override the defaults it sets.
 
 ## Pocket TTS
 
 Pocket TTS from Kyutai Labs provides streaming TTS with voice cloning:
 
 ```bash
-speech-to-speech \
+speech-to-speech serve \
     --tts pocket \
     --pocket_tts_voice jean \
     --pocket_tts_device cpu
@@ -539,14 +533,14 @@ Available voice presets: `alba`, `marius`, `javert`, `jean`, `fantine`, `cosette
 
 ## CLI Reference
 
-References for all CLI arguments live in the [arguments classes](./src/speech_to_speech/arguments_classes) and in `speech-to-speech -h`.
+References for pipeline CLI arguments live in the [arguments classes](./src/speech_to_speech/arguments_classes) and in `speech-to-speech serve -h`. Client arguments are listed by `speech-to-speech talk -h`.
 
 ### Module-Level Parameters
 
 See [ModuleArguments](./src/speech_to_speech/arguments_classes/module_arguments.py). It allows setting:
 
 - a common `--device`, if every part should run on the same device
-- `--mode`: `realtime` (default) starts the server; `local` also starts the packaged microphone/speaker client
+- macOS model/device defaults (`--mac-optimal-settings`)
 - STT implementation (`--stt`)
 - LLM backend (`--llm_backend`: `transformers`, `mlx-lm`, `responses-api`, or `chat-completions`)
 - TTS implementation (`--tts`)
@@ -580,7 +574,7 @@ The base package includes the quantized CPU runtime and enables Smart Turn by de
 
 ```bash
 pip install speech-to-speech
-speech-to-speech
+speech-to-speech serve
 ```
 
 The latest supported v3.2 CPU checkpoint downloads from the Hugging Face Hub on first use. Pass
