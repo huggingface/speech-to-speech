@@ -810,6 +810,9 @@ class TestFinishAudioResponse:
         assert st.current_response_id is None
         assert st.current_item_id is None
         assert st.current_response_params is None
+        assert st.pending_assistant_item_id is None
+        assert st.pending_assistant_output_index is None
+        assert not st.pending_function_calls
 
 
 class TestResponseDoneOutputItems:
@@ -886,6 +889,130 @@ class TestResponseDoneOutputItems:
             item for item in done.response.output if isinstance(item, RealtimeConversationItemFunctionCall)
         )
         assert call_item.id == args_done.item_id
+
+    def test_every_output_item_has_a_distinct_id(self, service, conn_id):
+        stream_events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantTextEvent(
+                text="One moment.",
+                tools=[
+                    {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_1",
+                        "name": "first",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call",
+                        "id": "fc_2",
+                        "call_id": "call_2",
+                        "name": "second",
+                        "arguments": "{}",
+                    },
+                ],
+            ),
+        )
+        args_done = [e for e in stream_events if isinstance(e, ResponseFunctionCallArgumentsDoneEvent)]
+        done = next(e for e in service.finish_response(conn_id) if isinstance(e, ResponseDoneEvent))
+
+        output_ids = [item.id for item in done.response.output]
+        assert all(output_ids)
+        assert len(set(output_ids)) == len(output_ids)
+        assert [event.item_id for event in args_done] == ["fc_1", "fc_2"]
+        assert output_ids[1:] == ["fc_1", "fc_2"]
+
+    def test_output_indexes_match_final_items_across_pipeline_chunks(self, service, conn_id):
+        text_events = service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="One moment."))
+        tool_events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantTextEvent(
+                text="",
+                tools=[
+                    {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_1",
+                        "name": "first",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call",
+                        "id": "fc_2",
+                        "call_id": "call_2",
+                        "name": "second",
+                        "arguments": "{}",
+                    },
+                ],
+            ),
+        )
+        terminal_events = service.finish_response(conn_id)
+        done = next(e for e in terminal_events if isinstance(e, ResponseDoneEvent))
+        output_events = [
+            e
+            for e in [*text_events, *tool_events]
+            if isinstance(e, (ResponseAudioTranscriptDoneEvent, ResponseFunctionCallArgumentsDoneEvent))
+        ]
+
+        assert [event.output_index for event in output_events] == [0, 1, 2]
+        for event in output_events:
+            assert done.response.output[event.output_index].id == event.item_id
+
+    def test_output_order_is_preserved_when_tool_precedes_text(self, service, conn_id):
+        tool_event = next(
+            e
+            for e in service.dispatch_pipeline_event(
+                conn_id,
+                AssistantTextEvent(
+                    text="",
+                    tools=[
+                        {
+                            "type": "function_call",
+                            "id": "fc_1",
+                            "call_id": "call_1",
+                            "name": "first",
+                            "arguments": "{}",
+                        }
+                    ],
+                ),
+            )
+            if isinstance(e, ResponseFunctionCallArgumentsDoneEvent)
+        )
+        text_event = next(
+            e
+            for e in service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="After the call."))
+            if isinstance(e, ResponseAudioTranscriptDoneEvent)
+        )
+        terminal_events = service.finish_response(conn_id)
+        audio_done = next(e for e in terminal_events if isinstance(e, ResponseAudioDoneEvent))
+        done = next(e for e in terminal_events if isinstance(e, ResponseDoneEvent))
+
+        assert tool_event.output_index == 0
+        assert text_event.output_index == 1
+        assert audio_done.output_index == 1
+        assert [item.id for item in done.response.output] == [tool_event.item_id, text_event.item_id]
+
+    def test_assistant_id_survives_non_interrupting_user_speech(self, service, conn_id):
+        transcript_event = next(
+            e
+            for e in service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="Still speaking."))
+            if isinstance(e, ResponseAudioTranscriptDoneEvent)
+        )
+        speech_event = next(
+            e
+            for e in service.dispatch_pipeline_event(
+                conn_id,
+                SpeechStartedEvent(interrupt_response=False),
+            )
+            if isinstance(e, InputAudioBufferSpeechStartedEvent)
+        )
+        done = next(e for e in service.finish_response(conn_id) if isinstance(e, ResponseDoneEvent))
+        message = next(
+            item for item in done.response.output if isinstance(item, RealtimeConversationItemAssistantMessage)
+        )
+
+        assert message.id == transcript_event.item_id
+        assert message.id != speech_event.item_id
 
     def test_cancelled_response_marks_every_item_incomplete(self, service, conn_id):
         """Items in a cancelled response should not claim to have completed -
