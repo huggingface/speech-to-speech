@@ -86,6 +86,18 @@ class TestConnectionLifecycle:
         assert st.last_item_id is None
         service.unregister(sid)
 
+    def test_register_applies_server_default_instructions(self, text_prompt_queue, should_listen):
+        service = RealtimeService(
+            text_prompt_queue=text_prompt_queue,
+            should_listen=should_listen,
+            default_instructions="Use the configured persona.",
+        )
+
+        sid = service.register()
+
+        assert service._state(sid).runtime_config.session.instructions == "Use the configured persona."
+        service.unregister(sid)
+
     def test_unregister_removes_state(self, service):
         sid = service.register()
         service.unregister(sid)

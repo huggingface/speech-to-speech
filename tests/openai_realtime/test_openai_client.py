@@ -18,27 +18,37 @@ import asyncio
 import base64
 import json
 import socket
+import sys
 import threading
 import time
-from queue import Queue
+from queue import Empty, Queue
 from threading import Event as ThreadingEvent
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import uvicorn
 from openai import AsyncOpenAI
 
+import speech_to_speech.api.openai_realtime.audio_client as audio_client_module
+from speech_to_speech.api.openai_realtime.audio_client import (
+    RealtimeAudioClientConfig,
+    listen_and_play_realtime,
+)
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
+    AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TranscriptionCompletedEvent,
 )
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, GenerateResponseRequest
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -285,6 +295,188 @@ class TestSDKVoiceTurn:
             assert event.type == RESPONSE_DONE
             assert event.response.status == "completed"
             assert event.response.conversation_id == conversation_id
+
+
+# ===================================================================
+# 3b. Packaged local client parity
+# ===================================================================
+
+
+class TestPackagedAudioClient:
+    @pytest.mark.asyncio
+    async def test_direct_audio_reopen_cancels_revision_zero_over_loopback(
+        self,
+        server_env,
+        monkeypatch,
+        capsys,
+    ):
+        """The embedded client uses the public WebSocket revision/cancellation lifecycle."""
+
+        tracker = SpeculativeTurnTracker()
+        server_env.service.speculative_turns = tracker
+        client_stop = ThreadingEvent()
+        received_events = []
+
+        class FakeInputStream:
+            def __init__(self, *, callback, **_kwargs):
+                self.callback = callback
+
+            def start(self):
+                # Two microphone callbacks become the original segment and its
+                # resumed continuation in the deterministic pipeline driver below.
+                self.callback(_pcm_bytes(512), 512, None, None)
+                self.callback(_pcm_bytes(512), 512, None, None)
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
+
+        class FakeOutputStream:
+            def __init__(self, **_kwargs):
+                pass
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
+
+        monkeypatch.setitem(
+            sys.modules,
+            "sounddevice",
+            SimpleNamespace(RawInputStream=FakeInputStream, RawOutputStream=FakeOutputStream),
+        )
+
+        original_handle_server_event = audio_client_module.handle_server_event
+
+        def record_server_event(event, **kwargs):
+            received_events.append(event)
+            original_handle_server_event(event, **kwargs)
+            if event.type == TRANSCRIPT_DONE and event.transcript == "fresh revision one":
+                client_stop.set()
+
+        monkeypatch.setattr(audio_client_module, "handle_server_event", record_server_event)
+
+        async def queue_get(queue: Queue, timeout: float = 3.0):
+            deadline = asyncio.get_running_loop().time() + timeout
+            while asyncio.get_running_loop().time() < deadline:
+                try:
+                    return queue.get_nowait()
+                except Empty:
+                    await asyncio.sleep(0.01)
+            raise AssertionError("Timed out waiting for the loopback pipeline queue")
+
+        async def wait_until(predicate, timeout: float = 3.0):
+            deadline = asyncio.get_running_loop().time() + timeout
+            while asyncio.get_running_loop().time() < deadline:
+                if predicate():
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError("Timed out waiting for the loopback pipeline state")
+
+        async def drive_direct_audio_reopen():
+            first_chunk, first_config = await queue_get(server_env.input_queue)
+            assert len(first_chunk) == 1024
+            first_generation = server_env.cancel_scope.generation
+
+            tracker.observe("turn_1", 0)
+            tracker.start_reopen_grace("turn_1", 0, 5.0)
+            server_env.text_output_queue.put(SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
+            server_env.text_output_queue.put(
+                SpeechStoppedEvent(
+                    duration_s=0.032,
+                    audio_end_ms=32,
+                    turn_id="turn_1",
+                    turn_revision=0,
+                )
+            )
+            server_env.text_output_queue.put(
+                AudioInputCompletedEvent(
+                    audio=np.zeros(512, dtype=np.float32),
+                    audio_sample_rate=16000,
+                    audio_duration_s=0.032,
+                    turn_id="turn_1",
+                    turn_revision=0,
+                )
+            )
+            first_request = await queue_get(server_env.text_prompt_queue)
+
+            second_chunk, second_config = await queue_get(server_env.input_queue)
+            assert len(second_chunk) == 1024
+            assert second_config is first_config
+
+            candidate = tracker.begin_reopen_candidate("turn_1", 0)
+            assert candidate == 1
+            assert tracker.confirm_reopen_candidate("turn_1", 0, candidate)
+            server_env.text_output_queue.put(SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True))
+            await wait_until(lambda: server_env.cancel_scope.generation == first_generation + 1)
+            reopened_generation = server_env.cancel_scope.generation
+
+            server_env.text_output_queue.put(
+                SpeechStoppedEvent(
+                    duration_s=0.064,
+                    audio_end_ms=64,
+                    turn_id="turn_1",
+                    turn_revision=1,
+                )
+            )
+            server_env.text_output_queue.put(
+                AudioInputCompletedEvent(
+                    audio=np.zeros(1024, dtype=np.float32),
+                    audio_sample_rate=16000,
+                    audio_duration_s=0.064,
+                    turn_id="turn_1",
+                    turn_revision=1,
+                )
+            )
+            second_request = await queue_get(server_env.text_prompt_queue)
+
+            server_env.text_output_queue.put(
+                AssistantTextEvent(
+                    text="stale revision zero",
+                    turn_id="turn_1",
+                    turn_revision=0,
+                    cancel_generation=first_generation,
+                )
+            )
+            server_env.text_output_queue.put(
+                AssistantTextEvent(
+                    text="fresh revision one",
+                    turn_id="turn_1",
+                    turn_revision=1,
+                    cancel_generation=first_generation + 1,
+                )
+            )
+            await wait_until(client_stop.is_set)
+            return (first_request, second_request), first_generation, reopened_generation
+
+        pipeline_task = asyncio.create_task(drive_direct_audio_reopen())
+        client_task = asyncio.create_task(
+            listen_and_play_realtime(
+                RealtimeAudioClientConfig(
+                    url=f"ws://127.0.0.1:{server_env.port}/v1/realtime",
+                    api_key="local",
+                ),
+                stop_event=client_stop,
+            )
+        )
+        pipeline_result, _ = await asyncio.wait_for(
+            asyncio.gather(pipeline_task, client_task),
+            timeout=5.0,
+        )
+        requests, first_generation, reopened_generation = pipeline_result
+
+        assert all(isinstance(request, GenerateResponseRequest) for request in requests)
+        assert [request.turn_revision for request in requests] == [0, 1]
+        assert reopened_generation == first_generation + 1
+        transcripts = [event.transcript for event in received_events if event.type == TRANSCRIPT_DONE]
+        assert transcripts == ["fresh revision one"]
+        capsys.readouterr()
 
 
 # ===================================================================
