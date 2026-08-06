@@ -53,6 +53,7 @@ from speech_to_speech.pipeline.events import (
     SpeechStoppedEvent,
     TokenUsageEvent,
     TranscriptionCompletedEvent,
+    TranscriptionFailedEvent,
 )
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
 from speech_to_speech.pipeline.queue_types import TextPromptItem
@@ -227,6 +228,7 @@ class RealtimeService:
             TokenUsageEvent: self._on_token_usage,
             PartialTranscriptionEvent: self.conversation.on_partial_transcription,
             TranscriptionCompletedEvent: self._on_transcription_completed,
+            TranscriptionFailedEvent: self._on_transcription_failed,
             AudioInputCompletedEvent: self._on_audio_input_completed,
             ResponseFailedEvent: self._on_response_failed,
         }
@@ -399,6 +401,7 @@ class RealtimeService:
             (
                 PartialTranscriptionEvent,
                 TranscriptionCompletedEvent,
+                TranscriptionFailedEvent,
                 AudioInputCompletedEvent,
                 AssistantTextEvent,
                 TokenUsageEvent,
@@ -477,6 +480,11 @@ class RealtimeService:
             )
 
         return events
+
+    def _on_transcription_failed(self, conn_id: str, event: TranscriptionFailedEvent) -> list[ServerEvent]:
+        """Surface a final STT failure without creating conversation or LLM work."""
+        self._state(conn_id).response_pending = False
+        return [self.make_error(event.message, "transcription_failed")]
 
     def _on_audio_input_completed(self, conn_id: str, event: AudioInputCompletedEvent) -> list[ServerEvent]:
         """Record final input audio and queue its realtime LM request."""
