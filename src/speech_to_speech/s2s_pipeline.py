@@ -31,6 +31,7 @@ from speech_to_speech.backend_registry import (
     STT_BACKENDS,
     TTS_BACKENDS,
     BackendSelection,
+    BackendSpec,
     HandlerContext,
     SharedBackendResources,
     create_backend_handler,
@@ -123,6 +124,46 @@ def build_llm_proxy_config(
     )
 
 
+def _parse_selected_cli_configs(
+    parser: HfArgumentParser,
+    pipeline_args: list[str],
+    selected_specs: Sequence[BackendSpec],
+) -> tuple[Any, ...]:
+    """Parse selected configs while accepting legacy options for inactive backends."""
+
+    *parsed, remaining = parser.parse_args_into_dataclasses(
+        args=pipeline_args,
+        return_remaining_strings=True,
+    )
+    if not remaining:
+        return tuple(parsed)
+
+    selected_types = {spec.config_type for spec in selected_specs}
+    inactive_types: list[type[Any]] = []
+    for registry in (STT_BACKENDS, LLM_BACKENDS, TTS_BACKENDS):
+        for spec in registry.values():
+            if spec.config_type not in selected_types and spec.config_type not in inactive_types:
+                inactive_types.append(spec.config_type)
+
+    compatibility_parser = HfArgumentParser(
+        tuple(inactive_types),  # type: ignore[arg-type]
+        add_help=False,
+        allow_abbrev=False,
+        conflict_handler="resolve",
+    )
+    known_options = compatibility_parser._option_string_actions
+    _, unknown = compatibility_parser.parse_known_args(remaining)
+    if unknown:
+        raise ValueError(f"Some specified arguments are not used by the HfArgumentParser: {unknown}")
+
+    ignored_options = sorted({token.split("=", 1)[0] for token in remaining if token.split("=", 1)[0] in known_options})
+    logger.warning(
+        "Ignoring options for inactive backends: %s",
+        ", ".join(ignored_options),
+    )
+    return tuple(parsed)
+
+
 def parse_arguments(
     argv: Sequence[str] | None = None,
     *,
@@ -201,7 +242,7 @@ def parse_arguments(
         assert pipeline_json is not None
         parsed = parser.parse_dict(pipeline_json, allow_extra_keys=True)
     else:
-        parsed = parser.parse_args_into_dataclasses(args=pipeline_args)
+        parsed = _parse_selected_cli_configs(parser, pipeline_args, selected_specs)
 
     # Build a {type: instance} lookup so field assignment is order-independent.
     by_type: dict[type, Any] = {type(obj): obj for obj in parsed}

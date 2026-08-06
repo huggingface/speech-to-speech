@@ -124,6 +124,36 @@ def test_parser_carries_only_selected_normalized_configs():
     assert not hasattr(args, "qwen3_tts_handler_kwargs")
 
 
+def test_parser_warning_ignores_known_options_for_inactive_backends(caplog):
+    args = parse_arguments(
+        [
+            "--stt",
+            "parakeet-tdt",
+            "--mlx_audio_whisper_model_name",
+            "unused/whisper",
+            "--language=auto",
+            "--tts",
+            "qwen3",
+            "--pocket_tts_voice",
+            "alba",
+        ]
+    )
+
+    assert args.stt_backend.name == "parakeet-tdt"
+    assert args.tts_backend.name == "qwen3"
+    assert "mlx_audio_whisper_model_name" not in args.stt_backend.config
+    assert "pocket_tts_voice" not in args.tts_backend.config
+    assert "--language" in caplog.text
+    assert "--mlx_audio_whisper_model_name" in caplog.text
+    assert "--pocket_tts_voice" in caplog.text
+    assert "unused/whisper" not in caplog.text
+
+
+def test_parser_still_rejects_unknown_options():
+    with pytest.raises(ValueError, match="--unknown_backend_option"):
+        parse_arguments(["--unknown_backend_option", "value"])
+
+
 @pytest.mark.parametrize(
     ("kind", "backend_name"),
     [
