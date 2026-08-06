@@ -482,6 +482,37 @@ def test_thread_manager_cleans_up_after_partial_start_failure(monkeypatch):
     assert cleaned == ["closed"]
 
 
+def test_thread_manager_tracks_thread_when_start_raises_after_launch(monkeypatch):
+    class Handler:
+        def __init__(self):
+            self.stop_event = Event()
+            self.entered_run = Event()
+
+        def run(self):
+            self.entered_run.set()
+            self.stop_event.wait()
+
+    handler = Handler()
+    cleaned = []
+    real_start = threading.Thread.start
+
+    def start_then_raise(thread):
+        real_start(thread)
+        raise KeyboardInterrupt("interrupted after launch")
+
+    monkeypatch.setattr(threading.Thread, "start", start_then_raise)
+    manager = ThreadManager([handler], cleanup_callbacks=[lambda: cleaned.append("closed")])
+
+    with pytest.raises(KeyboardInterrupt, match="interrupted after launch"):
+        manager.start()
+
+    assert handler.entered_run.is_set()
+    assert handler.stop_event.is_set()
+    assert len(manager.threads) == 1
+    assert not manager.threads[0].is_alive()
+    assert cleaned == ["closed"]
+
+
 def test_thread_manager_wait_preserves_join_error_when_cleanup_fails(caplog):
     class FailingThread:
         name = "failing-thread"

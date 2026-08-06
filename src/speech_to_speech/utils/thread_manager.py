@@ -18,6 +18,8 @@ class ThreadManager:
         self._cleanup_lock = threading.Lock()
         self._cleaned_up = False
         self._cleanup_deferred = False
+        self._thread_state_lock = threading.Lock()
+        self._thread_states: dict[threading.Thread, str] = {}
 
     def _cleanup(self) -> None:
         with self._cleanup_lock:
@@ -45,13 +47,32 @@ class ThreadManager:
         except BaseException:
             logger.exception(message)
 
+    def _run_handler(self, handler: Any) -> None:
+        thread = threading.current_thread()
+        with self._thread_state_lock:
+            if self._thread_states[thread] == "cancelled":
+                return
+            self._thread_states[thread] = "started"
+        handler.run()
+
     def start(self) -> None:
         try:
             for handler in self.handlers:
-                thread = threading.Thread(target=handler.run)
+                thread = threading.Thread(target=self._run_handler, args=(handler,))
                 thread.daemon = False  # Ensure threads are waited for on shutdown
-                thread.start()
+                with self._thread_state_lock:
+                    self._thread_states[thread] = "pending"
                 self.threads.append(thread)
+                try:
+                    thread.start()
+                except BaseException:
+                    with self._thread_state_lock:
+                        cancelled = self._thread_states[thread] == "pending"
+                        if cancelled:
+                            self._thread_states[thread] = "cancelled"
+                    if cancelled:
+                        self.threads.remove(thread)
+                    raise
         except BaseException:
             self._stop_and_cleanup("Failed to clean up resources after thread startup failed")
             raise
@@ -76,6 +97,13 @@ class ThreadManager:
 
         for i, thread in enumerate(self.threads):
             try:
+                with self._thread_state_lock:
+                    state = self._thread_states.get(thread, "started")
+                    if state == "pending":
+                        self._thread_states[thread] = "cancelled"
+                        state = "cancelled"
+                if state == "cancelled":
+                    continue
                 if thread.is_alive():
                     thread.join(timeout=5.0)
                     if thread.is_alive():
@@ -95,6 +123,9 @@ class ThreadManager:
         def wait_then_cleanup() -> None:
             try:
                 for thread in self.threads:
+                    with self._thread_state_lock:
+                        if self._thread_states.get(thread, "started") == "cancelled":
+                            continue
                     thread.join()
             except BaseException:
                 with self._cleanup_lock:
