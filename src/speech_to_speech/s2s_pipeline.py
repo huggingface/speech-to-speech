@@ -11,7 +11,7 @@ from queue import Queue
 from sys import platform
 from threading import Event
 from types import FrameType
-from typing import Any, Literal, Optional, Sequence
+from typing import Any, Callable, Literal, Optional, Sequence
 
 import nltk
 import torch
@@ -340,6 +340,31 @@ def prepare_all_args(args: ParsedArguments) -> None:
         setattr(args, field_name, replace(selection, config=config))
 
 
+def _cleanup_handler_safely(handler: Any, message: str) -> None:
+    cleanup = getattr(handler, "cleanup", None)
+    if cleanup is None:
+        return
+    try:
+        cleanup()
+    except BaseException:
+        logger.exception(message)
+
+
+def _cleanup_handlers_safely(handlers: Sequence[Any], message: str) -> None:
+    for handler in reversed(handlers):
+        _cleanup_handler_safely(handler, message)
+
+
+def _construct_handler(handlers: list[Any], factory: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    try:
+        handler = factory(*args, **kwargs)
+    except BaseException:
+        _cleanup_handlers_safely(handlers, "Failed to clean up handlers after pipeline construction failed")
+        raise
+    handlers.append(handler)
+    return handler
+
+
 def _build_handlers(
     *,
     stop_event: Event,
@@ -365,7 +390,10 @@ def _build_handlers(
     """Build a handler chain: VAD → STT/AudioInput → LM → TTS."""
     from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 
-    vad = VADHandler(
+    handlers: list[Any] = []
+    _construct_handler(
+        handlers,
+        VADHandler,
         stop_event,
         queue_in=recv_audio_chunks_queue,
         queue_out=spoken_prompt_queue,
@@ -395,9 +423,17 @@ def _build_handlers(
         enable_live_transcription=module_kwargs.enable_live_transcription,
         live_transcription_update_interval=module_kwargs.live_transcription_update_interval,
     )
-    speech_input_handlers = [create_backend_handler(stt_backend, stt_context, shared_resources.get(stt_backend))]
+    _construct_handler(
+        handlers,
+        create_backend_handler,
+        stt_backend,
+        stt_context,
+        shared_resources.get(stt_backend),
+    )
     if needs_notifier:
-        transcription_notifier = TranscriptionNotifier(
+        _construct_handler(
+            handlers,
+            TranscriptionNotifier,
             stop_event,
             queue_in=stt_output_queue,
             queue_out=text_prompt_queue,  # type: ignore[arg-type]
@@ -406,7 +442,6 @@ def _build_handlers(
                 "should_listen": should_listen,
             },
         )
-        speech_input_handlers.append(transcription_notifier)
 
     def handler_context(queue_in: Queue[Any], queue_out: Queue[Any]) -> HandlerContext:
         return HandlerContext(
@@ -424,13 +459,17 @@ def _build_handlers(
         )
 
     lm_context = handler_context(text_prompt_queue, lm_response_queue)
-    lm = create_backend_handler(
+    _construct_handler(
+        handlers,
+        create_backend_handler,
         llm_backend,
         lm_context,
         shared_resources.get(llm_backend),
     )
 
-    lm_processor = LMOutputProcessor(
+    _construct_handler(
+        handlers,
+        LMOutputProcessor,
         stop_event,
         queue_in=lm_response_queue,
         queue_out=lm_processed_queue,
@@ -438,13 +477,15 @@ def _build_handlers(
     )
 
     tts_context = handler_context(lm_processed_queue, send_audio_chunks_queue)
-    tts = create_backend_handler(
+    _construct_handler(
+        handlers,
+        create_backend_handler,
         tts_backend,
         tts_context,
         shared_resources.get(tts_backend),
     )
 
-    return [vad, *speech_input_handlers, lm, lm_processor, tts]
+    return handlers
 
 
 def _build_pipeline_unit(
@@ -521,21 +562,25 @@ def _build_pipeline_unit(
         pipeline_index=index,
         shared_resources=shared_resources,
     )
-    for h in handlers:
-        h.pipeline_index = index
+    try:
+        for h in handlers:
+            h.pipeline_index = index
 
-    return PipelineUnit(
-        index=index,
-        service=service,
-        cancel_scope=cancel_scope,
-        should_listen=should_listen,
-        response_playing=response_playing,
-        input_queue=recv_audio_chunks_queue,
-        output_queue=send_audio_chunks_queue,
-        text_output_queue=text_output_queue,
-        text_prompt_queue=text_prompt_queue,
-        handlers=handlers,
-    )
+        return PipelineUnit(
+            index=index,
+            service=service,
+            cancel_scope=cancel_scope,
+            should_listen=should_listen,
+            response_playing=response_playing,
+            input_queue=recv_audio_chunks_queue,
+            output_queue=send_audio_chunks_queue,
+            text_output_queue=text_output_queue,
+            text_prompt_queue=text_prompt_queue,
+            handlers=handlers,
+        )
+    except BaseException:
+        _cleanup_handlers_safely(handlers, "Failed to clean up handlers after pipeline unit construction failed")
+        raise
 
 
 def build_pipeline(
@@ -549,20 +594,21 @@ def build_pipeline(
 
     module_kwargs = args.module_kwargs
     shared_resources = SharedBackendResources.create((args.stt_backend, args.llm_backend, args.tts_backend))
+    pool: list[PipelineUnit] = []
     try:
-        pool = [
-            _build_pipeline_unit(
-                index=index,
-                stop_event=stop_event,
-                module_kwargs=module_kwargs,
-                vad_handler_kwargs=args.vad_handler_kwargs,
-                stt_backend=args.stt_backend,
-                llm_backend=args.llm_backend,
-                tts_backend=args.tts_backend,
-                shared_resources=shared_resources,
+        for index in range(module_kwargs.num_pipelines):
+            pool.append(
+                _build_pipeline_unit(
+                    index=index,
+                    stop_event=stop_event,
+                    module_kwargs=module_kwargs,
+                    vad_handler_kwargs=args.vad_handler_kwargs,
+                    stt_backend=args.stt_backend,
+                    llm_backend=args.llm_backend,
+                    tts_backend=args.tts_backend,
+                    shared_resources=shared_resources,
+                )
             )
-            for index in range(module_kwargs.num_pipelines)
-        ]
 
         server = RealtimeServer(
             stop_event=stop_event,
@@ -574,6 +620,11 @@ def build_pipeline(
             ),
         )
     except BaseException:
+        for unit in reversed(pool):
+            _cleanup_handlers_safely(
+                unit.handlers,
+                "Failed to clean up handlers after pipeline construction failed",
+            )
         try:
             shared_resources.close()
         except BaseException:

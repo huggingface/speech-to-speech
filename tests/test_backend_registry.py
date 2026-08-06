@@ -5,10 +5,12 @@ from copy import deepcopy
 from dataclasses import dataclass, fields
 from queue import Queue
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
 
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
+from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 from speech_to_speech.backend_registry import (
     LLM_BACKENDS,
     STT_BACKENDS,
@@ -25,6 +27,7 @@ from speech_to_speech.backend_registry import (
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.s2s_pipeline import (
+    _build_handlers,
     build_llm_proxy_config,
     build_local_pipeline,
     build_pipeline,
@@ -438,6 +441,105 @@ def test_partial_pipeline_construction_preserves_error_when_cleanup_fails(monkey
         build_pipeline(args, Event())
     assert cleaned == ["pipeline-resource"]
     assert "Failed to clean up shared backend resources" in caplog.text
+
+
+def test_later_pipeline_unit_failure_cleans_completed_units_in_reverse(monkeypatch, caplog):
+    cleaned = []
+
+    class Handler:
+        def __init__(self, name, cleanup_fails=False):
+            self.name = name
+            self.cleanup_fails = cleanup_fails
+
+        def cleanup(self):
+            cleaned.append(self.name)
+            if self.cleanup_fails:
+                raise RuntimeError("handler cleanup failed")
+
+    unit = SimpleNamespace(handlers=[Handler("first"), Handler("second", cleanup_fails=True)])
+
+    def build_unit(**kwargs):
+        if kwargs["index"] == 0:
+            return unit
+        raise ValueError("second unit failed")
+
+    monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", build_unit)
+    args = parse_arguments([])
+    args.module_kwargs.num_pipelines = 2
+
+    with pytest.raises(ValueError, match="second unit failed"):
+        build_pipeline(args, Event())
+
+    assert cleaned == ["second", "first"]
+    assert "Failed to clean up handlers after pipeline construction failed" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("failing_kind", "expected_cleanup"),
+    [
+        ("llm", ["stt", "vad"]),
+        ("tts", ["processor", "llm", "stt", "vad"]),
+    ],
+)
+def test_later_handler_factory_failure_cleans_partial_unit_in_reverse(
+    monkeypatch,
+    caplog,
+    failing_kind,
+    expected_cleanup,
+):
+    cleaned = []
+    cleanup_failure_name = "stt" if failing_kind == "llm" else "processor"
+
+    class Handler:
+        def __init__(self, name):
+            self.name = name
+
+        def cleanup(self):
+            cleaned.append(self.name)
+            if self.name == cleanup_failure_name:
+                raise RuntimeError("handler cleanup failed")
+
+    def selection(name, kind):
+        spec = BackendSpec(name, kind, FakeArguments, _factory)
+        return BackendSelection(spec, spec.normalize(FakeArguments()))
+
+    def create(selection, _context, _shared=None):
+        if selection.kind == failing_kind:
+            raise ValueError(f"{failing_kind} construction failed")
+        return Handler(selection.kind)
+
+    monkeypatch.setattr("speech_to_speech.s2s_pipeline.VADHandler", lambda *_args, **_kwargs: Handler("vad"))
+    monkeypatch.setattr("speech_to_speech.s2s_pipeline.create_backend_handler", create)
+    monkeypatch.setattr(
+        "speech_to_speech.LLM.lm_output_processor.LMOutputProcessor",
+        lambda *_args, **_kwargs: Handler("processor"),
+    )
+
+    with pytest.raises(ValueError, match=rf"{failing_kind} construction failed"):
+        _build_handlers(
+            stop_event=Event(),
+            should_listen=Event(),
+            recv_audio_chunks_queue=Queue(),
+            spoken_prompt_queue=Queue(),
+            stt_output_queue=Queue(),
+            text_prompt_queue=Queue(),
+            lm_response_queue=Queue(),
+            lm_processed_queue=Queue(),
+            send_audio_chunks_queue=Queue(),
+            text_output_queue=Queue(),
+            module_kwargs=ModuleArguments(),
+            vad_handler_kwargs=VADHandlerArguments(),
+            stt_backend=selection("stt", "stt"),
+            llm_backend=selection("llm", "llm"),
+            tts_backend=selection("tts", "tts"),
+            speculative_turns=SpeculativeTurnTracker(),
+            cancel_scope=CancelScope(),
+            pipeline_index=0,
+            shared_resources=SharedBackendResources.create([]),
+        )
+
+    assert cleaned == expected_cleanup
+    assert "Failed to clean up" in caplog.text
 
 
 def test_local_client_construction_failure_cleans_server_resources(monkeypatch):
