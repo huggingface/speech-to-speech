@@ -50,8 +50,8 @@ class ThreadManager:
             for handler in self.handlers:
                 thread = threading.Thread(target=handler.run)
                 thread.daemon = False  # Ensure threads are waited for on shutdown
-                self.threads.append(thread)
                 thread.start()
+                self.threads.append(thread)
         except BaseException:
             self._stop_and_cleanup("Failed to clean up resources after thread startup failed")
             raise

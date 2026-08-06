@@ -477,6 +477,7 @@ def test_thread_manager_cleans_up_after_partial_start_failure(monkeypatch):
         manager.start()
 
     assert all(handler.stop_event.is_set() for handler in handlers)
+    assert len(manager.threads) == 1
     assert all(not thread.is_alive() for thread in manager.threads)
     assert cleaned == ["closed"]
 
