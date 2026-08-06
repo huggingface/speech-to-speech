@@ -33,6 +33,7 @@ from speech_to_speech.api.openai_realtime.transports import (
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
+    AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     PipelineEvent,
     SpeechStartedEvent,
@@ -88,7 +89,13 @@ def _keep_audio_sentinel(item: Any) -> bool:
 def _keep_user_text_event(item: Any) -> bool:
     return isinstance(
         item,
-        (SpeechStoppedEvent, PartialTranscriptionEvent, TranscriptionCompletedEvent, TokenUsageEvent),
+        (
+            SpeechStoppedEvent,
+            PartialTranscriptionEvent,
+            TranscriptionCompletedEvent,
+            AudioInputCompletedEvent,
+            TokenUsageEvent,
+        ),
     )
 
 
@@ -378,6 +385,8 @@ async def _dispatch_client_event(
         err = service.handle_session_update(session_id, event)
         if err:
             await transport.send_events([err])
+        else:
+            await transport.send_events([service.build_session_updated(session_id)])
 
     elif isinstance(event, ConversationItemCreateEvent):
         events = service.handle_conversation_item_create(session_id, event)

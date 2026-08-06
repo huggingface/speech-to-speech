@@ -1,8 +1,10 @@
+import json
 import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
+import numpy as np
 import pytest
 from openai import Stream
 from openai.types.realtime.conversation_item import (
@@ -19,9 +21,14 @@ from openai.types.responses import (
 )
 from openai.types.responses.response_output_text import ResponseOutputText
 
+import speech_to_speech.LLM.base_openai_compatible_language_model as base_openai_compatible_language_model
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.base_openai_compatible_language_model import WARMUP_MAX_RETRIES
-from speech_to_speech.LLM.chat import Chat, make_user_message
+from speech_to_speech.LLM.chat import (
+    AUDIO_INPUT_HISTORY_PLACEHOLDER,
+    Chat,
+    make_user_message,
+)
 from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.messages import EndOfResponse, GenerateResponseRequest, LLMResponseChunk, TokenUsage
@@ -93,6 +100,34 @@ def _make_request(text="Hi", chat_size=2):
     return GenerateResponseRequest(runtime_config=cfg)
 
 
+def _make_audio_request(cfg=None):
+    return GenerateResponseRequest(
+        runtime_config=cfg or _make_runtime_config(chat_size=5),
+        audio=np.zeros(1600, dtype=np.float32),
+        audio_sample_rate=16000,
+    )
+
+
+def _chat_chunk(*, content=None, tool_calls=None, usage=None, refusal=None):
+    choices = []
+    if content is not None or tool_calls is not None or refusal is not None:
+        choices = [
+            SimpleNamespace(
+                delta=SimpleNamespace(content=content, tool_calls=tool_calls, refusal=refusal),
+                finish_reason=None,
+            )
+        ]
+    return SimpleNamespace(choices=choices, usage=usage)
+
+
+def _chat_tool_delta(index, *, tool_id=None, name=None, arguments=None):
+    return SimpleNamespace(
+        index=index,
+        id=tool_id,
+        function=SimpleNamespace(name=name, arguments=arguments),
+    )
+
+
 def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler = object.__new__(ResponsesApiModelHandler)
     handler.model_name = "test-model"
@@ -110,6 +145,10 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler.tools_choice = None
     handler.enable_lang_prompt = False
     handler.compactor = None
+    handler.audio_max_tokens = 80
+    handler.audio_temperature = 0.0
+    handler.audio_content_type = "input_audio"
+    handler.audio_history_turns = 1
     return handler
 
 
@@ -338,6 +377,69 @@ def test_responses_api_timing_logs_only_text_chunks():
     assert not handler.should_log_timing(EndOfResponse())
 
 
+def test_setup_uses_dummy_api_key_for_custom_base_url(monkeypatch):
+    captured = {}
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    class FakeOpenAI:
+        def __init__(self, *, api_key, base_url):
+            captured["api_key"] = api_key
+            captured["base_url"] = base_url
+
+    monkeypatch.setattr(base_openai_compatible_language_model, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(ResponsesApiModelHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(ResponsesApiModelHandler)
+    handler.setup(base_url="http://127.0.0.1:8080/v1", api_key=None, compact_history=False)
+
+    assert captured == {
+        "api_key": "none",
+        "base_url": "http://127.0.0.1:8080/v1",
+    }
+
+
+def test_setup_preserves_environment_api_key_for_custom_base_url(monkeypatch):
+    captured = {}
+    monkeypatch.setenv("OPENAI_API_KEY", "secret-from-environment")
+
+    class FakeOpenAI:
+        def __init__(self, *, api_key, base_url):
+            captured["api_key"] = api_key
+            captured["base_url"] = base_url
+
+    monkeypatch.setattr(base_openai_compatible_language_model, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(ResponsesApiModelHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(ResponsesApiModelHandler)
+    handler.setup(base_url="http://127.0.0.1:8080/v1", api_key=None, compact_history=False)
+
+    assert captured == {
+        "api_key": None,
+        "base_url": "http://127.0.0.1:8080/v1",
+    }
+
+
+def test_setup_does_not_inject_dummy_key_for_remote_custom_url(monkeypatch):
+    captured = {}
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    class FakeOpenAI:
+        def __init__(self, *, api_key, base_url):
+            captured["api_key"] = api_key
+            captured["base_url"] = base_url
+
+    monkeypatch.setattr(base_openai_compatible_language_model, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(ResponsesApiModelHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(ResponsesApiModelHandler)
+    handler.setup(base_url="https://provider.example/v1", api_key=None, compact_history=False)
+
+    assert captured == {
+        "api_key": None,
+        "base_url": "https://provider.example/v1",
+    }
+
+
 def test_process_read_timeout_ends_response_cleanly():
     handler = _make_handler()
 
@@ -497,6 +599,313 @@ def test_second_turn_flattens_assistant_history_for_responses():
     assert len(ai["content"]) == 1
     assert ai["content"][0]["type"] == "output_text"
     assert ai["content"][0]["text"] == "Hello."
+
+
+def test_audio_request_uses_chat_completions_input_audio_payload():
+    handler = _make_handler(stream=False)
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="Yes, I heard you.", refusal=None, tool_calls=[]),
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=12, completion_tokens=5),
+        )
+
+    handler.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)),
+    )
+
+    outputs = list(handler.process(_make_audio_request()))
+
+    assert isinstance(outputs[0], LLMResponseChunk)
+    assert outputs[0].text == "Yes, I heard you."
+    assert isinstance(outputs[1], TokenUsage)
+    assert outputs[1].input_tokens == 12
+    assert outputs[1].output_tokens == 5
+    assert isinstance(outputs[2], EndOfResponse)
+
+    assert captured["model"] == "test-model"
+    assert captured["stream"] is False
+    assert captured["max_tokens"] == 80
+    user_messages = [m for m in captured["messages"] if m["role"] == "user"]
+    assert user_messages[-1]["content"][0]["type"] == "input_audio"
+    audio_part = user_messages[-1]["content"][0]["input_audio"]
+    assert audio_part["format"] == "wav"
+    assert audio_part["data"]
+
+
+def test_audio_second_turn_retains_recent_audio_then_compacts_older_turn():
+    handler = _make_handler(stream=False)
+    captured_calls = []
+    responses = iter(
+        [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="First answer.", refusal=None, tool_calls=[]),
+                    )
+                ],
+                usage=None,
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="Second answer.", refusal=None, tool_calls=[]),
+                    )
+                ],
+                usage=None,
+            ),
+        ]
+    )
+
+    def fake_create(**kwargs):
+        captured_calls.append(kwargs)
+        return next(responses)
+
+    handler.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)))
+    cfg = _make_runtime_config(chat_size=5)
+
+    list(handler.process(_make_audio_request(cfg)))
+    list(handler.process(_make_audio_request(cfg)))
+
+    second_messages = captured_calls[1]["messages"]
+    assert [message["role"] for message in second_messages] == ["system", "user", "assistant", "user"]
+    assert second_messages[1]["content"][0]["type"] == "input_audio"
+    assert second_messages[2] == {"role": "assistant", "content": "First answer."}
+    assert second_messages[3]["content"][0]["type"] == "input_audio"
+    assert cfg.chat._user_turn_count == 2
+    stored_users = [item for item in cfg.chat.buffer if getattr(item, "role", None) == "user"]
+    assert stored_users[0].content[0].text == AUDIO_INPUT_HISTORY_PLACEHOLDER
+    assert stored_users[1].content[0].type == "input_audio"
+
+
+def test_audio_nonstreaming_tool_call_uses_chat_protocol_and_survives_next_turn():
+    handler = _make_handler(stream=False)
+    captured_calls = []
+    first_tool = SimpleNamespace(
+        id="server_call",
+        function=SimpleNamespace(name="lookup", arguments='{"q": "weather"}'),
+    )
+    responses = iter(
+        [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content=None, refusal=None, tool_calls=[first_tool]),
+                    )
+                ],
+                usage=SimpleNamespace(prompt_tokens=7, completion_tokens=3),
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="It is sunny.", refusal=None, tool_calls=[]),
+                    )
+                ],
+                usage=None,
+            ),
+        ]
+    )
+
+    def fake_create(**kwargs):
+        captured_calls.append(kwargs)
+        return next(responses)
+
+    handler.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)))
+    cfg = _make_runtime_config(chat_size=5)
+    cfg.session.tools = [
+        {
+            "type": "function",
+            "name": "lookup",
+            "description": "Look something up",
+            "parameters": {"type": "object"},
+        }
+    ]
+    cfg.session.tool_choice = {"type": "function", "name": "lookup"}
+
+    first_outputs = list(handler.process(_make_audio_request(cfg)))
+    emitted_tools = [tool for output in first_outputs if isinstance(output, LLMResponseChunk) for tool in output.tools]
+    assert len(emitted_tools) == 1
+    emitted_tool = emitted_tools[0]
+    assert emitted_tool.name == "lookup"
+    assert json.loads(emitted_tool.arguments) == {"q": "weather"}
+    assert captured_calls[0]["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "Look something up",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+    assert captured_calls[0]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "lookup"},
+    }
+
+    cfg.chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id=emitted_tool.call_id,
+            output='{"temperature": 22}',
+        )
+    )
+    list(handler.process(_make_audio_request(cfg)))
+
+    second_messages = captured_calls[1]["messages"]
+    assert [message["role"] for message in second_messages] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "user",
+    ]
+    tool_call_message = second_messages[2]
+    assert tool_call_message["tool_calls"][0]["function"]["name"] == "lookup"
+    assert tool_call_message["tool_calls"][0]["function"]["arguments"] == '{"q": "weather"}'
+    assert second_messages[3] == {
+        "role": "tool",
+        "tool_call_id": emitted_tool.call_id,
+        "content": '{"temperature": 22}',
+    }
+    assert second_messages[4]["content"][0]["type"] == "input_audio"
+
+
+def test_audio_streaming_reuses_tool_parser_and_emits_trailing_usage():
+    handler = _make_handler(stream=True)
+    captured = {}
+    stream = _make_stream(
+        [
+            _chat_chunk(content="Let me check."),
+            _chat_chunk(
+                tool_calls=[
+                    _chat_tool_delta(
+                        0,
+                        tool_id="server_call",
+                        name="lookup",
+                        arguments='{"q"',
+                    )
+                ]
+            ),
+            _chat_chunk(tool_calls=[_chat_tool_delta(0, arguments=': "weather"}')]),
+            _chat_chunk(usage=SimpleNamespace(prompt_tokens=12, completion_tokens=5)),
+        ]
+    )
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return stream
+
+    handler.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)))
+    cfg = _make_runtime_config(chat_size=5)
+    cfg.session.tools = [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}]
+
+    outputs = list(handler.process(_make_audio_request(cfg)))
+
+    chunks = [output for output in outputs if isinstance(output, LLMResponseChunk)]
+    usage = [output for output in outputs if isinstance(output, TokenUsage)]
+    assert any(chunk.text == "Let me check." for chunk in chunks)
+    assert [tool.name for chunk in chunks for tool in chunk.tools] == ["lookup"]
+    assert len(usage) == 1
+    assert (usage[0].input_tokens, usage[0].output_tokens) == (12, 5)
+    assert captured["stream_options"] == {"include_usage": True}
+
+
+def test_audio_nonstreaming_refusal_is_emitted_and_stored():
+    handler = _make_handler(stream=False)
+    handler.client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=lambda **kwargs: SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(
+                                content=None,
+                                refusal="I cannot help with that.",
+                                tool_calls=[],
+                            )
+                        )
+                    ],
+                    usage=None,
+                )
+            )
+        )
+    )
+    cfg = _make_runtime_config(chat_size=5)
+
+    outputs = list(handler.process(_make_audio_request(cfg)))
+
+    assert any(isinstance(output, LLMResponseChunk) and output.text == "I cannot help with that." for output in outputs)
+    assert any(
+        getattr(item, "role", None) == "assistant" and item.content[0].text == "I cannot help with that."
+        for item in cfg.chat.buffer
+    )
+
+
+def test_failed_audio_request_rolls_back_provisional_history():
+    handler = _make_handler(stream=False)
+    handler.client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("provider rejected audio"))
+            )
+        )
+    )
+    cfg = _make_runtime_config(chat_size=5)
+
+    generation = handler.process(_make_audio_request(cfg))
+    output = next(generation)
+
+    assert isinstance(output, EndOfResponse)
+    assert output.error is not None and "provider rejected audio" in output.error
+    assert cfg.chat.buffer == []
+    assert cfg.chat._user_turn_count == 0
+    with pytest.raises(StopIteration):
+        next(generation)
+
+
+def test_interrupted_audio_tool_turn_rolls_back_user_call_and_fast_output():
+    handler = _make_handler(stream=True)
+    stream = _make_stream(
+        [
+            _chat_chunk(
+                tool_calls=[
+                    _chat_tool_delta(
+                        0,
+                        tool_id="server_call",
+                        name="lookup",
+                        arguments="{}",
+                    )
+                ]
+            )
+        ]
+    )
+    handler.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kwargs: stream)))
+    cfg = _make_runtime_config(chat_size=5)
+    cfg.session.tools = [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}]
+
+    generation = handler.process(_make_audio_request(cfg))
+    tool_chunk = next(output for output in generation if isinstance(output, LLMResponseChunk) and output.tools)
+    call_id = tool_chunk.tools[0].call_id
+    cfg.chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id=call_id,
+            output='{"result": "ok"}',
+        )
+    )
+
+    generation.close()
+
+    assert cfg.chat.buffer == []
+    assert cfg.chat._pending_tool_calls == {}
+    assert cfg.chat._user_turn_count == 0
 
 
 # ── Out-of-band (conversation="none") responses ──────────────────────────

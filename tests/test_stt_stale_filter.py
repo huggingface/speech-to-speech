@@ -40,8 +40,15 @@ def _vad_audio(
     turn_id: str = "turn_1",
     revision: int = 0,
     mode: Literal["progressive", "final"] | None = None,
+    processing_delay_s: float = 0.0,
 ) -> VADAudio:
-    return VADAudio(audio=np.zeros(512, dtype=np.float32), mode=mode, turn_id=turn_id, turn_revision=revision)
+    return VADAudio(
+        audio=np.zeros(512, dtype=np.float32),
+        mode=mode,
+        turn_id=turn_id,
+        turn_revision=revision,
+        processing_delay_s=processing_delay_s,
+    )
 
 
 def _handler(
@@ -134,6 +141,28 @@ def test_stt_handler_waits_for_final_revision_stability_window():
     handler = _handler(tracker, queue_in, queue_out, final_revision_settle_s=0.2)
 
     queue_in.put(_vad_audio(revision=0, mode="final"))
+    queue_in.put(PIPELINE_END)
+    thread = Thread(target=handler.run)
+    thread.start()
+
+    sleep(0.05)
+    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert handler.processed == []
+    assert queue_out.get_nowait() == PIPELINE_END
+
+
+def test_stt_handler_uses_per_endpoint_processing_delay():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    queue_in = Queue()
+    queue_out = Queue()
+    handler = _handler(tracker, queue_in, queue_out)
+
+    queue_in.put(_vad_audio(revision=0, mode="final", processing_delay_s=0.2))
     queue_in.put(PIPELINE_END)
     thread = Thread(target=handler.run)
     thread.start()

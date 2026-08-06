@@ -59,7 +59,7 @@ class FasterWhisperSTTHandler(BaseSTTHandler):
             logger.debug("no text detected. skipping...")
 
     def cleanup(self) -> None:
-        print("Stopping FasterWhisperSTTHandler")
+        logger.info("Stopping FasterWhisperSTTHandler")
         del self.model
 
     def adapt_gen_kwargs(self, gen_kwargs: dict[str, Any]) -> dict[str, Any]:
