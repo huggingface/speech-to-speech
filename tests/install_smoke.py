@@ -4,6 +4,7 @@ import importlib
 import importlib.metadata as metadata
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +14,10 @@ def _require_modules(modules: list[str]) -> None:
     missing = [module for module in modules if importlib.util.find_spec(module) is None]
     if missing:
         raise RuntimeError(f"Missing expected install-time modules: {', '.join(missing)}")
+
+
+def _help_exposes_flag(help_text: str, flag: str) -> bool:
+    return re.search(rf"(?<!\S){re.escape(flag)}(?=[\s,=]|$)", help_text) is not None
 
 
 def _run_installed_cli_help() -> None:
@@ -55,11 +60,15 @@ def _run_installed_cli_help() -> None:
         raise RuntimeError("Installed talk help is missing --url")
 
     removed_flags = ("--mode", "--recv_host", "--send_host", "--ws_host", "--ws_port")
-    unexpected_flags = [flag for flag in removed_flags if flag in root_help.stdout or flag in serve_help]
+    unexpected_flags = [
+        flag
+        for flag in removed_flags
+        if _help_exposes_flag(root_help.stdout, flag) or _help_exposes_flag(serve_help, flag)
+    ]
     if unexpected_flags:
         raise RuntimeError(f"Installed CLI help still exposes removed transport flags: {', '.join(unexpected_flags)}")
     overlapping_client_flags = ("--host", "--port", "--base-url", "--websocket-base-url")
-    unexpected_client_flags = [flag for flag in overlapping_client_flags if flag in talk_help]
+    unexpected_client_flags = [flag for flag in overlapping_client_flags if _help_exposes_flag(talk_help, flag)]
     if unexpected_client_flags:
         raise RuntimeError(
             f"Installed talk help exposes overlapping connection flags: {', '.join(unexpected_client_flags)}"
