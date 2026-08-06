@@ -155,13 +155,13 @@ def _validate_empty_qwen_ref_audio_arg() -> None:
     original_argv = sys.argv[:]
     try:
         sys.argv = ["speech-to-speech", "--qwen3_tts_ref_audio="]
-        qwen3_args = parse_arguments().qwen3_tts_handler_kwargs
+        qwen3_config = parse_arguments().tts_backend.config
     finally:
         sys.argv = original_argv
 
-    assert qwen3_args.qwen3_tts_ref_audio == ""
-    assert qwen3_args.qwen3_tts_model_name == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
-    assert qwen3_args.qwen3_tts_speaker == "Aiden"
+    assert qwen3_config["ref_audio"] == ""
+    assert qwen3_config["model_name"] == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    assert qwen3_config["speaker"] == "Aiden"
 
 
 def _validate_realtime_engine_imports() -> None:
