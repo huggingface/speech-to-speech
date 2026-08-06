@@ -210,14 +210,18 @@ class AudioHandler(RealtimeBaseHandler):
                 client_out_rate = PIPELINE_SAMPLE_RATE
         audio = resample(audio, PIPELINE_SAMPLE_RATE, client_out_rate)
         b64 = base64.b64encode(audio).decode("ascii")
+        assistant_item_id = st.pending_assistant_item_id or item_id
+        assistant_output_index = (
+            st.pending_assistant_output_index if st.pending_assistant_output_index is not None else 0
+        )
         events.append(
             ResponseAudioDeltaEvent(
                 type="response.output_audio.delta",
                 event_id=self._next_event_id(),
                 content_index=response._next_content_index(conn_id),
                 delta=b64,
-                item_id=item_id,
-                output_index=0,
+                item_id=assistant_item_id,
+                output_index=assistant_output_index,
                 response_id=resp_id,
             )
         )

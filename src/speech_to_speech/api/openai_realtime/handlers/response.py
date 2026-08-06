@@ -258,10 +258,10 @@ class ResponseHandler(RealtimeBaseHandler):
         """Close the current response (audio/text done + response done).
 
         Audio responses emit ``response.output_audio.done`` for any terminal
-        status. Text-only responses emit a single ``response.output_text.done``
-        carrying the full streamed text, but only on ``status="completed"`` —
-        a cancelled or failed text response sends no audio, so it just closes
-        with ``response.done``.
+        status unless their only output is a function call. Text-only responses
+        emit a single ``response.output_text.done`` carrying the full streamed
+        text, but only on ``status="completed"`` — a cancelled or failed text
+        response sends no audio, so it just closes with ``response.done``.
         """
         st = self._state(conn_id)
         events: list[ServerEvent] = []
@@ -271,7 +271,8 @@ class ResponseHandler(RealtimeBaseHandler):
             assistant_output_index = (
                 st.pending_assistant_output_index if st.pending_assistant_output_index is not None else 0
             )
-            if response_wants_audio(st.current_response_params):
+            function_call_only = bool(st.pending_function_calls) and st.pending_assistant_item_id is None
+            if response_wants_audio(st.current_response_params) and not function_call_only:
                 events.append(
                     ResponseAudioDoneEvent(
                         type="response.output_audio.done",

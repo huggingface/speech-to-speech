@@ -842,6 +842,30 @@ class TestResponseDoneOutputItems:
         assert function_calls[0].call_id == "call_1"
         assert function_calls[0].arguments == "{}"
 
+    def test_function_call_only_response_skips_audio_done(self, service, conn_id):
+        stream_events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantTextEvent(
+                text="",
+                tools=[
+                    {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_1",
+                        "name": "endCall",
+                        "arguments": "{}",
+                    }
+                ],
+            ),
+        )
+
+        terminal_events = service.finish_response(conn_id)
+        done = next(e for e in terminal_events if isinstance(e, ResponseDoneEvent))
+        function_event = next(e for e in stream_events if isinstance(e, ResponseFunctionCallArgumentsDoneEvent))
+
+        assert not any(isinstance(e, ResponseAudioDoneEvent) for e in terminal_events)
+        assert [item.id for item in done.response.output] == [function_event.item_id]
+
     def test_output_includes_assistant_audio_message(self, service, conn_id):
         service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="Hello there."))
         events = service.finish_response(conn_id)
@@ -991,6 +1015,42 @@ class TestResponseDoneOutputItems:
         assert text_event.output_index == 1
         assert audio_done.output_index == 1
         assert [item.id for item in done.response.output] == [tool_event.item_id, text_event.item_id]
+
+    def test_audio_delta_uses_assistant_index_when_tool_precedes_text(self, service, conn_id):
+        tool_event = next(
+            e
+            for e in service.dispatch_pipeline_event(
+                conn_id,
+                AssistantTextEvent(
+                    text="",
+                    tools=[
+                        {
+                            "type": "function_call",
+                            "id": "fc_1",
+                            "call_id": "call_1",
+                            "name": "first",
+                            "arguments": "{}",
+                        }
+                    ],
+                ),
+            )
+            if isinstance(e, ResponseFunctionCallArgumentsDoneEvent)
+        )
+        text_event = next(
+            e
+            for e in service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="After the call."))
+            if isinstance(e, ResponseAudioTranscriptDoneEvent)
+        )
+
+        audio_delta = next(
+            e for e in service.encode_audio_chunk(conn_id, _pcm_bytes(256)) if isinstance(e, ResponseAudioDeltaEvent)
+        )
+        done = next(e for e in service.finish_response(conn_id) if isinstance(e, ResponseDoneEvent))
+
+        assert audio_delta.output_index == text_event.output_index == 1
+        assert audio_delta.item_id == text_event.item_id
+        assert done.response.output[audio_delta.output_index].id == audio_delta.item_id
+        assert done.response.output[tool_event.output_index].id == tool_event.item_id
 
     def test_assistant_id_survives_non_interrupting_user_speech(self, service, conn_id):
         transcript_event = next(
