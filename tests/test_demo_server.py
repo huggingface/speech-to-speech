@@ -127,6 +127,29 @@ async def test_session_rejects_locally_expired_oauth_before_proxying(monkeypatch
     }
 
 
+async def test_queue_rejects_locally_expired_oauth_before_polling(monkeypatch):
+    monkeypatch.setattr(demo_server, "LOAD_BALANCER_URL", "https://load-balancer.example")
+    monkeypatch.setattr(demo_server, "AUTH_ENABLED", True)
+    monkeypatch.setattr(
+        demo_server.auth,
+        "oauth_login_required_reason",
+        lambda request: "token_expired",
+    )
+    monkeypatch.setattr(
+        demo_server.auth,
+        "resolve_identity",
+        lambda request: pytest.fail("expired OAuth must not resolve as anonymous"),
+    )
+
+    response = await demo_server.queue_status("ticket", object())
+
+    assert response.status_code == 401
+    assert json.loads(response.body) == {
+        "reason": "token_expired",
+        "loginUrl": demo_auth.OAUTH_LOGIN_PATH,
+    }
+
+
 def test_websocket_client_classifies_session_401_as_login_required():
     node = shutil.which("node")
     if node is None:
@@ -155,6 +178,74 @@ try {
   if (error.loginUrl !== "/oauth/huggingface/login") {
     throw new Error(`unexpected login URL: ${error.loginUrl}`);
   }
+}
+"""
+    subprocess.run(
+        [node, "--input-type=module", "-e", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_login_required_state_wins_over_inflight_account_refresh():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for demo client tests")
+
+    script = """
+globalThis.localStorage = { getItem() { return null; } };
+const elements = new Map();
+function element() {
+  return {
+    hidden: false,
+    innerHTML: "",
+    textContent: "",
+    href: "",
+    open: false,
+    addEventListener() {},
+    contains() { return false; },
+    setAttribute() {},
+    showModal() { this.open = true; },
+    close() { this.open = false; },
+  };
+}
+globalThis.document = {
+  querySelector(selector) {
+    if (!elements.has(selector)) elements.set(selector, element());
+    return elements.get(selector);
+  },
+  addEventListener() {},
+  getElementById(id) { return this.querySelector(`#${id}`); },
+};
+
+let resolveFetch;
+globalThis.fetch = () => new Promise((resolve) => { resolveFetch = resolve; });
+
+const { Account } = await import("./demo/ui/account.js");
+const account = new Account();
+const refresh = account.refresh();
+account.showLoginRequired("/oauth/huggingface/login");
+resolveFetch({
+  ok: true,
+  async json() {
+    return {
+      enabled: true,
+      auth: true,
+      loggedIn: true,
+      username: "alice",
+      tier: "free",
+      loginUrl: "/oauth/huggingface/login",
+    };
+  },
+});
+await refresh;
+
+if (account.tier !== "anon") throw new Error(`unexpected tier: ${account.tier}`);
+const root = elements.get("#account");
+if (!root.innerHTML.includes("signin-pill")) {
+  throw new Error(`stale account refresh won: ${root.innerHTML}`);
 }
 """
     subprocess.run(

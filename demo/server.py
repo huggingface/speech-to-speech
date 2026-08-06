@@ -436,6 +436,10 @@ async def queue_status(queue_id: str, request: Request):
     if not LOAD_BALANCER_URL:
         raise HTTPException(status_code=404, detail="Not found.")
 
+    login_reason = auth.oauth_login_required_reason(request)
+    if login_reason:
+        return _login_required_response(login_reason)
+
     tier, keys, set_cookie = auth.resolve_identity(request)
     tracked = LIMITER_ENABLED and limiter.budget_for(tier) is not None
 
