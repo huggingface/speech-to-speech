@@ -63,6 +63,15 @@ class FasterWhisperSTTHandler(BaseSTTHandler):
         del self.model
 
     def adapt_gen_kwargs(self, gen_kwargs: dict[str, Any]) -> dict[str, Any]:
-        gen_kwargs["without_timestamps"] = not gen_kwargs.pop("return_timestamps", True)
+        """Translate the pipeline's `return_timestamps` into faster-whisper's inverse.
 
-        return gen_kwargs
+        Builds a new dict rather than popping from the argument. Popping consumes
+        the source key, so passing the same config to a second handler would read
+        the default instead of the caller's value and flip the setting; it also
+        mutates the shared `gen_kwargs = {}` default of `setup`, leaving
+        `without_timestamps` behind for every later handler.
+        """
+        adapted = dict(gen_kwargs)
+        adapted["without_timestamps"] = not adapted.pop("return_timestamps", True)
+
+        return adapted
