@@ -17,6 +17,7 @@ class ThreadManager:
         self.cleanup_callbacks = list(cleanup_callbacks)
         self._cleanup_lock = threading.Lock()
         self._cleaned_up = False
+        self._cleanup_deferred = False
 
     def _cleanup(self) -> None:
         with self._cleanup_lock:
@@ -52,8 +53,7 @@ class ThreadManager:
                 self.threads.append(thread)
                 thread.start()
         except BaseException:
-            self._stop_handlers_and_join()
-            self._cleanup_safely("Failed to clean up resources after thread startup failed")
+            self._stop_and_cleanup("Failed to clean up resources after thread startup failed")
             raise
 
     def wait(self) -> None:
@@ -61,16 +61,17 @@ class ThreadManager:
             for thread in self.threads:
                 thread.join()
         except BaseException:
-            self._stop_handlers_and_join()
-            self._cleanup_safely("Failed to clean up resources after thread wait failed")
+            self._stop_and_cleanup("Failed to clean up resources after thread wait failed")
             raise
         self._cleanup()
 
-    def _stop_handlers_and_join(self) -> None:
+    def _stop_handlers_and_join(self) -> bool:
+        all_stopped = True
         for handler in self.handlers:
             try:
                 handler.stop_event.set()
             except BaseException:
+                all_stopped = False
                 logger.exception("Failed to signal handler to stop")
 
         for i, thread in enumerate(self.threads):
@@ -78,10 +79,47 @@ class ThreadManager:
                 if thread.is_alive():
                     thread.join(timeout=5.0)
                     if thread.is_alive():
+                        all_stopped = False
                         logger.warning(f"Thread {i} ({thread.name}) did not terminate within timeout")
             except BaseException:
+                all_stopped = False
                 logger.exception("Failed while waiting for thread %d (%s) to stop", i, thread.name)
+        return all_stopped
+
+    def _defer_cleanup_until_threads_finish(self, message: str) -> None:
+        with self._cleanup_lock:
+            if self._cleaned_up or self._cleanup_deferred:
+                return
+            self._cleanup_deferred = True
+
+        def wait_then_cleanup() -> None:
+            try:
+                for thread in self.threads:
+                    thread.join()
+            except BaseException:
+                with self._cleanup_lock:
+                    self._cleanup_deferred = False
+                logger.exception("Unable to wait for handler threads; shared resources remain open")
+                return
+            self._cleanup_safely(message)
+
+        reaper = threading.Thread(
+            target=wait_then_cleanup,
+            name="speech-to-speech-cleanup",
+            daemon=False,
+        )
+        try:
+            reaper.start()
+        except BaseException:
+            with self._cleanup_lock:
+                self._cleanup_deferred = False
+            logger.exception("Unable to defer cleanup; shared resources remain open")
+
+    def _stop_and_cleanup(self, message: str) -> None:
+        if self._stop_handlers_and_join():
+            self._cleanup_safely(message)
+        else:
+            self._defer_cleanup_until_threads_finish(message)
 
     def stop(self) -> None:
-        self._stop_handlers_and_join()
-        self._cleanup_safely("Failed to clean up resources while stopping threads")
+        self._stop_and_cleanup("Failed to clean up resources while stopping threads")

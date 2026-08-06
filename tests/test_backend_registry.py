@@ -485,12 +485,16 @@ def test_thread_manager_wait_preserves_join_error_when_cleanup_fails(caplog):
     class FailingThread:
         name = "failing-thread"
 
+        def __init__(self):
+            self.alive = True
+
         def join(self, timeout=None):
             if timeout is None:
                 raise RuntimeError("join failed")
+            self.alive = False
 
         def is_alive(self):
-            return True
+            return self.alive
 
     class Handler:
         def __init__(self):
@@ -507,6 +511,47 @@ def test_thread_manager_wait_preserves_join_error_when_cleanup_fails(caplog):
         manager.wait()
     assert handler.stop_event.is_set()
     assert "Failed to clean up resources after thread wait failed" in caplog.text
+
+
+def test_thread_manager_defers_cleanup_until_slow_thread_finishes():
+    release_thread = Event()
+    cleanup_finished = Event()
+    cleaned = []
+
+    class SlowThread:
+        name = "slow-thread"
+
+        def __init__(self):
+            self.alive = True
+
+        def join(self, timeout=None):
+            if timeout is None:
+                release_thread.wait()
+                self.alive = False
+
+        def is_alive(self):
+            return self.alive
+
+    class Handler:
+        def __init__(self):
+            self.stop_event = Event()
+
+    def cleanup():
+        cleaned.append("closed")
+        cleanup_finished.set()
+
+    handler = Handler()
+    manager = ThreadManager([handler], cleanup_callbacks=[cleanup])
+    manager.threads = [SlowThread()]  # type: ignore[list-item]
+
+    manager.stop()
+
+    assert handler.stop_event.is_set()
+    assert cleaned == []
+
+    release_thread.set()
+    assert cleanup_finished.wait(timeout=1.0)
+    assert cleaned == ["closed"]
 
 
 def test_thread_manager_stop_logs_cleanup_errors(caplog):
