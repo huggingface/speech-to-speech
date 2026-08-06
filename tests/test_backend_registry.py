@@ -450,6 +450,55 @@ def test_thread_manager_runs_all_cleanup_callbacks_once():
     assert cleaned == ["second", "first"]
 
 
+def test_thread_manager_rejects_duplicate_start():
+    class Handler:
+        def __init__(self):
+            self.stop_event = Event()
+
+        def run(self):
+            self.stop_event.wait()
+
+    manager = ThreadManager([Handler()])
+    manager.start()
+
+    with pytest.raises(RuntimeError, match="may only be called once"):
+        manager.start()
+
+    assert len(manager.threads) == 1
+    manager.stop()
+
+
+@pytest.mark.parametrize("terminal_method", ["cleanup", "stop", "wait"])
+def test_thread_manager_rejects_start_after_terminal_method(terminal_method):
+    manager = ThreadManager([])
+
+    getattr(manager, terminal_method)()
+
+    with pytest.raises(RuntimeError, match="before cleanup"):
+        manager.start()
+
+
+def test_thread_manager_rejects_direct_cleanup_while_running():
+    cleaned = []
+
+    class Handler:
+        def __init__(self):
+            self.stop_event = Event()
+
+        def run(self):
+            self.stop_event.wait()
+
+    manager = ThreadManager([Handler()], cleanup_callbacks=[lambda: cleaned.append("closed")])
+    manager.start()
+
+    with pytest.raises(RuntimeError, match="call stop"):
+        manager.cleanup()
+    assert cleaned == []
+
+    manager.stop()
+    assert cleaned == ["closed"]
+
+
 def test_thread_manager_cleans_up_after_partial_start_failure(monkeypatch):
     class Handler:
         def __init__(self):

@@ -20,6 +20,8 @@ class ThreadManager:
         self._cleanup_deferred = False
         self._thread_state_lock = threading.Lock()
         self._thread_states: dict[threading.Thread, str] = {}
+        self._lifecycle_lock = threading.Lock()
+        self._lifecycle_state = "new"
 
     def _cleanup(self) -> None:
         with self._cleanup_lock:
@@ -33,12 +35,19 @@ class ThreadManager:
             except BaseException as exc:
                 if first_error is None:
                     first_error = exc
+        with self._lifecycle_lock:
+            self._lifecycle_state = "stopped"
         if first_error is not None:
             raise first_error
 
     def cleanup(self) -> None:
         """Run lifecycle callbacks once, including before threads are started."""
 
+        with self._lifecycle_lock:
+            if self._lifecycle_state in {"starting", "running", "stopping"}:
+                raise RuntimeError("Cannot clean up while handler threads may be running; call stop() instead.")
+            if self._lifecycle_state == "new":
+                self._lifecycle_state = "stopping"
         self._cleanup()
 
     def _cleanup_safely(self, message: str) -> None:
@@ -56,30 +65,47 @@ class ThreadManager:
         handler.run()
 
     def start(self) -> None:
+        with self._lifecycle_lock:
+            if self._lifecycle_state != "new":
+                raise RuntimeError("ThreadManager.start() may only be called once and before cleanup.")
+            self._lifecycle_state = "starting"
         try:
             for handler in self.handlers:
-                thread = threading.Thread(target=self._run_handler, args=(handler,))
-                thread.daemon = False  # Ensure threads are waited for on shutdown
-                with self._thread_state_lock:
-                    self._thread_states[thread] = "pending"
-                self.threads.append(thread)
-                try:
-                    thread.start()
-                except BaseException:
+                with self._lifecycle_lock:
+                    if self._lifecycle_state != "starting":
+                        raise RuntimeError("ThreadManager startup was interrupted by shutdown.")
+                    thread = threading.Thread(target=self._run_handler, args=(handler,))
+                    thread.daemon = False  # Ensure threads are waited for on shutdown
                     with self._thread_state_lock:
-                        pending = self._thread_states[thread] == "pending"
-                        launched = thread.ident is not None
-                        cancelled = pending and not launched
-                        if pending:
-                            self._thread_states[thread] = "cancelled" if cancelled else "started"
-                    if cancelled:
-                        self.threads.remove(thread)
-                    raise
+                        self._thread_states[thread] = "pending"
+                    self.threads.append(thread)
+                    try:
+                        thread.start()
+                    except BaseException:
+                        with self._thread_state_lock:
+                            pending = self._thread_states[thread] == "pending"
+                            launched = thread.ident is not None
+                            cancelled = pending and not launched
+                            if pending:
+                                self._thread_states[thread] = "cancelled" if cancelled else "started"
+                        if cancelled:
+                            self.threads.remove(thread)
+                        raise
+            with self._lifecycle_lock:
+                if self._lifecycle_state == "starting":
+                    self._lifecycle_state = "running"
         except BaseException:
+            with self._lifecycle_lock:
+                if self._lifecycle_state == "starting":
+                    self._lifecycle_state = "stopping"
             self._stop_and_cleanup("Failed to clean up resources after thread startup failed")
             raise
 
     def wait(self) -> None:
+        with self._lifecycle_lock:
+            if self._lifecycle_state == "stopped":
+                return
+            self._lifecycle_state = "stopping"
         try:
             for thread in self.threads:
                 thread.join()
@@ -155,4 +181,8 @@ class ThreadManager:
             self._defer_cleanup_until_threads_finish(message)
 
     def stop(self) -> None:
+        with self._lifecycle_lock:
+            if self._lifecycle_state == "stopped":
+                return
+            self._lifecycle_state = "stopping"
         self._stop_and_cleanup("Failed to clean up resources while stopping threads")
