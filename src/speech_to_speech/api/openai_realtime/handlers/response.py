@@ -159,17 +159,22 @@ class ResponseHandler(RealtimeBaseHandler):
         ("response.done will also have the complete data we need to call our function").
         """
         st = self._state(conn_id)
-        # Nothing in a non-completed response finished generating, so its items
-        # must not claim otherwise - that includes the function calls.
-        item_status: Literal["completed", "incomplete"] = "completed" if status == "completed" else "incomplete"
-        # Status is only known now, at close, so stamp it onto the calls that
-        # were collected while the response was still in progress.
+        assistant_status: Literal["completed", "incomplete"] = "completed" if status == "completed" else "incomplete"
+        # Function calls have their own upstream status. A completed call stays
+        # completed even when later assistant audio is cancelled; only a call
+        # that was still in progress becomes incomplete at response close.
         output: list[ConversationItem] = [
-            call.model_copy(update={"status": item_status}) for call in st.pending_function_calls
+            call.model_copy(
+                update={"status": "incomplete" if call.status == "in_progress" else call.status or "completed"}
+            )
+            for call in st.pending_function_calls
         ]
 
         text = "".join(st.pending_output_text_parts)
-        if text:
+        # Audio can reserve the assistant slot before its queued transcript is
+        # dispatched. Preserve that generated item even when cancellation leaves
+        # its transcript empty, so prior audio events still index response.output.
+        if st.pending_assistant_item_id is not None:
             if response_wants_audio(st.current_response_params):
                 content = Content(type="output_audio", transcript=text)
             else:
@@ -178,7 +183,7 @@ class ResponseHandler(RealtimeBaseHandler):
                 type="message",
                 role="assistant",
                 id=st.pending_assistant_item_id,
-                status=item_status,
+                status=assistant_status,
                 content=[content],
             )
             output.insert(
@@ -409,6 +414,7 @@ class ResponseHandler(RealtimeBaseHandler):
                         call_id=tool.call_id,
                         name=tool.name,
                         arguments=tool.arguments,
+                        status=tool.status or "completed",
                     )
                 )
                 st.last_item_id = function_item_id

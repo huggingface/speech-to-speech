@@ -1090,6 +1090,45 @@ class TestResponseDoneOutputItems:
         assert done.response.output[audio_delta.output_index].id == audio_delta.item_id
         assert done.response.output[tool_event.output_index].id == tool_event.item_id
 
+    def test_cancelled_audio_keeps_reserved_assistant_output_item(self, service, conn_id):
+        tool_event = next(
+            e
+            for e in service.dispatch_pipeline_event(
+                conn_id,
+                AssistantTextEvent(
+                    text="",
+                    tools=[
+                        {
+                            "type": "function_call",
+                            "id": "fc_1",
+                            "call_id": "call_1",
+                            "name": "first",
+                            "arguments": "{}",
+                            "status": "completed",
+                        }
+                    ],
+                ),
+            )
+            if isinstance(e, ResponseFunctionCallArgumentsDoneEvent)
+        )
+        audio_delta = next(
+            e for e in service.encode_audio_chunk(conn_id, _pcm_bytes(256)) if isinstance(e, ResponseAudioDeltaEvent)
+        )
+
+        terminal_events = service.finish_response(conn_id, status="cancelled", reason="client_cancelled")
+        audio_done = next(e for e in terminal_events if isinstance(e, ResponseAudioDoneEvent))
+        done = next(e for e in terminal_events if isinstance(e, ResponseDoneEvent))
+
+        assert tool_event.output_index == 0
+        assert audio_delta.output_index == audio_done.output_index == 1
+        assert audio_delta.item_id == audio_done.item_id
+        assert [item.id for item in done.response.output] == [tool_event.item_id, audio_delta.item_id]
+        assert [item.status for item in done.response.output] == ["completed", "incomplete"]
+        assistant = done.response.output[audio_delta.output_index]
+        assert isinstance(assistant, RealtimeConversationItemAssistantMessage)
+        assert assistant.content[0].type == "output_audio"
+        assert assistant.content[0].transcript == ""
+
     def test_assistant_id_survives_non_interrupting_user_speech(self, service, conn_id):
         transcript_event = next(
             e
@@ -1112,21 +1151,26 @@ class TestResponseDoneOutputItems:
         assert message.id == transcript_event.item_id
         assert message.id != speech_event.item_id
 
-    def test_cancelled_response_marks_every_item_incomplete(self, service, conn_id):
-        """Items in a cancelled response should not claim to have completed -
-        that includes the function calls, not just the assistant message.
-        """
+    def test_cancelled_response_preserves_completed_function_call(self, service, conn_id):
         service.dispatch_pipeline_event(
             conn_id,
             AssistantTextEvent(
                 text="One moment.",
-                tools=[{"type": "function_call", "call_id": "call_1", "name": "endCall", "arguments": "{}"}],
+                tools=[
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "endCall",
+                        "arguments": "{}",
+                        "status": "completed",
+                    }
+                ],
             ),
         )
         events = service.finish_response(conn_id, status="cancelled", reason="client_cancelled")
         done = next(e for e in events if isinstance(e, ResponseDoneEvent))
         assert done.response.output
-        assert [item.status for item in done.response.output] == ["incomplete", "incomplete"]
+        assert [item.status for item in done.response.output] == ["incomplete", "completed"]
 
 
 # ===================================================================
