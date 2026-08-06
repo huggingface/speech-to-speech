@@ -47,7 +47,7 @@ def test_realtime_url_rejects_noncanonical_endpoints(url):
         normalize_realtime_url(url)
 
 
-def test_audio_client_defers_to_sdk_environment_authentication(monkeypatch):
+def test_audio_client_api_key_precedence_and_loopback_fallback(monkeypatch):
     client_kwargs = []
 
     class FakeAsyncOpenAI:
@@ -55,12 +55,21 @@ def test_audio_client_defers_to_sdk_environment_authentication(monkeypatch):
             client_kwargs.append(kwargs)
 
     monkeypatch.setattr(audio_client_module, "AsyncOpenAI", FakeAsyncOpenAI)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
+    audio_client_module._make_client(RealtimeAudioClientConfig())
+    audio_client_module._make_client(RealtimeAudioClientConfig(url="ws://voice.example/v1/realtime"))
+
+    monkeypatch.setenv("OPENAI_API_KEY", "environment-secret")
+    audio_client_module._make_client(RealtimeAudioClientConfig(url="wss://voice.example/v1/realtime"))
     audio_client_module._make_client(RealtimeAudioClientConfig())
     audio_client_module._make_client(RealtimeAudioClientConfig(api_key="explicit-secret"))
 
-    assert "api_key" not in client_kwargs[0]
-    assert client_kwargs[1]["api_key"] == "explicit-secret"
+    assert client_kwargs[0]["api_key"] == "local"
+    assert "api_key" not in client_kwargs[1]
+    assert "api_key" not in client_kwargs[2]
+    assert client_kwargs[3]["api_key"] == "local"
+    assert client_kwargs[4]["api_key"] == "explicit-secret"
 
 
 def test_audio_client_sends_realtime_session_configuration():

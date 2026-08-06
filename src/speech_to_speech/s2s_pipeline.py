@@ -93,13 +93,18 @@ def _mac_preset_defaults(llm_backend: str) -> dict[str, Any]:
     """Return macOS parser defaults, leaving explicit arguments free to override them."""
 
     defaults: dict[str, Any] = {
-        "device": "mps",
         "stt": "parakeet-tdt",
         "llm_backend": "mlx-lm",
         "tts": "qwen3",
+        "stt_device": "mps",
+        "paraformer_stt_device": "mps",
+        "facebook_mms_device": "mps",
+        "qwen3_tts_device": "mps",
     }
-    if llm_backend == "mlx-lm":
-        defaults["model_name"] = MLX_DEFAULT_LM_MODEL
+    if llm_backend not in {"responses-api", "chat-completions"}:
+        defaults["llm_device"] = "mps"
+        if llm_backend == "mlx-lm":
+            defaults["model_name"] = MLX_DEFAULT_LM_MODEL
     return defaults
 
 

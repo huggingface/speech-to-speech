@@ -107,7 +107,10 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
     parser.add_argument(
         "--api-key",
         default=defaults.api_key,
-        help="Realtime API key. Defaults to the OPENAI_API_KEY environment variable.",
+        help=(
+            "Realtime API key. Defaults to OPENAI_API_KEY, or a harmless placeholder for an unauthenticated "
+            "loopback endpoint."
+        ),
     )
     parser.add_argument("--send-rate", type=int, default=defaults.send_rate)
     parser.add_argument("--recv-rate", type=int, default=defaults.recv_rate)

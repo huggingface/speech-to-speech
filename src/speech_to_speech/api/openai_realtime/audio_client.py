@@ -13,6 +13,7 @@ import logging
 import signal
 import time
 from dataclasses import dataclass
+from ipaddress import ip_address
 from queue import Empty, Full, Queue
 from threading import Event, Lock
 from typing import Any, Optional
@@ -69,8 +70,18 @@ def _make_client(config: RealtimeAudioClientConfig) -> AsyncOpenAI:
         "base_url": base_url,
         "websocket_base_url": websocket_base_url,
     }
-    if config.api_key is not None:
-        client_kwargs["api_key"] = config.api_key
+    api_key = config.api_key
+    if api_key is None:
+        hostname = urlsplit(config.url.strip()).hostname
+        try:
+            is_loopback = hostname == "localhost" or (hostname is not None and ip_address(hostname).is_loopback)
+        except ValueError:
+            is_loopback = False
+        if is_loopback:
+            api_key = "local"
+    # Omitting the key for non-loopback endpoints lets the SDK read OPENAI_API_KEY.
+    if api_key is not None:
+        client_kwargs["api_key"] = api_key
     return AsyncOpenAI(**client_kwargs)
 
 

@@ -12,8 +12,8 @@ class ModuleArguments:
         default=False,
         metadata={
             "help": "If specified, provides macOS defaults: Parakeet TDT for STT, MLX LM for the language "
-            "model, Qwen3-TTS for TTS, and MPS as the device. Explicit component, model, and device flags "
-            "override these defaults. It does not select a command.",
+            "model, Qwen3-TTS for TTS, and MPS for supported component devices. Explicit component, model, "
+            "global-device, and component-device flags override these defaults. It does not select a command.",
         },
     )
     stt: Optional[

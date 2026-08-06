@@ -77,10 +77,12 @@ def test_mac_optimal_settings_flag_does_not_select_a_command():
 
     assert args.module_kwargs.mac_optimal_settings is True
     assert not hasattr(args.module_kwargs, "mode")
-    assert args.module_kwargs.device == "mps"
+    assert args.module_kwargs.device is None
     assert args.module_kwargs.stt == "parakeet-tdt"
     assert args.module_kwargs.llm_backend == "mlx-lm"
     assert args.module_kwargs.tts == "qwen3"
+    assert args.language_model_handler_kwargs.llm_device == "mps"
+    assert args.qwen3_tts_handler_kwargs.qwen3_tts_device == "mps"
     assert args.language_model_handler_kwargs.model_name == "mlx-community/Qwen3-4B-Instruct-2507-bf16"
 
 
@@ -111,13 +113,28 @@ def test_mac_optimal_settings_preserves_explicit_component_overrides():
         ]
     )
 
-    prepare_module_args(args.module_kwargs, args.language_model_handler_kwargs)
+    prepare_module_args(
+        args.module_kwargs,
+        args.language_model_handler_kwargs,
+        args.qwen3_tts_handler_kwargs,
+    )
 
     assert args.module_kwargs.device == "cpu"
     assert args.module_kwargs.stt == "whisper"
     assert args.module_kwargs.llm_backend == "transformers"
     assert args.module_kwargs.tts == "kokoro"
+    assert args.language_model_handler_kwargs.llm_device == "cpu"
     assert args.language_model_handler_kwargs.model_name == "custom/transformers-model"
+    assert args.qwen3_tts_handler_kwargs.qwen3_tts_device == "cpu"
+
+
+def test_mac_optimal_settings_preserves_explicit_component_device():
+    args = parse_arguments(["--mac-optimal-settings", "--qwen3_tts_device", "cpu"])
+
+    prepare_module_args(args.module_kwargs, args.qwen3_tts_handler_kwargs)
+
+    assert args.module_kwargs.device is None
+    assert args.qwen3_tts_handler_kwargs.qwen3_tts_device == "cpu"
 
 
 @pytest.mark.parametrize("flag", ["--local_mac_optimal_settings", "--mac_optimal_settings"])

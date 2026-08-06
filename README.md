@@ -237,12 +237,12 @@ speech-to-speech local \
 
 This setting:
 
-- Adds `--device mps` to use MPS for all models.
+- Uses MPS defaults for supported model components.
 - Sets Parakeet TDT for STT.
 - Sets MLX LM as the LLM backend.
 - Sets Qwen3-TTS for TTS, using `mlx-audio` with the `6bit` MLX variant by default.
 
-The preset supplies these as defaults only: explicit `--device`, `--stt`, `--llm_backend`, `--model_name`, and `--tts` flags win. Use it with `serve` instead of `local` when you want to expose the server without starting the microphone/speaker client.
+The preset supplies these as defaults only: explicit `--device`, component-device flags such as `--qwen3_tts_device`, and `--stt`, `--llm_backend`, `--model_name`, and `--tts` all win. Use it with `serve` instead of `local` when you want to expose the server without starting the microphone/speaker client.
 
 `--tts pocket` and `--tts kokoro` are also valid on macOS.
 
