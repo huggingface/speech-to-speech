@@ -176,6 +176,33 @@ export class Account {
     if (!this._modal.open) this._modal.showModal();
   }
 
+  /** Replace a stale signed-in chip and ask the user to authenticate again.
+   *  @param {string | null | undefined} loginUrl */
+  showLoginRequired(loginUrl) {
+    const url = loginUrl || this._me.loginUrl;
+    this._me = {
+      ...this._me,
+      enabled: true,
+      auth: !!url,
+      loggedIn: false,
+      tier: "anon",
+      loginUrl: url,
+    };
+    this._render();
+    this._modalTitle.textContent = "Sign in again";
+    this._modalMsg.textContent =
+      "Your Hugging Face session expired or was revoked. Sign in again to start a conversation.";
+    this._modalNote.textContent = "This keeps your account and conversation time secure.";
+    if (url) {
+      this._modalCta.innerHTML = `${HF_MARK}<span>Sign in with Hugging Face</span>`;
+      this._modalCta.href = url;
+      this._modalCta.hidden = false;
+    } else {
+      this._modalCta.hidden = true;
+    }
+    if (!this._modal.open) this._modal.showModal();
+  }
+
   /** Show a warm "we're at capacity" message when even the waiting line is full.
    *  Reuses the limit modal shell; no call-to-action, just reassurance. */
   showBusy() {

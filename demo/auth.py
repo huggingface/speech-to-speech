@@ -16,6 +16,7 @@ Identity:
 import logging
 import os
 import secrets
+from datetime import datetime, timedelta, timezone
 
 import limiter
 
@@ -29,6 +30,7 @@ OAUTH_LOGOUT_PATH = "/oauth/huggingface/logout"
 
 ANON_COOKIE = "s2s_anon"
 _COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
+_OAUTH_EXPIRY_SKEW = timedelta(seconds=30)
 
 
 # Members of these orgs get unlimited usage (like PRO) out of the box. The
@@ -101,9 +103,49 @@ def current_oauth(request):
         return None
 
 
+def _oauth_token_expired(info, *, now=None) -> bool:
+    """Whether the OAuth access token is expired (including clock skew)."""
+    expires_at = _field(info, "access_token_expires_at")
+    if expires_at is None:
+        # Older huggingface_hub versions did not expose this field. Preserve
+        # compatibility and let the upstream service validate those tokens.
+        return False
+    if not isinstance(expires_at, datetime):
+        logger.warning("Unexpected OAuth expiry value; requiring a fresh login.")
+        return True
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return expires_at <= current + _OAUTH_EXPIRY_SKEW
+
+
+def _oauth_token(info) -> "str | None":
+    token = _field(info, "access_token")
+    if token is None:
+        return None
+    return str(token).strip() or None
+
+
+def oauth_login_required_reason(request) -> "str | None":
+    """Why a cached signed-in session cannot authenticate, if applicable."""
+    info = current_oauth(request)
+    if not _field(info, "user_info"):
+        return None
+    if _oauth_token_expired(info):
+        return "token_expired"
+    if not _oauth_token(info):
+        return "token_invalid"
+    return None
+
+
 def current_user(request):
     """The signed-in HF user-info, or None."""
-    return _field(current_oauth(request), "user_info")
+    info = current_oauth(request)
+    if _oauth_token_expired(info) or not _oauth_token(info):
+        return None
+    return _field(info, "user_info")
 
 
 def current_access_token(request) -> "str | None":
@@ -112,10 +154,10 @@ def current_access_token(request) -> "str | None":
     Keep this server-side: the demo uses it to attribute load-balancer session
     requests to the signed-in HF account, but never returns it to the browser.
     """
-    token = _field(current_oauth(request), "access_token")
-    if token is None:
+    info = current_oauth(request)
+    if _oauth_token_expired(info):
         return None
-    return str(token).strip() or None
+    return _oauth_token(info)
 
 
 def _user_org_names(user) -> "set[str]":
@@ -186,7 +228,11 @@ def user_view(request) -> dict:
     user = _field(info, "user_info")
     if not user:
         return {"loggedIn": False, "tier": "anon"}
-    token = _field(info, "access_token")
+    if _oauth_token_expired(info):
+        return {"loggedIn": False, "tier": "anon", "reason": "token_expired"}
+    token = _oauth_token(info)
+    if not token:
+        return {"loggedIn": False, "tier": "anon", "reason": "token_invalid"}
     out = {
         "loggedIn": True,
         "username": _field(user, "preferred_username") or _field(user, "name") or "you",
@@ -216,9 +262,9 @@ def resolve_identity(request):
     """
     info = current_oauth(request)
     user = _field(info, "user_info")
-    if user:
+    token = _oauth_token(info)
+    if user and token and not _oauth_token_expired(info):
         sub = _field(user, "sub") or _field(user, "preferred_username")
-        token = _field(info, "access_token")
         return resolve_tier(user, token), [limiter.hash_key(f"sub:{sub}")], None
 
     # Anonymous: key by IP and a signed cookie id, minting the cookie if absent.

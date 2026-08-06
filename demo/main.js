@@ -1176,6 +1176,13 @@ circleBtn.addEventListener("click", async () => {
  *  a real fault (surface it). doStart already closed any orphan AudioContext.
  *  @param {any} err */
 async function handleStartError(err) {
+  if (err && err.code === "login-required") {
+    await teardown();
+    setState("error");
+    setCaption("Sign in again to continue.", "error");
+    account.showLoginRequired(err.loginUrl);
+    return;
+  }
   if (err && err.code === "limit") {
     await teardown();
     account.showLimit(err.tier);
@@ -1203,7 +1210,7 @@ async function handleStartError(err) {
     );
     return;
   }
-  onFatalError(err);
+  await onFatalError(err);
 }
 
 micBtn.addEventListener("click", () => {
@@ -1513,7 +1520,7 @@ async function doStart(audioContext = null) {
   });
   c.addEventListener("error", (e) => {
     const detail = /** @type {CustomEvent<{ error: unknown }>} */ (e).detail;
-    onFatalError(detail.error);
+    void onFatalError(detail.error);
   });
   c.addEventListener("server-error", (e) => {
     // Non-fatal: the backend reported an error mid-session. Log it, keep the
@@ -1692,15 +1699,17 @@ async function teardown() {
 }
 
 /** @param {unknown} err */
-function onFatalError(err) {
+async function onFatalError(err) {
   console.error("[main] fatal:", err);
-  setState("error");
   const message = err instanceof Error ? err.message : String(err);
-  setCaption(truncateError(message), "error");
-  void teardown().catch(() => {
+  try {
+    await teardown();
+  } catch (teardownError) {
+    console.warn("[main] error during fatal teardown:", teardownError);
+  } finally {
     setState("error");
     setCaption(truncateError(message), "error");
-  });
+  }
 }
 
 setState("idle");
