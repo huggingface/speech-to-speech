@@ -12,7 +12,6 @@ from openai.types.realtime import (
     ConversationItemInputAudioTranscriptionDeltaEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferCommitEvent,
-    InputAudioBufferSpeechStartedEvent,
     InputAudioBufferSpeechStoppedEvent,
     OutputAudioBufferClearEvent,
     RealtimeError,
@@ -34,6 +33,11 @@ from openai.types.realtime import (
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from speech_to_speech.api.openai_realtime.extension_events import (
+    ExtendedInputAudioBufferSpeechStartedEvent,
+    InputAudioBufferSpeechCandidateRejectedEvent,
+    InputAudioBufferSpeechCandidateStartedEvent,
+)
 from speech_to_speech.api.openai_realtime.handlers import (
     AudioHandler,
     ConversationHandler,
@@ -48,6 +52,8 @@ from speech_to_speech.pipeline.events import (
     PartialTranscriptionEvent,
     PipelineEvent,
     ResponseFailedEvent,
+    SpeechCandidateRejectedEvent,
+    SpeechCandidateStartedEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TokenUsageEvent,
@@ -92,7 +98,9 @@ ServerEvent = Union[
     SessionCreatedEvent,
     SessionUpdatedEvent,
     RealtimeErrorEvent,
-    InputAudioBufferSpeechStartedEvent,
+    InputAudioBufferSpeechCandidateStartedEvent,
+    InputAudioBufferSpeechCandidateRejectedEvent,
+    ExtendedInputAudioBufferSpeechStartedEvent,
     InputAudioBufferSpeechStoppedEvent,
     ConversationItemCreatedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
@@ -184,6 +192,7 @@ class ConnState(BaseModel):
     speculative_user_item_id: Optional[str] = None
     speculative_input_item_id: Optional[str] = None
     speculative_audio_duration_s: float = 0.0
+    speech_candidate_id: Optional[str] = None
     # Client conversation.item.create items that arrived while a response was
     # generating. Applying them mid-generation races the LLM handler's chat
     # write-back (cross-thread), so they are buffered here and flushed in order
@@ -219,6 +228,8 @@ class RealtimeService:
         self.conversation = ConversationHandler(self)
 
         self._pipeline_dispatch: dict[type[PipelineEvent], Callable[..., list[ServerEvent]]] = {
+            SpeechCandidateStartedEvent: self.audio.on_speech_candidate_started,
+            SpeechCandidateRejectedEvent: self.audio.on_speech_candidate_rejected,
             SpeechStartedEvent: self.audio.on_speech_started,
             SpeechStoppedEvent: self.audio.on_speech_stopped,
             TokenUsageEvent: self._on_token_usage,

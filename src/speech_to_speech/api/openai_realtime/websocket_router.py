@@ -36,6 +36,8 @@ from speech_to_speech.pipeline.events import (
     AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     PipelineEvent,
+    SpeechCandidateRejectedEvent,
+    SpeechCandidateStartedEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TokenUsageEvent,
@@ -91,6 +93,8 @@ def _keep_user_text_event(item: Any) -> bool:
         item,
         (
             SpeechStoppedEvent,
+            SpeechCandidateStartedEvent,
+            SpeechCandidateRejectedEvent,
             PartialTranscriptionEvent,
             TranscriptionCompletedEvent,
             AudioInputCompletedEvent,

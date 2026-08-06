@@ -246,6 +246,7 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
 | `limiter.py` | SQLite per-day talk-time budget (chunked server-clock reservation) |
 | `ws/s2s-ws-client.js` | WebSocket handshake + OpenAI Realtime GA protocol |
 | `rtc/s2s-rtc-client.js` | WebRTC sibling: SDP handshake via `/api/calls`, events over the data channel, track audio |
+| `audio-ducker.js` | Candidate-scoped output gain controller shared by WebSocket and WebRTC clients |
 | `ws/codec.js` | base64 <-> PCM helpers + transcript extraction (pure) |
 | `ws/user-audio-recorder.js` | Bounded sent-PCM buffer + VAD slicing + browser-playable WAV wrapping |
 | `ws/orb-visualizer.js` | `OrbVisualiser`: FFT bands -> orb CSS custom properties |
@@ -267,10 +268,12 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
   and is posted to the `audio-playback` worklet. The worklet maintains a
   per-context ring buffer, linearly interpolates 24 -> 48, and applies
   short 32-frame fades on entry/exit to suppress clicks.
-- **Barge-in**: when the server VAD detects user speech mid-response
-  (`input_audio_buffer.speech_started` while `ai-speaking`), the client
-  posts `{ kind: "clear" }` to the playback worklet to wipe the queue
-  immediately. The server itself cancels the in-flight response.
+- **Barge-in**: after 96 ms of active speech, the optional
+  `input_audio_buffer.speech_candidate_started` event ramps output gain to
+  `0.12` over 15 ms. A matching reject restores it over 80 ms without
+  cancelling model work. Only confirmed speech (384 ms by default) clears the
+  WebSocket playback queue or server-side WebRTC track buffer and cancels the
+  response; `speech_stopped` restores full gain.
 
 ## Credits
 

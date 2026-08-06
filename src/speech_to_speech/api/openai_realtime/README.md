@@ -82,6 +82,18 @@ flowchart LR
 | `response.function_call_arguments.done` | Tool call with `call_id`, `name`, and JSON `arguments`. |
 | `response.done` | Response finished (`completed`, `cancelled` with reason `turn_detected` or `client_cancelled`). |
 
+### Project-specific optional extensions
+
+The bundled browser clients understand two additional outbound events. `input_audio_buffer.speech_candidate_started`
+is an early, reversible speech hint that ducks playback without creating a conversation item or cancelling the response.
+`input_audio_buffer.speech_candidate_rejected` restores playback only when its `candidate_id` matches the active hint.
+Other Realtime clients can safely ignore both events and continue to rely on the standard confirmed
+`input_audio_buffer.speech_started` boundary.
+
+Confirmed `input_audio_buffer.speech_started` events also carry an extra `interrupt_response` boolean. The bundled
+clients use it to avoid clearing or muting playback when session interruption is disabled; clients that do not need
+that distinction can ignore the extra field.
+
 ---
 
 ## WebRTC Transport
@@ -173,6 +185,9 @@ sequenceDiagram
 
     Note over TTS,Client: Response active or pending (in_response / response_pending)
     User->>VAD: speaks
+    VAD->>Client: speech_candidate_started after 96 ms
+    Client->>Client: duck playback (reversible)
+    Note over VAD,Client: A short noise emits speech_candidate_rejected and restores playback
     VAD->>SendLoop: speech_started on text_output_queue
     SendLoop->>Client: input_audio_buffer.speech_started
     SendLoop->>Client: response.done (status=cancelled, reason=turn_detected)
@@ -188,8 +203,8 @@ sequenceDiagram
 
 **Step by step:**
 
-1. **VAD detects speech**: puts a `SpeechStartedEvent` on `text_output_queue`.
-2. **`_send_loop` processes text events first** (priority over audio): translates `speech_started` into protocol events. If an active response was in progress, `RealtimeService.dispatch_pipeline_event` emits `response.output_audio.done` + `response.done` with `status="cancelled"` and `reason="turn_detected"`.
+1. **VAD proposes speech**: after `--speech_candidate_ms` of active speech (96 ms by default), it emits a candidate event. Bundled clients lower output gain, but the server does not create a conversation turn, cancel work, flush audio, or increment the cancellation generation. If speech ends below the confirmation threshold, a candidate-scoped reject restores playback. Set the threshold to `0` to disable this extension.
+2. **VAD confirms speech**: once active speech reaches `--min_speech_ms` (384 ms by default), it puts the ordinary `SpeechStartedEvent` on `text_output_queue`. `_send_loop` processes text events first and translates it into protocol events. If an active response was in progress, `RealtimeService.dispatch_pipeline_event` emits `response.output_audio.done` + `response.done` with `status="cancelled"` and `reason="turn_detected"`.
 3. **Cancel + queue flush**: if a response is active (`in_response`) *or* pending (`response_pending` -- a model request is queued, but no output has started), and interrupts are enabled (see step 4), the send loop calls `cancel_scope.cancel()` (increments generation, enables discard), clears `response_pending`, drains `output_queue` (preserving `__RESPONSE_DONE__` sentinels) and `text_output_queue` (preserving user-side events: `speech_stopped`, direct-audio completions, partial/completed transcriptions, token usage), then clears `response_playing`.
 4. **Interrupt gating**: the cancel only fires if the `SpeechStartedEvent.interrupt_response` flag is set *and* the session config allows it (`turn_detection.interrupt_response`, read via `RuntimeConfig.interrupt_response_enabled`, default true). When disabled, user speech during a response is transcribed but the response keeps playing.
 5. **LLM/TTS cancellation**: handlers capture `gen = cancel_scope.generation` at the start of each response and check `cancel_scope.is_stale(gen)` on every streaming token, aborting early when stale.

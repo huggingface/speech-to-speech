@@ -7,7 +7,12 @@ import numpy as np
 import pytest
 import torch
 
-from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
+from speech_to_speech.pipeline.events import (
+    SpeechCandidateRejectedEvent,
+    SpeechCandidateStartedEvent,
+    SpeechStartedEvent,
+    SpeechStoppedEvent,
+)
 from speech_to_speech.pipeline.messages import VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.VAD.smart_turn import SmartTurnResult
@@ -347,6 +352,10 @@ class _StaticVADIterator:
     def speech_buffer(self) -> list[torch.Tensor]:
         return self._speech_chunks
 
+    def reset_states(self) -> None:
+        self.triggered = False
+        self.buffer = []
+
 
 class _StaticSmartTurnAnalyzer:
     def __init__(self, *results: SmartTurnResult) -> None:
@@ -366,6 +375,7 @@ def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
     handler.sample_rate = 16000
     handler.min_silence_ms = 300
     handler.min_speech_ms = 384
+    handler.speech_candidate_ms = 0
     handler.min_speech_continuation_ms = handler.min_speech_ms
     handler.max_speech_ms = float("inf")
     handler.enable_realtime_transcription = False
@@ -388,6 +398,8 @@ def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
     handler._log_speech_ends = 0
     handler._log_progressive_yields = 0
     handler._speech_started_emitted = False
+    handler._speech_candidate_counter = 0
+    handler._speech_candidate_id = None
     handler._turn_counter = 0
     handler._current_turn_id = None
     handler._current_turn_revision = None
@@ -470,6 +482,117 @@ def test_vad_interruption_emits_after_active_speech_threshold():
     assert isinstance(event, SpeechStartedEvent)
     assert event.interrupt_response is True
     assert handler._speech_started_emitted is True
+
+
+def test_vad_emits_reversible_candidate_before_confirmed_speech():
+    chunks = [torch.zeros(512) for _ in range(3)]
+    iterator = _StaticVADIterator(
+        triggered=True,
+        vad_output=None,
+        buffer_chunks=chunks,
+        speech_chunks=chunks,
+        active_speech_samples=3 * 512,
+    )
+    handler = _vad_handler_for_iterator(iterator)
+    handler.speech_candidate_ms = 96
+
+    assert list(handler.process(_audio_bytes())) == []
+
+    event = handler.text_output_queue.get_nowait()
+    assert isinstance(event, SpeechCandidateStartedEvent)
+    assert event.candidate_id == "candidate_1"
+    assert handler._speech_started_emitted is False
+    assert handler._current_turn_id is None
+
+
+def test_vad_candidate_threshold_zero_disables_early_signal():
+    chunks = [torch.zeros(512) for _ in range(3)]
+    iterator = _StaticVADIterator(
+        triggered=True,
+        vad_output=None,
+        buffer_chunks=chunks,
+        speech_chunks=chunks,
+        active_speech_samples=3 * 512,
+    )
+    handler = _vad_handler_for_iterator(iterator)
+    handler.speech_candidate_ms = 0
+
+    assert list(handler.process(_audio_bytes())) == []
+    assert handler.text_output_queue.empty()
+    assert handler._current_turn_id is None
+
+
+def test_vad_rejects_short_candidate_without_creating_turn():
+    chunks = [torch.zeros(512) for _ in range(3)]
+    iterator = _StaticVADIterator(
+        triggered=True,
+        vad_output=None,
+        buffer_chunks=chunks,
+        speech_chunks=chunks,
+        active_speech_samples=3 * 512,
+    )
+    handler = _vad_handler_for_iterator(iterator)
+    handler.speech_candidate_ms = 96
+
+    assert list(handler.process(_audio_bytes())) == []
+    started = handler.text_output_queue.get_nowait()
+    assert isinstance(started, SpeechCandidateStartedEvent)
+
+    iterator.triggered = False
+    iterator._vad_output = [torch.zeros(512) for _ in range(4)]
+    iterator.last_utterance_active_speech_samples = 3 * 512
+    assert list(handler.process(_audio_bytes())) == []
+
+    rejected = handler.text_output_queue.get_nowait()
+    assert isinstance(rejected, SpeechCandidateRejectedEvent)
+    assert rejected.candidate_id == started.candidate_id
+    assert handler._current_turn_id is None
+    assert handler._speech_candidate_id is None
+
+
+def test_vad_confirmation_supersedes_candidate_without_reject():
+    chunks = [torch.zeros(512) for _ in range(12)]
+    iterator = _StaticVADIterator(
+        triggered=True,
+        vad_output=None,
+        buffer_chunks=chunks,
+        speech_chunks=chunks,
+        active_speech_samples=3 * 512,
+    )
+    handler = _vad_handler_for_iterator(iterator)
+    handler.speech_candidate_ms = 96
+
+    assert list(handler.process(_audio_bytes())) == []
+    assert isinstance(handler.text_output_queue.get_nowait(), SpeechCandidateStartedEvent)
+
+    iterator.active_speech_samples = 12 * 512
+    assert list(handler.process(_audio_bytes())) == []
+
+    confirmed = handler.text_output_queue.get_nowait()
+    assert isinstance(confirmed, SpeechStartedEvent)
+    assert handler._speech_candidate_id is None
+    assert handler.text_output_queue.empty()
+
+
+def test_vad_session_reset_clears_candidate_state():
+    chunks = [torch.zeros(512) for _ in range(3)]
+    iterator = _StaticVADIterator(
+        triggered=True,
+        vad_output=None,
+        buffer_chunks=chunks,
+        speech_chunks=chunks,
+        active_speech_samples=3 * 512,
+    )
+    handler = _vad_handler_for_iterator(iterator)
+    handler.speech_candidate_ms = 96
+
+    assert list(handler.process(_audio_bytes())) == []
+    assert handler._speech_candidate_id == "candidate_1"
+
+    handler.on_session_end()
+
+    assert handler._speech_candidate_id is None
+    assert handler._speech_candidate_counter == 0
 
 
 def test_vad_live_transcription_without_speculative_turns_stops_listening_on_final():

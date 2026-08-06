@@ -281,7 +281,7 @@ The compose file starts a llama.cpp server with Gemma 4, starts the TCP socket s
 
 ## Realtime API
 
-Realtime mode supports the OpenAI Realtime protocol over WebSocket and WebRTC, with live transcription and low-latency turn-taking. WebSocket clients connect at `/v1/realtime`:
+Realtime mode supports the OpenAI Realtime protocol over WebSocket and WebRTC, with live transcription and low-latency turn-taking. The bundled browser clients also use reversible barge-in: after 96 ms of active speech they temporarily duck assistant playback, but model cancellation and audio-buffer clearing still wait for the normal 384 ms speech confirmation. If the candidate was only a short noise, playback fades back in without restarting the response. WebSocket clients connect at `/v1/realtime`:
 
 ```python
 from openai import OpenAI
@@ -315,7 +315,7 @@ with client.realtime.connect(model="local") as conn:
         print(event.type)
 ```
 
-The server implements the core Realtime event set: `input_audio_buffer.append`, `session.update`, `conversation.item.create`, `response.create`, and `response.cancel` inbound; speech start/stop, streaming transcription, audio deltas, tool calls, and `response.done` outbound. The full event reference, architecture, and design details live in the [Realtime Engine README](./src/speech_to_speech/api/openai_realtime/README.md).
+The server implements the core Realtime event set: `input_audio_buffer.append`, `session.update`, `conversation.item.create`, `response.create`, and `response.cancel` inbound; speech start/stop, streaming transcription, audio deltas, tool calls, and `response.done` outbound. It additionally emits optional `input_audio_buffer.speech_candidate_started` and `input_audio_buffer.speech_candidate_rejected` extension events for reversible playback ducking; clients that do not implement them can safely ignore them. The full event reference, architecture, and design details live in the [Realtime Engine README](./src/speech_to_speech/api/openai_realtime/README.md).
 
 ### LLM Proxy
 
@@ -577,6 +577,7 @@ See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments
 
 - `--thresh`: threshold value to trigger voice activity detection.
 - `--min_speech_ms`: minimum duration of detected voice activity to be considered speech.
+- `--speech_candidate_ms`: active-speech duration before realtime clients receive a reversible playback-duck hint. Default is 96 ms; this does not create a turn or cancel model work, and `0` disables it.
 - `--min_speech_continuation_ms`: sustain-bar hysteresis threshold for speech that continues a reopenable soft-ended, uncommitted turn within the reopen window. The default and recommended pairing is `--min_speech_ms 384 --min_speech_continuation_ms 192`.
 - `--min_silence_ms`: minimum length of silence intervals for segmenting speech. Default is 64 ms.
 - `--short_segment_merge_ms`: optional merge window for stitching adjacent VAD segments that are each shorter than `--min_speech_ms`.

@@ -28,6 +28,28 @@ class PipelineEvent(BaseModel):
 # ── VAD events ────────────────────────────────────────────────────────
 
 
+class SpeechCandidateStartedEvent(PipelineEvent):
+    """Reversible early speech signal used to duck assistant playback.
+
+    Unlike :class:`SpeechStartedEvent`, this event must not create a
+    conversation item or cancel in-flight model work.  A short candidate is
+    either confirmed by the ordinary ``speech_started`` event or paired with a
+    :class:`SpeechCandidateRejectedEvent`.
+    """
+
+    type: Literal["speech_candidate_started"] = "speech_candidate_started"
+    candidate_id: str
+    audio_start_ms: int = 0
+    interrupt_response: bool = Field(default=True, exclude=True)
+
+
+class SpeechCandidateRejectedEvent(PipelineEvent):
+    """A pre-confirmation speech candidate ended below the speech threshold."""
+
+    type: Literal["speech_candidate_rejected"] = "speech_candidate_rejected"
+    candidate_id: str
+
+
 class SpeechStartedEvent(PipelineEvent):
     type: Literal["speech_started"] = "speech_started"
     audio_start_ms: int = 0

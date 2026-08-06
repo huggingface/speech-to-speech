@@ -27,6 +27,14 @@ class VADHandlerArguments:
             "help": "Minimum length of speech segments to be considered valid speech. Measured in milliseconds. Default is 384 ms."
         },
     )
+    speech_candidate_ms: int = field(
+        default=96,
+        metadata={
+            "help": "Active-speech duration before emitting a reversible playback-duck candidate in realtime mode. "
+            "The normal min_speech_ms threshold still controls conversation turns and cancellation. Set to 0 to disable. "
+            "Default is 96 ms."
+        },
+    )
     min_speech_continuation_ms: int = field(
         default=192,
         metadata={

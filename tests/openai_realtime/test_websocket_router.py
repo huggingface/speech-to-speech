@@ -27,6 +27,8 @@ from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessag
 from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
     AudioInputCompletedEvent,
+    SpeechCandidateRejectedEvent,
+    SpeechCandidateStartedEvent,
     SpeechStartedEvent,
     TokenUsageEvent,
 )
@@ -415,6 +417,31 @@ class TestSendLoop:
                 assert msg["type"] == "input_audio_buffer.speech_started"
                 assert msg["audio_start_ms"] == 0
 
+    def test_candidate_events_do_not_cancel_pending_response(self, setup):
+        app, service, _, _, text_output_queue, _, _, response_playing, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = service.connection_ids[0]
+                service._state(conn_id).response_pending = True
+                response_playing.set()
+                generation = cancel_scope.generation
+
+                text_output_queue.put(SpeechCandidateStartedEvent(candidate_id="candidate_1", audio_start_ms=32))
+                started = ws.receive_json()
+                assert started["type"] == "input_audio_buffer.speech_candidate_started"
+                assert started["candidate_id"] == "candidate_1"
+
+                text_output_queue.put(SpeechCandidateRejectedEvent(candidate_id="candidate_1"))
+                rejected = ws.receive_json()
+                assert rejected["type"] == "input_audio_buffer.speech_candidate_rejected"
+
+                time.sleep(0.1)
+                assert cancel_scope.generation == generation
+                assert not cancel_scope.discarding
+                assert service._state(conn_id).response_pending is True
+                assert response_playing.is_set()
+
     def test_barge_in_discard_clears_after_response_done(self, setup):
         """After barge-in sets discarding=True, __RESPONSE_DONE__ must clear it back to False."""
         app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
@@ -756,12 +783,18 @@ class TestDrainRelease:
     def test_barge_in_flush_preserves_completed_audio_input(self):
         q: Queue = Queue()
         audio_event = AudioInputCompletedEvent(audio=np.zeros(1600, dtype=np.float32), audio_duration_s=0.1)
+        candidate_started = SpeechCandidateStartedEvent(candidate_id="candidate_1")
+        candidate_rejected = SpeechCandidateRejectedEvent(candidate_id="candidate_1")
         q.put(AssistantTextEvent(text="stale"))
         q.put(audio_event)
+        q.put(candidate_started)
+        q.put(candidate_rejected)
 
         router_module._flush_queue(q, preserve=router_module._keep_user_text_event)
 
         assert q.get_nowait() is audio_event
+        assert q.get_nowait() is candidate_started
+        assert q.get_nowait() is candidate_rejected
         assert q.empty()
 
     def test_barge_in_flush_preserves_session_end(self):
