@@ -67,8 +67,7 @@ expected.
 ## Terminal 2: start the realtime speech pipeline
 
 ```bash
-uv run speech-to-speech \
-    --mode realtime \
+uv run speech-to-speech serve \
     --stt none \
     --llm_backend chat-completions \
     --tts qwen3 \
@@ -114,7 +113,7 @@ The important options are:
   endpoint, which accepts native audio.
 - `--responses_api_audio_content_type input_audio`: uses the payload shape
   supported by current llama.cpp builds.
-- `--mode realtime`: enables speculative turn revisions, response cancellation,
+- `serve`: runs the API with speculative turn revisions, response cancellation,
   and the standard Realtime event lifecycle.
 - `--min_silence_ms 300`: avoids treating very short pauses between words as
   completed turns while keeping endpointing responsive.
@@ -125,9 +124,8 @@ To test without the browser demo, replace Terminal 3 with the packaged
 microphone/speaker client:
 
 ```bash
-uv run python scripts/listen_and_play_realtime.py \
-    --host 127.0.0.1 \
-    --port 8765
+uv run speech-to-speech talk \
+    --url ws://127.0.0.1:8765/v1/realtime
 ```
 
 ## Troubleshooting

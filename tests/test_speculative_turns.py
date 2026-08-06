@@ -472,23 +472,6 @@ def test_vad_interruption_emits_after_active_speech_threshold():
     assert handler._speech_started_emitted is True
 
 
-def test_vad_live_transcription_without_speculative_turns_stops_listening_on_final():
-    final_chunks = [torch.zeros(512) for _ in range(31)]
-    iterator = _StaticVADIterator(
-        triggered=False,
-        vad_output=final_chunks,
-        last_utterance_active_speech_samples=12 * 512,
-    )
-    handler = _vad_handler_for_iterator(iterator)
-    handler.enable_realtime_transcription = True
-    handler.speculative_turns = None
-
-    outputs = list(handler.process(_audio_bytes()))
-
-    assert len(outputs) == 1
-    assert not handler.should_listen.is_set()
-
-
 def test_vad_discards_final_segment_when_active_speech_is_short():
     final_chunks = [torch.zeros(512) for _ in range(31)]
     iterator = _StaticVADIterator(
@@ -633,7 +616,8 @@ def _handler_after_soft_ended_turn() -> VADHandler:
     return handler
 
 
-def test_continuation_start_confirms_at_lower_bar():
+def test_soft_ended_direct_audio_turn_reopens_at_revision_one():
+    # Keep the turn uncommitted to model generation still being in flight.
     handler = _handler_after_soft_ended_turn()
     handler.min_speech_continuation_ms = 192
     chunks = [torch.zeros(512) for _ in range(8)]
@@ -986,7 +970,9 @@ def _vad_audio(
 def test_vad_drops_superseded_progressive_audio_from_output_queue():
     handler = object.__new__(VADHandler)
     handler.queue_out = Queue()
-    handler.speculative_turns = None
+    handler.speculative_turns = SpeculativeTurnTracker()
+    handler.speculative_turns.observe("turn_1", 0)
+    handler.speculative_turns.observe("turn_2", 0)
     first_progressive = _vad_audio()
     final_audio = _vad_audio(mode="final")
     second_progressive = _vad_audio()
@@ -1024,7 +1010,9 @@ def test_vad_drops_stale_progressive_revisions_from_output_queue():
 def test_vad_final_audio_replaces_queued_progressive_audio_for_same_revision():
     handler = object.__new__(VADHandler)
     handler.queue_out = Queue()
-    handler.speculative_turns = None
+    handler.speculative_turns = SpeculativeTurnTracker()
+    handler.speculative_turns.observe("turn_1", 0)
+    handler.speculative_turns.observe("turn_2", 0)
     progressive_audio = _vad_audio()
     final_audio = _vad_audio(mode="final")
     other_turn_progressive = _vad_audio(turn_id="turn_2")

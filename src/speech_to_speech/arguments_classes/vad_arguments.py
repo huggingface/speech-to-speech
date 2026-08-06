@@ -64,7 +64,7 @@ class VADHandlerArguments:
     speculative_reopen_ms: int = field(
         default=800,
         metadata={
-            "help": "In realtime mode, keep a soft-ended turn reopenable for this many milliseconds unless a response commits it. Default is 800 ms."
+            "help": "Keep a soft-ended Realtime turn reopenable for this many milliseconds unless a response commits it. Default is 800 ms."
         },
     )
     unanswered_reopen_ms: int = field(
@@ -82,7 +82,7 @@ class VADHandlerArguments:
     smart_turn: bool = field(
         default=True,
         metadata={
-            "help": "In realtime mode, use Smart Turn v3.2 after Silero finalizes a segment to choose how long assistant output remains speculative. Enabled by default; pass --no_smart_turn to disable it."
+            "help": "Use Smart Turn v3.2 after Silero finalizes a Realtime turn to choose how long assistant output remains speculative. Enabled by default; pass --no_smart_turn to disable it."
         },
     )
     smart_turn_model_path: str | None = field(

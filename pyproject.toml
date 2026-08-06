@@ -98,7 +98,7 @@ Repository = "https://github.com/huggingface/speech-to-speech"
 Issues = "https://github.com/huggingface/speech-to-speech/issues"
 
 [project.scripts]
-speech-to-speech = "speech_to_speech.s2s_pipeline:main"
+speech-to-speech = "speech_to_speech.cli:main"
 
 [dependency-groups]
 dev = [

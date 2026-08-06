@@ -18,6 +18,7 @@ from openai.types.realtime import (
     RealtimeConversationItemFunctionCall,
     RealtimeError,
     RealtimeErrorEvent,
+    RealtimeSessionCreateRequest,
     ResponseAudioDeltaEvent,
     ResponseAudioDoneEvent,
     ResponseAudioTranscriptDeltaEvent,
@@ -200,9 +201,9 @@ class ConnState(BaseModel):
 class RealtimeService:
     """Translates between OpenAI Realtime protocol events and internal pipeline messages.
 
-    One instance is shared across all WebSocket connections.  Per-connection
-    state (response lifecycle, audio buffer) is tracked internally by
-    connection id.
+    Each PipelineUnit owns one instance and uses it for whichever WebSocket or
+    WebRTC session currently claims that unit. Per-session response and audio
+    state is keyed by connection id.
     """
 
     def __init__(
@@ -211,11 +212,13 @@ class RealtimeService:
         should_listen: ThreadingEvent | None = None,
         chat_size: int = 10,
         speculative_turns: SpeculativeTurnTracker | None = None,
+        default_instructions: str | None = None,
     ) -> None:
         self.text_prompt_queue = text_prompt_queue
         self.should_listen = should_listen
         self._chat_size = chat_size
         self.speculative_turns = speculative_turns
+        self._default_instructions = default_instructions
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
 
@@ -240,7 +243,15 @@ class RealtimeService:
         """Register a new connection and return its session_id."""
         if self.speculative_turns:
             self.speculative_turns.reset()
-        state = ConnState(runtime_config=RuntimeConfig(chat=Chat(self._chat_size)))
+        state = ConnState(
+            runtime_config=RuntimeConfig(
+                chat=Chat(self._chat_size),
+                session=RealtimeSessionCreateRequest(
+                    type="realtime",
+                    instructions=self._default_instructions,
+                ),
+            )
+        )
         self._conns[state.session_id] = state
         self.total_usage.connections += 1
         return state.session_id
