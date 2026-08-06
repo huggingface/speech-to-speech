@@ -175,7 +175,7 @@ This installs the package in editable mode and makes the `speech-to-speech` CLI 
 | TTS | [ChatTTS](https://github.com/2noise/ChatTTS) | CUDA / CPU | `chattts` |
 | TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | built-in |
 
-Select implementations with `--stt`, `--llm_backend`, and `--tts`. Run `speech-to-speech serve -h` for exact values and backend-specific flags.
+Select implementations with `--stt`, `--llm_backend`, and `--tts`. The CLI registers options only for the selected backends, so inactive backend options are rejected; JSON configuration may include extra inactive-backend keys, which are ignored. Run `speech-to-speech serve -h` for the defaults, or pass selectors before `-h` to see another combination's backend-specific flags (for example, `speech-to-speech serve --stt mlx-audio-whisper -h`).
 
 ## Commands
 

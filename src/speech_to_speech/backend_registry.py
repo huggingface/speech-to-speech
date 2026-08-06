@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
@@ -38,6 +39,8 @@ BackendKind = Literal["stt", "llm", "tts"]
 BackendConfig = dict[str, Any]
 SharedFactory = Callable[[Mapping[str, Any]], Any]
 SharedCleanup = Callable[[Any], None]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -172,7 +175,8 @@ def create_backend_handler(selection: BackendSelection, context: HandlerContext,
             raise
         raise ImportError(
             f"Backend {selection.name!r} ({selection.kind}) requires optional dependencies. "
-            f'Install them with `pip install "speech-to-speech[{extra}]"`.'
+            f'Install them with `pip install "speech-to-speech[{extra}]"`. '
+            f"Original import error: {exc}"
         ) from exc
 
 
@@ -182,7 +186,7 @@ def _load_handler(module_name: str, class_name: str) -> type[Any]:
     except RuntimeError as exc:
         # Some optional packages fail at import time with RuntimeError rather
         # than ImportError when a native dependency is unavailable.
-        raise ImportError(f"Could not import backend module {module_name!r}.") from exc
+        raise ImportError(f"Could not import backend module {module_name!r}: {exc}") from exc
     return getattr(module, class_name)
 
 
@@ -477,7 +481,10 @@ class SharedBackendResources:
                 if factory is not None:
                     owner._resources[selection.kind] = (selection.spec, factory(selection.config))
         except BaseException:
-            owner.close()
+            try:
+                owner.close()
+            except BaseException:
+                logger.exception("Failed to clean up shared backend resources after construction failed")
             raise
         return owner
 

@@ -1,4 +1,5 @@
 import sys
+from copy import deepcopy
 from dataclasses import dataclass, fields
 from queue import Queue
 from threading import Event
@@ -20,7 +21,7 @@ from speech_to_speech.backend_registry import (
 )
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.s2s_pipeline import build_local_pipeline, build_pipeline, parse_arguments
+from speech_to_speech.s2s_pipeline import build_local_pipeline, build_pipeline, parse_arguments, prepare_all_args
 from speech_to_speech.utils.thread_manager import ThreadManager
 
 
@@ -123,6 +124,62 @@ def test_parser_carries_only_selected_normalized_configs():
     assert not hasattr(args, "qwen3_tts_handler_kwargs")
 
 
+@pytest.mark.parametrize(
+    ("kind", "backend_name"),
+    [
+        *(("stt", name) for name in STT_BACKENDS),
+        *(("llm", name) for name in LLM_BACKENDS),
+        *(("tts", name) for name in TTS_BACKENDS),
+    ],
+)
+def test_global_device_only_updates_device_aware_builtin_configs(kind, backend_name):
+    selector = {"stt": "--stt", "llm": "--llm_backend", "tts": "--tts"}[kind]
+    argv = ["--device", "cpu", selector, backend_name]
+    if kind == "stt" and backend_name == "none":
+        argv.extend(["--llm_backend", "chat-completions"])
+
+    args = parse_arguments(argv)
+    field_name = f"{kind}_backend"
+    before = deepcopy(getattr(args, field_name).config)
+
+    prepare_all_args(args)
+
+    expected = deepcopy(before)
+    if "device" in expected:
+        expected["device"] = "cpu"
+    assert getattr(args, field_name).config == expected
+
+
+def test_global_device_does_not_reach_mlx_audio_whisper_setup(monkeypatch):
+    from speech_to_speech.STT.mlx_audio_whisper_handler import MLXAudioWhisperSTTHandler
+
+    captured = {}
+
+    def fake_setup(self, model_name, language, gen_kwargs):
+        captured.update(model_name=model_name, language=language, gen_kwargs=gen_kwargs)
+
+    monkeypatch.setattr(MLXAudioWhisperSTTHandler, "setup", fake_setup)
+    args = parse_arguments(
+        [
+            "--device",
+            "mps",
+            "--stt",
+            "mlx-audio-whisper",
+            "--language",
+            "auto",
+        ]
+    )
+    prepare_all_args(args)
+
+    create_backend_handler(args.stt_backend, _context())
+
+    assert captured == {
+        "model_name": "mlx-community/whisper-large-v3-turbo",
+        "language": "auto",
+        "gen_kwargs": {},
+    }
+
+
 def test_factories_keep_backend_modules_lazy():
     module_names = [
         "speech_to_speech.STT.whisper_stt_handler",
@@ -220,15 +277,53 @@ def test_partial_shared_construction_cleans_already_created_resources():
     assert cleaned == ["stt-resource"]
 
 
-def test_partial_pipeline_construction_cleans_shared_resources(monkeypatch):
+def test_partial_shared_construction_preserves_error_when_cleanup_fails(caplog):
+    def cleanup(_resource):
+        raise RuntimeError("cleanup failed")
+
+    stt_spec = BackendSpec(
+        "first",
+        "stt",
+        FakeArguments,
+        _factory,
+        create_shared=lambda _config: "stt-resource",
+        cleanup_shared=cleanup,
+    )
+
+    def fail(_config):
+        raise ValueError("construction failed")
+
+    llm_spec = BackendSpec(
+        "second",
+        "llm",
+        FakeArguments,
+        _factory,
+        create_shared=fail,
+    )
+    selections = [
+        BackendSelection(stt_spec, stt_spec.normalize(FakeArguments())),
+        BackendSelection(llm_spec, llm_spec.normalize(FakeArguments())),
+    ]
+
+    with pytest.raises(ValueError, match="construction failed"):
+        SharedBackendResources.create(selections)
+    assert "Failed to clean up shared backend resources" in caplog.text
+
+
+def test_partial_pipeline_construction_preserves_error_when_cleanup_fails(monkeypatch, caplog):
     cleaned = []
+
+    def cleanup(resource):
+        cleaned.append(resource)
+        raise ValueError("cleanup failed")
+
     spec = BackendSpec(
         "shared",
         "stt",
         FakeArguments,
         _factory,
         create_shared=lambda _config: "pipeline-resource",
-        cleanup_shared=cleaned.append,
+        cleanup_shared=cleanup,
     )
     args = parse_arguments([])
     args.stt_backend = BackendSelection(spec, spec.normalize(FakeArguments()))
@@ -240,6 +335,7 @@ def test_partial_pipeline_construction_cleans_shared_resources(monkeypatch):
     with pytest.raises(RuntimeError, match="unit failed"):
         build_pipeline(args, Event())
     assert cleaned == ["pipeline-resource"]
+    assert "Failed to clean up shared backend resources" in caplog.text
 
 
 def test_local_client_construction_failure_cleans_server_resources(monkeypatch):
@@ -274,3 +370,30 @@ def test_thread_manager_runs_all_cleanup_callbacks_once():
     manager.stop()
 
     assert cleaned == ["second", "first"]
+
+
+def test_thread_manager_wait_preserves_join_error_when_cleanup_fails(caplog):
+    class FailingThread:
+        def join(self):
+            raise RuntimeError("join failed")
+
+    def cleanup():
+        raise ValueError("cleanup failed")
+
+    manager = ThreadManager([], cleanup_callbacks=[cleanup])
+    manager.threads = [FailingThread()]  # type: ignore[list-item]
+
+    with pytest.raises(RuntimeError, match="join failed"):
+        manager.wait()
+    assert "Failed to clean up resources after thread wait failed" in caplog.text
+
+
+def test_thread_manager_stop_logs_cleanup_errors(caplog):
+    def cleanup():
+        raise RuntimeError("cleanup failed")
+
+    manager = ThreadManager([], cleanup_callbacks=[cleanup])
+
+    manager.stop()
+
+    assert "Failed to clean up resources while stopping threads" in caplog.text

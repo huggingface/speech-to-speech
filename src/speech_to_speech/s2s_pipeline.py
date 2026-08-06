@@ -34,7 +34,6 @@ from speech_to_speech.backend_registry import (
     HandlerContext,
     SharedBackendResources,
     create_backend_handler,
-    select_backend,
 )
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.queue_types import (
@@ -129,6 +128,11 @@ def parse_arguments(
     *,
     command: Literal["serve", "local"] = "serve",
 ) -> ParsedArguments:
+    module_defaults = ModuleArguments()
+    assert module_defaults.stt is not None
+    assert module_defaults.llm_backend is not None
+    assert module_defaults.tts is not None
+
     pipeline_args = list(sys.argv[1:] if argv is None else argv)
     _is_json = len(pipeline_args) == 1 and pipeline_args[0].endswith(".json")
     pipeline_json: dict[str, Any] | None = None
@@ -136,11 +140,13 @@ def parse_arguments(
         with open(pipeline_args[0]) as _f:
             pipeline_json = json.load(_f)
         _mac_preset_enabled = bool(pipeline_json.get("mac_optimal_settings", False))
-        _llm_name = pipeline_json.get("llm_backend") or ("mlx-lm" if _mac_preset_enabled else "responses-api")
+        _llm_name = pipeline_json.get("llm_backend") or (
+            "mlx-lm" if _mac_preset_enabled else module_defaults.llm_backend
+        )
         if _mac_preset_enabled:
             pipeline_json = {**_mac_preset_defaults(_llm_name), **pipeline_json}
-        _stt_name = pipeline_json.get("stt") or "parakeet-tdt"
-        _tts_name = pipeline_json.get("tts") or "qwen3"
+        _stt_name = pipeline_json.get("stt") or module_defaults.stt
+        _tts_name = pipeline_json.get("tts") or module_defaults.tts
     else:
         _pre = argparse.ArgumentParser(add_help=False)
         _pre.add_argument("--mac-optimal-settings", action="store_true")
@@ -149,9 +155,9 @@ def parse_arguments(
         _pre.add_argument("--tts")
         _pre_args = _pre.parse_known_args(pipeline_args)[0]
         _mac_preset_enabled = _pre_args.mac_optimal_settings
-        _stt_name = _pre_args.stt or "parakeet-tdt"
-        _llm_name = _pre_args.llm_backend or ("mlx-lm" if _mac_preset_enabled else "responses-api")
-        _tts_name = _pre_args.tts or "qwen3"
+        _stt_name = _pre_args.stt or module_defaults.stt
+        _llm_name = _pre_args.llm_backend or ("mlx-lm" if _mac_preset_enabled else module_defaults.llm_backend)
+        _tts_name = _pre_args.tts or module_defaults.tts
 
     selected_specs = []
     for registry, name in (
@@ -217,9 +223,15 @@ def parse_arguments(
         realtime_server_kwargs=realtime_server_kwargs,
         local_audio_kwargs=by_type.get(LocalAudioArguments, LocalAudioArguments()),
         vad_handler_kwargs=by_type[VADHandlerArguments],
-        stt_backend=select_backend(STT_BACKENDS, _stt_name, by_type[selected_specs[0].config_type]),
-        llm_backend=select_backend(LLM_BACKENDS, _llm_name, by_type[selected_specs[1].config_type]),
-        tts_backend=select_backend(TTS_BACKENDS, _tts_name, by_type[selected_specs[2].config_type]),
+        stt_backend=BackendSelection(
+            selected_specs[0], selected_specs[0].normalize(by_type[selected_specs[0].config_type])
+        ),
+        llm_backend=BackendSelection(
+            selected_specs[1], selected_specs[1].normalize(by_type[selected_specs[1].config_type])
+        ),
+        tts_backend=BackendSelection(
+            selected_specs[2], selected_specs[2].normalize(by_type[selected_specs[2].config_type])
+        ),
     )
     return args
 
@@ -294,6 +306,8 @@ def prepare_all_args(args: ParsedArguments) -> None:
         return
     for field_name in ("stt_backend", "llm_backend", "tts_backend"):
         selection = getattr(args, field_name)
+        if "device" not in selection.config:
+            continue
         config = {**selection.config, "device": args.module_kwargs.device}
         setattr(args, field_name, replace(selection, config=config))
 
@@ -532,7 +546,10 @@ def build_pipeline(
             ),
         )
     except BaseException:
-        shared_resources.close()
+        try:
+            shared_resources.close()
+        except BaseException:
+            logger.exception("Failed to clean up shared backend resources after pipeline construction failed")
         raise
 
     handlers: list[Any] = []
@@ -566,7 +583,10 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
             ),
         )
     except BaseException:
-        server_manager.cleanup()
+        try:
+            server_manager.cleanup()
+        except BaseException:
+            logger.exception("Failed to clean up server resources after audio client construction failed")
         raise
     return ThreadManager(
         [*server_manager.handlers, client],

@@ -38,6 +38,12 @@ class ThreadManager:
 
         self._cleanup()
 
+    def _cleanup_safely(self, message: str) -> None:
+        try:
+            self._cleanup()
+        except BaseException:
+            logger.exception(message)
+
     def start(self) -> None:
         for handler in self.handlers:
             thread = threading.Thread(target=handler.run)
@@ -49,8 +55,10 @@ class ThreadManager:
         try:
             for thread in self.threads:
                 thread.join()
-        finally:
-            self._cleanup()
+        except BaseException:
+            self._cleanup_safely("Failed to clean up resources after thread wait failed")
+            raise
+        self._cleanup()
 
     def stop(self) -> None:
         # Signal all handlers to stop
@@ -63,4 +71,4 @@ class ThreadManager:
                 thread.join(timeout=5.0)
                 if thread.is_alive():
                     logger.warning(f"Thread {i} ({thread.name}) did not terminate within timeout")
-        self._cleanup()
+        self._cleanup_safely("Failed to clean up resources while stopping threads")
