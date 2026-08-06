@@ -59,7 +59,7 @@ def _run_installed_cli_help() -> None:
     if "--url" not in talk_help:
         raise RuntimeError("Installed talk help is missing --url")
 
-    removed_flags = ("--mode", "--recv_host", "--send_host", "--ws_host", "--ws_port")
+    removed_flags = ("--recv_host", "--send_host", "--ws_host", "--ws_port")
     unexpected_flags = [
         flag
         for flag in removed_flags
@@ -67,6 +67,32 @@ def _run_installed_cli_help() -> None:
     ]
     if unexpected_flags:
         raise RuntimeError(f"Installed CLI help still exposes removed transport flags: {', '.join(unexpected_flags)}")
+
+    for legacy_mode, command, expected_flag in (
+        ("realtime", "serve", "--host"),
+        ("local", "local", "--local_audio_input_device"),
+    ):
+        legacy_help = subprocess.run(
+            ["speech-to-speech", "--mode", legacy_mode, "--help"],
+            check=True,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if "deprecated and will stop working soon" not in legacy_help.stderr or expected_flag not in legacy_help.stdout:
+            raise RuntimeError(f"Installed CLI does not map deprecated '--mode {legacy_mode}' to '{command}'")
+
+    removed_mode = subprocess.run(
+        ["speech-to-speech", "--mode", "socket"],
+        check=False,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if removed_mode.returncode == 0 or "only 'realtime' and 'local' remain temporarily" not in removed_mode.stderr:
+        raise RuntimeError("Installed CLI does not reject removed modes with migration guidance")
     overlapping_client_flags = ("--host", "--port", "--base-url", "--websocket-base-url")
     unexpected_client_flags = [flag for flag in overlapping_client_flags if _help_exposes_flag(talk_help, flag)]
     if unexpected_client_flags:

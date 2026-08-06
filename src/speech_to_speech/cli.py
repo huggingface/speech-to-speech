@@ -12,6 +12,11 @@ from speech_to_speech.api.openai_realtime.audio_client import (
 
 Command = Literal["serve", "talk", "local"]
 
+_LEGACY_MODE_COMMANDS: dict[str, Command] = {
+    "realtime": "serve",
+    "local": "local",
+}
+
 
 def _command_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -25,6 +30,35 @@ def _command_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _extract_legacy_mode(command_args: list[str], parser: argparse.ArgumentParser) -> tuple[str | None, list[str]]:
+    """Remove one legacy ``--mode`` option without parsing command-owned flags."""
+
+    mode: str | None = None
+    remaining: list[str] = []
+    index = 0
+    while index < len(command_args):
+        argument = command_args[index]
+        if argument == "--mode":
+            if mode is not None:
+                parser.error("--mode may only be specified once")
+            if index + 1 == len(command_args) or command_args[index + 1].startswith("-"):
+                parser.error("--mode requires a value: realtime or local")
+            mode = command_args[index + 1]
+            index += 2
+            continue
+        if argument.startswith("--mode="):
+            if mode is not None:
+                parser.error("--mode may only be specified once")
+            mode = argument.partition("=")[2]
+            if not mode:
+                parser.error("--mode requires a value: realtime or local")
+            index += 1
+            continue
+        remaining.append(argument)
+        index += 1
+    return mode, remaining
+
+
 def parse_command(argv: Sequence[str] | None = None) -> tuple[Command, list[str]]:
     """Split the top-level command from arguments owned by that command."""
 
@@ -35,6 +69,21 @@ def parse_command(argv: Sequence[str] | None = None) -> tuple[Command, list[str]
     if command_args[0] in {"-h", "--help"}:
         parser.print_help()
         raise SystemExit(0)
+    if command_args[0] not in {"serve", "talk", "local"}:
+        legacy_mode, remaining = _extract_legacy_mode(command_args, parser)
+        if legacy_mode is not None:
+            legacy_command = _LEGACY_MODE_COMMANDS.get(legacy_mode)
+            if legacy_command is None:
+                parser.error(
+                    f"--mode {legacy_mode!r} is no longer supported; only 'realtime' and 'local' remain "
+                    "temporarily. Use 'speech-to-speech serve' or 'speech-to-speech local' instead."
+                )
+            print(
+                f"Warning: '--mode {legacy_mode}' is deprecated and will stop working soon; "
+                f"use 'speech-to-speech {legacy_command}' instead.",
+                file=sys.stderr,
+            )
+            return legacy_command, remaining
     command = command_args[0]
     if command not in {"serve", "talk", "local"}:
         parser.error(f"unknown command {command!r}; choose serve, talk, or local")

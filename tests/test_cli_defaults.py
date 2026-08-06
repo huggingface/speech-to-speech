@@ -24,7 +24,7 @@ from speech_to_speech.arguments_classes.responses_api_language_model_arguments i
 )
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
-from speech_to_speech.cli import parse_command, parse_talk_arguments
+from speech_to_speech.cli import main, parse_command, parse_talk_arguments
 from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments, prepare_module_args
 
 
@@ -247,10 +247,48 @@ def test_local_pipeline_arguments_support_smart_turn():
     assert args.vad_handler_kwargs.smart_turn is True
 
 
-@pytest.mark.parametrize("mode", ["realtime", "local", "socket", "raw-websocket", "websocket"])
-def test_cli_rejects_removed_mode_flag(mode):
-    with pytest.raises(SystemExit):
+@pytest.mark.parametrize(
+    ("mode", "command", "command_flag"),
+    [("realtime", "serve", "--host"), ("local", "local", "--local_audio_input_device")],
+)
+def test_cli_maps_legacy_modes_to_commands_with_warning(mode, command, command_flag, capsys):
+    assert parse_command(["--mode", mode, command_flag, "value"]) == (command, [command_flag, "value"])
+
+    assert (
+        capsys.readouterr().err == f"Warning: '--mode {mode}' is deprecated and will stop working soon; "
+        f"use 'speech-to-speech {command}' instead.\n"
+    )
+
+
+def test_cli_accepts_equals_syntax_for_legacy_mode(capsys):
+    assert parse_command(["--mode=realtime", "--port", "9876"]) == ("serve", ["--port", "9876"])
+    assert "use 'speech-to-speech serve' instead" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("mode", "command"), [("realtime", "serve"), ("local", "local")])
+def test_main_dispatches_legacy_modes_to_pipeline_commands(mode, command, monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "--mode", mode, "--port", "9876"])
+    monkeypatch.setattr(
+        "speech_to_speech.s2s_pipeline.run_pipeline_command",
+        lambda selected_command, command_args: calls.append((selected_command, command_args)),
+    )
+
+    main()
+
+    assert calls == [(command, ["--port", "9876"])]
+    assert f"use 'speech-to-speech {command}' instead" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mode", ["socket", "raw-websocket", "websocket"])
+def test_cli_rejects_other_legacy_modes_with_migration_guidance(mode, capsys):
+    with pytest.raises(SystemExit, match="2"):
         parse_command(["--mode", mode])
+
+    error = capsys.readouterr().err
+    assert "only 'realtime' and 'local' remain temporarily" in error
+    assert "speech-to-speech serve" in error
+    assert "speech-to-speech local" in error
 
 
 def test_talk_accepts_one_full_url_connection_option():
