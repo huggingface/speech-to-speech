@@ -4,6 +4,7 @@ import importlib
 import importlib.metadata as metadata
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -15,9 +16,13 @@ def _require_modules(modules: list[str]) -> None:
         raise RuntimeError(f"Missing expected install-time modules: {', '.join(missing)}")
 
 
+def _help_exposes_flag(help_text: str, flag: str) -> bool:
+    return re.search(rf"(?<!\S){re.escape(flag)}(?=[\s,=]|$)", help_text) is not None
+
+
 def _run_installed_cli_help() -> None:
     env = {**os.environ, "OPENAI_API_KEY": ""}
-    result = subprocess.run(
+    root_help = subprocess.run(
         ["speech-to-speech", "--help"],
         check=True,
         env=env,
@@ -25,10 +30,75 @@ def _run_installed_cli_help() -> None:
         stderr=subprocess.STDOUT,
         text=True,
     )
-    expected_flags = ("--mode", "--stt", "--llm_backend", "--tts")
-    missing_flags = [flag for flag in expected_flags if flag not in result.stdout]
+    expected_commands = ("serve", "talk", "local")
+    missing_commands = [command for command in expected_commands if command not in root_help.stdout]
+    if missing_commands:
+        raise RuntimeError(f"Installed CLI help is missing expected commands: {', '.join(missing_commands)}")
+
+    serve_help = subprocess.run(
+        ["speech-to-speech", "serve", "--help"],
+        check=True,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    ).stdout
+    expected_server_flags = ("--host", "--port", "--stt", "--llm_backend", "--tts")
+    missing_flags = [flag for flag in expected_server_flags if flag not in serve_help]
     if missing_flags:
-        raise RuntimeError(f"Installed CLI help is missing expected flags: {', '.join(missing_flags)}")
+        raise RuntimeError(f"Installed serve help is missing expected flags: {', '.join(missing_flags)}")
+
+    talk_help = subprocess.run(
+        ["speech-to-speech", "talk", "--help"],
+        check=True,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    ).stdout
+    if "--url" not in talk_help:
+        raise RuntimeError("Installed talk help is missing --url")
+
+    removed_flags = ("--recv_host", "--send_host", "--ws_host", "--ws_port")
+    unexpected_flags = [
+        flag
+        for flag in removed_flags
+        if _help_exposes_flag(root_help.stdout, flag) or _help_exposes_flag(serve_help, flag)
+    ]
+    if unexpected_flags:
+        raise RuntimeError(f"Installed CLI help still exposes removed transport flags: {', '.join(unexpected_flags)}")
+
+    for legacy_mode, command, expected_flag in (
+        ("realtime", "serve", "--host"),
+        ("local", "local", "--local_audio_input_device"),
+    ):
+        legacy_help = subprocess.run(
+            ["speech-to-speech", "--mode", legacy_mode, "--help"],
+            check=True,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if "deprecated and will stop working soon" not in legacy_help.stderr or expected_flag not in legacy_help.stdout:
+            raise RuntimeError(f"Installed CLI does not map deprecated '--mode {legacy_mode}' to '{command}'")
+
+    removed_mode = subprocess.run(
+        ["speech-to-speech", "--mode", "socket"],
+        check=False,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if removed_mode.returncode == 0 or "only 'realtime' and 'local' remain temporarily" not in removed_mode.stderr:
+        raise RuntimeError("Installed CLI does not reject removed modes with migration guidance")
+    overlapping_client_flags = ("--host", "--port", "--base-url", "--websocket-base-url")
+    unexpected_client_flags = [flag for flag in overlapping_client_flags if _help_exposes_flag(talk_help, flag)]
+    if unexpected_client_flags:
+        raise RuntimeError(
+            f"Installed talk help exposes overlapping connection flags: {', '.join(unexpected_client_flags)}"
+        )
 
 
 def _validate_package_defaults() -> None:
@@ -45,7 +115,6 @@ def _validate_package_defaults() -> None:
     qwen3_args = Qwen3TTSHandlerArguments()
     vad_args = VADHandlerArguments()
 
-    assert module_args.mode == "realtime"
     assert module_args.stt == "parakeet-tdt"
     assert module_args.llm_backend == "responses-api"
     assert module_args.tts == "qwen3"
@@ -72,6 +141,7 @@ def _validate_package_defaults() -> None:
     assert vad_args.min_speech_ms == 384
     assert vad_args.min_speech_continuation_ms == 192
     assert vad_args.realtime_processing_pause == 0.5
+    assert vad_args.smart_turn is True
 
     package_root = Path(speech_to_speech.__file__).resolve().parent
     ref_audio = package_root / "TTS" / "ref_audio.wav"
@@ -94,23 +164,12 @@ def _validate_empty_qwen_ref_audio_arg() -> None:
     assert qwen3_args.qwen3_tts_speaker == "Aiden"
 
 
-def _validate_pipeline_startup_primitives() -> None:
-    from speech_to_speech.s2s_pipeline import initialize_queues_and_events
+def _validate_realtime_engine_imports() -> None:
+    from speech_to_speech.api.openai_realtime.audio_client import RealtimeAudioClient
+    from speech_to_speech.api.openai_realtime.server import RealtimeServer
 
-    queues_and_events = initialize_queues_and_events()
-    expected_keys = {
-        "recv_audio_chunks_queue",
-        "send_audio_chunks_queue",
-        "spoken_prompt_queue",
-        "stt_output_queue",
-        "text_prompt_queue",
-        "lm_response_queue",
-        "lm_processed_queue",
-        "text_output_queue",
-    }
-    missing_keys = expected_keys.difference(queues_and_events)
-    if missing_keys:
-        raise RuntimeError(f"Pipeline startup primitives are missing: {', '.join(sorted(missing_keys))}")
+    assert RealtimeAudioClient is not None
+    assert RealtimeServer is not None
 
 
 def _validate_default_handler_imports() -> None:
@@ -156,7 +215,9 @@ def _validate_darwin_dependency_pins() -> None:
 def main() -> None:
     required_modules = [
         "fastapi",
+        "huggingface_hub",
         "lingua",
+        "onnxruntime",
         "openai",
         "PIL",
         "scipy",
@@ -178,7 +239,7 @@ def main() -> None:
     _run_installed_cli_help()
     _validate_package_defaults()
     _validate_empty_qwen_ref_audio_arg()
-    _validate_pipeline_startup_primitives()
+    _validate_realtime_engine_imports()
     _validate_default_handler_imports()
     _validate_realtime_websocket_support()
     print("speech-to-speech installed package smoke test passed")

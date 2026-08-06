@@ -20,7 +20,7 @@ Deprecated TTS implementations, including MeloTTS, live in [`../../../archive/TT
 Primary args prefix: `--chat_tts_*`
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech serve \
   --tts chatTTS \
   --chat_tts_device cuda \
   --chat_tts_stream true \
@@ -32,7 +32,7 @@ python s2s_pipeline.py \
 Primary args prefix: `--facebook_mms_*` plus `--tts_language`
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech serve \
   --tts facebookMMS \
   --facebook_mms_device cuda \
   --tts_language en
@@ -45,7 +45,7 @@ This handler maps STT language codes (e.g. `en`, `fr`, `es`) to MMS model suffix
 Primary args prefix: `--pocket_tts_*`
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech serve \
   --tts pocket \
   --pocket_tts_voice jean \
   --pocket_tts_device cpu \
@@ -60,7 +60,7 @@ Available preset voices include:
 Primary args prefix: `--kokoro_*`
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech serve \
   --tts kokoro \
   --kokoro_device auto \
   --kokoro_voice bm_fable \
@@ -77,7 +77,7 @@ Behavior:
 Primary args prefix: `--qwen3_tts_*`
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech serve \
   --tts qwen3 \
   --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
   --qwen3_tts_device cuda \
@@ -113,7 +113,7 @@ Available wheelhouse directories include `cu124`, `cu128`, `cu130`, and `cpu`.
 Select a quantized GGUF from the public model resolver:
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech serve \
   --tts qwen3 \
   --qwen3_tts_backend ggml \
   --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
@@ -124,7 +124,7 @@ python s2s_pipeline.py \
 Load local GGUF files by providing both the talker and codec paths. Keep the model name aligned with the local talker's model type so the handler selects the correct generation mode:
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech serve \
   --tts qwen3 \
   --qwen3_tts_backend ggml \
   --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign \
@@ -136,7 +136,7 @@ python s2s_pipeline.py \
 For GGML voice cloning, a raw reference is cached on its first use:
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech serve \
   --tts qwen3 \
   --qwen3_tts_backend ggml \
   --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-Base \
@@ -148,7 +148,7 @@ python s2s_pipeline.py \
 Automatic cache entries use the same SHA-256 cache key for their `.spk`, `.rvq`, and `.json` filenames. Inspect the cache directory for the matching key and replace `CACHE_KEY` below with that filename stem. You can then pass its `.spk` by itself for speaker-only conditioning, or pair it with the corresponding `.rvq` codes and transcript for ICL conditioning:
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech serve \
   --tts qwen3 \
   --qwen3_tts_backend ggml \
   --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-Base \
@@ -162,7 +162,7 @@ Raw `--qwen3_tts_ref_audio` and cached `--qwen3_tts_ref_spk`/`--qwen3_tts_ref_rv
 Example for Apple Silicon using the default 6-bit MLX variant:
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech serve \
   --tts qwen3 \
   --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
   --qwen3_tts_speaker Aiden
@@ -171,7 +171,7 @@ python s2s_pipeline.py \
 You can override the default and select `bf16`, `4bit`, or `8bit` explicitly:
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech serve \
   --tts qwen3 \
   --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
   --qwen3_tts_mlx_quantization 4bit \
@@ -204,7 +204,7 @@ for server commands and all relevant flags.
 ### Low-latency GPU setup
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech serve \
   --stt whisper \
   --tts pocket
 ```
@@ -212,8 +212,8 @@ python s2s_pipeline.py \
 ### Apple Silicon setup
 
 ```bash
-python s2s_pipeline.py \
-  --local_mac_optimal_settings
+speech-to-speech local \
+  --mac-optimal-settings
 ```
 
 `--tts pocket` and `--tts kokoro` are also valid options on macOS.

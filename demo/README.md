@@ -8,6 +8,7 @@ app_port: 7860
 pinned: false
 short_description: Voice chat over WebSocket against a HF speech-to-speech
 hf_oauth: true
+hf_oauth_expiration_minutes: 10080
 ---
 
 # Realtime Voice Demo
@@ -20,13 +21,12 @@ backend, speaking the OpenAI Realtime **GA** protocol over **WebSocket**
 
 ## Quick start (local)
 
-1. **Start the speech-to-speech backend** in realtime mode (from the repo root;
+1. **Start the speech-to-speech backend** (from the repo root;
    see the [backend README](https://github.com/huggingface/speech-to-speech/blob/main/src/speech_to_speech/api/openai_realtime/README.md)
    for more model combinations):
 
    ```bash
-   uv run speech-to-speech \
-     --mode realtime \
+   uv run speech-to-speech serve \
      --stt parakeet-tdt \
      --llm_backend transformers \
      --tts kokoro \
@@ -37,7 +37,7 @@ backend, speaking the OpenAI Realtime **GA** protocol over **WebSocket**
    ```
 
    The realtime server listens on `ws://localhost:8765/v1/realtime` by default
-   (`--ws_host` / `--ws_port` to change).
+   (`--host` / `--port` to change).
 
 2. **Start this app**, pointing it at the backend with `SPEECH_TO_SPEECH_URL`:
 

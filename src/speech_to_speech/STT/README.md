@@ -126,20 +126,20 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 ### Whisper (Transformers)
 
 ```bash
-python s2s_pipeline.py --stt whisper --language en
-python s2s_pipeline.py --stt whisper --language auto
+speech-to-speech serve --stt whisper --language en
+speech-to-speech serve --stt whisper --language auto
 ```
 
 ### Whisper MLX (LightningWhisperMLX)
 
 ```bash
-python s2s_pipeline.py --stt whisper-mlx --language auto --device mps
+speech-to-speech serve --stt whisper-mlx --language auto --device mps
 ```
 
 ### MLX Audio Whisper
 
 ```bash
-python s2s_pipeline.py --stt mlx-audio-whisper \
+speech-to-speech serve --stt mlx-audio-whisper \
   --mlx_audio_whisper_model_name mlx-community/whisper-large-v3-turbo \
   --language auto
 ```
@@ -147,7 +147,7 @@ python s2s_pipeline.py --stt mlx-audio-whisper \
 ### Faster-Whisper
 
 ```bash
-python s2s_pipeline.py --stt faster-whisper \
+speech-to-speech serve --stt faster-whisper \
   --faster_whisper_stt_model_name large-v3 \
   --faster_whisper_stt_gen_language en
 ```
@@ -155,14 +155,14 @@ python s2s_pipeline.py --stt faster-whisper \
 ### Parakeet TDT
 
 ```bash
-python s2s_pipeline.py --stt parakeet-tdt --parakeet_tdt_device auto
-python s2s_pipeline.py --stt parakeet-tdt --parakeet_tdt_language de
+speech-to-speech serve --stt parakeet-tdt --parakeet_tdt_device auto
+speech-to-speech serve --stt parakeet-tdt --parakeet_tdt_language de
 ```
 
 With live transcription (MLX or CUDA/nano-parakeet backend):
 
 ```bash
-python s2s_pipeline.py --stt parakeet-tdt \
+speech-to-speech serve --stt parakeet-tdt \
   --enable_live_transcription \
   --live_transcription_update_interval 0.25
 ```
@@ -170,5 +170,5 @@ python s2s_pipeline.py --stt parakeet-tdt \
 ### Paraformer
 
 ```bash
-python s2s_pipeline.py --stt paraformer --paraformer_stt_model_name paraformer-zh
+speech-to-speech serve --stt paraformer --paraformer_stt_model_name paraformer-zh
 ```

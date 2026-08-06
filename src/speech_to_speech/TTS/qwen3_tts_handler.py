@@ -50,9 +50,14 @@ MLX_STREAMING_TOKENS_PER_SECOND = 12.5
 PIPELINE_SR = 16000
 ESTIMATED_QWEN3_WORDS_PER_SECOND = 2.6
 ESTIMATED_QWEN3_CHARS_PER_SECOND = 14.0
+ESTIMATED_QWEN3_CJK_CHARS_PER_SECOND = 5.5
 QWEN3_TOKEN_SAFETY_MARGIN = 1.35
 QWEN3_BASE_PROMPT_SECONDS = 1.0
 QWEN3_PUNCTUATION_PAUSE_SECONDS = 0.5
+CJK_CHARACTER_PATTERN = re.compile(
+    r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff"
+    r"\U00020000-\U0002fa1f]"
+)
 QWEN3_LANGUAGE_ALIASES = {
     "zh": "chinese",
     "zh-cn": "chinese",
@@ -610,11 +615,15 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         word_count = len(re.findall(r"\w+", text, flags=re.UNICODE))
         char_count = len(re.sub(r"\s+", "", text))
+        cjk_char_count = len(CJK_CHARACTER_PATTERN.findall(text))
         word_seconds = word_count / ESTIMATED_QWEN3_WORDS_PER_SECOND if word_count else 0.0
         char_seconds = char_count / ESTIMATED_QWEN3_CHARS_PER_SECOND if char_count else 0.0
+        cjk_seconds = cjk_char_count / ESTIMATED_QWEN3_CJK_CHARS_PER_SECOND if cjk_char_count else 0.0
         punctuation_count = sum(unicodedata.category(ch).startswith("P") for ch in text)
         punctuation_seconds = punctuation_count * QWEN3_PUNCTUATION_PAUSE_SECONDS
-        estimated_seconds = max(word_seconds, char_seconds) + punctuation_seconds + QWEN3_BASE_PROMPT_SECONDS
+        estimated_seconds = (
+            max(word_seconds, char_seconds, cjk_seconds) + punctuation_seconds + QWEN3_BASE_PROMPT_SECONDS
+        )
         estimated_tokens = math.ceil(estimated_seconds * MLX_STREAMING_TOKENS_PER_SECOND * QWEN3_TOKEN_SAFETY_MARGIN)
         aligned_tokens = max(
             chunk_size,
@@ -633,10 +642,11 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             )
 
         logger.debug(
-            "Qwen3-TTS using max_new_tokens=%d for utterance with %d words and %d chars",
+            "Qwen3-TTS using max_new_tokens=%d for utterance with %d words, %d chars, and %d CJK chars",
             resolved_tokens,
             word_count,
             char_count,
+            cjk_char_count,
         )
         return resolved_tokens
 
