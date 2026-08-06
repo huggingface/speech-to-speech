@@ -91,6 +91,15 @@ class ResponseHandler(RealtimeBaseHandler):
     def _current_item_id(self, conn_id: str) -> str:
         return self._state(conn_id).current_item_id or self._start_item(conn_id)
 
+    def _ensure_assistant_output_item(self, conn_id: str, item_id: str) -> tuple[str, int]:
+        """Reserve the assistant's stable response-wide item ID and index."""
+        st = self._state(conn_id)
+        if st.pending_assistant_item_id is None:
+            st.pending_assistant_item_id = item_id
+            st.pending_assistant_output_index = len(st.pending_function_calls)
+        assert st.pending_assistant_output_index is not None
+        return st.pending_assistant_item_id, st.pending_assistant_output_index
+
     def _next_content_index(self, conn_id: str) -> int:
         """Return the current content index and advance it."""
         st = self._state(conn_id)
@@ -340,13 +349,7 @@ class ResponseHandler(RealtimeBaseHandler):
         events: list[ServerEvent] = []
         resp_id, item_id = self._ensure_response(conn_id)
         if event.text:
-            if st.pending_assistant_item_id is None:
-                st.pending_assistant_item_id = item_id
-                st.pending_assistant_output_index = len(st.pending_function_calls)
-            assistant_item_id = st.pending_assistant_item_id
-            assistant_output_index = st.pending_assistant_output_index
-            assert assistant_item_id is not None
-            assert assistant_output_index is not None
+            assistant_item_id, assistant_output_index = self._ensure_assistant_output_item(conn_id, item_id)
             st.last_item_id = assistant_item_id
             if response_wants_audio(st.current_response_params):
                 # Accumulated (not just streamed) so response.done's output can

@@ -210,10 +210,10 @@ class AudioHandler(RealtimeBaseHandler):
                 client_out_rate = PIPELINE_SAMPLE_RATE
         audio = resample(audio, PIPELINE_SAMPLE_RATE, client_out_rate)
         b64 = base64.b64encode(audio).decode("ascii")
-        assistant_item_id = st.pending_assistant_item_id or item_id
-        assistant_output_index = (
-            st.pending_assistant_output_index if st.pending_assistant_output_index is not None else 0
-        )
+        # The router may dequeue a function call, then audio, then the queued
+        # assistant text. Reserve the assistant's response-wide slot now so
+        # that every later transcript and terminal event reuses this identity.
+        assistant_item_id, assistant_output_index = response._ensure_assistant_output_item(conn_id, item_id)
         events.append(
             ResponseAudioDeltaEvent(
                 type="response.output_audio.delta",

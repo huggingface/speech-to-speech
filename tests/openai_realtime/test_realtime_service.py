@@ -1052,6 +1052,44 @@ class TestResponseDoneOutputItems:
         assert done.response.output[audio_delta.output_index].id == audio_delta.item_id
         assert done.response.output[tool_event.output_index].id == tool_event.item_id
 
+    def test_audio_reserves_assistant_index_before_queued_text(self, service, conn_id):
+        tool_event = next(
+            e
+            for e in service.dispatch_pipeline_event(
+                conn_id,
+                AssistantTextEvent(
+                    text="",
+                    tools=[
+                        {
+                            "type": "function_call",
+                            "id": "fc_1",
+                            "call_id": "call_1",
+                            "name": "first",
+                            "arguments": "{}",
+                        }
+                    ],
+                ),
+            )
+            if isinstance(e, ResponseFunctionCallArgumentsDoneEvent)
+        )
+        audio_delta = next(
+            e for e in service.encode_audio_chunk(conn_id, _pcm_bytes(256)) if isinstance(e, ResponseAudioDeltaEvent)
+        )
+        text_event = next(
+            e
+            for e in service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="After the call."))
+            if isinstance(e, ResponseAudioTranscriptDoneEvent)
+        )
+        terminal_events = service.finish_response(conn_id)
+        audio_done = next(e for e in terminal_events if isinstance(e, ResponseAudioDoneEvent))
+        done = next(e for e in terminal_events if isinstance(e, ResponseDoneEvent))
+
+        assert tool_event.output_index == 0
+        assert audio_delta.output_index == text_event.output_index == audio_done.output_index == 1
+        assert audio_delta.item_id == text_event.item_id == audio_done.item_id
+        assert done.response.output[audio_delta.output_index].id == audio_delta.item_id
+        assert done.response.output[tool_event.output_index].id == tool_event.item_id
+
     def test_assistant_id_survives_non_interrupting_user_speech(self, service, conn_id):
         transcript_event = next(
             e
