@@ -396,9 +396,9 @@ def test_prepare_module_args_rejects_responses_api_for_stt_none():
 
     with pytest.raises(
         ValueError,
-        match="--stt none requires --llm_backend chat-completions",
+        match="--stt none requires an audio-input LLM backend.*chat-completions",
     ):
-        prepare_module_args(args.module_kwargs)
+        prepare_module_args(args.module_kwargs, args.llm_backend)
 
 
 def test_parse_arguments_stt_none_supports_chat_completions_audio_path():
@@ -421,7 +421,7 @@ def test_parse_arguments_stt_none_supports_chat_completions_audio_path():
     finally:
         sys.argv = original_argv
 
-    prepare_module_args(args.module_kwargs)
+    prepare_module_args(args.module_kwargs, args.llm_backend)
 
     assert args.module_kwargs.stt == "none"
     assert args.module_kwargs.llm_backend == "chat-completions"

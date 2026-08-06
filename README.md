@@ -495,8 +495,8 @@ Language coverage depends on the STT and TTS backends you pick, not on the pipel
 
 Make sure the STT, LLM, and TTS you pair all cover your target language(s). Two usage patterns:
 
-- **Single language**: set `--language` to the target language code. The default is `en`.
-- **Language switching**: set `--language auto`. The STT detects the language of each spoken prompt and forwards it to the LLM. Optionally add `--enable_lang_prompt` to append a "Please reply to my message in ..." instruction. It defaults to `False`; large LLMs usually infer the language from context, but the explicit instruction can help smaller models.
+- **Single language**: with Parakeet TDT or a Whisper-family backend, set `--language` to the target language code. The default is `en` for Whisper-family backends; Parakeet auto-detects when the flag is omitted.
+- **Language switching**: with Parakeet TDT or a Whisper-family backend, set `--language auto`. The STT detects the language of each spoken prompt and forwards it to the LLM. Optionally add `--enable_lang_prompt` to append a "Please reply to my message in ..." instruction. It defaults to `False`; large LLMs usually infer the language from context, but the explicit instruction can help smaller models.
 
 Automatic language detection:
 

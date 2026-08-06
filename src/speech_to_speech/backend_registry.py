@@ -53,6 +53,8 @@ class BackendCapabilities:
     """Construction details that affect stage composition, not backend selection."""
 
     needs_transcription_notifier: bool = False
+    supports_audio_input: bool = False
+    supports_llm_proxy: bool = False
 
 
 @dataclass(frozen=True)
@@ -379,6 +381,7 @@ LLM_BACKENDS = build_backend_registry(
                 context_kwargs=True,
             ),
             config_prefix="responses_api",
+            capabilities=BackendCapabilities(supports_llm_proxy=True),
         ),
         BackendSpec(
             "chat-completions",
@@ -390,6 +393,7 @@ LLM_BACKENDS = build_backend_registry(
                 context_kwargs=True,
             ),
             config_prefix="responses_api",
+            capabilities=BackendCapabilities(supports_audio_input=True, supports_llm_proxy=True),
         ),
     ],
 )

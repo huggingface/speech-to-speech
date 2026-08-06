@@ -111,8 +111,12 @@ def build_llm_proxy_config(
     """Build proxy settings from the selected LLM's normalized configuration."""
     from speech_to_speech.api.openai_realtime.llm_proxy import LLMProxyConfig
 
-    if llm_backend.name not in {"responses-api", "chat-completions"}:
-        raise ValueError(f"The LLM proxy requires a remote backend, got {llm_backend.name!r}.")
+    if not llm_backend.spec.capabilities.supports_llm_proxy:
+        supported = ", ".join(name for name, spec in LLM_BACKENDS.items() if spec.capabilities.supports_llm_proxy)
+        raise ValueError(
+            f"The LLM proxy requires a backend with proxy support; choose one of: {supported}. "
+            f"Got {llm_backend.name!r}."
+        )
     config = llm_backend.config
     return LLMProxyConfig(
         enabled=module_kwargs.enable_llm_proxy,
@@ -312,37 +316,20 @@ def check_mac_settings(module_kwargs: ModuleArguments) -> None:
             )
 
 
-def overwrite_device_argument(common_device: Optional[str], *handler_kwargs: Any) -> None:
-    if common_device:
-        for kwargs in handler_kwargs:
-            if hasattr(kwargs, "llm_device"):
-                kwargs.llm_device = common_device
-            if hasattr(kwargs, "tts_device"):
-                kwargs.tts_device = common_device
-            if hasattr(kwargs, "stt_device"):
-                kwargs.stt_device = common_device
-            if hasattr(kwargs, "paraformer_stt_device"):
-                kwargs.paraformer_stt_device = common_device
-            if hasattr(kwargs, "facebook_mms_device"):
-                kwargs.facebook_mms_device = common_device
-            if hasattr(kwargs, "qwen3_tts_device"):
-                kwargs.qwen3_tts_device = common_device
-
-
-def prepare_module_args(module_kwargs: ModuleArguments, *handler_kwargs: Any) -> None:
+def prepare_module_args(module_kwargs: ModuleArguments, llm_backend: BackendSelection) -> None:
     if module_kwargs.tts is None:
         module_kwargs.tts = "qwen3"
-    if module_kwargs.stt == "none" and module_kwargs.llm_backend != "chat-completions":
-        raise ValueError("--stt none requires --llm_backend chat-completions for audio-input LLM requests.")
+    if module_kwargs.stt == "none" and not llm_backend.spec.capabilities.supports_audio_input:
+        supported = ", ".join(name for name, spec in LLM_BACKENDS.items() if spec.capabilities.supports_audio_input)
+        raise ValueError(f"--stt none requires an audio-input LLM backend; choose one of: {supported}.")
     if platform == "darwin":
         check_mac_settings(module_kwargs)
-    overwrite_device_argument(module_kwargs.device, *handler_kwargs)
 
 
 def prepare_all_args(args: ParsedArguments) -> None:
     """Validate selectors and apply the global device to selected configs only."""
 
-    prepare_module_args(args.module_kwargs)
+    prepare_module_args(args.module_kwargs, args.llm_backend)
     if args.module_kwargs.device is None:
         return
     for field_name in ("stt_backend", "llm_backend", "tts_backend"):

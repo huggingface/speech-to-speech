@@ -12,6 +12,7 @@ from speech_to_speech.backend_registry import (
     LLM_BACKENDS,
     STT_BACKENDS,
     TTS_BACKENDS,
+    BackendCapabilities,
     BackendSelection,
     BackendSpec,
     HandlerContext,
@@ -22,7 +23,14 @@ from speech_to_speech.backend_registry import (
 )
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.s2s_pipeline import build_local_pipeline, build_pipeline, parse_arguments, prepare_all_args
+from speech_to_speech.s2s_pipeline import (
+    build_llm_proxy_config,
+    build_local_pipeline,
+    build_pipeline,
+    parse_arguments,
+    prepare_all_args,
+    prepare_module_args,
+)
 from speech_to_speech.utils.thread_manager import ThreadManager
 
 
@@ -60,6 +68,10 @@ def test_builtin_registry_lookup_and_cli_choices_share_one_catalog():
     assert STT_BACKENDS["parakeet-tdt"].kind == "stt"
     assert LLM_BACKENDS["responses-api"].kind == "llm"
     assert TTS_BACKENDS["qwen3"].kind == "tts"
+    assert LLM_BACKENDS["responses-api"].capabilities.supports_llm_proxy
+    assert LLM_BACKENDS["chat-completions"].capabilities.supports_llm_proxy
+    assert LLM_BACKENDS["chat-completions"].capabilities.supports_audio_input
+    assert not LLM_BACKENDS["transformers"].capabilities.supports_audio_input
 
 
 def test_registry_rejects_duplicate_names_and_wrong_kinds():
@@ -69,6 +81,27 @@ def test_registry_rejects_duplicate_names_and_wrong_kinds():
         build_backend_registry("stt", [spec, spec])
     with pytest.raises(ValueError, match="expected 'llm'"):
         build_backend_registry("llm", [spec])
+
+
+def test_audio_input_validation_uses_registry_capability_not_backend_name():
+    spec = BackendSpec(
+        "future-audio-backend",
+        "llm",
+        FakeArguments,
+        _factory,
+        capabilities=BackendCapabilities(supports_audio_input=True),
+    )
+    selection = BackendSelection(spec, spec.normalize(FakeArguments()))
+    module_args = ModuleArguments(stt="none", llm_backend=selection.name)
+
+    prepare_module_args(module_args, selection)
+
+
+def test_llm_proxy_validation_uses_registry_capability():
+    args = parse_arguments(["--llm_backend", "transformers"])
+
+    with pytest.raises(ValueError, match="proxy support.*responses-api.*chat-completions"):
+        build_llm_proxy_config(args.module_kwargs, args.llm_backend)
 
 
 def test_test_backend_only_needs_config_factory_and_registry_entry():
@@ -142,9 +175,10 @@ def test_parser_warning_ignores_known_options_for_inactive_backends(caplog):
 
     assert args.stt_backend.name == "parakeet-tdt"
     assert args.tts_backend.name == "qwen3"
+    assert args.stt_backend.config["language"] == "auto"
     assert "mlx_audio_whisper_model_name" not in args.stt_backend.config
     assert "pocket_tts_voice" not in args.tts_backend.config
-    assert "--language" in caplog.text
+    assert "--language" not in caplog.text
     assert "--mlx_audio_whisper_model_name" in caplog.text
     assert "--pocket_tts_voice" in caplog.text
     assert "unused/whisper" not in caplog.text
@@ -153,6 +187,19 @@ def test_parser_warning_ignores_known_options_for_inactive_backends(caplog):
 def test_parser_still_rejects_unknown_options():
     with pytest.raises(ValueError, match="--unknown_backend_option"):
         parse_arguments(["--unknown_backend_option", "value"])
+
+
+@pytest.mark.parametrize(
+    "backend_name",
+    ["whisper", "whisper-mlx", "mlx-audio-whisper", "faster-whisper", "parakeet-tdt"],
+)
+def test_common_language_flag_reaches_supported_stt_backends(backend_name, caplog):
+    args = parse_arguments(["--stt", backend_name, "--language", "de"])
+
+    config = args.stt_backend.config
+    language = config["language"] if "language" in config else config["gen_kwargs"]["language"]
+    assert language == "de"
+    assert "Ignoring options for inactive backends" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -436,17 +483,29 @@ def test_thread_manager_cleans_up_after_partial_start_failure(monkeypatch):
 
 def test_thread_manager_wait_preserves_join_error_when_cleanup_fails(caplog):
     class FailingThread:
-        def join(self):
-            raise RuntimeError("join failed")
+        name = "failing-thread"
+
+        def join(self, timeout=None):
+            if timeout is None:
+                raise RuntimeError("join failed")
+
+        def is_alive(self):
+            return True
+
+    class Handler:
+        def __init__(self):
+            self.stop_event = Event()
 
     def cleanup():
         raise ValueError("cleanup failed")
 
-    manager = ThreadManager([], cleanup_callbacks=[cleanup])
+    handler = Handler()
+    manager = ThreadManager([handler], cleanup_callbacks=[cleanup])
     manager.threads = [FailingThread()]  # type: ignore[list-item]
 
     with pytest.raises(RuntimeError, match="join failed"):
         manager.wait()
+    assert handler.stop_event.is_set()
     assert "Failed to clean up resources after thread wait failed" in caplog.text
 
 

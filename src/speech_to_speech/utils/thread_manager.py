@@ -61,6 +61,7 @@ class ThreadManager:
             for thread in self.threads:
                 thread.join()
         except BaseException:
+            self._stop_handlers_and_join()
             self._cleanup_safely("Failed to clean up resources after thread wait failed")
             raise
         self._cleanup()

@@ -3,6 +3,11 @@ from typing import Optional
 
 from speech_to_speech.backend_registry import LLM_BACKENDS, STT_BACKENDS, TTS_BACKENDS
 
+_AUDIO_INPUT_LLM_BACKENDS = ", ".join(
+    name for name, spec in LLM_BACKENDS.items() if spec.capabilities.supports_audio_input
+)
+_PROXY_LLM_BACKENDS = ", ".join(name for name, spec in LLM_BACKENDS.items() if spec.capabilities.supports_llm_proxy)
+
 
 @dataclass
 class ModuleArguments:
@@ -23,25 +28,22 @@ class ModuleArguments:
         metadata={
             "choices": tuple(STT_BACKENDS),
             "help": "The STT to use. Use 'none' to send VAD audio directly to an audio-input LLM. "
-            "This requires --llm_backend chat-completions and an explicitly selected audio-capable "
-            "API model with --model_name. "
-            "Otherwise choose 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', "
-            "'parakeet-tdt', or 'paraformer'. Default is 'parakeet-tdt'.",
+            f"Audio-input LLM backends: {_AUDIO_INPUT_LLM_BACKENDS}. Select an explicitly audio-capable "
+            "model with --model_name. Default is 'parakeet-tdt'.",
         },
     )
     llm_backend: Optional[str] = field(
         default="responses-api",
         metadata={
             "choices": tuple(LLM_BACKENDS),
-            "help": "The LLM backend to use. Either 'transformers', 'mlx-lm', 'responses-api', or "
-            "'chat-completions' (OpenAI-compatible /v1/chat/completions). Default is 'responses-api'.",
+            "help": "The LLM backend to use. Default is 'responses-api'.",
         },
     )
     tts: Optional[str] = field(
         default="qwen3",
         metadata={
             "choices": tuple(TTS_BACKENDS),
-            "help": "The TTS to use. Either 'chatTTS', 'facebookMMS', 'pocket', 'kokoro', or 'qwen3'. Default is 'qwen3'.",
+            "help": "The TTS backend to use. Default is 'qwen3'.",
         },
     )
     log_level: str = field(
@@ -67,7 +69,7 @@ class ModuleArguments:
     enable_llm_proxy: bool = field(
         default=False,
         metadata={
-            "help": "Expose the configured remote LLM (--llm_backend chat-completions or responses-api) as an "
+            "help": f"Expose a proxy-capable LLM backend ({_PROXY_LLM_BACKENDS}) as an "
             "OpenAI-compatible HTTP endpoint on the realtime server. The server performs no authentication of "
             "its own: enable it only on a trusted network or behind a gateway that owns access control. Off by "
             "default."
