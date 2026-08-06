@@ -6,16 +6,25 @@ from typing import TYPE_CHECKING
 
 from openai.types.realtime import (
     InputAudioBufferAppendEvent,
-    InputAudioBufferSpeechStartedEvent,
     InputAudioBufferSpeechStoppedEvent,
     RealtimeErrorEvent,
     ResponseAudioDeltaEvent,
     ResponseCreatedEvent,
 )
 
+from speech_to_speech.api.openai_realtime.extension_events import (
+    ExtendedInputAudioBufferSpeechStartedEvent,
+    InputAudioBufferSpeechCandidateRejectedEvent,
+    InputAudioBufferSpeechCandidateStartedEvent,
+)
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
 from speech_to_speech.api.openai_realtime.utils import resample
-from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
+from speech_to_speech.pipeline.events import (
+    SpeechCandidateRejectedEvent,
+    SpeechCandidateStartedEvent,
+    SpeechStartedEvent,
+    SpeechStoppedEvent,
+)
 
 if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import ServerEvent
@@ -105,12 +114,51 @@ class AudioHandler(RealtimeBaseHandler):
 
     # ── Pipeline event handlers ────────────────────
 
+    def on_speech_candidate_started(
+        self,
+        conn_id: str,
+        event: SpeechCandidateStartedEvent,
+    ) -> list[ServerEvent]:
+        """Expose reversible playback ducking without touching turn state."""
+        st = self._state(conn_id)
+        interrupt_response = event.interrupt_response and st.runtime_config.interrupt_response_enabled
+        if not interrupt_response or st.speech_candidate_id == event.candidate_id:
+            return []
+        st.speech_candidate_id = event.candidate_id
+        return [
+            InputAudioBufferSpeechCandidateStartedEvent(
+                event_id=self._next_event_id(),
+                candidate_id=event.candidate_id,
+                audio_start_ms=event.audio_start_ms,
+                interrupt_response=True,
+            )
+        ]
+
+    def on_speech_candidate_rejected(
+        self,
+        conn_id: str,
+        event: SpeechCandidateRejectedEvent,
+    ) -> list[ServerEvent]:
+        """Release only the matching candidate so stale rejects are harmless."""
+        st = self._state(conn_id)
+        if st.speech_candidate_id != event.candidate_id:
+            return []
+        st.speech_candidate_id = None
+        return [
+            InputAudioBufferSpeechCandidateRejectedEvent(
+                event_id=self._next_event_id(),
+                candidate_id=event.candidate_id,
+            )
+        ]
+
     def on_speech_started(self, conn_id: str, event: SpeechStartedEvent) -> list[ServerEvent]:
         """Handle VAD speech_started: cancel active response if interrupts enabled, start new input item."""
         response = self._service.response
         events: list[ServerEvent] = []
         st = self._state(conn_id)
-        if st.in_response and event.interrupt_response and st.runtime_config.interrupt_response_enabled:
+        interrupt_response = event.interrupt_response and st.runtime_config.interrupt_response_enabled
+        st.speech_candidate_id = None
+        if st.in_response and interrupt_response:
             events.extend(response.finish_response(conn_id, status="cancelled", reason="turn_detected"))
         is_reopen = bool(event.reopened and event.turn_id is not None and event.turn_id == st.speculative_turn_id)
         preserve_active_response = st.in_response
@@ -138,11 +186,12 @@ class AudioHandler(RealtimeBaseHandler):
         st.speculative_turn_revision = event.turn_revision
         st.last_item_id = input_item_id
         events.append(
-            InputAudioBufferSpeechStartedEvent(
+            ExtendedInputAudioBufferSpeechStartedEvent(
                 type="input_audio_buffer.speech_started",
                 event_id=self._next_event_id(),
                 audio_start_ms=event.audio_start_ms,
                 item_id=input_item_id,
+                interrupt_response=interrupt_response,
             )
         )
         return events

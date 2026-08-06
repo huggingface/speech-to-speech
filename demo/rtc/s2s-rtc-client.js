@@ -57,6 +57,7 @@
  *   (AudioContext.setSinkId when supported).
  */
 
+import { ReversibleAudioDucker } from "../audio-ducker.js";
 import { extractResponseTranscript } from "../ws/codec.js";
 import { OrbVisualiser, VIS_FFT_SIZE } from "../ws/orb-visualizer.js";
 
@@ -113,6 +114,10 @@ export class S2sRtcRealtimeClient extends EventTarget {
     this._micAnalyser = null;
     /** @type {AnalyserNode | null} */
     this._outAnalyser = null;
+    /** @type {GainNode | null} */
+    this._outputGain = null;
+    /** @type {ReversibleAudioDucker | null} */
+    this._audioDucker = null;
     /** @type {OrbVisualiser | null} */
     this._visualiser = null;
     /** @type {number} Level/status poll timer (setInterval id). */
@@ -341,8 +346,12 @@ export class S2sRtcRealtimeClient extends EventTarget {
     const outAnalyser = ctx.createAnalyser();
     outAnalyser.fftSize = VIS_FFT_SIZE;
     outAnalyser.smoothingTimeConstant = 0.3;
-    outAnalyser.connect(ctx.destination);
+    const outputGain = ctx.createGain();
+    outAnalyser.connect(outputGain);
+    outputGain.connect(ctx.destination);
     this._outAnalyser = outAnalyser;
+    this._outputGain = outputGain;
+    this._audioDucker = new ReversibleAudioDucker(outputGain, ctx);
 
     void this.setAudioOutputDevice(this.options.audioOutputId || "");
 
@@ -465,20 +474,40 @@ export class S2sRtcRealtimeClient extends EventTarget {
       case "session.updated":
         break;
 
+      case "input_audio_buffer.speech_candidate_started":
+        this._audioDucker?.candidateStarted(
+          typeof event.candidate_id === "string" ? event.candidate_id : "",
+          event.interrupt_response !== false,
+        );
+        break;
+
+      case "input_audio_buffer.speech_candidate_rejected":
+        this._audioDucker?.candidateRejected(
+          typeof event.candidate_id === "string" ? event.candidate_id : "",
+        );
+        break;
+
       case "input_audio_buffer.speech_started":
-        // Barge-in: unlike WS there is no client playback buffer to clear —
-        // the server flushes its track buffer — so this is UI state only.
-        this._aiSpeaking = false;
-        this._lastAudibleAt = 0;
-        this.dispatchEvent(new CustomEvent("user-turn-started", {
-          detail: {
-            itemId: typeof event.item_id === "string" ? event.item_id : "",
-          },
-        }));
-        this._setStatus("user-speaking");
+        {
+          const interruptResponse = event.interrupt_response !== false;
+          this._audioDucker?.speechStarted(interruptResponse);
+          // Barge-in: unlike WS there is no client playback buffer to clear —
+          // the server flushes its track buffer — so this is UI state only.
+          if (interruptResponse) {
+            this._aiSpeaking = false;
+            this._lastAudibleAt = 0;
+          }
+          this.dispatchEvent(new CustomEvent("user-turn-started", {
+            detail: {
+              itemId: typeof event.item_id === "string" ? event.item_id : "",
+            },
+          }));
+          this._setStatus("user-speaking");
+        }
         break;
 
       case "input_audio_buffer.speech_stopped":
+        this._audioDucker?.speechStopped();
         this.dispatchEvent(new CustomEvent("user-turn-stopped", {
           detail: {
             itemId: typeof event.item_id === "string" ? event.item_id : "",
@@ -871,6 +900,13 @@ export class S2sRtcRealtimeClient extends EventTarget {
     } catch {
       // ignored
     }
+    this._audioDucker?.reset();
+    this._audioDucker = null;
+    try {
+      this._outputGain?.disconnect();
+    } catch {
+      // ignored
+    }
     try {
       await this._ctx?.close();
     } catch {
@@ -881,6 +917,7 @@ export class S2sRtcRealtimeClient extends EventTarget {
     this._micSrc = null;
     this._micAnalyser = null;
     this._outAnalyser = null;
+    this._outputGain = null;
     this._setStatus("closed");
   }
 }

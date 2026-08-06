@@ -13,7 +13,12 @@ import torch
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
+from speech_to_speech.pipeline.events import (
+    SpeechCandidateRejectedEvent,
+    SpeechCandidateStartedEvent,
+    SpeechStartedEvent,
+    SpeechStoppedEvent,
+)
 from speech_to_speech.pipeline.handler_types import VADIn, VADOut
 from speech_to_speech.pipeline.messages import VADAudio
 from speech_to_speech.pipeline.queue_types import TextEventItem
@@ -63,6 +68,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         sample_rate: int = 16000,
         min_silence_ms: int = 64,
         min_speech_ms: int = 384,
+        speech_candidate_ms: int = 96,
         min_speech_continuation_ms: int = 192,
         max_speech_ms: float = float("inf"),
         speech_pad_ms: int = 30,
@@ -85,6 +91,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.sample_rate = sample_rate
         self.min_silence_ms = min_silence_ms
         self.min_speech_ms = min_speech_ms
+        if speech_candidate_ms < 0:
+            raise ValueError(f"speech_candidate_ms must be at least 0, got {speech_candidate_ms}")
+        self.speech_candidate_ms = speech_candidate_ms
         self.min_speech_continuation_ms = self._resolve_min_speech_continuation_ms(
             self.min_speech_ms,
             min_speech_continuation_ms,
@@ -157,6 +166,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._log_speech_ends = 0
         self._log_progressive_yields = 0
         self._speech_started_emitted = False
+        self._speech_candidate_counter = 0
+        self._speech_candidate_id: str | None = None
         self._turn_counter = 0
         self._current_turn_id: str | None = None
         self._current_turn_revision: int | None = None
@@ -225,6 +236,51 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
     def _current_active_speech_duration_ms(self) -> float:
         active_speech_samples = getattr(self.iterator, "active_speech_samples", 0)
         return active_speech_samples / self.sample_rate * 1000
+
+    def _maybe_emit_speech_candidate(self, active_speech_ms: float, audio_start_ms: int) -> None:
+        """Emit a reversible early signal without allocating a turn.
+
+        Candidates are a realtime UX hint only.  The ordinary
+        ``SpeechStartedEvent`` remains the sole confirmation boundary for
+        response cancellation and conversation state.
+        """
+        if (
+            self._speech_candidate_id is not None
+            or self.speech_candidate_ms <= 0
+            or not self._uses_realtime_turn_handling()
+            or self.text_output_queue is None
+            or active_speech_ms < self.speech_candidate_ms
+        ):
+            return
+        self._speech_candidate_counter += 1
+        candidate_id = f"candidate_{self._speech_candidate_counter}"
+        self._speech_candidate_id = candidate_id
+        self.text_output_queue.put(
+            SpeechCandidateStartedEvent(
+                candidate_id=candidate_id,
+                audio_start_ms=audio_start_ms,
+            )
+        )
+        logger.debug(
+            "Speech candidate started (active=%.0fms, threshold=%dms, id=%s)",
+            active_speech_ms,
+            self.speech_candidate_ms,
+            candidate_id,
+        )
+
+    def _reject_speech_candidate(self) -> None:
+        candidate_id = self._speech_candidate_id
+        self._speech_candidate_id = None
+        if candidate_id is None or self.text_output_queue is None:
+            return
+        self.text_output_queue.put(SpeechCandidateRejectedEvent(candidate_id=candidate_id))
+        logger.debug("Speech candidate rejected (id=%s)", candidate_id)
+
+    def _confirm_speech_candidate(self) -> None:
+        # Confirmation is represented on the wire by the standard
+        # input_audio_buffer.speech_started event, so no second custom event is
+        # necessary. Clearing the id also makes a late reject impossible.
+        self._speech_candidate_id = None
 
     def _last_utterance_active_speech_duration_ms(self) -> float:
         active_speech_samples = getattr(self.iterator, "last_utterance_active_speech_samples", 0)
@@ -590,9 +646,12 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             )
             self._begin_pending_reopen_if_needed(effective_start_ms)
             active_speech_min_ms = self._active_speech_min_ms(effective_start_ms)
+            if self.speech_candidate_ms < active_speech_min_ms:
+                self._maybe_emit_speech_candidate(effective_active_speech_duration_ms, effective_start_ms)
             if effective_active_speech_duration_ms >= active_speech_min_ms:
                 turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start(effective_start_ms)
                 self._speech_started_emitted = True
+                self._confirm_speech_candidate()
                 self._log_speech_starts += 1
                 logger.info(
                     "Speech started (confirmed, active=%.0fms, min=%.0fms, segment=%.0fms, turn=%s rev=%s)",
@@ -687,6 +746,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         )
                     )
                 if not self._speech_started_emitted:
+                    self._reject_speech_candidate()
                     self._cancel_pending_reopen()
                 self._speech_started_emitted = False
                 self._discard_expired_pending_short_segment()
@@ -737,6 +797,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         )
                     )
                 if not self._speech_started_emitted:
+                    self._reject_speech_candidate()
                     self._cancel_pending_reopen()
                 self._speech_started_emitted = False
             else:
@@ -747,6 +808,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         active_speech_duration_ms,
                     )
                 if not self._speech_started_emitted:
+                    self._confirm_speech_candidate()
                     turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start(start_ms)
                     if self.text_output_queue:
                         self.text_output_queue.put(
@@ -929,6 +991,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.last_process_time = 0.0
         self._total_samples = 0
         self._speech_started_emitted = False
+        self._speech_candidate_counter = 0
+        self._speech_candidate_id = None
         self._turn_counter = 0
         self._current_turn_id = None
         self._current_turn_revision = None

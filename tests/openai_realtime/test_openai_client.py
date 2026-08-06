@@ -34,6 +34,8 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import (
     AssistantTextEvent,
     PartialTranscriptionEvent,
+    SpeechCandidateRejectedEvent,
+    SpeechCandidateStartedEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TranscriptionCompletedEvent,
@@ -139,6 +141,8 @@ async def _recv(conn, timeout: float = 3.0):
 # event.type using both GA and legacy names for compatibility.  These
 # constants match the Literal values from openai.types.realtime.
 SESSION_CREATED = "session.created"
+SPEECH_CANDIDATE_STARTED = "input_audio_buffer.speech_candidate_started"
+SPEECH_CANDIDATE_REJECTED = "input_audio_buffer.speech_candidate_rejected"
 SPEECH_STARTED = "input_audio_buffer.speech_started"
 SPEECH_STOPPED = "input_audio_buffer.speech_stopped"
 TRANSCRIPTION_DELTA = "conversation.item.input_audio_transcription.delta"
@@ -293,6 +297,24 @@ class TestSDKVoiceTurn:
 
 
 class TestSDKBargeIn:
+    @pytest.mark.asyncio
+    async def test_candidate_extensions_are_consumable_by_openai_sdk(self, server_env):
+        """Unknown optional events remain iterable through the stock SDK."""
+        client = server_env.make_client()
+        async with client.realtime.connect(model="test") as conn:
+            await _recv(conn)  # session.created
+
+            server_env.text_output_queue.put(SpeechCandidateStartedEvent(candidate_id="candidate_1", audio_start_ms=96))
+            started = await _recv(conn)
+            assert started.type == SPEECH_CANDIDATE_STARTED
+            assert started.candidate_id == "candidate_1"
+            assert started.audio_start_ms == 96
+
+            server_env.text_output_queue.put(SpeechCandidateRejectedEvent(candidate_id="candidate_1"))
+            rejected = await _recv(conn)
+            assert rejected.type == SPEECH_CANDIDATE_REJECTED
+            assert rejected.candidate_id == "candidate_1"
+
     @pytest.mark.asyncio
     async def test_speech_interrupts_active_response(self, server_env):
         """User speech during audio streaming cancels with turn_detected."""

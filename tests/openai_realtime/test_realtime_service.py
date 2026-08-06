@@ -36,6 +36,10 @@ from openai.types.realtime import (
     SessionUpdateEvent,
 )
 
+from speech_to_speech.api.openai_realtime.extension_events import (
+    InputAudioBufferSpeechCandidateRejectedEvent,
+    InputAudioBufferSpeechCandidateStartedEvent,
+)
 from speech_to_speech.api.openai_realtime.service import (
     CHUNK_SIZE_BYTES,
     RealtimeService,
@@ -45,6 +49,8 @@ from speech_to_speech.pipeline.events import (
     AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     ResponseFailedEvent,
+    SpeechCandidateRejectedEvent,
+    SpeechCandidateStartedEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TokenUsageEvent,
@@ -814,6 +820,65 @@ class TestFinishAudioResponse:
 
 
 class TestDispatchPipelineEvent:
+    # -- reversible speech candidate --
+
+    def test_speech_candidate_ducks_without_cancelling_response(self, service, conn_id):
+        service.response._ensure_response(conn_id)
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechCandidateStartedEvent(candidate_id="candidate_1", audio_start_ms=32),
+        )
+
+        assert len(events) == 1
+        assert isinstance(events[0], InputAudioBufferSpeechCandidateStartedEvent)
+        assert events[0].candidate_id == "candidate_1"
+        assert events[0].audio_start_ms == 32
+        assert service._state(conn_id).in_response is True
+
+        rejected = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechCandidateRejectedEvent(candidate_id="candidate_1"),
+        )
+        assert len(rejected) == 1
+        assert isinstance(rejected[0], InputAudioBufferSpeechCandidateRejectedEvent)
+        assert service._state(conn_id).in_response is True
+
+    def test_stale_candidate_reject_does_not_release_new_candidate(self, service, conn_id):
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechCandidateStartedEvent(candidate_id="candidate_1"),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechCandidateStartedEvent(candidate_id="candidate_2"),
+        )
+
+        assert (
+            service.dispatch_pipeline_event(
+                conn_id,
+                SpeechCandidateRejectedEvent(candidate_id="candidate_1"),
+            )
+            == []
+        )
+        assert service._state(conn_id).speech_candidate_id == "candidate_2"
+
+    def test_speech_candidate_is_suppressed_when_interrupt_disabled(self, service, conn_id):
+        from openai.types.realtime.realtime_audio_input_turn_detection import ServerVad
+
+        service._state(conn_id).runtime_config.session.audio.input.turn_detection = ServerVad(
+            type="server_vad",
+            interrupt_response=False,
+        )
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechCandidateStartedEvent(candidate_id="candidate_1"),
+        )
+
+        assert events == []
+        assert service._state(conn_id).speech_candidate_id is None
+
     # -- speech_started --
 
     def test_speech_started_emits_event(self, service, conn_id):
@@ -849,6 +914,7 @@ class TestDispatchPipelineEvent:
         )
         assert len(events) == 1
         assert isinstance(events[0], InputAudioBufferSpeechStartedEvent)
+        assert events[0].interrupt_response is True
 
     def test_speech_started_does_not_cancel_when_interrupt_disabled(self, service, conn_id):
         """With interrupt_response=False, speech_started emits the started event but does NOT cancel the active response."""
@@ -865,6 +931,7 @@ class TestDispatchPipelineEvent:
         )
         assert len(events) == 1
         assert isinstance(events[0], InputAudioBufferSpeechStartedEvent)
+        assert events[0].interrupt_response is False
         assert service._state(conn_id).in_response is True
         assert service._state(conn_id).current_item_id == response_item_id
 
@@ -877,10 +944,29 @@ class TestDispatchPipelineEvent:
 
         assert len(events) == 1
         assert isinstance(events[0], InputAudioBufferSpeechStartedEvent)
+        assert events[0].interrupt_response is False
         assert service._state(conn_id).in_response is True
         assert service._state(conn_id).current_item_id == response_item_id
         done_events = service.finish_response(conn_id)
         assert done_events[0].item_id == response_item_id
+
+    def test_speech_started_confirms_and_clears_active_candidate(self, service, conn_id):
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechCandidateStartedEvent(candidate_id="candidate_1"),
+        )
+
+        events = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+
+        assert any(isinstance(event, InputAudioBufferSpeechStartedEvent) for event in events)
+        assert service._state(conn_id).speech_candidate_id is None
+        assert (
+            service.dispatch_pipeline_event(
+                conn_id,
+                SpeechCandidateRejectedEvent(candidate_id="candidate_1"),
+            )
+            == []
+        )
 
     def test_consecutive_speech_cycles_get_distinct_item_ids(self, service, conn_id):
         """Each speech_started/stopped cycle generates a new unique item_id."""

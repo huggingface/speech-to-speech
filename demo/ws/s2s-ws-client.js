@@ -92,6 +92,7 @@ import {
   extractResponseTranscript,
   trimTrailingSlash,
 } from "./codec.js";
+import { ReversibleAudioDucker } from "../audio-ducker.js";
 import { OrbVisualiser, VIS_FFT_SIZE } from "./orb-visualizer.js";
 import { SentAudioRecorder } from "./user-audio-recorder.js";
 
@@ -168,6 +169,10 @@ export class S2sWsRealtimeClient extends EventTarget {
     this._micAnalyser = null;
     /** @type {AnalyserNode | null} */
     this._outAnalyser = null;
+    /** @type {GainNode | null} */
+    this._outputGain = null;
+    /** @type {ReversibleAudioDucker | null} */
+    this._audioDucker = null;
     /** @type {OrbVisualiser | null} */
     this._visualiser = null;
     /** @type {WsStatus} */
@@ -527,13 +532,18 @@ export class S2sWsRealtimeClient extends EventTarget {
     playbackNode.port.postMessage({ kind: "config", inputRate: OUTPUT_SAMPLE_RATE });
     playbackNode.port.onmessage = (e) => this._onPlaybackMessage(e.data);
 
-    // Output analyser sits between the playback worklet and the speakers.
+    // Keep the analyser before the gain so UI/audibility detection observes
+    // the source signal even while a reversible barge-in candidate ducks it.
     const outAnalyser = ctx.createAnalyser();
     outAnalyser.fftSize = VIS_FFT_SIZE;
     outAnalyser.smoothingTimeConstant = 0.3;
+    const outputGain = ctx.createGain();
     playbackNode.connect(outAnalyser);
-    outAnalyser.connect(ctx.destination);
+    outAnalyser.connect(outputGain);
+    outputGain.connect(ctx.destination);
     this._outAnalyser = outAnalyser;
+    this._outputGain = outputGain;
+    this._audioDucker = new ReversibleAudioDucker(outputGain, ctx);
     this._playbackNode = playbackNode;
 
     await this.setAudioOutputDevice(this.options.audioOutputId || "");
@@ -670,28 +680,47 @@ export class S2sWsRealtimeClient extends EventTarget {
         // already queued from session.created and is guarded against repeats.
         break;
 
+      case "input_audio_buffer.speech_candidate_started":
+        this._audioDucker?.candidateStarted(
+          typeof event.candidate_id === "string" ? event.candidate_id : "",
+          event.interrupt_response !== false,
+        );
+        break;
+
+      case "input_audio_buffer.speech_candidate_rejected":
+        this._audioDucker?.candidateRejected(
+          typeof event.candidate_id === "string" ? event.candidate_id : "",
+        );
+        break;
+
       case "input_audio_buffer.speech_started":
-        // User started speaking — stop any audio still playing OR queued, every
-        // time. We clear unconditionally (not just when `_aiSpeaking`): after a
-        // reply or a tool result the worklet's ring buffer can still be draining
-        // even though we already flipped `_aiSpeaking` off, and that tail would
-        // otherwise keep playing over the user's barge-in.
-        this._playbackNode?.port.postMessage({ kind: "clear" });
-        this._aiSpeaking = false;
-        this._userAudioRecorder.speechStarted({
-          itemId: typeof event.item_id === "string" ? event.item_id : "",
-          audioStartMs: Number(event.audio_start_ms),
-        });
-        this.dispatchEvent(new CustomEvent("user-turn-started", {
-          detail: {
+        {
+          const interruptResponse = event.interrupt_response !== false;
+          this._audioDucker?.speechStarted(interruptResponse);
+          // Clear every interrupting turn, even if `_aiSpeaking` is already
+          // false: the worklet can still be draining a response tail. When the
+          // session disables interruption, transcription continues while the
+          // existing playback buffer remains intact.
+          if (interruptResponse) {
+            this._playbackNode?.port.postMessage({ kind: "clear" });
+            this._aiSpeaking = false;
+          }
+          this._userAudioRecorder.speechStarted({
             itemId: typeof event.item_id === "string" ? event.item_id : "",
-          },
-        }));
-        this._setStatus("user-speaking");
+            audioStartMs: Number(event.audio_start_ms),
+          });
+          this.dispatchEvent(new CustomEvent("user-turn-started", {
+            detail: {
+              itemId: typeof event.item_id === "string" ? event.item_id : "",
+            },
+          }));
+          this._setStatus("user-speaking");
+        }
         break;
 
       case "input_audio_buffer.speech_stopped":
         {
+          this._audioDucker?.speechStopped();
           const itemId = typeof event.item_id === "string" ? event.item_id : "";
           const recording = this._userAudioRecorder.speechStopped({
             itemId,
@@ -1168,6 +1197,13 @@ export class S2sWsRealtimeClient extends EventTarget {
     } catch {
       // ignored
     }
+    this._audioDucker?.reset();
+    this._audioDucker = null;
+    try {
+      this._outputGain?.disconnect();
+    } catch {
+      // ignored
+    }
     try {
       this._playbackNode?.disconnect();
     } catch {
@@ -1184,6 +1220,7 @@ export class S2sWsRealtimeClient extends EventTarget {
     this._micSrc = null;
     this._micAnalyser = null;
     this._outAnalyser = null;
+    this._outputGain = null;
     this._setStatus("closed");
   }
 }

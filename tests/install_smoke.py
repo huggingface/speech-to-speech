@@ -25,7 +25,7 @@ def _run_installed_cli_help() -> None:
         stderr=subprocess.STDOUT,
         text=True,
     )
-    expected_flags = ("--mode", "--stt", "--llm_backend", "--tts")
+    expected_flags = ("--mode", "--stt", "--llm_backend", "--tts", "--speech_candidate_ms")
     missing_flags = [flag for flag in expected_flags if flag not in result.stdout]
     if missing_flags:
         raise RuntimeError(f"Installed CLI help is missing expected flags: {', '.join(missing_flags)}")
@@ -70,6 +70,7 @@ def _validate_package_defaults() -> None:
     assert vad_args.thresh == 0.6
     assert vad_args.min_silence_ms == 64
     assert vad_args.min_speech_ms == 384
+    assert vad_args.speech_candidate_ms == 96
     assert vad_args.min_speech_continuation_ms == 192
     assert vad_args.realtime_processing_pause == 0.5
     assert vad_args.smart_turn is True
