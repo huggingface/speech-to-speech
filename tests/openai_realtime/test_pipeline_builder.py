@@ -58,3 +58,4 @@ def test_local_composes_loopback_client_with_same_server_builder(monkeypatch):
     assert server.host == "127.0.0.1"
     assert server.port == 9876
     assert client.config.url == f"ws://127.0.0.1:{server.port}/v1/realtime"
+    assert client.config.api_key == "local"

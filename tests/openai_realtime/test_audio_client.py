@@ -1,4 +1,5 @@
 import signal
+import sys
 from threading import Event
 from types import SimpleNamespace
 
@@ -44,6 +45,22 @@ def test_full_realtime_url_is_normalized_for_openai_sdk(url, expected):
 def test_realtime_url_rejects_noncanonical_endpoints(url):
     with pytest.raises(ValueError, match="--url"):
         normalize_realtime_url(url)
+
+
+def test_audio_client_defers_to_sdk_environment_authentication(monkeypatch):
+    client_kwargs = []
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs):
+            client_kwargs.append(kwargs)
+
+    monkeypatch.setattr(audio_client_module, "AsyncOpenAI", FakeAsyncOpenAI)
+
+    audio_client_module._make_client(RealtimeAudioClientConfig())
+    audio_client_module._make_client(RealtimeAudioClientConfig(api_key="explicit-secret"))
+
+    assert "api_key" not in client_kwargs[0]
+    assert client_kwargs[1]["api_key"] == "explicit-secret"
 
 
 def test_audio_client_sends_realtime_session_configuration():
@@ -110,6 +127,75 @@ def test_audio_client_clears_unplayed_audio_when_response_is_cancelled(capsys):
     assert playback.buffered_bytes == 0
     assert not playback.is_active()
     capsys.readouterr()
+
+
+async def test_audio_streams_are_cleaned_up_when_output_start_fails(monkeypatch):
+    events = []
+
+    class FakeStream:
+        def __init__(self, name, *, fail_start=False):
+            self.name = name
+            self.fail_start = fail_start
+
+        def start(self):
+            events.append(f"{self.name}.start")
+            if self.fail_start:
+                raise RuntimeError("output start failed")
+
+        def stop(self):
+            events.append(f"{self.name}.stop")
+
+        def close(self):
+            events.append(f"{self.name}.close")
+
+    input_stream = FakeStream("input")
+    output_stream = FakeStream("output", fail_start=True)
+    fake_sounddevice = SimpleNamespace(
+        RawInputStream=lambda **_kwargs: input_stream,
+        RawOutputStream=lambda **_kwargs: output_stream,
+    )
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sounddevice)
+
+    with pytest.raises(RuntimeError, match="output start failed"):
+        await audio_client_module._run_audio_session(
+            SimpleNamespace(),
+            RealtimeAudioClientConfig(),
+            Event(),
+        )
+
+    assert events == [
+        "input.start",
+        "output.start",
+        "input.stop",
+        "output.close",
+        "input.close",
+    ]
+
+
+async def test_open_input_stream_is_closed_when_output_construction_fails(monkeypatch):
+    events = []
+
+    class FakeInputStream:
+        def close(self):
+            events.append("input.close")
+
+    def fail_output_stream(**_kwargs):
+        raise RuntimeError("output construction failed")
+
+    fake_sounddevice = SimpleNamespace(
+        RawInputStream=lambda **_kwargs: FakeInputStream(),
+        RawOutputStream=fail_output_stream,
+    )
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sounddevice)
+
+    with pytest.raises(RuntimeError, match="output construction failed"):
+        await audio_client_module._run_audio_session(
+            SimpleNamespace(),
+            RealtimeAudioClientConfig(),
+            Event(),
+        )
+
+    assert events == ["input.close"]
 
 
 async def test_audio_client_startup_and_shutdown_use_public_realtime_connection(monkeypatch):

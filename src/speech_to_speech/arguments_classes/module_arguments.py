@@ -11,8 +11,9 @@ class ModuleArguments:
     mac_optimal_settings: bool = field(
         default=False,
         metadata={
-            "help": "If specified, sets the optimal settings for macOS: Parakeet TDT for STT, MLX LM for "
-            "the language model, Qwen3-TTS for TTS, and MPS as the device. It does not select a command.",
+            "help": "If specified, provides macOS defaults: Parakeet TDT for STT, MLX LM for the language "
+            "model, Qwen3-TTS for TTS, and MPS as the device. Explicit component, model, and device flags "
+            "override these defaults. It does not select a command.",
         },
     )
     stt: Optional[

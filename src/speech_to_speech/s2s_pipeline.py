@@ -86,6 +86,22 @@ console = Console()
 logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.WARNING)  # quiet down numba logs
 
+MLX_DEFAULT_LM_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-bf16"
+
+
+def _mac_preset_defaults(llm_backend: str) -> dict[str, Any]:
+    """Return macOS parser defaults, leaving explicit arguments free to override them."""
+
+    defaults: dict[str, Any] = {
+        "device": "mps",
+        "stt": "parakeet-tdt",
+        "llm_backend": "mlx-lm",
+        "tts": "qwen3",
+    }
+    if llm_backend == "mlx-lm":
+        defaults["model_name"] = MLX_DEFAULT_LM_MODEL
+    return defaults
+
 
 @dataclass
 class ParsedArguments:
@@ -167,13 +183,21 @@ def parse_arguments(
     }
     pipeline_args = list(sys.argv[1:] if argv is None else argv)
     _is_json = len(pipeline_args) == 1 and pipeline_args[0].endswith(".json")
+    pipeline_json: dict[str, Any] | None = None
     if _is_json:
         with open(pipeline_args[0]) as _f:
-            _backend = json.load(_f).get("llm_backend")
+            pipeline_json = json.load(_f)
+        _mac_preset_enabled = bool(pipeline_json.get("mac_optimal_settings", False))
+        _backend = pipeline_json.get("llm_backend") or ("mlx-lm" if _mac_preset_enabled else "responses-api")
+        if _mac_preset_enabled:
+            pipeline_json = {**_mac_preset_defaults(_backend), **pipeline_json}
     else:
         _pre = argparse.ArgumentParser(add_help=False)
-        _pre.add_argument("--llm_backend", default="responses-api")
-        _backend = _pre.parse_known_args(pipeline_args)[0].llm_backend
+        _pre.add_argument("--mac-optimal-settings", action="store_true")
+        _pre.add_argument("--llm_backend", "--llm-backend")
+        _pre_args = _pre.parse_known_args(pipeline_args)[0]
+        _mac_preset_enabled = _pre_args.mac_optimal_settings
+        _backend = _pre_args.llm_backend or ("mlx-lm" if _mac_preset_enabled else "responses-api")
 
     _lm_class = _backend_lm_class.get(_backend, LanguageModelHandlerArguments)
     logger.debug("LLM backend pre-parse: backend=%s, registering %s", _backend, _lm_class.__name__)
@@ -204,9 +228,12 @@ def parse_arguments(
     parser = HfArgumentParser(tuple(argument_classes), prog=f"speech-to-speech {command}")  # type: ignore[arg-type]
     mac_action = parser._option_string_actions.pop("--mac_optimal_settings")
     mac_action.option_strings = [option for option in mac_action.option_strings if option != "--mac_optimal_settings"]
+    if _mac_preset_enabled:
+        parser.set_defaults(**_mac_preset_defaults(_backend))
 
     if _is_json:
-        parsed = parser.parse_json_file(json_file=os.path.abspath(pipeline_args[0]), allow_extra_keys=True)
+        assert pipeline_json is not None
+        parsed = parser.parse_dict(pipeline_json, allow_extra_keys=True)
     else:
         parsed = parser.parse_args_into_dataclasses(args=pipeline_args)
 
@@ -268,26 +295,6 @@ def setup_logger(log_level: str) -> None:
         torch._logging.set_logs(graph_breaks=True, recompiles=True, cudagraphs=True)
 
 
-MLX_DEFAULT_LM_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-bf16"
-TRANSFORMERS_DEFAULT_LM_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
-
-
-def optimal_mac_settings(mac_optimal_settings: bool, *handler_kwargs: Any) -> None:
-    if mac_optimal_settings:
-        for kwargs in handler_kwargs:
-            if hasattr(kwargs, "device"):
-                kwargs.device = "mps"
-            if hasattr(kwargs, "stt"):
-                kwargs.stt = "parakeet-tdt"
-            if hasattr(kwargs, "llm_backend"):
-                kwargs.llm_backend = "mlx-lm"
-            if hasattr(kwargs, "tts"):
-                kwargs.tts = "qwen3"
-            if hasattr(kwargs, "model_name"):
-                if kwargs.model_name == TRANSFORMERS_DEFAULT_LM_MODEL:
-                    kwargs.model_name = MLX_DEFAULT_LM_MODEL
-
-
 def check_mac_settings(module_kwargs: ModuleArguments) -> None:
     if platform == "darwin":
         if module_kwargs.device == "cuda":
@@ -320,7 +327,6 @@ def overwrite_device_argument(common_device: Optional[str], *handler_kwargs: Any
 
 
 def prepare_module_args(module_kwargs: ModuleArguments, *handler_kwargs: Any) -> None:
-    optimal_mac_settings(module_kwargs.mac_optimal_settings, module_kwargs, *handler_kwargs)
     if module_kwargs.tts is None:
         module_kwargs.tts = "qwen3"
     if module_kwargs.stt == "none" and module_kwargs.llm_backend != "chat-completions":
@@ -687,6 +693,7 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
         stop_event,
         RealtimeAudioClientConfig(
             url=f"ws://127.0.0.1:{args.realtime_server_kwargs.port}/v1/realtime",
+            api_key="local",
             chunk_size=local_audio.local_audio_chunk_size,
             input_device=local_audio.local_audio_input_device,
             output_device=local_audio.local_audio_output_device,

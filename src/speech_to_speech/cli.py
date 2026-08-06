@@ -104,7 +104,11 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         help="Full Realtime WebSocket endpoint, including /realtime.",
     )
     parser.add_argument("--model", default=defaults.model)
-    parser.add_argument("--api-key", default=defaults.api_key)
+    parser.add_argument(
+        "--api-key",
+        default=defaults.api_key,
+        help="Realtime API key. Defaults to the OPENAI_API_KEY environment variable.",
+    )
     parser.add_argument("--send-rate", type=int, default=defaults.send_rate)
     parser.add_argument("--recv-rate", type=int, default=defaults.recv_rate)
     parser.add_argument("--chunk-size", type=int, default=defaults.chunk_size)

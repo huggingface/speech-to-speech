@@ -29,7 +29,7 @@ class RealtimeAudioClientConfig:
 
     url: str = "ws://127.0.0.1:8765/v1/realtime"
     model: str = "local"
-    api_key: str = "test-key"
+    api_key: Optional[str] = None
     send_rate: int = 16000
     recv_rate: int = 16000
     chunk_size: int = 1024
@@ -65,11 +65,13 @@ def normalize_realtime_url(url: str) -> tuple[str, str]:
 
 def _make_client(config: RealtimeAudioClientConfig) -> AsyncOpenAI:
     base_url, websocket_base_url = normalize_realtime_url(config.url)
-    return AsyncOpenAI(
-        api_key=config.api_key,
-        base_url=base_url,
-        websocket_base_url=websocket_base_url,
-    )
+    client_kwargs: dict[str, Any] = {
+        "base_url": base_url,
+        "websocket_base_url": websocket_base_url,
+    }
+    if config.api_key is not None:
+        client_kwargs["api_key"] = config.api_key
+    return AsyncOpenAI(**client_kwargs)
 
 
 def build_session_update(config: RealtimeAudioClientConfig) -> dict[str, Any]:
@@ -290,26 +292,32 @@ async def _run_audio_session(
                 print_json=config.print_json,
             )
 
-    input_stream = sd.RawInputStream(
-        samplerate=config.send_rate,
-        channels=1,
-        dtype="int16",
-        blocksize=config.chunk_size,
-        callback=callback_send,
-        device=config.input_device,
-    )
-    output_stream = sd.RawOutputStream(
-        samplerate=config.recv_rate,
-        channels=1,
-        dtype="int16",
-        blocksize=config.chunk_size,
-        callback=callback_recv,
-        device=config.output_device,
-    )
-
-    input_stream.start()
-    output_stream.start()
+    opened_streams: list[Any] = []
+    started_streams: list[Any] = []
     try:
+        input_stream = sd.RawInputStream(
+            samplerate=config.send_rate,
+            channels=1,
+            dtype="int16",
+            blocksize=config.chunk_size,
+            callback=callback_send,
+            device=config.input_device,
+        )
+        opened_streams.append(input_stream)
+        output_stream = sd.RawOutputStream(
+            samplerate=config.recv_rate,
+            channels=1,
+            dtype="int16",
+            blocksize=config.chunk_size,
+            callback=callback_recv,
+            device=config.output_device,
+        )
+        opened_streams.append(output_stream)
+
+        for stream in opened_streams:
+            stream.start()
+            started_streams.append(stream)
+
         tasks = {
             asyncio.create_task(send_audio()),
             asyncio.create_task(receive_events()),
@@ -327,10 +335,16 @@ async def _run_audio_session(
     finally:
         stop_event.set()
         renderer.clear_live_user_text()
-        input_stream.stop()
-        output_stream.stop()
-        input_stream.close()
-        output_stream.close()
+        for stream in reversed(started_streams):
+            try:
+                stream.stop()
+            except Exception:
+                logger.exception("Failed to stop local audio stream")
+        for stream in reversed(opened_streams):
+            try:
+                stream.close()
+            except Exception:
+                logger.exception("Failed to close local audio stream")
 
 
 async def listen_and_play_realtime(

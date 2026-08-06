@@ -458,7 +458,10 @@ class TestPackagedAudioClient:
         pipeline_task = asyncio.create_task(drive_direct_audio_reopen())
         client_task = asyncio.create_task(
             listen_and_play_realtime(
-                RealtimeAudioClientConfig(url=f"ws://127.0.0.1:{server_env.port}/v1/realtime"),
+                RealtimeAudioClientConfig(
+                    url=f"ws://127.0.0.1:{server_env.port}/v1/realtime",
+                    api_key="local",
+                ),
                 stop_event=client_stop,
             )
         )

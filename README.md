@@ -242,7 +242,7 @@ This setting:
 - Sets MLX LM as the LLM backend.
 - Sets Qwen3-TTS for TTS, using `mlx-audio` with the `6bit` MLX variant by default.
 
-The preset selects model and device defaults only. Use it with `serve` instead of `local` when you want to expose the server without starting the microphone/speaker client.
+The preset supplies these as defaults only: explicit `--device`, `--stt`, `--llm_backend`, `--model_name`, and `--tts` flags win. Use it with `serve` instead of `local` when you want to expose the server without starting the microphone/speaker client.
 
 `--tts pocket` and `--tts kokoro` are also valid on macOS.
 

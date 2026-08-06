@@ -77,6 +77,47 @@ def test_mac_optimal_settings_flag_does_not_select_a_command():
 
     assert args.module_kwargs.mac_optimal_settings is True
     assert not hasattr(args.module_kwargs, "mode")
+    assert args.module_kwargs.device == "mps"
+    assert args.module_kwargs.stt == "parakeet-tdt"
+    assert args.module_kwargs.llm_backend == "mlx-lm"
+    assert args.module_kwargs.tts == "qwen3"
+    assert args.language_model_handler_kwargs.model_name == "mlx-community/Qwen3-4B-Instruct-2507-bf16"
+
+
+def test_mac_optimal_settings_routes_explicit_model_to_mlx_backend():
+    args = parse_arguments(["--mac-optimal-settings", "--model_name", "custom/mlx-model"])
+
+    prepare_module_args(args.module_kwargs, args.language_model_handler_kwargs)
+
+    assert args.module_kwargs.llm_backend == "mlx-lm"
+    assert type(args.language_model_handler_kwargs) is LanguageModelHandlerArguments
+    assert args.language_model_handler_kwargs.model_name == "custom/mlx-model"
+
+
+def test_mac_optimal_settings_preserves_explicit_component_overrides():
+    args = parse_arguments(
+        [
+            "--mac-optimal-settings",
+            "--device",
+            "cpu",
+            "--stt",
+            "whisper",
+            "--llm_backend",
+            "transformers",
+            "--tts",
+            "kokoro",
+            "--model_name",
+            "custom/transformers-model",
+        ]
+    )
+
+    prepare_module_args(args.module_kwargs, args.language_model_handler_kwargs)
+
+    assert args.module_kwargs.device == "cpu"
+    assert args.module_kwargs.stt == "whisper"
+    assert args.module_kwargs.llm_backend == "transformers"
+    assert args.module_kwargs.tts == "kokoro"
+    assert args.language_model_handler_kwargs.model_name == "custom/transformers-model"
 
 
 @pytest.mark.parametrize("flag", ["--local_mac_optimal_settings", "--mac_optimal_settings"])
@@ -295,6 +336,11 @@ def test_talk_accepts_one_full_url_connection_option():
     config = parse_talk_arguments(["--url", "wss://voice.example/v1/realtime"])
 
     assert config.url == "wss://voice.example/v1/realtime"
+
+
+def test_talk_leaves_api_key_unset_for_sdk_environment_authentication():
+    assert parse_talk_arguments([]).api_key is None
+    assert parse_talk_arguments(["--api-key", "explicit-secret"]).api_key == "explicit-secret"
 
 
 @pytest.mark.parametrize("flag", ["--host", "--port", "--base-url", "--websocket-base-url", "--stt"])
