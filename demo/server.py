@@ -328,6 +328,10 @@ async def session(request: Request):
         # never call this. 404 so it's indistinguishable from a missing route.
         raise HTTPException(status_code=404, detail="Not found.")
 
+    login_reason = auth.oauth_login_required_reason(request)
+    if login_reason:
+        return _login_required_response(login_reason)
+
     tier, keys, set_cookie = auth.resolve_identity(request)
     # Metering runs only on the deployed Space; off-Space the LB still proxies but
     # nothing is tracked. Within metering, unlimited tiers (pro, org) aren't either.
@@ -367,6 +371,16 @@ async def session(request: Request):
                 auth.set_anon_cookie(resp, set_cookie)
             return resp
 
+    if lb.status_code == 401:
+        body = _safe_json(lb)
+        reason = body.get("reason", "login_required")
+        if reason == "token_invalid":
+            session = getattr(request, "scope", {}).get("session")
+            if isinstance(session, dict):
+                session.pop("oauth_info", None)
+        logger.info("Session authentication rejected: %s", reason)
+        return _login_required_response(reason, set_cookie)
+
     if lb.status_code != 200:
         # The LB's error body may name the reason (e.g. capacity); it carries no
         # secret, so relay a trimmed copy.
@@ -386,6 +400,20 @@ async def session(request: Request):
 
     # A slot was free: reserve the first chunk now and return the grant.
     return await _finalize_grant(data, keys, tier, tracked, set_cookie)
+
+
+def _login_required_response(reason: str, set_cookie=None) -> JSONResponse:
+    """Actionable 401 understood by the browser's login-required flow."""
+    resp = JSONResponse(
+        {
+            "reason": reason,
+            "loginUrl": auth.OAUTH_LOGIN_PATH if AUTH_ENABLED else None,
+        },
+        status_code=401,
+    )
+    if set_cookie:
+        auth.set_anon_cookie(resp, set_cookie)
+    return resp
 
 
 def _load_balancer_headers(request: Request) -> dict[str, str]:
@@ -412,6 +440,10 @@ async def queue_status(queue_id: str, request: Request):
     daily budget at claim, since a multi-minute wait could have spent it elsewhere."""
     if not LOAD_BALANCER_URL:
         raise HTTPException(status_code=404, detail="Not found.")
+
+    login_reason = auth.oauth_login_required_reason(request)
+    if login_reason:
+        return _login_required_response(login_reason)
 
     tier, keys, set_cookie = auth.resolve_identity(request)
     tracked = LIMITER_ENABLED and limiter.budget_for(tier) is not None

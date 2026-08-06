@@ -8,6 +8,7 @@ app_port: 7860
 pinned: false
 short_description: Voice chat over WebSocket against a HF speech-to-speech
 hf_oauth: true
+hf_oauth_expiration_minutes: 10080
 ---
 
 # Realtime Voice Demo

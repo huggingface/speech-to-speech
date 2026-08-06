@@ -96,7 +96,8 @@ import { OrbVisualiser, VIS_FFT_SIZE } from "./orb-visualizer.js";
 import { SentAudioRecorder } from "./user-audio-recorder.js";
 
 /** Build an Error carrying a `code` (and optional extra fields) so callers can
- *  branch on the failure kind: "limit" | "queue-full" | "queue-expired" | "aborted".
+ *  branch on the failure kind: "login-required" | "limit" | "queue-full" |
+ *  "queue-expired" | "aborted".
  *  @param {string} message @param {string} code @param {object} [extra] */
 function _codedError(message, code, extra) {
   const err = /** @type {Error & { code?: string }} */ (new Error(message));
@@ -362,6 +363,12 @@ export class S2sWsRealtimeClient extends EventTarget {
       const body = await response.json().catch(() => ({}));
       throw _codedError("Daily conversation limit reached", "limit", { tier: body?.tier });
     }
+    if (response.status === 401) {
+      const body = await response.json().catch(() => ({}));
+      throw _codedError("Sign in again to continue", "login-required", {
+        loginUrl: body?.loginUrl,
+      });
+    }
     if (response.status === 503) {
       const body = await response.json().catch(() => ({}));
       if (body?.state === "at_capacity") {
@@ -413,6 +420,12 @@ export class S2sWsRealtimeClient extends EventTarget {
       if (response.status === 402) {
         const body = await response.json().catch(() => ({}));
         throw _codedError("Daily conversation limit reached", "limit", { tier: body?.tier });
+      }
+      if (response.status === 401) {
+        const body = await response.json().catch(() => ({}));
+        throw _codedError("Sign in again to continue", "login-required", {
+          loginUrl: body?.loginUrl,
+        });
       }
       if (response.status === 404) {
         throw _codedError("Queue timed out", "queue-expired");
