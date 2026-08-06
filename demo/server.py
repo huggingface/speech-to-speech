@@ -373,8 +373,13 @@ async def session(request: Request):
 
     if lb.status_code == 401:
         body = _safe_json(lb)
-        logger.info("Session authentication rejected: %s", body.get("reason", "unauthorized"))
-        return _login_required_response(body.get("reason", "login_required"), set_cookie)
+        reason = body.get("reason", "login_required")
+        if reason == "token_invalid":
+            session = getattr(request, "scope", {}).get("session")
+            if isinstance(session, dict):
+                session.pop("oauth_info", None)
+        logger.info("Session authentication rejected: %s", reason)
+        return _login_required_response(reason, set_cookie)
 
     if lb.status_code != 200:
         # The LB's error body may name the reason (e.g. capacity); it carries no

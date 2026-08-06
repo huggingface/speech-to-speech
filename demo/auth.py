@@ -114,10 +114,10 @@ def _oauth_token_expired(info, *, now=None) -> bool:
         logger.warning("Unexpected OAuth expiry value; requiring a fresh login.")
         return True
     if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
+        expires_at = expires_at.astimezone(timezone.utc)
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
+        current = current.astimezone(timezone.utc)
     return expires_at <= current + _OAUTH_EXPIRY_SKEW
 
 

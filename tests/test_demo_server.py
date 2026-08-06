@@ -3,8 +3,9 @@ import json
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -39,7 +40,7 @@ def test_expiring_oauth_token_requires_fresh_login(monkeypatch):
         "current_oauth",
         lambda request: {
             "access_token": "hf_user_token",
-            "access_token_expires_at": datetime.now(timezone.utc) + timedelta(seconds=15),
+            "access_token_expires_at": datetime.now() + timedelta(seconds=15),
             "user_info": {"sub": "123", "preferred_username": "alice"},
         },
     )
@@ -100,13 +101,15 @@ async def test_session_preserves_load_balancer_authentication_failure(monkeypatc
     monkeypatch.setattr(demo_server.auth, "resolve_identity", lambda request: ("free", ["key"], None))
     monkeypatch.setattr(demo_server.auth, "current_access_token", lambda request: "hf_user_token")
 
-    response = await demo_server.session(object())
+    request = SimpleNamespace(scope={"session": {"oauth_info": {"access_token": "hf_user_token"}}})
+    response = await demo_server.session(request)
 
     assert response.status_code == 401
     assert json.loads(response.body) == {
         "reason": "token_invalid",
         "loginUrl": demo_auth.OAUTH_LOGIN_PATH,
     }
+    assert "oauth_info" not in request.scope["session"]
 
 
 async def test_session_rejects_locally_expired_oauth_before_proxying(monkeypatch):
