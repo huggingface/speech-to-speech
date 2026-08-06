@@ -1,3 +1,10 @@
+"""Native Python microphone/speaker client used by the ``talk`` and ``local`` commands.
+
+The browser demo has separate browser-native WebSocket and WebRTC clients under
+``demo/``. Those clients share the Realtime protocol with this module, but not
+its OpenAI Python SDK, ``sounddevice``, or process-signal implementation.
+"""
+
 from __future__ import annotations
 
 import asyncio
