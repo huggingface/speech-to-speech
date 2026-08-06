@@ -193,11 +193,11 @@ def parse_arguments(
         _stt_name = pipeline_json.get("stt") or module_defaults.stt
         _tts_name = pipeline_json.get("tts") or module_defaults.tts
     else:
-        _pre = argparse.ArgumentParser(add_help=False)
+        _pre = argparse.ArgumentParser(prog=f"speech-to-speech {command}", add_help=False)
         _pre.add_argument("--mac-optimal-settings", action="store_true")
-        _pre.add_argument("--stt")
-        _pre.add_argument("--llm_backend", "--llm-backend")
-        _pre.add_argument("--tts")
+        _pre.add_argument("--stt", choices=tuple(STT_BACKENDS))
+        _pre.add_argument("--llm_backend", "--llm-backend", choices=tuple(LLM_BACKENDS))
+        _pre.add_argument("--tts", choices=tuple(TTS_BACKENDS))
         _pre_args = _pre.parse_known_args(pipeline_args)[0]
         _mac_preset_enabled = _pre_args.mac_optimal_settings
         _stt_name = _pre_args.stt or module_defaults.stt

@@ -194,6 +194,16 @@ def test_parser_still_rejects_unknown_options():
         parse_arguments(["--unknown_backend_option", "value"])
 
 
+@pytest.mark.parametrize("selector", ["--stt", "--llm_backend", "--tts"])
+def test_parser_reports_invalid_backend_selectors_with_argparse(selector, capsys):
+    with pytest.raises(SystemExit, match="2"):
+        parse_arguments([selector, "not-a-backend"])
+
+    stderr = capsys.readouterr().err
+    assert "usage: speech-to-speech serve" in stderr
+    assert "invalid choice: 'not-a-backend'" in stderr
+
+
 @pytest.mark.parametrize(
     "backend_name",
     ["whisper", "whisper-mlx", "mlx-audio-whisper", "faster-whisper", "parakeet-tdt"],
