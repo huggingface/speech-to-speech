@@ -473,6 +473,7 @@ class TestSendLoop:
                 output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=stale_generation))
                 time.sleep(0.15)
                 assert not cancel_scope.discarding
+                assert service.finish_response(conn_id) == []
 
     def test_speech_started_does_not_cancel_pending_when_internal_non_interrupt(self, setup):
         app, service, _, _, text_output_queue, _, _, _, cancel_scope = setup

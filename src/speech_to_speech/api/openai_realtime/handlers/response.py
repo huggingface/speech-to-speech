@@ -132,6 +132,9 @@ class ResponseHandler(RealtimeBaseHandler):
         if pending is None:
             return ""
         if response_wants_audio(st.current_response_params):
+            # Audio text arrives as sentence-sized TTS chunks, so normalize
+            # chunk boundaries to one space. Text-only responses expose the
+            # model's exact deltas instead and must preserve their whitespace.
             return " ".join(part.strip() for part in pending.text_parts if part.strip())
         return "".join(pending.text_parts)
 
@@ -308,6 +311,10 @@ class ResponseHandler(RealtimeBaseHandler):
         """
         st = self._state(conn_id)
         events: list[ServerEvent] = []
+        # The router owns cancellation of an unannounced pending generation and
+        # clears its marker when it advances CancelScope. A terminal call has no
+        # generation identity, so clearing non-completed pending state here could
+        # erase a newer turn when an older completion arrives late.
         if status == "completed" and st.response_pending and not st.in_response:
             _, _, created_events = self.begin_response(conn_id)
             events.extend(created_events)
@@ -391,11 +398,12 @@ class ResponseHandler(RealtimeBaseHandler):
                 return []
         st = self._state(conn_id)
         resp_id, item_id, events = self.begin_response(conn_id)
-        if event.text:
+        wants_audio = response_wants_audio(st.current_response_params)
+        if event.text and (not wants_audio or event.text.strip()):
             pending = self._ensure_assistant_output_item(conn_id, item_id)
             previous_text = self._assistant_text(conn_id)
             pending.text_parts.append(event.text)
-            if response_wants_audio(st.current_response_params):
+            if wants_audio:
                 # Sentence-sized pipeline chunks are normalized with a joining
                 # space. Emit the exact suffix added to the accumulated transcript
                 # so concatenating deltas reproduces the terminal transcript.

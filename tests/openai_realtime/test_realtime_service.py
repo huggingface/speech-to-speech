@@ -923,6 +923,14 @@ class TestResponseDoneOutputItems:
         assert state.response_pending is False
         assert state.in_response is False
 
+    def test_audio_whitespace_chunk_does_not_create_empty_assistant_output(self, service, conn_id):
+        events = service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="   \n"))
+
+        assert [event.type for event in events] == ["response.created"]
+        terminal_events = service.finish_response(conn_id)
+        assert [event.type for event in terminal_events] == ["response.done"]
+        assert not terminal_events[0].response.output
+
     def test_completed_response_completes_upstream_in_progress_call(self, service, conn_id):
         service.dispatch_pipeline_event(
             conn_id,

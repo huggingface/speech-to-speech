@@ -362,7 +362,7 @@ class TestPackagedAudioClient:
         def record_server_event(event, **kwargs):
             received_events.append(event)
             original_handle_server_event(event, **kwargs)
-            if event.type == TRANSCRIPT_DONE and event.transcript == "fresh revision one":
+            if event.type == TRANSCRIPT_DELTA and event.delta == "fresh revision one":
                 client_stop.set()
 
         monkeypatch.setattr(audio_client_module, "handle_server_event", record_server_event)
@@ -479,8 +479,8 @@ class TestPackagedAudioClient:
         assert all(isinstance(request, GenerateResponseRequest) for request in requests)
         assert [request.turn_revision for request in requests] == [0, 1]
         assert reopened_generation == first_generation + 1
-        transcripts = [event.transcript for event in received_events if event.type == TRANSCRIPT_DONE]
-        assert transcripts == ["fresh revision one"]
+        transcript_deltas = [event.delta for event in received_events if event.type == TRANSCRIPT_DELTA]
+        assert transcript_deltas == ["fresh revision one"]
         capsys.readouterr()
 
 

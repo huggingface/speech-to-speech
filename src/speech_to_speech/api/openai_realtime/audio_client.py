@@ -170,6 +170,8 @@ class _FriendlyEventRenderer:
         self.partial_user_text = ""
         self.live_user_width = 0
         self.saw_user_speech = False
+        self.live_assistant_text = False
+        self.assistant_transcript_streamed = False
 
     def render_live_user_text(self, text: str, *, final: bool = False) -> None:
         line = f"USER: {text}"
@@ -187,6 +189,36 @@ class _FriendlyEventRenderer:
         print("\r" + (" " * self.live_user_width) + "\r", end="", flush=True)
         self.live_user_width = 0
 
+    def render_assistant_text_delta(self, delta: str) -> None:
+        if not delta:
+            return
+        if not self.live_assistant_text:
+            delta = delta.lstrip()
+            if not delta:
+                return
+            print("ASSISTANT: ", end="", flush=True)
+            self.live_assistant_text = True
+        self.assistant_transcript_streamed = True
+        print(delta, end="", flush=True)
+
+    def render_assistant_text_done(self, transcript: str) -> None:
+        if self.live_assistant_text:
+            print("", flush=True)
+            self.live_assistant_text = False
+        if self.assistant_transcript_streamed:
+            self.assistant_transcript_streamed = False
+            return
+        print(f"ASSISTANT: {transcript}", flush=True)
+
+    def finish_live_assistant_text(self) -> None:
+        if self.live_assistant_text:
+            print("", flush=True)
+            self.live_assistant_text = False
+
+    def reset_assistant_text(self) -> None:
+        self.finish_live_assistant_text()
+        self.assistant_transcript_streamed = False
+
 
 def handle_server_event(
     event: Any,
@@ -198,14 +230,17 @@ def handle_server_event(
     """Apply one Realtime lifecycle event to local playback and console state."""
 
     if print_json:
+        renderer.finish_live_assistant_text()
         try:
             print(f"EVENT: {event.model_dump_json()}", flush=True)
         except Exception:
             print(f"EVENT: {event}", flush=True)
 
     if event.type == "session.created":
+        renderer.finish_live_assistant_text()
         print("Connected.", flush=True)
     elif event.type == "input_audio_buffer.speech_started":
+        renderer.finish_live_assistant_text()
         playback.clear()
         renderer.partial_user_text = ""
         if renderer.saw_user_speech:
@@ -219,23 +254,30 @@ def handle_server_event(
         if renderer.partial_user_text:
             renderer.render_live_user_text(renderer.partial_user_text)
     elif event.type == "conversation.item.input_audio_transcription.completed":
+        renderer.finish_live_assistant_text()
         renderer.partial_user_text = ""
         renderer.render_live_user_text(event.transcript.strip(), final=True)
     elif event.type == "response.created":
         renderer.clear_live_user_text()
+        renderer.reset_assistant_text()
         print("ASSISTANT: <response started>", flush=True)
     elif event.type == "response.output_audio.delta":
         playback.append(base64.b64decode(event.delta))
     elif event.type == "response.output_audio.done":
+        renderer.finish_live_assistant_text()
         print("ASSISTANT: <audio done>", flush=True)
+    elif event.type == "response.output_audio_transcript.delta":
+        renderer.render_assistant_text_delta(event.delta or "")
     elif event.type == "response.output_audio_transcript.done":
-        print(f"ASSISTANT: {event.transcript}", flush=True)
+        renderer.render_assistant_text_done(event.transcript or "")
     elif event.type == "response.function_call_arguments.done":
+        renderer.finish_live_assistant_text()
         print(
             f"TOOL: {event.name} call_id={event.call_id} arguments={event.arguments}",
             flush=True,
         )
     elif event.type == "response.done":
+        renderer.reset_assistant_text()
         if event.response.status == "cancelled":
             playback.clear()
         print(f"ASSISTANT: <response {event.response.status}>", flush=True)
@@ -243,9 +285,13 @@ def handle_server_event(
         playback.clear()
     elif event.type == "error":
         renderer.clear_live_user_text()
+        # A failed response can still send transcript.done after the error.
+        # Preserve the streamed marker so the terminal transcript is not printed twice.
+        renderer.finish_live_assistant_text()
         print(f"ERROR: {event.error.type}: {event.error.message}", flush=True)
     else:
         renderer.clear_live_user_text()
+        renderer.finish_live_assistant_text()
         print(f"EVENT: {event.type}", flush=True)
 
 
@@ -346,6 +392,7 @@ async def _run_audio_session(
     finally:
         stop_event.set()
         renderer.clear_live_user_text()
+        renderer.reset_assistant_text()
         for stream in reversed(started_streams):
             try:
                 stream.stop()
