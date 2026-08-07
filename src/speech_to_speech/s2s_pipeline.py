@@ -321,6 +321,12 @@ def prepare_module_args(module_kwargs: ModuleArguments, llm_backend: BackendSele
     if module_kwargs.stt == "none" and not llm_backend.spec.capabilities.supports_audio_input:
         supported = ", ".join(name for name, spec in LLM_BACKENDS.items() if spec.capabilities.supports_audio_input)
         raise ValueError(f"--stt none requires an audio-input LLM backend; choose one of: {supported}.")
+    if module_kwargs.enable_llm_proxy and not llm_backend.spec.capabilities.supports_llm_proxy:
+        supported = ", ".join(name for name, spec in LLM_BACKENDS.items() if spec.capabilities.supports_llm_proxy)
+        raise ValueError(
+            f"The LLM proxy requires a backend with proxy support; choose one of: {supported}. "
+            f"Got {llm_backend.name!r}."
+        )
     if platform == "darwin":
         check_mac_settings(module_kwargs)
 
@@ -378,7 +384,7 @@ def _build_handlers(
         },
     )
 
-    needs_notifier = stt_backend.spec.capabilities.needs_transcription_notifier
+    needs_notifier = not stt_backend.spec.capabilities.bypasses_transcription_notifier
     stt_queue_out: Queue[Any] = stt_output_queue if needs_notifier else text_prompt_queue
     stt_context = HandlerContext(
         stop_event=stop_event,

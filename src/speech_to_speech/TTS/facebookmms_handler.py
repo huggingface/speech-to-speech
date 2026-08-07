@@ -66,6 +66,7 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def setup(
         self,
         should_listen: Event,
+        model_name: str | None = None,
         device: str = "cuda",
         torch_dtype: str = "float32",
         language: str = "en",
@@ -85,15 +86,19 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.language = language
 
         self._initial_language = self.language
-        self.load_model(self.language)
+        self._initial_model_name = model_name
+        self.load_model(self.language, model_name)
         self.warmup()
 
-    def load_model(self, language_code: str) -> None:
+    def load_model(self, language_code: str, model_name: str | None = None) -> None:
         try:
-            model_name = f"facebook/mms-tts-{WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE[language_code]}"
-            logger.info(f"Loading model: {model_name}")
-            self.model = VitsModel.from_pretrained(model_name).to(self.device)  # type: ignore[arg-type]
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            resolved_model_name = model_name or (
+                f"facebook/mms-tts-{WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE[language_code]}"
+            )
+            logger.info(f"Loading model: {resolved_model_name}")
+            self.model = VitsModel.from_pretrained(resolved_model_name).to(self.device)  # type: ignore[arg-type]
+            self.tokenizer = AutoTokenizer.from_pretrained(resolved_model_name)
+            self.model_name = resolved_model_name
             self.language = language_code
         except KeyError:
             logger.warning(f"Unsupported language: {language_code}. Falling back to English.")
@@ -206,5 +211,5 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
     def on_session_end(self) -> None:
         if self.language != self._initial_language:
-            self.load_model(self._initial_language)
+            self.load_model(self._initial_language, self._initial_model_name)
         logger.debug("Facebook MMS TTS session state reset")

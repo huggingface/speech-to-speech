@@ -50,7 +50,7 @@ class EmptyBackendArguments:
 class BackendCapabilities:
     """Construction details that affect stage composition, not backend selection."""
 
-    needs_transcription_notifier: bool = False
+    bypasses_transcription_notifier: bool = False
     supports_audio_input: bool = False
     supports_llm_proxy: bool = False
 
@@ -137,6 +137,12 @@ def normalize_dataclass_config(config: Any, prefix: str | None = None) -> Backen
             normalized[name] = value
 
     normalized["gen_kwargs"] = generation
+    return normalized
+
+
+def _normalize_facebook_mms_config(config: Any) -> BackendConfig:
+    normalized = normalize_dataclass_config(config, "facebook_mms")
+    normalized["language"] = normalized.pop("tts_language")
     return normalized
 
 
@@ -281,7 +287,13 @@ def _create_local_llm(backend: Literal["transformers", "mlx-lm"]) -> HandlerFact
 STT_BACKENDS = build_backend_registry(
     "stt",
     [
-        BackendSpec("none", "stt", EmptyBackendArguments, _create_audio_input),
+        BackendSpec(
+            "none",
+            "stt",
+            EmptyBackendArguments,
+            _create_audio_input,
+            capabilities=BackendCapabilities(bypasses_transcription_notifier=True),
+        ),
         BackendSpec(
             "whisper",
             "stt",
@@ -292,7 +304,6 @@ STT_BACKENDS = build_backend_registry(
                 attach_speculative_turns=True,
             ),
             config_prefix="stt",
-            capabilities=BackendCapabilities(needs_transcription_notifier=True),
         ),
         BackendSpec(
             "whisper-mlx",
@@ -305,7 +316,6 @@ STT_BACKENDS = build_backend_registry(
             ),
             config_prefix="stt",
             required_extra="whisper-mlx",
-            capabilities=BackendCapabilities(needs_transcription_notifier=True),
         ),
         BackendSpec(
             "mlx-audio-whisper",
@@ -317,7 +327,6 @@ STT_BACKENDS = build_backend_registry(
                 attach_speculative_turns=True,
             ),
             config_prefix="mlx_audio_whisper",
-            capabilities=BackendCapabilities(needs_transcription_notifier=True),
         ),
         BackendSpec(
             "faster-whisper",
@@ -330,7 +339,6 @@ STT_BACKENDS = build_backend_registry(
             ),
             config_prefix="faster_whisper_stt",
             required_extra="faster-whisper",
-            capabilities=BackendCapabilities(needs_transcription_notifier=True),
         ),
         BackendSpec(
             "parakeet-tdt",
@@ -338,7 +346,6 @@ STT_BACKENDS = build_backend_registry(
             ParakeetTDTSTTHandlerArguments,
             _create_parakeet,
             config_prefix="parakeet_tdt",
-            capabilities=BackendCapabilities(needs_transcription_notifier=True),
         ),
         BackendSpec(
             "paraformer",
@@ -351,7 +358,6 @@ STT_BACKENDS = build_backend_registry(
             ),
             config_prefix="paraformer_stt",
             required_extra="paraformer",
-            capabilities=BackendCapabilities(needs_transcription_notifier=True),
         ),
     ],
 )
@@ -427,7 +433,7 @@ TTS_BACKENDS = build_backend_registry(
                 setup_should_listen=True,
                 context_kwargs=True,
             ),
-            config_prefix="facebook_mms",
+            normalize_config=_normalize_facebook_mms_config,
         ),
         BackendSpec(
             "pocket",

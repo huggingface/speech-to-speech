@@ -6,7 +6,9 @@ from threading import Event
 
 import pytest
 
+import speech_to_speech.s2s_pipeline as s2s_pipeline
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
+from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 from speech_to_speech.backend_registry import (
     LLM_BACKENDS,
     STT_BACKENDS,
@@ -67,6 +69,8 @@ def test_builtin_registry_lookup_and_cli_choices_share_one_catalog():
     assert LLM_BACKENDS["chat-completions"].capabilities.supports_llm_proxy
     assert LLM_BACKENDS["chat-completions"].capabilities.supports_audio_input
     assert not LLM_BACKENDS["transformers"].capabilities.supports_audio_input
+    assert STT_BACKENDS["none"].capabilities.bypasses_transcription_notifier
+    assert not STT_BACKENDS["whisper"].capabilities.bypasses_transcription_notifier
 
 
 def test_registry_rejects_duplicate_names_and_wrong_kinds():
@@ -99,6 +103,25 @@ def test_llm_proxy_validation_uses_registry_capability():
         build_llm_proxy_config(args.module_kwargs, args.llm_backend)
 
 
+def test_llm_proxy_validation_happens_before_pipeline_construction(monkeypatch):
+    constructed = False
+
+    def fake_build_pipeline(*_args, **_kwargs):
+        nonlocal constructed
+        constructed = True
+
+    monkeypatch.setattr(s2s_pipeline, "setup_logger", lambda _level: None)
+    monkeypatch.setattr(s2s_pipeline, "build_pipeline", fake_build_pipeline)
+
+    with pytest.raises(ValueError, match="proxy support.*responses-api.*chat-completions"):
+        s2s_pipeline.run_pipeline_command(
+            "serve",
+            ["--llm_backend", "transformers", "--enable_llm_proxy"],
+        )
+
+    assert not constructed
+
+
 def test_test_backend_only_needs_config_factory_and_registry_entry():
     calls = []
 
@@ -117,6 +140,58 @@ def test_test_backend_only_needs_config_factory_and_registry_entry():
     assert selection.config == {"option": "selected", "gen_kwargs": {}}
     assert parsed_config.fake_option == "selected"
     assert calls[0][1] is selection.config
+
+
+def test_new_stt_backend_gets_transcription_notifier_by_default(monkeypatch):
+    stt_contexts = []
+
+    class DummyHandler:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    class DummyNotifier(DummyHandler):
+        pass
+
+    def stt_factory(context, _config):
+        stt_contexts.append(context)
+        return object()
+
+    def other_factory(_context, _config):
+        return object()
+
+    stt_spec = BackendSpec("future-stt", "stt", FakeArguments, stt_factory)
+    llm_spec = BackendSpec("future-llm", "llm", FakeArguments, other_factory)
+    tts_spec = BackendSpec("future-tts", "tts", FakeArguments, other_factory)
+    stt_output_queue = Queue()
+    text_prompt_queue = Queue()
+
+    monkeypatch.setattr(s2s_pipeline, "VADHandler", DummyHandler)
+    monkeypatch.setattr(s2s_pipeline, "TranscriptionNotifier", DummyNotifier)
+    monkeypatch.setattr("speech_to_speech.LLM.lm_output_processor.LMOutputProcessor", DummyHandler)
+
+    handlers = s2s_pipeline._build_handlers(
+        stop_event=Event(),
+        should_listen=Event(),
+        recv_audio_chunks_queue=Queue(),
+        spoken_prompt_queue=Queue(),
+        stt_output_queue=stt_output_queue,
+        text_prompt_queue=text_prompt_queue,
+        lm_response_queue=Queue(),
+        lm_processed_queue=Queue(),
+        send_audio_chunks_queue=Queue(),
+        text_output_queue=Queue(),
+        module_kwargs=ModuleArguments(),
+        vad_handler_kwargs=VADHandlerArguments(),
+        stt_backend=BackendSelection(stt_spec, stt_spec.normalize(FakeArguments())),
+        llm_backend=BackendSelection(llm_spec, llm_spec.normalize(FakeArguments())),
+        tts_backend=BackendSelection(tts_spec, tts_spec.normalize(FakeArguments())),
+        speculative_turns=SpeculativeTurnTracker(),
+        cancel_scope=CancelScope(),
+        pipeline_index=0,
+    )
+
+    assert stt_contexts[0].queue_out is stt_output_queue
+    assert any(isinstance(handler, DummyNotifier) for handler in handlers)
 
 
 def test_parser_carries_only_selected_normalized_configs():
@@ -151,6 +226,51 @@ def test_parser_carries_only_selected_normalized_configs():
     assert args.tts_backend.config["voice"] == "alba"
     assert not hasattr(args, "whisper_stt_handler_kwargs")
     assert not hasattr(args, "qwen3_tts_handler_kwargs")
+
+
+def test_facebook_mms_options_are_normalized_for_handler_setup(monkeypatch):
+    from speech_to_speech.TTS.facebookmms_handler import FacebookMMSTTSHandler
+
+    captured = {}
+
+    def fake_setup(self, _should_listen, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(FacebookMMSTTSHandler, "setup", fake_setup)
+    args = parse_arguments(
+        [
+            "--tts",
+            "facebookMMS",
+            "--tts_language",
+            "fr",
+            "--facebook_mms_model_name",
+            "acme/custom-mms",
+        ]
+    )
+
+    assert args.tts_backend.config["language"] == "fr"
+    assert "tts_language" not in args.tts_backend.config
+    create_backend_handler(args.tts_backend, _context())
+    assert captured["language"] == "fr"
+    assert captured["model_name"] == "acme/custom-mms"
+
+
+def test_facebook_mms_handler_honors_model_override(monkeypatch):
+    from speech_to_speech.TTS.facebookmms_handler import FacebookMMSTTSHandler
+
+    load_calls = []
+    monkeypatch.setattr(
+        FacebookMMSTTSHandler,
+        "load_model",
+        lambda self, language, model_name=None: load_calls.append((language, model_name)),
+    )
+    monkeypatch.setattr(FacebookMMSTTSHandler, "warmup", lambda self: None)
+    handler = FacebookMMSTTSHandler.__new__(FacebookMMSTTSHandler)
+
+    handler.setup(Event(), model_name="acme/custom-mms", language="fr", device="cpu")
+
+    assert load_calls == [("fr", "acme/custom-mms")]
+    assert handler._initial_model_name == "acme/custom-mms"
 
 
 def test_parser_warning_ignores_known_options_for_inactive_backends(caplog):
