@@ -190,14 +190,15 @@ class AudioHandler(RealtimeBaseHandler):
                     response=response._build_response(conn_id, "in_progress"),
                 )
             )
-        return resp_id, item_id, events
+        assistant_item_id, _ = response._ensure_assistant_output_item(conn_id, item_id)
+        return resp_id, assistant_item_id, events
 
     def encode_audio_chunk(self, conn_id: str, audio: bytes) -> list[ServerEvent]:
         """Encode a raw PCM audio chunk as a base64 delta event for the WebSocket transport."""
         response = self._service.response
         st = self._state(conn_id)
 
-        resp_id, item_id, events = self.begin_audio_response(conn_id)
+        resp_id, assistant_item_id, events = self.begin_audio_response(conn_id)
         rp = st.current_response_params
         client_out_rate = None
         if rp and rp.audio and rp.audio.output and rp.audio.output.format:
@@ -210,10 +211,8 @@ class AudioHandler(RealtimeBaseHandler):
                 client_out_rate = PIPELINE_SAMPLE_RATE
         audio = resample(audio, PIPELINE_SAMPLE_RATE, client_out_rate)
         b64 = base64.b64encode(audio).decode("ascii")
-        assistant_item_id = st.pending_assistant_item_id or item_id
-        assistant_output_index = (
-            st.pending_assistant_output_index if st.pending_assistant_output_index is not None else 0
-        )
+        assistant_output_index = st.pending_assistant_output_index
+        assert assistant_output_index is not None
         events.append(
             ResponseAudioDeltaEvent(
                 type="response.output_audio.delta",
