@@ -66,6 +66,7 @@ Any OpenAI Realtime-compatible client can connect. See [Realtime API](#realtime-
 
 * [How it works](#how-it-works)
 * [Installation](#installation)
+* [Offline operation](#offline-operation)
 * [Supported components](#supported-components)
 * [Commands](#commands)
 * [Realtime API](#realtime-api)
@@ -154,6 +155,28 @@ uv sync
 ```
 
 This installs the package in editable mode and makes the `speech-to-speech` CLI available.
+
+## Offline Operation
+
+The pipeline can run without internet access after the dependencies and model assets for the selected components
+are installed locally. Before disconnecting, start the exact configuration once while online so it can cache the
+STT, LLM, TTS, Silero VAD, NLTK, and Smart Turn resources it needs.
+
+Set `HF_HUB_OFFLINE=1` when starting the cached configuration to prevent Hugging Face Hub requests:
+
+```bash
+HF_HUB_OFFLINE=1 speech-to-speech serve \
+    --llm_backend transformers \
+    --model_name Qwen/Qwen3-4B-Instruct-2507
+```
+
+The default `responses-api` LLM backend calls a remote service. For a fully offline pipeline, use a local backend
+such as `transformers` or `mlx-lm`, or point an OpenAI-compatible backend at a model server running on the local
+machine. Every selected model must already be cached or supplied through a local path supported by its backend.
+
+Smart Turn uses a separate ONNX checkpoint. A cached checkpoint works with `HF_HUB_OFFLINE=1`; for an explicit,
+cache-independent setup, pass `--smart_turn_model_path /path/to/smart-turn-v3.2-cpu.onnx`. If the checkpoint is not
+available, pass `--no_smart_turn` to disable Smart Turn.
 
 ## Supported Components
 
