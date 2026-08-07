@@ -15,6 +15,7 @@ from openai.types.realtime import (
     InputAudioBufferSpeechStartedEvent,
     InputAudioBufferSpeechStoppedEvent,
     OutputAudioBufferClearEvent,
+    RealtimeConversationItemFunctionCall,
     RealtimeError,
     RealtimeErrorEvent,
     RealtimeSessionCreateRequest,
@@ -176,6 +177,11 @@ class ConnState(BaseModel):
     last_item_id: Optional[str] = None
     current_response_params: RealtimeResponseCreateParams | None = None
     pending_output_text_parts: list[str] = Field(default_factory=list)
+    pending_assistant_item_id: Optional[str] = None
+    pending_assistant_output_index: Optional[int] = None
+    # Function calls the model has requested during the current response, so
+    # response.done's output can include them per the OpenAI Realtime protocol.
+    pending_function_calls: list[RealtimeConversationItemFunctionCall] = Field(default_factory=list)
     response_usage: UsageMetrics = Field(default_factory=UsageMetrics)
     speculative_turn_id: Optional[str] = None
     speculative_turn_revision: Optional[int] = None
