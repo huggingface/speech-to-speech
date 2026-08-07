@@ -83,18 +83,12 @@ flowchart LR
 | `conversation.item.created` | Acknowledges injected `input_text` from `conversation.item.create`. |
 | `conversation.item.input_audio_transcription.delta` | Streaming partial transcript (when live transcription is enabled). |
 | `conversation.item.input_audio_transcription.completed` | Final transcript for the user turn (with duration usage). |
-| `response.created` | First event for a response, emitted before its first text, tool, or audio output (response is `in_progress`). |
+| `response.created` | Emitted on the first outbound audio chunk (response is `in_progress`). |
 | `response.output_audio.delta` | Base64 PCM audio chunk from TTS. |
 | `response.output_audio.done` | Audio stream complete for the current output item. |
-| `response.output_audio_transcript.delta` | Incremental assistant transcript suffix for the current audio output item. |
 | `response.output_audio_transcript.done` | Full assistant text transcript for the turn. |
 | `response.function_call_arguments.done` | Tool call with `call_id`, `name`, and JSON `arguments`. |
-| `response.done` | Response finished (`completed`, `cancelled` with reason `turn_detected` or `client_cancelled`) and includes every generated output item. |
-
-### Unreleased protocol compatibility notes
-
-- Assistant audio transcripts now use `response.output_audio_transcript.delta` for incremental chunks and emit exactly one `response.output_audio_transcript.done` with the full transcript when the item closes. Clients that previously treated each `done` event as a sentence update should render `delta` events for live text and use `done` only for finalization.
-- `response.output_audio.delta.content_index` identifies the audio content part, not the PCM chunk number. It therefore remains `0` for every chunk of the response's single audio content part.
+| `response.done` | Response finished (`completed`, `cancelled` with reason `turn_detected` or `client_cancelled`). |
 
 ---
 
@@ -151,7 +145,7 @@ Tools are passed natively as the `tools=` parameter to `client.responses.create`
 ### Common output path
 
 Both handlers yield `(text, language_code, tools)` tuples. `LMOutputProcessor` forwards clean text to TTS and puts `{"type": "assistant_text", "text": ..., "tools": [...]}` on the `text_output_queue`. The router's `_send_loop` translates these into:
-- `response.output_audio_transcript.delta` for each text chunk, followed by one terminal `response.output_audio_transcript.done`
+- `response.output_audio_transcript.done` for the text
 - `response.function_call_arguments.done` for each tool call
 
 ### Tool result flow

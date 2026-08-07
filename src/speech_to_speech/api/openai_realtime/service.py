@@ -21,7 +21,6 @@ from openai.types.realtime import (
     RealtimeSessionCreateRequest,
     ResponseAudioDeltaEvent,
     ResponseAudioDoneEvent,
-    ResponseAudioTranscriptDeltaEvent,
     ResponseAudioTranscriptDoneEvent,
     ResponseCancelEvent,
     ResponseCreatedEvent,
@@ -40,7 +39,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from speech_to_speech.api.openai_realtime.handlers import (
     AudioHandler,
     ConversationHandler,
-    PendingAssistantOutput,
     ResponseHandler,
     SessionHandler,
 )
@@ -105,7 +103,6 @@ ServerEvent = Union[
     ResponseDoneEvent,
     ResponseAudioDeltaEvent,
     ResponseAudioDoneEvent,
-    ResponseAudioTranscriptDeltaEvent,
     ResponseAudioTranscriptDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseTextDeltaEvent,
@@ -174,11 +171,14 @@ class ConnState(BaseModel):
     audio_remainder: bytes = b""
     current_response_id: Optional[str] = None
     current_item_id: Optional[str] = None
+    content_index: int = 0
     input_content_index: int = 0
     input_audio_duration_s: float = 0.0
     last_item_id: Optional[str] = None
     current_response_params: RealtimeResponseCreateParams | None = None
-    pending_assistant_output: PendingAssistantOutput | None = None
+    pending_output_text_parts: list[str] = Field(default_factory=list)
+    pending_assistant_item_id: Optional[str] = None
+    pending_assistant_output_index: Optional[int] = None
     # Function calls the model has requested during the current response, so
     # response.done's output can include them per the OpenAI Realtime protocol.
     pending_function_calls: list[RealtimeConversationItemFunctionCall] = Field(default_factory=list)
@@ -323,9 +323,6 @@ class RealtimeService:
 
     def begin_audio_response(self, conn_id: str) -> tuple[str, str, list[ServerEvent]]:
         return self.audio.begin_audio_response(conn_id)
-
-    def begin_audio_output(self, conn_id: str) -> tuple[str, str, int, list[ServerEvent]]:
-        return self.audio.begin_audio_output(conn_id)
 
     def encode_audio_chunk(self, conn_id: str, audio: bytes) -> list[ServerEvent]:
         return self.audio.encode_audio_chunk(conn_id, audio)

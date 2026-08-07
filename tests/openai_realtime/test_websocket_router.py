@@ -265,8 +265,11 @@ class TestClientEventDispatch:
                 conn_id = list(service._conns.keys())[0]
                 service.response._ensure_response(conn_id)
                 ws.send_json({"type": "response.cancel"})
-                msg = ws.receive_json()
-                assert msg["type"] == "response.done"
+                msg1 = ws.receive_json()
+                msg2 = ws.receive_json()
+                types = {msg1["type"], msg2["type"]}
+                assert "response.output_audio.done" in types
+                assert "response.done" in types
 
     def test_response_cancel_flushes_queues(self, setup):
         app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
@@ -280,6 +283,7 @@ class TestClientEventDispatch:
                 output_queue.put(_pcm_bytes(256))
                 text_output_queue.put(AssistantTextEvent(text="stale"))
                 ws.send_json({"type": "response.cancel"})
+                ws.receive_json()  # response.output_audio.done
                 ws.receive_json()  # response.done
                 time.sleep(0.1)
                 assert output_queue.empty()
@@ -309,6 +313,7 @@ class TestClientEventDispatch:
                 service.response._ensure_response(conn_id)
                 response_playing.set()
                 ws.send_json({"type": "response.cancel"})
+                ws.receive_json()  # response.output_audio.done
                 ws.receive_json()  # response.done
                 time.sleep(0.1)
                 assert cancel_scope.discarding
@@ -379,12 +384,11 @@ class TestSendLoop:
                 decoded = base64.b64decode(msg2["delta"])
                 assert len(decoded) == len(_pcm_bytes(512))
 
-                terminal = [ws.receive_json() for _ in range(3)]
-                assert [msg["type"] for msg in terminal] == [
-                    "response.output_audio_transcript.done",
-                    "response.output_audio.done",
-                    "response.done",
-                ]
+                msg3 = ws.receive_json()
+                msg4 = ws.receive_json()
+                types = {msg3["type"], msg4["type"]}
+                assert "response.output_audio.done" in types
+                assert "response.done" in types
 
     def test_end_marker_sends_finish_events(self, setup):
         app, _, _, output_queue, *_ = setup
@@ -395,28 +399,11 @@ class TestSendLoop:
                 ws.receive_json()  # response.created
                 ws.receive_json()  # audio delta
                 output_queue.put(PIPELINE_END)
-                terminal = [ws.receive_json() for _ in range(3)]
-                assert [msg["type"] for msg in terminal] == [
-                    "response.output_audio_transcript.done",
-                    "response.output_audio.done",
-                    "response.done",
-                ]
-
-    def test_empty_pending_response_sends_created_and_done(self, setup):
-        app, service, _, output_queue, *_ = setup
-        with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                ws.receive_json()  # session.created
-                conn_id = list(service._conns.keys())[0]
-                service._state(conn_id).response_pending = True
-
-                output_queue.put(AUDIO_RESPONSE_DONE)
-
-                assert ws.receive_json()["type"] == "response.created"
-                done = ws.receive_json()
-                assert done["type"] == "response.done"
-                assert done["response"]["output"] == []
-                assert service._state(conn_id).response_pending is False
+                msg1 = ws.receive_json()
+                msg2 = ws.receive_json()
+                types = {msg1["type"], msg2["type"]}
+                assert "response.output_audio.done" in types
+                assert "response.done" in types
 
     def test_text_output_sends_pipeline_events(self, setup):
         app, _, _, _, text_output_queue, *_ = setup
@@ -439,11 +426,9 @@ class TestSendLoop:
                 response_playing.set()
                 # Trigger barge-in
                 text_output_queue.put(SpeechStartedEvent())
-                messages = [ws.receive_json(), ws.receive_json()]
-                assert {message["type"] for message in messages} == {
-                    "input_audio_buffer.speech_started",
-                    "response.done",
-                }
+                ws.receive_json()  # input_audio_buffer.speech_started
+                ws.receive_json()  # response.output_audio.done
+                ws.receive_json()  # response.done
                 time.sleep(0.1)
                 assert cancel_scope.discarding
                 output_queue.put(AUDIO_RESPONSE_DONE)
@@ -473,7 +458,6 @@ class TestSendLoop:
                 output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=stale_generation))
                 time.sleep(0.15)
                 assert not cancel_scope.discarding
-                assert service.finish_response(conn_id) == []
 
     def test_speech_started_does_not_cancel_pending_when_internal_non_interrupt(self, setup):
         app, service, _, _, text_output_queue, _, _, _, cancel_scope = setup
@@ -516,8 +500,8 @@ class TestSendLoop:
         so ``response_done()`` never cleared the flag). The next response's audio is tagged
         with the current generation and streams fine, but the assistant text used to be
         blanket-dropped while discarding — leaving audio + ``response.done`` with no
-        transcript. The text is now discarded by the same generation-aware rule as audio,
-        so a current-generation transcript is kept and also starts the response lifecycle.
+        ``response.output_audio_transcript.done``. The text is now discarded by the same
+        generation-aware rule as audio, so a current-generation transcript is kept.
         """
         app, _, _, output_queue, text_output_queue, _, _, _, cancel_scope = setup
         with TestClient(app) as client:
@@ -542,11 +526,6 @@ class TestSendLoop:
                         break
                 assert "response.output_audio_transcript.done" in types
                 assert transcript == "hello there"
-                assert types[:3] == [
-                    "response.created",
-                    "response.output_audio_transcript.delta",
-                    "response.output_audio.delta",
-                ]
 
     def test_stale_tagged_response_done_does_not_finish_current_response(self, setup):
         app, service, _, output_queue, _, _, _, _, cancel_scope = setup
@@ -567,26 +546,6 @@ class TestSendLoop:
                 assert state.in_response
                 assert state.current_response_id == current_response_id
 
-    def test_stale_response_done_preserves_pending_empty_next_response(self, setup):
-        app, service, _, output_queue, _, _, _, _, cancel_scope = setup
-        with TestClient(app) as client:
-            with client.websocket_connect("/v1/realtime") as ws:
-                ws.receive_json()  # session.created
-                conn_id = list(service._conns.keys())[0]
-                stale_generation = cancel_scope.generation
-                cancel_scope.cancel()
-                current_generation = cancel_scope.generation
-                service._state(conn_id).response_pending = True
-
-                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=stale_generation))
-                time.sleep(0.15)
-                assert service._state(conn_id).response_pending is True
-
-                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=current_generation))
-                assert ws.receive_json()["type"] == "response.created"
-                assert ws.receive_json()["type"] == "response.done"
-                assert service._state(conn_id).response_pending is False
-
     def test_response_done_drains_pending_token_usage_before_finish(self, setup):
         app, service, _, output_queue, text_output_queue, *_ = setup
         with TestClient(app) as client:
@@ -603,9 +562,10 @@ class TestSendLoop:
                 text_output_queue.put(TokenUsageEvent(input_tokens=10, output_tokens=5))
                 output_queue.put(AUDIO_RESPONSE_DONE)
 
-                assert ws.receive_json()["type"] == "response.created"
                 assert ws.receive_json()["type"] == "response.function_call_arguments.done"
-                assert ws.receive_json()["type"] == "response.done"
+                msg1 = ws.receive_json()
+                msg2 = ws.receive_json()
+                assert {msg1["type"], msg2["type"]} == {"response.output_audio.done", "response.done"}
 
                 assert service.total_usage.input_tokens == 10
                 assert service.total_usage.output_tokens == 5
@@ -650,11 +610,11 @@ class TestSendLoop:
         done_events = service.finish_response(conn_id)
 
         assert [payload["type"] for payload in ws.sent] == ["response.function_call_arguments.done"]
-        assert [event.type for event in done_events] == ["response.done"]
+        assert [event.type for event in done_events] == ["response.output_audio.done", "response.done"]
         assert ws.sent[0]["response_id"] == response_id
-        assert done_events[0].response.id == response_id
-        assert done_events[0].response.usage.input_tokens == 10
-        assert done_events[0].response.usage.output_tokens == 5
+        assert done_events[1].response.id == response_id
+        assert done_events[1].response.usage.input_tokens == 10
+        assert done_events[1].response.usage.output_tokens == 5
         assert text_output_queue.empty()
 
     def test_response_completion_drain_preserves_usage_across_non_response_boundary(self, setup):
@@ -691,8 +651,8 @@ class TestSendLoop:
 
         assert [payload["type"] for payload in ws.sent] == ["response.function_call_arguments.done"]
         assert ws.sent[0]["response_id"] == response_id
-        assert done_events[0].response.usage.input_tokens == 10
-        assert done_events[0].response.usage.output_tokens == 5
+        assert done_events[1].response.usage.input_tokens == 10
+        assert done_events[1].response.usage.output_tokens == 5
 
         boundary = text_output_queue.get_nowait()
         queued_assistant = text_output_queue.get_nowait()
