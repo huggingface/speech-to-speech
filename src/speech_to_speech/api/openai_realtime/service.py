@@ -326,6 +326,9 @@ class RealtimeService:
     def begin_audio_response(self, conn_id: str) -> tuple[str, str, list[ServerEvent]]:
         return self.audio.begin_audio_response(conn_id)
 
+    def begin_audio_output(self, conn_id: str) -> tuple[str, str, int, list[ServerEvent]]:
+        return self.audio.begin_audio_output(conn_id)
+
     def encode_audio_chunk(self, conn_id: str, audio: bytes) -> list[ServerEvent]:
         return self.audio.encode_audio_chunk(conn_id, audio)
 

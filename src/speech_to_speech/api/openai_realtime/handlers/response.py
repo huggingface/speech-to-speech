@@ -92,6 +92,16 @@ class ResponseHandler(RealtimeBaseHandler):
     def _current_item_id(self, conn_id: str) -> str:
         return self._state(conn_id).current_item_id or self._start_item(conn_id)
 
+    def _ensure_assistant_output_item(self, conn_id: str, item_id: str) -> tuple[str, int]:
+        """Reserve the assistant's stable response-wide item ID and index."""
+        st = self._state(conn_id)
+        if st.pending_assistant_item_id is None:
+            st.pending_assistant_item_id = item_id
+            st.pending_assistant_output_index = len(st.pending_function_calls)
+            st.last_item_id = item_id
+        assert st.pending_assistant_output_index is not None
+        return st.pending_assistant_item_id, st.pending_assistant_output_index
+
     def _next_content_index(self, conn_id: str) -> int:
         """Return the current content index and advance it."""
         st = self._state(conn_id)
@@ -163,7 +173,7 @@ class ResponseHandler(RealtimeBaseHandler):
             output.append(call.model_copy(update={"object": "realtime.item", "status": call_status}))
 
         text = self._assistant_text(conn_id)
-        if text:
+        if st.pending_assistant_item_id is not None:
             if response_wants_audio(st.current_response_params):
                 content = Content(type="output_audio", transcript=text)
             else:
@@ -268,12 +278,12 @@ class ResponseHandler(RealtimeBaseHandler):
     ) -> list[ServerEvent]:
         """Close the current response (audio/text done + response done).
 
-        Audio responses emit ``response.output_audio.done``, followed by one
-        terminal transcript event when text was produced, for any terminal
-        status. Text-only responses emit a single ``response.output_text.done``
-        carrying the full streamed text, but only on ``status="completed"`` —
-        a cancelled or failed text response sends no audio, so it just closes
-        with ``response.done``.
+        Audio responses emit ``response.output_audio.done`` unless their only
+        output is a function call, followed by one terminal transcript event
+        when text was produced. Text-only responses emit a single
+        ``response.output_text.done`` carrying the full streamed text, but only
+        on ``status="completed"`` — a cancelled or failed text response sends no
+        audio, so it just closes with ``response.done``.
         """
         st = self._state(conn_id)
         events: list[ServerEvent] = []
@@ -283,7 +293,8 @@ class ResponseHandler(RealtimeBaseHandler):
             assistant_output_index = (
                 st.pending_assistant_output_index if st.pending_assistant_output_index is not None else 0
             )
-            if response_wants_audio(st.current_response_params):
+            function_call_only = bool(st.pending_function_calls) and st.pending_assistant_item_id is None
+            if response_wants_audio(st.current_response_params) and not function_call_only:
                 events.append(
                     ResponseAudioDoneEvent(
                         type="response.output_audio.done",
@@ -294,7 +305,7 @@ class ResponseHandler(RealtimeBaseHandler):
                         response_id=resp_id,
                     )
                 )
-                if st.pending_assistant_item_id is not None:
+                if st.pending_output_text_parts:
                     events.append(
                         ResponseAudioTranscriptDoneEvent(
                             type="response.output_audio_transcript.done",
@@ -364,14 +375,7 @@ class ResponseHandler(RealtimeBaseHandler):
         resp_id, item_id = self._ensure_response(conn_id)
         wants_audio = response_wants_audio(st.current_response_params)
         if event.text and (not wants_audio or event.text.strip()):
-            if st.pending_assistant_item_id is None:
-                st.pending_assistant_item_id = item_id
-                st.pending_assistant_output_index = len(st.pending_function_calls)
-            assistant_item_id = st.pending_assistant_item_id
-            assistant_output_index = st.pending_assistant_output_index
-            assert assistant_item_id is not None
-            assert assistant_output_index is not None
-            st.last_item_id = assistant_item_id
+            assistant_item_id, assistant_output_index = self._ensure_assistant_output_item(conn_id, item_id)
             if wants_audio:
                 # Accumulated (not just streamed) so response.done's output can
                 # carry the full transcript as an assistant message item.

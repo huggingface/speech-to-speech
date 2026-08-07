@@ -743,6 +743,18 @@ class TestHandleResponseCancel:
 
 
 class TestEncodeAudioChunk:
+    def test_begin_audio_output_reserves_assistant_item_for_media_transports(self, service, conn_id):
+        _, item_id, output_index, events = service.begin_audio_output(conn_id)
+
+        st = service._state(conn_id)
+        assert isinstance(events[0], ResponseCreatedEvent)
+        assert st.pending_assistant_item_id == item_id
+        assert st.pending_assistant_output_index == output_index == 0
+        assert st.last_item_id == item_id
+
+        done = next(e for e in service.finish_response(conn_id) if isinstance(e, ResponseDoneEvent))
+        assert done.response.output[0].id == item_id
+
     def test_first_chunk_emits_response_created_and_delta(self, service, conn_id):
         audio = _pcm_bytes(256)
         events = service.encode_audio_chunk(conn_id, audio)
@@ -854,6 +866,30 @@ class TestResponseDoneOutputItems:
         assert function_calls[0].name == "endCall"
         assert function_calls[0].call_id == "call_1"
         assert function_calls[0].arguments == "{}"
+
+    def test_function_call_only_response_skips_audio_done(self, service, conn_id):
+        stream_events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantTextEvent(
+                text="",
+                tools=[
+                    {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_1",
+                        "name": "endCall",
+                        "arguments": "{}",
+                    }
+                ],
+            ),
+        )
+
+        terminal_events = service.finish_response(conn_id)
+        done = next(e for e in terminal_events if isinstance(e, ResponseDoneEvent))
+        function_event = next(e for e in stream_events if isinstance(e, ResponseFunctionCallArgumentsDoneEvent))
+
+        assert [type(event) for event in terminal_events] == [ResponseDoneEvent]
+        assert [item.id for item in done.response.output] == [function_event.item_id]
 
     def test_output_includes_assistant_audio_message(self, service, conn_id):
         service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="First sentence."))
@@ -1020,6 +1056,81 @@ class TestResponseDoneOutputItems:
         assert audio_delta.item_id == text_event.item_id
         assert audio_delta.output_index == text_event.output_index
         assert done.response.output[audio_delta.output_index].id == audio_delta.item_id
+
+    def test_audio_first_reserves_assistant_identity_across_tool_and_text_chunks(self, service, conn_id):
+        audio_delta = next(
+            e for e in service.encode_audio_chunk(conn_id, _pcm_bytes(256)) if isinstance(e, ResponseAudioDeltaEvent)
+        )
+        tool_event = next(
+            e
+            for e in service.dispatch_pipeline_event(
+                conn_id,
+                AssistantTextEvent(
+                    text="",
+                    tools=[
+                        {
+                            "type": "function_call",
+                            "id": "fc_1",
+                            "call_id": "call_1",
+                            "name": "first",
+                            "arguments": "{}",
+                        }
+                    ],
+                ),
+            )
+            if isinstance(e, ResponseFunctionCallArgumentsDoneEvent)
+        )
+        text_event = next(
+            e
+            for e in service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="Speaking now."))
+            if isinstance(e, ResponseAudioTranscriptDeltaEvent)
+        )
+
+        terminal_events = service.finish_response(conn_id)
+        audio_done = next(e for e in terminal_events if isinstance(e, ResponseAudioDoneEvent))
+        done = next(e for e in terminal_events if isinstance(e, ResponseDoneEvent))
+
+        assert audio_delta.output_index == text_event.output_index == audio_done.output_index == 0
+        assert audio_delta.item_id == text_event.item_id == audio_done.item_id
+        assert tool_event.output_index == 1
+        assert [item.id for item in done.response.output] == [audio_delta.item_id, tool_event.item_id]
+        assert service._state(conn_id).last_item_id == tool_event.item_id
+
+    def test_cancelled_audio_keeps_reserved_assistant_output_item(self, service, conn_id):
+        tool_event = next(
+            e
+            for e in service.dispatch_pipeline_event(
+                conn_id,
+                AssistantTextEvent(
+                    text="",
+                    tools=[
+                        {
+                            "type": "function_call",
+                            "id": "fc_1",
+                            "call_id": "call_1",
+                            "name": "first",
+                            "arguments": "{}",
+                        }
+                    ],
+                ),
+            )
+            if isinstance(e, ResponseFunctionCallArgumentsDoneEvent)
+        )
+        audio_delta = next(
+            e for e in service.encode_audio_chunk(conn_id, _pcm_bytes(256)) if isinstance(e, ResponseAudioDeltaEvent)
+        )
+
+        terminal_events = service.finish_response(conn_id, status="cancelled", reason="client_cancelled")
+        done = next(e for e in terminal_events if isinstance(e, ResponseDoneEvent))
+
+        assert tool_event.output_index == 0
+        assert audio_delta.output_index == 1
+        assert [item.id for item in done.response.output] == [tool_event.item_id, audio_delta.item_id]
+        assert [item.status for item in done.response.output] == ["completed", "incomplete"]
+        assistant = done.response.output[audio_delta.output_index]
+        assert isinstance(assistant, RealtimeConversationItemAssistantMessage)
+        assert assistant.content[0].type == "output_audio"
+        assert assistant.content[0].transcript == ""
 
     def test_assistant_id_survives_non_interrupting_user_speech(self, service, conn_id):
         transcript_event = next(
@@ -1947,6 +2058,7 @@ class TestDispatchPipelineEvent:
         assert len(done) == 1
         assert done[0].response.status == "failed"
         assert done[0].response.id == created.response.id
+        assert done[0].response.output == []
         state = service._state(conn_id)
         assert state.response_pending is False
         assert state.in_response is False

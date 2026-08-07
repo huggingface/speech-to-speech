@@ -563,9 +563,7 @@ class TestSendLoop:
                 output_queue.put(AUDIO_RESPONSE_DONE)
 
                 assert ws.receive_json()["type"] == "response.function_call_arguments.done"
-                msg1 = ws.receive_json()
-                msg2 = ws.receive_json()
-                assert {msg1["type"], msg2["type"]} == {"response.output_audio.done", "response.done"}
+                assert ws.receive_json()["type"] == "response.done"
 
                 assert service.total_usage.input_tokens == 10
                 assert service.total_usage.output_tokens == 5
@@ -610,11 +608,11 @@ class TestSendLoop:
         done_events = service.finish_response(conn_id)
 
         assert [payload["type"] for payload in ws.sent] == ["response.function_call_arguments.done"]
-        assert [event.type for event in done_events] == ["response.output_audio.done", "response.done"]
+        assert [event.type for event in done_events] == ["response.done"]
         assert ws.sent[0]["response_id"] == response_id
-        assert done_events[1].response.id == response_id
-        assert done_events[1].response.usage.input_tokens == 10
-        assert done_events[1].response.usage.output_tokens == 5
+        assert done_events[0].response.id == response_id
+        assert done_events[0].response.usage.input_tokens == 10
+        assert done_events[0].response.usage.output_tokens == 5
         assert text_output_queue.empty()
 
     def test_response_completion_drain_preserves_usage_across_non_response_boundary(self, setup):
@@ -651,8 +649,8 @@ class TestSendLoop:
 
         assert [payload["type"] for payload in ws.sent] == ["response.function_call_arguments.done"]
         assert ws.sent[0]["response_id"] == response_id
-        assert done_events[1].response.usage.input_tokens == 10
-        assert done_events[1].response.usage.output_tokens == 5
+        assert done_events[0].response.usage.input_tokens == 10
+        assert done_events[0].response.usage.output_tokens == 5
 
         boundary = text_output_queue.get_nowait()
         queued_assistant = text_output_queue.get_nowait()
