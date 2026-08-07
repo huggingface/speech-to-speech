@@ -69,6 +69,35 @@ def test_inference_failure_uses_default_speculative_grace() -> None:
     assert len(analyzer.calls) == 1
 
 
+def test_silero_load_pins_cached_master_ref(monkeypatch) -> None:
+    class FakeSileroModel:
+        def reset_states(self) -> None:
+            pass
+
+    load_calls = []
+
+    def fake_load(repo, model, **kwargs):
+        load_calls.append((repo, model, kwargs))
+        return FakeSileroModel(), None
+
+    monkeypatch.setattr(torch.hub, "load", fake_load)
+    handler = object.__new__(VADHandler)
+
+    handler.setup(
+        Event(),
+        speculative_turns=SpeculativeTurnTracker(),
+        smart_turn=False,
+    )
+
+    assert load_calls == [
+        (
+            "snakers4/silero-vad:master",
+            "silero_vad",
+            {"trust_repo": True, "skip_validation": True},
+        )
+    ]
+
+
 def test_unanswered_reopen_cap_covers_smart_turn_wait(monkeypatch) -> None:
     class FakeSileroModel:
         def reset_states(self) -> None:
