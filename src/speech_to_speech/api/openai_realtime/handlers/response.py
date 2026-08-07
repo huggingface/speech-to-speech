@@ -8,6 +8,7 @@ from openai.types.realtime import (
     RealtimeConversationItemFunctionCall,
     RealtimeResponse,
     ResponseAudioDoneEvent,
+    ResponseAudioTranscriptDeltaEvent,
     ResponseAudioTranscriptDoneEvent,
     ResponseCreatedEvent,
     ResponseCreateEvent,
@@ -161,10 +162,7 @@ class ResponseHandler(RealtimeBaseHandler):
                 call_status = "incomplete"
             output.append(call.model_copy(update={"object": "realtime.item", "status": call_status}))
 
-        if response_wants_audio(st.current_response_params):
-            text = " ".join(part.strip() for part in st.pending_output_text_parts if part.strip())
-        else:
-            text = "".join(st.pending_output_text_parts)
+        text = self._assistant_text(conn_id)
         if text:
             if response_wants_audio(st.current_response_params):
                 content = Content(type="output_audio", transcript=text)
@@ -183,6 +181,13 @@ class ResponseHandler(RealtimeBaseHandler):
                 message,
             )
         return output
+
+    def _assistant_text(self, conn_id: str) -> str:
+        """Assemble transcript parts using the active output modality's semantics."""
+        st = self._state(conn_id)
+        if response_wants_audio(st.current_response_params):
+            return " ".join(part.strip() for part in st.pending_output_text_parts if part.strip())
+        return "".join(st.pending_output_text_parts)
 
     # ── Public handlers ───────────────────────────
 
@@ -263,7 +268,8 @@ class ResponseHandler(RealtimeBaseHandler):
     ) -> list[ServerEvent]:
         """Close the current response (audio/text done + response done).
 
-        Audio responses emit ``response.output_audio.done`` for any terminal
+        Audio responses emit ``response.output_audio.done``, followed by one
+        terminal transcript event when text was produced, for any terminal
         status. Text-only responses emit a single ``response.output_text.done``
         carrying the full streamed text, but only on ``status="completed"`` —
         a cancelled or failed text response sends no audio, so it just closes
@@ -288,6 +294,18 @@ class ResponseHandler(RealtimeBaseHandler):
                         response_id=resp_id,
                     )
                 )
+                if st.pending_assistant_item_id is not None:
+                    events.append(
+                        ResponseAudioTranscriptDoneEvent(
+                            type="response.output_audio_transcript.done",
+                            event_id=self._next_event_id(),
+                            content_index=0,
+                            item_id=assistant_item_id,
+                            output_index=assistant_output_index,
+                            response_id=resp_id,
+                            transcript=self._assistant_text(conn_id),
+                        )
+                    )
             elif status == "completed" and st.pending_output_text_parts:
                 events.append(
                     ResponseTextDoneEvent(
@@ -344,7 +362,8 @@ class ResponseHandler(RealtimeBaseHandler):
         st = self._state(conn_id)
         events: list[ServerEvent] = []
         resp_id, item_id = self._ensure_response(conn_id)
-        if event.text:
+        wants_audio = response_wants_audio(st.current_response_params)
+        if event.text and (not wants_audio or event.text.strip()):
             if st.pending_assistant_item_id is None:
                 st.pending_assistant_item_id = item_id
                 st.pending_assistant_output_index = len(st.pending_function_calls)
@@ -353,19 +372,21 @@ class ResponseHandler(RealtimeBaseHandler):
             assert assistant_item_id is not None
             assert assistant_output_index is not None
             st.last_item_id = assistant_item_id
-            if response_wants_audio(st.current_response_params):
+            if wants_audio:
                 # Accumulated (not just streamed) so response.done's output can
                 # carry the full transcript as an assistant message item.
-                st.pending_output_text_parts.append(event.text)
+                text_part = event.text.strip()
+                delta = (" " if st.pending_output_text_parts else "") + text_part
+                st.pending_output_text_parts.append(text_part)
                 events.append(
-                    ResponseAudioTranscriptDoneEvent(
-                        type="response.output_audio_transcript.done",
+                    ResponseAudioTranscriptDeltaEvent(
+                        type="response.output_audio_transcript.delta",
                         event_id=self._next_event_id(),
                         content_index=0,
+                        delta=delta,
                         item_id=assistant_item_id,
                         output_index=assistant_output_index,
                         response_id=resp_id,
-                        transcript=event.text,
                     )
                 )
             else:
