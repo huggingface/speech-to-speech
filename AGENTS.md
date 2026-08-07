@@ -1,6 +1,7 @@
 # Repository Instructions
 
 - Never include `codex` in branch names or pull request titles.
+- For existing/open pull requests, do not amend, squash, rebase-rewrite, or force-push follow-up changes. Make new commits and push normally unless explicitly asked to rewrite history.
 - Keep release pull requests focused on version metadata and release documentation.
 - Do not commit local build artifacts such as `dist/`, `build/`, or generated wheel/sdist files.
 
