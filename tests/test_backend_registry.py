@@ -273,6 +273,26 @@ def test_facebook_mms_handler_honors_model_override(monkeypatch):
     assert handler._initial_model_name == "acme/custom-mms"
 
 
+def test_facebook_mms_session_reset_restores_custom_model_for_same_language(monkeypatch):
+    from speech_to_speech.TTS.facebookmms_handler import FacebookMMSTTSHandler
+
+    load_calls = []
+    monkeypatch.setattr(
+        FacebookMMSTTSHandler,
+        "load_model",
+        lambda self, language, model_name=None: load_calls.append((language, model_name)),
+    )
+    handler = FacebookMMSTTSHandler.__new__(FacebookMMSTTSHandler)
+    handler._initial_language = "en"
+    handler._initial_model_name = "acme/custom-mms"
+    handler.language = "en"
+    handler.model_name = "facebook/mms-tts-eng"
+
+    handler.on_session_end()
+
+    assert load_calls == [("en", "acme/custom-mms")]
+
+
 def test_parser_warning_ignores_known_options_for_inactive_backends(caplog):
     args = parse_arguments(
         [

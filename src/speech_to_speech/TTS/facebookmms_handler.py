@@ -210,6 +210,7 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 )
 
     def on_session_end(self) -> None:
-        if self.language != self._initial_language:
+        custom_model_changed = self._initial_model_name is not None and self.model_name != self._initial_model_name
+        if self.language != self._initial_language or custom_model_changed:
             self.load_model(self._initial_language, self._initial_model_name)
         logger.debug("Facebook MMS TTS session state reset")
