@@ -138,6 +138,178 @@ def test_audio_client_clears_unplayed_audio_when_response_is_cancelled(capsys):
     capsys.readouterr()
 
 
+def test_audio_client_streams_assistant_transcript_without_reprinting_done(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    for event in (
+        SimpleNamespace(type="response.output_audio_transcript.delta", delta="Hello"),
+        SimpleNamespace(type="response.output_audio_transcript.delta", delta=" there."),
+        SimpleNamespace(type="response.output_audio_transcript.done", transcript="Hello there."),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    assert capsys.readouterr().out == "ASSISTANT: Hello there.\n"
+
+
+def test_audio_client_tracks_interleaved_transcripts_per_output_item(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    def transcript_event(type, *, item_id, output_index, delta=None, transcript=None):
+        return SimpleNamespace(
+            type=type,
+            response_id="response_1",
+            item_id=item_id,
+            output_index=output_index,
+            content_index=0,
+            delta=delta,
+            transcript=transcript,
+        )
+
+    for event in (
+        transcript_event("response.output_audio_transcript.delta", item_id="item_a", output_index=0, delta="first"),
+        transcript_event("response.output_audio_transcript.delta", item_id="item_b", output_index=1, delta="second"),
+        transcript_event("response.output_audio_transcript.done", item_id="item_a", output_index=0, transcript="first"),
+        transcript_event(
+            "response.output_audio_transcript.done", item_id="item_b", output_index=1, transcript="second"
+        ),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    assert capsys.readouterr().out == "ASSISTANT: first\nASSISTANT: second\n"
+
+
+def test_audio_client_separates_done_only_transcript_from_live_stream(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    def transcript_event(type, *, item_id, delta=None, transcript=None):
+        return SimpleNamespace(
+            type=type,
+            response_id="response_1",
+            item_id=item_id,
+            output_index=0,
+            content_index=0,
+            delta=delta,
+            transcript=transcript,
+        )
+
+    for event in (
+        transcript_event("response.output_audio_transcript.delta", item_id="item_b", delta="second"),
+        transcript_event("response.output_audio_transcript.done", item_id="item_a", transcript="legacy first"),
+        transcript_event("response.output_audio_transcript.done", item_id="item_b", transcript="second"),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    assert capsys.readouterr().out == "ASSISTANT: second\nASSISTANT: legacy first\n"
+
+
+def test_audio_client_separates_alternating_assistant_and_user_partial_text(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    def assistant_event(type, *, delta=None, transcript=None):
+        return SimpleNamespace(
+            type=type,
+            response_id="response_1",
+            item_id="item_1",
+            output_index=0,
+            content_index=0,
+            delta=delta,
+            transcript=transcript,
+        )
+
+    for event in (
+        assistant_event("response.output_audio_transcript.delta", delta="assistant"),
+        SimpleNamespace(type="conversation.item.input_audio_transcription.delta", delta="user partial"),
+        assistant_event("response.output_audio_transcript.delta", delta="continues"),
+        assistant_event("response.output_audio_transcript.done", transcript="assistant continues"),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    user_line = "USER: user partial"
+    assert capsys.readouterr().out == (
+        f"ASSISTANT: assistant\n\r{user_line}\r{' ' * len(user_line)}\rASSISTANT: continues\n"
+    )
+
+
+def test_audio_client_response_done_preserves_other_response_transcripts(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    def transcript_event(type, *, response_id, delta=None, transcript=None):
+        return SimpleNamespace(
+            type=type,
+            response_id=response_id,
+            item_id=f"item_{response_id}",
+            output_index=0,
+            content_index=0,
+            delta=delta,
+            transcript=transcript,
+        )
+
+    for event in (
+        transcript_event("response.output_audio_transcript.delta", response_id="response_a", delta="first"),
+        transcript_event("response.output_audio_transcript.delta", response_id="response_b", delta="second"),
+        transcript_event("response.output_audio_transcript.done", response_id="response_a", transcript="first"),
+        SimpleNamespace(type="response.done", response=SimpleNamespace(id="response_a", status="completed")),
+        transcript_event("response.output_audio_transcript.done", response_id="response_b", transcript="second"),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    assert capsys.readouterr().out == ("ASSISTANT: first\nASSISTANT: second\nASSISTANT: <response completed>\n")
+
+
+def test_audio_client_prints_transcript_from_legacy_done_only_server(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    handle_server_event(
+        SimpleNamespace(type="response.output_audio_transcript.done", transcript="Hello there."),
+        playback=playback,
+        renderer=renderer,
+        print_json=False,
+    )
+
+    assert capsys.readouterr().out == "ASSISTANT: Hello there.\n"
+
+
+def test_audio_client_keeps_tool_event_off_live_transcript_line(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    for event in (
+        SimpleNamespace(type="response.output_audio_transcript.delta", delta="Checking."),
+        SimpleNamespace(
+            type="response.function_call_arguments.done",
+            name="lookup",
+            call_id="call_1",
+            arguments="{}",
+        ),
+        SimpleNamespace(type="response.output_audio_transcript.done", transcript="Checking."),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    assert capsys.readouterr().out == "ASSISTANT: Checking.\nTOOL: lookup call_id=call_1 arguments={}\n"
+
+
+def test_audio_client_does_not_duplicate_partial_transcript_on_cancel(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+    playback.append(b"\x01\x02" * 100)
+
+    for event in (
+        SimpleNamespace(type="response.output_audio_transcript.delta", delta="partial"),
+        SimpleNamespace(type="response.output_audio_transcript.done", transcript="partial"),
+        SimpleNamespace(type="response.done", response=SimpleNamespace(status="cancelled")),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    assert capsys.readouterr().out == "ASSISTANT: partial\nASSISTANT: <response cancelled>\n"
+    assert playback.buffered_bytes == 0
+
+
 async def test_audio_streams_are_cleaned_up_when_output_start_fails(monkeypatch):
     events = []
 
