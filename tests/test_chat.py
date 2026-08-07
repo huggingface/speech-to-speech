@@ -779,6 +779,43 @@ class TestToTransformersChat:
         assert result[3]["name"] == "action"
         assert result[4] == {"role": "assistant", "content": "All set."}
 
+    def test_function_call_carries_empty_content(self):
+        chat = Chat(size=5)
+        chat.add_item(_fc("c1", "search", '{"query": "test"}'))
+        chat.add_item(_fco("c1", "ok"))
+        entry = chat.to_transformers_chat()[0]
+        assert entry["content"] == ""
+
+    def test_every_assistant_entry_exposes_content(self):
+        chat = Chat(size=10)
+        chat.add_item(_user("Do it"))
+        chat.add_item(_fc("c1", "action", '{"a": 1}'))
+        chat.add_item(_fco("c1", "done"))
+        chat.add_item(_assistant("All set."))
+
+        assistant_entries = [m for m in chat.to_transformers_chat() if m["role"] == "assistant"]
+        assert len(assistant_entries) == 2
+        assert all("content" in m for m in assistant_entries)
+
+    def test_function_call_renders_in_template_reading_content(self):
+        """Chat templates read ``content`` on every assistant message, tool calls included.
+
+        Concatenation mirrors what the Qwen3 template does; a missing key would
+        leave an undefined value here and raise rather than render empty.
+        """
+        sandbox = pytest.importorskip("jinja2.sandbox")
+
+        chat = Chat(size=5)
+        chat.add_item(_user("What's the weather?"))
+        chat.add_item(_fc("c1", "get_weather", '{"city": "Paris"}'))
+        chat.add_item(_fco("c1", "18C, clear"))
+
+        template = sandbox.ImmutableSandboxedEnvironment().from_string(
+            "{% for m in messages %}{{ m.role + ':' + m.content + '\\n' }}{% endfor %}"
+        )
+        rendered = template.render(messages=chat.to_transformers_chat())
+        assert "assistant:\n" in rendered
+
 
 # ===================================================================
 # 9. TestCopyAndReset
