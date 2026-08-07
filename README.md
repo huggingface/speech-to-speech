@@ -66,6 +66,7 @@ Any OpenAI Realtime-compatible client can connect. See [Realtime API](#realtime-
 
 * [How it works](#how-it-works)
 * [Installation](#installation)
+* [Offline operation](#offline-operation)
 * [Supported components](#supported-components)
 * [Commands](#commands)
 * [Realtime API](#realtime-api)
@@ -478,6 +479,31 @@ speech-to-speech serve \
 ```
 
 Use `speech-to-speech local` when you want to run the same server and talk through the machine hosting it. In-process local backends are available with `--llm_backend mlx-lm` on Apple Silicon or `--llm_backend transformers` on CUDA / CPU.
+
+## Offline Operation
+
+The pipeline can run without internet access after the dependencies and model assets for the selected components
+are installed locally. Before disconnecting, start the exact configuration once while online so it can cache the
+STT, LLM, TTS, Silero VAD, NLTK, and Smart Turn resources it needs.
+
+For the lowest-friction fully local LLM setup, run llama.cpp on the same machine as described in
+[Fully Local](#fully-local). Once llama.cpp and the pipeline assets are available locally, set
+`HF_HUB_OFFLINE=1` when starting speech-to-speech to prevent Hugging Face Hub requests:
+
+```bash
+HF_HUB_OFFLINE=1 speech-to-speech serve \
+    --model_name "ggml-org/gemma-4-E4B-it-GGUF" \
+    --responses_api_base_url "http://127.0.0.1:8080/v1" \
+    --responses_api_api_key ""
+```
+
+Without the local base URL override, the default `responses-api` LLM backend calls a remote service. Alternatively,
+use an in-process local backend such as `transformers` or `mlx-lm`. Every selected model must already be cached or
+supplied through a local path supported by its backend.
+
+Smart Turn uses a separate ONNX checkpoint. A cached checkpoint works with `HF_HUB_OFFLINE=1`; for an explicit,
+cache-independent setup, pass `--smart_turn_model_path /path/to/smart-turn-v3.2-cpu.onnx`. If the checkpoint is not
+available, pass `--no_smart_turn` to disable Smart Turn.
 
 ## Multi-Language Support
 
