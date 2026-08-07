@@ -167,10 +167,16 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
         logger.debug(f"Processing text: {text}")
         logger.debug(f"Language code: {language_code}")
 
-        if language_code is not None and self.language != language_code:
+        restore_initial_model = (
+            language_code == self._initial_language
+            and self._initial_model_name is not None
+            and self.model_name != self._initial_model_name
+        )
+        if language_code is not None and (self.language != language_code or restore_initial_model):
             try:
-                logger.info(f"Switching language from {self.language} to {language_code}")
-                self.load_model(language_code)
+                logger.info("Loading TTS model for language %s", language_code)
+                model_name = self._initial_model_name if language_code == self._initial_language else None
+                self.load_model(language_code, model_name)
             except KeyError:
                 console.print(
                     f"[red]Language {language_code} not supported by Facebook MMS. Using {self.language} instead."

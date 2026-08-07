@@ -273,6 +273,32 @@ def test_facebook_mms_handler_honors_model_override(monkeypatch):
     assert handler._initial_model_name == "acme/custom-mms"
 
 
+def test_facebook_mms_restores_custom_model_when_returning_to_initial_language(monkeypatch):
+    from speech_to_speech.pipeline.messages import TTSInput
+    from speech_to_speech.TTS.facebookmms_handler import FacebookMMSTTSHandler
+
+    load_calls = []
+
+    def fake_load_model(self, language, model_name=None):
+        load_calls.append((language, model_name))
+        self.language = language
+        self.model_name = model_name or f"default/{language}"
+
+    monkeypatch.setattr(FacebookMMSTTSHandler, "load_model", fake_load_model)
+    monkeypatch.setattr(FacebookMMSTTSHandler, "generate_audio", lambda self, _text: None)
+    handler = FacebookMMSTTSHandler.__new__(FacebookMMSTTSHandler)
+    handler._initial_language = "en"
+    handler._initial_model_name = "acme/custom-mms"
+    handler.language = "en"
+    handler.model_name = "acme/custom-mms"
+    handler.cancel_scope = None
+
+    list(handler.process(TTSInput(text="Bonjour", language_code="fr")))
+    list(handler.process(TTSInput(text="Hello", language_code="en")))
+
+    assert load_calls == [("fr", None), ("en", "acme/custom-mms")]
+
+
 def test_facebook_mms_session_reset_restores_custom_model_for_same_language(monkeypatch):
     from speech_to_speech.TTS.facebookmms_handler import FacebookMMSTTSHandler
 
