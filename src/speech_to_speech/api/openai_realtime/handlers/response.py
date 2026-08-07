@@ -97,6 +97,7 @@ class ResponseHandler(RealtimeBaseHandler):
         if st.pending_assistant_item_id is None:
             st.pending_assistant_item_id = item_id
             st.pending_assistant_output_index = len(st.pending_function_calls)
+            st.last_item_id = item_id
         assert st.pending_assistant_output_index is not None
         return st.pending_assistant_item_id, st.pending_assistant_output_index
 
@@ -356,7 +357,6 @@ class ResponseHandler(RealtimeBaseHandler):
         resp_id, item_id = self._ensure_response(conn_id)
         if event.text:
             assistant_item_id, assistant_output_index = self._ensure_assistant_output_item(conn_id, item_id)
-            st.last_item_id = assistant_item_id
             if response_wants_audio(st.current_response_params):
                 # Accumulated (not just streamed) so response.done's output can
                 # carry the full transcript as an assistant message item.

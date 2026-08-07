@@ -742,13 +742,14 @@ class TestHandleResponseCancel:
 
 
 class TestEncodeAudioChunk:
-    def test_begin_audio_response_reserves_assistant_item_for_media_transports(self, service, conn_id):
-        _, item_id, events = service.begin_audio_response(conn_id)
+    def test_begin_audio_output_reserves_assistant_item_for_media_transports(self, service, conn_id):
+        _, item_id, output_index, events = service.begin_audio_output(conn_id)
 
         st = service._state(conn_id)
         assert isinstance(events[0], ResponseCreatedEvent)
         assert st.pending_assistant_item_id == item_id
-        assert st.pending_assistant_output_index == 0
+        assert st.pending_assistant_output_index == output_index == 0
+        assert st.last_item_id == item_id
 
         done = next(e for e in service.finish_response(conn_id) if isinstance(e, ResponseDoneEvent))
         assert done.response.output[0].id == item_id
@@ -1092,6 +1093,7 @@ class TestResponseDoneOutputItems:
         assert audio_delta.item_id == text_event.item_id == audio_done.item_id
         assert tool_event.output_index == 1
         assert [item.id for item in done.response.output] == [audio_delta.item_id, tool_event.item_id]
+        assert service._state(conn_id).last_item_id == tool_event.item_id
 
     def test_cancelled_audio_keeps_reserved_assistant_output_item(self, service, conn_id):
         tool_event = next(
@@ -1979,6 +1981,7 @@ class TestDispatchPipelineEvent:
         assert len(done) == 1
         assert done[0].response.status == "failed"
         assert done[0].response.id == created.response.id
+        assert done[0].response.output == []
         state = service._state(conn_id)
         assert state.response_pending is False
         assert state.in_response is False
