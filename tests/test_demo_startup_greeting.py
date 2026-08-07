@@ -89,6 +89,87 @@ if (sends !== 0) throw new Error(`expected no events, got ${{sends}}`);
     )
 
 
+@pytest.mark.parametrize(
+    "module_path,class_name,message_handler",
+    [
+        ("./demo/ws/s2s-ws-client.js", "S2sWsRealtimeClient", "_onWsMessage"),
+        ("./demo/rtc/s2s-rtc-client.js", "S2sRtcRealtimeClient", "_onDcMessage"),
+    ],
+)
+def test_demo_clients_finalize_one_transcript_after_streamed_deltas(module_path, class_name, message_handler):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for demo client tests")
+
+    script = f"""
+globalThis.localStorage = {{ getItem() {{ return null; }} }};
+globalThis.CustomEvent = class CustomEvent extends Event {{
+  constructor(type, init = {{}}) {{
+    super(type);
+    this.detail = init.detail;
+  }}
+}};
+const {{ {class_name} }} = await import({json.dumps(module_path)});
+const client = new {class_name}({{
+  voice: "Aiden",
+  instructions: "Be helpful.",
+  directUrl: "ws://unused",
+  callsUrl: "api/calls",
+}});
+const transcripts = [];
+let finishedTranscript = null;
+client.addEventListener("transcript", (event) => transcripts.push(event.detail));
+client.addEventListener("response-finished", (event) => {{
+  finishedTranscript = event.detail.transcript;
+}});
+const deliver = async (event) => {{
+  await client[{json.dumps(message_handler)}](JSON.stringify(event));
+}};
+
+await deliver({{
+  type: "response.output_audio_transcript.delta",
+  response_id: "response_1",
+  delta: "Hello",
+}});
+await deliver({{
+  type: "response.output_audio_transcript.delta",
+  response_id: "response_1",
+  delta: " there.",
+}});
+await deliver({{
+  type: "response.output_audio_transcript.done",
+  response_id: "response_1",
+  transcript: "Hello there.",
+}});
+await deliver({{
+  type: "response.done",
+  response: {{ id: "response_1", status: "completed", output: [] }},
+}});
+
+const expected = [
+  {{ role: "assistant", text: "Hello", partial: true, responseId: "response_1" }},
+  {{ role: "assistant", text: "Hello there.", partial: true, responseId: "response_1" }},
+  {{ role: "assistant", text: "Hello there.", partial: false, responseId: "response_1" }},
+];
+if (JSON.stringify(transcripts) !== JSON.stringify(expected)) {{
+  throw new Error(`unexpected transcript events: ${{JSON.stringify(transcripts)}}`);
+}}
+if (finishedTranscript !== "Hello there.") {{
+  throw new Error(`unexpected finished transcript: ${{finishedTranscript}}`);
+}}
+if (client._asstTranscriptByResp.size !== 0 || client._asstFullByResp.size !== 0) {{
+  throw new Error("response.done did not clear transcript state");
+}}
+"""
+    subprocess.run(
+        [node, "--input-type=module", "-e", script],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_rtc_microphone_opens_after_startup_events_are_queued():
     node = shutil.which("node")
     if node is None:
