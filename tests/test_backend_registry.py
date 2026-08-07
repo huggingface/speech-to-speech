@@ -1,16 +1,12 @@
-import signal
 import sys
-import threading
 from copy import deepcopy
 from dataclasses import dataclass, fields
 from queue import Queue
 from threading import Event
-from types import SimpleNamespace
 
 import pytest
 
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
-from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 from speech_to_speech.backend_registry import (
     LLM_BACKENDS,
     STT_BACKENDS,
@@ -19,7 +15,6 @@ from speech_to_speech.backend_registry import (
     BackendSelection,
     BackendSpec,
     HandlerContext,
-    SharedBackendResources,
     build_backend_registry,
     create_backend_handler,
     select_backend,
@@ -27,16 +22,11 @@ from speech_to_speech.backend_registry import (
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.s2s_pipeline import (
-    _build_handlers,
     build_llm_proxy_config,
-    build_local_pipeline,
-    build_pipeline,
     parse_arguments,
     prepare_all_args,
     prepare_module_args,
-    run_pipeline_command,
 )
-from speech_to_speech.utils.thread_manager import ThreadManager
 
 
 @dataclass
@@ -60,8 +50,8 @@ def _context() -> HandlerContext:
     )
 
 
-def _factory(_context, config, shared):
-    return config, shared
+def _factory(_context, config):
+    return config
 
 
 def test_builtin_registry_lookup_and_cli_choices_share_one_catalog():
@@ -112,8 +102,8 @@ def test_llm_proxy_validation_uses_registry_capability():
 def test_test_backend_only_needs_config_factory_and_registry_entry():
     calls = []
 
-    def factory(context, config, shared):
-        calls.append((context, config, shared))
+    def factory(context, config):
+        calls.append((context, config))
         return "handler"
 
     registry = build_backend_registry(
@@ -123,7 +113,7 @@ def test_test_backend_only_needs_config_factory_and_registry_entry():
     parsed_config = FakeArguments(fake_option="selected")
     selection = select_backend(registry, "fake", parsed_config)
 
-    assert create_backend_handler(selection, _context(), "shared") == "handler"
+    assert create_backend_handler(selection, _context()) == "handler"
     assert selection.config == {"option": "selected", "gen_kwargs": {}}
     assert parsed_config.fake_option == "selected"
     assert calls[0][1] is selection.config
@@ -180,10 +170,10 @@ def test_parser_warning_ignores_known_options_for_inactive_backends(caplog):
 
     assert args.stt_backend.name == "parakeet-tdt"
     assert args.tts_backend.name == "qwen3"
-    assert args.stt_backend.config["language"] == "auto"
+    assert args.stt_backend.config["language"] is None
     assert "mlx_audio_whisper_model_name" not in args.stt_backend.config
     assert "pocket_tts_voice" not in args.tts_backend.config
-    assert "--language" not in caplog.text
+    assert "--language" in caplog.text
     assert "--mlx_audio_whisper_model_name" in caplog.text
     assert "--pocket_tts_voice" in caplog.text
     assert "unused/whisper" not in caplog.text
@@ -204,16 +194,11 @@ def test_parser_reports_invalid_backend_selectors_with_argparse(selector, capsys
     assert "invalid choice: 'not-a-backend'" in stderr
 
 
-@pytest.mark.parametrize(
-    "backend_name",
-    ["whisper", "whisper-mlx", "mlx-audio-whisper", "faster-whisper", "parakeet-tdt"],
-)
-def test_common_language_flag_reaches_supported_stt_backends(backend_name, caplog):
+@pytest.mark.parametrize("backend_name", ["whisper", "whisper-mlx", "mlx-audio-whisper"])
+def test_common_language_flag_reaches_compatible_stt_backends(backend_name, caplog):
     args = parse_arguments(["--stt", backend_name, "--language", "de"])
 
-    config = args.stt_backend.config
-    language = config["language"] if "language" in config else config["gen_kwargs"]["language"]
-    assert language == "de"
+    assert args.stt_backend.config["language"] == "de"
     assert "Ignoring options for inactive backends" not in caplog.text
 
 
@@ -289,7 +274,7 @@ def test_factories_keep_backend_modules_lazy():
 
 
 def test_dependency_error_names_backend_and_required_extra():
-    def missing(_context, _config, _shared):
+    def missing(_context, _config):
         raise ImportError("missing package")
 
     spec = BackendSpec(
@@ -303,599 +288,3 @@ def test_dependency_error_names_backend_and_required_extra():
 
     with pytest.raises(ImportError, match=r"optional.*tts.*speech-to-speech\[optional-extra\]"):
         create_backend_handler(selection, _context())
-
-
-@pytest.mark.parametrize("error_type", [ImportError, RuntimeError])
-def test_shared_dependency_error_names_backend_and_required_extra(error_type):
-    def missing(_config):
-        raise error_type("missing shared package")
-
-    spec = BackendSpec(
-        "optional-shared",
-        "llm",
-        FakeArguments,
-        _factory,
-        create_shared=missing,
-        required_extra="shared-extra",
-    )
-    selection = BackendSelection(spec, spec.normalize(FakeArguments()))
-
-    with pytest.raises(
-        ImportError,
-        match=r"optional-shared.*llm.*speech-to-speech\[shared-extra\].*missing shared package",
-    ):
-        SharedBackendResources.create([selection])
-
-
-def test_shared_resource_is_reused_and_cleanup_is_idempotent():
-    seen = []
-
-    class Resource:
-        close_calls = 0
-
-        def close(self):
-            self.close_calls += 1
-
-    resource = Resource()
-
-    def factory(_context, _config, shared):
-        seen.append(shared)
-        return object()
-
-    spec = BackendSpec(
-        "shared",
-        "stt",
-        FakeArguments,
-        factory,
-        create_shared=lambda _config: resource,
-    )
-    selection = BackendSelection(spec, spec.normalize(FakeArguments()))
-    owner = SharedBackendResources.create([selection])
-
-    create_backend_handler(selection, _context(), owner.get(selection))
-    create_backend_handler(selection, _context(), owner.get(selection))
-    owner.close()
-    owner.close()
-
-    assert seen == [resource, resource]
-    assert resource.close_calls == 1
-
-
-def test_partial_shared_construction_cleans_already_created_resources():
-    cleaned = []
-    stt_spec = BackendSpec(
-        "first",
-        "stt",
-        FakeArguments,
-        _factory,
-        create_shared=lambda _config: "stt-resource",
-        cleanup_shared=cleaned.append,
-    )
-
-    def fail(_config):
-        raise RuntimeError("construction failed")
-
-    llm_spec = BackendSpec(
-        "second",
-        "llm",
-        FakeArguments,
-        _factory,
-        create_shared=fail,
-    )
-    selections = [
-        BackendSelection(stt_spec, stt_spec.normalize(FakeArguments())),
-        BackendSelection(llm_spec, llm_spec.normalize(FakeArguments())),
-    ]
-
-    with pytest.raises(RuntimeError, match="construction failed"):
-        SharedBackendResources.create(selections)
-    assert cleaned == ["stt-resource"]
-
-
-def test_partial_shared_construction_preserves_error_when_cleanup_fails(caplog):
-    def cleanup(_resource):
-        raise RuntimeError("cleanup failed")
-
-    stt_spec = BackendSpec(
-        "first",
-        "stt",
-        FakeArguments,
-        _factory,
-        create_shared=lambda _config: "stt-resource",
-        cleanup_shared=cleanup,
-    )
-
-    def fail(_config):
-        raise ValueError("construction failed")
-
-    llm_spec = BackendSpec(
-        "second",
-        "llm",
-        FakeArguments,
-        _factory,
-        create_shared=fail,
-    )
-    selections = [
-        BackendSelection(stt_spec, stt_spec.normalize(FakeArguments())),
-        BackendSelection(llm_spec, llm_spec.normalize(FakeArguments())),
-    ]
-
-    with pytest.raises(ValueError, match="construction failed"):
-        SharedBackendResources.create(selections)
-    assert "Failed to clean up shared backend resources" in caplog.text
-
-
-def test_partial_pipeline_construction_preserves_error_when_cleanup_fails(monkeypatch, caplog):
-    cleaned = []
-
-    def cleanup(resource):
-        cleaned.append(resource)
-        raise ValueError("cleanup failed")
-
-    spec = BackendSpec(
-        "shared",
-        "stt",
-        FakeArguments,
-        _factory,
-        create_shared=lambda _config: "pipeline-resource",
-        cleanup_shared=cleanup,
-    )
-    args = parse_arguments([])
-    args.stt_backend = BackendSelection(spec, spec.normalize(FakeArguments()))
-    monkeypatch.setattr(
-        "speech_to_speech.s2s_pipeline._build_pipeline_unit",
-        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("unit failed")),
-    )
-
-    with pytest.raises(RuntimeError, match="unit failed"):
-        build_pipeline(args, Event())
-    assert cleaned == ["pipeline-resource"]
-    assert "Failed to clean up shared backend resources" in caplog.text
-
-
-def test_later_pipeline_unit_failure_cleans_completed_units_in_reverse(monkeypatch, caplog):
-    cleaned = []
-
-    class Handler:
-        def __init__(self, name, cleanup_fails=False):
-            self.name = name
-            self.cleanup_fails = cleanup_fails
-
-        def cleanup(self):
-            cleaned.append(self.name)
-            if self.cleanup_fails:
-                raise RuntimeError("handler cleanup failed")
-
-    unit = SimpleNamespace(handlers=[Handler("first"), Handler("second", cleanup_fails=True)])
-
-    def build_unit(**kwargs):
-        if kwargs["index"] == 0:
-            return unit
-        raise ValueError("second unit failed")
-
-    monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", build_unit)
-    args = parse_arguments([])
-    args.module_kwargs.num_pipelines = 2
-
-    with pytest.raises(ValueError, match="second unit failed"):
-        build_pipeline(args, Event())
-
-    assert cleaned == ["second", "first"]
-    assert "Failed to clean up handlers after pipeline construction failed" in caplog.text
-
-
-@pytest.mark.parametrize(
-    ("failing_kind", "expected_cleanup"),
-    [
-        ("llm", ["stt", "vad"]),
-        ("tts", ["processor", "llm", "stt", "vad"]),
-    ],
-)
-def test_later_handler_factory_failure_cleans_partial_unit_in_reverse(
-    monkeypatch,
-    caplog,
-    failing_kind,
-    expected_cleanup,
-):
-    cleaned = []
-    cleanup_failure_name = "stt" if failing_kind == "llm" else "processor"
-
-    class Handler:
-        def __init__(self, name):
-            self.name = name
-
-        def cleanup(self):
-            cleaned.append(self.name)
-            if self.name == cleanup_failure_name:
-                raise RuntimeError("handler cleanup failed")
-
-    def selection(name, kind):
-        spec = BackendSpec(name, kind, FakeArguments, _factory)
-        return BackendSelection(spec, spec.normalize(FakeArguments()))
-
-    def create(selection, _context, _shared=None):
-        if selection.kind == failing_kind:
-            raise ValueError(f"{failing_kind} construction failed")
-        return Handler(selection.kind)
-
-    monkeypatch.setattr("speech_to_speech.s2s_pipeline.VADHandler", lambda *_args, **_kwargs: Handler("vad"))
-    monkeypatch.setattr("speech_to_speech.s2s_pipeline.create_backend_handler", create)
-    monkeypatch.setattr(
-        "speech_to_speech.LLM.lm_output_processor.LMOutputProcessor",
-        lambda *_args, **_kwargs: Handler("processor"),
-    )
-
-    with pytest.raises(ValueError, match=rf"{failing_kind} construction failed"):
-        _build_handlers(
-            stop_event=Event(),
-            should_listen=Event(),
-            recv_audio_chunks_queue=Queue(),
-            spoken_prompt_queue=Queue(),
-            stt_output_queue=Queue(),
-            text_prompt_queue=Queue(),
-            lm_response_queue=Queue(),
-            lm_processed_queue=Queue(),
-            send_audio_chunks_queue=Queue(),
-            text_output_queue=Queue(),
-            module_kwargs=ModuleArguments(),
-            vad_handler_kwargs=VADHandlerArguments(),
-            stt_backend=selection("stt", "stt"),
-            llm_backend=selection("llm", "llm"),
-            tts_backend=selection("tts", "tts"),
-            speculative_turns=SpeculativeTurnTracker(),
-            cancel_scope=CancelScope(),
-            pipeline_index=0,
-            shared_resources=SharedBackendResources.create([]),
-        )
-
-    assert cleaned == expected_cleanup
-    assert "Failed to clean up" in caplog.text
-
-
-def test_local_client_construction_failure_cleans_server_resources(monkeypatch):
-    cleaned = []
-    monkeypatch.setattr(
-        "speech_to_speech.s2s_pipeline.build_pipeline",
-        lambda *_args, **_kwargs: ThreadManager([], cleanup_callbacks=[lambda: cleaned.append("closed")]),
-    )
-
-    class FailingClient:
-        def __init__(self, *_args, **_kwargs):
-            raise RuntimeError("client failed")
-
-    monkeypatch.setattr(
-        "speech_to_speech.api.openai_realtime.audio_client.RealtimeAudioClient",
-        FailingClient,
-    )
-
-    with pytest.raises(RuntimeError, match="client failed"):
-        build_local_pipeline(parse_arguments([], command="local"), Event())
-    assert cleaned == ["closed"]
-
-
-def test_thread_manager_runs_all_cleanup_callbacks_once():
-    cleaned = []
-    manager = ThreadManager(
-        [],
-        cleanup_callbacks=[lambda: cleaned.append("first"), lambda: cleaned.append("second")],
-    )
-
-    manager.cleanup()
-    manager.stop()
-
-    assert cleaned == ["second", "first"]
-
-
-def test_thread_manager_cleanup_before_start_cleans_handlers_before_resources():
-    cleaned = []
-
-    class Handler:
-        def cleanup(self):
-            cleaned.append("handler")
-
-    manager = ThreadManager([Handler()], cleanup_callbacks=[lambda: cleaned.append("shared")])
-
-    manager.cleanup()
-
-    assert cleaned == ["handler", "shared"]
-
-
-def test_thread_manager_rejects_duplicate_start():
-    class Handler:
-        def __init__(self):
-            self.stop_event = Event()
-
-        def run(self):
-            self.stop_event.wait()
-
-    manager = ThreadManager([Handler()])
-    manager.start()
-
-    with pytest.raises(RuntimeError, match="may only be called once"):
-        manager.start()
-
-    assert len(manager.threads) == 1
-    manager.stop()
-
-
-@pytest.mark.parametrize("terminal_method", ["cleanup", "stop", "wait"])
-def test_thread_manager_rejects_start_after_terminal_method(terminal_method):
-    manager = ThreadManager([])
-
-    getattr(manager, terminal_method)()
-
-    with pytest.raises(RuntimeError, match="before cleanup"):
-        manager.start()
-
-
-def test_thread_manager_rejects_direct_cleanup_while_running():
-    cleaned = []
-
-    class Handler:
-        def __init__(self):
-            self.stop_event = Event()
-
-        def run(self):
-            self.stop_event.wait()
-
-    manager = ThreadManager([Handler()], cleanup_callbacks=[lambda: cleaned.append("closed")])
-    manager.start()
-
-    with pytest.raises(RuntimeError, match="call stop"):
-        manager.cleanup()
-    assert cleaned == []
-
-    manager.stop()
-    assert cleaned == ["closed"]
-
-
-def test_thread_manager_cleans_up_after_partial_start_failure(monkeypatch):
-    class Handler:
-        def __init__(self):
-            self.stop_event = Event()
-            self.entered_run = Event()
-            self.cleanup_calls = 0
-
-        def run(self):
-            self.entered_run.set()
-            self.stop_event.wait()
-            self.cleanup()
-
-        def cleanup(self):
-            self.cleanup_calls += 1
-
-    handlers = [Handler(), Handler()]
-    cleaned = []
-    real_start = threading.Thread.start
-    start_calls = 0
-
-    def fail_second_start(thread):
-        nonlocal start_calls
-        start_calls += 1
-        if start_calls == 2:
-            raise RuntimeError("thread startup failed")
-        real_start(thread)
-
-    monkeypatch.setattr(threading.Thread, "start", fail_second_start)
-    manager = ThreadManager(handlers, cleanup_callbacks=[lambda: cleaned.append("closed")])
-
-    with pytest.raises(RuntimeError, match="thread startup failed"):
-        manager.start()
-
-    assert all(handler.stop_event.is_set() for handler in handlers)
-    assert handlers[0].entered_run.is_set()
-    assert not handlers[1].entered_run.is_set()
-    assert [handler.cleanup_calls for handler in handlers] == [1, 1]
-    assert len(manager.threads) == 1
-    assert all(not thread.is_alive() for thread in manager.threads)
-    assert cleaned == ["closed"]
-
-
-def test_thread_manager_tracks_thread_when_start_raises_after_launch(monkeypatch):
-    class Handler:
-        def __init__(self):
-            self.stop_event = Event()
-            self.entered_run = Event()
-
-        def run(self):
-            self.entered_run.set()
-            self.stop_event.wait()
-
-    handler = Handler()
-    cleaned = []
-    wrapper_launched = Event()
-    allow_wrapper = Event()
-    cleanup_finished = Event()
-    real_start = threading.Thread.start
-    real_join = threading.Thread.join
-    start_calls = 0
-
-    def cleanup():
-        cleaned.append("closed")
-        cleanup_finished.set()
-
-    manager = ThreadManager([handler], cleanup_callbacks=[cleanup])
-    run_handler = manager._run_handler
-
-    def delay_handler_wrapper(selected_handler):
-        wrapper_launched.set()
-        allow_wrapper.wait()
-        run_handler(selected_handler)
-
-    monkeypatch.setattr(manager, "_run_handler", delay_handler_wrapper)
-
-    def start_then_raise(thread):
-        nonlocal start_calls
-        start_calls += 1
-        real_start(thread)
-        if start_calls == 1:
-            assert wrapper_launched.wait(timeout=1.0)
-            raise KeyboardInterrupt("interrupted after launch")
-
-    def fast_timed_join(thread, timeout=None):
-        if timeout is None:
-            real_join(thread)
-
-    monkeypatch.setattr(threading.Thread, "join", fast_timed_join)
-    monkeypatch.setattr(threading.Thread, "start", start_then_raise)
-
-    with pytest.raises(KeyboardInterrupt, match="interrupted after launch"):
-        manager.start()
-
-    assert handler.stop_event.is_set()
-    assert len(manager.threads) == 1
-
-    assert cleaned == []
-    allow_wrapper.set()
-    assert cleanup_finished.wait(timeout=1.0)
-    assert handler.entered_run.is_set()
-    assert not manager.threads[0].is_alive()
-    assert cleaned == ["closed"]
-
-
-def test_thread_manager_wait_preserves_join_error_when_cleanup_fails(caplog):
-    class FailingThread:
-        name = "failing-thread"
-
-        def __init__(self):
-            self.alive = True
-
-        def join(self, timeout=None):
-            if timeout is None:
-                raise RuntimeError("join failed")
-            self.alive = False
-
-        def is_alive(self):
-            return self.alive
-
-    class Handler:
-        def __init__(self):
-            self.stop_event = Event()
-
-    def cleanup():
-        raise ValueError("cleanup failed")
-
-    handler = Handler()
-    manager = ThreadManager([handler], cleanup_callbacks=[cleanup])
-    manager.threads = [FailingThread()]  # type: ignore[list-item]
-
-    with pytest.raises(RuntimeError, match="join failed"):
-        manager.wait()
-    assert handler.stop_event.is_set()
-    assert "Failed to clean up resources after thread wait failed" in caplog.text
-
-
-def test_thread_manager_defers_cleanup_until_slow_thread_finishes():
-    release_thread = Event()
-    cleanup_finished = Event()
-    cleaned = []
-
-    class SlowThread:
-        name = "slow-thread"
-
-        def __init__(self):
-            self.alive = True
-
-        def join(self, timeout=None):
-            if timeout is None:
-                release_thread.wait()
-                self.alive = False
-
-        def is_alive(self):
-            return self.alive
-
-    class Handler:
-        def __init__(self):
-            self.stop_event = Event()
-
-    def cleanup():
-        cleaned.append("closed")
-        cleanup_finished.set()
-
-    handler = Handler()
-    manager = ThreadManager([handler], cleanup_callbacks=[cleanup])
-    manager.threads = [SlowThread()]  # type: ignore[list-item]
-
-    manager.stop()
-
-    assert handler.stop_event.is_set()
-    assert cleaned == []
-
-    release_thread.set()
-    assert cleanup_finished.wait(timeout=1.0)
-    assert cleaned == ["closed"]
-
-
-def test_thread_manager_falls_back_when_cleanup_reaper_cannot_start(monkeypatch, caplog):
-    cleaned = []
-
-    class SlowThread:
-        name = "slow-thread"
-
-        def __init__(self):
-            self.alive = True
-
-        def join(self, timeout=None):
-            if timeout is None:
-                self.alive = False
-
-        def is_alive(self):
-            return self.alive
-
-    class Handler:
-        def __init__(self):
-            self.stop_event = Event()
-
-    def fail_reaper_start(_thread):
-        raise RuntimeError("cannot start reaper")
-
-    monkeypatch.setattr(threading.Thread, "start", fail_reaper_start)
-    manager = ThreadManager([Handler()], cleanup_callbacks=[lambda: cleaned.append("closed")])
-    manager.threads = [SlowThread()]  # type: ignore[list-item]
-
-    manager.stop()
-
-    assert cleaned == ["closed"]
-    assert "waiting for handler threads synchronously" in caplog.text
-
-
-def test_thread_manager_stop_logs_cleanup_errors(caplog):
-    def cleanup():
-        raise RuntimeError("cleanup failed")
-
-    manager = ThreadManager([], cleanup_callbacks=[cleanup])
-
-    manager.stop()
-
-    assert "Failed to clean up resources while stopping threads" in caplog.text
-
-
-def test_pipeline_signal_handler_defers_shutdown_until_wait(monkeypatch):
-    installed_handlers = {}
-    stop_event_seen = None
-    stop_called = False
-
-    class Manager:
-        def start(self):
-            installed_handlers[signal.SIGTERM](signal.SIGTERM, None)
-
-        def wait(self):
-            assert stop_event_seen is not None
-            assert stop_event_seen.is_set()
-
-        def stop(self):
-            nonlocal stop_called
-            stop_called = True
-
-    def build(_args, stop_event):
-        nonlocal stop_event_seen
-        stop_event_seen = stop_event
-        return Manager()
-
-    monkeypatch.setattr("speech_to_speech.s2s_pipeline.build_pipeline", build)
-    monkeypatch.setattr("speech_to_speech.s2s_pipeline.setup_logger", lambda _level: None)
-    monkeypatch.setattr(signal, "signal", installed_handlers.__setitem__)
-
-    run_pipeline_command("serve", [])
-
-    assert not stop_called

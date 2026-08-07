@@ -50,8 +50,5 @@ class FasterWhisperSTTHandlerArguments:
     )
     faster_whisper_stt_gen_language: str = field(
         default="en",
-        metadata={
-            "aliases": ["--language"],
-            "help": "The language of the speech to transcribe. Default is 'en' for English.",
-        },
+        metadata={"help": "The language of the speech to transcribe. Default is 'en' for English."},
     )

@@ -11,7 +11,7 @@ from queue import Queue
 from sys import platform
 from threading import Event
 from types import FrameType
-from typing import Any, Callable, Literal, Optional, Sequence
+from typing import Any, Literal, Optional, Sequence
 
 import nltk
 import torch
@@ -33,7 +33,6 @@ from speech_to_speech.backend_registry import (
     BackendSelection,
     BackendSpec,
     HandlerContext,
-    SharedBackendResources,
     create_backend_handler,
 )
 from speech_to_speech.pipeline.cancel_scope import CancelScope
@@ -340,31 +339,6 @@ def prepare_all_args(args: ParsedArguments) -> None:
         setattr(args, field_name, replace(selection, config=config))
 
 
-def _cleanup_handler_safely(handler: Any, message: str) -> None:
-    cleanup = getattr(handler, "cleanup", None)
-    if cleanup is None:
-        return
-    try:
-        cleanup()
-    except BaseException:
-        logger.exception(message)
-
-
-def _cleanup_handlers_safely(handlers: Sequence[Any], message: str) -> None:
-    for handler in reversed(handlers):
-        _cleanup_handler_safely(handler, message)
-
-
-def _construct_handler(handlers: list[Any], factory: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
-    try:
-        handler = factory(*args, **kwargs)
-    except BaseException:
-        _cleanup_handlers_safely(handlers, "Failed to clean up handlers after pipeline construction failed")
-        raise
-    handlers.append(handler)
-    return handler
-
-
 def _build_handlers(
     *,
     stop_event: Event,
@@ -385,15 +359,11 @@ def _build_handlers(
     speculative_turns: SpeculativeTurnTracker,
     cancel_scope: CancelScope,
     pipeline_index: int,
-    shared_resources: SharedBackendResources,
 ) -> list[Any]:
     """Build a handler chain: VAD → STT/AudioInput → LM → TTS."""
     from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 
-    handlers: list[Any] = []
-    _construct_handler(
-        handlers,
-        VADHandler,
+    vad = VADHandler(
         stop_event,
         queue_in=recv_audio_chunks_queue,
         queue_out=spoken_prompt_queue,
@@ -423,17 +393,9 @@ def _build_handlers(
         enable_live_transcription=module_kwargs.enable_live_transcription,
         live_transcription_update_interval=module_kwargs.live_transcription_update_interval,
     )
-    _construct_handler(
-        handlers,
-        create_backend_handler,
-        stt_backend,
-        stt_context,
-        shared_resources.get(stt_backend),
-    )
+    speech_input_handlers = [create_backend_handler(stt_backend, stt_context)]
     if needs_notifier:
-        _construct_handler(
-            handlers,
-            TranscriptionNotifier,
+        transcription_notifier = TranscriptionNotifier(
             stop_event,
             queue_in=stt_output_queue,
             queue_out=text_prompt_queue,  # type: ignore[arg-type]
@@ -442,6 +404,7 @@ def _build_handlers(
                 "should_listen": should_listen,
             },
         )
+        speech_input_handlers.append(transcription_notifier)
 
     def handler_context(queue_in: Queue[Any], queue_out: Queue[Any]) -> HandlerContext:
         return HandlerContext(
@@ -459,17 +422,12 @@ def _build_handlers(
         )
 
     lm_context = handler_context(text_prompt_queue, lm_response_queue)
-    _construct_handler(
-        handlers,
-        create_backend_handler,
+    lm = create_backend_handler(
         llm_backend,
         lm_context,
-        shared_resources.get(llm_backend),
     )
 
-    _construct_handler(
-        handlers,
-        LMOutputProcessor,
+    lm_processor = LMOutputProcessor(
         stop_event,
         queue_in=lm_response_queue,
         queue_out=lm_processed_queue,
@@ -477,15 +435,12 @@ def _build_handlers(
     )
 
     tts_context = handler_context(lm_processed_queue, send_audio_chunks_queue)
-    _construct_handler(
-        handlers,
-        create_backend_handler,
+    tts = create_backend_handler(
         tts_backend,
         tts_context,
-        shared_resources.get(tts_backend),
     )
 
-    return handlers
+    return [vad, *speech_input_handlers, lm, lm_processor, tts]
 
 
 def _build_pipeline_unit(
@@ -497,7 +452,6 @@ def _build_pipeline_unit(
     stt_backend: BackendSelection,
     llm_backend: BackendSelection,
     tts_backend: BackendSelection,
-    shared_resources: SharedBackendResources,
 ) -> "PipelineUnit":
     """Build one isolated pipeline with its own state and queues.
 
@@ -560,27 +514,22 @@ def _build_pipeline_unit(
         speculative_turns=speculative_turns,
         cancel_scope=cancel_scope,
         pipeline_index=index,
-        shared_resources=shared_resources,
     )
-    try:
-        for h in handlers:
-            h.pipeline_index = index
+    for h in handlers:
+        h.pipeline_index = index
 
-        return PipelineUnit(
-            index=index,
-            service=service,
-            cancel_scope=cancel_scope,
-            should_listen=should_listen,
-            response_playing=response_playing,
-            input_queue=recv_audio_chunks_queue,
-            output_queue=send_audio_chunks_queue,
-            text_output_queue=text_output_queue,
-            text_prompt_queue=text_prompt_queue,
-            handlers=handlers,
-        )
-    except BaseException:
-        _cleanup_handlers_safely(handlers, "Failed to clean up handlers after pipeline unit construction failed")
-        raise
+    return PipelineUnit(
+        index=index,
+        service=service,
+        cancel_scope=cancel_scope,
+        should_listen=should_listen,
+        response_playing=response_playing,
+        input_queue=recv_audio_chunks_queue,
+        output_queue=send_audio_chunks_queue,
+        text_output_queue=text_output_queue,
+        text_prompt_queue=text_prompt_queue,
+        handlers=handlers,
+    )
 
 
 def build_pipeline(
@@ -593,49 +542,34 @@ def build_pipeline(
     from speech_to_speech.api.openai_realtime.server import RealtimeServer
 
     module_kwargs = args.module_kwargs
-    shared_resources = SharedBackendResources.create((args.stt_backend, args.llm_backend, args.tts_backend))
-    pool: list[PipelineUnit] = []
-    try:
-        for index in range(module_kwargs.num_pipelines):
-            pool.append(
-                _build_pipeline_unit(
-                    index=index,
-                    stop_event=stop_event,
-                    module_kwargs=module_kwargs,
-                    vad_handler_kwargs=args.vad_handler_kwargs,
-                    stt_backend=args.stt_backend,
-                    llm_backend=args.llm_backend,
-                    tts_backend=args.tts_backend,
-                    shared_resources=shared_resources,
-                )
-            )
-
-        server = RealtimeServer(
+    pool = [
+        _build_pipeline_unit(
+            index=index,
             stop_event=stop_event,
-            pool=pool,
-            host=host or args.realtime_server_kwargs.host,
-            port=args.realtime_server_kwargs.port,
-            llm_proxy_config=(
-                build_llm_proxy_config(module_kwargs, args.llm_backend) if module_kwargs.enable_llm_proxy else None
-            ),
+            module_kwargs=module_kwargs,
+            vad_handler_kwargs=args.vad_handler_kwargs,
+            stt_backend=args.stt_backend,
+            llm_backend=args.llm_backend,
+            tts_backend=args.tts_backend,
         )
-    except BaseException:
-        for unit in reversed(pool):
-            _cleanup_handlers_safely(
-                unit.handlers,
-                "Failed to clean up handlers after pipeline construction failed",
-            )
-        try:
-            shared_resources.close()
-        except BaseException:
-            logger.exception("Failed to clean up shared backend resources after pipeline construction failed")
-        raise
+        for index in range(module_kwargs.num_pipelines)
+    ]
+
+    server = RealtimeServer(
+        stop_event=stop_event,
+        pool=pool,
+        host=host or args.realtime_server_kwargs.host,
+        port=args.realtime_server_kwargs.port,
+        llm_proxy_config=(
+            build_llm_proxy_config(module_kwargs, args.llm_backend) if module_kwargs.enable_llm_proxy else None
+        ),
+    )
 
     handlers: list[Any] = []
     for unit in pool:
         handlers.extend(unit.handlers)
     handlers.append(server)
-    return ThreadManager(handlers, cleanup_callbacks=[shared_resources.close])
+    return ThreadManager(handlers)
 
 
 def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadManager:
@@ -648,29 +582,19 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
 
     server_manager = build_pipeline(args, stop_event, host="127.0.0.1")
     local_audio = args.local_audio_kwargs
-    try:
-        client = RealtimeAudioClient(
-            stop_event,
-            RealtimeAudioClientConfig(
-                url=f"ws://127.0.0.1:{args.realtime_server_kwargs.port}/v1/realtime",
-                api_key="local",
-                chunk_size=local_audio.local_audio_chunk_size,
-                input_device=local_audio.local_audio_input_device,
-                output_device=local_audio.local_audio_output_device,
-                print_json=local_audio.local_audio_print_json,
-                block_mic_during_playback=local_audio.local_audio_block_mic_during_playback,
-            ),
-        )
-    except BaseException:
-        try:
-            server_manager.cleanup()
-        except BaseException:
-            logger.exception("Failed to clean up server resources after audio client construction failed")
-        raise
-    return ThreadManager(
-        [*server_manager.handlers, client],
-        cleanup_callbacks=server_manager.cleanup_callbacks,
+    client = RealtimeAudioClient(
+        stop_event,
+        RealtimeAudioClientConfig(
+            url=f"ws://127.0.0.1:{args.realtime_server_kwargs.port}/v1/realtime",
+            api_key="local",
+            chunk_size=local_audio.local_audio_chunk_size,
+            input_device=local_audio.local_audio_input_device,
+            output_device=local_audio.local_audio_output_device,
+            print_json=local_audio.local_audio_print_json,
+            block_mic_during_playback=local_audio.local_audio_block_mic_during_playback,
+        ),
     )
+    return ThreadManager([*server_manager.handlers, client])
 
 
 def run_pipeline_command(command: Literal["serve", "local"], argv: Sequence[str]) -> None:
@@ -709,10 +633,8 @@ def run_pipeline_command(command: Literal["serve", "local"], argv: Sequence[str]
         if not shutdown_requested[0]:
             shutdown_requested[0] = True
             console.print("\n[yellow]Shutting down gracefully...[/yellow]")
-            # Python signal handlers run synchronously on the main thread and must not
-            # acquire manager locks that startup may already hold. The normal wait path
-            # joins handlers and closes resources after this event asks them to stop.
-            stop_event.set()
+            pipeline_manager.stop()
+            console.print("[green]✓ Pipeline stopped successfully[/green]")
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -720,8 +642,6 @@ def run_pipeline_command(command: Literal["serve", "local"], argv: Sequence[str]
     try:
         pipeline_manager.start()
         pipeline_manager.wait()
-        if shutdown_requested[0]:
-            console.print("[green]✓ Pipeline stopped successfully[/green]")
     except KeyboardInterrupt:
         if not shutdown_requested[0]:
             console.print("\n[yellow]Shutting down gracefully...[/yellow]")

@@ -6,7 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from importlib import import_module
 from queue import Queue
-from threading import Event, Lock
+from threading import Event
 from typing import Any, Literal
 
 from speech_to_speech.arguments_classes.chat_completions_language_model_arguments import (
@@ -37,8 +37,6 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 BackendKind = Literal["stt", "llm", "tts"]
 BackendConfig = dict[str, Any]
-SharedFactory = Callable[[Mapping[str, Any]], Any]
-SharedCleanup = Callable[[Any], None]
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +72,7 @@ class HandlerContext:
     live_transcription_update_interval: float
 
 
-HandlerFactory = Callable[[HandlerContext, Mapping[str, Any], Any], Any]
+HandlerFactory = Callable[[HandlerContext, Mapping[str, Any]], Any]
 ConfigNormalizer = Callable[[Any], BackendConfig]
 
 
@@ -88,8 +86,6 @@ class BackendSpec:
     create_handler: HandlerFactory
     config_prefix: str | None = None
     normalize_config: ConfigNormalizer | None = None
-    create_shared: SharedFactory | None = None
-    cleanup_shared: SharedCleanup | None = None
     required_extra: str | None = None
     capabilities: BackendCapabilities = field(default_factory=BackendCapabilities)
 
@@ -177,11 +173,11 @@ def _optional_dependency_error(selection: BackendSelection, exc: BaseException) 
     )
 
 
-def create_backend_handler(selection: BackendSelection, context: HandlerContext, shared: Any = None) -> Any:
+def create_backend_handler(selection: BackendSelection, context: HandlerContext) -> Any:
     """Construct a handler and turn lazy dependency failures into actionable errors."""
 
     try:
-        return selection.spec.create_handler(context, selection.config, shared)
+        return selection.spec.create_handler(context, selection.config)
     except ImportError as exc:
         dependency_error = _optional_dependency_error(selection, exc)
         if dependency_error is None:
@@ -207,7 +203,7 @@ def _simple_handler_factory(
     attach_speculative_turns: bool = False,
     context_kwargs: bool = False,
 ) -> HandlerFactory:
-    def create(context: HandlerContext, config: Mapping[str, Any], _shared: Any) -> Any:
+    def create(context: HandlerContext, config: Mapping[str, Any]) -> Any:
         handler_class = _load_handler(module_name, class_name)
         setup_kwargs = dict(config)
         if context_kwargs:
@@ -229,7 +225,7 @@ def _simple_handler_factory(
     return create
 
 
-def _create_audio_input(context: HandlerContext, _config: Mapping[str, Any], _shared: Any) -> Any:
+def _create_audio_input(context: HandlerContext, _config: Mapping[str, Any]) -> Any:
     handler_class = _load_handler("speech_to_speech.LLM.audio_input_notifier", "AudioInputNotifier")
     return handler_class(
         context.stop_event,
@@ -243,7 +239,7 @@ def _create_audio_input(context: HandlerContext, _config: Mapping[str, Any], _sh
     )
 
 
-def _create_parakeet(context: HandlerContext, config: Mapping[str, Any], _shared: Any) -> Any:
+def _create_parakeet(context: HandlerContext, config: Mapping[str, Any]) -> Any:
     handler_class = _load_handler("speech_to_speech.STT.parakeet_tdt_handler", "ParakeetTDTSTTHandler")
     setup_kwargs = {
         **config,
@@ -261,7 +257,7 @@ def _create_parakeet(context: HandlerContext, config: Mapping[str, Any], _shared
 
 
 def _create_local_llm(backend: Literal["transformers", "mlx-lm"]) -> HandlerFactory:
-    def create(context: HandlerContext, config: Mapping[str, Any], _shared: Any) -> Any:
+    def create(context: HandlerContext, config: Mapping[str, Any]) -> Any:
         setup_kwargs = dict(config)
         is_vlm = setup_kwargs.pop("is_vlm", False)
         if backend == "mlx-lm":
@@ -473,64 +469,3 @@ TTS_BACKENDS = build_backend_registry(
         ),
     ],
 )
-
-
-class SharedBackendResources:
-    """Own process-level resources for the selected backends."""
-
-    def __init__(self) -> None:
-        self._resources: dict[BackendKind, tuple[BackendSpec, Any]] = {}
-        self._closed = False
-        self._lock = Lock()
-
-    @classmethod
-    def create(cls, selections: Iterable[BackendSelection]) -> SharedBackendResources:
-        owner = cls()
-        try:
-            for selection in selections:
-                factory = selection.spec.create_shared
-                if factory is not None:
-                    try:
-                        resource = factory(selection.config)
-                    except (ImportError, RuntimeError) as exc:
-                        dependency_error = _optional_dependency_error(selection, exc)
-                        if dependency_error is None:
-                            raise
-                        raise dependency_error from exc
-                    owner._resources[selection.kind] = (selection.spec, resource)
-        except BaseException:
-            try:
-                owner.close()
-            except BaseException:
-                logger.exception("Failed to clean up shared backend resources after construction failed")
-            raise
-        return owner
-
-    def get(self, selection: BackendSelection) -> Any:
-        resource = self._resources.get(selection.kind)
-        if resource is None or resource[0] is not selection.spec:
-            return None
-        return resource[1]
-
-    def close(self) -> None:
-        with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            resources = list(reversed(self._resources.values()))
-            self._resources.clear()
-
-        first_error: BaseException | None = None
-        for spec, resource in resources:
-            try:
-                if spec.cleanup_shared is not None:
-                    spec.cleanup_shared(resource)
-                else:
-                    close = getattr(resource, "close", None)
-                    if close is not None:
-                        close()
-            except BaseException as exc:
-                if first_error is None:
-                    first_error = exc
-        if first_error is not None:
-            raise first_error
