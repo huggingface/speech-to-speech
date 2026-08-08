@@ -32,6 +32,8 @@ SUPPORTED_LANGUAGES = [
     "nl",
 ]
 
+DEFAULT_LANGUAGE = "en"
+
 
 class LightningWhisperSTTHandler(BaseSTTHandler):
     """
@@ -52,7 +54,9 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
         self.device = device
         self.model = LightningWhisperMLX(model=model_name, batch_size=6, quant=None)
         self.start_language = language
-        self.last_language = language
+        # "auto" is a request to detect, not a language code, so it must never leak into
+        # last_language -- it would fail every SUPPORTED_LANGUAGES check downstream.
+        self.last_language = language if language != "auto" else None
 
         self.warmup()
 
@@ -67,29 +71,50 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
             with MLXLockContext(handler_name=self.__class__.__name__):
                 _ = self.model.transcribe(dummy_input)["text"].strip()
 
+    def _forced_language(self) -> Optional[str]:
+        """The language explicitly requested by the user, if any."""
+        if self.start_language and self.start_language != "auto":
+            return self.start_language
+        return None
+
+    def _resolve_language(self, transcription_dict: dict[str, Any], forced_language: Optional[str]) -> str:
+        """Report the language that was actually transcribed.
+
+        A detected language outside ``SUPPORTED_LANGUAGES`` is still reported as-is: the
+        transcription is correct, and that list only decides what becomes the sticky
+        fallback. Re-transcribing in a different language, or dropping the turn, throws away
+        a good result because of a downstream allowlist.
+        """
+        if forced_language is not None:
+            # transcribe() ran with this language, so it is authoritative.
+            self.last_language = forced_language
+            return forced_language
+
+        detected = transcription_dict.get("language")
+        if isinstance(detected, str) and detected:
+            if detected in SUPPORTED_LANGUAGES:
+                self.last_language = detected
+            else:
+                logger.warning("Whisper detected unsupported language: %s", detected)
+            return detected
+
+        # Only when no language could be determined at all.
+        return self.last_language or DEFAULT_LANGUAGE
+
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("infering whisper...")
 
         audio = vad_audio.audio
-        if self.start_language != "auto":
-            with MLXLockContext(handler_name=self.__class__.__name__):
-                transcription_dict = self.model.transcribe(audio, language=self.start_language)
-        else:
-            with MLXLockContext(handler_name=self.__class__.__name__):
-                transcription_dict = self.model.transcribe(audio)
-            language_code = transcription_dict["language"]
-            if language_code not in SUPPORTED_LANGUAGES:
-                logger.warning(f"Whisper detected unsupported language: {language_code}")
-                if self.last_language in SUPPORTED_LANGUAGES:  # reprocess with the last language
-                    with MLXLockContext(handler_name=self.__class__.__name__):
-                        transcription_dict = self.model.transcribe(audio, language=self.last_language)
-                else:
-                    transcription_dict = {"text": "", "language": "en"}
-            else:
-                self.last_language = language_code
+        forced_language = self._forced_language()
 
-        pred_text = transcription_dict["text"].strip()
-        language_code = transcription_dict["language"]
+        with MLXLockContext(handler_name=self.__class__.__name__):
+            if forced_language is not None:
+                transcription_dict = self.model.transcribe(audio, language=forced_language)
+            else:
+                transcription_dict = self.model.transcribe(audio)
+
+        pred_text = (transcription_dict.get("text") or "").strip()
+        language_code = self._resolve_language(transcription_dict, forced_language)
         torch.mps.empty_cache()
 
         logger.debug("finished whisper inference")
