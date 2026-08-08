@@ -225,7 +225,6 @@ class AudioHandler(RealtimeBaseHandler):
                 )
             )
             st.completed_audio_output_indices.add(previous_output_index)
-            st.audio_content_index = 0
         return resp_id, assistant_item_id, output_index, events
 
     def encode_audio_chunk(

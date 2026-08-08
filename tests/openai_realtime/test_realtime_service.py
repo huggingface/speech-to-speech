@@ -769,12 +769,12 @@ class TestEncodeAudioChunk:
         assert events[1].output_index == 0
         assert events[1].delta == base64.b64encode(audio).decode("ascii")
 
-    def test_subsequent_chunks_increment_content_index(self, service, conn_id):
+    def test_subsequent_chunks_keep_content_index(self, service, conn_id):
         service.encode_audio_chunk(conn_id, _pcm_bytes(256))  # first
         events = service.encode_audio_chunk(conn_id, _pcm_bytes(256))  # second
         assert len(events) == 1
         assert isinstance(events[0], ResponseAudioDeltaEvent)
-        assert events[0].content_index == 1
+        assert events[0].content_index == 0
 
     def test_response_created_includes_metadata(self, service, conn_id):
         from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
@@ -1510,7 +1510,10 @@ class TestDispatchPipelineEvent:
                 ]
             ),
         )
-        first_audio = service.encode_audio_chunk(conn_id, _pcm_bytes(256), "output_1")
+        first_audio = [
+            *service.encode_audio_chunk(conn_id, _pcm_bytes(256), "output_1"),
+            *service.encode_audio_chunk(conn_id, _pcm_bytes(256), "output_1"),
+        ]
         second_audio = service.encode_audio_chunk(conn_id, _pcm_bytes(256), "output_2")
         terminal = service.finish_response(conn_id)
 
@@ -1518,8 +1521,8 @@ class TestDispatchPipelineEvent:
         audio_done = [event for event in [*second_audio, *terminal] if isinstance(event, ResponseAudioDoneEvent)]
         response_done = next(event for event in terminal if isinstance(event, ResponseDoneEvent))
         assert [event.output_index for event in stream_events] == [0, 1, 2]
-        assert [event.output_index for event in deltas] == [0, 2]
-        assert [event.content_index for event in deltas] == [0, 0]
+        assert [event.output_index for event in deltas] == [0, 0, 2]
+        assert [event.content_index for event in deltas] == [0, 0, 0]
         assert [event.output_index for event in audio_done] == [0, 2]
         assert [item.id for item in response_done.response.output] == [event.item_id for event in stream_events]
 
@@ -2240,17 +2243,17 @@ class TestIdAndStateManagement:
         assert st.last_item_id == events[0].item.id
         assert events[0].previous_item_id == output_id
 
-    def test_content_index_resets_on_new_item(self, service, conn_id):
+    def test_content_index_stays_on_single_content_part(self, service, conn_id):
         service.response._start_item(conn_id)
         assert service.response._next_content_index(conn_id) == 0
-        assert service.response._next_content_index(conn_id) == 1
+        assert service.response._next_content_index(conn_id) == 0
 
         service.response._start_item(conn_id)
         assert service.response._next_content_index(conn_id) == 0
 
         service.response._ensure_response(conn_id)
         assert service.response._next_content_index(conn_id) == 0
-        assert service.response._next_content_index(conn_id) == 1
+        assert service.response._next_content_index(conn_id) == 0
 
         service.response._end_response(conn_id)
         service.response._ensure_response(conn_id)

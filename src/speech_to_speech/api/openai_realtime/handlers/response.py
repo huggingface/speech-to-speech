@@ -72,7 +72,6 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_response_id = None
         st.current_item_id = None
         st.content_index = 0
-        st.audio_content_index = 0
         st.in_response = False
         st.response_pending = False
         st.current_response_params = None
@@ -86,14 +85,12 @@ class ResponseHandler(RealtimeBaseHandler):
         st.pending_text_outputs = []
         st.pending_function_calls = {}
 
-    def _start_item(self, conn_id: str, *, reset_audio_content_index: bool = True) -> str:
+    def _start_item(self, conn_id: str) -> str:
         """Generate a new item ID, reset content index, and store it."""
         st = self._state(conn_id)
         item_id = _generate_id("item")
         st.current_item_id = item_id
         st.content_index = 0
-        if reset_audio_content_index:
-            st.audio_content_index = 0
         st.input_audio_duration_s = 0.0
         return item_id
 
@@ -138,11 +135,8 @@ class ResponseHandler(RealtimeBaseHandler):
         return target
 
     def _next_content_index(self, conn_id: str) -> int:
-        """Return the current content index and advance it."""
-        st = self._state(conn_id)
-        idx = st.audio_content_index
-        st.audio_content_index += 1
-        return idx
+        """Return the index of the output item's sole audio content part."""
+        return self._state(conn_id).content_index
 
     def _output_part_context(
         self,
@@ -171,11 +165,7 @@ class ResponseHandler(RealtimeBaseHandler):
             st.current_item_id = item_id
             st.content_index = 0
         else:
-            item_id = (
-                self._current_item_id(conn_id)
-                if st.next_output_index == 0
-                else self._start_item(conn_id, reset_audio_content_index=False)
-            )
+            item_id = self._current_item_id(conn_id) if st.next_output_index == 0 else self._start_item(conn_id)
         output_index = st.next_output_index
         st.next_output_index += 1
         st.current_output_index = output_index
