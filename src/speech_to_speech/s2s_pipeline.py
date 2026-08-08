@@ -614,6 +614,19 @@ def run_pipeline_command(command: Literal["serve", "local"], argv: Sequence[str]
         raise ValueError(f"--num_pipelines must be >= 1, got {args.module_kwargs.num_pipelines}")
 
     prepare_all_args(args)
+    # On Apple Silicon, all MLX inference serializes through a global lock (utils/mlx_lock.py).
+    # The progressive STT path uses a short timeout and drops work under contention, producing
+    # a flood of warnings without affecting final transcripts. With a pool, pre-emptively turn
+    # it off so logs stay readable; the final STT path is unaffected. Non-darwin platforms
+    # don't share this lock, so leave their live transcription alone.
+    if args.module_kwargs.num_pipelines > 1 and platform == "darwin" and args.module_kwargs.enable_live_transcription:
+        logger.info(
+            "MLX contention: --num_pipelines=%d > 1 on Apple Silicon → disabling live transcription "
+            "(progressive STT contends on the global MLX lock)",
+            args.module_kwargs.num_pipelines,
+        )
+        args.module_kwargs.enable_live_transcription = False
+
     stop_event = Event()
     pipeline_manager = (
         build_local_pipeline(args, stop_event) if command == "local" else build_pipeline(args, stop_event)

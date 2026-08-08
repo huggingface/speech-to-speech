@@ -25,7 +25,7 @@ from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.STT.smart_progressive_streaming import PartialTranscription as ProgressiveStreamPartial
-from speech_to_speech.utils.mlx_concurrency import MLXConcurrencyContext
+from speech_to_speech.utils.mlx_lock import MLXLockContext
 
 try:
     from lingua import Language, LanguageDetectorBuilder
@@ -261,9 +261,8 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                 logger.debug("Skipping stale progressive update (final audio already received)")
                 return
 
-            # Non-MLX backends still serialize access to their model. MLX can run
-            # independent computations concurrently on current supported releases.
-            compute_scope_start_s = perf_counter()
+            # Try to acquire lock with short timeout - skip if busy
+            lock_scope_start_s = perf_counter()
             with self._compute_lock_context(handler_name="ParakeetSTT-Progressive", timeout=0.01) as acquired:
                 if acquired:
                     try:
@@ -273,12 +272,12 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                         if inference_s >= 0.25:
                             logger.info(
                                 "Parakeet progressive STT timing turn=%s rev=%s audio=%.3fs age=%.3fs "
-                                "compute_scope=%.3fs inference=%.3fs chars=%d",
+                                "lock_scope=%.3fs inference=%.3fs chars=%d",
                                 vad_audio.turn_id,
                                 vad_audio.turn_revision,
                                 audio_duration_s,
                                 item_age_s,
-                                perf_counter() - compute_scope_start_s,
+                                perf_counter() - lock_scope_start_s,
                                 inference_s,
                                 len(progressive_text),
                             )
@@ -304,15 +303,16 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
             item_age_s,
         )
         inference_s = 0.0
-        compute_scope_s = 0.0
+        lock_scope_s = 0.0
         try:
             if self.enable_live_transcription:
                 # Mark that we're processing final audio (ignore stale progressive updates)
                 self.processing_final = True
 
-            compute_scope_start_s = perf_counter()
+            # Acquire lock with longer timeout for final transcription
+            lock_scope_start_s = perf_counter()
             with self._compute_lock_context(handler_name="ParakeetSTT-Final", timeout=5.0) as acquired:
-                compute_scope_s = perf_counter() - compute_scope_start_s
+                lock_scope_s = perf_counter() - lock_scope_start_s
                 if not acquired:
                     logger.error("Failed to acquire compute lock for final transcription")
                     pred_text = ""
@@ -324,7 +324,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                     else:
                         pred_text, language_code = self._process_nano_parakeet(audio_input)
                     inference_s = perf_counter() - inference_start_s
-                    compute_scope_s = perf_counter() - compute_scope_start_s
+                    lock_scope_s = perf_counter() - lock_scope_start_s
 
             # Validate and update language
             if language_code and language_code in SUPPORTED_LANGUAGES:
@@ -339,11 +339,11 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
 
         total_s = perf_counter() - process_start_s
         logger.info(
-            "Parakeet final STT done turn=%s rev=%s total=%.3fs compute_scope=%.3fs inference=%.3fs chars=%d",
+            "Parakeet final STT done turn=%s rev=%s total=%.3fs lock_scope=%.3fs inference=%.3fs chars=%d",
             vad_audio.turn_id,
             vad_audio.turn_revision,
             total_s,
-            compute_scope_s,
+            lock_scope_s,
             inference_s,
             len(pred_text),
         )
@@ -405,7 +405,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
     @contextmanager
     def _compute_lock_context(self, handler_name: str, timeout: float) -> Iterator[bool]:
         if self.backend == "mlx":
-            with MLXConcurrencyContext(handler_name=handler_name, timeout=timeout) as acquired:
+            with MLXLockContext(handler_name=handler_name, timeout=timeout) as acquired:
                 yield acquired
             return
 

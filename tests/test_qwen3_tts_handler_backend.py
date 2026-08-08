@@ -979,6 +979,17 @@ def test_process_voice_clone_scales_max_new_tokens_for_faster_backend(monkeypatc
 def test_process_voice_clone_scales_max_tokens_for_mlx_backend(monkeypatch):
     captured = {}
 
+    class _FakeMLXLockContext:
+        def __init__(self, handler_name, timeout):
+            self.handler_name = handler_name
+            self.timeout = timeout
+
+        def __enter__(self):
+            return True
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
     handler = object.__new__(Qwen3TTSHandler)
     handler.should_listen = Event()
     handler.cancel_scope = None
@@ -1006,6 +1017,7 @@ def test_process_voice_clone_scales_max_tokens_for_mlx_backend(monkeypatch):
     handler._prepare_mlx_ref_audio = lambda ref_audio: ref_audio
 
     monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+    monkeypatch.setattr(qwen3_tts_module, "MLXLockContext", _FakeMLXLockContext)
 
     long_text = " ".join(["This is a deliberately long sentence for the MLX Qwen3 TTS backend."] * 12)
     outputs = list(handler.process(TTSInput(text=long_text)))

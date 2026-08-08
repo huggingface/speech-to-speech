@@ -9,7 +9,7 @@ from rich.console import Console
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
-from speech_to_speech.utils.mlx_concurrency import MLXConcurrencyContext
+from speech_to_speech.utils.mlx_lock import MLXLockContext
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ class MLXAudioWhisperSTTHandler(BaseSTTHandler):
 
         try:
             # Pre-warm the model by running a transcription
-            with MLXConcurrencyContext(handler_name=self.__class__.__name__):
+            with MLXLockContext(handler_name=self.__class__.__name__):
                 _ = self.model.generate(dummy_audio, verbose=False)
             logger.info("Model warmed up and ready")
         except Exception as e:
@@ -142,7 +142,11 @@ class MLXAudioWhisperSTTHandler(BaseSTTHandler):
             gen_kwargs["language"] = forced_language
 
         try:
-            with MLXConcurrencyContext(handler_name=self.__class__.__name__):
+            # MLX models share a single Metal command queue, so concurrent inference from
+            # the STT/LLM/TTS threads aborts the process with
+            # "Completed handler provided after commit call". Every other MLX path in the
+            # pipeline serializes through this lock; this one must too.
+            with MLXLockContext(handler_name=self.__class__.__name__):
                 result = self.model.generate(audio_input, verbose=False, **gen_kwargs)
 
             # Extract text from result

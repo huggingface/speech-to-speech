@@ -31,7 +31,7 @@ from speech_to_speech.pipeline.control import SESSION_END, is_control_message
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.utils.mlx_concurrency import MLXConcurrencyContext
+from speech_to_speech.utils.mlx_lock import MLXLockContext
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -867,9 +867,9 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         max_tokens: int,
         **generation_kwargs: Any,
     ) -> Iterator[bytes | np.ndarray]:
-        with MLXConcurrencyContext(handler_name="Qwen3TTS", timeout=10.0) as acquired:
+        with MLXLockContext(handler_name="Qwen3TTS", timeout=10.0) as acquired:
             if not acquired:
-                raise TimeoutError("Timed out waiting for MLX concurrency slot")
+                raise TimeoutError("Timed out waiting for MLX lock")
             yield from self._stream(
                 generation_fn(
                     **self._mlx_stream_kwargs(max_tokens=max_tokens),
