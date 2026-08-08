@@ -42,7 +42,7 @@ from speech_to_speech.pipeline.events import (
     TranscriptionCompletedEvent,
 )
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AssistantTextPart, AudioOutput
 
 # aiortc (the 'webrtc' extra) is optional. Import it here, at module load,
 # rather than lazily in the calls endpoint: the av/cryptography C extensions
@@ -111,6 +111,17 @@ def _assistant_output_id(item: Any) -> str | None:
     return item.assistant_output_id if isinstance(item, AudioOutput) else None
 
 
+def _assistant_output_event_pending(q: Queue[Any], output_id: str) -> bool:
+    """Return whether the matching transcript event is waiting behind a queue boundary."""
+    with q.mutex:
+        queued_items = list(q.queue)
+    return any(
+        isinstance(item, AssistantTextEvent)
+        and any(isinstance(part, AssistantTextPart) and part.output_id == output_id for part in item.parts)
+        for item in queued_items
+    )
+
+
 def _flush_queue(q: Queue[QItem], *, preserve: Callable[[QItem], bool] | None = None) -> None:
     """Drain a queue, optionally preserving items matching *preserve*.
 
@@ -176,7 +187,7 @@ async def _drain_pending_response_events(
 
     if drained_assistant or drained_usage:
         logger.debug(
-            "Pipeline %d: drained %d assistant event(s) and %d token usage event(s) before response completion",
+            "Pipeline %d: drained %d assistant event(s) and %d token usage event(s) before output delivery",
             unit.index,
             drained_assistant,
             drained_usage,
@@ -852,6 +863,18 @@ def create_app(
                     await _drain_pending_response_events(transport, unit, session_id)
 
                     assistant_output_id = _assistant_output_id(audio_chunk)
+                    if (
+                        assistant_output_id is not None
+                        and session_id is not None
+                        and assistant_output_id not in unit.service._state(session_id).assistant_output_items
+                        and _assistant_output_event_pending(unit.text_output_queue, assistant_output_id)
+                    ):
+                        # A non-response event is still ahead of this audio's
+                        # transcript. Preserve queue order and retry once the
+                        # normal text-event path has crossed that boundary.
+                        if session is not None:
+                            session.pending_output_item = audio_chunk
+                        continue
                     audio_chunk = _to_audio_bytes(audio_chunk)
 
                     audio_batch = bytearray(audio_chunk)

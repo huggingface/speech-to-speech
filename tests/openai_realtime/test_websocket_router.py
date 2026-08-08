@@ -541,6 +541,9 @@ class TestSendLoop:
                 text_output_queue.put(
                     AssistantTextEvent(parts=[AssistantTextPart(text="before", output_id="output_1")])
                 )
+                # A non-interrupting VAD event is a legitimate queue boundary
+                # and must be observed before the later assistant events.
+                text_output_queue.put(SpeechStartedEvent(interrupt_response=False))
                 text_output_queue.put(
                     AssistantTextEvent(
                         parts=[
