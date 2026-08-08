@@ -501,9 +501,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 if self._generation_is_stale(turn.gen):
                     logger.info("LLM generation cancelled (interruption)")
                 else:
-                    logger.debug(f"Clean text: {state.clean_text}")
+                    logger.debug("Clean text generated (characters=%d)", len(state.clean_text))
                     yield from _flush(sentence_batch)
-            logger.info(f"Tools: {state.tools}")
+            logger.info("Tools generated (count=%d)", len(state.tools))
         return (
             not cancelled
             and not self._generation_is_stale(turn.gen)
@@ -542,8 +542,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
                 ):
                     yield self._chunk(turn, text=out)
-        logger.debug(f"Clean text: {state.clean_text}")
-        logger.info(f"Tools: {state.tools}")
+        logger.debug("Clean text generated (characters=%d)", len(state.clean_text))
+        logger.info("Tools generated (count=%d)", len(state.tools))
         return (
             not self._generation_is_stale(turn.gen)
             and self._turn_is_latest(turn.turn_id, turn.turn_revision)

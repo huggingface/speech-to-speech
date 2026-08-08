@@ -18,9 +18,9 @@ from time import perf_counter
 from typing import Any, Iterator, Optional
 
 import numpy as np
-from rich.console import Console
 from rich.text import Text
 
+from speech_to_speech.conversation_console import console
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
@@ -35,8 +35,6 @@ except ImportError:
     LINGUA_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
-console = Console()
-
 # Parakeet TDT v3 supports 25 European languages
 SUPPORTED_LANGUAGES = [
     "en",

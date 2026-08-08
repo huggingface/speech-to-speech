@@ -16,9 +16,9 @@ from threading import Event
 from typing import Any, Iterator, Optional
 
 import numpy as np
-from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.conversation_console import console
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
@@ -26,8 +26,6 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 
 logger = logging.getLogger(__name__)
-console = Console()
-
 # Language code mapping from Whisper/langdetect language codes to Kokoro lang codes
 WHISPER_LANGUAGE_TO_KOKORO_LANG = {
     "en": "b",  # British English

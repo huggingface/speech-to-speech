@@ -310,6 +310,43 @@ def test_audio_client_does_not_duplicate_partial_transcript_on_cancel(capsys):
     assert playback.buffered_bytes == 0
 
 
+def test_audio_client_private_mode_suppresses_content_surfaces(capsys):
+    sentinel = "NEUTRAL-PRIVACY-SENTINEL"
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    events = (
+        SimpleNamespace(type="conversation.item.input_audio_transcription.delta", delta=sentinel),
+        SimpleNamespace(type="conversation.item.input_audio_transcription.completed", transcript=sentinel),
+        SimpleNamespace(type="response.output_audio_transcript.delta", delta=sentinel),
+        SimpleNamespace(type="response.output_audio_transcript.done", transcript=sentinel),
+        SimpleNamespace(
+            type="response.function_call_arguments.done",
+            name=sentinel,
+            call_id=sentinel,
+            arguments=sentinel,
+        ),
+        SimpleNamespace(
+            type="error",
+            error=SimpleNamespace(type=sentinel, message=sentinel),
+            model_dump_json=lambda: sentinel,
+        ),
+    )
+    for event in events:
+        handle_server_event(
+            event,
+            playback=playback,
+            renderer=renderer,
+            print_json=True,
+            show_conversation_text=False,
+        )
+
+    output = capsys.readouterr().out
+    assert sentinel not in output
+    assert "TOOL: <call completed>" in output
+    assert "ERROR: realtime request failed" in output
+
+
 async def test_audio_streams_are_cleaned_up_when_output_start_fails(monkeypatch):
     events = []
 

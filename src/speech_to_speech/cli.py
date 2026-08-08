@@ -125,6 +125,14 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
     )
     parser.add_argument("--print-json", action="store_true", default=defaults.print_json)
     parser.add_argument(
+        "--no-show-conversation-text",
+        "--no_show_conversation_text",
+        action="store_false",
+        dest="show_conversation_text",
+        default=defaults.show_conversation_text,
+        help="Suppress user, assistant, tool-argument, and raw error content in console output.",
+    )
+    parser.add_argument(
         "--block-mic-during-playback",
         action="store_true",
         default=defaults.block_mic_during_playback,
@@ -148,6 +156,7 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         instructions=namespace.instructions,
         voice=namespace.voice,
         print_json=namespace.print_json,
+        show_conversation_text=namespace.show_conversation_text,
         block_mic_during_playback=namespace.block_mic_during_playback,
         connection_retry_timeout_s=namespace.connection_retry_timeout,
     )

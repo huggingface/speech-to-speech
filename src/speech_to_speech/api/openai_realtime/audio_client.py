@@ -41,6 +41,7 @@ class RealtimeAudioClientConfig:
     instructions: Optional[str] = None
     voice: Optional[str] = None
     print_json: bool = False
+    show_conversation_text: bool = True
     block_mic_during_playback: bool = False
     connection_retry_timeout_s: float = 30.0
 
@@ -249,10 +250,11 @@ def handle_server_event(
     playback: PlaybackBuffer,
     renderer: _FriendlyEventRenderer,
     print_json: bool,
+    show_conversation_text: bool = True,
 ) -> None:
     """Apply one Realtime lifecycle event to local playback and console state."""
 
-    if print_json:
+    if print_json and show_conversation_text:
         renderer.finish_live_assistant_text()
         try:
             print(f"EVENT: {event.model_dump_json()}", flush=True)
@@ -274,13 +276,14 @@ def handle_server_event(
     elif event.type == "conversation.item.input_audio_transcription.delta":
         # This server emits the latest partial hypothesis, not a token suffix.
         renderer.finish_live_assistant_text()
-        renderer.partial_user_text = event.delta.strip()
-        if renderer.partial_user_text:
+        renderer.partial_user_text = event.delta.strip() if show_conversation_text else ""
+        if show_conversation_text and renderer.partial_user_text:
             renderer.render_live_user_text(renderer.partial_user_text)
     elif event.type == "conversation.item.input_audio_transcription.completed":
         renderer.finish_live_assistant_text()
         renderer.partial_user_text = ""
-        renderer.render_live_user_text(event.transcript.strip(), final=True)
+        if show_conversation_text:
+            renderer.render_live_user_text(event.transcript.strip(), final=True)
     elif event.type == "response.created":
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()
@@ -291,15 +294,20 @@ def handle_server_event(
         renderer.finish_live_assistant_text()
         print("ASSISTANT: <audio done>", flush=True)
     elif event.type == "response.output_audio_transcript.delta":
-        renderer.render_assistant_text_delta(event)
+        if show_conversation_text:
+            renderer.render_assistant_text_delta(event)
     elif event.type == "response.output_audio_transcript.done":
-        renderer.render_assistant_text_done(event)
+        if show_conversation_text:
+            renderer.render_assistant_text_done(event)
     elif event.type == "response.function_call_arguments.done":
         renderer.finish_live_assistant_text()
-        print(
-            f"TOOL: {event.name} call_id={event.call_id} arguments={event.arguments}",
-            flush=True,
-        )
+        if show_conversation_text:
+            print(
+                f"TOOL: {event.name} call_id={event.call_id} arguments={event.arguments}",
+                flush=True,
+            )
+        else:
+            print("TOOL: <call completed>", flush=True)
     elif event.type == "response.done":
         renderer.finish_assistant_response(getattr(event.response, "id", None))
         if event.response.status == "cancelled":
@@ -310,7 +318,10 @@ def handle_server_event(
     elif event.type == "error":
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()
-        print(f"ERROR: {event.error.type}: {event.error.message}", flush=True)
+        if show_conversation_text:
+            print(f"ERROR: {event.error.type}: {event.error.message}", flush=True)
+        else:
+            print("ERROR: realtime request failed", flush=True)
     else:
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()
@@ -369,6 +380,7 @@ async def _run_audio_session(
                 playback=playback,
                 renderer=renderer,
                 print_json=config.print_json,
+                show_conversation_text=config.show_conversation_text,
             )
 
     opened_streams: list[Any] = []

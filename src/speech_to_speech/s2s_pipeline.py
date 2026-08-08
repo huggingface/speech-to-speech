@@ -35,6 +35,7 @@ from speech_to_speech.backend_registry import (
     HandlerContext,
     create_backend_handler,
 )
+from speech_to_speech.conversation_console import configure_conversation_text_output
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.queue_types import (
     AudioInItem,
@@ -597,6 +598,7 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
             input_device=local_audio.local_audio_input_device,
             output_device=local_audio.local_audio_output_device,
             print_json=local_audio.local_audio_print_json,
+            show_conversation_text=args.module_kwargs.show_conversation_text,
             block_mic_during_playback=local_audio.local_audio_block_mic_during_playback,
         ),
     )
@@ -609,6 +611,7 @@ def run_pipeline_command(command: Literal["serve", "local"], argv: Sequence[str]
     args = parse_arguments(argv, command=command)
 
     setup_logger(args.module_kwargs.log_level)
+    configure_conversation_text_output(enabled=args.module_kwargs.show_conversation_text)
 
     if args.module_kwargs.num_pipelines < 1:
         raise ValueError(f"--num_pipelines must be >= 1, got {args.module_kwargs.num_pipelines}")

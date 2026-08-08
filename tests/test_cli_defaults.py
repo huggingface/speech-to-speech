@@ -32,6 +32,7 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_profile():
     assert module_args.tts == "qwen3"
     assert module_args.log_level == "info"
     assert module_args.enable_live_transcription is True
+    assert module_args.show_conversation_text is True
     assert module_args.live_transcription_update_interval == 0.5
 
     assert vad_args.thresh == 0.6
@@ -62,6 +63,18 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_profile():
 
 def test_server_defaults_to_loopback():
     assert RealtimeServerArguments().host == "127.0.0.1"
+
+
+def test_server_can_suppress_conversation_text():
+    args = parse_arguments(["--no_show_conversation_text"])
+
+    assert args.module_kwargs.show_conversation_text is False
+
+
+def test_talk_client_can_suppress_conversation_text():
+    config = parse_talk_arguments(["--no-show-conversation-text"])
+
+    assert config.show_conversation_text is False
 
 
 def test_mac_optimal_settings_flag_does_not_select_a_command():

@@ -554,7 +554,7 @@ class RealtimeService:
         can emit terminal events for a response the client already knows about.
         Once closed, a later EndOfResponse-driven close does nothing.
         """
-        logger.info("Response failed: %s", event.message)
+        logger.info("Response failed")
         st = self._state(conn_id)
         if not (st.in_response or st.response_pending):
             return []

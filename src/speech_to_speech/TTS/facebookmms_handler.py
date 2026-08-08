@@ -7,18 +7,16 @@ from typing import Any, Iterator
 import librosa
 import numpy as np
 import torch
-from rich.console import Console
 from transformers import AutoTokenizer, VitsModel
 
 from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.conversation_console import console
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 logger = logging.getLogger(__name__)
-
-console = Console()
 
 WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE = {
     "en": "eng",  # English
@@ -114,7 +112,7 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
             return None
 
         try:
-            logger.debug(f"Tokenizing text: {text}")
+            logger.debug("Tokenizing text (characters=%d)", len(text))
             logger.debug(f"Current language: {self.language}")
             logger.debug(f"Tokenizer: {self.tokenizer}")
 
@@ -164,7 +162,7 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
         text = tts_input.text
 
         console.print(f"[green]ASSISTANT: {text}")
-        logger.debug(f"Processing text: {text}")
+        logger.debug("Processing text (characters=%d)", len(text))
         logger.debug(f"Language code: {language_code}")
 
         restore_initial_model = (
