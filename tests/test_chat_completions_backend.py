@@ -10,6 +10,7 @@ Run with pytest, or standalone:  python tests/test_chat_completions_backend.py
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import threading
 from types import SimpleNamespace
@@ -388,27 +389,31 @@ def test_streaming_text_and_usage():
     assert any(getattr(i, "role", None) == "assistant" for i in chat.buffer)
 
 
-def test_streaming_tool_call_accumulates_arguments():
+def test_streaming_tool_call_accumulates_arguments_without_logging_content(caplog):
     h = _make_handler(stream=True)
+    sentinel = "NEUTRAL-TOOL-ARGUMENT-SENTINEL"
     # Arguments arrive split across deltas, as real servers stream them.
     h.client.chat.completions.create = lambda **k: _FakeStream(
         [
             _chunk(tool_calls=[_tc_delta(0, id="srv_1", name="move_head", arguments='{"direction"')]),
-            _chunk(tool_calls=[_tc_delta(0, arguments=': "left"}')]),
+            _chunk(tool_calls=[_tc_delta(0, arguments=f': "{sentinel}"}}')]),
             _chunk(usage=SimpleNamespace(prompt_tokens=20, completion_tokens=8)),
         ]
     )
-    text, tools, usage, chat, _end = _drive(
-        h,
-        tools=[{"type": "function", "name": "move_head", "parameters": {"type": "object"}}],
-        tool_choice="required",
-    )
+    with caplog.at_level(logging.INFO, logger="speech_to_speech.LLM.base_openai_compatible_language_model"):
+        text, tools, usage, chat, _end = _drive(
+            h,
+            tools=[{"type": "function", "name": "move_head", "parameters": {"type": "object"}}],
+            tool_choice="required",
+        )
     assert len(tools) == 1
     tc = tools[0]
     assert isinstance(tc, ResponseFunctionToolCall)
     assert tc.name == "move_head"
-    assert json.loads(tc.arguments) == {"direction": "left"}  # reassembled from two deltas
+    assert json.loads(tc.arguments) == {"direction": sentinel}  # reassembled from two deltas
     assert usage == (20, 8)
+    assert sentinel not in caplog.text
+    assert "Tools generated (count=1)" in caplog.text
     # the function_call was stored in history with a freshly minted call_id
     assert chat._pending_tool_calls, "tool call should be recorded in chat history"
 

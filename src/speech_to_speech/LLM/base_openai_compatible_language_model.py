@@ -503,7 +503,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 else:
                     logger.debug("Clean text generated (characters=%d)", len(state.clean_text))
                     yield from _flush(sentence_batch)
-            logger.info(f"Tools: {state.tools}")
+            logger.info("Tools generated (count=%d)", len(state.tools))
         return (
             not cancelled
             and not self._generation_is_stale(turn.gen)
@@ -543,7 +543,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 ):
                     yield self._chunk(turn, text=out)
         logger.debug("Clean text generated (characters=%d)", len(state.clean_text))
-        logger.info(f"Tools: {state.tools}")
+        logger.info("Tools generated (count=%d)", len(state.tools))
         return (
             not self._generation_is_stale(turn.gen)
             and self._turn_is_latest(turn.turn_id, turn.turn_revision)

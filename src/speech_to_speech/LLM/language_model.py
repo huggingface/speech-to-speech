@@ -575,7 +575,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 original_chat.strip_images(consumed_image_ids)
                 original_chat.trim_if_needed(self.compactor)
             logger.debug("Clean text generated (characters=%d)", len(ctx.generated_text))
-            logger.info(f"Tools: {ctx.tools}")
+            logger.info("Tools generated (count=%d)", len(ctx.tools))
 
             if turn_output_allowed and ctx.printable_text.strip():
                 yield LLMResponseChunk(
