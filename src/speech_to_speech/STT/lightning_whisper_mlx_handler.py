@@ -11,7 +11,7 @@ from rich.console import Console
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
-from speech_to_speech.utils.mlx_lock import MLXLockContext
+from speech_to_speech.utils.mlx_concurrency import MLXConcurrencyContext
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
         dummy_input = np.array([0] * 512)
 
         for _ in range(n_steps):
-            with MLXLockContext(handler_name=self.__class__.__name__):
+            with MLXConcurrencyContext(handler_name=self.__class__.__name__):
                 _ = self.model.transcribe(dummy_input)["text"].strip()
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
@@ -72,16 +72,16 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
 
         audio = vad_audio.audio
         if self.start_language != "auto":
-            with MLXLockContext(handler_name=self.__class__.__name__):
+            with MLXConcurrencyContext(handler_name=self.__class__.__name__):
                 transcription_dict = self.model.transcribe(audio, language=self.start_language)
         else:
-            with MLXLockContext(handler_name=self.__class__.__name__):
+            with MLXConcurrencyContext(handler_name=self.__class__.__name__):
                 transcription_dict = self.model.transcribe(audio)
             language_code = transcription_dict["language"]
             if language_code not in SUPPORTED_LANGUAGES:
                 logger.warning(f"Whisper detected unsupported language: {language_code}")
                 if self.last_language in SUPPORTED_LANGUAGES:  # reprocess with the last language
-                    with MLXLockContext(handler_name=self.__class__.__name__):
+                    with MLXConcurrencyContext(handler_name=self.__class__.__name__):
                         transcription_dict = self.model.transcribe(audio, language=self.last_language)
                 else:
                     transcription_dict = {"text": "", "language": "en"}

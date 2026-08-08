@@ -55,6 +55,7 @@ from speech_to_speech.pipeline.messages import (
     TokenUsage,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.utils.mlx_concurrency import MLXConcurrencyContext
 from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
 
 try:
@@ -62,8 +63,6 @@ try:
     from mlx_lm import generate as mlx_generate
     from mlx_lm import load as mlx_load
     from mlx_lm import stream_generate as mlx_stream_generate
-
-    from speech_to_speech.utils.mlx_lock import MLXLockContext
 
     HAS_MLX = True
 except ImportError:
@@ -183,8 +182,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         self.user_role = user_role
         # Serializes transformers pipe/model.generate calls between the speech
-        # response path and the background compaction worker. MLX paths use
-        # MLXLockContext instead.
+        # response path and the background compaction worker. MLX inference uses
+        # the process-wide bounded concurrency gate around individual operations.
         self._transformers_lock = Lock()
         self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
 
@@ -690,7 +689,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
         )
 
         if self.backend == "mlx":
-            with MLXLockContext(handler_name="MLX-LLM", timeout=10.0):
+            with MLXConcurrencyContext(handler_name="MLX-LLM"):
                 token_iter = mlx_stream_generate(
                     self.model,  # type: ignore[arg-type]
                     self.tokenizer,  # type: ignore[arg-type]
@@ -730,7 +729,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
                 prompt = tokenizer.apply_chat_template(  # type: ignore[union-attr]
                     messages, tokenize=False, add_generation_prompt=True
                 )
-                with MLXLockContext(handler_name="MLX-compact", timeout=10.0):
+                with MLXConcurrencyContext(handler_name="MLX-compact"):
                     return mlx_generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens, verbose=False)  # type: ignore[arg-type]
 
             return generate_mlx
@@ -862,7 +861,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             ctx.input_tokens += len(self.tokenizer.encode(formatted_prompt))
             logger.debug("MLX VLM prompt token count: %d", ctx.input_tokens)
 
-            with MLXLockContext(handler_name="MLX-VLM", timeout=10.0):
+            with MLXConcurrencyContext(handler_name="MLX-VLM"):
                 token_iter = mlx_vlm_stream_generate(  # type: ignore[arg-type]
                     self.model,
                     self.processor,
@@ -915,7 +914,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                 formatted_prompt = processor.apply_chat_template(  # type: ignore[union-attr]
                     messages, tokenize=False, add_generation_prompt=True
                 )
-                with MLXLockContext(handler_name="MLX-VLM-compact", timeout=10.0):
+                with MLXConcurrencyContext(handler_name="MLX-VLM-compact"):
                     token_iter = mlx_vlm_stream_generate(  # type: ignore[arg-type]
                         model, processor, formatted_prompt, None, max_tokens=max_tokens
                     )
