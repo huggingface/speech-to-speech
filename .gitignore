@@ -229,3 +229,6 @@ dmypy.json
 cover/
 .tox/
 uv.lock
+
+# Manual eval outputs
+evals/voice_mode/results/
