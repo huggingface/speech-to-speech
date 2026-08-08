@@ -574,6 +574,7 @@ See [ModuleArguments](./src/speech_to_speech/arguments_classes/module_arguments.
 - LLM backend (`--llm_backend`: `transformers`, `mlx-lm`, `responses-api`, or `chat-completions`)
 - TTS implementation (`--tts`)
 - logging level
+- optional conversation text suppression (`--no_show_conversation_text`) for private sessions
 - realtime pipeline pool size (`--num_pipelines`)
 
 ### VAD Parameters

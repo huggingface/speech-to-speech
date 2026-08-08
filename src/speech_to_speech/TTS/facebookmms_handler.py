@@ -7,18 +7,16 @@ from typing import Any, Iterator
 import librosa
 import numpy as np
 import torch
-from rich.console import Console
 from transformers import AutoTokenizer, VitsModel
 
 from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.conversation_console import console
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 logger = logging.getLogger(__name__)
-
-console = Console()
 
 WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE = {
     "en": "eng",  # English

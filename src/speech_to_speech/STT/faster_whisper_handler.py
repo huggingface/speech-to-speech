@@ -5,13 +5,11 @@ import os
 from typing import Any, Iterator
 
 from faster_whisper import WhisperModel
-from rich.console import Console
 
+from speech_to_speech.conversation_console import console
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
-
-console = Console()
 
 logger = logging.getLogger(__name__)
 

@@ -6,16 +6,15 @@ from time import perf_counter
 from typing import Any, Iterator
 
 import numpy as np
-from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.conversation_console import console
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 
 class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):

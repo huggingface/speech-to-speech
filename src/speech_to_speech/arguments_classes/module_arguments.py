@@ -56,6 +56,13 @@ class ModuleArguments:
             "help": "Enable live transcription display while user is speaking (works with parakeet-tdt). Default is true."
         },
     )
+    show_conversation_text: bool = field(
+        default=True,
+        metadata={
+            "help": "Show user and assistant text in the server console. Disable for private conversations. "
+            "Default is true."
+        },
+    )
     live_transcription_update_interval: float = field(
         default=0.5,
         metadata={"help": "Update interval for live transcription in seconds (default: 0.5s = 500ms)"},
