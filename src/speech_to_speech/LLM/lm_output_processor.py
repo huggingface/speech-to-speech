@@ -15,7 +15,7 @@ from queue import Queue
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.events import AssistantTextEvent, ResponseFailedEvent, TokenUsageEvent
 from speech_to_speech.pipeline.handler_types import LLMOut, TTSIn
-from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk, TokenUsage, TTSInput
+from speech_to_speech.pipeline.messages import AssistantTextPart, EndOfResponse, LLMResponseChunk, TokenUsage, TTSInput
 from speech_to_speech.pipeline.queue_types import TextEventItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.utils import response_wants_audio
@@ -118,11 +118,11 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
             logger.debug("Dropping stale LLM chunk for turn=%s rev=%s", lm_output.turn_id, lm_output.turn_revision)
             return
 
-        logger.debug(f"LM processor: text='{lm_output.text}', tools={lm_output.tools}")
+        logger.debug("LM processor: parts=%s", lm_output.parts)
 
         if self.text_output_queue is not None:
             event = AssistantTextEvent(
-                text=lm_output.text,
+                parts=lm_output.parts,
                 turn_id=lm_output.turn_id,
                 turn_revision=lm_output.turn_revision,
                 cancel_generation=lm_output.cancel_generation,
@@ -134,15 +134,18 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                 logger.debug(f"Sending to clients: text='{lm_output.text}' (no tools)")
             self.text_output_queue.put(event)
 
-        if lm_output.text and response_wants_audio(lm_output.response):
-            logger.debug(f"Forwarding to TTS: '{lm_output.text}'")
-            yield TTSInput(
-                text=lm_output.text,
-                language_code=lm_output.language_code,
-                runtime_config=lm_output.runtime_config,
-                response=lm_output.response,
-                turn_id=lm_output.turn_id,
-                turn_revision=lm_output.turn_revision,
-                speech_stopped_at_s=lm_output.speech_stopped_at_s,
-                cancel_generation=lm_output.cancel_generation,
-            )
+        if response_wants_audio(lm_output.response):
+            for part in lm_output.parts:
+                if not isinstance(part, AssistantTextPart) or not part.text:
+                    continue
+                logger.debug("Forwarding to TTS: '%s'", part.text)
+                yield TTSInput(
+                    text=part.text,
+                    language_code=lm_output.language_code,
+                    runtime_config=lm_output.runtime_config,
+                    response=lm_output.response,
+                    turn_id=lm_output.turn_id,
+                    turn_revision=lm_output.turn_revision,
+                    speech_stopped_at_s=lm_output.speech_stopped_at_s,
+                    cancel_generation=lm_output.cancel_generation,
+                )

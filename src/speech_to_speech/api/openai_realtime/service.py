@@ -178,12 +178,18 @@ class ConnState(BaseModel):
     input_audio_duration_s: float = 0.0
     last_item_id: Optional[str] = None
     current_response_params: RealtimeResponseCreateParams | None = None
-    pending_output_text_parts: list[str] = Field(default_factory=list)
     pending_assistant_item_id: Optional[str] = None
     pending_assistant_output_index: Optional[int] = None
-    # Function calls the model has requested during the current response, so
-    # response.done's output can include them per the OpenAI Realtime protocol.
-    pending_function_calls: list[RealtimeConversationItemFunctionCall] = Field(default_factory=list)
+    next_output_index: int = 0
+    current_output_index: int | None = None
+    current_output_kind: Literal["text", "tool_call"] | None = None
+    # Each entry contains item_id, output_index, and the contiguous text parts
+    # for one assistant message. Kept as plain internal data to avoid coupling
+    # connection state to protocol event models.
+    pending_text_outputs: list[dict[str, Any]] = Field(default_factory=list)
+    # Keyed by output index so response.done can preserve interleaving with
+    # assistant message items.
+    pending_function_calls: dict[int, RealtimeConversationItemFunctionCall] = Field(default_factory=dict)
     response_usage: UsageMetrics = Field(default_factory=UsageMetrics)
     speculative_turn_id: Optional[str] = None
     speculative_turn_revision: Optional[int] = None
