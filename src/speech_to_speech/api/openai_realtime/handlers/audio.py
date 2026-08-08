@@ -201,30 +201,33 @@ class AudioHandler(RealtimeBaseHandler):
         """Ensure an audio response and reserve its assistant output identity."""
         resp_id, item_id, events = self.begin_audio_response(conn_id)
         st = self._state(conn_id)
-        previous_item_id = st.pending_assistant_item_id
-        previous_output_index = st.pending_assistant_output_index
         assistant_item_id, output_index = self._service.response._ensure_assistant_output_item(
             conn_id,
             item_id,
             assistant_output_id,
         )
-        if (
-            previous_item_id is not None
-            and previous_output_index is not None
-            and previous_output_index != output_index
-            and previous_output_index not in st.completed_audio_output_indices
-        ):
+        earlier_outputs = sorted(
+            (
+                pending
+                for pending in st.pending_text_outputs
+                if int(pending["output_index"]) < output_index
+                and int(pending["output_index"]) not in st.completed_audio_output_indices
+            ),
+            key=lambda pending: int(pending["output_index"]),
+        )
+        for pending in earlier_outputs:
+            earlier_output_index = int(pending["output_index"])
             events.append(
                 ResponseAudioDoneEvent(
                     type="response.output_audio.done",
                     event_id=self._next_event_id(),
                     content_index=0,
-                    item_id=previous_item_id,
-                    output_index=previous_output_index,
+                    item_id=str(pending["item_id"]),
+                    output_index=earlier_output_index,
                     response_id=resp_id,
                 )
             )
-            st.completed_audio_output_indices.add(previous_output_index)
+            st.completed_audio_output_indices.add(earlier_output_index)
         return resp_id, assistant_item_id, output_index, events
 
     def encode_audio_chunk(

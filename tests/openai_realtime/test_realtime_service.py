@@ -1526,6 +1526,40 @@ class TestDispatchPipelineEvent:
         assert [event.output_index for event in audio_done] == [0, 2]
         assert [item.id for item in response_done.response.output] == [event.item_id for event in stream_events]
 
+    def test_later_audio_closes_silent_intermediate_outputs_in_order(self, service, conn_id):
+        service.dispatch_pipeline_event(
+            conn_id,
+            AssistantTextEvent(
+                parts=[
+                    AssistantTextPart(text="a", output_id="output_a"),
+                    AssistantToolCallPart(
+                        tool={"type": "function_call", "call_id": "c1", "name": "first", "arguments": "{}"}
+                    ),
+                    AssistantTextPart(text="b", output_id="output_b"),
+                    AssistantToolCallPart(
+                        tool={"type": "function_call", "call_id": "c2", "name": "second", "arguments": "{}"}
+                    ),
+                    AssistantTextPart(text="c", output_id="output_c"),
+                ]
+            ),
+        )
+        first_audio = service.encode_audio_chunk(conn_id, _pcm_bytes(256), "output_a")
+        last_audio = service.encode_audio_chunk(conn_id, _pcm_bytes(256), "output_c")
+        terminal = service.finish_response(conn_id)
+
+        lifecycle = [
+            (event.type, event.output_index)
+            for event in [*first_audio, *last_audio, *terminal]
+            if isinstance(event, (ResponseAudioDeltaEvent, ResponseAudioDoneEvent))
+        ]
+        assert lifecycle == [
+            ("response.output_audio.delta", 0),
+            ("response.output_audio.done", 0),
+            ("response.output_audio.done", 2),
+            ("response.output_audio.delta", 4),
+            ("response.output_audio.done", 4),
+        ]
+
     def test_text_only_interleaving_closes_each_text_item_before_response_done(self, service, conn_id):
         from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
