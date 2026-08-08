@@ -200,7 +200,6 @@ class AudioHandler(RealtimeBaseHandler):
 
     def encode_audio_chunk(self, conn_id: str, audio: bytes) -> list[ServerEvent]:
         """Encode a raw PCM audio chunk as a base64 delta event for the WebSocket transport."""
-        response = self._service.response
         st = self._state(conn_id)
 
         resp_id, assistant_item_id, assistant_output_index, events = self.begin_audio_output(conn_id)
@@ -220,7 +219,7 @@ class AudioHandler(RealtimeBaseHandler):
             ResponseAudioDeltaEvent(
                 type="response.output_audio.delta",
                 event_id=self._next_event_id(),
-                content_index=response._next_content_index(conn_id),
+                content_index=0,
                 delta=b64,
                 item_id=assistant_item_id,
                 output_index=assistant_output_index,

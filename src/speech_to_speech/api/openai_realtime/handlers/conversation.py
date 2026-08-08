@@ -103,7 +103,7 @@ class ConversationHandler(RealtimeBaseHandler):
             ConversationItemInputAudioTranscriptionDeltaEvent(
                 type="conversation.item.input_audio_transcription.delta",
                 event_id=self._next_event_id(),
-                content_index=self._next_input_content_index(conn_id),
+                content_index=0,
                 item_id=self._input_item_id(conn_id),
                 delta=event.delta,
             )

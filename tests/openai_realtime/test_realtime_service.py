@@ -769,12 +769,12 @@ class TestEncodeAudioChunk:
         assert events[1].output_index == 0
         assert events[1].delta == base64.b64encode(audio).decode("ascii")
 
-    def test_subsequent_chunks_increment_content_index(self, service, conn_id):
+    def test_subsequent_chunks_keep_content_index(self, service, conn_id):
         service.encode_audio_chunk(conn_id, _pcm_bytes(256))  # first
         events = service.encode_audio_chunk(conn_id, _pcm_bytes(256))  # second
         assert len(events) == 1
         assert isinstance(events[0], ResponseAudioDeltaEvent)
-        assert events[0].content_index == 1
+        assert events[0].content_index == 0
 
     def test_response_created_includes_metadata(self, service, conn_id):
         from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
@@ -1702,7 +1702,7 @@ class TestDispatchPipelineEvent:
         assert e1[0].content_index == 0
         assert e1[0].delta == "hel"
         assert isinstance(e2[0], ConversationItemInputAudioTranscriptionDeltaEvent)
-        assert e2[0].content_index == 1
+        assert e2[0].content_index == 0
 
     # -- transcription_completed --
 
