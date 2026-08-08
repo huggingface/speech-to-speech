@@ -171,6 +171,9 @@ class ConnState(BaseModel):
     response_pending: bool = False
     audio_buffer_has_data: bool = False
     audio_remainder: bytes = b""
+    # Trailing byte of a PCM16 sample split across two appends, held at the
+    # client's sample rate until its other half arrives (see ``append_pcm``).
+    pcm_byte_remainder: bytes = b""
     current_response_id: Optional[str] = None
     current_item_id: Optional[str] = None
     content_index: int = 0

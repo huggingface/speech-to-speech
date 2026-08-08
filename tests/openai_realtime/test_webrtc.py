@@ -123,6 +123,36 @@ class TestAppendPcm:
         unit.service.append_pcm(conn_id, b"\x01\x00" * 512, PIPELINE_SAMPLE_RATE)
         assert unit.service.handle_audio_commit(conn_id) is None
 
+    def test_odd_length_append_at_a_non_pipeline_rate_does_not_raise(self):
+        """A client may split a PCM16 sample across two appends.
+
+        ``resample`` does ``np.frombuffer(..., np.int16)``, which raises
+        ``ValueError`` on an odd-length buffer. That raise is outside
+        ``handle_audio_append``'s try/except and unwinds the websocket receive
+        loop, tearing down the whole session. 24 kHz is the OpenAI Realtime
+        default input rate, so a spec-following client reaches this path.
+        """
+        unit = _make_unit()
+        conn_id = unit.service.register()
+
+        # 1024 well-formed bytes plus the low half of one more sample.
+        unit.service.append_pcm(conn_id, b"\x01\x00" * 512 + b"\xff", 24000)
+        # The next append supplies its high half.
+        unit.service.append_pcm(conn_id, b"\x7f" + b"\x02\x00" * 512, 24000)
+
+    def test_split_sample_is_reassembled_across_appends(self):
+        """The byte held back from an odd-length append must be paired with the
+        byte that follows it, not dropped and not left to shift the stream."""
+        unit = _make_unit()
+        conn_id = unit.service.register()
+
+        unit.service.append_pcm(conn_id, b"\x01\x00" * 512 + b"\xff", PIPELINE_SAMPLE_RATE)
+        chunks = unit.service.append_pcm(conn_id, b"\x7f" + b"\x02\x00" * 512, PIPELINE_SAMPLE_RATE)
+
+        assert [len(c) for c in chunks] == [CHUNK_SIZE_BYTES]
+        assert chunks[0][:4] == b"\xff\x7f\x02\x00"
+        assert len(unit.service._state(conn_id).audio_remainder) % 2 == 0
+
 
 # ---------------------------------------------------------------------------
 # PcmResampler
