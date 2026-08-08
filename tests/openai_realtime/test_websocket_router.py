@@ -539,9 +539,11 @@ class TestSendLoop:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()  # session.created
                 text_output_queue.put(
+                    AssistantTextEvent(parts=[AssistantTextPart(text="before", output_id="output_1")])
+                )
+                text_output_queue.put(
                     AssistantTextEvent(
                         parts=[
-                            AssistantTextPart(text="before", output_id="output_1"),
                             AssistantToolCallPart(
                                 tool={
                                     "type": "function_call",
@@ -549,12 +551,13 @@ class TestSendLoop:
                                     "name": "tool",
                                     "arguments": "{}",
                                 }
-                            ),
-                            AssistantTextPart(text="after", output_id="output_2"),
+                            )
                         ]
                     )
                 )
-                output_queue.put(AudioOutput(audio=_pcm_bytes(256), assistant_output_id="output_1"))
+                text_output_queue.put(AssistantTextEvent(parts=[AssistantTextPart(text="after", output_id="output_2")]))
+                # The first text segment intentionally produces no audio. The
+                # later segment must still retain its post-tool output index.
                 output_queue.put(AudioOutput(audio=_pcm_bytes(256), assistant_output_id="output_2"))
                 output_queue.put(AUDIO_RESPONSE_DONE)
 
@@ -564,14 +567,23 @@ class TestSendLoop:
 
                 audio_deltas = [message for message in messages if message["type"] == "response.output_audio.delta"]
                 audio_done = [message for message in messages if message["type"] == "response.output_audio.done"]
+                transcript_deltas = [
+                    message for message in messages if message["type"] == "response.output_audio_transcript.delta"
+                ]
                 response_done = messages[-1]
-                assert [message["output_index"] for message in audio_deltas] == [0, 2]
+                assert [message["output_index"] for message in transcript_deltas] == [0, 2]
+                assert [message["output_index"] for message in audio_deltas] == [2]
                 assert [message["output_index"] for message in audio_done] == [0, 2]
                 assert [item["type"] for item in response_done["response"]["output"]] == [
                     "message",
                     "function_call",
                     "message",
                 ]
+                assert [
+                    item.get("content", [{}])[0].get("transcript")
+                    for item in response_done["response"]["output"]
+                    if item["type"] == "message"
+                ] == ["before", "after"]
 
     def test_stale_tagged_response_done_does_not_finish_current_response(self, setup):
         app, service, _, output_queue, _, _, _, _, cancel_scope = setup

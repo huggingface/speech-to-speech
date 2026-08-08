@@ -845,6 +845,12 @@ def create_app(
                     if _should_discard_audio(unit, audio_chunk):
                         continue
 
+                    # The LM side channel enqueues each assistant event before
+                    # its text reaches TTS. Drain those events before assigning
+                    # an audio item so a later text segment cannot be mistaken
+                    # for an earlier one when an intervening segment is silent.
+                    await _drain_pending_response_events(transport, unit, session_id)
+
                     assistant_output_id = _assistant_output_id(audio_chunk)
                     audio_chunk = _to_audio_bytes(audio_chunk)
 
