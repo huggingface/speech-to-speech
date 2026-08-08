@@ -1497,6 +1497,32 @@ class TestDispatchPipelineEvent:
         assert [first[0].output_index, second[0].output_index, third[0].output_index] == [0, 1, 2]
         assert len({first[0].item_id, second[0].item_id, third[0].item_id}) == 3
 
+    def test_interleaved_audio_switches_output_identity_and_closes_each_item(self, service, conn_id):
+        stream_events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantTextEvent(
+                parts=[
+                    AssistantTextPart(text="before", output_id="output_1"),
+                    AssistantToolCallPart(
+                        tool={"type": "function_call", "call_id": "c1", "name": "tool", "arguments": "{}"}
+                    ),
+                    AssistantTextPart(text="after", output_id="output_2"),
+                ]
+            ),
+        )
+        first_audio = service.encode_audio_chunk(conn_id, _pcm_bytes(256), "output_1")
+        second_audio = service.encode_audio_chunk(conn_id, _pcm_bytes(256), "output_2")
+        terminal = service.finish_response(conn_id)
+
+        deltas = [event for event in [*first_audio, *second_audio] if isinstance(event, ResponseAudioDeltaEvent)]
+        audio_done = [event for event in [*second_audio, *terminal] if isinstance(event, ResponseAudioDoneEvent)]
+        response_done = next(event for event in terminal if isinstance(event, ResponseDoneEvent))
+        assert [event.output_index for event in stream_events] == [0, 1, 2]
+        assert [event.output_index for event in deltas] == [0, 2]
+        assert [event.content_index for event in deltas] == [0, 0]
+        assert [event.output_index for event in audio_done] == [0, 2]
+        assert [item.id for item in response_done.response.output] == [event.item_id for event in stream_events]
+
     def test_text_only_interleaving_closes_each_text_item_before_response_done(self, service, conn_id):
         from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 

@@ -11,11 +11,19 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from queue import Queue
+from uuid import uuid4
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.events import AssistantTextEvent, ResponseFailedEvent, TokenUsageEvent
 from speech_to_speech.pipeline.handler_types import LLMOut, TTSIn
-from speech_to_speech.pipeline.messages import AssistantTextPart, EndOfResponse, LLMResponseChunk, TokenUsage, TTSInput
+from speech_to_speech.pipeline.messages import (
+    AssistantTextPart,
+    AssistantToolCallPart,
+    EndOfResponse,
+    LLMResponseChunk,
+    TokenUsage,
+    TTSInput,
+)
 from speech_to_speech.pipeline.queue_types import TextEventItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.utils import response_wants_audio
@@ -45,6 +53,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
         """
         self.text_output_queue = text_output_queue
         self.speculative_turns = speculative_turns
+        self._assistant_output_id: str | None = None
 
     def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
         if self.speculative_turns is None:
@@ -79,6 +88,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
             return
 
         if isinstance(lm_output, EndOfResponse):
+            self._assistant_output_id = None
             if not self._turn_output_allowed(
                 lm_output.turn_id,
                 lm_output.turn_revision,
@@ -120,6 +130,14 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
 
         logger.debug("LM processor: parts=%s", lm_output.parts)
 
+        for part in lm_output.parts:
+            if isinstance(part, AssistantTextPart):
+                if self._assistant_output_id is None:
+                    self._assistant_output_id = uuid4().hex
+                part.output_id = self._assistant_output_id
+            elif isinstance(part, AssistantToolCallPart):
+                self._assistant_output_id = None
+
         if self.text_output_queue is not None:
             event = AssistantTextEvent(
                 parts=lm_output.parts,
@@ -148,4 +166,8 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                     turn_revision=lm_output.turn_revision,
                     speech_stopped_at_s=lm_output.speech_stopped_at_s,
                     cancel_generation=lm_output.cancel_generation,
+                    assistant_output_id=part.output_id,
                 )
+
+    def on_session_end(self) -> None:
+        self._assistant_output_id = None

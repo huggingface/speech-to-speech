@@ -80,6 +80,9 @@ class AssistantTextPart(BaseModel):
 
     type: Literal["text"] = "text"
     text: str
+    # Internal identity shared with TTS audio produced for this contiguous
+    # assistant message. Excluded from serialized pipeline payloads.
+    output_id: str | None = Field(default=None, exclude=True, repr=False)
 
 
 class AssistantToolCallPart(BaseModel):
@@ -168,6 +171,7 @@ class TTSInput(PipelineMessage):
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
     cancel_generation: int | None = None
+    assistant_output_id: str | None = None
 
 
 class AudioOutput(PipelineMessage):
@@ -176,6 +180,7 @@ class AudioOutput(PipelineMessage):
     tag: Literal["audio_output"] = "audio_output"
     audio: bytes | np.ndarray
     cancel_generation: int | None = None
+    assistant_output_id: str | None = None
 
 
 # ── Realtime service → LLM ────────────────────────────────────────────

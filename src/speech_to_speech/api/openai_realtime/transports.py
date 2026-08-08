@@ -34,7 +34,13 @@ class SessionTransport(ABC):
     async def send_events(self, events: list[ServerEvent]) -> None: ...
 
     @abstractmethod
-    async def send_audio_chunk(self, service: RealtimeService, session_id: str, pcm: bytes) -> None:
+    async def send_audio_chunk(
+        self,
+        service: RealtimeService,
+        session_id: str,
+        pcm: bytes,
+        assistant_output_id: str | None = None,
+    ) -> None:
         """Deliver a pipeline-rate PCM16 chunk to the client."""
 
     @abstractmethod
@@ -85,8 +91,14 @@ class WebSocketTransport(SessionTransport):
         for event in events:
             await send_ws_event(self.websocket, event)
 
-    async def send_audio_chunk(self, service: RealtimeService, session_id: str, pcm: bytes) -> None:
-        await self.send_events(service.encode_audio_chunk(session_id, pcm))
+    async def send_audio_chunk(
+        self,
+        service: RealtimeService,
+        session_id: str,
+        pcm: bytes,
+        assistant_output_id: str | None = None,
+    ) -> None:
+        await self.send_events(service.encode_audio_chunk(session_id, pcm, assistant_output_id))
 
     def discard_pending_audio(self) -> None:
         # Unplayed audio lives client-side over WebSocket; truncation is the

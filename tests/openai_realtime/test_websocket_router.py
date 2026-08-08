@@ -30,7 +30,13 @@ from speech_to_speech.pipeline.events import (
     SpeechStartedEvent,
     TokenUsageEvent,
 )
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
+from speech_to_speech.pipeline.messages import (
+    AUDIO_RESPONSE_DONE,
+    PIPELINE_END,
+    AssistantTextPart,
+    AssistantToolCallPart,
+    AudioOutput,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -526,6 +532,46 @@ class TestSendLoop:
                         break
                 assert "response.output_audio_transcript.done" in types
                 assert transcript == "hello there"
+
+    def test_audio_batching_preserves_ordered_output_boundaries(self, setup):
+        app, _, _, output_queue, text_output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                text_output_queue.put(
+                    AssistantTextEvent(
+                        parts=[
+                            AssistantTextPart(text="before", output_id="output_1"),
+                            AssistantToolCallPart(
+                                tool={
+                                    "type": "function_call",
+                                    "call_id": "c1",
+                                    "name": "tool",
+                                    "arguments": "{}",
+                                }
+                            ),
+                            AssistantTextPart(text="after", output_id="output_2"),
+                        ]
+                    )
+                )
+                output_queue.put(AudioOutput(audio=_pcm_bytes(256), assistant_output_id="output_1"))
+                output_queue.put(AudioOutput(audio=_pcm_bytes(256), assistant_output_id="output_2"))
+                output_queue.put(AUDIO_RESPONSE_DONE)
+
+                messages = []
+                while not messages or messages[-1]["type"] != "response.done":
+                    messages.append(ws.receive_json())
+
+                audio_deltas = [message for message in messages if message["type"] == "response.output_audio.delta"]
+                audio_done = [message for message in messages if message["type"] == "response.output_audio.done"]
+                response_done = messages[-1]
+                assert [message["output_index"] for message in audio_deltas] == [0, 2]
+                assert [message["output_index"] for message in audio_done] == [0, 2]
+                assert [item["type"] for item in response_done["response"]["output"]] == [
+                    "message",
+                    "function_call",
+                    "message",
+                ]
 
     def test_stale_tagged_response_done_does_not_finish_current_response(self, setup):
         app, service, _, output_queue, _, _, _, _, cancel_scope = setup

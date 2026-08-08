@@ -72,6 +72,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_response_id = None
         st.current_item_id = None
         st.content_index = 0
+        st.audio_content_index = 0
         st.in_response = False
         st.response_pending = False
         st.current_response_params = None
@@ -80,43 +81,67 @@ class ResponseHandler(RealtimeBaseHandler):
         st.next_output_index = 0
         st.current_output_index = None
         st.current_output_kind = None
+        st.assistant_output_items = {}
+        st.completed_audio_output_indices = set()
         st.pending_text_outputs = []
         st.pending_function_calls = {}
 
-    def _start_item(self, conn_id: str) -> str:
+    def _start_item(self, conn_id: str, *, reset_audio_content_index: bool = True) -> str:
         """Generate a new item ID, reset content index, and store it."""
         st = self._state(conn_id)
         item_id = _generate_id("item")
         st.current_item_id = item_id
         st.content_index = 0
+        if reset_audio_content_index:
+            st.audio_content_index = 0
         st.input_audio_duration_s = 0.0
         return item_id
 
     def _current_item_id(self, conn_id: str) -> str:
         return self._state(conn_id).current_item_id or self._start_item(conn_id)
 
-    def _ensure_assistant_output_item(self, conn_id: str, item_id: str) -> tuple[str, int]:
+    def _ensure_assistant_output_item(
+        self,
+        conn_id: str,
+        item_id: str,
+        assistant_output_id: str | None = None,
+    ) -> tuple[str, int]:
         """Reserve the assistant item used by the outbound audio stream."""
         st = self._state(conn_id)
-        if st.pending_assistant_item_id is None:
+        target: tuple[str, int] | None = None
+        if assistant_output_id is not None:
+            target = st.assistant_output_items.get(assistant_output_id)
+            if target is None:
+                output_index, output_item_id = self._output_part_context(
+                    conn_id,
+                    "text",
+                    preferred_item_id=item_id if st.next_output_index == 0 else None,
+                )
+                st.pending_text_outputs.append({"item_id": output_item_id, "output_index": output_index, "parts": []})
+                target = (output_item_id, output_index)
+                st.assistant_output_items[assistant_output_id] = target
+        elif st.pending_assistant_item_id is not None and st.pending_assistant_output_index is not None:
+            return st.pending_assistant_item_id, st.pending_assistant_output_index
+
+        if target is None:
             if st.pending_text_outputs:
                 pending = st.pending_text_outputs[0]
-                st.pending_assistant_item_id = str(pending["item_id"])
-                st.pending_assistant_output_index = int(pending["output_index"])
+                target = (str(pending["item_id"]), int(pending["output_index"]))
             else:
                 output_index, item_id = self._output_part_context(conn_id, "text", preferred_item_id=item_id)
                 st.pending_text_outputs.append({"item_id": item_id, "output_index": output_index, "parts": []})
-                st.pending_assistant_item_id = item_id
-                st.pending_assistant_output_index = output_index
+                target = (item_id, output_index)
+
+        st.pending_assistant_item_id, st.pending_assistant_output_index = target
+        if st.last_item_id is None:
             st.last_item_id = st.pending_assistant_item_id
-        assert st.pending_assistant_output_index is not None
-        return st.pending_assistant_item_id, st.pending_assistant_output_index
+        return target
 
     def _next_content_index(self, conn_id: str) -> int:
         """Return the current content index and advance it."""
         st = self._state(conn_id)
-        idx = st.content_index
-        st.content_index += 1
+        idx = st.audio_content_index
+        st.audio_content_index += 1
         return idx
 
     def _output_part_context(
@@ -146,7 +171,11 @@ class ResponseHandler(RealtimeBaseHandler):
             st.current_item_id = item_id
             st.content_index = 0
         else:
-            item_id = self._current_item_id(conn_id) if st.next_output_index == 0 else self._start_item(conn_id)
+            item_id = (
+                self._current_item_id(conn_id)
+                if st.next_output_index == 0
+                else self._start_item(conn_id, reset_audio_content_index=False)
+            )
         output_index = st.next_output_index
         st.next_output_index += 1
         st.current_output_index = output_index
@@ -333,20 +362,32 @@ class ResponseHandler(RealtimeBaseHandler):
             wants_audio = response_wants_audio(st.current_response_params)
             function_call_only = bool(st.pending_function_calls) and not st.pending_text_outputs
             if wants_audio and not function_call_only:
-                assistant_item_id = st.pending_assistant_item_id or item_id
-                assistant_output_index = (
-                    st.pending_assistant_output_index if st.pending_assistant_output_index is not None else 0
-                )
-                events.append(
-                    ResponseAudioDoneEvent(
-                        type="response.output_audio.done",
-                        event_id=self._next_event_id(),
-                        content_index=0,
-                        item_id=assistant_item_id,
-                        output_index=assistant_output_index,
-                        response_id=resp_id,
+                if st.pending_text_outputs:
+                    for pending in st.pending_text_outputs:
+                        output_index = int(pending["output_index"])
+                        if output_index in st.completed_audio_output_indices:
+                            continue
+                        events.append(
+                            ResponseAudioDoneEvent(
+                                type="response.output_audio.done",
+                                event_id=self._next_event_id(),
+                                content_index=0,
+                                item_id=str(pending["item_id"]),
+                                output_index=output_index,
+                                response_id=resp_id,
+                            )
+                        )
+                else:
+                    events.append(
+                        ResponseAudioDoneEvent(
+                            type="response.output_audio.done",
+                            event_id=self._next_event_id(),
+                            content_index=0,
+                            item_id=st.pending_assistant_item_id or item_id,
+                            output_index=st.pending_assistant_output_index or 0,
+                            response_id=resp_id,
+                        )
                     )
-                )
                 for pending in st.pending_text_outputs:
                     transcript = self._assistant_text(pending, wants_audio=True)
                     if not transcript:
@@ -429,26 +470,33 @@ class ResponseHandler(RealtimeBaseHandler):
                 if not text:
                     continue
                 pending = None
-                if wants_audio and st.pending_assistant_item_id is not None:
+                mapped_output = st.assistant_output_items.get(part.output_id) if part.output_id is not None else None
+                if (
+                    mapped_output is None
+                    and part.output_id is None
+                    and wants_audio
+                    and st.pending_assistant_item_id is not None
+                    and st.pending_assistant_output_index is not None
+                    and any(
+                        candidate["output_index"] == st.pending_assistant_output_index and not candidate["parts"]
+                        for candidate in st.pending_text_outputs
+                    )
+                ):
+                    # Compatibility path for untagged audio that reserved its
+                    # item before the transcript side channel arrived.
+                    mapped_output = (st.pending_assistant_item_id, st.pending_assistant_output_index)
+                if mapped_output is not None:
+                    item_id, output_idx = mapped_output
                     pending = next(
-                        (
-                            candidate
-                            for candidate in st.pending_text_outputs
-                            if candidate["item_id"] == st.pending_assistant_item_id and not candidate["parts"]
-                        ),
+                        (candidate for candidate in st.pending_text_outputs if candidate["output_index"] == output_idx),
                         None,
                     )
-                rejoined_reserved_audio = pending is not None
-                if pending is not None:
-                    item_id = str(pending["item_id"])
-                    output_idx = int(pending["output_index"])
-                    # Audio can reach the transport before its transcript side
-                    # channel. Rejoin that already-reserved item instead of
-                    # creating a later output for the delayed text event.
+                    rejoined_earlier_output = st.current_output_index != output_idx
                     st.current_item_id = item_id
                     st.current_output_index = output_idx
                     st.current_output_kind = "text"
                 else:
+                    rejoined_earlier_output = False
                     output_idx, item_id = self._output_part_context(conn_id, "text")
                 if pending is None:
                     if st.pending_text_outputs and st.pending_text_outputs[-1]["output_index"] == output_idx:
@@ -456,6 +504,8 @@ class ResponseHandler(RealtimeBaseHandler):
                     else:
                         st.pending_text_outputs.append({"item_id": item_id, "output_index": output_idx, "parts": []})
                         pending = st.pending_text_outputs[-1]
+                if part.output_id is not None:
+                    st.assistant_output_items[part.output_id] = (item_id, output_idx)
                 assert pending is not None
                 parts = pending["parts"]
                 assert isinstance(parts, list)
@@ -489,7 +539,7 @@ class ResponseHandler(RealtimeBaseHandler):
                             delta=text,
                         )
                     )
-                if not rejoined_reserved_audio:
+                if not rejoined_earlier_output:
                     st.last_item_id = item_id
             elif isinstance(part, AssistantToolCallPart):
                 tool = part.tool

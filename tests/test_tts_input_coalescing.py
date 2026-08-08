@@ -40,3 +40,16 @@ def test_coalesce_pending_tts_input_stops_before_control_messages():
     assert lang == "en"
     assert saw_end is False
     assert handler.queue_in.get_nowait() == SESSION_END
+
+
+def test_coalesce_pending_tts_input_stops_at_ordered_output_boundary():
+    handler = _make_handler()
+    handler.queue_in.put(TTSInput(text="After tool.", assistant_output_id="output_2"))
+
+    text, _, saw_end = handler._coalesce_pending_tts_input(
+        TTSInput(text="Before tool.", assistant_output_id="output_1")
+    )
+
+    assert text == "Before tool."
+    assert saw_end is False
+    assert handler.queue_in.get_nowait().assistant_output_id == "output_2"

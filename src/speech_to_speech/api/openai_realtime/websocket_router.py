@@ -107,6 +107,10 @@ def _audio_generation(item: Any) -> int | None:
     return item.cancel_generation if isinstance(item, AudioOutput) else None
 
 
+def _assistant_output_id(item: Any) -> str | None:
+    return item.assistant_output_id if isinstance(item, AudioOutput) else None
+
+
 def _flush_queue(q: Queue[QItem], *, preserve: Callable[[QItem], bool] | None = None) -> None:
     """Drain a queue, optionally preserving items matching *preserve*.
 
@@ -841,6 +845,7 @@ def create_app(
                     if _should_discard_audio(unit, audio_chunk):
                         continue
 
+                    assistant_output_id = _assistant_output_id(audio_chunk)
                     audio_chunk = _to_audio_bytes(audio_chunk)
 
                     audio_batch = bytearray(audio_chunk)
@@ -863,6 +868,11 @@ def create_app(
                         if _should_discard_audio(unit, next_chunk):
                             continue
 
+                        if _assistant_output_id(next_chunk) != assistant_output_id:
+                            if session is not None:
+                                session.pending_output_item = next_chunk
+                            break
+
                         next_audio = _to_audio_bytes(next_chunk)
                         if len(audio_batch) + len(next_audio) > MAX_AUDIO_BATCH_BYTES:
                             if session is not None:
@@ -875,7 +885,12 @@ def create_app(
                         unit.should_listen.set()
 
                     if transport is not None and session_id:
-                        await transport.send_audio_chunk(unit.service, session_id, bytes(audio_batch))
+                        await transport.send_audio_chunk(
+                            unit.service,
+                            session_id,
+                            bytes(audio_batch),
+                            assistant_output_id,
+                        )
                 except Empty:
                     pass
 

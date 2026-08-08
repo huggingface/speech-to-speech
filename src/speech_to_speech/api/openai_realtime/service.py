@@ -174,6 +174,7 @@ class ConnState(BaseModel):
     current_response_id: Optional[str] = None
     current_item_id: Optional[str] = None
     content_index: int = 0
+    audio_content_index: int = 0
     input_content_index: int = 0
     input_audio_duration_s: float = 0.0
     last_item_id: Optional[str] = None
@@ -183,6 +184,8 @@ class ConnState(BaseModel):
     next_output_index: int = 0
     current_output_index: int | None = None
     current_output_kind: Literal["text", "tool_call"] | None = None
+    assistant_output_items: dict[str, tuple[str, int]] = Field(default_factory=dict)
+    completed_audio_output_indices: set[int] = Field(default_factory=set)
     # Each entry contains item_id, output_index, and the contiguous text parts
     # for one assistant message. Kept as plain internal data to avoid coupling
     # connection state to protocol event models.
@@ -332,11 +335,20 @@ class RealtimeService:
     def begin_audio_response(self, conn_id: str) -> tuple[str, str, list[ServerEvent]]:
         return self.audio.begin_audio_response(conn_id)
 
-    def begin_audio_output(self, conn_id: str) -> tuple[str, str, int, list[ServerEvent]]:
-        return self.audio.begin_audio_output(conn_id)
+    def begin_audio_output(
+        self,
+        conn_id: str,
+        assistant_output_id: str | None = None,
+    ) -> tuple[str, str, int, list[ServerEvent]]:
+        return self.audio.begin_audio_output(conn_id, assistant_output_id)
 
-    def encode_audio_chunk(self, conn_id: str, audio: bytes) -> list[ServerEvent]:
-        return self.audio.encode_audio_chunk(conn_id, audio)
+    def encode_audio_chunk(
+        self,
+        conn_id: str,
+        audio: bytes,
+        assistant_output_id: str | None = None,
+    ) -> list[ServerEvent]:
+        return self.audio.encode_audio_chunk(conn_id, audio, assistant_output_id)
 
     def handle_response_create(self, conn_id: str, event: ResponseCreateEvent) -> ServerEvent | None:
         return self.response.handle_response_create(conn_id, event)

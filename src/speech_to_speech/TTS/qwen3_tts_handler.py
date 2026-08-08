@@ -766,6 +766,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                     break
                 if current_input.turn_id != next_item.turn_id or current_input.turn_revision != next_item.turn_revision:
                     break
+                if current_input.assistant_output_id != next_item.assistant_output_id:
+                    break
                 if (
                     language_code is not None
                     and next_item.language_code is not None

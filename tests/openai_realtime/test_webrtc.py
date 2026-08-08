@@ -85,7 +85,7 @@ class _FakeTransport(SessionTransport):
     async def send_events(self, events):
         self.sent.extend(e.model_dump() for e in events)
 
-    async def send_audio_chunk(self, service, session_id, pcm):
+    async def send_audio_chunk(self, service, session_id, pcm, assistant_output_id=None):
         raise AssertionError("dispatch tests never send audio")
 
     def discard_pending_audio(self):

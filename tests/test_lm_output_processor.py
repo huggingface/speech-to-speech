@@ -4,10 +4,12 @@ from threading import Event, Thread
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses import ResponseFunctionToolCall
 
+from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.messages import (
     AssistantTextPart,
     AssistantToolCallPart,
+    AudioOutput,
     EndOfResponse,
     LLMResponseChunk,
     TTSInput,
@@ -129,10 +131,53 @@ def test_ordered_parts_reach_clients_and_only_text_reaches_tts():
     )
 
     assert [output.text for output in outputs] == ["between", "after"]
+    assert outputs[0].assistant_output_id
+    assert outputs[1].assistant_output_id
+    assert outputs[0].assistant_output_id != outputs[1].assistant_output_id
     event = processor.text_output_queue.get_nowait()
     assert [part.type for part in event.parts] == ["tool_call", "text", "tool_call", "text"]
+    text_parts = [part for part in event.parts if isinstance(part, AssistantTextPart)]
+    assert [part.output_id for part in text_parts] == [output.assistant_output_id for output in outputs]
     assert event.text == "betweenafter"
     assert [tool.name for tool in event.tools] == ["first", "second"]
+
+
+def test_consecutive_text_chunks_share_output_identity_until_a_tool_call():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    processor = _processor(tracker)
+    tool = ResponseFunctionToolCall(type="function_call", call_id="call_1", name="tool", arguments="{}")
+
+    first = list(processor.process(LLMResponseChunk(text="first", turn_id="turn_1", turn_revision=0)))[0]
+    second = list(processor.process(LLMResponseChunk(text="second", turn_id="turn_1", turn_revision=0)))[0]
+    assert (
+        list(
+            processor.process(
+                LLMResponseChunk(
+                    parts=[AssistantToolCallPart(tool=tool)],
+                    turn_id="turn_1",
+                    turn_revision=0,
+                )
+            )
+        )
+        == []
+    )
+    third = list(processor.process(LLMResponseChunk(text="third", turn_id="turn_1", turn_revision=0)))[0]
+
+    assert first.assistant_output_id == second.assistant_output_id
+    assert third.assistant_output_id != first.assistant_output_id
+
+
+def test_tts_audio_keeps_assistant_output_identity_on_the_audio_queue():
+    handler = object.__new__(BaseHandler)
+    queued = handler.output_for_queue(
+        b"audio",
+        TTSInput(text="hello", assistant_output_id="output_1"),
+    )
+
+    assert isinstance(queued, AudioOutput)
+    assert queued.audio == b"audio"
+    assert queued.assistant_output_id == "output_1"
 
 
 def test_empty_modalities_is_forwarded_to_tts():
