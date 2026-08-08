@@ -122,7 +122,7 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
         console.print(f"[green]ASSISTANT: {text}")
 
         # Generate audio stream
-        logger.debug(f"Generating audio for: {text[:50]}...")
+        logger.debug("Generating audio (characters=%d)", len(text))
 
         pipeline_start = perf_counter()
         first_chunk = True

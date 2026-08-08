@@ -40,7 +40,7 @@ class TranscriptionNotifier(BaseHandler[STTOut, LLMIn]):
                         turn_revision=transcription.turn_revision,
                     )
                 )
-                logger.debug("Partial transcription: %s", str(transcription.text)[:80])
+                logger.debug("Partial transcription received")
             return
 
         if isinstance(transcription, Transcription):
@@ -79,8 +79,8 @@ class TranscriptionNotifier(BaseHandler[STTOut, LLMIn]):
             return
 
         if language_code:
-            logger.info("Transcription completed (language=%s): %s", language_code, transcript)
+            logger.info("Transcription completed (language=%s)", language_code)
         else:
-            logger.info("Transcription completed: %s", transcript)
+            logger.info("Transcription completed")
 
         yield from ()

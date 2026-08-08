@@ -112,7 +112,7 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
             return None
 
         try:
-            logger.debug(f"Tokenizing text: {text}")
+            logger.debug("Tokenizing text (characters=%d)", len(text))
             logger.debug(f"Current language: {self.language}")
             logger.debug(f"Tokenizer: {self.tokenizer}")
 
@@ -162,7 +162,7 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
         text = tts_input.text
 
         console.print(f"[green]ASSISTANT: {text}")
-        logger.debug(f"Processing text: {text}")
+        logger.debug("Processing text (characters=%d)", len(text))
         logger.debug(f"Language code: {language_code}")
 
         restore_initial_model = (

@@ -35,14 +35,15 @@ def test_empty_final_transcription_still_emits_completion_after_partial():
     assert text_output_queue.empty()
 
 
-def test_non_empty_final_transcription_logs_full_text_at_info(caplog):
+def test_non_empty_final_transcription_logs_content_free_completion(caplog):
     notifier = _notifier()
     transcript = "hello " * 30
 
     with caplog.at_level(logging.INFO, logger="speech_to_speech.STT.transcription_notifier"):
         assert list(notifier.process(Transcription(text=transcript, language_code="en"))) == []
 
-    assert "Transcription completed (language=en): " + transcript in caplog.text
+    assert "Transcription completed (language=en)" in caplog.text
+    assert transcript not in caplog.text
 
 
 def test_empty_final_transcription_reenables_listening_without_runtime_config():

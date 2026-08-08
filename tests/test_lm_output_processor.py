@@ -1,3 +1,4 @@
+import logging
 from queue import Queue
 from threading import Event, Thread
 
@@ -97,6 +98,28 @@ def test_audio_chunk_is_forwarded_to_tts():
     assert len(outputs) == 1
     assert isinstance(outputs[0], TTSInput)
     assert outputs[0].text == "hello"
+
+
+def test_response_content_is_not_logged(caplog):
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    processor = _processor(tracker)
+    sentinel = "NEUTRAL-PRIVACY-SENTINEL"
+
+    with caplog.at_level(logging.DEBUG, logger="speech_to_speech.LLM.lm_output_processor"):
+        outputs = list(
+            processor.process(
+                LLMResponseChunk(
+                    text=sentinel,
+                    turn_id="turn_1",
+                    turn_revision=0,
+                    response=RealtimeResponseCreateParams(output_modalities=["audio"]),
+                )
+            )
+        )
+
+    assert len(outputs) == 1
+    assert sentinel not in caplog.text
 
 
 def test_empty_modalities_is_forwarded_to_tts():

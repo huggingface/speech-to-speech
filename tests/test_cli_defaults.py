@@ -71,6 +71,12 @@ def test_server_can_suppress_conversation_text():
     assert args.module_kwargs.show_conversation_text is False
 
 
+def test_talk_client_can_suppress_conversation_text():
+    config = parse_talk_arguments(["--no-show-conversation-text"])
+
+    assert config.show_conversation_text is False
+
+
 def test_mac_optimal_settings_flag_does_not_select_a_command():
     args = parse_arguments(["--mac-optimal-settings"])
 

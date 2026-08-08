@@ -59,7 +59,7 @@ class ModuleArguments:
     show_conversation_text: bool = field(
         default=True,
         metadata={
-            "help": "Show user and assistant text in the server console. Disable for private conversations. "
+            "help": "Show user and assistant text in the runtime console. Disable for private conversations. "
             "Default is true."
         },
     )
