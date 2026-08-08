@@ -111,13 +111,16 @@ def _assistant_output_id(item: Any) -> str | None:
     return item.assistant_output_id if isinstance(item, AudioOutput) else None
 
 
-def _assistant_output_event_pending(q: Queue[Any], output_id: str) -> bool:
-    """Return whether the matching transcript event is waiting behind a queue boundary."""
+def _assistant_event_pending(q: Queue[Any], output_id: str | None = None) -> bool:
+    """Return whether assistant output is waiting behind a queue boundary."""
     with q.mutex:
         queued_items = list(q.queue)
     return any(
         isinstance(item, AssistantTextEvent)
-        and any(isinstance(part, AssistantTextPart) and part.output_id == output_id for part in item.parts)
+        and (
+            output_id is None
+            or any(isinstance(part, AssistantTextPart) and part.output_id == output_id for part in item.parts)
+        )
         for item in queued_items
     )
 
@@ -828,6 +831,12 @@ def create_app(
                             logger.info(f"Pipeline {unit.index}: stale response complete, listening re-enabled")
                             continue
                         await _drain_pending_response_events(transport, unit, session_id)
+                        if session is not None and _assistant_event_pending(unit.text_output_queue):
+                            # A queue boundary still precedes ordered assistant
+                            # output that produced no audio. Let the normal
+                            # event path cross it before closing the response.
+                            session.pending_output_item = audio_chunk
+                            continue
                         if transport is not None and session_id:
                             await transport.send_events(unit.service.finish_response(session_id))
                         if session_id:
@@ -867,7 +876,7 @@ def create_app(
                         assistant_output_id is not None
                         and session_id is not None
                         and assistant_output_id not in unit.service._state(session_id).assistant_output_items
-                        and _assistant_output_event_pending(unit.text_output_queue, assistant_output_id)
+                        and _assistant_event_pending(unit.text_output_queue, assistant_output_id)
                     ):
                         # A non-response event is still ahead of this audio's
                         # transcript. Preserve queue order and retry once the

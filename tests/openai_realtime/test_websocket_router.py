@@ -588,6 +588,66 @@ class TestSendLoop:
                     if item["type"] == "message"
                 ] == ["before", "after"]
 
+    def test_response_done_waits_for_silent_ordered_tail_after_boundary(self, setup):
+        app, _, _, output_queue, text_output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                text_output_queue.put(AssistantTextEvent(parts=[AssistantTextPart(text="before")]))
+                text_output_queue.put(SpeechStartedEvent(interrupt_response=False))
+                text_output_queue.put(
+                    AssistantTextEvent(
+                        parts=[
+                            AssistantToolCallPart(
+                                tool={
+                                    "type": "function_call",
+                                    "call_id": "c1",
+                                    "name": "tool",
+                                    "arguments": "{}",
+                                }
+                            )
+                        ]
+                    )
+                )
+                output_queue.put(AUDIO_RESPONSE_DONE)
+
+                messages = []
+                while not messages or messages[-1]["type"] != "response.done":
+                    messages.append(ws.receive_json())
+
+                message_types = [message["type"] for message in messages]
+                assert message_types.index("response.function_call_arguments.done") < message_types.index(
+                    "response.done"
+                )
+                assert [item["type"] for item in messages[-1]["response"]["output"]] == [
+                    "message",
+                    "function_call",
+                ]
+
+    def test_response_done_waits_for_silent_text_tail_after_boundary(self, setup):
+        app, _, _, output_queue, text_output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                text_output_queue.put(AssistantTextEvent(parts=[AssistantTextPart(text="before")]))
+                text_output_queue.put(SpeechStartedEvent(interrupt_response=False))
+                text_output_queue.put(AssistantTextEvent(parts=[AssistantTextPart(text="after")]))
+                output_queue.put(AUDIO_RESPONSE_DONE)
+
+                messages = []
+                while not messages or messages[-1]["type"] != "response.done":
+                    messages.append(ws.receive_json())
+
+                transcript_deltas = [
+                    message["delta"]
+                    for message in messages
+                    if message["type"] == "response.output_audio_transcript.delta"
+                ]
+                assert transcript_deltas == ["before", " after"]
+                output = messages[-1]["response"]["output"]
+                assert [item["type"] for item in output] == ["message"]
+                assert output[0]["content"][0]["transcript"] == "before after"
+
     def test_stale_tagged_response_done_does_not_finish_current_response(self, setup):
         app, service, _, output_queue, _, _, _, _, cancel_scope = setup
         with TestClient(app) as client:
