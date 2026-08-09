@@ -1066,6 +1066,30 @@ def test_out_of_band_emits_output_but_does_not_commit_to_default_conversation():
     assert not any(isinstance(i, RealtimeConversationItemAssistantMessage) for i in cfg.chat.buffer)
 
 
+def test_out_of_band_timeout_after_tool_call_fails_without_apology():
+    handler = _make_handler()
+
+    class ToolThenTimeoutStream:
+        def __iter__(self):
+            yield _make_function_call_done_event()
+            raise httpx.ReadTimeout("timed out")
+
+        def close(self):
+            pass
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: ToolThenTimeoutStream()))
+    request, cfg = _make_oob_request([make_user_message("OOB tool request")])
+
+    outputs = list(handler.process(request))
+
+    assert isinstance(outputs[0], LLMResponseChunk)
+    assert outputs[0].tools
+    assert not any(isinstance(output, LLMResponseChunk) and "slow today" in output.text for output in outputs)
+    end = next(output for output in outputs if isinstance(output, EndOfResponse))
+    assert end.error is not None and "timed out" in end.error
+    assert [item.type for item in cfg.chat.buffer] == ["message"]
+
+
 def test_out_of_band_input_builds_fresh_context():
     handler = _make_handler()
     req, _cfg = _make_oob_request([make_user_message("OOB question")])

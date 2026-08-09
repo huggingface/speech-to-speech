@@ -121,6 +121,7 @@ class _GenState(BaseModel):
     clean_text: str = ""  # filtered text, kept only for the debug log
     input_tokens: int = 0
     output_tokens: int = 0
+    tool_emitted: bool = False
 
 
 class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
@@ -418,6 +419,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if recorded_call.id is not None:
                 state.recorded_item_ids.add(recorded_call.id)
             state.recorded_call_ids.add(item.call_id)
+        state.tool_emitted = True
         yield self._chunk(turn, tools=[item])
 
     # ── consumption ─────────────────────────────────────────────────────────--
@@ -614,7 +616,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     "OpenAI API read timed out after %.1fs; ending the current response",
                     self.request_timeout_s,
                 )
-                if state.recorded_call_ids:
+                if state.tool_emitted:
                     error_message = f"Language model generation timed out after {self.request_timeout_s:.1f}s."
                 elif not self._generation_is_stale(turn.gen) and self._turn_output_allowed(
                     turn.turn_id, turn.turn_revision
