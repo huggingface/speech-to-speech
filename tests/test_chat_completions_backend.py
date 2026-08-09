@@ -419,8 +419,8 @@ def test_streaming_preserves_text_tool_text_order():
     h.client.chat.completions.create = lambda **kwargs: _FakeStream(
         [
             _chunk(content="Before."),
-            _chunk(tool_calls=[_tc_delta(0, id="srv_1", name="lookup", arguments="{}")]),
-            _chunk(content="After."),
+            _chunk(tool_calls=[_tc_delta(0, id="srv_1", name="lookup", arguments='{"q":')]),
+            _chunk(content="After.", tool_calls=[_tc_delta(0, arguments='"x"}')]),
         ]
     )
     chat = Chat(10)
@@ -434,6 +434,7 @@ def test_streaming_preserves_text_tool_text_order():
     output_parts = [part.type for output in outputs if isinstance(output, LLMResponseChunk) for part in output.parts]
     assert output_parts == ["text", "tool_call", "text"]
     call = next(item for item in chat.buffer if isinstance(item, RealtimeConversationItemFunctionCall))
+    assert json.loads(call.arguments) == {"q": "x"}
     chat.add_item(
         RealtimeConversationItemFunctionCallOutput(
             type="function_call_output",

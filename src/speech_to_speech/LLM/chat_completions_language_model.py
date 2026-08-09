@@ -213,6 +213,17 @@ def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Itera
         yield from _tool_calls_from_accum(tool_accum)
         tool_accum.clear()
 
+    def accumulate_tools(tool_calls: Any) -> None:
+        for tool_call in tool_calls or []:
+            entry = tool_accum.setdefault(tool_call.index, {"name": "", "args": "", "id": ""})
+            if tool_call.id:
+                entry["id"] = tool_call.id
+            if tool_call.function is not None:
+                if tool_call.function.name:
+                    entry["name"] = tool_call.function.name
+                if tool_call.function.arguments:
+                    entry["args"] += tool_call.function.arguments
+
     for chunk in api_response:
         if chunk.usage is not None:
             usage = Usage(
@@ -223,21 +234,16 @@ def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Itera
             continue
         delta = chunk.choices[0].delta
         text_piece = delta.content or getattr(delta, "refusal", None)
+        continuing_tool = bool(tool_accum)
+        if continuing_tool:
+            accumulate_tools(delta.tool_calls)
         if text_piece:
-            if tool_accum:
+            if continuing_tool:
                 yield from flush_tools()
             text_segment += text_piece
             yield TextDelta(text=text_piece)
-        if delta.tool_calls:
-            for tool_call in delta.tool_calls:
-                entry = tool_accum.setdefault(tool_call.index, {"name": "", "args": "", "id": ""})
-                if tool_call.id:
-                    entry["id"] = tool_call.id
-                if tool_call.function is not None:
-                    if tool_call.function.name:
-                        entry["name"] = tool_call.function.name
-                    if tool_call.function.arguments:
-                        entry["args"] += tool_call.function.arguments
+        if not continuing_tool:
+            accumulate_tools(delta.tool_calls)
 
     if tool_accum:
         yield from flush_tools()
