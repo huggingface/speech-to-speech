@@ -24,7 +24,7 @@ from openai.types.realtime.realtime_response_status import RealtimeResponseStatu
 from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
-from speech_to_speech.LLM.chat import ChatItemError
+from speech_to_speech.LLM.chat import ChatItemError, add_supported_item
 from speech_to_speech.pipeline.events import AssistantResponseDoneEvent, AssistantTextEvent
 from speech_to_speech.pipeline.messages import AssistantTextPart, AssistantToolCallPart, GenerateResponseRequest
 from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
@@ -305,17 +305,21 @@ class ResponseHandler(RealtimeBaseHandler):
         # In-band: response.input items are added to the default conversation here so
         # they appear in history. Out-of-band: leave the default conversation untouched —
         # the input rides along on the request and seeds a throwaway chat in the LM.
-        if not out_of_band and event.response and event.response.input:
-            for input_item in event.response.input:
-                try:
-                    self._service.conversation._append_item(conn_id, input_item)
-                except ChatItemError as exc:
-                    return self.make_error(message=str(exc), _type="invalid_input_item")
-        if not out_of_band and st.runtime_config.chat.has_pending_tool_calls():
-            return self.make_error(
-                message="Cannot create a response while function call outputs are pending.",
-                _type="function_call_output_pending",
-            )
+        if not out_of_band:
+            input_items = list(event.response.input) if event.response and event.response.input else []
+            candidate_chat = st.runtime_config.chat.copy(deep=True)
+            try:
+                for input_item in input_items:
+                    add_supported_item(candidate_chat, input_item.model_copy(deep=True))
+            except ChatItemError as exc:
+                return self.make_error(message=str(exc), _type="invalid_input_item")
+            if candidate_chat.has_pending_tool_calls():
+                return self.make_error(
+                    message="Cannot create a response while function call outputs are pending.",
+                    _type="function_call_output_pending",
+                )
+            for input_item in input_items:
+                self._service.conversation._append_item(conn_id, input_item)
 
         cfg = st.runtime_config
         queue = self._queue(conn_id)

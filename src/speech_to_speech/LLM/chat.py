@@ -4,6 +4,7 @@ import json
 import logging
 import threading
 from collections.abc import Callable
+from copy import deepcopy
 from typing import Any, Literal, Union
 
 from openai.types.realtime import ConversationItem
@@ -534,15 +535,26 @@ class Chat:
                     )
             return [m.model_dump() for m in messages]
 
-    def copy(self) -> Chat:
-        """Return a shallow snapshot safe for concurrent read access."""
+    def copy(self, *, deep: bool = False) -> Chat:
+        """Return a snapshot safe for concurrent read access."""
         with self._lock:
             clone = Chat(self.size)
-            clone.init_chat_message = self.init_chat_message
-            clone.buffer = list(self.buffer)
-            clone._pending_tool_calls = dict(self._pending_tool_calls)
-            clone._ordered_pending_call_ids = set(self._ordered_pending_call_ids)
-            clone._user_turn_count = self._user_turn_count
+            state = (
+                self.init_chat_message,
+                list(self.buffer),
+                dict(self._pending_tool_calls),
+                set(self._ordered_pending_call_ids),
+                self._user_turn_count,
+            )
+            if deep:
+                state = deepcopy(state)
+            (
+                clone.init_chat_message,
+                clone.buffer,
+                clone._pending_tool_calls,
+                clone._ordered_pending_call_ids,
+                clone._user_turn_count,
+            ) = state
             return clone
 
     def reset(self) -> None:
