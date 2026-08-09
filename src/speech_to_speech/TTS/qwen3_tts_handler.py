@@ -748,16 +748,15 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             f"Qwen3-TTS generated {audio_duration:.2f}s audio in {generation_time:.2f}s (RTF: {rtf:.2f}, {label})"
         )
 
-    def _coalesce_pending_tts_input(self, current_input: TTSInput) -> tuple[str, Optional[str], bool]:
+    def _coalesce_pending_tts_input(self, current_input: TTSInput) -> tuple[str, Optional[str]]:
         """Combine already-queued text chunks before the next TTS synthesis call."""
         if not hasattr(self.queue_in, "mutex") or not hasattr(self.queue_in, "queue"):
-            return current_input.text, current_input.language_code, False
+            return current_input.text, current_input.language_code
 
         text = current_input.text
         language_code = current_input.language_code
 
         parts = [text.strip()] if text and text.strip() else []
-        saw_end_of_response = False
         text_events: list[AssistantOutputEvent] = []
 
         def same_response(item: TTSInput | AssistantOutputEvent) -> bool:
@@ -776,7 +775,6 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 if isinstance(next_item, bytes) and next_item == PIPELINE_END:
                     break
                 if isinstance(next_item, EndOfResponse):
-                    saw_end_of_response = True
                     break
                 if isinstance(next_item, AssistantOutputEvent):
                     if not same_response(next_item) or any(
@@ -809,7 +807,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             self.queue_out.put(cast(TTSOut, event))
 
         combined_text = " ".join(parts).strip()
-        return combined_text, language_code, saw_end_of_response
+        return combined_text, language_code
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         speculative_turns = getattr(self, "speculative_turns", None)
@@ -836,7 +834,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         runtime_config = tts_input.runtime_config
         response = tts_input.response
 
-        coalesced_text, _language_code, _saw_end_of_response = self._coalesce_pending_tts_input(tts_input)
+        coalesced_text, _language_code = self._coalesce_pending_tts_input(tts_input)
 
         text = coalesced_text or "Hello."
 
