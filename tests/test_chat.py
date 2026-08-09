@@ -521,6 +521,23 @@ class TestAddItem:
         assert not chat.has_pending_tool_calls()
         assert chat._provisional_generations == {}
 
+    def test_final_provisional_items_and_commit_share_one_cancellation_boundary(self):
+        chat = Chat(size=5)
+        response_key = "completed_response"
+        eager = chat.add_provisional_generation_items(response_key, [_assistant("before"), _fc("final")])
+        assert eager is not None
+
+        trailing = chat.add_provisional_generation_items(
+            response_key,
+            [_assistant("after")],
+            commit=True,
+        )
+        chat.rollback_provisional_generation(response_key)
+
+        assert trailing is not None
+        assert [item.type for item in chat.buffer] == ["message", "function_call", "message"]
+        assert chat._provisional_generations == {}
+
     # -- Function call output --
 
     def test_function_call_output_delegates_to_append_tool_output(self):

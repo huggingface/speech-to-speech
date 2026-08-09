@@ -677,6 +677,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         recorded_items = original_chat.add_provisional_generation_items(
                             turn.response_key,
                             state.pending,
+                            commit=True,
                         )
                         if recorded_items is None:
                             can_commit = False
@@ -688,7 +689,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                             if history_commit_fn is not None:
                                 history_commit_fn()
                             original_chat.trim_if_needed(self.compactor)
-                            original_chat.commit_provisional_generation(turn.response_key)
                     history_committed = can_commit
                 except Exception as exc:
                     logger.exception("LLM history commit failed; rolling back the current response")
