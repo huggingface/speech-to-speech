@@ -150,7 +150,32 @@ def _response_event_blocked(unit: PipelineUnit, session_id: str, item: Any) -> b
     if response_key is None:
         return False
     st = unit.service._state(session_id)
-    return st.in_response and st.current_response_key not in (None, response_key)
+    return (
+        st.in_response
+        and st.current_response_key not in (None, response_key)
+        and response_key in st.pending_response_keys
+    )
+
+
+def _response_key_is_obsolete(unit: PipelineUnit, session_id: str, response_key: str | None) -> bool:
+    """Whether *response_key* belongs to a closed response rather than a queued one."""
+    if response_key is None:
+        return False
+    st = unit.service._state(session_id)
+    return (
+        st.in_response
+        and st.current_response_key not in (None, response_key)
+        and response_key not in st.pending_response_keys
+    )
+
+
+def _discard_obsolete_response_key(unit: PipelineUnit, session_id: str, response_key: str | None) -> None:
+    if response_key is None:
+        return
+    st = unit.service._state(session_id)
+    st.clear_pending_response(response_key)
+    st.pending_token_usage.pop(response_key, None)
+    logger.debug("Pipeline %d: discarded obsolete response %s output", unit.index, response_key)
 
 
 def _flush_queue(q: Queue[QItem], *, preserve: Callable[[QItem], bool] | None = None) -> None:
@@ -191,17 +216,21 @@ async def _drain_pending_response_events(
         except Empty:
             break
         item_key = _response_event_key(item)
-        if not isinstance(item, _RESPONSE_PIPELINE_EVENTS) or (
-            response_key is not None and item_key not in (None, response_key)
-        ):
-            _put_queue_front(unit.text_output_queue, item)
-            break
-        if _response_event_blocked(unit, session_id, item):
+        if not isinstance(item, _RESPONSE_PIPELINE_EVENTS):
             _put_queue_front(unit.text_output_queue, item)
             break
         generation = getattr(item, "cancel_generation", None)
         if _generation_is_discardable(unit, generation):
             continue
+        if _response_key_is_obsolete(unit, session_id, item_key):
+            _discard_obsolete_response_key(unit, session_id, item_key)
+            continue
+        if response_key is not None and item_key not in (None, response_key):
+            _put_queue_front(unit.text_output_queue, item)
+            break
+        if _response_event_blocked(unit, session_id, item):
+            _put_queue_front(unit.text_output_queue, item)
+            break
         events = unit.service.dispatch_pipeline_event(session_id, item)
         if transport is not None and events:
             await transport.send_events(events)
@@ -778,13 +807,17 @@ def create_app(
                 # Text events first (speech_started cancels active response).
                 try:
                     text_msg = unit.text_output_queue.get_nowait()
-                    if (
-                        session_id is not None
-                        and isinstance(text_msg, _RESPONSE_PIPELINE_EVENTS)
-                        and _response_event_blocked(unit, session_id, text_msg)
-                    ):
-                        _put_queue_front(unit.text_output_queue, text_msg)
-                        text_msg = None
+                    if session_id is not None and isinstance(text_msg, _RESPONSE_PIPELINE_EVENTS):
+                        generation = getattr(text_msg, "cancel_generation", None)
+                        response_key = _response_event_key(text_msg)
+                        if _generation_is_discardable(unit, generation):
+                            text_msg = None
+                        elif _response_key_is_obsolete(unit, session_id, response_key):
+                            _discard_obsolete_response_key(unit, session_id, response_key)
+                            text_msg = None
+                        elif _response_event_blocked(unit, session_id, text_msg):
+                            _put_queue_front(unit.text_output_queue, text_msg)
+                            text_msg = None
                     is_speech_start = isinstance(text_msg, SpeechStartedEvent)
 
                     was_in_response = False
@@ -794,11 +827,7 @@ def create_app(
                         was_in_response = st.in_response
                         was_response_pending = st.response_pending
 
-                    if isinstance(text_msg, _RESPONSE_PIPELINE_EVENTS) and _generation_is_discardable(
-                        unit, getattr(text_msg, "cancel_generation", None)
-                    ):
-                        pass
-                    elif transport is not None and isinstance(text_msg, PipelineEvent) and session_id:
+                    if transport is not None and isinstance(text_msg, PipelineEvent) and session_id:
                         events = unit.service.dispatch_pipeline_event(session_id, text_msg)
                         if events:
                             await transport.send_events(events)
@@ -886,6 +915,9 @@ def create_app(
                             unit.should_listen.set()
                             logger.info(f"Pipeline {unit.index}: stale response complete, listening re-enabled")
                             continue
+                        if session_id is not None and _response_key_is_obsolete(unit, session_id, response_key):
+                            _discard_obsolete_response_key(unit, session_id, response_key)
+                            continue
                         await _drain_pending_response_events(transport, unit, session_id, response_key)
                         if session is not None and session_id is not None and response_key is not None:
                             st = unit.service._state(session_id)
@@ -924,11 +956,15 @@ def create_app(
                     if _should_discard_audio(unit, audio_chunk):
                         continue
 
+                    response_key = _audio_response_key(audio_chunk)
+                    if session_id is not None and _response_key_is_obsolete(unit, session_id, response_key):
+                        _discard_obsolete_response_key(unit, session_id, response_key)
+                        continue
+
                     # The LM side channel enqueues each assistant event before
                     # its text reaches TTS. Drain those events before assigning
                     # an audio item so a later text segment cannot be mistaken
                     # for an earlier one when an intervening segment is silent.
-                    response_key = _audio_response_key(audio_chunk)
                     await _drain_pending_response_events(transport, unit, session_id, response_key)
 
                     assistant_output_ordinal = _assistant_output_ordinal(audio_chunk)

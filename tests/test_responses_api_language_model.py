@@ -1128,7 +1128,9 @@ def test_out_of_band_absent_input_reads_default_conversation():
 
 
 def test_out_of_band_invalid_input_emits_failed_end_of_response():
-    handler = _make_handler()
+    scope = CancelScope()
+    scope.cancel()
+    handler = _make_handler(cancel_scope=scope)
     called = False
 
     def fake_create(**kwargs):
@@ -1149,3 +1151,4 @@ def test_out_of_band_invalid_input_emits_failed_end_of_response():
     assert len(outputs) == 1
     assert isinstance(outputs[0], EndOfResponse)
     assert outputs[0].error is not None
+    assert outputs[0].cancel_generation == scope.generation

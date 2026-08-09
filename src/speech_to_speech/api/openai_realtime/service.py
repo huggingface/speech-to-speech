@@ -177,6 +177,7 @@ class ConnState(BaseModel):
     current_response_key: Optional[str] = None
     response_text_complete: bool = False
     response_failed: bool = False
+    response_error_type: Optional[str] = None
     current_item_id: Optional[str] = None
     content_index: int = 0
     input_content_index: int = 0
@@ -650,6 +651,7 @@ class RealtimeService:
         if st.response_failed:
             return events
         st.response_failed = True
+        st.response_error_type = "response_failed"
         st.response_text_complete = True
         events.append(self.make_error(event.message, "response_failed"))
         return events

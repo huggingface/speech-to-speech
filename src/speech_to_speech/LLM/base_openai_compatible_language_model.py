@@ -702,13 +702,18 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         turn_id = request.turn_id
         turn_revision = request.turn_revision
         speech_stopped_at_s = request.speech_stopped_at_s
+        gen = self.cancel_scope.generation if self.cancel_scope else None
         if not self._turn_is_latest(turn_id, turn_revision):
             logger.info("Skipping stale LLM request for turn=%s rev=%s", turn_id, turn_revision)
-            yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision, response_key=request.response_key)
+            yield EndOfResponse(
+                turn_id=turn_id,
+                turn_revision=turn_revision,
+                cancel_generation=gen,
+                response_key=request.response_key,
+            )
             return
 
         original_chat = runtime_config.chat
-        gen = self.cancel_scope.generation if self.cancel_scope else None
         if not is_out_of_band(response) and original_chat.has_pending_tool_calls():
             yield EndOfResponse(
                 turn_id=turn_id,
@@ -726,6 +731,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 yield EndOfResponse(
                     turn_id=turn_id,
                     turn_revision=turn_revision,
+                    cancel_generation=gen,
                     response_key=request.response_key,
                     error=str(exc),
                 )
@@ -802,13 +808,18 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         turn_id = request.turn_id
         turn_revision = request.turn_revision
         speech_stopped_at_s = request.speech_stopped_at_s
+        gen = self.cancel_scope.generation if self.cancel_scope else None
         if not self._turn_is_latest(turn_id, turn_revision):
             logger.info("Skipping stale LLM request for turn=%s rev=%s", turn_id, turn_revision)
-            yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision, response_key=request.response_key)
+            yield EndOfResponse(
+                turn_id=turn_id,
+                turn_revision=turn_revision,
+                cancel_generation=gen,
+                response_key=request.response_key,
+            )
             return
 
         original_chat = runtime_config.chat
-        gen = self.cancel_scope.generation if self.cancel_scope else None
         if not is_out_of_band(response) and original_chat.has_pending_tool_calls():
             yield EndOfResponse(
                 turn_id=turn_id,
@@ -826,6 +837,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 yield EndOfResponse(
                     turn_id=turn_id,
                     turn_revision=turn_revision,
+                    cancel_generation=gen,
                     response_key=request.response_key,
                     error=str(exc),
                 )

@@ -548,11 +548,14 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         ctx.turn_id = request.turn_id
         ctx.turn_revision = request.turn_revision
         ctx.speech_stopped_at_s = request.speech_stopped_at_s
+        gen = self.cancel_scope.generation if self.cancel_scope else None
+        ctx.cancel_generation = gen
         if not self._turn_is_latest(ctx.turn_id, ctx.turn_revision):
             logger.info("Skipping stale LLM request for turn=%s rev=%s", ctx.turn_id, ctx.turn_revision)
             yield EndOfResponse(
                 turn_id=ctx.turn_id,
                 turn_revision=ctx.turn_revision,
+                cancel_generation=gen,
                 response_key=request.response_key,
             )
             return
@@ -561,7 +564,6 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         response = request.response
         original_chat = runtime_config.chat
         out_of_band = is_out_of_band(response)
-        gen = self.cancel_scope.generation if self.cancel_scope else None
         if not out_of_band and original_chat.has_pending_tool_calls():
             yield EndOfResponse(
                 turn_id=ctx.turn_id,
@@ -579,6 +581,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 yield EndOfResponse(
                     turn_id=ctx.turn_id,
                     turn_revision=ctx.turn_revision,
+                    cancel_generation=gen,
                     response_key=request.response_key,
                     error=str(exc),
                 )
@@ -603,7 +606,6 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         if lang_name and self.enable_lang_prompt:
             active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
 
-        ctx.cancel_generation = gen
         # Images the model sees this turn; only these are stripped on write-back,
         # so an image a fast client injects mid-generation for the next turn
         # survives (it is not in this serialized snapshot).

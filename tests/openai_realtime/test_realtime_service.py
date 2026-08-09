@@ -1826,7 +1826,24 @@ class TestDispatchPipelineEvent:
         # done.text concatenates the raw streamed parts verbatim (== sum of deltas).
         assert text_done[0].text == "Hello there. How are you?"
 
-    def test_text_only_no_text_done_on_cancel(self, service, conn_id):
+    def test_text_only_preserves_standalone_whitespace_deltas(self, service, conn_id):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            output_modalities=["text"],
+        )
+
+        events = []
+        for text in ("Hello", " ", "world", "\n"):
+            events.extend(service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text=text)))
+
+        deltas = [event.delta for event in events if isinstance(event, ResponseTextDeltaEvent)]
+        assert deltas == ["Hello", " ", "world", "\n"]
+        done_events = service.finish_response(conn_id)
+        text_done = next(event for event in done_events if isinstance(event, ResponseTextDoneEvent))
+        assert text_done.text == "Hello world\n"
+
+    def test_text_only_emits_text_done_on_cancel(self, service, conn_id):
         from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
         service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
@@ -1834,7 +1851,8 @@ class TestDispatchPipelineEvent:
         )
         service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="partial"))
         done_events = service.finish_response(conn_id, status="cancelled", reason="client_cancelled")
-        assert not any(isinstance(e, ResponseTextDoneEvent) for e in done_events)
+        text_done = next(event for event in done_events if isinstance(event, ResponseTextDoneEvent))
+        assert text_done.text == "partial"
         assert any(isinstance(e, ResponseDoneEvent) for e in done_events)
 
     def test_assistant_text_text_only_keeps_tool_events(self, service, conn_id):
@@ -2370,8 +2388,26 @@ class TestDispatchPipelineEvent:
         done = service.finish_response(conn_id)
         assert len(done) == 1
         assert done[0].response.status == "failed"
+        assert done[0].response.status_details.error.type == "response_failed"
         # Slot released so the next response is not locked out.
         assert service._state(conn_id).in_response is False
+
+    def test_failed_text_only_response_emits_text_done(self, service, conn_id):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        state = service._state(conn_id)
+        state.current_response_params = RealtimeResponseCreateParams(output_modalities=["text"])
+        service.dispatch_pipeline_event(conn_id, AssistantTextEvent(text="partial"))
+        service.dispatch_pipeline_event(conn_id, ResponseFailedEvent(message="provider failed"))
+
+        events = service.finish_response(conn_id)
+
+        text_done = next(event for event in events if isinstance(event, ResponseTextDoneEvent))
+        response_done = next(event for event in events if isinstance(event, ResponseDoneEvent))
+        assert text_done.text == "partial"
+        assert response_done.response.status == "failed"
+        assert response_done.response.output[0].status == "incomplete"
+        assert response_done.response.status_details.error.type == "response_failed"
 
     def test_response_failed_while_pending_emits_error_and_failed_done(self, service, conn_id):
         service.dispatch_pipeline_event(

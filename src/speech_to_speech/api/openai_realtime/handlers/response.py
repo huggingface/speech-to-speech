@@ -20,6 +20,7 @@ from openai.types.realtime import (
 from openai.types.realtime.conversation_item import RealtimeConversationItemAssistantMessage
 from openai.types.realtime.realtime_conversation_item_assistant_message import Content
 from openai.types.realtime.realtime_response import Audio, AudioOutput
+from openai.types.realtime.realtime_response_status import Error as RealtimeResponseStatusError
 from openai.types.realtime.realtime_response_status import RealtimeResponseStatus
 from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
 
@@ -85,6 +86,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_response_key = None
         st.response_text_complete = False
         st.response_failed = False
+        st.response_error_type = None
         st.current_item_id = None
         st.content_index = 0
         st.in_response = False
@@ -200,7 +202,12 @@ class ResponseHandler(RealtimeBaseHandler):
         st = self._state(conn_id)
         status_details = None
         if reason or status in ("completed", "cancelled", "incomplete", "failed"):
-            status_details = RealtimeResponseStatus(type=status, reason=reason)  # type: ignore[arg-type]
+            error = (
+                RealtimeResponseStatusError(type=st.response_error_type or "response_failed")
+                if status == "failed"
+                else None
+            )
+            status_details = RealtimeResponseStatus(type=status, reason=reason, error=error)  # type: ignore[arg-type]
 
         rp = st.current_response_params
         metadata = rp.metadata if rp and rp.metadata else None
@@ -429,7 +436,7 @@ class ResponseHandler(RealtimeBaseHandler):
                             transcript=transcript,
                         )
                     )
-            elif status == "completed":
+            else:
                 for pending in st.pending_text_outputs:
                     text = self._assistant_text(pending, wants_audio=False)
                     if not text:
@@ -488,11 +495,12 @@ class ResponseHandler(RealtimeBaseHandler):
                 return []
         st = self._state(conn_id)
         events: list[ServerEvent] = []
+        wants_audio = response_wants_audio(st.current_response_params)
         meaningful_parts = [
             part
             for part in event.parts
             if isinstance(part, AssistantToolCallPart)
-            or (isinstance(part, AssistantTextPart) and bool(part.text.strip()))
+            or (isinstance(part, AssistantTextPart) and (bool(part.text.strip()) if wants_audio else bool(part.text)))
         ]
         if not meaningful_parts:
             return events
@@ -507,7 +515,6 @@ class ResponseHandler(RealtimeBaseHandler):
                 )
             )
         self._service._apply_pending_token_usage(conn_id, event.response_key)
-        wants_audio = response_wants_audio(st.current_response_params)
         for part in meaningful_parts:
             if isinstance(part, AssistantTextPart):
                 text = part.text.strip() if wants_audio else part.text
