@@ -145,4 +145,5 @@ class ResponseFailedEvent(PipelineEvent):
     message: str = ""
     turn_id: str | None = None
     turn_revision: int | None = None
+    cancel_generation: int | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)

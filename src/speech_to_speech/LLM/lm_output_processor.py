@@ -131,6 +131,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                         message=lm_output.error,
                         turn_id=lm_output.turn_id,
                         turn_revision=lm_output.turn_revision,
+                        cancel_generation=lm_output.cancel_generation,
                         response_key=response_key,
                     )
                 )

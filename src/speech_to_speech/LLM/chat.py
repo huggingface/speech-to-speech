@@ -434,6 +434,8 @@ class Chat:
                     )
             elif isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
                 if item.call_id in self._pending_tool_calls:
+                    if item.call_id in self._ordered_pending_call_ids:
+                        break
                     continue
                 assert item.call_id is not None and item.call_id != ""
                 function_call = ResponseFunctionToolCallParam(
@@ -488,6 +490,8 @@ class Chat:
                     messages.append(TransformersAssistantMessage(content=text))
                 elif isinstance(item, RealtimeConversationItemFunctionCall):
                     if item.call_id in self._pending_tool_calls:
+                        if item.call_id in self._ordered_pending_call_ids:
+                            break
                         continue
                     assert item.call_id is not None and item.call_id != ""
                     args: Any = item.arguments

@@ -2237,6 +2237,30 @@ class TestDispatchPipelineEvent:
         )
         assert events == []
 
+    def test_keyed_response_failure_survives_previous_response_completion(self, service, conn_id):
+        service.response._ensure_response(conn_id, "first")
+        service._state(conn_id).response_pending = True
+
+        service.finish_response(conn_id, response_key="first")
+        assert service._state(conn_id).response_pending is False
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            ResponseFailedEvent(
+                message="second response failed",
+                response_key="second",
+                cancel_generation=2,
+            ),
+        )
+
+        assert [event.type for event in events] == [
+            "response.created",
+            "error",
+            "response.done",
+        ]
+        assert isinstance(events[-1], ResponseDoneEvent)
+        assert events[-1].response.status == "failed"
+
     # -- unknown --
 
     def test_unknown_type_returns_empty(self, service, conn_id):

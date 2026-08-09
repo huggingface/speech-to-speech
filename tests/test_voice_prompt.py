@@ -286,6 +286,20 @@ def test_local_history_commits_text_and_tools_in_emitted_order():
             output="first result",
         )
     )
+
+    assert [item["type"] for item in chat.to_responses_api_chat()[1:]] == [
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+    ]
+    assert [item["role"] for item in chat.to_transformers_chat()[1:]] == [
+        "assistant",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+
     chat.add_item(
         RealtimeConversationItemFunctionCallOutput(
             type="function_call_output",

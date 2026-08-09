@@ -583,19 +583,27 @@ class RealtimeService:
         the human-readable reason — ``response.done.status_details.error`` only
         has code/type, no message — then ``finish_response`` closes the slot.
 
-        Idempotent: gated on an active or pending response. Pending implicit
-        responses are announced and promoted to active so ``finish_response``
-        can emit terminal events for a response the client already knows about.
-        Once closed, a later EndOfResponse-driven close does nothing.
+        Keyed failures may arrive after a preceding response clears the
+        connection-global pending flag. They still announce and fail their own
+        response; stale generations are discarded by the router. Unkeyed late
+        failures remain gated on active/pending state for compatibility.
         """
         logger.info("Response failed: %s", event.message)
         st = self._state(conn_id)
-        if not (st.in_response or st.response_pending):
+        if event.response_key is None and not (st.in_response or st.response_pending):
+            return []
+        if (
+            st.in_response
+            and event.response_key is not None
+            and st.current_response_key not in (None, event.response_key)
+        ):
             return []
         events: list[ServerEvent] = []
-        if st.response_pending:
+        if not st.in_response:
             _, _, created_events = self.audio.begin_audio_response(conn_id, event.response_key)
             events.extend(created_events)
+        elif st.current_response_key is None:
+            self.response._ensure_response(conn_id, event.response_key)
         events.append(self.make_error(event.message, "response_failed"))
         events.extend(self.response.finish_response(conn_id, status="failed", response_key=event.response_key))
         return events

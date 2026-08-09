@@ -6,6 +6,7 @@ from openai.types.responses import ResponseFunctionToolCall
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
+from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.messages import (
     AssistantTextPart,
     AssistantToolCallPart,
@@ -62,6 +63,30 @@ def test_cancel_generation_is_forwarded_to_tts():
     )
 
     assert len(outputs) == 1
+    assert outputs[0].cancel_generation == 7
+
+
+def test_failed_response_keeps_generation_identity():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    processor = _processor(tracker)
+
+    outputs = list(
+        processor.process(
+            EndOfResponse(
+                error="provider rejected input",
+                response_key="response_1",
+                turn_id="turn_1",
+                turn_revision=0,
+                cancel_generation=7,
+            )
+        )
+    )
+
+    event = processor.text_output_queue.get_nowait()
+    assert isinstance(event, ResponseFailedEvent)
+    assert event.response_key == "response_1"
+    assert event.cancel_generation == 7
     assert outputs[0].cancel_generation == 7
 
 

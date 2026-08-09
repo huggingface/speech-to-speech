@@ -28,6 +28,7 @@ from speech_to_speech.pipeline.events import (
     AssistantResponseDoneEvent,
     AssistantTextEvent,
     AudioInputCompletedEvent,
+    ResponseFailedEvent,
     SpeechStartedEvent,
     TokenUsageEvent,
 )
@@ -491,6 +492,35 @@ class TestSendLoop:
 
                 assert delta["type"] == "response.output_audio.delta"
                 assert len(base64.b64decode(delta["delta"])) == len(_pcm_bytes(512))
+
+    def test_stale_tagged_failure_is_dropped_after_interruption(self, setup):
+        app, _, _, _, text_output_queue, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                stale_generation = cancel_scope.generation
+                cancel_scope.cancel()
+                current_generation = cancel_scope.generation
+
+                text_output_queue.put(
+                    ResponseFailedEvent(
+                        message="stale failure",
+                        response_key="stale_response",
+                        cancel_generation=stale_generation,
+                    )
+                )
+                text_output_queue.put(
+                    AssistantTextEvent(
+                        text="fresh response",
+                        response_key="fresh_response",
+                        cancel_generation=current_generation,
+                    )
+                )
+
+                assert ws.receive_json()["type"] == "response.created"
+                delta = ws.receive_json()
+                assert delta["type"] == "response.output_audio_transcript.delta"
+                assert delta["delta"] == "fresh response"
 
     def test_current_generation_text_survives_stuck_discarding(self, setup):
         """Regression: a fresh response's transcript must survive a stuck discard guard.
