@@ -1,3 +1,4 @@
+from threading import Event
 from types import MethodType, SimpleNamespace
 
 from openai.types.realtime.conversation_item import (
@@ -5,6 +6,7 @@ from openai.types.realtime.conversation_item import (
     RealtimeConversationItemFunctionCall,
     RealtimeConversationItemFunctionCallOutput,
 )
+from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses import ResponseFunctionToolCall
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
@@ -213,6 +215,77 @@ def test_local_tool_parser_preserves_interleaved_text_and_tool_calls(monkeypatch
     ]
     assert [tool.name for tool in tools] == ["dance", "camera"]
     assert remaining.strip() == "Last."
+
+
+def test_local_text_only_with_tools_preserves_plain_text_verbatim():
+    handler = object.__new__(LanguageModelHandler)
+    handler.cancel_scope = None
+    handler.speculative_turns = None
+    handler.stop_event = Event()
+    handler.stream_batch_sentences = 3
+    ctx = StreamContext(
+        function_tools=[
+            FunctionTool(
+                type="function",
+                name="lookup",
+                description="Look something up.",
+                parameters={"type": "object", "properties": {}},
+            )
+        ],
+        block_regex=build_block_regex(),
+        enter_code=ENTER_CODE,
+        end_code=END_CODE,
+    )
+    raw = "  First.\n\nSecond.  "
+
+    chunks = list(
+        handler._stream_tokens(
+            iter([raw]),
+            None,
+            None,
+            ctx,
+            response=RealtimeResponseCreateParams(output_modalities=["text"]),
+        )
+    )
+
+    assert "".join(chunk.text for chunk in chunks) == raw
+    assert ctx.printable_text == ""
+
+
+def test_local_text_only_tool_marker_can_span_tokens_without_losing_whitespace():
+    handler = object.__new__(LanguageModelHandler)
+    ctx = StreamContext(
+        function_tools=[
+            FunctionTool(
+                type="function",
+                name="dance",
+                description="Dance once.",
+                parameters={"type": "object", "properties": {}},
+            )
+        ],
+        block_regex=build_block_regex(),
+        enter_code=ENTER_CODE,
+        end_code=END_CODE,
+    )
+    response = RealtimeResponseCreateParams(output_modalities=["text"])
+
+    first, tools, remaining = handler._process_printable_text("  before <co", None, [], ctx, response=response)
+    second, tools, remaining = handler._process_printable_text(
+        f"{remaining}de>dance(){END_CODE}\n after  ",
+        None,
+        tools,
+        ctx,
+        response=response,
+    )
+
+    chunks = [*first, *second]
+    assert [(chunk.text, [tool.name for tool in chunk.tools]) for chunk in chunks] == [
+        ("  before ", []),
+        ("", ["dance"]),
+        ("\n after  ", []),
+    ]
+    assert [tool.name for tool in tools] == ["dance"]
+    assert remaining == ""
 
 
 def _local_handler_with_chunks(chunks, *, cancelled=False):

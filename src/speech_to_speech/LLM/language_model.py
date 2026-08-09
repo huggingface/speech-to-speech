@@ -314,27 +314,31 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         when the batch reaches ``self.stream_batch_sentences``.
         """
         chunks: list[LLMResponseChunk] = []
+        text_only = not response_wants_audio(response)
+
+        def text_chunk(text: str) -> LLMResponseChunk:
+            return LLMResponseChunk(
+                text=text,
+                language_code=language_code,
+                runtime_config=runtime_config,
+                response=response,
+                turn_id=ctx.turn_id,
+                turn_revision=ctx.turn_revision,
+                speech_stopped_at_s=ctx.speech_stopped_at_s,
+                cancel_generation=ctx.cancel_generation,
+            )
 
         while ctx.enter_code and ctx.enter_code in printable_text:
             idx = printable_text.index(ctx.enter_code)
             before = printable_text[:idx]
             code_and_after = printable_text[idx:]
-            if before.strip():
+            if text_only and before:
+                chunks.append(text_chunk(before))
+            elif before.strip():
                 for s in sent_tokenize(before):
                     ctx.sentence_batch.append(s)
             if ctx.sentence_batch:
-                chunks.append(
-                    LLMResponseChunk(
-                        text=" ".join(ctx.sentence_batch),
-                        language_code=language_code,
-                        runtime_config=runtime_config,
-                        response=response,
-                        turn_id=ctx.turn_id,
-                        turn_revision=ctx.turn_revision,
-                        speech_stopped_at_s=ctx.speech_stopped_at_s,
-                        cancel_generation=ctx.cancel_generation,
-                    )
-                )
+                chunks.append(text_chunk(" ".join(ctx.sentence_batch)))
                 ctx.sentence_batch = []
             if not ctx.block_regex or not ctx.end_code or ctx.end_code not in code_and_after:
                 # Preserve the incomplete block until more streamed text arrives.
@@ -367,24 +371,21 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     )
                 )
 
-        if printable_text and not response_wants_audio(response) and ctx.enter_code is None:
-            # Text-only with no tool block: stream the raw text immediately. No TTS
-            # means no need to split into sentences, and sent_tokenize would collapse
-            # newlines / markdown. Streaming (vs buffering to the end) keeps the
-            # response interruptible by a new speech turn.
-            chunks.append(
-                LLMResponseChunk(
-                    text=printable_text,
-                    language_code=language_code,
-                    runtime_config=runtime_config,
-                    response=response,
-                    turn_id=ctx.turn_id,
-                    turn_revision=ctx.turn_revision,
-                    speech_stopped_at_s=ctx.speech_stopped_at_s,
-                    cancel_generation=ctx.cancel_generation,
-                )
-            )
-            return chunks, tools, ""
+        if printable_text and text_only:
+            # Stream every character known not to begin a tool block. Retain only
+            # the longest suffix that could become ``<code>`` in the next token.
+            # This keeps text-only output verbatim without exposing tool syntax.
+            pending_marker = ""
+            if ctx.enter_code:
+                max_prefix_length = min(len(ctx.enter_code) - 1, len(printable_text))
+                for prefix_length in range(max_prefix_length, 0, -1):
+                    if printable_text.endswith(ctx.enter_code[:prefix_length]):
+                        pending_marker = printable_text[-prefix_length:]
+                        printable_text = printable_text[:-prefix_length]
+                        break
+            if printable_text:
+                chunks.append(text_chunk(printable_text))
+            return chunks, tools, pending_marker
 
         if printable_text:
             sentences = sent_tokenize(printable_text)
@@ -392,18 +393,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 for s in sentences[:-1]:
                     ctx.sentence_batch.append(s)
                     if len(ctx.sentence_batch) >= self.stream_batch_sentences:
-                        chunks.append(
-                            LLMResponseChunk(
-                                text=" ".join(ctx.sentence_batch),
-                                language_code=language_code,
-                                runtime_config=runtime_config,
-                                response=response,
-                                turn_id=ctx.turn_id,
-                                turn_revision=ctx.turn_revision,
-                                speech_stopped_at_s=ctx.speech_stopped_at_s,
-                                cancel_generation=ctx.cancel_generation,
-                            )
-                        )
+                        chunks.append(text_chunk(" ".join(ctx.sentence_batch)))
                         ctx.sentence_batch = []
                 printable_text = sentences[-1]
 
@@ -650,9 +640,10 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             # conversation (their context was a throwaway chat).
             commit_allowed = turn_output_allowed and not out_of_band
             trailing_chunk: LLMResponseChunk | None = None
-            if turn_output_allowed and ctx.printable_text.strip():
+            trailing_text = ctx.printable_text.strip() if response_wants_audio(response) else ctx.printable_text
+            if turn_output_allowed and trailing_text:
                 trailing_chunk = LLMResponseChunk(
-                    text=ctx.printable_text.strip(),
+                    text=trailing_text,
                     language_code=language_code,
                     runtime_config=runtime_config,
                     response=response,

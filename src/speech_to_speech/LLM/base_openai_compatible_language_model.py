@@ -121,7 +121,7 @@ class _GenState(BaseModel):
     clean_text: str = ""  # filtered text, kept only for the debug log
     input_tokens: int = 0
     output_tokens: int = 0
-    tool_emitted: bool = False
+    output_emitted: bool = False
 
 
 class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
@@ -419,7 +419,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if recorded_call.id is not None:
                 state.recorded_item_ids.add(recorded_call.id)
             state.recorded_call_ids.add(item.call_id)
-        state.tool_emitted = True
+        state.output_emitted = True
         yield self._chunk(turn, tools=[item])
 
     # ── consumption ─────────────────────────────────────────────────────────--
@@ -440,6 +440,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
                 logger.info("LLM generation cancelled (stale speculative turn)")
                 return
+            state.output_emitted = True
             yield self._chunk(turn, text=" ".join(batch))
 
         for event in events:
@@ -479,6 +480,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                             logger.info("LLM generation cancelled (stale speculative turn)")
                             cancelled = True
                             break
+                        state.output_emitted = True
                         yield self._chunk(turn, text=event.text)
                     continue
                 new_text = remove_unspeechable(event.text)
@@ -546,6 +548,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     and not self._generation_is_stale(turn.gen)
                     and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
                 ):
+                    state.output_emitted = True
                     yield self._chunk(turn, text=out)
         logger.debug(f"Clean text: {state.clean_text}")
         logger.info(f"Tools: {state.tools}")
@@ -616,14 +619,25 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     "OpenAI API read timed out after %.1fs; ending the current response",
                     self.request_timeout_s,
                 )
-                if state.tool_emitted:
+                if state.output_emitted or state.pending:
                     error_message = f"Language model generation timed out after {self.request_timeout_s:.1f}s."
                 elif not self._generation_is_stale(turn.gen) and self._turn_output_allowed(
                     turn.turn_id, turn.turn_revision
                 ):
                     # Canned apology carries no language_code (mirrors the prior handlers).
+                    apology = "Wow I'm a bit slow today, could you repeat that?"
+                    state.clean_text += apology
+                    state.pending.append(
+                        RealtimeConversationItemAssistantMessage(
+                            type="message",
+                            role="assistant",
+                            content=[AssistantContent(type="output_text", text=apology)],
+                        )
+                    )
+                    state.output_emitted = True
+                    generation_completed = True
                     yield LLMResponseChunk(
-                        text="Wow I'm a bit slow today, could you repeat that?",
+                        text=apology,
                         runtime_config=turn.runtime_config,
                         response=turn.response,
                         turn_id=turn.turn_id,

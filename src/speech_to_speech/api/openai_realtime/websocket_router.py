@@ -849,6 +849,7 @@ def create_app(
                             if interrupt_enabled:
                                 unit.cancel_scope.cancel()
                                 unit.service._state(session_id).close_pending_responses()
+                                _flush_queue(unit.text_prompt_queue, preserve=_keep_pipeline_control)
                                 _flush_queue(unit.output_queue, preserve=_keep_audio_sentinel)
                                 _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
                                 if unit.response_playing.is_set():

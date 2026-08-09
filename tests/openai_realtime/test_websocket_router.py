@@ -472,7 +472,16 @@ class TestSendLoop:
                 ws.receive_json()  # session.created
                 conn_id = list(service._conns.keys())[0]
                 stale_generation = cancel_scope.generation
-                service._state(conn_id).response_pending = True
+                service.dispatch_pipeline_event(
+                    conn_id,
+                    AudioInputCompletedEvent(
+                        audio=np.zeros(1600, dtype=np.float32),
+                        audio_duration_s=0.1,
+                    ),
+                )
+                state = service._state(conn_id)
+                assert service.text_prompt_queue.qsize() == 1
+                pending_key = next(iter(state.pending_response_keys))
 
                 text_output_queue.put(SpeechStartedEvent())
                 msg = ws.receive_json()
@@ -481,8 +490,10 @@ class TestSendLoop:
                 time.sleep(0.15)
                 assert cancel_scope.discarding
                 assert cancel_scope.generation == stale_generation + 1
-                assert service._state(conn_id).response_pending is False
-                assert service._state(conn_id).in_response is False
+                assert service.text_prompt_queue.empty()
+                assert state.response_pending is False
+                assert state.in_response is False
+                assert pending_key in state.closed_response_keys
                 assert not response_playing.is_set()
 
                 output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=stale_generation))

@@ -546,7 +546,8 @@ def test_process_read_timeout_ends_response_cleanly():
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: make_timeout_stream()))
 
-    outputs = list(handler.process(_make_request("Hi")))
+    request = _make_request("Hi")
+    outputs = list(handler.process(request))
 
     assert len(outputs) == 2
     assert (
@@ -554,6 +555,35 @@ def test_process_read_timeout_ends_response_cleanly():
         and outputs[0].text == "Wow I'm a bit slow today, could you repeat that?"
     )
     assert isinstance(outputs[1], EndOfResponse)
+    assert outputs[1].error is None
+    assert [item.type for item in request.runtime_config.chat.buffer] == ["message", "message"]
+    assistant = request.runtime_config.chat.buffer[-1]
+    assert isinstance(assistant, RealtimeConversationItemAssistantMessage)
+    assert assistant.content[0].text == outputs[0].text
+
+
+def test_read_timeout_after_partial_text_fails_without_apology_or_history_commit():
+    handler = _make_handler()
+
+    class PartialThenTimeoutStream:
+        def __iter__(self):
+            yield _make_text_delta_event("Partial answer. ")
+            raise httpx.ReadTimeout("timed out")
+
+        def close(self):
+            pass
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: PartialThenTimeoutStream()))
+    request = _make_request("Hi")
+    request.response = RealtimeResponseCreateParams(output_modalities=["text"])
+
+    outputs = list(handler.process(request))
+
+    chunks = [output.text for output in outputs if isinstance(output, LLMResponseChunk)]
+    assert chunks == ["Partial answer. "]
+    end = next(output for output in outputs if isinstance(output, EndOfResponse))
+    assert end.error is not None and "timed out" in end.error
+    assert [item.type for item in request.runtime_config.chat.buffer] == ["message"]
 
 
 def test_read_timeout_after_tool_call_fails_and_rolls_back_call():
