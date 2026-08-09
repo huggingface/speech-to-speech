@@ -82,6 +82,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_response_id = None
         st.current_response_key = None
         st.response_text_complete = False
+        st.response_failed = False
         st.current_item_id = None
         st.content_index = 0
         st.in_response = False
@@ -364,6 +365,8 @@ class ResponseHandler(RealtimeBaseHandler):
         if response_key is not None and st.current_response_key not in (None, response_key):
             return events
         if st.in_response:
+            if status == "completed" and st.response_failed:
+                status = "failed"
             resp_id, item_id = self._ensure_response(conn_id)
             wants_audio = response_wants_audio(st.current_response_params)
             function_call_only = bool(st.pending_function_calls) and not st.pending_text_outputs

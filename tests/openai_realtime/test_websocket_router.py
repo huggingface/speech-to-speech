@@ -522,6 +522,69 @@ class TestSendLoop:
                 assert delta["type"] == "response.output_audio_transcript.delta"
                 assert delta["delta"] == "fresh response"
 
+    def test_partial_failed_response_drains_audio_before_failed_done(self, setup):
+        app, _, _, output_queue, text_output_queue, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                response_key = "response_1"
+                generation = cancel_scope.generation
+                text_output_queue.put(
+                    AssistantTextEvent(
+                        parts=[AssistantTextPart(text="partial response", ordinal=0)],
+                        response_key=response_key,
+                        cancel_generation=generation,
+                    )
+                )
+                output_queue.put(
+                    AudioOutput(
+                        audio=_pcm_bytes(256),
+                        response_key=response_key,
+                        assistant_output_ordinal=0,
+                        cancel_generation=generation,
+                    )
+                )
+
+                messages = []
+                while not any(message["type"] == "response.output_audio.delta" for message in messages):
+                    messages.append(ws.receive_json())
+
+                text_output_queue.put(
+                    ResponseFailedEvent(
+                        message="provider stream failed",
+                        response_key=response_key,
+                        cancel_generation=generation,
+                    )
+                )
+                output_queue.put(
+                    AudioOutput(
+                        audio=_pcm_bytes(128),
+                        response_key=response_key,
+                        assistant_output_ordinal=0,
+                        cancel_generation=generation,
+                    )
+                )
+                output_queue.put(
+                    AudioOutput(
+                        audio=AUDIO_RESPONSE_DONE,
+                        response_key=response_key,
+                        cancel_generation=generation,
+                    )
+                )
+
+                while not messages or messages[-1]["type"] != "response.done":
+                    messages.append(ws.receive_json())
+
+                created = [message for message in messages if message["type"] == "response.created"]
+                deltas = [message for message in messages if message["type"] == "response.output_audio.delta"]
+                errors = [message for message in messages if message["type"] == "error"]
+                assert len(created) == 1
+                assert len(deltas) == 2
+                assert len(errors) == 1
+                assert messages[-1]["response"]["id"] == created[0]["response"]["id"]
+                assert messages[-1]["response"]["status"] == "failed"
+                assert messages.index(errors[0]) < messages.index(messages[-1])
+
     def test_current_generation_text_survives_stuck_discarding(self, setup):
         """Regression: a fresh response's transcript must survive a stuck discard guard.
 

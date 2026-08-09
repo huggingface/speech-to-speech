@@ -263,7 +263,8 @@ def test_process_flushes_tool_lead_in_before_function_call_with_sentence_batchin
         )
     )
 
-    outputs = list(handler.process(_make_request("What do you see?")))
+    request = _make_request("What do you see?")
+    outputs = list(handler.process(request))
 
     assert len(outputs) == 3
     assert isinstance(outputs[0], LLMResponseChunk)
@@ -336,7 +337,8 @@ def test_process_preserves_nonstreaming_text_tool_text_order():
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: api_response))
 
-    outputs = list(handler.process(_make_request("What do you see?")))
+    request = _make_request("What do you see?")
+    outputs = list(handler.process(request))
 
     assert len(outputs) == 4
     assert isinstance(outputs[0], LLMResponseChunk)
@@ -349,6 +351,24 @@ def test_process_preserves_nonstreaming_text_tool_text_order():
     assert outputs[2].text == "This may take a second."
     assert outputs[2].tools == []
     assert isinstance(outputs[3], EndOfResponse)
+    call_id = outputs[1].tools[0].call_id
+
+    chat = request.runtime_config.chat
+    assert [item.type for item in chat.buffer] == ["message", "message", "function_call", "message"]
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id=call_id,
+            output="camera result",
+        )
+    )
+    assert [item.type for item in chat.buffer] == [
+        "message",
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+    ]
 
 
 def test_process_handles_cancellation():

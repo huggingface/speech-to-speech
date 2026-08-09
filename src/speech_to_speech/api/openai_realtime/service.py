@@ -175,6 +175,7 @@ class ConnState(BaseModel):
     current_response_id: Optional[str] = None
     current_response_key: Optional[str] = None
     response_text_complete: bool = False
+    response_failed: bool = False
     current_item_id: Optional[str] = None
     content_index: int = 0
     input_content_index: int = 0
@@ -576,12 +577,13 @@ class RealtimeService:
         return []
 
     def _on_response_failed(self, conn_id: str, event: ResponseFailedEvent) -> list[ServerEvent]:
-        """Surface the failure to the client and close the response as ``failed``.
+        """Surface a generation failure and defer terminal output to the audio sentinel.
 
         Emitted when generation failed (e.g. invalid out-of-band input, or the
         provider rejecting an empty context). A top-level ``error`` event carries
         the human-readable reason — ``response.done.status_details.error`` only
-        has code/type, no message — then ``finish_response`` closes the slot.
+        has code/type, no message. The matching audio terminal closes the response
+        after any already-queued partial audio has drained.
 
         Keyed failures may arrive after a preceding response clears the
         connection-global pending flag. They still announce and fail their own
@@ -604,8 +606,11 @@ class RealtimeService:
             events.extend(created_events)
         elif st.current_response_key is None:
             self.response._ensure_response(conn_id, event.response_key)
+        if st.response_failed:
+            return events
+        st.response_failed = True
+        st.response_text_complete = True
         events.append(self.make_error(event.message, "response_failed"))
-        events.extend(self.response.finish_response(conn_id, status="failed", response_key=event.response_key))
         return events
 
     def get_usage(self) -> dict[str, Any]:

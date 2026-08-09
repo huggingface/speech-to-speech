@@ -387,7 +387,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         races ahead of the deferred end-of-turn write-back and the output is
         rejected ("No function_call with call_id ... found"), which makes the
         model re-issue the same tool call. The call lands in ``_pending_tool_calls``
-        (not serialized until its output pairs it), so eager recording is safe.
+        at its emitted position (not serialized until its output pairs it), so
+        eager recording is safe.
 
         Out-of-band turns never touch the default conversation, and a stale turn
         records nothing (it is not forwarded to the client either)."""
@@ -413,7 +414,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 if recorded.id is not None:
                     state.recorded_item_ids.add(recorded.id)
             state.pending.clear()
-            recorded_call = chat.add_item(fc_item)
+            recorded_call = chat.add_ordered_function_call(fc_item)
             if recorded_call.id is not None:
                 state.recorded_item_ids.add(recorded_call.id)
             state.recorded_call_ids.add(item.call_id)

@@ -2183,13 +2183,14 @@ class TestDispatchPipelineEvent:
             conn_id,
             ResponseFailedEvent(message="input must not be empty"),
         )
-        # A top-level error event carries the reason (response.done can't), then
-        # the response is closed as failed.
+        # A top-level error carries the reason; the audio terminal closes the response.
         err = events[0]
         assert isinstance(err, RealtimeErrorEvent)
         assert err.error.message == "input must not be empty"
         assert err.error.type == "response_failed"
-        done = [e for e in events if isinstance(e, ResponseDoneEvent)]
+        assert service._state(conn_id).response_text_complete is True
+
+        done = service.finish_response(conn_id)
         assert len(done) == 1
         assert done[0].response.status == "failed"
         # Slot released so the next response is not locked out.
@@ -2213,14 +2214,13 @@ class TestDispatchPipelineEvent:
         assert [event.type for event in events] == [
             "response.created",
             "error",
-            "response.done",
         ]
         created = events[0]
         assert isinstance(created, ResponseCreatedEvent)
         err = events[1]
         assert isinstance(err, RealtimeErrorEvent)
         assert err.error.message == "provider rejected audio"
-        done = [event for event in events if isinstance(event, ResponseDoneEvent)]
+        done = service.finish_response(conn_id)
         assert len(done) == 1
         assert done[0].response.status == "failed"
         assert done[0].response.id == created.response.id
@@ -2256,10 +2256,11 @@ class TestDispatchPipelineEvent:
         assert [event.type for event in events] == [
             "response.created",
             "error",
-            "response.done",
         ]
-        assert isinstance(events[-1], ResponseDoneEvent)
-        assert events[-1].response.status == "failed"
+        done = service.finish_response(conn_id, response_key="second")
+        assert len(done) == 1
+        assert isinstance(done[0], ResponseDoneEvent)
+        assert done[0].response.status == "failed"
 
     # -- unknown --
 
