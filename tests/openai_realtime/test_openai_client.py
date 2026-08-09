@@ -40,7 +40,7 @@ from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import (
-    AssistantTextEvent,
+    AssistantOutputEvent,
     AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     SpeechStartedEvent,
@@ -283,7 +283,7 @@ class TestSDKVoiceTurn:
             decoded = base64.b64decode(event.delta)
             assert len(decoded) == len(_pcm_bytes(256))
 
-            server_env.text_output_queue.put(AssistantTextEvent(text="Hi there!"))
+            server_env.text_output_queue.put(AssistantOutputEvent(text="Hi there!"))
             event = await _recv(conn)
             assert event.type == TRANSCRIPT_DELTA
             assert event.delta == "Hi there!"
@@ -442,7 +442,7 @@ class TestPackagedAudioClient:
             second_request = await queue_get(server_env.text_prompt_queue)
 
             server_env.text_output_queue.put(
-                AssistantTextEvent(
+                AssistantOutputEvent(
                     text="stale revision zero",
                     turn_id="turn_1",
                     turn_revision=0,
@@ -450,7 +450,7 @@ class TestPackagedAudioClient:
                 )
             )
             server_env.text_output_queue.put(
-                AssistantTextEvent(
+                AssistantOutputEvent(
                     text="fresh revision one",
                     turn_id="turn_1",
                     turn_revision=1,
@@ -530,7 +530,7 @@ class TestSDKBargeIn:
             await _recv(conn)  # audio delta
 
             server_env.text_output_queue.put(SpeechStartedEvent())
-            server_env.text_output_queue.put(AssistantTextEvent(text="stale response text"))
+            server_env.text_output_queue.put(AssistantOutputEvent(text="stale response text"))
 
             events = []
             for _ in range(3):
@@ -635,7 +635,7 @@ class TestSDKToolCalling:
             await _recv(conn)
 
             server_env.text_output_queue.put(
-                AssistantTextEvent(
+                AssistantOutputEvent(
                     text="Checking weather",
                     tools=[
                         {
@@ -669,7 +669,7 @@ class TestSDKToolCalling:
             await _recv(conn)
 
             server_env.text_output_queue.put(
-                AssistantTextEvent(
+                AssistantOutputEvent(
                     text="",
                     tools=[
                         {"type": "function_call", "call_id": "c1", "name": "tool_a", "arguments": "{}"},

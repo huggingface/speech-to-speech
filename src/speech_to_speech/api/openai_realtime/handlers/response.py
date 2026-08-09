@@ -26,7 +26,7 @@ from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
 from speech_to_speech.LLM.chat import ChatItemError, add_supported_item
-from speech_to_speech.pipeline.events import AssistantResponseDoneEvent, AssistantTextEvent
+from speech_to_speech.pipeline.events import AssistantOutputEvent, AssistantResponseDoneEvent
 from speech_to_speech.pipeline.messages import AssistantTextPart, AssistantToolCallPart, GenerateResponseRequest
 from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
 
@@ -455,14 +455,14 @@ class ResponseHandler(RealtimeBaseHandler):
 
     # ── Pipeline event handlers ───────────────────
 
-    def on_assistant_text(
+    def on_assistant_output(
         self,
         conn_id: str,
-        event: AssistantTextEvent,
+        event: AssistantOutputEvent,
         *,
         wait_for_pending_reopen: bool = True,
     ) -> list[ServerEvent] | None:
-        """Handle assistant_text: emit transcript and/or tool-call events."""
+        """Translate ordered assistant output into OpenAI Realtime events."""
         if self._service.speculative_turns:
             commit_result: bool | None
             if wait_for_pending_reopen:
@@ -478,7 +478,7 @@ class ResponseHandler(RealtimeBaseHandler):
             if commit_result is None:
                 return None
             if not commit_result:
-                logger.debug("Dropping stale assistant text for turn=%s rev=%s", event.turn_id, event.turn_revision)
+                logger.debug("Dropping stale assistant output for turn=%s rev=%s", event.turn_id, event.turn_revision)
                 return []
         st = self._state(conn_id)
         events: list[ServerEvent] = []

@@ -32,8 +32,8 @@ from speech_to_speech.api.openai_realtime.transports import (
 )
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
+    AssistantOutputEvent,
     AssistantResponseDoneEvent,
-    AssistantTextEvent,
     AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     PipelineEvent,
@@ -122,7 +122,7 @@ def _audio_cleanup_only(item: Any) -> bool:
 
 
 _RESPONSE_PIPELINE_EVENTS = (
-    AssistantTextEvent,
+    AssistantOutputEvent,
     AssistantResponseDoneEvent,
     TokenUsageEvent,
     ResponseFailedEvent,

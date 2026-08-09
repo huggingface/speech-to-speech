@@ -44,8 +44,8 @@ from speech_to_speech.api.openai_realtime.webrtc_session import (  # noqa: E402
 )
 from speech_to_speech.pipeline.cancel_scope import CancelScope  # noqa: E402
 from speech_to_speech.pipeline.events import (  # noqa: E402
+    AssistantOutputEvent,
     AssistantResponseDoneEvent,
-    AssistantTextEvent,
     ResponseFailedEvent,
     SpeechStartedEvent,
     TokenUsageEvent,
@@ -262,8 +262,8 @@ class TestWebRTCDispatch:
         conn_id = unit.service.register()
         transport = _FakeTransport()
 
-        text_event = AssistantTextEvent(text="before audio", response_key="response_1")
-        tool_event = AssistantTextEvent(
+        text_event = AssistantOutputEvent(text="before audio", response_key="response_1")
+        tool_event = AssistantOutputEvent(
             tools=[{"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"}],
             response_key="response_1",
         )
@@ -475,7 +475,7 @@ class TestWebRTCLoopback:
             # output identities over a real WebRTC media/data-channel pair.
             response_key = "webrtc_response_1"
             server_env.output_queue.put(
-                AssistantTextEvent(
+                AssistantOutputEvent(
                     response_key=response_key,
                     parts=[AssistantTextPart(text="before")],
                 )
@@ -487,7 +487,7 @@ class TestWebRTCLoopback:
                 )
             )
             server_env.output_queue.put(
-                AssistantTextEvent(
+                AssistantOutputEvent(
                     response_key=response_key,
                     parts=[
                         AssistantToolCallPart(
@@ -502,7 +502,7 @@ class TestWebRTCLoopback:
                 )
             )
             server_env.output_queue.put(
-                AssistantTextEvent(
+                AssistantOutputEvent(
                     response_key=response_key,
                     parts=[AssistantTextPart(text="after")],
                 )

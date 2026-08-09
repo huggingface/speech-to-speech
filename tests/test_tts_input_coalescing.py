@@ -3,7 +3,7 @@ from threading import Event
 
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.control import SESSION_END
-from speech_to_speech.pipeline.events import AssistantTextEvent
+from speech_to_speech.pipeline.events import AssistantOutputEvent
 from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk, TTSInput
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 
@@ -40,9 +40,9 @@ def test_coalesce_pending_processor_output_for_one_response():
         *processor.process(LLMResponseChunk(text="Second sentence.", response_key="response_1")),
     ]
     assert [type(output) for output in outputs] == [
-        AssistantTextEvent,
+        AssistantOutputEvent,
         TTSInput,
-        AssistantTextEvent,
+        AssistantOutputEvent,
         TTSInput,
     ]
 
@@ -73,7 +73,7 @@ def test_coalesce_pending_tts_input_stops_before_control_messages():
 def test_coalesce_pending_tts_input_stops_at_ordered_output_boundary():
     handler = _make_handler()
     handler.queue_in.put(
-        AssistantTextEvent(tools=[{"type": "function_call", "call_id": "call_1", "name": "tool", "arguments": "{}"}])
+        AssistantOutputEvent(tools=[{"type": "function_call", "call_id": "call_1", "name": "tool", "arguments": "{}"}])
     )
     handler.queue_in.put(TTSInput(text="After tool."))
 
@@ -81,4 +81,4 @@ def test_coalesce_pending_tts_input_stops_at_ordered_output_boundary():
 
     assert text == "Before tool."
     assert saw_end is False
-    assert isinstance(handler.queue_in.get_nowait(), AssistantTextEvent)
+    assert isinstance(handler.queue_in.get_nowait(), AssistantOutputEvent)

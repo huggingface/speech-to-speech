@@ -46,8 +46,8 @@ from speech_to_speech.api.openai_realtime.handlers import (
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.pipeline.events import (
+    AssistantOutputEvent,
     AssistantResponseDoneEvent,
-    AssistantTextEvent,
     AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     PipelineEvent,
@@ -439,7 +439,7 @@ class RealtimeService:
     def should_defer_pipeline_event(self, event: PipelineEvent) -> bool:
         if self.speculative_turns is None or not isinstance(
             event,
-            (AssistantTextEvent, AssistantResponseDoneEvent),
+            (AssistantOutputEvent, AssistantResponseDoneEvent),
         ):
             return False
         return self.speculative_turns.has_pending_reopen_or_grace(
@@ -472,8 +472,8 @@ class RealtimeService:
             return []
 
         self._observe_turn_event(event)
-        if isinstance(event, AssistantTextEvent):
-            return self.response.on_assistant_text(
+        if isinstance(event, AssistantOutputEvent):
+            return self.response.on_assistant_output(
                 conn_id,
                 event,
                 wait_for_pending_reopen=wait_for_pending_reopen,
@@ -495,14 +495,14 @@ class RealtimeService:
                 PartialTranscriptionEvent,
                 TranscriptionCompletedEvent,
                 AudioInputCompletedEvent,
-                AssistantTextEvent,
+                AssistantOutputEvent,
                 AssistantResponseDoneEvent,
             ),
         ):
             return False
         turn_id = getattr(event, "turn_id", None)
         turn_revision = getattr(event, "turn_revision", None)
-        if isinstance(event, (AssistantTextEvent, AssistantResponseDoneEvent)):
+        if isinstance(event, (AssistantOutputEvent, AssistantResponseDoneEvent)):
             is_latest: bool | None
             if wait_for_pending_reopen:
                 is_latest = self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)

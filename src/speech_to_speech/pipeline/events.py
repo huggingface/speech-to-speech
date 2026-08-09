@@ -89,7 +89,9 @@ class AudioInputCompletedEvent(PipelineEvent):
 # ── LLM output events (LMOutputProcessor) ────────────────────────────
 
 
-class AssistantTextEvent(PipelineEvent):
+class AssistantOutputEvent(PipelineEvent):
+    """Internal ordered assistant output awaiting API-specific serialization."""
+
     type: Literal["assistant_text"] = "assistant_text"
     parts: list[AssistantOutputPart] = Field(default_factory=list)
     text: str = ""
@@ -103,7 +105,7 @@ class AssistantTextEvent(PipelineEvent):
     response_key: str | None = Field(default=None, exclude=True, repr=False)
 
     @model_validator(mode="after")
-    def _normalize_ordered_parts(self) -> "AssistantTextEvent":
+    def _normalize_ordered_parts(self) -> "AssistantOutputEvent":
         if self.parts:
             self.text = "".join(part.text for part in self.parts if isinstance(part, AssistantTextPart))
             self.tools = [part.tool for part in self.parts if isinstance(part, AssistantToolCallPart)]
@@ -112,6 +114,10 @@ class AssistantTextEvent(PipelineEvent):
                 self.parts.append(AssistantTextPart(text=self.text))
             self.parts.extend(AssistantToolCallPart(tool=tool) for tool in self.tools)
         return self
+
+
+# Kept for callers that imported the original public pipeline symbol.
+AssistantTextEvent = AssistantOutputEvent
 
 
 class TokenUsageEvent(PipelineEvent):

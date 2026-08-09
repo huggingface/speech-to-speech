@@ -8,8 +8,8 @@ from openai.types.responses import ResponseFunctionToolCall
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.events import (
+    AssistantOutputEvent,
     AssistantResponseDoneEvent,
-    AssistantTextEvent,
     ResponseFailedEvent,
     TokenUsageEvent,
 )
@@ -150,7 +150,7 @@ def test_text_event_precedes_optional_tts_input(modalities, text, expect_tts):
         )
     )
 
-    assert isinstance(outputs[0], AssistantTextEvent)
+    assert isinstance(outputs[0], AssistantOutputEvent)
     assert outputs[0].text == text
     assert outputs[0].cancel_generation == 7
     assert [isinstance(output, TTSInput) for output in outputs] == [False, *([True] if expect_tts else [])]
@@ -177,14 +177,14 @@ def test_ordered_parts_and_tts_inputs_share_one_queue():
     )
 
     assert [type(output) for output in outputs] == [
-        AssistantTextEvent,
-        AssistantTextEvent,
+        AssistantOutputEvent,
+        AssistantOutputEvent,
         TTSInput,
-        AssistantTextEvent,
-        AssistantTextEvent,
+        AssistantOutputEvent,
+        AssistantOutputEvent,
         TTSInput,
     ]
-    events = [output for output in outputs if isinstance(output, AssistantTextEvent)]
+    events = [output for output in outputs if isinstance(output, AssistantOutputEvent)]
     assert [event.parts[0].type for event in events] == ["tool_call", "text", "tool_call", "text"]
     assert [output.text for output in outputs if isinstance(output, TTSInput)] == ["between", "after"]
 
@@ -201,7 +201,7 @@ def test_audio_output_keeps_response_identity():
 def test_tts_handler_forwards_response_events_without_processing_them():
     queue_in, queue_out = Queue(), Queue()
     handler = BaseHandler(Event(), queue_in, queue_out)
-    event = AssistantTextEvent(text="before")
+    event = AssistantOutputEvent(text="before")
     queue_in.put(event)
     queue_in.put(PIPELINE_END)
 
@@ -251,7 +251,7 @@ def test_pending_reopen_holds_output_until_cancelled():
     assert done.wait(1.0)
     thread.join(timeout=1.0)
 
-    assert [type(output) for output in outputs] == [AssistantTextEvent, TTSInput]
+    assert [type(output) for output in outputs] == [AssistantOutputEvent, TTSInput]
 
 
 def test_reopen_grace_holds_output_until_elapsed():
@@ -263,7 +263,7 @@ def test_reopen_grace_holds_output_until_elapsed():
     assert done.wait(1.0)
     thread.join(timeout=1.0)
 
-    assert [type(output) for output in outputs] == [AssistantTextEvent, TTSInput]
+    assert [type(output) for output in outputs] == [AssistantOutputEvent, TTSInput]
 
 
 def test_confirmed_reopen_drops_held_output():

@@ -22,8 +22,8 @@ from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
+    AssistantOutputEvent,
     AssistantResponseDoneEvent,
-    AssistantTextEvent,
     AudioInputCompletedEvent,
     ResponseFailedEvent,
     SpeechStartedEvent,
@@ -272,7 +272,7 @@ class TestClientEventDispatch:
                 response_playing.set()
                 output_queue.put(_pcm_bytes(256))
                 output_queue.put(_pcm_bytes(256))
-                output_queue.put(AssistantTextEvent(text="stale"))
+                output_queue.put(AssistantOutputEvent(text="stale"))
                 ws.send_json({"type": "response.cancel"})
                 assert ws.receive_json()["type"] == "response.done"
                 time.sleep(0.1)
@@ -521,7 +521,7 @@ class TestSendLoop:
                         cleanup_only=True,
                     )
                 )
-                output_queue.put(AssistantTextEvent(text="fresh", response_key=response_b))
+                output_queue.put(AssistantOutputEvent(text="fresh", response_key=response_b))
                 output_queue.put(AssistantResponseDoneEvent(response_key=response_b))
                 output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_b))
 
@@ -567,7 +567,7 @@ class TestSendLoop:
                 response_key = "fresh"
                 output_queue.put(stale_event)
                 output_queue.put(
-                    AssistantTextEvent(
+                    AssistantOutputEvent(
                         text="fresh response",
                         response_key=response_key,
                         cancel_generation=cancel_scope.generation,
@@ -628,7 +628,7 @@ class TestSendLoop:
                 while cancel_scope.discarding and time.monotonic() < deadline:
                     time.sleep(0.01)
 
-                output_queue.put(AssistantTextEvent(text="fresh", response_key="fresh"))
+                output_queue.put(AssistantOutputEvent(text="fresh", response_key="fresh"))
                 output_queue.put(AssistantResponseDoneEvent(response_key="fresh"))
                 output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key="fresh"))
                 messages = []
@@ -655,7 +655,7 @@ class TestSendLoop:
                 # so generation alone cannot distinguish this output as stale.
                 current_generation = cancel_scope.generation
                 output_queue.put(
-                    AssistantTextEvent(
+                    AssistantOutputEvent(
                         text="late response",
                         response_key=request.response_key,
                         cancel_generation=current_generation,
@@ -689,7 +689,7 @@ class TestSendLoop:
                 response_key = "response_1"
                 generation = cancel_scope.generation
                 output_queue.put(
-                    AssistantTextEvent(
+                    AssistantOutputEvent(
                         parts=[AssistantTextPart(text="partial response")],
                         response_key=response_key,
                         cancel_generation=generation,
@@ -761,7 +761,7 @@ class TestSendLoop:
                 current_generation = cancel_scope.generation
                 assert cancel_scope.discarding
 
-                output_queue.put(AssistantTextEvent(text="hello there", cancel_generation=current_generation))
+                output_queue.put(AssistantOutputEvent(text="hello there", cancel_generation=current_generation))
                 output_queue.put(AudioOutput(audio=_pcm_bytes(256), cancel_generation=current_generation))
                 output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=current_generation))
 
@@ -784,13 +784,13 @@ class TestSendLoop:
                 ws.receive_json()  # session.created
                 response_key = "response_1"
                 output_queue.put(
-                    AssistantTextEvent(
+                    AssistantOutputEvent(
                         response_key=response_key,
                         parts=[AssistantTextPart(text="before")],
                     )
                 )
                 output_queue.put(
-                    AssistantTextEvent(
+                    AssistantOutputEvent(
                         response_key=response_key,
                         parts=[
                             AssistantToolCallPart(
@@ -805,7 +805,7 @@ class TestSendLoop:
                     )
                 )
                 output_queue.put(
-                    AssistantTextEvent(
+                    AssistantOutputEvent(
                         response_key=response_key,
                         parts=[AssistantTextPart(text="after")],
                     )
@@ -854,7 +854,7 @@ class TestSendLoop:
                 response_key = "response_whitespace"
                 service._state(conn_id).mark_response_pending(response_key)
                 output_queue.put(
-                    AssistantTextEvent(
+                    AssistantOutputEvent(
                         response_key=response_key,
                         parts=[AssistantTextPart(text="   \n")],
                     )
@@ -879,7 +879,7 @@ class TestSendLoop:
                 state = service._state(conn_id)
                 for response_key, text in (("response_1", "first"), ("response_2", "second")):
                     state.mark_response_pending(response_key)
-                    output_queue.put(AssistantTextEvent(response_key=response_key, text=text))
+                    output_queue.put(AssistantOutputEvent(response_key=response_key, text=text))
                     output_queue.put(AssistantResponseDoneEvent(response_key=response_key))
                     output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key))
 
@@ -932,7 +932,7 @@ class TestSendLoop:
                 response_key = "response_1"
 
                 output_queue.put(
-                    AssistantTextEvent(
+                    AssistantOutputEvent(
                         response_key=response_key,
                         text="",
                         tools=[{"type": "function_call", "call_id": "c1", "name": "f1", "arguments": "{}"}],
@@ -1027,7 +1027,7 @@ class TestCleanup:
                 service.response._ensure_response(conn_id)
                 response_playing.set()
                 output_queue.put(_pcm_bytes(256))
-                output_queue.put(AssistantTextEvent(text="stale"))
+                output_queue.put(AssistantOutputEvent(text="stale"))
             _simulate_session_end_drain(input_queue, output_queue)
             time.sleep(0.3)
 
@@ -1046,7 +1046,7 @@ class TestDrainRelease:
     def test_barge_in_flush_preserves_completed_audio_input(self):
         q: Queue = Queue()
         audio_event = AudioInputCompletedEvent(audio=np.zeros(1600, dtype=np.float32), audio_duration_s=0.1)
-        q.put(AssistantTextEvent(text="stale"))
+        q.put(AssistantOutputEvent(text="stale"))
         q.put(audio_event)
 
         router_module._flush_queue(q, preserve=router_module._keep_user_text_event)

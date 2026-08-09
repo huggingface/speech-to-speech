@@ -28,7 +28,7 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, is_control_message
-from speech_to_speech.pipeline.events import AssistantTextEvent
+from speech_to_speech.pipeline.events import AssistantOutputEvent
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import (
     AUDIO_RESPONSE_DONE,
@@ -758,9 +758,9 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         parts = [text.strip()] if text and text.strip() else []
         saw_end_of_response = False
-        text_events: list[AssistantTextEvent] = []
+        text_events: list[AssistantOutputEvent] = []
 
-        def same_response(item: TTSInput | AssistantTextEvent) -> bool:
+        def same_response(item: TTSInput | AssistantOutputEvent) -> bool:
             return (
                 item.turn_id == current_input.turn_id
                 and item.turn_revision == current_input.turn_revision
@@ -778,7 +778,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 if isinstance(next_item, EndOfResponse):
                     saw_end_of_response = True
                     break
-                if isinstance(next_item, AssistantTextEvent):
+                if isinstance(next_item, AssistantOutputEvent):
                     if not same_response(next_item) or any(
                         not isinstance(part, AssistantTextPart) for part in next_item.parts
                     ):

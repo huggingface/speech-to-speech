@@ -15,8 +15,8 @@ from uuid import uuid4
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.events import (
+    AssistantOutputEvent,
     AssistantResponseDoneEvent,
-    AssistantTextEvent,
     PipelineEvent,
     ResponseFailedEvent,
     TokenUsageEvent,
@@ -152,7 +152,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         response_key = self._start_response(lm_output.response_key)
 
         for part in lm_output.parts:
-            event = AssistantTextEvent(
+            event = AssistantOutputEvent(
                 parts=[part],
                 turn_id=lm_output.turn_id,
                 turn_revision=lm_output.turn_revision,
