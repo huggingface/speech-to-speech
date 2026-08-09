@@ -414,6 +414,42 @@ def test_streaming_tool_call_accumulates_arguments():
     assert chat._pending_tool_calls, "tool call should be recorded in chat history"
 
 
+def test_streaming_preserves_text_tool_text_order():
+    h = _make_handler(stream=True)
+    h.client.chat.completions.create = lambda **kwargs: _FakeStream(
+        [
+            _chunk(content="Before."),
+            _chunk(tool_calls=[_tc_delta(0, id="srv_1", name="lookup", arguments="{}")]),
+            _chunk(content="After."),
+        ]
+    )
+    chat = Chat(10)
+    chat.add_item(make_user_message("go"))
+    session = RealtimeSessionCreateRequest(type="realtime", instructions="Use tools.")
+    session.tools = [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}]
+    request = GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat, session=session))
+
+    outputs = list(h.process(request))
+
+    output_parts = [part.type for output in outputs if isinstance(output, LLMResponseChunk) for part in output.parts]
+    assert output_parts == ["text", "tool_call", "text"]
+    call = next(item for item in chat.buffer if isinstance(item, RealtimeConversationItemFunctionCall))
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id=call.call_id,
+            output="done",
+        )
+    )
+    assert [item.type for item in chat.buffer] == [
+        "message",
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+    ]
+
+
 def test_tool_call_recorded_before_chunk_is_emitted():
     """Regression: a fast client can return function_call_output before the
     deferred end-of-turn write-back runs. The call must already be in history

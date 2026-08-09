@@ -306,6 +306,35 @@ class TestClientEventDispatch:
                 time.sleep(0.1)
                 assert not cancel_scope.discarding
 
+    def test_response_cancel_clears_pending_implicit_response(self, setup):
+        app, service, _, _, _, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                generation = cancel_scope.generation
+                service.dispatch_pipeline_event(
+                    conn_id,
+                    AudioInputCompletedEvent(
+                        audio=np.zeros(1600, dtype=np.float32),
+                        audio_duration_s=0.1,
+                    ),
+                )
+                state = service._state(conn_id)
+                assert state.response_pending is True
+                assert not service.text_prompt_queue.empty()
+
+                ws.send_json({"type": "response.cancel"})
+                time.sleep(0.1)
+
+                assert cancel_scope.generation == generation + 1
+                assert service.text_prompt_queue.empty()
+                assert state.response_pending is False
+                assert state.pending_response_keys == set()
+
+                ws.send_json({"type": "response.create"})
+                assert ws.receive_json()["type"] == "response.created"
+
     def test_response_cancel_late_audio_is_discarded(self, setup):
         """Audio arriving after response.cancel is silently dropped (discard guard)."""
         app, service, _, output_queue, _, _, _, response_playing, cancel_scope = setup

@@ -101,6 +101,10 @@ def _keep_user_text_event(item: Any) -> bool:
     )
 
 
+def _keep_pipeline_control(item: Any) -> bool:
+    return isinstance(item, (PipelineControlMessage, bytes))
+
+
 def _audio_payload(item: Any) -> Any:
     return item.audio if isinstance(item, AudioOutput) else item
 
@@ -433,9 +437,11 @@ async def _dispatch_client_event(
             await transport.send_events([result])
 
     elif isinstance(event, ResponseCancelEvent):
-        was_active = service._state(session_id).in_response
-        if was_active:
+        st = service._state(session_id)
+        had_response = st.in_response or st.response_pending
+        if had_response:
             unit.cancel_scope.cancel()
+            _flush_queue(unit.text_prompt_queue, preserve=_keep_pipeline_control)
         _flush_queue(unit.output_queue, preserve=_keep_audio_sentinel)
         _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
         transport.discard_pending_audio()
