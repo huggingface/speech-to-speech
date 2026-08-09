@@ -500,6 +500,27 @@ class TestAddItem:
         chat.rollback_generation(None, item_ids=set(), call_ids=set(), response_key=response_key)
         assert chat._cancelled_provisional_generations == {}
 
+    def test_invalid_provisional_batch_rolls_back_earlier_items(self):
+        chat = Chat(size=5)
+        existing = chat.add_item(_user("existing"))
+        invalid_call = RealtimeConversationItemFunctionCall(
+            type="function_call",
+            id="invalid",
+            call_id="call_bad",
+            name="bad",
+            arguments="{}",
+        )
+
+        with pytest.raises(ChatItemError, match="fc_"):
+            chat.add_provisional_generation_items(
+                "failed_response",
+                [_assistant("must roll back"), invalid_call],
+            )
+
+        assert chat.buffer == [existing]
+        assert not chat.has_pending_tool_calls()
+        assert chat._provisional_generations == {}
+
     # -- Function call output --
 
     def test_function_call_output_delegates_to_append_tool_output(self):

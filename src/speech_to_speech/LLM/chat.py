@@ -367,30 +367,41 @@ class Chat:
         with self._lock:
             if response_key in self._cancelled_provisional_generations:
                 return None
+            buffer_before = list(self.buffer)
+            pending_calls_before = dict(self._pending_tool_calls)
+            ordered_calls_before = set(self._ordered_pending_call_ids)
+            user_turn_count_before = self._user_turn_count
             recorded_items: list[SupportedItem] = []
             item_ids: set[str] = set()
             call_ids: set[str] = set()
-            for item in items:
-                if not isinstance(
-                    item,
-                    (
-                        RealtimeConversationItemUserMessage,
-                        RealtimeConversationItemAssistantMessage,
-                        RealtimeConversationItemFunctionCall,
-                    ),
-                ):
-                    raise ChatItemError(f"Unsupported provisional item type: {getattr(item, 'type', None)}")
-                recorded = self._add_item_locked(
-                    item,
-                    ordered_function_call=isinstance(item, RealtimeConversationItemFunctionCall),
-                )
-                if isinstance(recorded, RealtimeConversationItemAssistantMessage) and not recorded.content:
-                    continue
-                recorded_items.append(recorded)
-                if recorded.id is not None:
-                    item_ids.add(recorded.id)
-                if isinstance(recorded, RealtimeConversationItemFunctionCall) and recorded.call_id is not None:
-                    call_ids.add(recorded.call_id)
+            try:
+                for item in items:
+                    if not isinstance(
+                        item,
+                        (
+                            RealtimeConversationItemUserMessage,
+                            RealtimeConversationItemAssistantMessage,
+                            RealtimeConversationItemFunctionCall,
+                        ),
+                    ):
+                        raise ChatItemError(f"Unsupported provisional item type: {getattr(item, 'type', None)}")
+                    recorded = self._add_item_locked(
+                        item,
+                        ordered_function_call=isinstance(item, RealtimeConversationItemFunctionCall),
+                    )
+                    if isinstance(recorded, RealtimeConversationItemAssistantMessage) and not recorded.content:
+                        continue
+                    recorded_items.append(recorded)
+                    if recorded.id is not None:
+                        item_ids.add(recorded.id)
+                    if isinstance(recorded, RealtimeConversationItemFunctionCall) and recorded.call_id is not None:
+                        call_ids.add(recorded.call_id)
+            except Exception:
+                self.buffer = buffer_before
+                self._pending_tool_calls = pending_calls_before
+                self._ordered_pending_call_ids = ordered_calls_before
+                self._user_turn_count = user_turn_count_before
+                raise
             tracked_item_ids, tracked_call_ids = self._provisional_generations.setdefault(
                 response_key,
                 (set(), set()),
