@@ -14,7 +14,12 @@ from queue import Queue
 from uuid import uuid4
 
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.pipeline.events import AssistantTextEvent, ResponseFailedEvent, TokenUsageEvent
+from speech_to_speech.pipeline.events import (
+    AssistantResponseDoneEvent,
+    AssistantTextEvent,
+    ResponseFailedEvent,
+    TokenUsageEvent,
+)
 from speech_to_speech.pipeline.handler_types import LLMOut, TTSIn
 from speech_to_speech.pipeline.messages import (
     AssistantTextPart,
@@ -53,7 +58,22 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
         """
         self.text_output_queue = text_output_queue
         self.speculative_turns = speculative_turns
-        self._assistant_output_id: str | None = None
+        self._response_key: str | None = None
+        self._assistant_output_ordinal: int | None = None
+        self._next_assistant_output_ordinal = 0
+
+    def _start_response(self, response_key: str | None) -> str:
+        key = response_key or self._response_key or uuid4().hex
+        if key != self._response_key:
+            self._response_key = key
+            self._assistant_output_ordinal = None
+            self._next_assistant_output_ordinal = 0
+        return key
+
+    def _reset_response(self) -> None:
+        self._response_key = None
+        self._assistant_output_ordinal = None
+        self._next_assistant_output_ordinal = 0
 
     def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
         if self.speculative_turns is None:
@@ -76,6 +96,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                     "Dropping stale token usage for turn=%s rev=%s", lm_output.turn_id, lm_output.turn_revision
                 )
                 return
+            usage_response_key = self._start_response(lm_output.response_key)
             if self.text_output_queue is not None:
                 self.text_output_queue.put(
                     TokenUsageEvent(
@@ -83,12 +104,13 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                         output_tokens=lm_output.output_tokens or 0,
                         turn_id=lm_output.turn_id,
                         turn_revision=lm_output.turn_revision,
+                        response_key=usage_response_key,
                     )
                 )
             return
 
         if isinstance(lm_output, EndOfResponse):
-            self._assistant_output_id = None
+            response_key = lm_output.response_key or self._response_key
             if not self._turn_output_allowed(
                 lm_output.turn_id,
                 lm_output.turn_revision,
@@ -98,6 +120,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                     lm_output.turn_id,
                     lm_output.turn_revision,
                 )
+                self._reset_response()
                 return
             # A failed generation (e.g. invalid out-of-band input) closes the response as
             # "failed" via the text side-channel, then falls through to emit the normal
@@ -108,13 +131,25 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                         message=lm_output.error,
                         turn_id=lm_output.turn_id,
                         turn_revision=lm_output.turn_revision,
+                        response_key=response_key,
+                    )
+                )
+            if not lm_output.error and self.text_output_queue is not None:
+                self.text_output_queue.put(
+                    AssistantResponseDoneEvent(
+                        response_key=response_key,
+                        turn_id=lm_output.turn_id,
+                        turn_revision=lm_output.turn_revision,
+                        cancel_generation=lm_output.cancel_generation,
                     )
                 )
             yield EndOfResponse(
                 turn_id=lm_output.turn_id,
                 turn_revision=lm_output.turn_revision,
                 cancel_generation=lm_output.cancel_generation,
+                response_key=response_key,
             )
+            self._reset_response()
             return
 
         if not isinstance(lm_output, LLMResponseChunk):
@@ -130,13 +165,16 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
 
         logger.debug("LM processor: parts=%s", lm_output.parts)
 
+        response_key = self._start_response(lm_output.response_key)
+
         for part in lm_output.parts:
             if isinstance(part, AssistantTextPart):
-                if self._assistant_output_id is None:
-                    self._assistant_output_id = uuid4().hex
-                part.output_id = self._assistant_output_id
+                if self._assistant_output_ordinal is None:
+                    self._assistant_output_ordinal = self._next_assistant_output_ordinal
+                    self._next_assistant_output_ordinal += 1
+                part.ordinal = self._assistant_output_ordinal
             elif isinstance(part, AssistantToolCallPart):
-                self._assistant_output_id = None
+                self._assistant_output_ordinal = None
 
         if self.text_output_queue is not None:
             event = AssistantTextEvent(
@@ -144,6 +182,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                 turn_id=lm_output.turn_id,
                 turn_revision=lm_output.turn_revision,
                 cancel_generation=lm_output.cancel_generation,
+                response_key=response_key,
             )
             if lm_output.tools:
                 event.tools = lm_output.tools
@@ -166,8 +205,9 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                     turn_revision=lm_output.turn_revision,
                     speech_stopped_at_s=lm_output.speech_stopped_at_s,
                     cancel_generation=lm_output.cancel_generation,
-                    assistant_output_id=part.output_id,
+                    response_key=response_key,
+                    assistant_output_ordinal=part.ordinal,
                 )
 
     def on_session_end(self) -> None:
-        self._assistant_output_id = None
+        self._reset_response()

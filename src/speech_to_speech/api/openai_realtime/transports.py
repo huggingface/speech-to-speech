@@ -39,7 +39,8 @@ class SessionTransport(ABC):
         service: RealtimeService,
         session_id: str,
         pcm: bytes,
-        assistant_output_id: str | None = None,
+        response_key: str | None = None,
+        assistant_output_ordinal: int | None = None,
     ) -> None:
         """Deliver a pipeline-rate PCM16 chunk to the client."""
 
@@ -96,9 +97,10 @@ class WebSocketTransport(SessionTransport):
         service: RealtimeService,
         session_id: str,
         pcm: bytes,
-        assistant_output_id: str | None = None,
+        response_key: str | None = None,
+        assistant_output_ordinal: int | None = None,
     ) -> None:
-        await self.send_events(service.encode_audio_chunk(session_id, pcm, assistant_output_id))
+        await self.send_events(service.encode_audio_chunk(session_id, pcm, response_key, assistant_output_ordinal))
 
     def discard_pending_audio(self) -> None:
         # Unplayed audio lives client-side over WebSocket; truncation is the

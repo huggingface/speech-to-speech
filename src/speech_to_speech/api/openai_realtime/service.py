@@ -46,6 +46,7 @@ from speech_to_speech.api.openai_realtime.handlers import (
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.pipeline.events import (
+    AssistantResponseDoneEvent,
     AssistantTextEvent,
     AudioInputCompletedEvent,
     PartialTranscriptionEvent,
@@ -172,6 +173,8 @@ class ConnState(BaseModel):
     audio_buffer_has_data: bool = False
     audio_remainder: bytes = b""
     current_response_id: Optional[str] = None
+    current_response_key: Optional[str] = None
+    response_text_complete: bool = False
     current_item_id: Optional[str] = None
     content_index: int = 0
     input_content_index: int = 0
@@ -183,8 +186,9 @@ class ConnState(BaseModel):
     next_output_index: int = 0
     current_output_index: int | None = None
     current_output_kind: Literal["text", "tool_call"] | None = None
-    assistant_output_items: dict[str, tuple[str, int]] = Field(default_factory=dict)
+    assistant_output_items: dict[int, tuple[str, int]] = Field(default_factory=dict)
     completed_audio_output_indices: set[int] = Field(default_factory=set)
+    started_audio_output_indices: set[int] = Field(default_factory=set)
     # Each entry contains item_id, output_index, and the contiguous text parts
     # for one assistant message. Kept as plain internal data to avoid coupling
     # connection state to protocol event models.
@@ -331,23 +335,29 @@ class RealtimeService:
     def handle_audio_commit(self, conn_id: str) -> RealtimeErrorEvent | None:
         return self.audio.handle_audio_commit(conn_id)
 
-    def begin_audio_response(self, conn_id: str) -> tuple[str, str, list[ServerEvent]]:
-        return self.audio.begin_audio_response(conn_id)
+    def begin_audio_response(
+        self,
+        conn_id: str,
+        response_key: str | None = None,
+    ) -> tuple[str, str, list[ServerEvent]]:
+        return self.audio.begin_audio_response(conn_id, response_key)
 
     def begin_audio_output(
         self,
         conn_id: str,
-        assistant_output_id: str | None = None,
+        response_key: str | None = None,
+        assistant_output_ordinal: int | None = None,
     ) -> tuple[str, str, int, list[ServerEvent]]:
-        return self.audio.begin_audio_output(conn_id, assistant_output_id)
+        return self.audio.begin_audio_output(conn_id, response_key, assistant_output_ordinal)
 
     def encode_audio_chunk(
         self,
         conn_id: str,
         audio: bytes,
-        assistant_output_id: str | None = None,
+        response_key: str | None = None,
+        assistant_output_ordinal: int | None = None,
     ) -> list[ServerEvent]:
-        return self.audio.encode_audio_chunk(conn_id, audio, assistant_output_id)
+        return self.audio.encode_audio_chunk(conn_id, audio, response_key, assistant_output_ordinal)
 
     def handle_response_create(self, conn_id: str, event: ResponseCreateEvent) -> ServerEvent | None:
         return self.response.handle_response_create(conn_id, event)
@@ -360,8 +370,9 @@ class RealtimeService:
         conn_id: str,
         status: _ResponseStatus = "completed",
         reason: _StatusReason | None = None,
+        response_key: str | None = None,
     ) -> list[ServerEvent]:
-        return self.response.finish_response(conn_id, status, reason)
+        return self.response.finish_response(conn_id, status, reason, response_key=response_key)
 
     def handle_conversation_item_create(self, conn_id: str, event: ConversationItemCreateEvent) -> list[ServerEvent]:
         return self.conversation.handle_conversation_item_create(conn_id, event)
@@ -380,7 +391,10 @@ class RealtimeService:
         return self._dispatch_pipeline_event(conn_id, event, wait_for_pending_reopen=False)
 
     def should_defer_pipeline_event(self, event: PipelineEvent) -> bool:
-        if self.speculative_turns is None or not isinstance(event, (AssistantTextEvent, TokenUsageEvent)):
+        if self.speculative_turns is None or not isinstance(
+            event,
+            (AssistantTextEvent, AssistantResponseDoneEvent, TokenUsageEvent),
+        ):
             return False
         return self.speculative_turns.has_pending_reopen_or_grace(
             getattr(event, "turn_id", None),
@@ -413,6 +427,8 @@ class RealtimeService:
                 event,
                 wait_for_pending_reopen=wait_for_pending_reopen,
             )
+        if isinstance(event, AssistantResponseDoneEvent):
+            return self.response.on_assistant_response_done(conn_id, event)
         handler = self._pipeline_dispatch.get(type(event))
         if handler is None:
             logger.debug("Unhandled pipeline event type: %s", type(event).__name__)
@@ -429,13 +445,14 @@ class RealtimeService:
                 TranscriptionCompletedEvent,
                 AudioInputCompletedEvent,
                 AssistantTextEvent,
+                AssistantResponseDoneEvent,
                 TokenUsageEvent,
             ),
         ):
             return False
         turn_id = getattr(event, "turn_id", None)
         turn_revision = getattr(event, "turn_revision", None)
-        if isinstance(event, (AssistantTextEvent, TokenUsageEvent)):
+        if isinstance(event, (AssistantTextEvent, AssistantResponseDoneEvent, TokenUsageEvent)):
             is_latest: bool | None
             if wait_for_pending_reopen:
                 is_latest = self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
@@ -577,10 +594,10 @@ class RealtimeService:
             return []
         events: list[ServerEvent] = []
         if st.response_pending:
-            _, _, created_events = self.audio.begin_audio_response(conn_id)
+            _, _, created_events = self.audio.begin_audio_response(conn_id, event.response_key)
             events.extend(created_events)
         events.append(self.make_error(event.message, "response_failed"))
-        events.extend(self.response.finish_response(conn_id, status="failed"))
+        events.extend(self.response.finish_response(conn_id, status="failed", response_key=event.response_key))
         return events
 
     def get_usage(self) -> dict[str, Any]:

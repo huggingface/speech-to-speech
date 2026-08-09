@@ -102,6 +102,10 @@ class Chat:
         # is evicted -- or, with a compactor, summarized in the background.
         self.buffer: list[SupportedItem] = []
         self._pending_tool_calls: dict[str, RealtimeConversationItemFunctionCall] = {}
+        # Local models can emit text after a tool call in the same response.
+        # Those calls stay in their emitted buffer position, but serializers
+        # omit them until a function_call_output pairs the call.
+        self._ordered_pending_call_ids: set[str] = set()
         self._user_turn_count: int = 0
 
         # All state mutations and serializations go through _lock. Public methods
@@ -156,12 +160,22 @@ class Chat:
         if self._has_call_id_in_buffer(call_id):
             self._pending_tool_calls.pop(call_id, None)
             self._mark_call_completed(call_id, output_item.status)
-            self.buffer.append(output_item)
+            if call_id in self._ordered_pending_call_ids:
+                call_index = next(
+                    index
+                    for index, item in enumerate(self.buffer)
+                    if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id == call_id
+                )
+                self.buffer.insert(call_index + 1, output_item)
+                self._ordered_pending_call_ids.discard(call_id)
+            else:
+                self.buffer.append(output_item)
             return
 
         if call_id in self._pending_tool_calls:
             logger.info("Re-injecting evicted function_call for call_id=%s", call_id)
             fc = self._pending_tool_calls.pop(call_id)
+            self._ordered_pending_call_ids.discard(call_id)
             fc.status = "completed" if output_item.status is None else output_item.status
             self.buffer.append(fc)
             self.buffer.append(output_item)
@@ -240,6 +254,19 @@ class Chat:
 
             return item
 
+    def add_ordered_function_call(
+        self, item: RealtimeConversationItemFunctionCall
+    ) -> RealtimeConversationItemFunctionCall:
+        """Stage a local-model call at its emitted position until its output arrives."""
+        with self._lock:
+            item.id = _ensure_id(item.id, "fc")
+            item.call_id = _ensure_id(item.call_id, "call")
+            self.buffer.append(item)
+            self._pending_tool_calls[item.call_id] = item
+            self._ordered_pending_call_ids.add(item.call_id)
+            logger.debug("Added ordered function_call to chat (call_id=%s)", item.call_id)
+            return item
+
     def trim_if_needed(self, compactor: CompactFn | None = None) -> None:
         """Enforce the size limit after a generation completes. Fires when
         ``user_turn_count > size``.
@@ -313,6 +340,7 @@ class Chat:
             self.buffer = kept
             for call_id in call_ids:
                 self._pending_tool_calls.pop(call_id, None)
+                self._ordered_pending_call_ids.discard(call_id)
             self._user_turn_count = sum(isinstance(item, RealtimeConversationItemUserMessage) for item in self.buffer)
             logger.debug("Rolled back failed generation for user message %s", user_message_id)
 
@@ -405,6 +433,8 @@ class Chat:
                         )
                     )
             elif isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
+                if item.call_id in self._pending_tool_calls:
+                    continue
                 assert item.call_id is not None and item.call_id != ""
                 function_call = ResponseFunctionToolCallParam(
                     arguments=item.arguments,
@@ -457,6 +487,8 @@ class Chat:
                     text = " ".join(p.text for p in item.content if p.text)
                     messages.append(TransformersAssistantMessage(content=text))
                 elif isinstance(item, RealtimeConversationItemFunctionCall):
+                    if item.call_id in self._pending_tool_calls:
+                        continue
                     assert item.call_id is not None and item.call_id != ""
                     args: Any = item.arguments
                     try:
@@ -499,6 +531,7 @@ class Chat:
             clone.init_chat_message = self.init_chat_message
             clone.buffer = list(self.buffer)
             clone._pending_tool_calls = dict(self._pending_tool_calls)
+            clone._ordered_pending_call_ids = set(self._ordered_pending_call_ids)
             clone._user_turn_count = self._user_turn_count
             return clone
 
@@ -510,6 +543,7 @@ class Chat:
             self.buffer = []
             self.init_chat_message = None
             self._pending_tool_calls = {}
+            self._ordered_pending_call_ids = set()
             self._user_turn_count = 0
 
     def close(self) -> None:

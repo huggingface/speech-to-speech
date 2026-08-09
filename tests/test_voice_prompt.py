@@ -1,7 +1,24 @@
+from types import MethodType, SimpleNamespace
+
+from openai.types.realtime.conversation_item import (
+    RealtimeConversationItemAssistantMessage,
+    RealtimeConversationItemFunctionCall,
+    RealtimeConversationItemFunctionCallOutput,
+)
+from openai.types.responses import ResponseFunctionToolCall
+
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.LLM.language_model import LanguageModelHandler, StreamContext
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
 from speech_to_speech.LLM.voice_prompt import VOICE_SYSTEM_PROMPT, build_voice_system_prompt
+from speech_to_speech.pipeline.messages import (
+    AssistantTextPart,
+    AssistantToolCallPart,
+    GenerateResponseRequest,
+    LLMResponseChunk,
+)
 
 
 def test_voice_prompt_is_short_and_keeps_persona_in_session_prompt():
@@ -196,3 +213,112 @@ def test_local_tool_parser_preserves_interleaved_text_and_tool_calls(monkeypatch
     ]
     assert [tool.name for tool in tools] == ["dance", "camera"]
     assert remaining.strip() == "Last."
+
+
+def _local_handler_with_chunks(chunks, *, cancelled=False):
+    handler = object.__new__(LanguageModelHandler)
+    handler.cancel_scope = None
+    handler.speculative_turns = None
+    handler.enable_lang_prompt = False
+    handler.compactor = None
+    handler.user_role = "user"
+    handler.tokenizer = SimpleNamespace(encode=lambda _text: [])
+
+    def generate(_self, _chat, _language_code, _generation, ctx, _runtime_config, _response):
+        ctx.raw_generated_text = "raw model output with <code>tool blocks</code>"
+        ctx.generated_text = ctx.raw_generated_text
+        yield from chunks
+        ctx.cancelled = cancelled
+
+    handler._generate = MethodType(generate, handler)
+    return handler
+
+
+def test_local_history_commits_text_and_tools_in_emitted_order():
+    first_tool = ResponseFunctionToolCall(
+        type="function_call",
+        id="fc_first",
+        call_id="call_first",
+        name="first",
+        arguments="{}",
+    )
+    second_tool = ResponseFunctionToolCall(
+        type="function_call",
+        id="fc_second",
+        call_id="call_second",
+        name="second",
+        arguments="{}",
+    )
+    chunks = [
+        LLMResponseChunk(
+            parts=[
+                AssistantTextPart(text="before"),
+                AssistantToolCallPart(tool=first_tool),
+                AssistantTextPart(text="between"),
+                AssistantToolCallPart(tool=second_tool),
+                AssistantTextPart(text="after"),
+            ]
+        )
+    ]
+    handler = _local_handler_with_chunks(chunks)
+    chat = Chat(5)
+    chat.add_item(make_user_message("go"))
+
+    list(handler.process(GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat))))
+
+    output = chat.buffer[1:]
+    assert [item.type for item in output] == ["message", "function_call", "message", "function_call", "message"]
+    assert [item.content[0].text for item in output if isinstance(item, RealtimeConversationItemAssistantMessage)] == [
+        "before",
+        "between",
+        "after",
+    ]
+    assert [item.name for item in output if isinstance(item, RealtimeConversationItemFunctionCall)] == [
+        "first",
+        "second",
+    ]
+    assert "<code>" not in str(output)
+
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id="call_first",
+            output="first result",
+        )
+    )
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id="call_second",
+            output="second result",
+        )
+    )
+
+    assert [item.type for item in chat.buffer[1:]] == [
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+    ]
+    assert [item["type"] for item in chat.to_responses_api_chat()[1:]] == [
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+    ]
+
+
+def test_cancelled_local_generation_does_not_write_partial_history():
+    handler = _local_handler_with_chunks([LLMResponseChunk(text="partial")], cancelled=True)
+    chat = Chat(5)
+    user = chat.add_item(make_user_message("go"))
+
+    list(handler.process(GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat))))
+
+    assert chat.buffer == [user]

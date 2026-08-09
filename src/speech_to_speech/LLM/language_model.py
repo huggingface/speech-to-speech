@@ -49,6 +49,8 @@ from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
 from speech_to_speech.pipeline.messages import (
+    AssistantOutputPart,
+    AssistantTextPart,
     AssistantToolCallPart,
     EndOfResponse,
     GenerateResponseRequest,
@@ -136,6 +138,7 @@ class StreamContext(BaseModel):
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
     cancel_generation: int | None = None
+    output_parts: list[AssistantOutputPart] = Field(default_factory=list)
 
     @property
     def interrupted(self) -> bool:
@@ -403,6 +406,38 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         return chunks, tools, printable_text
 
+    @staticmethod
+    def _commit_ordered_output(chat: Chat, parts: list[AssistantOutputPart], *, wants_audio: bool) -> None:
+        """Persist exactly the ordered text/tool stream emitted to the client."""
+        text_parts: list[str] = []
+
+        def flush_text() -> None:
+            if not text_parts:
+                return
+            separator = " " if wants_audio else ""
+            text = separator.join(part for part in text_parts if part)
+            if text:
+                chat.add_item(make_assistant_message(text))
+            text_parts.clear()
+
+        for part in parts:
+            if isinstance(part, AssistantTextPart):
+                text_parts.append(part.text)
+                continue
+            flush_text()
+            tool = part.tool
+            chat.add_ordered_function_call(
+                RealtimeConversationItemFunctionCall(
+                    type="function_call",
+                    id=tool.id,
+                    call_id=tool.call_id,
+                    name=tool.name,
+                    arguments=tool.arguments,
+                    status=tool.status,
+                )
+            )
+        flush_text()
+
     def _check_stop(self, gen: int | None, ctx: StreamContext) -> bool:
         """Check whether generation should be aborted and mark the reason on *ctx*."""
         if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
@@ -499,7 +534,11 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         ctx.speech_stopped_at_s = request.speech_stopped_at_s
         if not self._turn_is_latest(ctx.turn_id, ctx.turn_revision):
             logger.info("Skipping stale LLM request for turn=%s rev=%s", ctx.turn_id, ctx.turn_revision)
-            yield EndOfResponse(turn_id=ctx.turn_id, turn_revision=ctx.turn_revision)
+            yield EndOfResponse(
+                turn_id=ctx.turn_id,
+                turn_revision=ctx.turn_revision,
+                response_key=request.response_key,
+            )
             return
 
         runtime_config = request.runtime_config
@@ -511,7 +550,12 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 active_chat = build_active_chat(original_chat, response)
             except ChatItemError as exc:
                 logger.info("Out-of-band response rejected: %s", exc)
-                yield EndOfResponse(turn_id=ctx.turn_id, turn_revision=ctx.turn_revision, error=str(exc))
+                yield EndOfResponse(
+                    turn_id=ctx.turn_id,
+                    turn_revision=ctx.turn_revision,
+                    response_key=request.response_key,
+                    error=str(exc),
+                )
                 return
         else:
             active_chat = original_chat.copy()
@@ -541,7 +585,10 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         consumed_image_ids = active_chat.image_message_ids()
 
         try:
-            yield from self._generate(active_chat, language_code, gen, ctx, runtime_config, response)
+            for chunk in self._generate(active_chat, language_code, gen, ctx, runtime_config, response):
+                chunk.response_key = request.response_key
+                ctx.output_parts.extend(part.model_copy(deep=True) for part in chunk.parts)
+                yield chunk
 
             if ctx.stopped:
                 return
@@ -550,28 +597,9 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             # Out-of-band responses still emit output, but never write back to the default
             # conversation (their context was a throwaway chat).
             commit_allowed = turn_output_allowed and not out_of_band
-            if commit_allowed:
-                original_chat.add_item(make_assistant_message(ctx.generated_text))
-            if commit_allowed and ctx.tools:
-                for t in ctx.tools:
-                    original_chat.add_item(
-                        RealtimeConversationItemFunctionCall(
-                            type="function_call",
-                            id=t.id,
-                            call_id=t.call_id,
-                            name=t.name,
-                            arguments=t.arguments,
-                            status=t.status,
-                        )
-                    )
-            if commit_allowed:
-                original_chat.strip_images(consumed_image_ids)
-                original_chat.trim_if_needed(self.compactor)
-            logger.debug("Clean text: %s", ctx.generated_text)
-            logger.info(f"Tools: {ctx.tools}")
-
+            trailing_chunk: LLMResponseChunk | None = None
             if turn_output_allowed and ctx.printable_text.strip():
-                yield LLMResponseChunk(
+                trailing_chunk = LLMResponseChunk(
                     text=ctx.printable_text.strip(),
                     language_code=language_code,
                     runtime_config=runtime_config,
@@ -580,7 +608,22 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     turn_revision=ctx.turn_revision,
                     speech_stopped_at_s=ctx.speech_stopped_at_s,
                     cancel_generation=ctx.cancel_generation,
+                    response_key=request.response_key,
                 )
+                ctx.output_parts.extend(part.model_copy(deep=True) for part in trailing_chunk.parts)
+            if commit_allowed:
+                self._commit_ordered_output(
+                    original_chat,
+                    ctx.output_parts,
+                    wants_audio=response_wants_audio(response),
+                )
+                original_chat.strip_images(consumed_image_ids)
+                original_chat.trim_if_needed(self.compactor)
+            logger.debug("Clean text: %s", ctx.generated_text)
+            logger.info(f"Tools: {ctx.tools}")
+
+            if trailing_chunk is not None:
+                yield trailing_chunk
 
             output_tokens = len(self.tokenizer.encode(ctx.raw_generated_text)) if ctx.raw_generated_text else 0
             if turn_output_allowed and (ctx.input_tokens or output_tokens):
@@ -589,6 +632,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     output_tokens=output_tokens,
                     turn_id=ctx.turn_id,
                     turn_revision=ctx.turn_revision,
+                    response_key=request.response_key,
                 )
         except Exception as exc:
             # Any generation failure must still terminate the response. Without this
@@ -599,6 +643,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 turn_id=ctx.turn_id,
                 turn_revision=ctx.turn_revision,
                 cancel_generation=ctx.cancel_generation,
+                response_key=request.response_key,
                 error=f"Language model generation failed: {exc}",
             )
             return
@@ -606,6 +651,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             turn_id=ctx.turn_id,
             turn_revision=ctx.turn_revision,
             cancel_generation=ctx.cancel_generation,
+            response_key=request.response_key,
         )
 
     def on_session_end(self) -> None:

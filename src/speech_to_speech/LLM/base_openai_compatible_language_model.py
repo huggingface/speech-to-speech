@@ -106,6 +106,7 @@ class _Turn(BaseModel):
     turn_revision: int | None
     speech_stopped_at_s: float | None
     wants_audio: bool
+    response_key: str
 
 
 class _GenState(BaseModel):
@@ -374,6 +375,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             turn_revision=turn.turn_revision,
             speech_stopped_at_s=turn.speech_stopped_at_s,
             cancel_generation=turn.gen,
+            response_key=turn.response_key,
         )
 
     def _record_tool_call(self, state: _GenState, turn: _Turn, item: ResponseFunctionToolCall) -> Iterator[LLMOut]:
@@ -621,6 +623,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         turn_revision=turn.turn_revision,
                         speech_stopped_at_s=turn.speech_stopped_at_s,
                         cancel_generation=turn.gen,
+                        response_key=turn.response_key,
                     )
             except Exception as exc:
                 # Any other generation failure must still terminate the response: record
@@ -665,11 +668,13 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     output_tokens=state.output_tokens,
                     turn_id=turn.turn_id,
                     turn_revision=turn.turn_revision,
+                    response_key=turn.response_key,
                 )
             yield EndOfResponse(
                 turn_id=turn.turn_id,
                 turn_revision=turn.turn_revision,
                 cancel_generation=turn.gen,
+                response_key=turn.response_key,
                 error=error_message,
             )
             return history_committed
@@ -691,7 +696,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         speech_stopped_at_s = request.speech_stopped_at_s
         if not self._turn_is_latest(turn_id, turn_revision):
             logger.info("Skipping stale LLM request for turn=%s rev=%s", turn_id, turn_revision)
-            yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision)
+            yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision, response_key=request.response_key)
             return
 
         original_chat = runtime_config.chat
@@ -700,7 +705,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 active_chat = build_active_chat(original_chat, response)
             except ChatItemError as exc:
                 logger.info("Out-of-band response rejected: %s", exc)
-                yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision, error=str(exc))
+                yield EndOfResponse(
+                    turn_id=turn_id,
+                    turn_revision=turn_revision,
+                    response_key=request.response_key,
+                    error=str(exc),
+                )
                 return
         else:
             active_chat = original_chat.copy()
@@ -750,6 +760,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             turn_revision=turn_revision,
             speech_stopped_at_s=speech_stopped_at_s,
             wants_audio=wants_audio,
+            response_key=request.response_key,
         )
         yield from self._generate(
             active_chat,
@@ -776,7 +787,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         speech_stopped_at_s = request.speech_stopped_at_s
         if not self._turn_is_latest(turn_id, turn_revision):
             logger.info("Skipping stale LLM request for turn=%s rev=%s", turn_id, turn_revision)
-            yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision)
+            yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision, response_key=request.response_key)
             return
 
         original_chat = runtime_config.chat
@@ -785,7 +796,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 active_chat = build_active_chat(original_chat, response)
             except ChatItemError as exc:
                 logger.info("Out-of-band response rejected: %s", exc)
-                yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision, error=str(exc))
+                yield EndOfResponse(
+                    turn_id=turn_id,
+                    turn_revision=turn_revision,
+                    response_key=request.response_key,
+                    error=str(exc),
+                )
                 return
         else:
             active_chat = original_chat.copy()
@@ -819,6 +835,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             turn_revision=turn_revision,
             speech_stopped_at_s=speech_stopped_at_s,
             wants_audio=wants_audio,
+            response_key=request.response_key,
         )
         yield from self._generate(active_chat, original_chat, turn, optional_kwargs)
 

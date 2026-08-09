@@ -43,8 +43,17 @@ from speech_to_speech.api.openai_realtime.webrtc_session import (  # noqa: E402
     PipelineAudioTrack,
 )
 from speech_to_speech.pipeline.cancel_scope import CancelScope  # noqa: E402
-from speech_to_speech.pipeline.events import SpeechStartedEvent  # noqa: E402
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE  # noqa: E402
+from speech_to_speech.pipeline.events import (  # noqa: E402
+    AssistantResponseDoneEvent,
+    AssistantTextEvent,
+    SpeechStartedEvent,
+)
+from speech_to_speech.pipeline.messages import (  # noqa: E402
+    AUDIO_RESPONSE_DONE,
+    AssistantTextPart,
+    AssistantToolCallPart,
+    AudioOutput,
+)
 
 from .test_openai_client import _ServerEnv  # noqa: E402
 
@@ -85,7 +94,14 @@ class _FakeTransport(SessionTransport):
     async def send_events(self, events):
         self.sent.extend(e.model_dump() for e in events)
 
-    async def send_audio_chunk(self, service, session_id, pcm, assistant_output_id=None):
+    async def send_audio_chunk(
+        self,
+        service,
+        session_id,
+        pcm,
+        response_key=None,
+        assistant_output_ordinal=None,
+    ):
         raise AssertionError("dispatch tests never send audio")
 
     def discard_pending_audio(self):
@@ -378,7 +394,7 @@ class _DataChannelInbox:
 
 
 class TestWebRTCLoopback:
-    async def test_handshake_events_and_audio_roundtrip(self, server_env):
+    async def test_handshake_events_and_multi_output_audio_roundtrip(self, server_env):
         pc = RTCPeerConnection()
         try:
             dc = pc.createDataChannel("oai-events")
@@ -434,17 +450,59 @@ class TestWebRTCLoopback:
             chunk, _cfg = await asyncio.get_running_loop().run_in_executor(None, _wait_for_input_chunk)
             assert len(chunk) == CHUNK_SIZE_BYTES
 
-            # Outbound pipeline audio: PCM through output_queue reaches the
-            # client as RTP frames, and the done-sentinel closes the response
-            # over the data channel (response.created was sent implicitly).
-            server_env.output_queue.put(np.ones(4096, dtype=np.int16).tobytes())
-            server_env.output_queue.put(AUDIO_RESPONSE_DONE)
+            # Two assistant messages separated by a tool call keep distinct
+            # output identities over a real WebRTC media/data-channel pair.
+            response_key = "webrtc_response_1"
+            server_env.text_output_queue.put(
+                AssistantTextEvent(
+                    response_key=response_key,
+                    parts=[
+                        AssistantTextPart(text="before", ordinal=0),
+                        AssistantToolCallPart(
+                            tool={
+                                "type": "function_call",
+                                "call_id": "call_1",
+                                "name": "tool",
+                                "arguments": "{}",
+                            }
+                        ),
+                        AssistantTextPart(text="after", ordinal=1),
+                    ],
+                )
+            )
+            server_env.text_output_queue.put(AssistantResponseDoneEvent(response_key=response_key))
+            server_env.output_queue.put(
+                AudioOutput(
+                    audio=np.ones(2048, dtype=np.int16).tobytes(),
+                    response_key=response_key,
+                    assistant_output_ordinal=0,
+                )
+            )
+            server_env.output_queue.put(
+                AudioOutput(
+                    audio=np.ones(2048, dtype=np.int16).tobytes(),
+                    response_key=response_key,
+                    assistant_output_ordinal=1,
+                )
+            )
+            server_env.output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key))
 
             await inbox.wait_for("response.created", timeout=10.0)
-            audio_done = await inbox.wait_for("response.output_audio.done", timeout=10.0)
             done = await inbox.wait_for("response.done", timeout=10.0)
             assert done["response"]["status"] == "completed"
-            assert done["response"]["output"][audio_done["output_index"]]["id"] == audio_done["item_id"]
+            transcript_deltas = [
+                event for event in inbox.events if event["type"] == "response.output_audio_transcript.delta"
+            ]
+            audio_done = [event for event in inbox.events if event["type"] == "response.output_audio.done"]
+            assert [event["output_index"] for event in transcript_deltas] == [0, 2]
+            assert [event["output_index"] for event in audio_done] == [0, 2]
+            assert [item["type"] for item in done["response"]["output"]] == [
+                "message",
+                "function_call",
+                "message",
+            ]
+            for event in audio_done:
+                assert done["response"]["output"][event["output_index"]]["id"] == event["item_id"]
 
             await asyncio.wait_for(track_ready.wait(), timeout=10.0)
             assert received_frames[0].sample_rate == WEBRTC_SAMPLE_RATE

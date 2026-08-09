@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from time import perf_counter
 from typing import Annotated, Final, Literal, Optional, TypeAlias
+from uuid import uuid4
 
 import numpy as np
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
@@ -80,9 +81,9 @@ class AssistantTextPart(BaseModel):
 
     type: Literal["text"] = "text"
     text: str
-    # Internal identity shared with TTS audio produced for this contiguous
+    # Zero-based identity shared with TTS audio produced for this contiguous
     # assistant message. Excluded from serialized pipeline payloads.
-    output_id: str | None = Field(default=None, exclude=True, repr=False)
+    ordinal: int | None = Field(default=None, exclude=True, repr=False)
 
 
 class AssistantToolCallPart(BaseModel):
@@ -117,6 +118,7 @@ class LLMResponseChunk(PipelineMessage):
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
     cancel_generation: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
 
     @model_validator(mode="after")
     def _normalize_ordered_parts(self) -> "LLMResponseChunk":
@@ -138,6 +140,7 @@ class TokenUsage(PipelineMessage):
     output_tokens: int
     turn_id: str | None = None
     turn_revision: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
 
 
 class EndOfResponse(PipelineMessage):
@@ -153,6 +156,7 @@ class EndOfResponse(PipelineMessage):
     turn_id: str | None = None
     turn_revision: int | None = None
     cancel_generation: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
     error: str | None = None
 
 
@@ -171,7 +175,8 @@ class TTSInput(PipelineMessage):
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
     cancel_generation: int | None = None
-    assistant_output_id: str | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
+    assistant_output_ordinal: int | None = None
 
 
 class AudioOutput(PipelineMessage):
@@ -180,7 +185,8 @@ class AudioOutput(PipelineMessage):
     tag: Literal["audio_output"] = "audio_output"
     audio: bytes | np.ndarray
     cancel_generation: int | None = None
-    assistant_output_id: str | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
+    assistant_output_ordinal: int | None = None
 
 
 # ── Realtime service → LLM ────────────────────────────────────────────
@@ -198,6 +204,7 @@ class GenerateResponseRequest(PipelineMessage):
     """
 
     tag: Literal["generate_response"] = "generate_response"
+    response_key: str = Field(default_factory=lambda: uuid4().hex, exclude=True, repr=False)
     runtime_config: RuntimeConfig
     response: RealtimeResponseCreateParams | None = None
     audio: np.ndarray | None = None

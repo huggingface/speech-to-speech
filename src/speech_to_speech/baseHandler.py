@@ -76,15 +76,17 @@ class BaseHandler(Generic[InT, OutT]):
 
     def output_for_queue(self, output: OutT, source_input: InT) -> OutT | AudioOutput:
         cancel_generation = getattr(source_input, "cancel_generation", None)
-        assistant_output_id = getattr(source_input, "assistant_output_id", None)
-        if (cancel_generation is not None or assistant_output_id is not None) and (
+        response_key = getattr(source_input, "response_key", None)
+        assistant_output_ordinal = getattr(source_input, "assistant_output_ordinal", None)
+        if (cancel_generation is not None or response_key is not None or assistant_output_ordinal is not None) and (
             isinstance(output, bytes) or hasattr(output, "tobytes")
         ):
             audio = cast(bytes | np.ndarray, output)
             return AudioOutput(
                 audio=audio,
                 cancel_generation=cancel_generation,
-                assistant_output_id=assistant_output_id,
+                response_key=response_key,
+                assistant_output_ordinal=assistant_output_ordinal,
             )
         return output
 

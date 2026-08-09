@@ -101,6 +101,7 @@ class AssistantTextEvent(PipelineEvent):
     # send loop discard stale assistant text by the same generation-aware rule as
     # audio, instead of blanket-dropping while cancel_scope.discarding is set.
     cancel_generation: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
 
     @model_validator(mode="after")
     def _normalize_ordered_parts(self) -> "AssistantTextEvent":
@@ -120,6 +121,17 @@ class TokenUsageEvent(PipelineEvent):
     output_tokens: int = 0
     turn_id: str | None = None
     turn_revision: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
+
+
+class AssistantResponseDoneEvent(PipelineEvent):
+    """Marks the end of ordered assistant output for one response."""
+
+    type: Literal["assistant_response_done"] = "assistant_response_done"
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
+    turn_id: str | None = None
+    turn_revision: int | None = None
+    cancel_generation: int | None = None
 
 
 class ResponseFailedEvent(PipelineEvent):
@@ -133,3 +145,4 @@ class ResponseFailedEvent(PipelineEvent):
     message: str = ""
     turn_id: str | None = None
     turn_revision: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)

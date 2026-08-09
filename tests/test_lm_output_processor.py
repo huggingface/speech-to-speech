@@ -131,13 +131,12 @@ def test_ordered_parts_reach_clients_and_only_text_reaches_tts():
     )
 
     assert [output.text for output in outputs] == ["between", "after"]
-    assert outputs[0].assistant_output_id
-    assert outputs[1].assistant_output_id
-    assert outputs[0].assistant_output_id != outputs[1].assistant_output_id
+    assert outputs[0].assistant_output_ordinal == 0
+    assert outputs[1].assistant_output_ordinal == 1
     event = processor.text_output_queue.get_nowait()
     assert [part.type for part in event.parts] == ["tool_call", "text", "tool_call", "text"]
     text_parts = [part for part in event.parts if isinstance(part, AssistantTextPart)]
-    assert [part.output_id for part in text_parts] == [output.assistant_output_id for output in outputs]
+    assert [part.ordinal for part in text_parts] == [output.assistant_output_ordinal for output in outputs]
     assert event.text == "betweenafter"
     assert [tool.name for tool in event.tools] == ["first", "second"]
 
@@ -164,20 +163,21 @@ def test_consecutive_text_chunks_share_output_identity_until_a_tool_call():
     )
     third = list(processor.process(LLMResponseChunk(text="third", turn_id="turn_1", turn_revision=0)))[0]
 
-    assert first.assistant_output_id == second.assistant_output_id
-    assert third.assistant_output_id != first.assistant_output_id
+    assert first.assistant_output_ordinal == second.assistant_output_ordinal == 0
+    assert third.assistant_output_ordinal == 1
 
 
 def test_tts_audio_keeps_assistant_output_identity_on_the_audio_queue():
     handler = object.__new__(BaseHandler)
     queued = handler.output_for_queue(
         b"audio",
-        TTSInput(text="hello", assistant_output_id="output_1"),
+        TTSInput(text="hello", response_key="response_1", assistant_output_ordinal=2),
     )
 
     assert isinstance(queued, AudioOutput)
     assert queued.audio == b"audio"
-    assert queued.assistant_output_id == "output_1"
+    assert queued.response_key == "response_1"
+    assert queued.assistant_output_ordinal == 2
 
 
 def test_empty_modalities_is_forwarded_to_tts():

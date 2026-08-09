@@ -25,7 +25,7 @@ from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
 from speech_to_speech.LLM.chat import ChatItemError
-from speech_to_speech.pipeline.events import AssistantTextEvent
+from speech_to_speech.pipeline.events import AssistantResponseDoneEvent, AssistantTextEvent
 from speech_to_speech.pipeline.messages import AssistantTextPart, AssistantToolCallPart, GenerateResponseRequest
 from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
 
@@ -40,13 +40,23 @@ class ResponseHandler(RealtimeBaseHandler):
 
     # ── ID / state helpers ────────────────────────
 
-    def _ensure_response(self, conn_id: str) -> tuple[str, str]:
+    def _ensure_response(self, conn_id: str, response_key: str | None = None) -> tuple[str, str]:
         """Ensure a response and output item exist, creating them if needed."""
         st = self._state(conn_id)
+        if (
+            st.current_response_id is not None
+            and response_key is not None
+            and st.current_response_key is not None
+            and response_key != st.current_response_key
+        ):
+            raise RuntimeError("Cannot attach output to a different active response")
         if st.current_response_id is None:
             st.current_response_id = _generate_id("resp")
+            st.current_response_key = response_key
             self._start_item(conn_id)
             st.in_response = True
+        elif st.current_response_key is None:
+            st.current_response_key = response_key
         st.response_pending = False
         return st.current_response_id, self._current_item_id(conn_id)
 
@@ -70,6 +80,8 @@ class ResponseHandler(RealtimeBaseHandler):
         )
         st.response_usage.reset()
         st.current_response_id = None
+        st.current_response_key = None
+        st.response_text_complete = False
         st.current_item_id = None
         st.content_index = 0
         st.in_response = False
@@ -82,6 +94,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_output_kind = None
         st.assistant_output_items = {}
         st.completed_audio_output_indices = set()
+        st.started_audio_output_indices = set()
         st.pending_text_outputs = []
         st.pending_function_calls = {}
 
@@ -101,13 +114,13 @@ class ResponseHandler(RealtimeBaseHandler):
         self,
         conn_id: str,
         item_id: str,
-        assistant_output_id: str | None = None,
+        assistant_output_ordinal: int | None = None,
     ) -> tuple[str, int]:
         """Reserve the assistant item used by the outbound audio stream."""
         st = self._state(conn_id)
         target: tuple[str, int] | None = None
-        if assistant_output_id is not None:
-            target = st.assistant_output_items.get(assistant_output_id)
+        if assistant_output_ordinal is not None:
+            target = st.assistant_output_items.get(assistant_output_ordinal)
             if target is None:
                 output_index, output_item_id = self._output_part_context(
                     conn_id,
@@ -116,7 +129,7 @@ class ResponseHandler(RealtimeBaseHandler):
                 )
                 st.pending_text_outputs.append({"item_id": output_item_id, "output_index": output_index, "parts": []})
                 target = (output_item_id, output_index)
-                st.assistant_output_items[assistant_output_id] = target
+                st.assistant_output_items[assistant_output_ordinal] = target
         elif st.pending_assistant_item_id is not None and st.pending_assistant_output_index is not None:
             return st.pending_assistant_item_id, st.pending_assistant_output_index
 
@@ -294,28 +307,27 @@ class ResponseHandler(RealtimeBaseHandler):
                 except ChatItemError as exc:
                     return self.make_error(message=str(exc), _type="invalid_input_item")
 
-        st.in_response = True
-        st.response_pending = False
-
-        st.current_response_params = event.response
-        st.current_response_id = _generate_id("resp")
-        self._start_item(conn_id)
-
         cfg = st.runtime_config
         queue = self._queue(conn_id)
+        request = GenerateResponseRequest(
+            runtime_config=cfg,
+            response=event.response,
+            turn_id=None if out_of_band else st.speculative_user_turn_id,
+            turn_revision=None if out_of_band else st.speculative_user_turn_revision,
+            speech_stopped_at_s=None if out_of_band else st.speculative_user_speech_stopped_at_s,
+        )
+        st.in_response = True
+        st.response_pending = False
+        st.current_response_params = event.response
+        st.current_response_id = _generate_id("resp")
+        st.current_response_key = request.response_key
+        self._start_item(conn_id)
+
         if queue:
             # Out-of-band responses carry no turn identity: a null turn_id makes every
             # speculative-turn staleness gate treat them as always-latest, so a new user
             # turn mid-generation can never silently drop their output.
-            queue.put(
-                GenerateResponseRequest(
-                    runtime_config=cfg,
-                    response=event.response,
-                    turn_id=None if out_of_band else st.speculative_user_turn_id,
-                    turn_revision=None if out_of_band else st.speculative_user_turn_revision,
-                    speech_stopped_at_s=None if out_of_band else st.speculative_user_speech_stopped_at_s,
-                )
-            )
+            queue.put(request)
         logger.debug("response.create received, LLM generation triggered")
         return ResponseCreatedEvent(
             type="response.created",
@@ -337,6 +349,8 @@ class ResponseHandler(RealtimeBaseHandler):
         conn_id: str,
         status: _ResponseStatus = "completed",
         reason: _StatusReason | None = None,
+        *,
+        response_key: str | None = None,
     ) -> list[ServerEvent]:
         """Close the current response (audio/text done + response done).
 
@@ -347,6 +361,8 @@ class ResponseHandler(RealtimeBaseHandler):
         """
         st = self._state(conn_id)
         events: list[ServerEvent] = []
+        if response_key is not None and st.current_response_key not in (None, response_key):
+            return events
         if st.in_response:
             resp_id, item_id = self._ensure_response(conn_id)
             wants_audio = response_wants_audio(st.current_response_params)
@@ -355,7 +371,10 @@ class ResponseHandler(RealtimeBaseHandler):
                 if st.pending_text_outputs:
                     for pending in st.pending_text_outputs:
                         output_index = int(pending["output_index"])
-                        if output_index in st.completed_audio_output_indices:
+                        if (
+                            output_index in st.completed_audio_output_indices
+                            or output_index not in st.started_audio_output_indices
+                        ):
                             continue
                         events.append(
                             ResponseAudioDoneEvent(
@@ -367,7 +386,7 @@ class ResponseHandler(RealtimeBaseHandler):
                                 response_id=resp_id,
                             )
                         )
-                else:
+                elif st.pending_assistant_output_index in st.started_audio_output_indices:
                     events.append(
                         ResponseAudioDoneEvent(
                             type="response.output_audio.done",
@@ -452,18 +471,35 @@ class ResponseHandler(RealtimeBaseHandler):
                 return []
         st = self._state(conn_id)
         events: list[ServerEvent] = []
-        resp_id, _ = self._ensure_response(conn_id)
+        meaningful_parts = [
+            part
+            for part in event.parts
+            if isinstance(part, AssistantToolCallPart)
+            or (isinstance(part, AssistantTextPart) and bool(part.text.strip()))
+        ]
+        if not meaningful_parts:
+            return events
+        response_was_missing = st.current_response_id is None
+        resp_id, _ = self._ensure_response(conn_id, event.response_key)
+        if response_was_missing:
+            events.append(
+                ResponseCreatedEvent(
+                    type="response.created",
+                    event_id=self._next_event_id(),
+                    response=self._build_response(conn_id, "in_progress"),
+                )
+            )
         wants_audio = response_wants_audio(st.current_response_params)
-        for part in event.parts:
+        for part in meaningful_parts:
             if isinstance(part, AssistantTextPart):
                 text = part.text.strip() if wants_audio else part.text
                 if not text:
                     continue
                 pending = None
-                mapped_output = st.assistant_output_items.get(part.output_id) if part.output_id is not None else None
+                mapped_output = st.assistant_output_items.get(part.ordinal) if part.ordinal is not None else None
                 if (
                     mapped_output is None
-                    and part.output_id is None
+                    and part.ordinal is None
                     and wants_audio
                     and st.pending_assistant_item_id is not None
                     and st.pending_assistant_output_index is not None
@@ -494,8 +530,8 @@ class ResponseHandler(RealtimeBaseHandler):
                     else:
                         st.pending_text_outputs.append({"item_id": item_id, "output_index": output_idx, "parts": []})
                         pending = st.pending_text_outputs[-1]
-                if part.output_id is not None:
-                    st.assistant_output_items[part.output_id] = (item_id, output_idx)
+                if part.ordinal is not None:
+                    st.assistant_output_items[part.ordinal] = (item_id, output_idx)
                 assert pending is not None
                 parts = pending["parts"]
                 assert isinstance(parts, list)
@@ -566,3 +602,23 @@ class ResponseHandler(RealtimeBaseHandler):
                 )
                 st.last_item_id = function_item_id
         return events
+
+    def on_assistant_response_done(
+        self,
+        conn_id: str,
+        event: AssistantResponseDoneEvent,
+    ) -> list[ServerEvent]:
+        """Record that all ordered text/tool output for one response was emitted."""
+        st = self._state(conn_id)
+        response_was_missing = st.current_response_id is None
+        self._ensure_response(conn_id, event.response_key)
+        st.response_text_complete = True
+        if not response_was_missing:
+            return []
+        return [
+            ResponseCreatedEvent(
+                type="response.created",
+                event_id=self._next_event_id(),
+                response=self._build_response(conn_id, "in_progress"),
+            )
+        ]
