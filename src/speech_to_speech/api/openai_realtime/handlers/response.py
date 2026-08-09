@@ -90,9 +90,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_item_id = None
         st.content_index = 0
         st.in_response = False
-        if completed_response_key is not None:
-            st.pending_response_keys.discard(completed_response_key)
-        st.response_pending = bool(st.pending_response_keys)
+        st.close_response_key(completed_response_key)
         st.current_response_params = None
         st.pending_assistant_item_id = None
         st.pending_assistant_output_index = None
@@ -359,7 +357,7 @@ class ResponseHandler(RealtimeBaseHandler):
     def handle_response_cancel(self, conn_id: str) -> list[ServerEvent]:
         """Cancel the in-progress response and re-enable listening."""
         events = self.finish_response(conn_id, status="cancelled", reason="client_cancelled")
-        self._state(conn_id).clear_pending_response()
+        self._state(conn_id).close_pending_responses()
         should_listen = self._should_listen(conn_id)
         if should_listen:
             should_listen.set()

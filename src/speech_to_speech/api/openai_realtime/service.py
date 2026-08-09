@@ -171,6 +171,7 @@ class ConnState(BaseModel):
     in_response: bool = False
     response_pending: bool = False
     pending_response_keys: set[str] = Field(default_factory=set)
+    closed_response_keys: dict[str, None] = Field(default_factory=dict)
     audio_buffer_has_data: bool = False
     audio_remainder: bytes = b""
     current_response_id: Optional[str] = None
@@ -217,6 +218,7 @@ class ConnState(BaseModel):
 
     def mark_response_pending(self, response_key: str) -> None:
         """Track an implicit response from queueing until its first output."""
+        self.closed_response_keys.pop(response_key, None)
         self.pending_response_keys.add(response_key)
         self.response_pending = True
 
@@ -226,6 +228,24 @@ class ConnState(BaseModel):
             self.pending_response_keys.clear()
         else:
             self.pending_response_keys.discard(response_key)
+        self.response_pending = bool(self.pending_response_keys)
+
+    def close_response_key(self, response_key: str | None) -> None:
+        """Tombstone a finished key so output arriving after cancellation stays stale."""
+        if response_key is None:
+            self.response_pending = bool(self.pending_response_keys)
+            return
+        self.pending_response_keys.discard(response_key)
+        self.pending_token_usage.pop(response_key, None)
+        self.closed_response_keys[response_key] = None
+        while len(self.closed_response_keys) > 128:
+            self.closed_response_keys.pop(next(iter(self.closed_response_keys)))
+        self.response_pending = bool(self.pending_response_keys)
+
+    def close_pending_responses(self) -> None:
+        """Tombstone every queued response during an interruption or explicit cancel."""
+        for response_key in tuple(self.pending_response_keys):
+            self.close_response_key(response_key)
         self.response_pending = bool(self.pending_response_keys)
 
 

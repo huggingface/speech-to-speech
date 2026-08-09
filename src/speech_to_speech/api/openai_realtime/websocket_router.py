@@ -162,6 +162,8 @@ def _response_key_is_obsolete(unit: PipelineUnit, session_id: str, response_key:
     if response_key is None:
         return False
     st = unit.service._state(session_id)
+    if response_key in st.closed_response_keys:
+        return True
     return (
         st.in_response
         and st.current_response_key not in (None, response_key)
@@ -173,8 +175,7 @@ def _discard_obsolete_response_key(unit: PipelineUnit, session_id: str, response
     if response_key is None:
         return
     st = unit.service._state(session_id)
-    st.clear_pending_response(response_key)
-    st.pending_token_usage.pop(response_key, None)
+    st.close_response_key(response_key)
     logger.debug("Pipeline %d: discarded obsolete response %s output", unit.index, response_key)
 
 
@@ -847,7 +848,7 @@ def create_app(
                         if was_in_response or was_response_pending:
                             if interrupt_enabled:
                                 unit.cancel_scope.cancel()
-                                unit.service._state(session_id).clear_pending_response()
+                                unit.service._state(session_id).close_pending_responses()
                                 _flush_queue(unit.output_queue, preserve=_keep_audio_sentinel)
                                 _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
                                 if unit.response_playing.is_set():
@@ -897,7 +898,7 @@ def create_app(
                                     if transport is not None and events:
                                         await transport.send_events(events)
                                 else:
-                                    st.clear_pending_response(response_key)
+                                    st.close_response_key(response_key)
                                 if cleaned_active_response:
                                     unit.response_playing.clear()
                                 if not (st.in_response or st.response_pending):
@@ -910,7 +911,7 @@ def create_app(
                             continue
                         if audio_generation is not None and unit.cancel_scope.is_stale(audio_generation):
                             if session_id:
-                                unit.service._state(session_id).clear_pending_response(response_key)
+                                unit.service._state(session_id).close_response_key(response_key)
                             unit.cancel_scope.response_done(audio_generation)
                             unit.should_listen.set()
                             logger.info(f"Pipeline {unit.index}: stale response complete, listening re-enabled")

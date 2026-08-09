@@ -776,6 +776,49 @@ class TestSendLoop:
                 assert text_output_queue.empty()
                 assert output_queue.empty()
 
+    def test_cancelled_response_key_cannot_reopen_while_idle(self, setup):
+        app, service, _, output_queue, text_output_queue, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+
+                ws.send_json({"type": "response.create"})
+                assert ws.receive_json()["type"] == "response.created"
+                request = service.text_prompt_queue.get_nowait()
+                ws.send_json({"type": "response.cancel"})
+                assert ws.receive_json()["type"] == "response.done"
+
+                # The cancelled request may only begin processing after cancel,
+                # so generation alone cannot distinguish this output as stale.
+                current_generation = cancel_scope.generation
+                text_output_queue.put(
+                    AssistantTextEvent(
+                        text="late response",
+                        response_key=request.response_key,
+                        cancel_generation=current_generation,
+                    )
+                )
+                text_output_queue.put(
+                    AssistantResponseDoneEvent(
+                        response_key=request.response_key,
+                        cancel_generation=current_generation,
+                    )
+                )
+                output_queue.put(
+                    AudioOutput(
+                        audio=AUDIO_RESPONSE_DONE,
+                        response_key=request.response_key,
+                        cancel_generation=current_generation,
+                    )
+                )
+                time.sleep(0.15)
+
+                state = service._state(list(service._conns.keys())[0])
+                assert not state.in_response
+                assert service.total_usage.responses_completed == 0
+                assert text_output_queue.empty()
+                assert output_queue.empty()
+
     def test_partial_failed_response_drains_audio_before_failed_done(self, setup):
         app, _, _, output_queue, text_output_queue, _, _, _, cancel_scope = setup
         with TestClient(app) as client:
