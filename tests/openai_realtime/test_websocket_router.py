@@ -1060,6 +1060,31 @@ class TestSendLoop:
                 assert [item["type"] for item in output] == ["message"]
                 assert output[0]["content"][0]["transcript"] == "before after"
 
+    def test_whitespace_only_audio_response_completes_without_output_identity(self, setup):
+        app, service, _, output_queue, text_output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                response_key = "response_whitespace"
+                service._state(conn_id).mark_response_pending(response_key)
+                text_output_queue.put(
+                    AssistantTextEvent(
+                        response_key=response_key,
+                        parts=[AssistantTextPart(text="   \n", ordinal=0)],
+                    )
+                )
+                text_output_queue.put(AssistantResponseDoneEvent(response_key=response_key))
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key))
+
+                messages = []
+                while not messages or messages[-1]["type"] != "response.done":
+                    messages.append(ws.receive_json())
+
+                assert [message["type"] for message in messages] == ["response.created", "response.done"]
+                assert messages[-1]["response"]["output"] == []
+                assert not service._state(conn_id).in_response
+
     def test_response_keys_keep_consecutive_silent_responses_separate(self, setup):
         app, service, _, output_queue, text_output_queue, *_ = setup
         with TestClient(app) as client:

@@ -182,6 +182,27 @@ def test_audio_chunk_is_forwarded_to_tts():
     assert outputs[0].text == "hello"
 
 
+def test_whitespace_only_audio_chunk_is_not_forwarded_to_tts():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    processor = _processor(tracker)
+
+    outputs = list(
+        processor.process(
+            LLMResponseChunk(
+                text="   \n",
+                turn_id="turn_1",
+                turn_revision=0,
+                response=RealtimeResponseCreateParams(output_modalities=["audio"]),
+            )
+        )
+    )
+
+    assert outputs == []
+    event = processor.text_output_queue.get_nowait()
+    assert event.text == "   \n"
+
+
 def test_ordered_parts_reach_clients_and_only_text_reaches_tts():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)

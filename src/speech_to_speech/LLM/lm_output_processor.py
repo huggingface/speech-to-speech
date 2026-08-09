@@ -204,7 +204,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
 
         if response_wants_audio(lm_output.response):
             for part in lm_output.parts:
-                if not isinstance(part, AssistantTextPart) or not part.text:
+                if not isinstance(part, AssistantTextPart) or not part.text.strip():
                     continue
                 logger.debug("Forwarding to TTS: '%s'", part.text)
                 yield TTSInput(
