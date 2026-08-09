@@ -303,14 +303,12 @@ class WebRTCSession(SessionTransport):
         session_id: str,
         pcm: bytes,
         response_key: str | None = None,
-        assistant_output_ordinal: int | None = None,
     ) -> None:
         # Bookkeeping events (response.created on the implicit VAD path) go
         # over the data channel; the audio itself goes on the media track.
         _resp_id, _item_id, _output_index, events = service.begin_audio_output(
             session_id,
             response_key,
-            assistant_output_ordinal,
         )
         if events:
             await self.send_events(events)

@@ -81,9 +81,6 @@ class AssistantTextPart(BaseModel):
 
     type: Literal["text"] = "text"
     text: str
-    # Zero-based identity shared with TTS audio produced for this contiguous
-    # assistant message. Excluded from serialized pipeline payloads.
-    ordinal: int | None = Field(default=None, exclude=True, repr=False)
 
 
 class AssistantToolCallPart(BaseModel):
@@ -178,7 +175,6 @@ class TTSInput(PipelineMessage):
     speech_stopped_at_s: float | None = None
     cancel_generation: int | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
-    assistant_output_ordinal: int | None = None
 
 
 class AudioOutput(PipelineMessage):
@@ -188,7 +184,6 @@ class AudioOutput(PipelineMessage):
     audio: bytes | np.ndarray
     cancel_generation: int | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
-    assistant_output_ordinal: int | None = None
     cleanup_only: bool = False
 
 

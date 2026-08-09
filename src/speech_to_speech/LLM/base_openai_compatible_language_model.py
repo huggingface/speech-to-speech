@@ -677,7 +677,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         recorded_items = original_chat.add_provisional_generation_items(
                             turn.response_key,
                             state.pending,
-                            commit=True,
+                            committed_item_ids=(
+                                {transactional_user_message_id} if transactional_user_message_id is not None else None
+                            ),
                         )
                         if recorded_items is None:
                             can_commit = False

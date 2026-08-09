@@ -409,7 +409,6 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         *,
         wants_audio: bool,
         response_key: str | None = None,
-        commit: bool = False,
         recorded_item_ids: set[str] | None = None,
         recorded_call_ids: set[str] | None = None,
     ) -> bool:
@@ -445,7 +444,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         flush_text()
 
         if response_key is not None:
-            recorded_items = chat.add_provisional_generation_items(response_key, items, commit=commit)
+            recorded_items = chat.add_provisional_generation_items(response_key, items)
             if recorded_items is None:
                 return False
         else:
@@ -687,7 +686,6 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     ctx.output_parts[ctx.history_parts_committed :],
                     wants_audio=response_wants_audio(response),
                     response_key=request.response_key,
-                    commit=True,
                     recorded_item_ids=ctx.recorded_item_ids,
                     recorded_call_ids=ctx.recorded_call_ids,
                 )

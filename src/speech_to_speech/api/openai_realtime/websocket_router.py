@@ -117,10 +117,6 @@ def _audio_response_key(item: Any) -> str | None:
     return item.response_key if isinstance(item, AudioOutput) else None
 
 
-def _assistant_output_ordinal(item: Any) -> int | None:
-    return item.assistant_output_ordinal if isinstance(item, AudioOutput) else None
-
-
 def _audio_cleanup_only(item: Any) -> bool:
     return item.cleanup_only if isinstance(item, AudioOutput) else False
 
@@ -133,28 +129,15 @@ _RESPONSE_PIPELINE_EVENTS = (
 )
 
 
+def _keep_non_audio_output(item: Any) -> bool:
+    """Preserve response bookkeeping when WebRTC clears buffered audio."""
+    return _keep_audio_sentinel(item) or isinstance(item, _RESPONSE_PIPELINE_EVENTS)
+
+
 def _response_event_key(item: Any) -> str | None:
     if isinstance(item, _RESPONSE_PIPELINE_EVENTS):
         return item.response_key
     return None
-
-
-def _put_queue_front(q: Queue[Any], item: Any) -> None:
-    with q.mutex:
-        q.queue.appendleft(item)
-        q.not_empty.notify()
-
-
-def _response_event_blocked(unit: PipelineUnit, session_id: str, item: Any) -> bool:
-    response_key = _response_event_key(item)
-    if response_key is None:
-        return False
-    st = unit.service._state(session_id)
-    return (
-        st.in_response
-        and st.current_response_key not in (None, response_key)
-        and response_key in st.pending_response_keys
-    )
 
 
 def _response_key_is_obsolete(unit: PipelineUnit, session_id: str, response_key: str | None) -> bool:
@@ -199,50 +182,6 @@ def _flush_queue(q: Queue[QItem], *, preserve: Callable[[QItem], bool] | None = 
             for item in reversed(preserved):
                 q.queue.appendleft(item)
             q.not_empty.notify(len(preserved))
-
-
-async def _drain_pending_response_events(
-    transport: SessionTransport | None,
-    unit: PipelineUnit,
-    session_id: str | None,
-    response_key: str | None = None,
-) -> None:
-    if session_id is None:
-        return
-
-    drained = 0
-    while True:
-        try:
-            item = unit.text_output_queue.get_nowait()
-        except Empty:
-            break
-        item_key = _response_event_key(item)
-        if not isinstance(item, _RESPONSE_PIPELINE_EVENTS):
-            _put_queue_front(unit.text_output_queue, item)
-            break
-        generation = getattr(item, "cancel_generation", None)
-        if _generation_is_discardable(unit, generation):
-            continue
-        if _response_key_is_obsolete(unit, session_id, item_key):
-            _discard_obsolete_response_key(unit, session_id, item_key)
-            continue
-        if response_key is not None and item_key not in (None, response_key):
-            _put_queue_front(unit.text_output_queue, item)
-            break
-        if _response_event_blocked(unit, session_id, item):
-            _put_queue_front(unit.text_output_queue, item)
-            break
-        events = unit.service.dispatch_pipeline_event(session_id, item)
-        if transport is not None and events:
-            await transport.send_events(events)
-        drained += 1
-
-    if drained:
-        logger.debug(
-            "Pipeline %d: drained %d response event(s) before output delivery",
-            unit.index,
-            drained,
-        )
 
 
 def _clean_unit(unit: PipelineUnit, preserve: Callable[[Any], bool] | None = None) -> None:
@@ -444,7 +383,7 @@ async def _dispatch_client_event(
                 ]
             )
             return
-        _flush_queue(unit.output_queue, preserve=_keep_audio_sentinel)
+        _flush_queue(unit.output_queue, preserve=_keep_non_audio_output)
         transport.discard_pending_audio()
 
     elif isinstance(event, SessionUpdateEvent):
@@ -808,17 +747,6 @@ def create_app(
                 # Text events first (speech_started cancels active response).
                 try:
                     text_msg = unit.text_output_queue.get_nowait()
-                    if session_id is not None and isinstance(text_msg, _RESPONSE_PIPELINE_EVENTS):
-                        generation = getattr(text_msg, "cancel_generation", None)
-                        response_key = _response_event_key(text_msg)
-                        if _generation_is_discardable(unit, generation):
-                            text_msg = None
-                        elif _response_key_is_obsolete(unit, session_id, response_key):
-                            _discard_obsolete_response_key(unit, session_id, response_key)
-                            text_msg = None
-                        elif _response_event_blocked(unit, session_id, text_msg):
-                            _put_queue_front(unit.text_output_queue, text_msg)
-                            text_msg = None
                     is_speech_start = isinstance(text_msg, SpeechStartedEvent)
 
                     was_in_response = False
@@ -848,7 +776,7 @@ def create_app(
                         if was_in_response or was_response_pending:
                             if interrupt_enabled:
                                 unit.cancel_scope.cancel()
-                                unit.service._state(session_id).close_pending_responses()
+                                unit.service.close_pending_responses(session_id)
                                 _flush_queue(unit.text_prompt_queue, preserve=_keep_pipeline_control)
                                 _flush_queue(unit.output_queue, preserve=_keep_audio_sentinel)
                                 _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
@@ -873,8 +801,19 @@ def create_app(
                     else:
                         audio_chunk = unit.output_queue.get_nowait()
 
+                    if isinstance(audio_chunk, _RESPONSE_PIPELINE_EVENTS):
+                        generation = getattr(audio_chunk, "cancel_generation", None)
+                        response_key = _response_event_key(audio_chunk)
+                        if _generation_is_discardable(unit, generation):
+                            continue
+                        if session_id is not None and _response_key_is_obsolete(unit, session_id, response_key):
+                            _discard_obsolete_response_key(unit, session_id, response_key)
+                            continue
+                        if transport is not None and session_id is not None:
+                            await transport.send_events(unit.service.dispatch_pipeline_event(session_id, audio_chunk))
+                        continue
+
                     if _is_pipeline_end(audio_chunk):
-                        await _drain_pending_response_events(transport, unit, session_id)
                         if transport is not None and session_id:
                             await transport.send_events(unit.service.finish_response(session_id))
                         break
@@ -920,14 +859,6 @@ def create_app(
                         if session_id is not None and _response_key_is_obsolete(unit, session_id, response_key):
                             _discard_obsolete_response_key(unit, session_id, response_key)
                             continue
-                        await _drain_pending_response_events(transport, unit, session_id, response_key)
-                        if session is not None and session_id is not None and response_key is not None:
-                            st = unit.service._state(session_id)
-                            if st.in_response and (
-                                st.current_response_key != response_key or not st.response_text_complete
-                            ):
-                                session.pending_output_item = audio_chunk
-                                continue
                         if transport is not None and session_id:
                             await transport.send_events(
                                 unit.service.finish_response(session_id, response_key=response_key)
@@ -963,28 +894,6 @@ def create_app(
                         _discard_obsolete_response_key(unit, session_id, response_key)
                         continue
 
-                    # The LM side channel enqueues each assistant event before
-                    # its text reaches TTS. Drain those events before assigning
-                    # an audio item so a later text segment cannot be mistaken
-                    # for an earlier one when an intervening segment is silent.
-                    await _drain_pending_response_events(transport, unit, session_id, response_key)
-
-                    assistant_output_ordinal = _assistant_output_ordinal(audio_chunk)
-                    if (
-                        response_key is not None
-                        and session_id is not None
-                        and (
-                            unit.service._state(session_id).current_response_key != response_key
-                            or (
-                                assistant_output_ordinal is not None
-                                and assistant_output_ordinal
-                                not in unit.service._state(session_id).assistant_output_items
-                            )
-                        )
-                    ):
-                        if session is not None:
-                            session.pending_output_item = audio_chunk
-                        continue
                     audio_chunk = _to_audio_bytes(audio_chunk)
 
                     audio_batch = bytearray(audio_chunk)
@@ -997,6 +906,7 @@ def create_app(
                         if (
                             _is_pipeline_end(next_chunk)
                             or _is_audio_done(next_chunk)
+                            or isinstance(next_chunk, PipelineEvent)
                             or is_control_message(next_chunk, SESSION_END.kind)
                         ):
                             # Only stash if we still have a session; otherwise drop it.
@@ -1007,10 +917,7 @@ def create_app(
                         if _should_discard_audio(unit, next_chunk):
                             continue
 
-                        if (
-                            _audio_response_key(next_chunk) != response_key
-                            or _assistant_output_ordinal(next_chunk) != assistant_output_ordinal
-                        ):
+                        if _audio_response_key(next_chunk) != response_key:
                             if session is not None:
                                 session.pending_output_item = next_chunk
                             break
@@ -1032,7 +939,6 @@ def create_app(
                             session_id,
                             bytes(audio_batch),
                             response_key,
-                            assistant_output_ordinal,
                         )
                 except Empty:
                     pass

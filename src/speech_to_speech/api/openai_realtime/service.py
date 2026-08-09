@@ -176,7 +176,6 @@ class ConnState(BaseModel):
     audio_remainder: bytes = b""
     current_response_id: Optional[str] = None
     current_response_key: Optional[str] = None
-    response_text_complete: bool = False
     response_failed: bool = False
     response_error_type: Optional[str] = None
     current_item_id: Optional[str] = None
@@ -190,9 +189,7 @@ class ConnState(BaseModel):
     next_output_index: int = 0
     current_output_index: int | None = None
     current_output_kind: Literal["text", "tool_call"] | None = None
-    assistant_output_items: dict[int, tuple[str, int]] = Field(default_factory=dict)
-    completed_audio_output_indices: set[int] = Field(default_factory=set)
-    started_audio_output_indices: set[int] = Field(default_factory=set)
+    audio_output_started: bool = False
     # Each entry contains item_id, output_index, and the contiguous text parts
     # for one assistant message. Kept as plain internal data to avoid coupling
     # connection state to protocol event models.
@@ -242,13 +239,6 @@ class ConnState(BaseModel):
             self.closed_response_keys.pop(next(iter(self.closed_response_keys)))
         self.response_pending = bool(self.pending_response_keys)
 
-    def close_pending_responses(self) -> None:
-        """Tombstone every queued response during an interruption or explicit cancel."""
-        for response_key in tuple(self.pending_response_keys):
-            self.runtime_config.chat.rollback_provisional_generation(response_key)
-            self.close_response_key(response_key)
-        self.response_pending = bool(self.pending_response_keys)
-
 
 class RealtimeService:
     """Translates between OpenAI Realtime protocol events and internal pipeline messages.
@@ -282,7 +272,6 @@ class RealtimeService:
         self._pipeline_dispatch: dict[type[PipelineEvent], Callable[..., list[ServerEvent]]] = {
             SpeechStartedEvent: self.audio.on_speech_started,
             SpeechStoppedEvent: self.audio.on_speech_stopped,
-            TokenUsageEvent: self._on_token_usage,
             PartialTranscriptionEvent: self.conversation.on_partial_transcription,
             TranscriptionCompletedEvent: self._on_transcription_completed,
             AudioInputCompletedEvent: self._on_audio_input_completed,
@@ -387,18 +376,23 @@ class RealtimeService:
         self,
         conn_id: str,
         response_key: str | None = None,
-        assistant_output_ordinal: int | None = None,
     ) -> tuple[str, str, int, list[ServerEvent]]:
-        return self.audio.begin_audio_output(conn_id, response_key, assistant_output_ordinal)
+        return self.audio.begin_audio_output(conn_id, response_key)
 
     def encode_audio_chunk(
         self,
         conn_id: str,
         audio: bytes,
         response_key: str | None = None,
-        assistant_output_ordinal: int | None = None,
     ) -> list[ServerEvent]:
-        return self.audio.encode_audio_chunk(conn_id, audio, response_key, assistant_output_ordinal)
+        return self.audio.encode_audio_chunk(conn_id, audio, response_key)
+
+    def finish_audio_output(
+        self,
+        conn_id: str,
+        response_key: str | None = None,
+    ) -> list[ServerEvent]:
+        return self.response.finish_audio_output(conn_id, response_key)
 
     def handle_response_create(self, conn_id: str, event: ResponseCreateEvent) -> ServerEvent | None:
         return self.response.handle_response_create(conn_id, event)
@@ -415,11 +409,22 @@ class RealtimeService:
     ) -> list[ServerEvent]:
         return self.response.finish_response(conn_id, status, reason, response_key=response_key)
 
+    def close_pending_responses(self, conn_id: str) -> None:
+        """Cancel queued responses without losing usage already reported by their LMs."""
+        st = self._state(conn_id)
+        for response_key in tuple(st.pending_response_keys):
+            input_tokens, output_tokens = st.pending_token_usage.pop(response_key, (0, 0))
+            self.total_usage.input_tokens += input_tokens
+            self.total_usage.output_tokens += output_tokens
+            st.runtime_config.chat.rollback_provisional_generation(response_key)
+            st.close_response_key(response_key)
+        st.response_pending = bool(st.pending_response_keys)
+
     def handle_conversation_item_create(self, conn_id: str, event: ConversationItemCreateEvent) -> list[ServerEvent]:
         return self.conversation.handle_conversation_item_create(conn_id, event)
 
     def dispatch_pipeline_event(self, conn_id: str, event: PipelineEvent) -> list[ServerEvent]:
-        """Route a pipeline text_output_queue event to the appropriate handler."""
+        """Route an internal pipeline event to the appropriate handler."""
         events = self._dispatch_pipeline_event(conn_id, event, wait_for_pending_reopen=True)
         return [] if events is None else events
 
@@ -434,7 +439,7 @@ class RealtimeService:
     def should_defer_pipeline_event(self, event: PipelineEvent) -> bool:
         if self.speculative_turns is None or not isinstance(
             event,
-            (AssistantTextEvent, AssistantResponseDoneEvent, TokenUsageEvent),
+            (AssistantTextEvent, AssistantResponseDoneEvent),
         ):
             return False
         return self.speculative_turns.has_pending_reopen_or_grace(
@@ -449,6 +454,11 @@ class RealtimeService:
         *,
         wait_for_pending_reopen: bool,
     ) -> list[ServerEvent] | None:
+        # Provider-reported usage is billable accounting, not client-visible
+        # assistant output. Cancellation must not make it stale.
+        if isinstance(event, TokenUsageEvent):
+            return self._on_token_usage(conn_id, event)
+
         is_stale = self._is_stale_turn_event(event, wait_for_pending_reopen=wait_for_pending_reopen)
         if is_stale is None:
             return None
@@ -487,13 +497,12 @@ class RealtimeService:
                 AudioInputCompletedEvent,
                 AssistantTextEvent,
                 AssistantResponseDoneEvent,
-                TokenUsageEvent,
             ),
         ):
             return False
         turn_id = getattr(event, "turn_id", None)
         turn_revision = getattr(event, "turn_revision", None)
-        if isinstance(event, (AssistantTextEvent, AssistantResponseDoneEvent, TokenUsageEvent)):
+        if isinstance(event, (AssistantTextEvent, AssistantResponseDoneEvent)):
             is_latest: bool | None
             if wait_for_pending_reopen:
                 is_latest = self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
@@ -598,13 +607,11 @@ class RealtimeService:
 
     def _on_token_usage(self, conn_id: str, event: TokenUsageEvent) -> list[ServerEvent]:
         """Accumulate usage only on the response identified by the event."""
-        if self.speculative_turns and not self.speculative_turns.is_latest(
-            event.turn_id,
-            event.turn_revision,
-        ):
-            logger.debug("Dropping stale token usage for turn=%s rev=%s", event.turn_id, event.turn_revision)
-            return []
         st = self._state(conn_id)
+        if event.response_key is not None and event.response_key in st.closed_response_keys:
+            self.total_usage.input_tokens += event.input_tokens
+            self.total_usage.output_tokens += event.output_tokens
+            return []
         if event.response_key is not None and not (
             st.in_response and st.current_response_key in (None, event.response_key)
         ):
@@ -673,7 +680,7 @@ class RealtimeService:
             return events
         st.response_failed = True
         st.response_error_type = "response_failed"
-        st.response_text_complete = True
+        events.extend(self.response.finish_audio_output(conn_id, event.response_key))
         events.append(self.make_error(event.message, "response_failed"))
         return events
 

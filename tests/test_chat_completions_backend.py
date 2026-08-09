@@ -487,6 +487,8 @@ def test_tool_call_recorded_before_chunk_is_emitted():
             )
     assert emitted_call_id is not None, "a tool call should have been emitted"
     assert chat._has_call_id_in_buffer(emitted_call_id), "call+output should be paired in the buffer"
+    assert req.response_key in chat._provisional_generations
+    chat.finalize_provisional_generation(req.response_key)
     assert chat._provisional_generations == {}
 
 

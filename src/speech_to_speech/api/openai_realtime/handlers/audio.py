@@ -10,7 +10,6 @@ from openai.types.realtime import (
     InputAudioBufferSpeechStoppedEvent,
     RealtimeErrorEvent,
     ResponseAudioDeltaEvent,
-    ResponseAudioDoneEvent,
     ResponseCreatedEvent,
 )
 
@@ -202,7 +201,6 @@ class AudioHandler(RealtimeBaseHandler):
         self,
         conn_id: str,
         response_key: str | None = None,
-        assistant_output_ordinal: int | None = None,
     ) -> tuple[str, str, int, list[ServerEvent]]:
         """Ensure an audio response and reserve its assistant output identity."""
         resp_id, item_id, events = self.begin_audio_response(conn_id, response_key)
@@ -210,32 +208,8 @@ class AudioHandler(RealtimeBaseHandler):
         assistant_item_id, output_index = self._service.response._ensure_assistant_output_item(
             conn_id,
             item_id,
-            assistant_output_ordinal,
         )
-        st.started_audio_output_indices.add(output_index)
-        earlier_outputs = sorted(
-            (
-                pending
-                for pending in st.pending_text_outputs
-                if int(pending["output_index"]) < output_index
-                and int(pending["output_index"]) not in st.completed_audio_output_indices
-                and int(pending["output_index"]) in st.started_audio_output_indices
-            ),
-            key=lambda pending: int(pending["output_index"]),
-        )
-        for pending in earlier_outputs:
-            earlier_output_index = int(pending["output_index"])
-            events.append(
-                ResponseAudioDoneEvent(
-                    type="response.output_audio.done",
-                    event_id=self._next_event_id(),
-                    content_index=0,
-                    item_id=str(pending["item_id"]),
-                    output_index=earlier_output_index,
-                    response_id=resp_id,
-                )
-            )
-            st.completed_audio_output_indices.add(earlier_output_index)
+        st.audio_output_started = True
         return resp_id, assistant_item_id, output_index, events
 
     def encode_audio_chunk(
@@ -243,7 +217,6 @@ class AudioHandler(RealtimeBaseHandler):
         conn_id: str,
         audio: bytes,
         response_key: str | None = None,
-        assistant_output_ordinal: int | None = None,
     ) -> list[ServerEvent]:
         """Encode a raw PCM audio chunk as a base64 delta event for the WebSocket transport."""
         response = self._service.response
@@ -252,7 +225,6 @@ class AudioHandler(RealtimeBaseHandler):
         resp_id, assistant_item_id, assistant_output_index, events = self.begin_audio_output(
             conn_id,
             response_key,
-            assistant_output_ordinal,
         )
         rp = st.current_response_params
         client_out_rate = None

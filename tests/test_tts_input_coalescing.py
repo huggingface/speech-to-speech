@@ -1,8 +1,10 @@
 from queue import Queue
 from threading import Event
 
+from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.control import SESSION_END
-from speech_to_speech.pipeline.messages import EndOfResponse, TTSInput
+from speech_to_speech.pipeline.events import AssistantTextEvent
+from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk, TTSInput
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 
 
@@ -30,6 +32,32 @@ def test_coalesce_pending_tts_input_merges_ready_sentences_and_absorbs_response_
     assert isinstance(remaining, EndOfResponse)
 
 
+def test_coalesce_pending_processor_output_for_one_response():
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup()
+    outputs = [
+        *processor.process(LLMResponseChunk(text="First sentence.", response_key="response_1")),
+        *processor.process(LLMResponseChunk(text="Second sentence.", response_key="response_1")),
+    ]
+    assert [type(output) for output in outputs] == [
+        AssistantTextEvent,
+        TTSInput,
+        AssistantTextEvent,
+        TTSInput,
+    ]
+
+    handler = _make_handler()
+    handler.queue_in.put(outputs[2])
+    handler.queue_in.put(outputs[3])
+
+    text, _, saw_end = handler._coalesce_pending_tts_input(outputs[1])
+
+    assert text == "First sentence. Second sentence."
+    assert saw_end is False
+    assert handler.queue_out.get_nowait() == outputs[2]
+    assert handler.queue_in.empty()
+
+
 def test_coalesce_pending_tts_input_stops_before_control_messages():
     handler = _make_handler()
 
@@ -44,10 +72,13 @@ def test_coalesce_pending_tts_input_stops_before_control_messages():
 
 def test_coalesce_pending_tts_input_stops_at_ordered_output_boundary():
     handler = _make_handler()
-    handler.queue_in.put(TTSInput(text="After tool.", assistant_output_ordinal=1))
+    handler.queue_in.put(
+        AssistantTextEvent(tools=[{"type": "function_call", "call_id": "call_1", "name": "tool", "arguments": "{}"}])
+    )
+    handler.queue_in.put(TTSInput(text="After tool."))
 
-    text, _, saw_end = handler._coalesce_pending_tts_input(TTSInput(text="Before tool.", assistant_output_ordinal=0))
+    text, _, saw_end = handler._coalesce_pending_tts_input(TTSInput(text="Before tool."))
 
     assert text == "Before tool."
     assert saw_end is False
-    assert handler.queue_in.get_nowait().assistant_output_ordinal == 1
+    assert isinstance(handler.queue_in.get_nowait(), AssistantTextEvent)

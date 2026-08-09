@@ -46,7 +46,9 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope  # noqa: E402
 from speech_to_speech.pipeline.events import (  # noqa: E402
     AssistantResponseDoneEvent,
     AssistantTextEvent,
+    ResponseFailedEvent,
     SpeechStartedEvent,
+    TokenUsageEvent,
 )
 from speech_to_speech.pipeline.messages import (  # noqa: E402
     AUDIO_RESPONSE_DONE,
@@ -100,7 +102,6 @@ class _FakeTransport(SessionTransport):
         session_id,
         pcm,
         response_key=None,
-        assistant_output_ordinal=None,
     ):
         raise AssertionError("dispatch tests never send audio")
 
@@ -261,7 +262,20 @@ class TestWebRTCDispatch:
         conn_id = unit.service.register()
         transport = _FakeTransport()
 
+        text_event = AssistantTextEvent(text="before audio", response_key="response_1")
+        tool_event = AssistantTextEvent(
+            tools=[{"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"}],
+            response_key="response_1",
+        )
+        failed_event = ResponseFailedEvent(message="provider failed", response_key="response_1")
+        usage_event = TokenUsageEvent(input_tokens=3, output_tokens=2, response_key="response_1")
+        done_event = AssistantResponseDoneEvent(response_key="response_1")
+        unit.output_queue.put(text_event)
         unit.output_queue.put(b"\x01\x00" * 512)
+        unit.output_queue.put(tool_event)
+        unit.output_queue.put(failed_event)
+        unit.output_queue.put(usage_event)
+        unit.output_queue.put(done_event)
         unit.output_queue.put(AUDIO_RESPONSE_DONE)
 
         await router_module._dispatch_client_event(
@@ -274,8 +288,15 @@ class TestWebRTCDispatch:
 
         assert transport.sent == []  # no error
         assert transport.discards == 1
-        # Pending audio flushed, done-sentinel preserved so the response still closes.
-        assert unit.output_queue.get_nowait() == AUDIO_RESPONSE_DONE
+        # Only audio is flushed; ordered response state and the terminal survive.
+        assert [unit.output_queue.get_nowait() for _ in range(6)] == [
+            text_event,
+            tool_event,
+            failed_event,
+            usage_event,
+            done_event,
+            AUDIO_RESPONSE_DONE,
+        ]
         with pytest.raises(Empty):
             unit.output_queue.get_nowait()
 
@@ -453,11 +474,22 @@ class TestWebRTCLoopback:
             # Two assistant messages separated by a tool call keep distinct
             # output identities over a real WebRTC media/data-channel pair.
             response_key = "webrtc_response_1"
-            server_env.text_output_queue.put(
+            server_env.output_queue.put(
+                AssistantTextEvent(
+                    response_key=response_key,
+                    parts=[AssistantTextPart(text="before")],
+                )
+            )
+            server_env.output_queue.put(
+                AudioOutput(
+                    audio=np.ones(2048, dtype=np.int16).tobytes(),
+                    response_key=response_key,
+                )
+            )
+            server_env.output_queue.put(
                 AssistantTextEvent(
                     response_key=response_key,
                     parts=[
-                        AssistantTextPart(text="before", ordinal=0),
                         AssistantToolCallPart(
                             tool={
                                 "type": "function_call",
@@ -465,26 +497,23 @@ class TestWebRTCLoopback:
                                 "name": "tool",
                                 "arguments": "{}",
                             }
-                        ),
-                        AssistantTextPart(text="after", ordinal=1),
+                        )
                     ],
                 )
             )
-            server_env.text_output_queue.put(AssistantResponseDoneEvent(response_key=response_key))
             server_env.output_queue.put(
-                AudioOutput(
-                    audio=np.ones(2048, dtype=np.int16).tobytes(),
+                AssistantTextEvent(
                     response_key=response_key,
-                    assistant_output_ordinal=0,
+                    parts=[AssistantTextPart(text="after")],
                 )
             )
             server_env.output_queue.put(
                 AudioOutput(
                     audio=np.ones(2048, dtype=np.int16).tobytes(),
                     response_key=response_key,
-                    assistant_output_ordinal=1,
                 )
             )
+            server_env.output_queue.put(AssistantResponseDoneEvent(response_key=response_key))
             server_env.output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key))
 
             await inbox.wait_for("response.created", timeout=10.0)

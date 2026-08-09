@@ -437,7 +437,10 @@ def _build_handlers(
         stop_event,
         queue_in=lm_response_queue,
         queue_out=lm_processed_queue,
-        setup_kwargs={"text_output_queue": text_output_queue, "speculative_turns": speculative_turns},
+        setup_kwargs={
+            "text_output_queue": text_output_queue,
+            "speculative_turns": speculative_turns,
+        },
     )
 
     tts_context = handler_context(lm_processed_queue, send_audio_chunks_queue)

@@ -37,10 +37,10 @@ TextPromptItem: TypeAlias = LLMIn | PipelineInternalItem
 LMOutItem: TypeAlias = LLMOut | PipelineInternalItem
 
 # Inputs flowing into TTS.
-TTSInItem: TypeAlias = TTSIn | PipelineInternalItem
+TTSInItem: TypeAlias = TTSIn | PipelineEvent | PipelineInternalItem
 
-# Audio outputs flowing to speakers / client (includes sentinels as bytes).
-AudioOutItem: TypeAlias = bytes | np.ndarray | AudioOutput | PipelineControlMessage
+# Ordered response events and audio flowing to the client.
+AudioOutItem: TypeAlias = bytes | np.ndarray | AudioOutput | PipelineEvent | PipelineControlMessage
 
-# Side-channel text events translated into Realtime protocol events.
+# VAD, transcription, and usage events that do not wait for TTS.
 TextEventItem: TypeAlias = PipelineEvent | PipelineInternalItem

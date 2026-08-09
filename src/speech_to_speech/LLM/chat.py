@@ -357,14 +357,14 @@ class Chat:
         response_key: str,
         items: Sequence[SupportedItem],
         *,
-        commit: bool = False,
+        committed_item_ids: set[str] | None = None,
     ) -> list[SupportedItem] | None:
         """Atomically write and track items exposed by an active response.
 
         ``None`` means cancellation won the race before the items were written.
         Function calls use ordered insertion because these are streamed response
-        parts rather than legacy deferred calls. With ``commit=True``, insertion
-        and final transaction commit happen under this same lock.
+        parts rather than legacy deferred calls. Tracking remains live after model
+        generation finishes because slow TTS may not have delivered every part yet.
         """
 
         with self._lock:
@@ -411,9 +411,18 @@ class Chat:
             )
             tracked_item_ids.update(item_ids)
             tracked_call_ids.update(call_ids)
-            if commit:
-                self._provisional_generations.pop(response_key, None)
+            if committed_item_ids:
+                tracked_item_ids.difference_update(committed_item_ids)
             return recorded_items
+
+    def finalize_provisional_generation(self, response_key: str | None) -> None:
+        """Make delivered response history permanent."""
+
+        if response_key is None:
+            return
+        with self._lock:
+            self._provisional_generations.pop(response_key, None)
+            self._cancelled_provisional_generations.pop(response_key, None)
 
     def rollback_provisional_generation(self, response_key: str | None) -> None:
         """Synchronously remove eager output for a cancelled response, if any."""

@@ -84,7 +84,6 @@ class ResponseHandler(RealtimeBaseHandler):
         completed_response_key = st.current_response_key
         st.current_response_id = None
         st.current_response_key = None
-        st.response_text_complete = False
         st.response_failed = False
         st.response_error_type = None
         st.current_item_id = None
@@ -97,9 +96,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.next_output_index = 0
         st.current_output_index = None
         st.current_output_kind = None
-        st.assistant_output_items = {}
-        st.completed_audio_output_indices = set()
-        st.started_audio_output_indices = set()
+        st.audio_output_started = False
         st.pending_text_outputs = []
         st.pending_function_calls = {}
 
@@ -119,38 +116,19 @@ class ResponseHandler(RealtimeBaseHandler):
         self,
         conn_id: str,
         item_id: str,
-        assistant_output_ordinal: int | None = None,
     ) -> tuple[str, int]:
         """Reserve the assistant item used by the outbound audio stream."""
         st = self._state(conn_id)
-        target: tuple[str, int] | None = None
-        if assistant_output_ordinal is not None:
-            target = st.assistant_output_items.get(assistant_output_ordinal)
-            if target is None:
-                output_index, output_item_id = self._output_part_context(
-                    conn_id,
-                    "text",
-                    preferred_item_id=item_id if st.next_output_index == 0 else None,
-                )
-                st.pending_text_outputs.append({"item_id": output_item_id, "output_index": output_index, "parts": []})
-                target = (output_item_id, output_index)
-                st.assistant_output_items[assistant_output_ordinal] = target
-        elif st.pending_assistant_item_id is not None and st.pending_assistant_output_index is not None:
+        if st.pending_assistant_item_id is not None and st.pending_assistant_output_index is not None:
             return st.pending_assistant_item_id, st.pending_assistant_output_index
 
-        if target is None:
-            if st.pending_text_outputs:
-                pending = st.pending_text_outputs[0]
-                target = (str(pending["item_id"]), int(pending["output_index"]))
-            else:
-                output_index, item_id = self._output_part_context(conn_id, "text", preferred_item_id=item_id)
-                st.pending_text_outputs.append({"item_id": item_id, "output_index": output_index, "parts": []})
-                target = (item_id, output_index)
-
-        st.pending_assistant_item_id, st.pending_assistant_output_index = target
+        output_index, item_id = self._output_part_context(conn_id, "text", preferred_item_id=item_id)
+        st.pending_text_outputs.append({"item_id": item_id, "output_index": output_index, "parts": []})
+        st.pending_assistant_item_id = item_id
+        st.pending_assistant_output_index = output_index
         if st.last_item_id is None:
-            st.last_item_id = st.pending_assistant_item_id
-        return target
+            st.last_item_id = item_id
+        return item_id, output_index
 
     def _next_content_index(self, conn_id: str) -> int:
         """Return the index of the output item's sole audio content part."""
@@ -357,12 +335,44 @@ class ResponseHandler(RealtimeBaseHandler):
     def handle_response_cancel(self, conn_id: str) -> list[ServerEvent]:
         """Cancel the in-progress response and re-enable listening."""
         events = self.finish_response(conn_id, status="cancelled", reason="client_cancelled")
-        self._state(conn_id).close_pending_responses()
+        self._service.close_pending_responses(conn_id)
         should_listen = self._should_listen(conn_id)
         if should_listen:
             should_listen.set()
         logger.info("Response cancelled, listening re-enabled")
         return events
+
+    def finish_audio_output(
+        self,
+        conn_id: str,
+        response_key: str | None = None,
+    ) -> list[ServerEvent]:
+        """Close one synthesized assistant audio item exactly once."""
+        st = self._state(conn_id)
+        if response_key is not None and st.current_response_key not in (None, response_key):
+            return []
+        if (
+            not st.audio_output_started
+            or st.pending_assistant_item_id is None
+            or st.pending_assistant_output_index is None
+        ):
+            return []
+        item_id = st.pending_assistant_item_id
+        output_index = st.pending_assistant_output_index
+        st.audio_output_started = False
+        st.pending_assistant_item_id = None
+        st.pending_assistant_output_index = None
+        resp_id, _ = self._ensure_response(conn_id, response_key)
+        return [
+            ResponseAudioDoneEvent(
+                type="response.output_audio.done",
+                event_id=self._next_event_id(),
+                content_index=0,
+                item_id=item_id,
+                output_index=output_index,
+                response_id=resp_id,
+            )
+        ]
 
     def finish_response(
         self,
@@ -386,39 +396,11 @@ class ResponseHandler(RealtimeBaseHandler):
         if st.in_response:
             if status == "completed" and st.response_failed:
                 status = "failed"
-            resp_id, item_id = self._ensure_response(conn_id)
+            resp_id, _ = self._ensure_response(conn_id)
             wants_audio = response_wants_audio(st.current_response_params)
             function_call_only = bool(st.pending_function_calls) and not st.pending_text_outputs
             if wants_audio and not function_call_only:
-                if st.pending_text_outputs:
-                    for pending in st.pending_text_outputs:
-                        output_index = int(pending["output_index"])
-                        if (
-                            output_index in st.completed_audio_output_indices
-                            or output_index not in st.started_audio_output_indices
-                        ):
-                            continue
-                        events.append(
-                            ResponseAudioDoneEvent(
-                                type="response.output_audio.done",
-                                event_id=self._next_event_id(),
-                                content_index=0,
-                                item_id=str(pending["item_id"]),
-                                output_index=output_index,
-                                response_id=resp_id,
-                            )
-                        )
-                elif st.pending_assistant_output_index in st.started_audio_output_indices:
-                    events.append(
-                        ResponseAudioDoneEvent(
-                            type="response.output_audio.done",
-                            event_id=self._next_event_id(),
-                            content_index=0,
-                            item_id=st.pending_assistant_item_id or item_id,
-                            output_index=st.pending_assistant_output_index or 0,
-                            response_id=resp_id,
-                        )
-                    )
+                events.extend(self.finish_audio_output(conn_id, response_key))
                 for pending in st.pending_text_outputs:
                     transcript = self._assistant_text(pending, wants_audio=True)
                     if not transcript:
@@ -457,11 +439,12 @@ class ResponseHandler(RealtimeBaseHandler):
                     response=self._build_response(conn_id, status, reason),
                 )
             )
-            if status == "cancelled" and reason in ("client_cancelled", "turn_detected"):
+            if status == "completed":
+                st.runtime_config.chat.finalize_provisional_generation(st.current_response_key)
+            elif status in ("cancelled", "failed", "incomplete"):
                 # Tool calls are recorded before their chunks reach the client.
-                # Remove that provisional transaction before deferred client
-                # items are applied, so cancellation cannot acknowledge a tool
-                # result that the LLM thread will subsequently roll back.
+                # Remove incomplete response history before deferred client items
+                # are applied, so an unseen call cannot poison the next turn.
                 st.runtime_config.chat.rollback_provisional_generation(st.current_response_key)
             self._end_response(conn_id, status)
         # Apply any client items that arrived mid-generation now that in_response
@@ -524,50 +507,17 @@ class ResponseHandler(RealtimeBaseHandler):
                 text = part.text.strip() if wants_audio else part.text
                 if not text:
                     continue
-                pending = None
-                mapped_output = st.assistant_output_items.get(part.ordinal) if part.ordinal is not None else None
-                if (
-                    mapped_output is None
-                    and part.ordinal is None
-                    and wants_audio
-                    and st.pending_assistant_item_id is not None
-                    and st.pending_assistant_output_index is not None
-                    and any(
-                        candidate["output_index"] == st.pending_assistant_output_index and not candidate["parts"]
-                        for candidate in st.pending_text_outputs
-                    )
-                ):
-                    # Compatibility path for untagged audio that reserved its
-                    # item before the transcript side channel arrived.
-                    mapped_output = (st.pending_assistant_item_id, st.pending_assistant_output_index)
-                if mapped_output is not None:
-                    item_id, output_idx = mapped_output
-                    pending = next(
-                        (candidate for candidate in st.pending_text_outputs if candidate["output_index"] == output_idx),
-                        None,
-                    )
-                    rejoined_earlier_output = st.current_output_index != output_idx
-                    st.current_item_id = item_id
-                    st.current_output_index = output_idx
-                    st.current_output_kind = "text"
+                output_idx, item_id = self._output_part_context(conn_id, "text")
+                if st.pending_text_outputs and st.pending_text_outputs[-1]["output_index"] == output_idx:
+                    pending = st.pending_text_outputs[-1]
                 else:
-                    rejoined_earlier_output = False
-                    output_idx, item_id = self._output_part_context(conn_id, "text")
-                if pending is None:
-                    if st.pending_text_outputs and st.pending_text_outputs[-1]["output_index"] == output_idx:
-                        pending = st.pending_text_outputs[-1]
-                    else:
-                        st.pending_text_outputs.append({"item_id": item_id, "output_index": output_idx, "parts": []})
-                        pending = st.pending_text_outputs[-1]
-                if part.ordinal is not None:
-                    st.assistant_output_items[part.ordinal] = (item_id, output_idx)
-                assert pending is not None
+                    st.pending_text_outputs.append({"item_id": item_id, "output_index": output_idx, "parts": []})
+                    pending = st.pending_text_outputs[-1]
                 parts = pending["parts"]
                 assert isinstance(parts, list)
                 if wants_audio:
-                    if st.pending_assistant_item_id is None:
-                        st.pending_assistant_item_id = item_id
-                        st.pending_assistant_output_index = output_idx
+                    st.pending_assistant_item_id = item_id
+                    st.pending_assistant_output_index = output_idx
                     delta = (" " if parts else "") + text
                     parts.append(text)
                     events.append(
@@ -594,9 +544,9 @@ class ResponseHandler(RealtimeBaseHandler):
                             delta=text,
                         )
                     )
-                if not rejoined_earlier_output:
-                    st.last_item_id = item_id
+                st.last_item_id = item_id
             elif isinstance(part, AssistantToolCallPart):
+                events.extend(self.finish_audio_output(conn_id, event.response_key))
                 tool = part.tool
                 function_item_id = tool.id or _generate_id("item")
                 output_idx, function_item_id = self._output_part_context(
@@ -641,8 +591,8 @@ class ResponseHandler(RealtimeBaseHandler):
         st = self._state(conn_id)
         response_was_missing = st.current_response_id is None
         self._ensure_response(conn_id, event.response_key)
-        st.response_text_complete = True
-        events: list[ServerEvent] = (
+        events = self.finish_audio_output(conn_id, event.response_key)
+        events.extend(
             [
                 ResponseCreatedEvent(
                     type="response.created",

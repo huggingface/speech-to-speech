@@ -23,6 +23,35 @@ from speech_to_speech.pipeline.messages import (
 )
 
 
+def _tool(name="dance"):
+    return FunctionTool(
+        type="function",
+        name=name,
+        description=f"Use {name}.",
+        parameters={"type": "object", "properties": {}},
+    )
+
+
+def _stream_context(*tool_names, sentence_batch=None):
+    return StreamContext(
+        function_tools=[_tool(name) for name in tool_names],
+        block_regex=build_block_regex(),
+        enter_code=ENTER_CODE,
+        end_code=END_CODE,
+        sentence_batch=sentence_batch or [],
+    )
+
+
+def _tool_call(name):
+    return ResponseFunctionToolCall(
+        type="function_call",
+        id=f"fc_{name}",
+        call_id=f"call_{name}",
+        name=name,
+        arguments="{}",
+    )
+
+
 def test_voice_prompt_is_short_and_keeps_persona_in_session_prompt():
     prompt = build_voice_system_prompt("Be concise.")
 
@@ -184,25 +213,7 @@ def test_local_tool_parser_preserves_interleaved_text_and_tool_calls(monkeypatch
         lambda value: [value.strip()] if value.strip() else [],
     )
     handler = object.__new__(LanguageModelHandler)
-    ctx = StreamContext(
-        function_tools=[
-            FunctionTool(
-                type="function",
-                name="dance",
-                description="Dance once.",
-                parameters={"type": "object", "properties": {}},
-            ),
-            FunctionTool(
-                type="function",
-                name="camera",
-                description="Look through the camera.",
-                parameters={"type": "object", "properties": {}},
-            ),
-        ],
-        block_regex=build_block_regex(),
-        enter_code=ENTER_CODE,
-        end_code=END_CODE,
-    )
+    ctx = _stream_context("dance", "camera")
     text = f"First. {ENTER_CODE}dance(){END_CODE} Middle. {ENTER_CODE}camera(){END_CODE} Last."
 
     chunks, tools, remaining = handler._process_printable_text(text, None, [], ctx)
@@ -223,19 +234,7 @@ def test_local_text_only_with_tools_preserves_plain_text_verbatim():
     handler.speculative_turns = None
     handler.stop_event = Event()
     handler.stream_batch_sentences = 3
-    ctx = StreamContext(
-        function_tools=[
-            FunctionTool(
-                type="function",
-                name="lookup",
-                description="Look something up.",
-                parameters={"type": "object", "properties": {}},
-            )
-        ],
-        block_regex=build_block_regex(),
-        enter_code=ENTER_CODE,
-        end_code=END_CODE,
-    )
+    ctx = _stream_context("lookup")
     raw = "  First.\n\nSecond.  "
 
     chunks = list(
@@ -254,19 +253,7 @@ def test_local_text_only_with_tools_preserves_plain_text_verbatim():
 
 def test_local_text_only_tool_marker_can_span_tokens_without_losing_whitespace():
     handler = object.__new__(LanguageModelHandler)
-    ctx = StreamContext(
-        function_tools=[
-            FunctionTool(
-                type="function",
-                name="dance",
-                description="Dance once.",
-                parameters={"type": "object", "properties": {}},
-            )
-        ],
-        block_regex=build_block_regex(),
-        enter_code=ENTER_CODE,
-        end_code=END_CODE,
-    )
+    ctx = _stream_context("dance")
     response = RealtimeResponseCreateParams(output_modalities=["text"])
 
     first, tools, remaining = handler._process_printable_text("  before <co", None, [], ctx, response=response)
@@ -308,20 +295,8 @@ def _local_handler_with_chunks(chunks, *, cancelled=False):
 
 
 def test_local_history_commits_text_and_tools_in_emitted_order():
-    first_tool = ResponseFunctionToolCall(
-        type="function_call",
-        id="fc_first",
-        call_id="call_first",
-        name="first",
-        arguments="{}",
-    )
-    second_tool = ResponseFunctionToolCall(
-        type="function_call",
-        id="fc_second",
-        call_id="call_second",
-        name="second",
-        arguments="{}",
-    )
+    first_tool = _tool_call("first")
+    second_tool = _tool_call("second")
     chunks = [
         LLMResponseChunk(
             parts=[
@@ -412,13 +387,7 @@ def test_cancelled_local_generation_does_not_write_partial_history():
 
 
 def test_local_tool_call_is_recorded_before_chunk_is_emitted():
-    tool = ResponseFunctionToolCall(
-        type="function_call",
-        id="fc_first",
-        call_id="call_first",
-        name="first",
-        arguments="{}",
-    )
+    tool = _tool_call("first")
     handler = _local_handler_with_chunks(
         [
             LLMResponseChunk(
@@ -432,7 +401,8 @@ def test_local_tool_call_is_recorded_before_chunk_is_emitted():
     )
     chat = Chat(5)
     chat.add_item(make_user_message("go"))
-    generation = handler.process(GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat)))
+    request = GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat))
+    generation = handler.process(request)
 
     first = next(generation)
 
@@ -454,17 +424,13 @@ def test_local_tool_call_is_recorded_before_chunk_is_emitted():
         "function_call_output",
         "message",
     ]
+    assert request.response_key in chat._provisional_generations
+    chat.finalize_provisional_generation(request.response_key)
     assert chat._provisional_generations == {}
 
 
 def test_cancelled_local_tool_turn_rolls_back_fast_output():
-    tool = ResponseFunctionToolCall(
-        type="function_call",
-        id="fc_first",
-        call_id="call_first",
-        name="first",
-        arguments="{}",
-    )
+    tool = _tool_call("first")
     handler = _local_handler_with_chunks(
         [LLMResponseChunk(parts=[AssistantToolCallPart(tool=tool)])],
         cancelled=True,

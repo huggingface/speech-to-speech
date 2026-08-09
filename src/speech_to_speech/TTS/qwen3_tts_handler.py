@@ -17,7 +17,7 @@ from pathlib import Path
 from sys import platform
 from threading import Event
 from time import perf_counter
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, Optional, cast
 
 import numpy as np
 import torch
@@ -28,8 +28,15 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, is_control_message
+from speech_to_speech.pipeline.events import AssistantTextEvent
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.messages import (
+    AUDIO_RESPONSE_DONE,
+    PIPELINE_END,
+    AssistantTextPart,
+    EndOfResponse,
+    TTSInput,
+)
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 
@@ -751,6 +758,15 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         parts = [text.strip()] if text and text.strip() else []
         saw_end_of_response = False
+        text_events: list[AssistantTextEvent] = []
+
+        def same_response(item: TTSInput | AssistantTextEvent) -> bool:
+            return (
+                item.turn_id == current_input.turn_id
+                and item.turn_revision == current_input.turn_revision
+                and item.cancel_generation == current_input.cancel_generation
+                and item.response_key == current_input.response_key
+            )
 
         with self.queue_in.mutex:
             while self.queue_in.queue:
@@ -762,13 +778,16 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 if isinstance(next_item, EndOfResponse):
                     saw_end_of_response = True
                     break
+                if isinstance(next_item, AssistantTextEvent):
+                    if not same_response(next_item) or any(
+                        not isinstance(part, AssistantTextPart) for part in next_item.parts
+                    ):
+                        break
+                    text_events.append(self.queue_in.queue.popleft())
+                    continue
                 if not isinstance(next_item, TTSInput):
                     break
-                if current_input.turn_id != next_item.turn_id or current_input.turn_revision != next_item.turn_revision:
-                    break
-                if current_input.response_key != next_item.response_key:
-                    break
-                if current_input.assistant_output_ordinal != next_item.assistant_output_ordinal:
+                if not same_response(next_item):
                     break
                 if (
                     language_code is not None
@@ -782,6 +801,12 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                     parts.append(next_item.text.strip())
                 if language_code is None:
                     language_code = next_item.language_code
+
+        # These events preceded the inputs absorbed above. Forward them before
+        # synthesis so protocol ordering remains text -> audio while Qwen still
+        # gets to combine consecutive text chunks.
+        for event in text_events:
+            self.queue_out.put(cast(TTSOut, event))
 
         combined_text = " ".join(parts).strip()
         return combined_text, language_code, saw_end_of_response

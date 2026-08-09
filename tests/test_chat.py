@@ -521,22 +521,52 @@ class TestAddItem:
         assert not chat.has_pending_tool_calls()
         assert chat._provisional_generations == {}
 
-    def test_final_provisional_items_and_commit_share_one_cancellation_boundary(self):
+    def test_generation_stays_provisional_until_response_delivery(self):
         chat = Chat(size=5)
         response_key = "completed_response"
         eager = chat.add_provisional_generation_items(response_key, [_assistant("before"), _fc("final")])
         assert eager is not None
 
-        trailing = chat.add_provisional_generation_items(
-            response_key,
-            [_assistant("after")],
-            commit=True,
-        )
+        trailing = chat.add_provisional_generation_items(response_key, [_assistant("after")])
         chat.rollback_provisional_generation(response_key)
 
         assert trailing is not None
+        assert chat.buffer == []
+        assert chat._provisional_generations == {}
+
+    def test_delivered_generation_is_no_longer_rollbackable(self):
+        chat = Chat(size=5)
+        response_key = "completed_response"
+        recorded = chat.add_provisional_generation_items(
+            response_key,
+            [_assistant("before"), _fc("final"), _assistant("after")],
+        )
+
+        chat.finalize_provisional_generation(response_key)
+        chat.rollback_provisional_generation(response_key)
+
+        assert recorded is not None
         assert [item.type for item in chat.buffer] == ["message", "function_call", "message"]
         assert chat._provisional_generations == {}
+
+    def test_committed_user_input_survives_response_delivery_cancellation(self):
+        chat = Chat(size=5)
+        response_key = "completed_model_request"
+        user = _user("keep me")
+        assert user.id is None
+        assert chat.add_provisional_generation_items(response_key, [user]) is not None
+        assert user.id is not None
+        recorded = chat.add_provisional_generation_items(
+            response_key,
+            [_assistant("unseen"), _fc("unseen")],
+            committed_item_ids={user.id},
+        )
+        assert recorded is not None
+
+        chat.rollback_provisional_generation(response_key)
+
+        assert chat.buffer == [user]
+        assert not chat.has_pending_tool_calls()
 
     # -- Function call output --
 

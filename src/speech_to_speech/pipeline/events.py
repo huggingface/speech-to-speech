@@ -1,9 +1,8 @@
-"""Typed events flowing on ``text_output_queue``.
+"""Typed events flowing from pipeline handlers to the realtime router.
 
-These are internal pipeline events produced by VAD, TranscriptionNotifier, and
-LMOutputProcessor, consumed by the realtime ``WebSocketRouter`` send-loop and
-``RealtimeService.dispatch_pipeline_event``.  They replace the raw ``dict``
-literals that were previously put on the queue.
+VAD, transcription, and token-usage events use ``text_output_queue``; ordered
+assistant output events share the TTS output queue with their audio. The router
+dispatches both through ``RealtimeService``.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ from speech_to_speech.pipeline.messages import (
 
 
 class PipelineEvent(BaseModel):
-    """Base for all text_output_queue events.
+    """Base for protocol-neutral events consumed by the realtime router.
 
     The ``type`` field mirrors the former dict ``"type"`` key and acts as a
     Pydantic discriminator.
