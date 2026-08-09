@@ -13,6 +13,7 @@ from speech_to_speech.pipeline.messages import (
     AudioOutput,
     EndOfResponse,
     LLMResponseChunk,
+    TokenUsage,
     TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -88,6 +89,29 @@ def test_failed_response_keeps_generation_identity():
     assert event.response_key == "response_1"
     assert event.cancel_generation == 7
     assert outputs[0].cancel_generation == 7
+
+
+def test_token_usage_keeps_generation_and_response_identity():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    processor = _processor(tracker)
+
+    list(
+        processor.process(
+            TokenUsage(
+                input_tokens=11,
+                output_tokens=7,
+                response_key="response_1",
+                turn_id="turn_1",
+                turn_revision=0,
+                cancel_generation=7,
+            )
+        )
+    )
+
+    event = processor.text_output_queue.get_nowait()
+    assert event.response_key == "response_1"
+    assert event.cancel_generation == 7
 
 
 def test_text_only_chunk_is_not_forwarded_to_tts():

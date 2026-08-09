@@ -336,3 +336,78 @@ def test_cancelled_local_generation_does_not_write_partial_history():
     list(handler.process(GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat))))
 
     assert chat.buffer == [user]
+
+
+def test_local_tool_call_is_recorded_before_chunk_is_emitted():
+    tool = ResponseFunctionToolCall(
+        type="function_call",
+        id="fc_first",
+        call_id="call_first",
+        name="first",
+        arguments="{}",
+    )
+    handler = _local_handler_with_chunks(
+        [
+            LLMResponseChunk(
+                parts=[
+                    AssistantTextPart(text="before"),
+                    AssistantToolCallPart(tool=tool),
+                ]
+            ),
+            LLMResponseChunk(text="after"),
+        ]
+    )
+    chat = Chat(5)
+    chat.add_item(make_user_message("go"))
+    generation = handler.process(GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat)))
+
+    first = next(generation)
+
+    assert first.tools == [tool]
+    assert chat.has_pending_tool_calls()
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id="call_first",
+            output="result",
+        )
+    )
+    list(generation)
+
+    assert [item.type for item in chat.buffer] == [
+        "message",
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+    ]
+
+
+def test_cancelled_local_tool_turn_rolls_back_fast_output():
+    tool = ResponseFunctionToolCall(
+        type="function_call",
+        id="fc_first",
+        call_id="call_first",
+        name="first",
+        arguments="{}",
+    )
+    handler = _local_handler_with_chunks(
+        [LLMResponseChunk(parts=[AssistantToolCallPart(tool=tool)])],
+        cancelled=True,
+    )
+    chat = Chat(5)
+    user = chat.add_item(make_user_message("go"))
+    generation = handler.process(GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat)))
+
+    next(generation)
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id="call_first",
+            output="result",
+        )
+    )
+    list(generation)
+
+    assert chat.buffer == [user]
+    assert not chat.has_pending_tool_calls()

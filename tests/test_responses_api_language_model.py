@@ -9,6 +9,7 @@ import pytest
 from openai import Stream
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
+    RealtimeConversationItemFunctionCall,
     RealtimeConversationItemFunctionCallOutput,
 )
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
@@ -385,6 +386,81 @@ def test_process_handles_cancellation():
 
     assert len(outputs) == 1
     assert isinstance(outputs[0], EndOfResponse)
+
+
+def test_cancelled_text_tool_turn_rolls_back_ordered_call():
+    scope = CancelScope()
+    handler = _make_handler(cancel_scope=scope)
+    handler.client = SimpleNamespace(
+        responses=SimpleNamespace(create=lambda **kwargs: _make_stream([_make_function_call_done_event()]))
+    )
+    request = _make_request("Use a tool")
+    generation = handler.process(request)
+
+    tool_chunk = next(generation)
+    assert isinstance(tool_chunk, LLMResponseChunk)
+    assert tool_chunk.tools
+    assert request.runtime_config.chat.has_pending_tool_calls()
+
+    scope.cancel()
+    remaining = list(generation)
+
+    assert any(isinstance(output, EndOfResponse) for output in remaining)
+    assert [item.type for item in request.runtime_config.chat.buffer] == ["message"]
+    assert not request.runtime_config.chat.has_pending_tool_calls()
+
+
+def test_provider_error_after_text_tool_rolls_back_ordered_call():
+    handler = _make_handler()
+
+    class FailingStream:
+        def __iter__(self):
+            yield _make_function_call_done_event()
+            raise RuntimeError("provider stream failed")
+
+        def close(self):
+            pass
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: FailingStream()))
+    request = _make_request("Use a tool")
+    outputs = list(handler.process(request))
+
+    end = next(output for output in outputs if isinstance(output, EndOfResponse))
+    assert end.error is not None and "provider stream failed" in end.error
+    assert [item.type for item in request.runtime_config.chat.buffer] == ["message"]
+    assert not request.runtime_config.chat.has_pending_tool_calls()
+
+
+def test_generation_is_rejected_until_ordered_tool_output_arrives():
+    handler = _make_handler()
+    called = False
+
+    def create(**kwargs):
+        nonlocal called
+        called = True
+        return _make_stream([])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    chat = Chat(5)
+    chat.add_item(make_user_message("first"))
+    chat.add_ordered_function_call(
+        RealtimeConversationItemFunctionCall(
+            type="function_call",
+            call_id="call_pending",
+            name="pending",
+            arguments="{}",
+        )
+    )
+    chat.add_item(make_user_message("second"))
+    request = GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat))
+
+    outputs = list(handler.process(request))
+
+    assert called is False
+    assert len(outputs) == 1
+    assert isinstance(outputs[0], EndOfResponse)
+    assert outputs[0].error is not None and "function call outputs are pending" in outputs[0].error
+    assert [item.type for item in chat.buffer] == ["message", "function_call", "message"]
 
 
 def test_responses_api_timing_logs_only_text_chunks():

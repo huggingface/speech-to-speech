@@ -578,7 +578,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         def rollback_transaction() -> None:
             nonlocal transaction_rolled_back
-            if transactional_user_message_id is None or history_committed or transaction_rolled_back:
+            if history_committed or transaction_rolled_back:
+                return
+            if transactional_user_message_id is None and not (state.recorded_item_ids or state.recorded_call_ids):
                 return
             original_chat.rollback_generation(
                 transactional_user_message_id,
@@ -669,6 +671,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     output_tokens=state.output_tokens,
                     turn_id=turn.turn_id,
                     turn_revision=turn.turn_revision,
+                    cancel_generation=turn.gen,
                     response_key=turn.response_key,
                 )
             yield EndOfResponse(
@@ -701,6 +704,16 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return
 
         original_chat = runtime_config.chat
+        gen = self.cancel_scope.generation if self.cancel_scope else None
+        if not is_out_of_band(response) and original_chat.has_pending_tool_calls():
+            yield EndOfResponse(
+                turn_id=turn_id,
+                turn_revision=turn_revision,
+                cancel_generation=gen,
+                response_key=request.response_key,
+                error="Cannot generate a response while function call outputs are pending.",
+            )
+            return
         if is_out_of_band(response):
             try:
                 active_chat = build_active_chat(original_chat, response)
@@ -751,7 +764,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         # CancelScope.is_stale(gen) is checked when the stream iterator advances; a
         # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from
         # the websocket router. Mitigations: request_timeout_s / ReadTimeout.
-        gen = self.cancel_scope.generation if self.cancel_scope else None
         turn = _Turn(
             language_code=language_code,
             gen=gen,
@@ -792,6 +804,16 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return
 
         original_chat = runtime_config.chat
+        gen = self.cancel_scope.generation if self.cancel_scope else None
+        if not is_out_of_band(response) and original_chat.has_pending_tool_calls():
+            yield EndOfResponse(
+                turn_id=turn_id,
+                turn_revision=turn_revision,
+                cancel_generation=gen,
+                response_key=request.response_key,
+                error="Cannot generate a response while function call outputs are pending.",
+            )
+            return
         if is_out_of_band(response):
             try:
                 active_chat = build_active_chat(original_chat, response)
@@ -825,8 +847,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         # CancelScope.is_stale(gen) is checked when the stream iterator advances; a
         # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from
         # the websocket router. Mitigations: request_timeout_s / ReadTimeout.
-        gen = self.cancel_scope.generation if self.cancel_scope else None
-
         turn = _Turn(
             language_code=language_code,
             gen=gen,

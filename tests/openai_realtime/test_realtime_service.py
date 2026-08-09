@@ -46,6 +46,7 @@ from speech_to_speech.api.openai_realtime.service import (
     RealtimeService,
 )
 from speech_to_speech.pipeline.events import (
+    AssistantResponseDoneEvent,
     AssistantTextEvent,
     AudioInputCompletedEvent,
     PartialTranscriptionEvent,
@@ -536,6 +537,23 @@ class TestHandleResponseCreate:
         assert isinstance(err, RealtimeErrorEvent)
         assert err.error.type == "conversation_already_has_active_response"
 
+    def test_response_create_while_implicit_response_pending(self, service, conn_id, text_prompt_queue):
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="implicit request"),
+        )
+        queued = text_prompt_queue.get_nowait()
+        assert isinstance(queued, GenerateResponseRequest)
+        assert service._state(conn_id).response_pending is True
+
+        result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
+
+        assert isinstance(result, RealtimeErrorEvent)
+        assert result.error.type == "conversation_already_has_active_response"
+        assert service._state(conn_id).current_response_id is None
+        assert service._state(conn_id).response_pending is True
+        assert text_prompt_queue.empty()
+
     def test_response_create_stores_overrides(self, service, conn_id, runtime_config, text_prompt_queue):
         evt = ResponseCreateEvent(
             type="response.create",
@@ -569,6 +587,7 @@ class TestHandleResponseCreate:
         assert initial_req.turn_id == "turn_1"
         assert initial_req.turn_revision == 2
         assert initial_req.speech_stopped_at_s == 123.0
+        service.response._end_response(conn_id)
 
         result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
 
@@ -639,6 +658,53 @@ class TestHandleResponseCreate:
         assert "call_bogus" in result.error.message
         assert service._state(conn_id).in_response is False
 
+    def test_response_create_rejects_unresolved_function_call(self, service, conn_id, text_prompt_queue):
+        chat = service._state(conn_id).runtime_config.chat
+        chat.add_ordered_function_call(
+            RealtimeConversationItemFunctionCall(
+                type="function_call",
+                call_id="call_pending",
+                name="pending",
+                arguments="{}",
+            )
+        )
+
+        result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
+
+        assert isinstance(result, RealtimeErrorEvent)
+        assert result.error.type == "function_call_output_pending"
+        assert service._state(conn_id).in_response is False
+        assert text_prompt_queue.empty()
+
+    def test_response_create_accepts_matching_function_output_in_input(self, service, conn_id, text_prompt_queue):
+        chat = service._state(conn_id).runtime_config.chat
+        chat.add_ordered_function_call(
+            RealtimeConversationItemFunctionCall(
+                type="function_call",
+                call_id="call_pending",
+                name="pending",
+                arguments="{}",
+            )
+        )
+        event = ResponseCreateEvent(
+            type="response.create",
+            response={
+                "input": [
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_pending",
+                        "output": "done",
+                    }
+                ]
+            },
+        )
+
+        result = service.handle_response_create(conn_id, event)
+
+        assert isinstance(result, ResponseCreatedEvent)
+        assert not chat.has_pending_tool_calls()
+        assert isinstance(text_prompt_queue.get_nowait(), GenerateResponseRequest)
+
     def test_double_response_create_rejected(self, service, conn_id, text_prompt_queue):
         """Second response.create is rejected because in_response is set immediately."""
         evt = ResponseCreateEvent(type="response.create")
@@ -689,6 +755,7 @@ class TestHandleResponseCreate:
             ),
         )
         text_prompt_queue.get()  # drain the STT-triggered request
+        service.response._end_response(conn_id)
 
         result = service.handle_response_create(
             conn_id, ResponseCreateEvent(type="response.create", response={"conversation": "none"})
@@ -2426,6 +2493,42 @@ class TestUsageMetricsTracking:
             TokenUsageEvent(input_tokens=10, output_tokens=20),
         )
         assert events == []
+
+    def test_keyed_usage_waits_for_implicit_response_and_created_stays_zero(self, service, conn_id):
+        response_key = "response_1"
+        service.dispatch_pipeline_event(
+            conn_id,
+            TokenUsageEvent(response_key=response_key, input_tokens=11, output_tokens=7),
+        )
+        assert service._state(conn_id).response_usage.input_tokens == 0
+
+        created = service.response.on_assistant_response_done(
+            conn_id,
+            AssistantResponseDoneEvent(response_key=response_key),
+        )[0]
+        assert isinstance(created, ResponseCreatedEvent)
+        assert created.response.usage.input_tokens == 0
+        assert created.response.usage.output_tokens == 0
+
+        done = service.finish_response(conn_id, response_key=response_key)[0]
+        assert isinstance(done, ResponseDoneEvent)
+        assert done.response.usage.input_tokens == 11
+        assert done.response.usage.output_tokens == 7
+
+    def test_usage_for_closed_response_does_not_leak_into_next_response(self, service, conn_id):
+        service.response._ensure_response(conn_id, "cancelled_response")
+        service.finish_response(conn_id, status="cancelled", response_key="cancelled_response")
+        service.dispatch_pipeline_event(
+            conn_id,
+            TokenUsageEvent(response_key="cancelled_response", input_tokens=11, output_tokens=7),
+        )
+
+        service.response._ensure_response(conn_id, "next_response")
+        done = service.finish_response(conn_id, response_key="next_response")[0]
+
+        assert isinstance(done, ResponseDoneEvent)
+        assert done.response.usage.input_tokens == 0
+        assert done.response.usage.output_tokens == 0
 
     def test_response_done_reflects_token_usage(self, service, conn_id):
         service.response._ensure_response(conn_id)

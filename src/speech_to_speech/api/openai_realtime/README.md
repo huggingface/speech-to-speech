@@ -83,7 +83,7 @@ flowchart LR
 | `conversation.item.created` | Acknowledges injected `input_text` from `conversation.item.create`. |
 | `conversation.item.input_audio_transcription.delta` | Streaming partial transcript (when live transcription is enabled). |
 | `conversation.item.input_audio_transcription.completed` | Final transcript for the user turn (with duration usage). |
-| `response.created` | Emitted on the first outbound audio chunk (response is `in_progress`). |
+| `response.created` | Emitted when an explicit response is accepted or before the first implicit text, tool, audio, or terminal event (response is `in_progress`). |
 | `response.output_audio.delta` | Base64 PCM audio chunk from TTS. |
 | `response.output_audio.done` | Audio stream complete for the current output item. |
 | `response.output_audio_transcript.delta` | Incremental assistant transcript suffix for the current audio output item. |

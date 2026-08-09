@@ -34,6 +34,7 @@ from speech_to_speech.LLM.chat_completions_language_model import (
     _to_chat_tool_choice,
     _to_chat_tools,
 )
+from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.messages import (
     EndOfResponse,
     GenerateResponseRequest,
@@ -449,6 +450,38 @@ def test_tool_call_recorded_before_chunk_is_emitted():
             )
     assert emitted_call_id is not None, "a tool call should have been emitted"
     assert chat._has_call_id_in_buffer(emitted_call_id), "call+output should be paired in the buffer"
+
+
+def test_cancelled_text_tool_turn_rolls_back_ordered_call():
+    h = _make_handler(stream=True)
+    scope = CancelScope()
+    h.cancel_scope = scope
+    h.client.chat.completions.create = lambda **kwargs: _FakeStream(
+        [_chunk(tool_calls=[_tc_delta(0, id="srv_1", name="camera_snapshot", arguments="{}")])]
+    )
+    chat = Chat(10)
+    user = chat.add_item(make_user_message("take a photo"))
+    session = RealtimeSessionCreateRequest(type="realtime", instructions="Use tools.")
+    session.tools = [{"type": "function", "name": "camera_snapshot", "parameters": {"type": "object"}}]
+    request = GenerateResponseRequest(
+        runtime_config=RuntimeConfig(chat=chat, session=session),
+        turn_id="t",
+        turn_revision=0,
+    )
+    generation = h.process(request)
+
+    while True:
+        output = next(generation)
+        if isinstance(output, LLMResponseChunk) and output.tools:
+            break
+    assert chat.has_pending_tool_calls()
+
+    scope.cancel()
+    remaining = list(generation)
+
+    assert any(isinstance(output, EndOfResponse) for output in remaining)
+    assert chat.buffer == [user]
+    assert not chat.has_pending_tool_calls()
 
 
 def test_non_streaming_tool_call():

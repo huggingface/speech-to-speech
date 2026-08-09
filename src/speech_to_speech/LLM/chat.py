@@ -267,6 +267,11 @@ class Chat:
             logger.debug("Added ordered function_call to chat (call_id=%s)", item.call_id)
             return item
 
+    def has_pending_tool_calls(self) -> bool:
+        """Whether the conversation is waiting for any function-call output."""
+        with self._lock:
+            return bool(self._pending_tool_calls)
+
     def trim_if_needed(self, compactor: CompactFn | None = None) -> None:
         """Enforce the size limit after a generation completes. Fires when
         ``user_turn_count > size``.
@@ -317,7 +322,7 @@ class Chat:
 
     def rollback_generation(
         self,
-        user_message_id: str,
+        user_message_id: str | None,
         *,
         item_ids: set[str],
         call_ids: set[str],
@@ -326,13 +331,14 @@ class Chat:
 
         A tool output may be appended by a fast client while generation is still
         streaming, so rollback matches both item IDs and tool ``call_id`` values.
-        Unrelated messages injected concurrently for a later turn are preserved.
+        ``user_message_id=None`` preserves a pre-existing text input while removing
+        only provisional assistant output. Unrelated later items are preserved.
         """
 
         with self._lock:
             kept: list[SupportedItem] = []
             for item in self.buffer:
-                remove = item.id == user_message_id or item.id in item_ids
+                remove = (user_message_id is not None and item.id == user_message_id) or item.id in item_ids
                 if isinstance(item, (RealtimeConversationItemFunctionCall, RealtimeConversationItemFunctionCallOutput)):
                     remove = remove or item.call_id in call_ids
                 if not remove:
@@ -342,7 +348,7 @@ class Chat:
                 self._pending_tool_calls.pop(call_id, None)
                 self._ordered_pending_call_ids.discard(call_id)
             self._user_turn_count = sum(isinstance(item, RealtimeConversationItemUserMessage) for item in self.buffer)
-            logger.debug("Rolled back failed generation for user message %s", user_message_id)
+            logger.debug("Rolled back failed generation output for user message %s", user_message_id)
 
     def compact_audio_history(self, max_audio_turns: int) -> None:
         """Retain only the newest bounded set of audio turns.

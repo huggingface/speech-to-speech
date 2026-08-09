@@ -290,9 +290,9 @@ class ResponseHandler(RealtimeBaseHandler):
                     message="Only string tool_choice values are supported for now (auto, required, none).",
                     _type="tool_choice_not_supported",
                 )
-        if st.in_response:
+        if st.in_response or st.response_pending:
             return self.make_error(
-                message="Cannot create response while another response is in progress.",
+                message="Cannot create response while another response is in progress or pending.",
                 _type="conversation_already_has_active_response",
             )
 
@@ -307,6 +307,11 @@ class ResponseHandler(RealtimeBaseHandler):
                     self._service.conversation._append_item(conn_id, input_item)
                 except ChatItemError as exc:
                     return self.make_error(message=str(exc), _type="invalid_input_item")
+        if not out_of_band and st.runtime_config.chat.has_pending_tool_calls():
+            return self.make_error(
+                message="Cannot create a response while function call outputs are pending.",
+                _type="function_call_output_pending",
+            )
 
         cfg = st.runtime_config
         queue = self._queue(conn_id)
@@ -492,6 +497,7 @@ class ResponseHandler(RealtimeBaseHandler):
                     response=self._build_response(conn_id, "in_progress"),
                 )
             )
+        self._service._apply_pending_token_usage(conn_id, event.response_key)
         wants_audio = response_wants_audio(st.current_response_params)
         for part in meaningful_parts:
             if isinstance(part, AssistantTextPart):
@@ -616,12 +622,16 @@ class ResponseHandler(RealtimeBaseHandler):
         response_was_missing = st.current_response_id is None
         self._ensure_response(conn_id, event.response_key)
         st.response_text_complete = True
-        if not response_was_missing:
-            return []
-        return [
-            ResponseCreatedEvent(
-                type="response.created",
-                event_id=self._next_event_id(),
-                response=self._build_response(conn_id, "in_progress"),
-            )
-        ]
+        events: list[ServerEvent] = (
+            [
+                ResponseCreatedEvent(
+                    type="response.created",
+                    event_id=self._next_event_id(),
+                    response=self._build_response(conn_id, "in_progress"),
+                )
+            ]
+            if response_was_missing
+            else []
+        )
+        self._service._apply_pending_token_usage(conn_id, event.response_key)
+        return events

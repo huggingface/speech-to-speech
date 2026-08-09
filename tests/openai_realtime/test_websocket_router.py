@@ -522,6 +522,53 @@ class TestSendLoop:
                 assert delta["type"] == "response.output_audio_transcript.delta"
                 assert delta["delta"] == "fresh response"
 
+    def test_stale_tagged_usage_does_not_leak_into_next_response(self, setup):
+        app, _, _, output_queue, text_output_queue, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                stale_generation = cancel_scope.generation
+                cancel_scope.cancel()
+                current_generation = cancel_scope.generation
+                response_key = "fresh_response"
+
+                text_output_queue.put(
+                    TokenUsageEvent(
+                        input_tokens=11,
+                        output_tokens=7,
+                        response_key="cancelled_response",
+                        cancel_generation=stale_generation,
+                    )
+                )
+                text_output_queue.put(
+                    AssistantTextEvent(
+                        text="fresh response",
+                        response_key=response_key,
+                        cancel_generation=current_generation,
+                    )
+                )
+                text_output_queue.put(
+                    AssistantResponseDoneEvent(
+                        response_key=response_key,
+                        cancel_generation=current_generation,
+                    )
+                )
+                output_queue.put(
+                    AudioOutput(
+                        audio=AUDIO_RESPONSE_DONE,
+                        response_key=response_key,
+                        cancel_generation=current_generation,
+                    )
+                )
+
+                messages = []
+                while not messages or messages[-1]["type"] != "response.done":
+                    messages.append(ws.receive_json())
+
+                usage = messages[-1]["response"]["usage"]
+                assert usage["input_tokens"] == 0
+                assert usage["output_tokens"] == 0
+
     def test_partial_failed_response_drains_audio_before_failed_done(self, setup):
         app, _, _, output_queue, text_output_queue, _, _, _, cancel_scope = setup
         with TestClient(app) as client:

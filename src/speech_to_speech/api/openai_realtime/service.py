@@ -198,6 +198,7 @@ class ConnState(BaseModel):
     # assistant message items.
     pending_function_calls: dict[int, RealtimeConversationItemFunctionCall] = Field(default_factory=dict)
     response_usage: UsageMetrics = Field(default_factory=UsageMetrics)
+    pending_token_usage: dict[str, tuple[int, int]] = Field(default_factory=dict)
     speculative_turn_id: Optional[str] = None
     speculative_turn_revision: Optional[int] = None
     speculative_user_turn_id: Optional[str] = None
@@ -278,6 +279,9 @@ class RealtimeService:
             # mutate a Chat tied to a closed session, and don't make further
             # billable LLM calls on its behalf once the splice is suppressed.
             st.runtime_config.chat.close()
+            for input_tokens, output_tokens in st.pending_token_usage.values():
+                st.response_usage.input_tokens += input_tokens
+                st.response_usage.output_tokens += output_tokens
             self.total_usage += st.response_usage
             logger.info(
                 "Session %s unregistered — cumulative: input_tokens=%d, output_tokens=%d, audio=%.2fs",
@@ -559,7 +563,7 @@ class RealtimeService:
     # ── Metrics ────────────────────────────────────
 
     def _on_token_usage(self, conn_id: str, event: TokenUsageEvent) -> list[ServerEvent]:
-        """Accumulate input/output token counts on the connection's usage metrics."""
+        """Accumulate usage only on the response identified by the event."""
         if self.speculative_turns and not self.speculative_turns.is_latest(
             event.turn_id,
             event.turn_revision,
@@ -567,6 +571,15 @@ class RealtimeService:
             logger.debug("Dropping stale token usage for turn=%s rev=%s", event.turn_id, event.turn_revision)
             return []
         st = self._state(conn_id)
+        if event.response_key is not None and not (
+            st.in_response and st.current_response_key in (None, event.response_key)
+        ):
+            pending_input, pending_output = st.pending_token_usage.get(event.response_key, (0, 0))
+            st.pending_token_usage[event.response_key] = (
+                pending_input + event.input_tokens,
+                pending_output + event.output_tokens,
+            )
+            return []
         st.response_usage.input_tokens += event.input_tokens
         st.response_usage.output_tokens += event.output_tokens
         logger.info(
@@ -575,6 +588,22 @@ class RealtimeService:
             st.response_usage.output_tokens,
         )
         return []
+
+    def _apply_pending_token_usage(self, conn_id: str, response_key: str | None) -> None:
+        """Attach usage queued before an implicit response became visible."""
+        if response_key is None:
+            return
+        st = self._state(conn_id)
+        input_tokens, output_tokens = st.pending_token_usage.pop(response_key, (0, 0))
+        if not (input_tokens or output_tokens):
+            return
+        st.response_usage.input_tokens += input_tokens
+        st.response_usage.output_tokens += output_tokens
+        logger.info(
+            "Token usage (response): input=%d, output=%d",
+            st.response_usage.input_tokens,
+            st.response_usage.output_tokens,
+        )
 
     def _on_response_failed(self, conn_id: str, event: ResponseFailedEvent) -> list[ServerEvent]:
         """Surface a generation failure and defer terminal output to the audio sentinel.

@@ -139,6 +139,9 @@ class StreamContext(BaseModel):
     speech_stopped_at_s: float | None = None
     cancel_generation: int | None = None
     output_parts: list[AssistantOutputPart] = Field(default_factory=list)
+    history_parts_committed: int = 0
+    recorded_item_ids: set[str] = Field(default_factory=set)
+    recorded_call_ids: set[str] = Field(default_factory=set)
 
     @property
     def interrupted(self) -> bool:
@@ -407,7 +410,14 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         return chunks, tools, printable_text
 
     @staticmethod
-    def _commit_ordered_output(chat: Chat, parts: list[AssistantOutputPart], *, wants_audio: bool) -> None:
+    def _commit_ordered_output(
+        chat: Chat,
+        parts: list[AssistantOutputPart],
+        *,
+        wants_audio: bool,
+        recorded_item_ids: set[str] | None = None,
+        recorded_call_ids: set[str] | None = None,
+    ) -> None:
         """Persist exactly the ordered text/tool stream emitted to the client."""
         text_parts: list[str] = []
 
@@ -417,7 +427,9 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             separator = " " if wants_audio else ""
             text = separator.join(part for part in text_parts if part)
             if text:
-                chat.add_item(make_assistant_message(text))
+                recorded = chat.add_item(make_assistant_message(text))
+                if recorded_item_ids is not None and recorded.id is not None:
+                    recorded_item_ids.add(recorded.id)
             text_parts.clear()
 
         for part in parts:
@@ -426,7 +438,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 continue
             flush_text()
             tool = part.tool
-            chat.add_ordered_function_call(
+            recorded = chat.add_ordered_function_call(
                 RealtimeConversationItemFunctionCall(
                     type="function_call",
                     id=tool.id,
@@ -436,6 +448,10 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     status=tool.status,
                 )
             )
+            if recorded_item_ids is not None and recorded.id is not None:
+                recorded_item_ids.add(recorded.id)
+            if recorded_call_ids is not None and recorded.call_id is not None:
+                recorded_call_ids.add(recorded.call_id)
         flush_text()
 
     def _check_stop(self, gen: int | None, ctx: StreamContext) -> bool:
@@ -545,6 +561,16 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         response = request.response
         original_chat = runtime_config.chat
         out_of_band = is_out_of_band(response)
+        gen = self.cancel_scope.generation if self.cancel_scope else None
+        if not out_of_band and original_chat.has_pending_tool_calls():
+            yield EndOfResponse(
+                turn_id=ctx.turn_id,
+                turn_revision=ctx.turn_revision,
+                cancel_generation=gen,
+                response_key=request.response_key,
+                error="Cannot generate a response while function call outputs are pending.",
+            )
+            return
         if out_of_band:
             try:
                 active_chat = build_active_chat(original_chat, response)
@@ -577,17 +603,41 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         if lang_name and self.enable_lang_prompt:
             active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
 
-        gen = self.cancel_scope.generation if self.cancel_scope else None
         ctx.cancel_generation = gen
         # Images the model sees this turn; only these are stripped on write-back,
         # so an image a fast client injects mid-generation for the next turn
         # survives (it is not in this serialized snapshot).
         consumed_image_ids = active_chat.image_message_ids()
+        history_committed = False
+        history_rolled_back = False
+
+        def rollback_history() -> None:
+            nonlocal history_rolled_back
+            if out_of_band or history_committed or history_rolled_back:
+                return
+            if not (ctx.recorded_item_ids or ctx.recorded_call_ids):
+                return
+            original_chat.rollback_generation(
+                None,
+                item_ids=ctx.recorded_item_ids,
+                call_ids=ctx.recorded_call_ids,
+            )
+            history_rolled_back = True
 
         try:
             for chunk in self._generate(active_chat, language_code, gen, ctx, runtime_config, response):
                 chunk.response_key = request.response_key
-                ctx.output_parts.extend(part.model_copy(deep=True) for part in chunk.parts)
+                new_parts = [part.model_copy(deep=True) for part in chunk.parts]
+                ctx.output_parts.extend(new_parts)
+                if not out_of_band and any(isinstance(part, AssistantToolCallPart) for part in new_parts):
+                    self._commit_ordered_output(
+                        original_chat,
+                        ctx.output_parts[ctx.history_parts_committed :],
+                        wants_audio=response_wants_audio(response),
+                        recorded_item_ids=ctx.recorded_item_ids,
+                        recorded_call_ids=ctx.recorded_call_ids,
+                    )
+                    ctx.history_parts_committed = len(ctx.output_parts)
                 yield chunk
 
             if ctx.stopped:
@@ -614,11 +664,15 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if commit_allowed:
                 self._commit_ordered_output(
                     original_chat,
-                    ctx.output_parts,
+                    ctx.output_parts[ctx.history_parts_committed :],
                     wants_audio=response_wants_audio(response),
+                    recorded_item_ids=ctx.recorded_item_ids,
+                    recorded_call_ids=ctx.recorded_call_ids,
                 )
+                ctx.history_parts_committed = len(ctx.output_parts)
                 original_chat.strip_images(consumed_image_ids)
                 original_chat.trim_if_needed(self.compactor)
+                history_committed = True
             logger.debug("Clean text: %s", ctx.generated_text)
             logger.info(f"Tools: {ctx.tools}")
 
@@ -632,6 +686,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     output_tokens=output_tokens,
                     turn_id=ctx.turn_id,
                     turn_revision=ctx.turn_revision,
+                    cancel_generation=ctx.cancel_generation,
                     response_key=request.response_key,
                 )
         except Exception as exc:
@@ -639,6 +694,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             # the exception would escape process() and no EndOfResponse would be
             # emitted, leaving st.in_response stuck and locking every later response.
             logger.exception("LLM generation failed; ending the current response")
+            rollback_history()
             yield EndOfResponse(
                 turn_id=ctx.turn_id,
                 turn_revision=ctx.turn_revision,
@@ -647,6 +703,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 error=f"Language model generation failed: {exc}",
             )
             return
+        finally:
+            rollback_history()
         yield EndOfResponse(
             turn_id=ctx.turn_id,
             turn_revision=ctx.turn_revision,

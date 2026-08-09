@@ -104,6 +104,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                         output_tokens=lm_output.output_tokens or 0,
                         turn_id=lm_output.turn_id,
                         turn_revision=lm_output.turn_revision,
+                        cancel_generation=lm_output.cancel_generation,
                         response_key=usage_response_key,
                     )
                 )

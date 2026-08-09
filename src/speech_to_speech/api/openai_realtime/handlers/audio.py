@@ -195,6 +195,7 @@ class AudioHandler(RealtimeBaseHandler):
                     response=response._build_response(conn_id, "in_progress"),
                 )
             )
+        self._service._apply_pending_token_usage(conn_id, response_key)
         return resp_id, item_id, events
 
     def begin_audio_output(
