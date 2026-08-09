@@ -245,6 +245,7 @@ class ConnState(BaseModel):
     def close_pending_responses(self) -> None:
         """Tombstone every queued response during an interruption or explicit cancel."""
         for response_key in tuple(self.pending_response_keys):
+            self.runtime_config.chat.rollback_provisional_generation(response_key)
             self.close_response_key(response_key)
         self.response_pending = bool(self.pending_response_keys)
 

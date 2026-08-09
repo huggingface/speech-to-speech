@@ -487,6 +487,19 @@ class TestAddItem:
         with pytest.raises(ChatItemError, match="call_"):
             chat.add_item(fc)
 
+    def test_cancelled_response_rejects_late_provisional_items_atomically(self):
+        chat = Chat(size=5)
+        response_key = "cancelled_response"
+        chat.rollback_provisional_generation(response_key)
+
+        recorded = chat.add_provisional_generation_items(response_key, [_assistant("late"), _fc("late")])
+
+        assert recorded is None
+        assert chat.buffer == []
+        assert not chat.has_pending_tool_calls()
+        chat.rollback_generation(None, item_ids=set(), call_ids=set(), response_key=response_key)
+        assert chat._cancelled_provisional_generations == {}
+
     # -- Function call output --
 
     def test_function_call_output_delegates_to_append_tool_output(self):

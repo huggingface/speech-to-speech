@@ -39,6 +39,8 @@ from openai.types.realtime import (
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
+    RealtimeConversationItemFunctionCallOutput,
+    RealtimeConversationItemUserMessage,
 )
 
 from speech_to_speech.api.openai_realtime.service import (
@@ -494,6 +496,61 @@ class TestDeferConversationItemsDuringResponse:
         assert not any(isinstance(e, RealtimeErrorEvent) for e in finish_events)
         assert chat._has_call_id_in_buffer("call_1")
         assert chat.buffer[-1].type == "function_call_output"
+
+    def test_cancel_rolls_back_provisional_call_before_flushing_deferred_output(self, service, conn_id):
+        st = service._state(conn_id)
+        chat = st.runtime_config.chat
+        user = chat.add_item(
+            RealtimeConversationItemUserMessage(
+                type="message",
+                role="user",
+                content=[{"type": "input_text", "text": "use a tool"}],
+            )
+        )
+        response_key = "response_cancelled"
+        recorded_items = chat.add_provisional_generation_items(
+            response_key,
+            [
+                RealtimeConversationItemFunctionCall(
+                    type="function_call",
+                    id="fc_cancelled",
+                    call_id="call_cancelled",
+                    name="camera_snapshot",
+                    arguments="{}",
+                )
+            ],
+        )
+        assert recorded_items is not None
+        call = recorded_items[0]
+        assert isinstance(call, RealtimeConversationItemFunctionCall)
+        st.in_response = True
+        st.current_response_id = "resp_cancelled"
+        st.current_response_key = response_key
+        st.pending_function_calls[0] = call
+        result_event = ConversationItemCreateEvent(
+            type="conversation.item.create",
+            item=RealtimeConversationItemFunctionCallOutput(
+                type="function_call_output",
+                call_id=call.call_id,
+                output="result",
+            ),
+        )
+
+        assert service.handle_conversation_item_create(conn_id, result_event) == []
+
+        events = service.finish_response(conn_id, status="cancelled", reason="client_cancelled")
+
+        assert any(isinstance(event, ResponseDoneEvent) for event in events)
+        assert any(isinstance(event, RealtimeErrorEvent) for event in events), events
+        assert not any(isinstance(event, ConversationItemCreatedEvent) for event in events)
+        assert chat.buffer == [user]
+        assert not chat.has_pending_tool_calls()
+        assert chat._provisional_generations == {}
+
+        # response.done is now a safe boundary: an immediate follow-up does not
+        # see the cancelled call or get rejected as waiting for its output.
+        next_response = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
+        assert isinstance(next_response, ResponseCreatedEvent)
 
 
 # ===================================================================

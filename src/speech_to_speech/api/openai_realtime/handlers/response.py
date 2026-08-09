@@ -457,6 +457,12 @@ class ResponseHandler(RealtimeBaseHandler):
                     response=self._build_response(conn_id, status, reason),
                 )
             )
+            if status == "cancelled" and reason in ("client_cancelled", "turn_detected"):
+                # Tool calls are recorded before their chunks reach the client.
+                # Remove that provisional transaction before deferred client
+                # items are applied, so cancellation cannot acknowledge a tool
+                # result that the LLM thread will subsequently roll back.
+                st.runtime_config.chat.rollback_provisional_generation(st.current_response_key)
             self._end_response(conn_id, status)
         # Apply any client items that arrived mid-generation now that in_response
         # is cleared and the generation's own write-back has landed. Done outside

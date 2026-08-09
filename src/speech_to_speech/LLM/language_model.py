@@ -9,6 +9,9 @@ from typing import Any, Literal, Optional, Protocol, runtime_checkable
 
 import torch
 from nltk import sent_tokenize
+from openai.types.realtime.realtime_conversation_item_assistant_message import (
+    RealtimeConversationItemAssistantMessage,
+)
 from openai.types.realtime.realtime_conversation_item_function_call import (
     RealtimeConversationItemFunctionCall,
 )
@@ -405,11 +408,13 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         parts: list[AssistantOutputPart],
         *,
         wants_audio: bool,
+        response_key: str | None = None,
         recorded_item_ids: set[str] | None = None,
         recorded_call_ids: set[str] | None = None,
-    ) -> None:
+    ) -> bool:
         """Persist exactly the ordered text/tool stream emitted to the client."""
         text_parts: list[str] = []
+        items: list[RealtimeConversationItemAssistantMessage | RealtimeConversationItemFunctionCall] = []
 
         def flush_text() -> None:
             if not text_parts:
@@ -417,9 +422,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             separator = " " if wants_audio else ""
             text = separator.join(part for part in text_parts if part)
             if text:
-                recorded = chat.add_item(make_assistant_message(text))
-                if recorded_item_ids is not None and recorded.id is not None:
-                    recorded_item_ids.add(recorded.id)
+                items.append(make_assistant_message(text))
             text_parts.clear()
 
         for part in parts:
@@ -428,7 +431,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 continue
             flush_text()
             tool = part.tool
-            recorded = chat.add_ordered_function_call(
+            items.append(
                 RealtimeConversationItemFunctionCall(
                     type="function_call",
                     id=tool.id,
@@ -438,11 +441,29 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     status=tool.status,
                 )
             )
+        flush_text()
+
+        if response_key is not None:
+            recorded_items = chat.add_provisional_generation_items(response_key, items)
+            if recorded_items is None:
+                return False
+        else:
+            recorded_items = []
+            for item in items:
+                if isinstance(item, RealtimeConversationItemFunctionCall):
+                    recorded_items.append(chat.add_ordered_function_call(item))
+                else:
+                    recorded_items.append(chat.add_item(item))
+        for recorded in recorded_items:
             if recorded_item_ids is not None and recorded.id is not None:
                 recorded_item_ids.add(recorded.id)
-            if recorded_call_ids is not None and recorded.call_id is not None:
+            if (
+                recorded_call_ids is not None
+                and isinstance(recorded, RealtimeConversationItemFunctionCall)
+                and recorded.call_id is not None
+            ):
                 recorded_call_ids.add(recorded.call_id)
-        flush_text()
+        return True
 
     def _check_stop(self, gen: int | None, ctx: StreamContext) -> bool:
         """Check whether generation should be aborted and mark the reason on *ctx*."""
@@ -613,6 +634,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 None,
                 item_ids=ctx.recorded_item_ids,
                 call_ids=ctx.recorded_call_ids,
+                response_key=request.response_key,
             )
             history_rolled_back = True
 
@@ -622,13 +644,17 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 new_parts = [part.model_copy(deep=True) for part in chunk.parts]
                 ctx.output_parts.extend(new_parts)
                 if not out_of_band and any(isinstance(part, AssistantToolCallPart) for part in new_parts):
-                    self._commit_ordered_output(
+                    recorded = self._commit_ordered_output(
                         original_chat,
                         ctx.output_parts[ctx.history_parts_committed :],
                         wants_audio=response_wants_audio(response),
+                        response_key=request.response_key,
                         recorded_item_ids=ctx.recorded_item_ids,
                         recorded_call_ids=ctx.recorded_call_ids,
                     )
+                    if not recorded:
+                        ctx.cancelled = True
+                        break
                     ctx.history_parts_committed = len(ctx.output_parts)
                 yield chunk
 
@@ -655,17 +681,22 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 )
                 ctx.output_parts.extend(part.model_copy(deep=True) for part in trailing_chunk.parts)
             if commit_allowed:
-                self._commit_ordered_output(
+                commit_allowed = self._commit_ordered_output(
                     original_chat,
                     ctx.output_parts[ctx.history_parts_committed :],
                     wants_audio=response_wants_audio(response),
+                    response_key=request.response_key,
                     recorded_item_ids=ctx.recorded_item_ids,
                     recorded_call_ids=ctx.recorded_call_ids,
                 )
-                ctx.history_parts_committed = len(ctx.output_parts)
-                original_chat.strip_images(consumed_image_ids)
-                original_chat.trim_if_needed(self.compactor)
-                history_committed = True
+                if commit_allowed:
+                    ctx.history_parts_committed = len(ctx.output_parts)
+                    original_chat.strip_images(consumed_image_ids)
+                    original_chat.trim_if_needed(self.compactor)
+                    original_chat.commit_provisional_generation(request.response_key)
+                    history_committed = True
+                else:
+                    trailing_chunk = None
             logger.debug("Clean text: %s", ctx.generated_text)
             logger.info(f"Tools: {ctx.tools}")
 

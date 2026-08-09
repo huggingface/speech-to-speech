@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from copy import deepcopy
 from typing import Any, Literal, Union
 
@@ -107,6 +107,11 @@ class Chat:
         # Those calls stay in their emitted buffer position, but serializers
         # omit them until a function_call_output pairs the call.
         self._ordered_pending_call_ids: set[str] = set()
+        # Assistant output is written eagerly when a tool call is exposed to a
+        # realtime client. Keep the exact provisional IDs keyed by response so
+        # cancellation can roll them back before accepting deferred client items.
+        self._provisional_generations: dict[str, tuple[set[str], set[str]]] = {}
+        self._cancelled_provisional_generations: dict[str, None] = {}
         self._user_turn_count: int = 0
 
         # All state mutations and serializations go through _lock. Public methods
@@ -188,6 +193,67 @@ class Chat:
         with self._lock:
             self.init_chat_message = message
 
+    def _add_item_locked(self, item: SupportedItem, *, ordered_function_call: bool = False) -> SupportedItem:
+        """Body of :meth:`add_item`; caller holds ``_lock``."""
+
+        if isinstance(item, RealtimeConversationItemSystemMessage):
+            item.id = _ensure_id(item.id, "sys")
+            self.init_chat_message = item
+            logger.debug("Set system message via conversation item")
+
+        elif isinstance(item, RealtimeConversationItemUserMessage):
+            item.id = _ensure_id(item.id, "msg")
+            item.content = [
+                part
+                for part in item.content
+                if (part.type == "input_text" and part.text)
+                or (part.type == "input_image" and part.image_url)
+                or (part.type == "input_audio" and part.audio)
+            ]
+            if not item.content:
+                raise ChatItemError(
+                    "Message has no supported content. Supported modalities: input_text, input_image, input_audio."
+                )
+            self.buffer.append(item)
+            self._user_turn_count += 1
+            logger.debug("Added user message to chat (%d parts)", len(item.content))
+
+        elif isinstance(item, RealtimeConversationItemAssistantMessage):
+            item.id = _ensure_id(item.id, "msg")
+            item.content = [part for part in item.content if part.type == "output_text" and part.text]
+            if not item.content:
+                return item
+            self.buffer.append(item)
+            logger.debug("Added assistant message to chat (%d parts)", len(item.content))
+
+        elif isinstance(item, RealtimeConversationItemFunctionCall):
+            item.id = _ensure_id(item.id, "fc")
+            item.call_id = _ensure_id(item.call_id, "call")
+            if ordered_function_call:
+                self.buffer.append(item)
+                self._ordered_pending_call_ids.add(item.call_id)
+            self._pending_tool_calls[item.call_id] = item
+            logger.debug("Added function_call to chat (call_id=%s)", item.call_id)
+
+        elif isinstance(item, RealtimeConversationItemFunctionCallOutput):
+            item.id = _ensure_id(item.id, "fco")
+            self._append_tool_output_locked(item.call_id, item)
+            logger.debug("Added function_call_output to chat (call_id=%s)", item.call_id)
+
+        else:
+            raise ChatItemError(f"Unsupported item type: {getattr(item, 'type', None)}")
+
+        if self.size > 0 and self._user_turn_count > 2 * self.size:
+            logger.warning(
+                "Chat buffer exceeded hard cap (%d > 2 * size=%d); evicting oldest turn",
+                self._user_turn_count,
+                self.size,
+            )
+            while self._user_turn_count > 2 * self.size:
+                self._evict_oldest_turn()
+
+        return item
+
     def add_item(self, item: SupportedItem) -> SupportedItem:
         """Validate and route a conversation item into the chat buffer.
 
@@ -200,73 +266,16 @@ class Chat:
         Raises :class:`ChatItemError` if the item fails validation.
         """
         with self._lock:
-            if isinstance(item, RealtimeConversationItemSystemMessage):
-                item.id = _ensure_id(item.id, "sys")
-                self.init_chat_message = item
-                logger.debug("Set system message via conversation item")
-
-            elif isinstance(item, RealtimeConversationItemUserMessage):
-                item.id = _ensure_id(item.id, "msg")
-                item.content = [
-                    p
-                    for p in item.content
-                    if (p.type == "input_text" and p.text)
-                    or (p.type == "input_image" and p.image_url)
-                    or (p.type == "input_audio" and p.audio)
-                ]
-                if not item.content:
-                    raise ChatItemError(
-                        "Message has no supported content. Supported modalities: input_text, input_image, input_audio."
-                    )
-                self.buffer.append(item)
-                self._user_turn_count += 1
-                logger.debug("Added user message to chat (%d parts)", len(item.content))
-
-            elif isinstance(item, RealtimeConversationItemAssistantMessage):
-                item.id = _ensure_id(item.id, "msg")
-                item.content = [p for p in item.content if p.type == "output_text" and p.text]
-                if not item.content:
-                    return item
-                self.buffer.append(item)
-                logger.debug("Added assistant message to chat (%d parts)", len(item.content))
-
-            elif isinstance(item, RealtimeConversationItemFunctionCall):
-                item.id = _ensure_id(item.id, "fc")
-                item.call_id = _ensure_id(item.call_id, "call")
-                self._pending_tool_calls[item.call_id] = item
-                logger.debug("Added function_call to chat (call_id=%s)", item.call_id)
-
-            elif isinstance(item, RealtimeConversationItemFunctionCallOutput):
-                item.id = _ensure_id(item.id, "fco")
-                self._append_tool_output_locked(item.call_id, item)
-                logger.debug("Added function_call_output to chat (call_id=%s)", item.call_id)
-
-            else:
-                raise ChatItemError(f"Unsupported item type: {getattr(item, 'type', None)}")
-
-            if self.size > 0 and self._user_turn_count > 2 * self.size:
-                logger.warning(
-                    "Chat buffer exceeded hard cap (%d > 2 * size=%d); evicting oldest turn",
-                    self._user_turn_count,
-                    self.size,
-                )
-                while self._user_turn_count > 2 * self.size:
-                    self._evict_oldest_turn()
-
-            return item
+            return self._add_item_locked(item)
 
     def add_ordered_function_call(
         self, item: RealtimeConversationItemFunctionCall
     ) -> RealtimeConversationItemFunctionCall:
         """Stage a local-model call at its emitted position until its output arrives."""
         with self._lock:
-            item.id = _ensure_id(item.id, "fc")
-            item.call_id = _ensure_id(item.call_id, "call")
-            self.buffer.append(item)
-            self._pending_tool_calls[item.call_id] = item
-            self._ordered_pending_call_ids.add(item.call_id)
-            logger.debug("Added ordered function_call to chat (call_id=%s)", item.call_id)
-            return item
+            recorded = self._add_item_locked(item, ordered_function_call=True)
+            assert isinstance(recorded, RealtimeConversationItemFunctionCall)
+            return recorded
 
     def has_pending_tool_calls(self) -> bool:
         """Whether the conversation is waiting for any function-call output."""
@@ -327,6 +336,7 @@ class Chat:
         *,
         item_ids: set[str],
         call_ids: set[str],
+        response_key: str | None = None,
     ) -> None:
         """Remove only the provisional state written by one failed generation.
 
@@ -337,19 +347,102 @@ class Chat:
         """
 
         with self._lock:
-            kept: list[SupportedItem] = []
-            for item in self.buffer:
-                remove = (user_message_id is not None and item.id == user_message_id) or item.id in item_ids
-                if isinstance(item, (RealtimeConversationItemFunctionCall, RealtimeConversationItemFunctionCallOutput)):
-                    remove = remove or item.call_id in call_ids
-                if not remove:
-                    kept.append(item)
-            self.buffer = kept
-            for call_id in call_ids:
-                self._pending_tool_calls.pop(call_id, None)
-                self._ordered_pending_call_ids.discard(call_id)
-            self._user_turn_count = sum(isinstance(item, RealtimeConversationItemUserMessage) for item in self.buffer)
-            logger.debug("Rolled back failed generation output for user message %s", user_message_id)
+            if response_key is not None:
+                self._provisional_generations.pop(response_key, None)
+                self._cancelled_provisional_generations.pop(response_key, None)
+            self._rollback_generation_locked(user_message_id, item_ids=item_ids, call_ids=call_ids)
+
+    def add_provisional_generation_items(
+        self,
+        response_key: str,
+        items: Sequence[SupportedItem],
+    ) -> list[SupportedItem] | None:
+        """Atomically write and track items exposed by an active response.
+
+        ``None`` means cancellation won the race before the items were written.
+        Function calls use ordered insertion because these are streamed response
+        parts rather than legacy deferred calls.
+        """
+
+        with self._lock:
+            if response_key in self._cancelled_provisional_generations:
+                return None
+            recorded_items: list[SupportedItem] = []
+            item_ids: set[str] = set()
+            call_ids: set[str] = set()
+            for item in items:
+                if not isinstance(
+                    item,
+                    (
+                        RealtimeConversationItemUserMessage,
+                        RealtimeConversationItemAssistantMessage,
+                        RealtimeConversationItemFunctionCall,
+                    ),
+                ):
+                    raise ChatItemError(f"Unsupported provisional item type: {getattr(item, 'type', None)}")
+                recorded = self._add_item_locked(
+                    item,
+                    ordered_function_call=isinstance(item, RealtimeConversationItemFunctionCall),
+                )
+                if isinstance(recorded, RealtimeConversationItemAssistantMessage) and not recorded.content:
+                    continue
+                recorded_items.append(recorded)
+                if recorded.id is not None:
+                    item_ids.add(recorded.id)
+                if isinstance(recorded, RealtimeConversationItemFunctionCall) and recorded.call_id is not None:
+                    call_ids.add(recorded.call_id)
+            tracked_item_ids, tracked_call_ids = self._provisional_generations.setdefault(
+                response_key,
+                (set(), set()),
+            )
+            tracked_item_ids.update(item_ids)
+            tracked_call_ids.update(call_ids)
+            return recorded_items
+
+    def commit_provisional_generation(self, response_key: str) -> None:
+        """Mark an eagerly written response as committed history."""
+
+        with self._lock:
+            self._provisional_generations.pop(response_key, None)
+            self._cancelled_provisional_generations.pop(response_key, None)
+
+    def rollback_provisional_generation(self, response_key: str | None) -> None:
+        """Synchronously remove eager output for a cancelled response, if any."""
+
+        if response_key is None:
+            return
+        with self._lock:
+            self._cancelled_provisional_generations[response_key] = None
+            while len(self._cancelled_provisional_generations) > 128:
+                self._cancelled_provisional_generations.pop(next(iter(self._cancelled_provisional_generations)))
+            tracked = self._provisional_generations.pop(response_key, None)
+            if tracked is None:
+                return
+            item_ids, call_ids = tracked
+            self._rollback_generation_locked(None, item_ids=item_ids, call_ids=call_ids)
+
+    def _rollback_generation_locked(
+        self,
+        user_message_id: str | None,
+        *,
+        item_ids: set[str],
+        call_ids: set[str],
+    ) -> None:
+        """Body of :meth:`rollback_generation`; caller holds ``_lock``."""
+
+        kept: list[SupportedItem] = []
+        for item in self.buffer:
+            remove = (user_message_id is not None and item.id == user_message_id) or item.id in item_ids
+            if isinstance(item, (RealtimeConversationItemFunctionCall, RealtimeConversationItemFunctionCallOutput)):
+                remove = remove or item.call_id in call_ids
+            if not remove:
+                kept.append(item)
+        self.buffer = kept
+        for call_id in call_ids:
+            self._pending_tool_calls.pop(call_id, None)
+            self._ordered_pending_call_ids.discard(call_id)
+        self._user_turn_count = sum(isinstance(item, RealtimeConversationItemUserMessage) for item in self.buffer)
+        logger.debug("Rolled back failed generation output for user message %s", user_message_id)
 
     def compact_audio_history(self, max_audio_turns: int) -> None:
         """Retain only the newest bounded set of audio turns.
@@ -566,6 +659,8 @@ class Chat:
             self.init_chat_message = None
             self._pending_tool_calls = {}
             self._ordered_pending_call_ids = set()
+            self._provisional_generations = {}
+            self._cancelled_provisional_generations = {}
             self._user_turn_count = 0
 
     def close(self) -> None:

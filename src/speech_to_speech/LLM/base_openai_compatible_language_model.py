@@ -410,15 +410,19 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             # order matches what the client received), then persist the call —
             # all before the chunk leaves for the client.
             chat = turn.runtime_config.chat
-            for pending_item in state.pending:
-                recorded = chat.add_item(pending_item)
+            recorded_items = chat.add_provisional_generation_items(
+                turn.response_key,
+                [*state.pending, fc_item],
+            )
+            state.pending.clear()
+            if recorded_items is None:
+                logger.info("LLM generation cancelled before tool output was recorded")
+                return
+            for recorded in recorded_items:
                 if recorded.id is not None:
                     state.recorded_item_ids.add(recorded.id)
-            state.pending.clear()
-            recorded_call = chat.add_ordered_function_call(fc_item)
-            if recorded_call.id is not None:
-                state.recorded_item_ids.add(recorded_call.id)
-            state.recorded_call_ids.add(item.call_id)
+                if isinstance(recorded, RealtimeConversationItemFunctionCall) and recorded.call_id is not None:
+                    state.recorded_call_ids.add(recorded.call_id)
         state.output_emitted = True
         yield self._chunk(turn, tools=[item])
 
@@ -591,6 +595,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 transactional_user_message_id,
                 item_ids=state.recorded_item_ids,
                 call_ids=state.recorded_call_ids,
+                response_key=turn.response_key,
             )
             transaction_rolled_back = True
 
@@ -669,15 +674,22 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     if not is_out_of_band(turn.response):
                         # Tool calls (and any assistant text preceding them) were already
                         # written eagerly in _record_tool_call; only trailing items remain.
-                        for item in state.pending:
-                            recorded = original_chat.add_item(item)
+                        recorded_items = original_chat.add_provisional_generation_items(
+                            turn.response_key,
+                            state.pending,
+                        )
+                        if recorded_items is None:
+                            can_commit = False
+                        for recorded in recorded_items or []:
                             if recorded.id is not None:
                                 state.recorded_item_ids.add(recorded.id)
-                        original_chat.strip_images(consumed_image_ids)
-                        if history_commit_fn is not None:
-                            history_commit_fn()
-                        original_chat.trim_if_needed(self.compactor)
-                    history_committed = True
+                        if can_commit:
+                            original_chat.strip_images(consumed_image_ids)
+                            if history_commit_fn is not None:
+                                history_commit_fn()
+                            original_chat.trim_if_needed(self.compactor)
+                            original_chat.commit_provisional_generation(turn.response_key)
+                    history_committed = can_commit
                 except Exception as exc:
                     logger.exception("LLM history commit failed; rolling back the current response")
                     error_message = f"Language model history commit failed: {exc}"
@@ -776,7 +788,18 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         if not is_out_of_band(response):
             provisional_message = make_user_audio_message(audio_b64)
             provisional_message.id = audio_message.id
-            original_chat.add_item(provisional_message)
+            recorded_items = original_chat.add_provisional_generation_items(
+                request.response_key,
+                [provisional_message],
+            )
+            if recorded_items is None:
+                yield EndOfResponse(
+                    turn_id=turn_id,
+                    turn_revision=turn_revision,
+                    cancel_generation=gen,
+                    response_key=request.response_key,
+                )
+                return
             assert provisional_message.id is not None
             transactional_user_message_id = provisional_message.id
 

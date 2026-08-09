@@ -454,6 +454,7 @@ def test_local_tool_call_is_recorded_before_chunk_is_emitted():
         "function_call_output",
         "message",
     ]
+    assert chat._provisional_generations == {}
 
 
 def test_cancelled_local_tool_turn_rolls_back_fast_output():
@@ -473,6 +474,7 @@ def test_cancelled_local_tool_turn_rolls_back_fast_output():
     generation = handler.process(GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat)))
 
     next(generation)
+    assert chat._provisional_generations
     chat.add_item(
         RealtimeConversationItemFunctionCallOutput(
             type="function_call_output",
@@ -484,3 +486,4 @@ def test_cancelled_local_tool_turn_rolls_back_fast_output():
 
     assert chat.buffer == [user]
     assert not chat.has_pending_tool_calls()
+    assert chat._provisional_generations == {}

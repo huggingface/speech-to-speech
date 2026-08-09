@@ -487,6 +487,7 @@ def test_tool_call_recorded_before_chunk_is_emitted():
             )
     assert emitted_call_id is not None, "a tool call should have been emitted"
     assert chat._has_call_id_in_buffer(emitted_call_id), "call+output should be paired in the buffer"
+    assert chat._provisional_generations == {}
 
 
 def test_cancelled_text_tool_turn_rolls_back_ordered_call():
@@ -512,6 +513,7 @@ def test_cancelled_text_tool_turn_rolls_back_ordered_call():
         if isinstance(output, LLMResponseChunk) and output.tools:
             break
     assert chat.has_pending_tool_calls()
+    assert request.response_key in chat._provisional_generations
 
     scope.cancel()
     remaining = list(generation)
@@ -519,6 +521,7 @@ def test_cancelled_text_tool_turn_rolls_back_ordered_call():
     assert any(isinstance(output, EndOfResponse) for output in remaining)
     assert chat.buffer == [user]
     assert not chat.has_pending_tool_calls()
+    assert chat._provisional_generations == {}
 
 
 def test_non_streaming_tool_call():
