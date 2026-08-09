@@ -7,6 +7,7 @@ from openai.types.responses import ResponseFunctionToolCall
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
+from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -27,12 +28,9 @@ from speech_to_speech.pipeline.messages import (
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 
-def _processor(
-    tracker: SpeculativeTurnTracker,
-    text_output_queue: Queue | None = None,
-) -> LMOutputProcessor:
+def _processor(tracker: SpeculativeTurnTracker) -> LMOutputProcessor:
     processor = LMOutputProcessor.__new__(LMOutputProcessor)
-    processor.setup(text_output_queue=text_output_queue, speculative_turns=tracker)
+    processor.setup(speculative_turns=tracker)
     return processor
 
 
@@ -96,14 +94,13 @@ def test_failed_response_event_precedes_terminal_and_keeps_identity():
     assert all(output.response_key == "response_1" and output.cancel_generation == 7 for output in outputs)
 
 
-def test_token_usage_keeps_generation_and_response_identity():
+def test_token_usage_stays_on_ordered_response_path():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
-    text_output_queue = Queue()
-    processor = _processor(tracker, text_output_queue)
+    processor = _processor(tracker)
 
-    outputs = list(
-        processor.process(
+    outputs = [
+        *processor.process(
             TokenUsage(
                 input_tokens=11,
                 output_tokens=7,
@@ -112,11 +109,19 @@ def test_token_usage_keeps_generation_and_response_identity():
                 turn_revision=0,
                 cancel_generation=7,
             )
-        )
-    )
+        ),
+        *processor.process(
+            EndOfResponse(
+                response_key="response_1",
+                turn_id="turn_1",
+                turn_revision=0,
+                cancel_generation=7,
+            )
+        ),
+    ]
 
-    assert outputs == []
-    event = text_output_queue.get_nowait()
+    assert [type(output) for output in outputs] == [TokenUsageEvent, AssistantResponseDoneEvent, EndOfResponse]
+    event = outputs[0]
     assert isinstance(event, TokenUsageEvent)
     assert (event.response_key, event.cancel_generation, event.input_tokens, event.output_tokens) == (
         "response_1",
@@ -202,6 +207,22 @@ def test_tts_handler_forwards_response_events_without_processing_them():
     queue_in, queue_out = Queue(), Queue()
     handler = BaseHandler(Event(), queue_in, queue_out)
     event = AssistantOutputEvent(text="before")
+    queue_in.put(event)
+    queue_in.put(PIPELINE_END)
+
+    handler.run()
+
+    assert queue_out.get_nowait() is event
+    assert queue_out.get_nowait() == PIPELINE_END
+
+
+def test_tts_handler_forwards_provider_usage_after_cancellation():
+    queue_in, queue_out = Queue(), Queue()
+    handler = BaseHandler(Event(), queue_in, queue_out)
+    handler.cancel_scope = CancelScope()
+    generation = handler.cancel_scope.generation
+    handler.cancel_scope.cancel()
+    event = TokenUsageEvent(input_tokens=11, output_tokens=7, cancel_generation=generation)
     queue_in.put(event)
     queue_in.put(PIPELINE_END)
 

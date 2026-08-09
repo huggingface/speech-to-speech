@@ -1,8 +1,8 @@
 """Typed events flowing from pipeline handlers to the realtime router.
 
-VAD, transcription, and token-usage events use ``text_output_queue``; ordered
-assistant output events share the TTS output queue with their audio. The router
-dispatches both through ``RealtimeService``.
+VAD and transcription events use ``text_output_queue``; response-dependent
+assistant and token-usage events share the TTS output queue with their audio.
+The router dispatches both through ``RealtimeService``.
 """
 
 from __future__ import annotations

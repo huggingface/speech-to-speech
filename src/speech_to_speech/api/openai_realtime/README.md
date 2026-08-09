@@ -39,8 +39,7 @@ flowchart LR
     TN -- "transcription event" --> Router
     Service -- "GenerateResponseRequest" --> LLM
     LLM -- "text + tools" --> Proc
-    Proc -- "ordered events + clean text" --> TTS
-    Proc -. "token usage" .-> Router
+    Proc -- "ordered events + usage + clean text" --> TTS
     TTS -- "ordered events + PCM audio" --> Router
     VAD -- "speech_started/stopped" --> Router
     TN -- "transcription events" --> Router
@@ -53,7 +52,7 @@ flowchart LR
 1. **Inbound audio**: Client sends `input_audio_buffer.append` with base64 PCM. `RealtimeService` decodes, resamples to 16 kHz, splits into 512-sample chunks, and puts them on the `recv_audio_chunks_queue` for VAD.
 2. **Speech detection**: VAD detects speech boundaries and emits `speech_started` / `speech_stopped` events on the `text_output_queue`. Full utterance audio goes to STT.
 3. **Transcription**: STT output passes through `TranscriptionNotifier`, which emits `transcription.delta` / `transcription.completed` events. `RealtimeService` commits the current revision to conversation state and creates the LLM request.
-4. **Generation**: The LLM generates ordered text and tool parts. `LMOutputProcessor` places their events and matching TTS inputs on one queue so later parts cannot overtake audio. Token usage takes the existing text-event path because accounting must not wait for TTS playback.
+4. **Generation**: The LLM generates ordered text and tool parts. `LMOutputProcessor` places their events, token usage, and matching TTS inputs on one queue so neither later parts nor the response terminal can overtake them.
 5. **Outbound audio**: TTS forwards response events alongside PCM chunks on `send_audio_chunks_queue`. The router's async `_send_loop` encodes PCM as `response.output_audio.delta` events and translates internal messages into protocol events.
 6. **Session config**: `session.update` events deep-merge into `RuntimeConfig`, which is a shared Pydantic model read by VAD (turn detection thresholds), LLM (instructions, tools), and TTS (voice) at processing time.
 
@@ -207,10 +206,10 @@ sequenceDiagram
 
 1. **VAD detects speech**: puts a `SpeechStartedEvent` on `text_output_queue`.
 2. **`_send_loop` processes text events first** (priority over audio): translates `speech_started` into protocol events. If an active response was in progress, `RealtimeService.dispatch_pipeline_event` first emits `response.output_audio.done`, then `response.output_audio_transcript.done` when transcript text was produced, and finally `response.done` with `status="cancelled"` and `reason="turn_detected"`; `input_audio_buffer.speech_started` follows those terminal events.
-3. **Cancel + queue flush**: if a response is active (`in_response`) *or* pending (`response_pending` -- a model request is queued, but no output has started), and interrupts are enabled (see step 4), the send loop calls `cancel_scope.cancel()` (increments generation, enables discard), clears the pending response keys, drains `output_queue` (preserving `__RESPONSE_DONE__` sentinels) and `text_output_queue` (preserving user-side speech and transcription events), then clears `response_playing`.
+3. **Cancel + queue flush**: if a response is active (`in_response`) *or* pending (`response_pending` -- a model request is queued, but no output has started), and interrupts are enabled (see step 4), the send loop calls `cancel_scope.cancel()` (increments generation, enables discard), clears the pending response keys, drains `output_queue` (preserving token usage and `__RESPONSE_DONE__` sentinels) and `text_output_queue` (preserving user-side speech and transcription events), then clears `response_playing`.
 4. **Interrupt gating**: the cancel only fires if the `SpeechStartedEvent.interrupt_response` flag is set *and* the session config allows it (`turn_detection.interrupt_response`, read via `RuntimeConfig.interrupt_response_enabled`, default true). When disabled, user speech during a response is transcribed but the response keeps playing.
 5. **LLM/TTS cancellation**: handlers capture `gen = cancel_scope.generation` at the start of each response and check `cancel_scope.is_stale(gen)` on every streaming token, aborting early when stale.
-6. **Discard guard**: while `cancel_scope.discarding` is True, the send loop drops audio chunks and assistant text whose `cancel_generation` is not current (see `_generation_is_discardable` above). The guard clears when a `__RESPONSE_DONE__` with a matching generation arrives (via `cancel_scope.response_done(gen)`), or when an explicit `response.create` starts a new response (`cancel_scope.new_response()`).
+6. **Discard guard**: while `cancel_scope.discarding` is True, the send loop drops audio chunks and assistant output whose `cancel_generation` is not current (see `_generation_is_discardable` above), while preserving provider-reported usage for billing. The guard clears when a `__RESPONSE_DONE__` with a matching generation arrives (via `cancel_scope.response_done(gen)`), or when an explicit `response.create` starts a new response (`cancel_scope.new_response()`).
 7. **Client-initiated cancel**: `response.cancel` calls `cancel_scope.cancel()` when a response is active or queued, removes queued model requests while preserving pipeline-control sentinels, flushes the output queues with the same preservation rules, clears pending response keys, triggers `finish_response(status="cancelled", reason="client_cancelled")` for an opened response, re-enables `should_listen`, and clears `response_playing`.
 8. **Spurious cancel safety**: if no response is active, `cancel_scope.cancel()` is not called, preventing the discard guard from being set without a `__RESPONSE_DONE__` to clear it.
 

@@ -413,12 +413,18 @@ class RealtimeService:
         """Cancel queued responses without losing usage already reported by their LMs."""
         st = self._state(conn_id)
         for response_key in tuple(st.pending_response_keys):
+            st.runtime_config.chat.rollback_provisional_generation(response_key)
+            self.close_response_key(conn_id, response_key)
+        st.response_pending = bool(st.pending_response_keys)
+
+    def close_response_key(self, conn_id: str, response_key: str | None) -> None:
+        """Tombstone a response key without losing its pending provider usage."""
+        st = self._state(conn_id)
+        if response_key is not None:
             input_tokens, output_tokens = st.pending_token_usage.pop(response_key, (0, 0))
             self.total_usage.input_tokens += input_tokens
             self.total_usage.output_tokens += output_tokens
-            st.runtime_config.chat.rollback_provisional_generation(response_key)
-            st.close_response_key(response_key)
-        st.response_pending = bool(st.pending_response_keys)
+        st.close_response_key(response_key)
 
     def handle_conversation_item_create(self, conn_id: str, event: ConversationItemCreateEvent) -> list[ServerEvent]:
         return self.conversation.handle_conversation_item_create(conn_id, event)

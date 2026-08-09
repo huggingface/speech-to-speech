@@ -448,15 +448,18 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             yield self._chunk(turn, text=" ".join(batch))
 
         for event in events:
+            # Provider usage is billable even when cancellation rolls back the
+            # assistant output that accompanied it.
+            if isinstance(event, Usage):
+                state.input_tokens = event.input_tokens
+                state.output_tokens = event.output_tokens
+                continue
             if self._generation_is_stale(turn.gen) or not self._turn_is_latest(turn.turn_id, turn.turn_revision):
                 logger.info("LLM generation cancelled (interruption)")
                 cancelled = True
                 break
 
-            if isinstance(event, Usage):
-                state.input_tokens = event.input_tokens
-                state.output_tokens = event.output_tokens
-            elif isinstance(event, AssistantMessage):
+            if isinstance(event, AssistantMessage):
                 state.pending.append(
                     RealtimeConversationItemAssistantMessage(type="message", role="assistant", content=event.content)
                 )
@@ -528,14 +531,17 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         state: _GenState,
         turn: _Turn,
     ) -> Generator[LLMOut, None, bool]:
-        if self._generation_is_stale(turn.gen) or not self._turn_is_latest(turn.turn_id, turn.turn_revision):
-            logger.info("LLM generation cancelled (interruption)")
-            return False
+        cancelled = False
         for event in events:
             if isinstance(event, Usage):
                 state.input_tokens = event.input_tokens
                 state.output_tokens = event.output_tokens
-            elif isinstance(event, AssistantMessage):
+                continue
+            if self._generation_is_stale(turn.gen) or not self._turn_is_latest(turn.turn_id, turn.turn_revision):
+                logger.info("LLM generation cancelled (interruption)")
+                cancelled = True
+                break
+            if isinstance(event, AssistantMessage):
                 state.pending.append(
                     RealtimeConversationItemAssistantMessage(type="message", role="assistant", content=event.content)
                 )
@@ -557,7 +563,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         logger.debug(f"Clean text: {state.clean_text}")
         logger.info(f"Tools: {state.tools}")
         return (
-            not self._generation_is_stale(turn.gen)
+            not cancelled
+            and not self._generation_is_stale(turn.gen)
             and self._turn_is_latest(turn.turn_id, turn.turn_revision)
             and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
         )
@@ -697,7 +704,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     error_message = f"Language model history commit failed: {exc}"
 
             rollback_transaction()
-            if history_committed and (state.input_tokens or state.output_tokens):
+            if state.input_tokens or state.output_tokens:
                 yield TokenUsage(
                     input_tokens=state.input_tokens,
                     output_tokens=state.output_tokens,

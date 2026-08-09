@@ -25,6 +25,7 @@ from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
     AudioInputCompletedEvent,
+    PipelineEvent,
     ResponseFailedEvent,
     SpeechStartedEvent,
     TokenUsageEvent,
@@ -539,6 +540,33 @@ class TestSendLoop:
                 assert state.response_pending is False
                 assert state.pending_response_keys == set()
 
+    def test_stale_cleanup_preserves_pending_token_usage_globally(self, setup):
+        app, service, _, output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = next(iter(service._conns))
+                response_key = "cancelled_pending_response"
+                state = service._state(conn_id)
+                state.mark_response_pending(response_key)
+                output_queue.put(TokenUsageEvent(response_key=response_key, input_tokens=11, output_tokens=7))
+                output_queue.put(
+                    AudioOutput(
+                        audio=AUDIO_RESPONSE_DONE,
+                        response_key=response_key,
+                        cleanup_only=True,
+                    )
+                )
+
+                deadline = time.monotonic() + 1.0
+                while response_key not in state.closed_response_keys and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+                assert response_key in state.closed_response_keys
+                assert state.pending_token_usage == {}
+                assert service.total_usage.input_tokens == 11
+                assert service.total_usage.output_tokens == 7
+
     def test_stale_tagged_audio_is_dropped_after_interruption(self, setup):
         app, _, _, output_queue, _, _, _, _, cancel_scope = setup
         with TestClient(app) as client:
@@ -594,8 +622,8 @@ class TestSendLoop:
                 assert not any(message["type"] == "error" for message in messages)
                 assert messages[-1]["response"]["usage"]["total_tokens"] == 0
 
-    def test_cancelled_usage_bypasses_tts_and_does_not_leak_into_next_response(self, setup):
-        app, service, _, output_queue, text_output_queue, _, _, _, cancel_scope = setup
+    def test_cancelled_usage_on_ordered_path_does_not_leak_into_next_response(self, setup):
+        app, service, _, output_queue, _, _, _, _, cancel_scope = setup
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
@@ -605,7 +633,7 @@ class TestSendLoop:
                 ws.send_json({"type": "response.cancel"})
                 assert ws.receive_json()["type"] == "response.done"
 
-                text_output_queue.put(
+                output_queue.put(
                     TokenUsageEvent(
                         input_tokens=11,
                         output_tokens=7,
@@ -923,13 +951,16 @@ class TestSendLoop:
                 assert state.in_response
                 assert state.current_response_id == current_response_id
 
-    def test_response_done_drains_pending_token_usage_before_finish(self, setup):
-        app, service, _, output_queue, *_ = setup
+    def test_response_done_observes_ordered_usage_despite_text_backlog(self, setup):
+        app, service, _, output_queue, text_output_queue, *_ = setup
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()  # session.created
                 conn_id = list(service._conns.keys())[0]
                 response_key = "response_1"
+
+                for _ in range(5):
+                    text_output_queue.put(PipelineEvent(type="test_backlog"))
 
                 output_queue.put(
                     AssistantOutputEvent(
@@ -944,7 +975,10 @@ class TestSendLoop:
 
                 assert ws.receive_json()["type"] == "response.created"
                 assert ws.receive_json()["type"] == "response.function_call_arguments.done"
-                assert ws.receive_json()["type"] == "response.done"
+                done = ws.receive_json()
+                assert done["type"] == "response.done"
+                assert done["response"]["usage"]["input_tokens"] == 10
+                assert done["response"]["usage"]["output_tokens"] == 5
 
                 assert service.total_usage.input_tokens == 10
                 assert service.total_usage.output_tokens == 5
@@ -1061,7 +1095,7 @@ class TestDrainRelease:
         q.put(_pcm_bytes(10))
         q.put(PipelineControlMessage(SESSION_END.kind, session_id="sess_a"))
         q.put(_pcm_bytes(10))
-        router_module._flush_queue(q, preserve=router_module._keep_audio_sentinel)
+        router_module._flush_queue(q, preserve=router_module._keep_cancel_bookkeeping)
         assert is_control_message(q.get_nowait(), SESSION_END.kind)
         assert q.empty()
 

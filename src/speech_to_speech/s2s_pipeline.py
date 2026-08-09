@@ -438,7 +438,6 @@ def _build_handlers(
         queue_in=lm_response_queue,
         queue_out=lm_processed_queue,
         setup_kwargs={
-            "text_output_queue": text_output_queue,
             "speculative_turns": speculative_turns,
         },
     )

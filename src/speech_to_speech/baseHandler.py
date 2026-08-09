@@ -11,7 +11,7 @@ from typing import Any, Generic, Iterator, TypeVar, cast
 import numpy as np
 
 from speech_to_speech.pipeline.control import PipelineControlMessage, is_control_message, SESSION_END
-from speech_to_speech.pipeline.events import PipelineEvent
+from speech_to_speech.pipeline.events import PipelineEvent, TokenUsageEvent
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import PIPELINE_END, AudioOutput, EndOfResponse
 
@@ -58,7 +58,7 @@ class BaseHandler(Generic[InT, OutT]):
         if (
             cancel_scope is not None
             and cancel_generation is not None
-            and not isinstance(item, EndOfResponse)
+            and not isinstance(item, (EndOfResponse, TokenUsageEvent))
             and cancel_scope.is_stale(cancel_generation)
         ):
             logger.debug(

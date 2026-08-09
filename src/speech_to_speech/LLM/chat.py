@@ -129,11 +129,30 @@ class Chat:
         """Remove items from the front until the next user message boundary."""
         if not self.buffer:
             return
+        removed_call_ids: set[str] = set()
+
+        def record_call(item: SupportedItem) -> None:
+            if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
+                removed_call_ids.add(item.call_id)
+
         first = self.buffer.pop(0)
+        record_call(first)
         if isinstance(first, RealtimeConversationItemUserMessage):
             self._user_turn_count -= 1
         while self.buffer and not isinstance(self.buffer[0], RealtimeConversationItemUserMessage):
-            self.buffer.pop(0)
+            record_call(self.buffer.pop(0))
+
+        # A provider result can arrive after later user turns. If its call was
+        # evicted above, remove the completed result as well so history never
+        # retains an orphaned function_call_output.
+        if removed_call_ids:
+            self.buffer = [
+                item
+                for item in self.buffer
+                if not (
+                    isinstance(item, RealtimeConversationItemFunctionCallOutput) and item.call_id in removed_call_ids
+                )
+            ]
 
     def _has_call_id_in_buffer(self, call_id: str) -> bool:
         for entry in self.buffer:
@@ -166,16 +185,8 @@ class Chat:
         if self._has_call_id_in_buffer(call_id):
             self._pending_tool_calls.pop(call_id, None)
             self._mark_call_completed(call_id, output_item.status)
-            if call_id in self._ordered_pending_call_ids:
-                call_index = next(
-                    index
-                    for index, item in enumerate(self.buffer)
-                    if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id == call_id
-                )
-                self.buffer.insert(call_index + 1, output_item)
-                self._ordered_pending_call_ids.discard(call_id)
-            else:
-                self.buffer.append(output_item)
+            self._ordered_pending_call_ids.discard(call_id)
+            self.buffer.append(output_item)
             return
 
         if call_id in self._pending_tool_calls:
@@ -491,6 +502,28 @@ class Chat:
                         replacement_added = True
                 item.content = compacted
 
+    @staticmethod
+    def _with_adjacent_tool_outputs(items: Sequence[SupportedItem]) -> list[SupportedItem]:
+        """Return a backend-safe snapshot without rewriting canonical chronology."""
+        call_ids = {
+            item.call_id
+            for item in items
+            if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None
+        }
+        outputs_by_call_id: dict[str, list[RealtimeConversationItemFunctionCallOutput]] = {}
+        for item in items:
+            if isinstance(item, RealtimeConversationItemFunctionCallOutput) and item.call_id in call_ids:
+                outputs_by_call_id.setdefault(item.call_id, []).append(item)
+
+        normalized: list[SupportedItem] = []
+        for item in items:
+            if isinstance(item, RealtimeConversationItemFunctionCallOutput) and item.call_id in call_ids:
+                continue
+            normalized.append(item)
+            if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
+                normalized.extend(outputs_by_call_id.get(item.call_id, []))
+        return normalized
+
     def to_responses_api_chat(self, items: list[SupportedItem] | None = None) -> ResponseInputParam:
         """Serialize the chat (system prompt + buffer) for the OpenAI Responses API.
 
@@ -502,7 +535,7 @@ class Chat:
 
     def _to_responses_api_chat_locked(self, items: list[SupportedItem]) -> ResponseInputParam:
         """Body of :meth:`to_responses_api_chat`. Caller must hold ``_lock``."""
-        buffer_items = list(items)
+        buffer_items = self._with_adjacent_tool_outputs(items)
         result: list[ResponseInputItemParam] = []
         if self.init_chat_message:
             result.append(
@@ -593,7 +626,7 @@ class Chat:
             if self.init_chat_message:
                 text = " ".join(p.text for p in self.init_chat_message.content if p.text)
                 messages.append(TransformersSystemMessage(content=text))
-            for item in self.buffer:
+            for item in self._with_adjacent_tool_outputs(self.buffer):
                 if isinstance(item, RealtimeConversationItemUserMessage):
                     has_media = any(p.type in {"input_image", "input_audio"} for p in item.content)
                     if has_media:
@@ -749,7 +782,23 @@ class Chat:
 
         items_to_compact = self.buffer[:end_idx]
         marker_ids = {entry.id for entry in items_to_compact if entry.id is not None}
-        snapshot = self._to_responses_api_chat_locked(items=items_to_compact)
+        # A completed result can appear after this turn-aligned prefix. Leave
+        # its call out of the summarizer input; _apply_compaction keeps that
+        # call in the live buffer so the pair remains intact after the splice.
+        output_call_ids_after_snapshot = {
+            entry.call_id
+            for entry in self.buffer[end_idx:]
+            if isinstance(entry, RealtimeConversationItemFunctionCallOutput)
+        }
+        serializable_items = [
+            entry
+            for entry in items_to_compact
+            if not (
+                isinstance(entry, RealtimeConversationItemFunctionCall)
+                and entry.call_id in output_call_ids_after_snapshot
+            )
+        ]
+        snapshot = self._to_responses_api_chat_locked(items=serializable_items)
         # Strip media parts so the summarizer doesn't have to handle them.
         for raw in snapshot:
             if not isinstance(raw, dict) or raw.get("role") != "user":
@@ -827,8 +876,8 @@ class Chat:
 
         FC/FCO pairing is left entirely to :meth:`add_item` / :meth:`append_tool_output`.
         Compaction only drops items; it never inserts an FC into the buffer.
-        Pending FCs (no FCO yet) stay in ``_pending_tool_calls`` and will be
-        appended adjacent to their FCO when it arrives.
+        Pending FCs (no FCO yet) stay in ``_pending_tool_calls``. Serializer
+        snapshots pair completed calls and outputs without reordering this buffer.
         """
         with self._lock:
             if self._shutdown.is_set() or self._gen_counter != gen:

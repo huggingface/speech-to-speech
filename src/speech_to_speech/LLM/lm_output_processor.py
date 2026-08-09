@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from queue import Queue
 from uuid import uuid4
 
 from speech_to_speech.baseHandler import BaseHandler
@@ -29,7 +28,6 @@ from speech_to_speech.pipeline.messages import (
     TokenUsage,
     TTSInput,
 )
-from speech_to_speech.pipeline.queue_types import TextEventItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.utils import response_wants_audio
 
@@ -41,16 +39,14 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
     Places ordered output events and their TTS inputs on one queue.
 
     Input: :class:`LLMResponseChunk`, :class:`TokenUsage`, or :class:`EndOfResponse` from LLM
-    Output: assistant events, :class:`TTSInput`, or :class:`EndOfResponse` to TTS;
-    token usage bypasses TTS through ``text_output_queue``.
+    Output: assistant and usage events, :class:`TTSInput`, or :class:`EndOfResponse`
+    on the same ordered path through TTS.
     """
 
     def setup(
         self,
-        text_output_queue: Queue[TextEventItem] | None = None,
         speculative_turns: SpeculativeTurnTracker | None = None,
     ) -> None:
-        self.text_output_queue = text_output_queue
         self.speculative_turns = speculative_turns
         self._response_key: str | None = None
 
@@ -84,10 +80,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 cancel_generation=lm_output.cancel_generation,
                 response_key=usage_response_key,
             )
-            if self.text_output_queue is not None:
-                self.text_output_queue.put(usage_event)
-            else:
-                yield usage_event
+            yield usage_event
             return
 
         if isinstance(lm_output, EndOfResponse):

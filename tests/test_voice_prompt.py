@@ -359,11 +359,11 @@ def test_local_history_commits_text_and_tools_in_emitted_order():
     assert [item.type for item in chat.buffer[1:]] == [
         "message",
         "function_call",
-        "function_call_output",
         "message",
         "function_call",
-        "function_call_output",
         "message",
+        "function_call_output",
+        "function_call_output",
     ]
     assert [item["type"] for item in chat.to_responses_api_chat()[1:]] == [
         "message",

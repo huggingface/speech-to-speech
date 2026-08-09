@@ -24,7 +24,7 @@ from openai.types.responses.response_output_text import ResponseOutputText
 
 import speech_to_speech.LLM.base_openai_compatible_language_model as base_openai_compatible_language_model
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.LLM.base_openai_compatible_language_model import WARMUP_MAX_RETRIES
+from speech_to_speech.LLM.base_openai_compatible_language_model import WARMUP_MAX_RETRIES, ToolCall, Usage
 from speech_to_speech.LLM.chat import (
     AUDIO_INPUT_HISTORY_PLACEHOLDER,
     Chat,
@@ -367,6 +367,13 @@ def test_process_preserves_nonstreaming_text_tool_text_order():
         "message",
         "message",
         "function_call",
+        "message",
+        "function_call_output",
+    ]
+    assert [item["type"] for item in chat.to_responses_api_chat()] == [
+        "message",
+        "message",
+        "function_call",
         "function_call_output",
         "message",
     ]
@@ -386,6 +393,70 @@ def test_process_handles_cancellation():
 
     assert len(outputs) == 1
     assert isinstance(outputs[0], EndOfResponse)
+
+
+def test_cancelled_stream_emits_provider_usage_and_rolls_back_history():
+    scope = CancelScope()
+    handler = _make_handler(cancel_scope=scope)
+    handler._iter_stream_events = lambda _: iter(
+        [
+            ToolCall(
+                item=ResponseFunctionToolCall(
+                    type="function_call",
+                    call_id="call_provider",
+                    id="fc_provider",
+                    name="camera",
+                    arguments="{}",
+                )
+            ),
+            Usage(input_tokens=11, output_tokens=7),
+        ]
+    )
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: _make_stream([])))
+    request = _make_request("Use a tool")
+    generation = handler.process(request)
+
+    tool_chunk = next(generation)
+    assert isinstance(tool_chunk, LLMResponseChunk) and tool_chunk.tools
+
+    scope.cancel()
+    remaining = list(generation)
+
+    usage = next(output for output in remaining if isinstance(output, TokenUsage))
+    assert (usage.input_tokens, usage.output_tokens, usage.response_key) == (11, 7, request.response_key)
+    assert any(isinstance(output, EndOfResponse) for output in remaining)
+    assert [item.type for item in request.runtime_config.chat.buffer] == ["message"]
+
+
+def test_cancelled_nonstreaming_response_emits_provider_usage():
+    scope = CancelScope()
+    handler = _make_handler(stream=False, cancel_scope=scope)
+
+    def fake_create(**kwargs):
+        scope.cancel()
+        return _make_response(
+            [
+                ResponseOutputMessage(
+                    id="msg_1",
+                    type="message",
+                    role="assistant",
+                    status="completed",
+                    content=[ResponseOutputText(type="output_text", text="unseen", annotations=[])],
+                )
+            ],
+            usage=SimpleNamespace(input_tokens=11, output_tokens=7),
+        )
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+    request = _make_request("Hi")
+
+    outputs = list(handler.process(request))
+
+    assert not any(isinstance(output, LLMResponseChunk) for output in outputs)
+    usage = next(output for output in outputs if isinstance(output, TokenUsage))
+    assert (usage.input_tokens, usage.output_tokens) == (11, 7)
+    assert isinstance(outputs[-1], EndOfResponse)
+    assert [item.type for item in request.runtime_config.chat.buffer] == ["message"]
 
 
 def test_cancelled_text_tool_turn_rolls_back_ordered_call():

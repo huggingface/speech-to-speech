@@ -42,5 +42,5 @@ TTSInItem: TypeAlias = TTSIn | PipelineEvent | PipelineInternalItem
 # Ordered response events and audio flowing to the client.
 AudioOutItem: TypeAlias = bytes | np.ndarray | AudioOutput | PipelineEvent | PipelineControlMessage
 
-# VAD, transcription, and usage events that do not wait for TTS.
+# VAD and transcription events that do not wait for TTS.
 TextEventItem: TypeAlias = PipelineEvent | PipelineInternalItem

@@ -446,8 +446,15 @@ def test_streaming_preserves_text_tool_text_order():
         "message",
         "message",
         "function_call",
-        "function_call_output",
         "message",
+        "function_call_output",
+    ]
+    assert [message["role"] for message in h._serialize(chat)] == [
+        "user",
+        "assistant",
+        "assistant",
+        "tool",
+        "assistant",
     ]
 
 
