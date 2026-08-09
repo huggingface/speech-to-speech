@@ -122,6 +122,15 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                     lm_output.turn_revision,
                 )
                 self._reset_response()
+                if response_key is not None:
+                    # Bypass downstream speculative gates with a lifecycle-only
+                    # terminal. The router uses its key to cancel an opened stale
+                    # response or clear only that queued response.
+                    yield EndOfResponse(
+                        cancel_generation=lm_output.cancel_generation,
+                        response_key=response_key,
+                        cleanup_only=True,
+                    )
                 return
             # A failed generation (e.g. invalid out-of-band input) closes the response as
             # "failed" via the text side-channel, then falls through to emit the normal

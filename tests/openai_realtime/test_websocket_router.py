@@ -508,6 +508,75 @@ class TestSendLoop:
                 assert state.response_pending is True
                 assert state.pending_response_keys == {request_b.response_key}
 
+    def test_stale_cleanup_cancels_active_response_before_next_response(self, setup):
+        app, service, _, output_queue, text_output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                response_a = "response_a"
+                response_b = "response_b"
+                service.response._ensure_response(conn_id, response_a)
+                state = service._state(conn_id)
+                state.mark_response_pending(response_b)
+                text_output_queue.put(AssistantTextEvent(text="fresh", response_key=response_b))
+                text_output_queue.put(AssistantResponseDoneEvent(response_key=response_b))
+                output_queue.put(
+                    AudioOutput(
+                        audio=AUDIO_RESPONSE_DONE,
+                        response_key=response_a,
+                        cleanup_only=True,
+                    )
+                )
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_b))
+
+                messages = []
+                while len([message for message in messages if message["type"] == "response.done"]) < 2:
+                    messages.append(ws.receive_json())
+
+                done = [message for message in messages if message["type"] == "response.done"]
+                assert [message["response"]["status"] for message in done] == ["cancelled", "completed"]
+                assert any(
+                    message["type"] == "response.output_audio_transcript.delta" and message["delta"] == "fresh"
+                    for message in messages
+                )
+                assert state.in_response is False
+                assert state.response_pending is False
+                assert state.pending_response_keys == set()
+
+    def test_stale_pending_cleanup_does_not_finish_current_response(self, setup):
+        app, service, _, output_queue, text_output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                stale_response = "response_a"
+                current_response = "response_b"
+                state = service._state(conn_id)
+                state.mark_response_pending(stale_response)
+                state.mark_response_pending(current_response)
+                text_output_queue.put(AssistantTextEvent(text="fresh", response_key=current_response))
+                text_output_queue.put(AssistantResponseDoneEvent(response_key=current_response))
+                output_queue.put(
+                    AudioOutput(
+                        audio=AUDIO_RESPONSE_DONE,
+                        response_key=stale_response,
+                        cleanup_only=True,
+                    )
+                )
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=current_response))
+
+                messages = []
+                while not messages or messages[-1]["type"] != "response.done":
+                    messages.append(ws.receive_json())
+
+                done = [message for message in messages if message["type"] == "response.done"]
+                assert len(done) == 1
+                assert done[0]["response"]["status"] == "completed"
+                assert state.in_response is False
+                assert state.response_pending is False
+                assert state.pending_response_keys == set()
+
     def test_stale_tagged_audio_is_dropped_after_interruption(self, setup):
         app, _, _, output_queue, _, _, _, _, cancel_scope = setup
         with TestClient(app) as client:

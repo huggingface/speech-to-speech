@@ -117,6 +117,10 @@ def _assistant_output_ordinal(item: Any) -> int | None:
     return item.assistant_output_ordinal if isinstance(item, AudioOutput) else None
 
 
+def _audio_cleanup_only(item: Any) -> bool:
+    return item.cleanup_only if isinstance(item, AudioOutput) else False
+
+
 _RESPONSE_PIPELINE_EVENTS = (
     AssistantTextEvent,
     AssistantResponseDoneEvent,
@@ -841,6 +845,34 @@ def create_app(
                     if _is_audio_done(audio_chunk):
                         audio_generation = _audio_generation(audio_chunk)
                         response_key = _audio_response_key(audio_chunk)
+                        if _audio_cleanup_only(audio_chunk):
+                            if response_key is None:
+                                logger.warning("Ignoring unkeyed stale response cleanup terminal")
+                                continue
+                            cleaned_active_response = False
+                            if session_id:
+                                st = unit.service._state(session_id)
+                                if st.in_response and st.current_response_key in (None, response_key):
+                                    cleaned_active_response = True
+                                    events = unit.service.finish_response(
+                                        session_id,
+                                        status="cancelled",
+                                        response_key=response_key,
+                                    )
+                                    if transport is not None and events:
+                                        await transport.send_events(events)
+                                else:
+                                    st.clear_pending_response(response_key)
+                                if cleaned_active_response:
+                                    unit.response_playing.clear()
+                                if not (st.in_response or st.response_pending):
+                                    unit.should_listen.set()
+                            unit.cancel_scope.response_done(audio_generation)
+                            logger.info(
+                                "Pipeline %d: stale response lifecycle cleaned up",
+                                unit.index,
+                            )
+                            continue
                         if audio_generation is not None and unit.cancel_scope.is_stale(audio_generation):
                             if session_id:
                                 unit.service._state(session_id).clear_pending_response(response_key)

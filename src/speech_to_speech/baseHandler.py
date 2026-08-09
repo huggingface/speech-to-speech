@@ -78,15 +78,20 @@ class BaseHandler(Generic[InT, OutT]):
         cancel_generation = getattr(source_input, "cancel_generation", None)
         response_key = getattr(source_input, "response_key", None)
         assistant_output_ordinal = getattr(source_input, "assistant_output_ordinal", None)
-        if (cancel_generation is not None or response_key is not None or assistant_output_ordinal is not None) and (
-            isinstance(output, bytes) or hasattr(output, "tobytes")
-        ):
+        cleanup_only = getattr(source_input, "cleanup_only", False)
+        if (
+            cancel_generation is not None
+            or response_key is not None
+            or assistant_output_ordinal is not None
+            or cleanup_only
+        ) and (isinstance(output, bytes) or hasattr(output, "tobytes")):
             audio = cast(bytes | np.ndarray, output)
             return AudioOutput(
                 audio=audio,
                 cancel_generation=cancel_generation,
                 response_key=response_key,
                 assistant_output_ordinal=assistant_output_ordinal,
+                cleanup_only=cleanup_only,
             )
         return output
 

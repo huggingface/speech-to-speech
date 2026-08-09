@@ -8,6 +8,7 @@ from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.messages import (
+    AUDIO_RESPONSE_DONE,
     AssistantTextPart,
     AssistantToolCallPart,
     AudioOutput,
@@ -33,6 +34,30 @@ def test_stale_end_of_response_is_not_forwarded_to_tts():
     outputs = list(processor.process(EndOfResponse(turn_id="turn_1", turn_revision=0)))
 
     assert outputs == []
+
+
+def test_stale_keyed_end_of_response_emits_cleanup_terminal():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 1)
+    processor = _processor(tracker)
+
+    outputs = list(
+        processor.process(
+            EndOfResponse(
+                response_key="response_1",
+                turn_id="turn_1",
+                turn_revision=0,
+                cancel_generation=7,
+            )
+        )
+    )
+
+    assert len(outputs) == 1
+    assert outputs[0].response_key == "response_1"
+    assert outputs[0].cancel_generation == 7
+    assert outputs[0].turn_id is None
+    assert outputs[0].cleanup_only is True
+    assert processor.text_output_queue.empty()
 
 
 def test_latest_end_of_response_is_forwarded_to_tts():
@@ -227,6 +252,20 @@ def test_tts_audio_keeps_assistant_output_identity_on_the_audio_queue():
     assert queued.audio == b"audio"
     assert queued.response_key == "response_1"
     assert queued.assistant_output_ordinal == 2
+
+
+def test_stale_response_cleanup_reaches_the_audio_queue():
+    handler = object.__new__(BaseHandler)
+    queued = handler.output_for_queue(
+        AUDIO_RESPONSE_DONE,
+        EndOfResponse(response_key="response_1", cancel_generation=7, cleanup_only=True),
+    )
+
+    assert isinstance(queued, AudioOutput)
+    assert queued.audio == AUDIO_RESPONSE_DONE
+    assert queued.response_key == "response_1"
+    assert queued.cancel_generation == 7
+    assert queued.cleanup_only is True
 
 
 def test_empty_modalities_is_forwarded_to_tts():

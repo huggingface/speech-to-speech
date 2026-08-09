@@ -159,6 +159,7 @@ class EndOfResponse(PipelineMessage):
     cancel_generation: int | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
     error: str | None = None
+    cleanup_only: bool = False
 
 
 # ── LMOutputProcessor → TTS ──────────────────────────────────────────
@@ -188,6 +189,7 @@ class AudioOutput(PipelineMessage):
     cancel_generation: int | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
     assistant_output_ordinal: int | None = None
+    cleanup_only: bool = False
 
 
 # ── Realtime service → LLM ────────────────────────────────────────────
