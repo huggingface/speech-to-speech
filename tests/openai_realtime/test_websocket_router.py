@@ -476,6 +476,38 @@ class TestSendLoop:
                 assert not cancel_scope.discarding
                 assert service._state(conn_id).response_pending is True
 
+    def test_finishing_response_keeps_next_implicit_response_pending(self, setup):
+        app, service, _, output_queue, _, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                response_a = "response_a"
+                service.response._ensure_response(conn_id, response_a)
+                service._state(conn_id).response_text_complete = True
+                service.dispatch_pipeline_event(
+                    conn_id,
+                    AudioInputCompletedEvent(
+                        audio=np.zeros(1600, dtype=np.float32),
+                        audio_duration_s=0.1,
+                    ),
+                )
+                request_b = service.text_prompt_queue.get_nowait()
+
+                output_queue.put(
+                    AudioOutput(
+                        audio=AUDIO_RESPONSE_DONE,
+                        response_key=response_a,
+                        cancel_generation=cancel_scope.generation,
+                    )
+                )
+                message = ws.receive_json()
+
+                assert message["type"] == "response.done"
+                state = service._state(conn_id)
+                assert state.response_pending is True
+                assert state.pending_response_keys == {request_b.response_key}
+
     def test_stale_tagged_audio_is_dropped_after_interruption(self, setup):
         app, _, _, output_queue, _, _, _, _, cancel_scope = setup
         with TestClient(app) as client:

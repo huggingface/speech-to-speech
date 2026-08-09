@@ -614,7 +614,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     "OpenAI API read timed out after %.1fs; ending the current response",
                     self.request_timeout_s,
                 )
-                if not self._generation_is_stale(turn.gen) and self._turn_output_allowed(
+                if state.recorded_call_ids:
+                    error_message = f"Language model generation timed out after {self.request_timeout_s:.1f}s."
+                elif not self._generation_is_stale(turn.gen) and self._turn_output_allowed(
                     turn.turn_id, turn.turn_revision
                 ):
                     # Canned apology carries no language_code (mirrors the prior handlers).

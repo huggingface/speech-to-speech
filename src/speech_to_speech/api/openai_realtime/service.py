@@ -170,6 +170,7 @@ class ConnState(BaseModel):
     runtime_config: RuntimeConfig = Field(default_factory=RuntimeConfig)
     in_response: bool = False
     response_pending: bool = False
+    pending_response_keys: set[str] = Field(default_factory=set)
     audio_buffer_has_data: bool = False
     audio_remainder: bytes = b""
     current_response_id: Optional[str] = None
@@ -212,6 +213,19 @@ class ConnState(BaseModel):
     # write-back (cross-thread), so they are buffered here and flushed in order
     # once the response completes. See ConversationHandler.flush_deferred_items.
     deferred_items: list[ConversationItem] = Field(default_factory=list)
+
+    def mark_response_pending(self, response_key: str) -> None:
+        """Track an implicit response from queueing until its first output."""
+        self.pending_response_keys.add(response_key)
+        self.response_pending = True
+
+    def clear_pending_response(self, response_key: str | None = None) -> None:
+        """Clear one queued response, or every queued response on cancellation."""
+        if response_key is None:
+            self.pending_response_keys.clear()
+        else:
+            self.pending_response_keys.discard(response_key)
+        self.response_pending = bool(self.pending_response_keys)
 
 
 class RealtimeService:
@@ -515,16 +529,15 @@ class RealtimeService:
 
         queue = self.text_prompt_queue
         if queue and transcript:
-            st.response_pending = True
-            queue.put(
-                GenerateResponseRequest(
-                    runtime_config=cfg,
-                    language_code=event.language_code,
-                    turn_id=event.turn_id,
-                    turn_revision=event.turn_revision,
-                    speech_stopped_at_s=event.speech_stopped_at_s,
-                )
+            request = GenerateResponseRequest(
+                runtime_config=cfg,
+                language_code=event.language_code,
+                turn_id=event.turn_id,
+                turn_revision=event.turn_revision,
+                speech_stopped_at_s=event.speech_stopped_at_s,
             )
+            st.mark_response_pending(request.response_key)
+            queue.put(request)
 
         return events
 
@@ -547,17 +560,16 @@ class RealtimeService:
 
         queue = self.text_prompt_queue
         if queue:
-            st.response_pending = True
-            queue.put(
-                GenerateResponseRequest(
-                    runtime_config=st.runtime_config,
-                    audio=event.audio,
-                    audio_sample_rate=event.audio_sample_rate,
-                    turn_id=event.turn_id,
-                    turn_revision=event.turn_revision,
-                    speech_stopped_at_s=event.speech_stopped_at_s,
-                )
+            request = GenerateResponseRequest(
+                runtime_config=st.runtime_config,
+                audio=event.audio,
+                audio_sample_rate=event.audio_sample_rate,
+                turn_id=event.turn_id,
+                turn_revision=event.turn_revision,
+                speech_stopped_at_s=event.speech_stopped_at_s,
             )
+            st.mark_response_pending(request.response_key)
+            queue.put(request)
         return []
 
     # ── Metrics ────────────────────────────────────

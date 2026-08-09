@@ -43,6 +43,7 @@ class ResponseHandler(RealtimeBaseHandler):
     def _ensure_response(self, conn_id: str, response_key: str | None = None) -> tuple[str, str]:
         """Ensure a response and output item exist, creating them if needed."""
         st = self._state(conn_id)
+        effective_response_key = response_key or st.current_response_key
         if (
             st.current_response_id is not None
             and response_key is not None
@@ -57,7 +58,7 @@ class ResponseHandler(RealtimeBaseHandler):
             st.in_response = True
         elif st.current_response_key is None:
             st.current_response_key = response_key
-        st.response_pending = False
+        st.clear_pending_response(effective_response_key)
         return st.current_response_id, self._current_item_id(conn_id)
 
     def _end_response(self, conn_id: str, status: _ResponseStatus = "completed") -> None:
@@ -79,6 +80,7 @@ class ResponseHandler(RealtimeBaseHandler):
             self._service.total_usage.audio_duration_s,
         )
         st.response_usage.reset()
+        completed_response_key = st.current_response_key
         st.current_response_id = None
         st.current_response_key = None
         st.response_text_complete = False
@@ -86,7 +88,9 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_item_id = None
         st.content_index = 0
         st.in_response = False
-        st.response_pending = False
+        if completed_response_key is not None:
+            st.pending_response_keys.discard(completed_response_key)
+        st.response_pending = bool(st.pending_response_keys)
         st.current_response_params = None
         st.pending_assistant_item_id = None
         st.pending_assistant_output_index = None
@@ -323,7 +327,7 @@ class ResponseHandler(RealtimeBaseHandler):
             speech_stopped_at_s=None if out_of_band else st.speculative_user_speech_stopped_at_s,
         )
         st.in_response = True
-        st.response_pending = False
+        st.clear_pending_response(request.response_key)
         st.current_response_params = event.response
         st.current_response_id = _generate_id("resp")
         st.current_response_key = request.response_key

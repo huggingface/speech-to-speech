@@ -554,6 +554,33 @@ class TestHandleResponseCreate:
         assert service._state(conn_id).response_pending is True
         assert text_prompt_queue.empty()
 
+    def test_finishing_active_response_preserves_next_implicit_pending_key(self, service, conn_id, text_prompt_queue):
+        service.response._ensure_response(conn_id, "response_a")
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="queued response B"),
+        )
+        request_b = text_prompt_queue.get_nowait()
+        assert isinstance(request_b, GenerateResponseRequest)
+        assert service._state(conn_id).pending_response_keys == {request_b.response_key}
+
+        service.finish_response(conn_id, response_key="response_a")
+
+        state = service._state(conn_id)
+        assert state.response_pending is True
+        assert state.pending_response_keys == {request_b.response_key}
+        result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
+        assert isinstance(result, RealtimeErrorEvent)
+        assert result.error.type == "conversation_already_has_active_response"
+
+        created = service.response.on_assistant_response_done(
+            conn_id,
+            AssistantResponseDoneEvent(response_key=request_b.response_key),
+        )
+        assert isinstance(created[0], ResponseCreatedEvent)
+        assert state.response_pending is False
+        assert state.pending_response_keys == set()
+
     def test_response_create_stores_overrides(self, service, conn_id, runtime_config, text_prompt_queue):
         evt = ResponseCreateEvent(
             type="response.create",
@@ -587,6 +614,7 @@ class TestHandleResponseCreate:
         assert initial_req.turn_id == "turn_1"
         assert initial_req.turn_revision == 2
         assert initial_req.speech_stopped_at_s == 123.0
+        service.response._ensure_response(conn_id, initial_req.response_key)
         service.response._end_response(conn_id)
 
         result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
@@ -754,7 +782,8 @@ class TestHandleResponseCreate:
                 speech_stopped_at_s=123.0,
             ),
         )
-        text_prompt_queue.get()  # drain the STT-triggered request
+        initial_req = text_prompt_queue.get()  # drain the STT-triggered request
+        service.response._ensure_response(conn_id, initial_req.response_key)
         service.response._end_response(conn_id)
 
         result = service.handle_response_create(

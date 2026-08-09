@@ -556,6 +556,31 @@ def test_process_read_timeout_ends_response_cleanly():
     assert isinstance(outputs[1], EndOfResponse)
 
 
+def test_read_timeout_after_tool_call_fails_and_rolls_back_call():
+    handler = _make_handler()
+
+    class ToolThenTimeoutStream:
+        def __iter__(self):
+            yield _make_function_call_done_event()
+            raise httpx.ReadTimeout("timed out")
+
+        def close(self):
+            pass
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: ToolThenTimeoutStream()))
+    request = _make_request("Use a tool")
+
+    outputs = list(handler.process(request))
+
+    assert isinstance(outputs[0], LLMResponseChunk)
+    assert outputs[0].tools
+    assert not any(isinstance(output, LLMResponseChunk) and "slow today" in output.text for output in outputs)
+    end = next(output for output in outputs if isinstance(output, EndOfResponse))
+    assert end.error is not None and "timed out" in end.error
+    assert [item.type for item in request.runtime_config.chat.buffer] == ["message"]
+    assert not request.runtime_config.chat.has_pending_tool_calls()
+
+
 def test_generation_error_emits_failed_end_of_response():
     """A non-timeout failure (e.g. provider rejecting empty input) must still emit a
     terminating EndOfResponse carrying the error, so the response is closed instead

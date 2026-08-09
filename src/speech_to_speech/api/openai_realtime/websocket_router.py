@@ -808,7 +808,7 @@ def create_app(
                         if was_in_response or was_response_pending:
                             if interrupt_enabled:
                                 unit.cancel_scope.cancel()
-                                unit.service._state(session_id).response_pending = False
+                                unit.service._state(session_id).clear_pending_response()
                                 _flush_queue(unit.output_queue, preserve=_keep_audio_sentinel)
                                 _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
                                 if unit.response_playing.is_set():
@@ -843,7 +843,7 @@ def create_app(
                         response_key = _audio_response_key(audio_chunk)
                         if audio_generation is not None and unit.cancel_scope.is_stale(audio_generation):
                             if session_id:
-                                unit.service._state(session_id).response_pending = False
+                                unit.service._state(session_id).clear_pending_response(response_key)
                             unit.cancel_scope.response_done(audio_generation)
                             unit.should_listen.set()
                             logger.info(f"Pipeline {unit.index}: stale response complete, listening re-enabled")
@@ -861,7 +861,7 @@ def create_app(
                                 unit.service.finish_response(session_id, response_key=response_key)
                             )
                         if session_id:
-                            unit.service._state(session_id).response_pending = False
+                            unit.service._state(session_id).clear_pending_response(response_key)
                         unit.response_playing.clear()
                         unit.cancel_scope.response_done(audio_generation)
                         unit.should_listen.set()
