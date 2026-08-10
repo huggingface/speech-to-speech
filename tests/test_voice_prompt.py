@@ -73,15 +73,18 @@ def test_voice_prompt_makes_speech_the_default_and_handles_noisy_stt():
     assert "If unsure whether a tool is needed, just speak." in prompt
 
 
-def test_voice_prompt_requests_spoken_lead_in_and_sparing_expression_tools():
+def test_voice_prompt_requests_one_lead_in_and_silent_follow_up_tools():
     prompt = build_voice_system_prompt("Be concise.")
 
-    assert "Before a tool call, use a brief natural utterance" in prompt
-    assert "briefly say that you will check" in prompt
+    assert "act immediately rather than merely offering" in prompt
+    assert "one brief acknowledgement before the first call" in prompt
+    assert "After tool results" in prompt
+    assert "make further calls without speaking" in prompt
+    assert "give one final answer; do not narrate individual calls" in prompt
+    assert prompt.count("Never mention tools or their function names in spoken output.") == 1
     assert "For expression/background tools, speak first." in prompt
     assert "Sure, here's my best <emotion>." in prompt
     assert "Sure, here's my best sadness." not in prompt
-    assert "Never mention tools." in prompt
     assert "do not add a second spoken comment" in prompt
     assert "Use motion, dance, emotion, and similar tools sparingly" in prompt
 
@@ -103,7 +106,7 @@ def test_local_tool_prompt_preserves_multiple_tool_call_order():
     assert "Only one tool call may appear in a response." not in prompt
 
 
-def test_local_tool_prompt_allows_spoken_lead_in_before_code_block():
+def test_local_tool_prompt_leaves_voice_choreography_to_voice_prompt():
     prompt = build_tool_system_prompt(
         [
             FunctionTool(
@@ -115,11 +118,9 @@ def test_local_tool_prompt_allows_spoken_lead_in_before_code_block():
         ]
     )
 
-    assert "one brief natural sentence before the tool call" in prompt
-    assert "always speak first" in prompt
-    assert "Sure, here's my best <emotion>." in prompt
-    assert "Sure, here's my best sadness." not in prompt
-    assert "fitting empathetic sentence" in prompt
+    assert "brief acknowledgement" not in prompt
+    assert "speak first" not in prompt
+    assert "<emotion>" not in prompt
     assert "do not claim tool results before a tool result is available" in prompt
     assert "Omit optional args instead of placeholder values" in prompt
 

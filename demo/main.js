@@ -25,18 +25,7 @@ import { ChatView } from "./ui/chat.js";
 import { Account } from "./ui/account.js";
 
 const DEFAULT_VOICE = "Aiden";
-const DEFAULT_INSTRUCTIONS =
-  "You are a friendly voice assistant. " +
-  "Keep replies short, warm, and spoken. Avoid long monologues.";
-
-// Appended to the user's instructions whenever at least one tool is enabled.
-// Stops the model from announcing capabilities ("Yes, I can search") and then
-// idling for the next turn — it should act immediately in the same response.
-const TOOL_USE_HINT =
-  " When the user's request calls for one of your tools, do not describe your " +
-  "capabilities or say you can do it and wait for another turn. Instead, say " +
-  'a brief acknowledgement like "Let me search for that..." and call the tool ' +
-  "right away in the same response.";
+const DEFAULT_INSTRUCTIONS = "You are a friendly voice assistant.";
 
 const STORAGE_KEYS = {
   // Direct s2s server URL, used only when the deploy has no LOAD_BALANCER_URL
@@ -361,19 +350,10 @@ function activeToolDefs() {
   return defs;
 }
 
-/** Instructions plus the hidden tool-use hint when any tool is active. */
-function effectiveInstructions() {
-  const base = settings.instructions;
-  return activeToolDefs().length ? base + TOOL_USE_HINT : base;
-}
-
 /** Push the active tool set to a live session so toggles apply mid-call. */
 function pushToolsToSession() {
   if (!client || !LIVE_STATES.has(currentState)) return;
   client.setTools(activeToolDefs());
-  // The hidden tool-use hint depends on whether any tool is active, so refresh
-  // instructions alongside the tool set.
-  client.updateSession({ instructions: effectiveInstructions() });
 }
 
 // ── Chat view ───────────────────────────────────────────────────────────────
@@ -1109,7 +1089,7 @@ settingsForm.addEventListener("submit", (event) => {
   // output can switch live when the browser supports AudioContext.setSinkId;
   // mic device changes need a Restart (new getUserMedia stream).
   if (client && LIVE_STATES.has(currentState)) {
-    client.updateSession({ voice: settings.voice, instructions: effectiveInstructions() });
+    client.updateSession({ voice: settings.voice, instructions: settings.instructions });
     if (typeof client.setAudioOutputDevice === "function") {
       void client.setAudioOutputDevice(settings.audioOutputId);
     }
@@ -1429,7 +1409,7 @@ async function doStart(audioContext = null) {
 
   const common = {
     voice: settings.voice,
-    instructions: effectiveInstructions(),
+    instructions: settings.instructions,
     startupGreeting,
     acquireMic: acquireMicStream,
     tools: activeToolDefs(),

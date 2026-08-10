@@ -38,17 +38,15 @@ To call tools, put each named-argument function call inside its own {{ enter_cod
 {{ enter_code }}function_name(required_arg='value'){{ end_code }}
 
 Rules:
-- You may say one brief natural sentence before the tool call; for slow information tools, briefly say that you will check.
-- For expression/background tools, always speak first. For requested expressions, use a short pattern like "Sure, here's my best <emotion>."; otherwise use a fitting empathetic sentence.
-- Do not mention tags, functions, or tools. Keep prose outside tags brief, and do not claim tool results before a tool result is available.
+- Keep tags out of prose. Keep prose outside tags brief, and do not claim tool results before a tool result is available.
 - Use named arguments only; quote strings. Omit optional args instead of placeholder values like "random", "none", "", or null.
 - Keep every tool call in a separate block and preserve the intended text/tool order.\
 """,
     keep_trailing_newline=True,
 )
 
-# Text-channel variant: same call format and structural rules, without the
-# voice-specific "speak first" prose.
+# Text-channel variant: same call format and structural rules, with explicit
+# guidance to skip a preamble before a tool call.
 TEXT_TOOL_PROMPT_TEMPLATE = Template(
     """\
 Available tools:
@@ -86,7 +84,7 @@ def build_tool_system_prompt(
 
     Returns an empty string when *tools* is empty so it can be
     unconditionally appended to a base system prompt.  When *text_only* is set,
-    the written-channel variant is used (no voice "speak first" prose).
+    the written-channel variant adds explicit no-preamble guidance.
     """
     if not tools:
         return ""

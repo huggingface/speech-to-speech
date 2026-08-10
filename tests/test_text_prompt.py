@@ -47,7 +47,8 @@ def test_text_tool_prompt_drops_speak_first_but_keeps_structural_rules():
     assert "fitting empathetic sentence" not in prompt
 
 
-def test_voice_tool_prompt_is_default():
+def test_voice_tool_prompt_does_not_include_text_only_guidance():
     prompt = build_tool_system_prompt([_dance_tool()])
 
-    assert "always speak first" in prompt
+    assert "no preamble sentence is required" not in prompt
+    assert "each named-argument function call inside its own" in prompt
