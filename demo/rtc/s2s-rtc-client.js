@@ -74,6 +74,7 @@ const ICE_GATHERING_TIMEOUT_MS = 3_000;
 const SPEAKING_OPEN_DB = -50;
 const SPEAKING_HANG_MS = 250;
 const LEVEL_POLL_MS = 50;
+const RESPONSE_CREATE_ID_METADATA_KEY = "s2s_demo_create_id";
 
 /** Build an Error carrying a `code` so callers can branch on the failure kind.
  *  @param {string} message @param {string} code */
@@ -142,11 +143,14 @@ export class S2sRtcRealtimeClient extends EventTarget {
     this._muted = false;
     // ── Response lock ────────────────────────────────────────────────────
     // Same scheme as the WS client: the backend allows ONE response in
-    // flight, so response.create is serialized. `_openResponses` counts
-    // confirmed-but-unfinished responses; `_createInFlight` covers the window
-    // between our create and its response.created echo; extra creates queue.
-    this._openResponses = 0;
-    this._createInFlight = false;
+    // flight, so response.create is serialized. `_activeResponseId` identifies
+    // the confirmed-but-unfinished response; `_pendingCreateId` covers the
+    // window between our create and its matching response.created echo. The id
+    // travels as response metadata so automatic responses cannot clear it.
+    this._pendingCreateId = "";
+    this._pendingCreateSawResponse = false;
+    this._waitingForResponseAfterCollision = false;
+    this._nextCreateSequence = 0;
     /** @type {{ image?: string }[]} */
     this._createQueue = [];
     this._sessionConfigured = false;
@@ -491,9 +495,14 @@ export class S2sRtcRealtimeClient extends EventTarget {
         break;
 
       case "response.created":
-        this._openResponses++;
-        this._createInFlight = false;
+        this._waitingForResponseAfterCollision = false;
         this._activeResponseId = event.response?.id ?? "";
+        if (event.response?.metadata?.[RESPONSE_CREATE_ID_METADATA_KEY] === this._pendingCreateId) {
+          this._pendingCreateId = "";
+          this._pendingCreateSawResponse = false;
+        } else if (this._pendingCreateId) {
+          this._pendingCreateSawResponse = true;
+        }
         if (this._status === "connected" || this._status === "user-speaking") {
           this._setStatus("processing");
         }
@@ -508,7 +517,6 @@ export class S2sRtcRealtimeClient extends EventTarget {
       case "response.done": {
         this._aiSpeaking = false;
         this._lastAudibleAt = 0;
-        this._openResponses = Math.max(0, this._openResponses - 1);
         if (this._status === "ai-speaking" || this._status === "processing") {
           this._setStatus("connected");
         }
@@ -517,6 +525,7 @@ export class S2sRtcRealtimeClient extends EventTarget {
         const status = event.response?.status ?? "completed";
         const responseId = event.response?.id ?? "";
         if (this._activeResponseId === responseId) this._activeResponseId = "";
+        this._waitingForResponseAfterCollision = false;
         const audible = responseId ? this._audibleResponses.has(responseId) : false;
         this._audibleResponses.delete(responseId);
         const transcript =
@@ -568,6 +577,12 @@ export class S2sRtcRealtimeClient extends EventTarget {
 
       case "conversation.item.input_audio_transcription.completed": {
         const transcript = typeof event.transcript === "string" ? event.transcript : "";
+        if (this._waitingForResponseAfterCollision) {
+          // A pending response interrupted by new speech has no response.done;
+          // the final transcript is the first safe retry point.
+          this._waitingForResponseAfterCollision = false;
+          this._flushQueuedCreate();
+        }
         if (transcript) {
           this.dispatchEvent(
             new CustomEvent("transcript", {
@@ -632,14 +647,19 @@ export class S2sRtcRealtimeClient extends EventTarget {
       case "error": {
         const err = event.error;
         console.error("[rtc] server error:", err);
-        // Our optimistic create collided with a still-running response: clear
-        // the guard and re-queue for the next response.done (never retried
-        // immediately — that would just collide again).
+        // Our optimistic create collided with a still-running response: re-queue
+        // the rejected create and retry as soon as the response slot is free.
         if (err?.type === "conversation_already_has_active_response" ||
             err?.code === "conversation_already_has_active_response") {
-          if (this._createInFlight) {
-            this._createInFlight = false;
-            this._createQueue.push({});
+          if (this._pendingCreateId) {
+            const responseAlreadyFinished = this._pendingCreateSawResponse && !this._activeResponseId;
+            this._waitingForResponseAfterCollision = !this._pendingCreateSawResponse;
+            this._pendingCreateId = "";
+            this._pendingCreateSawResponse = false;
+            // The image preceded the rejected create and must not be resent.
+            // Preserve FIFO priority over requests queued after it.
+            this._createQueue.unshift({});
+            if (responseAlreadyFinished) this._flushQueuedCreate();
           }
           break;
         }
@@ -771,7 +791,7 @@ export class S2sRtcRealtimeClient extends EventTarget {
    *  single-response slot, same as the WS client.
    *  @param {{ image?: string }} [opts] */
   requestResponse(opts = {}) {
-    if (this._responseActive()) {
+    if (this._responsePending()) {
       this._createQueue.push(opts);
       if (this._debug) console.debug(`[rtc] response.create queued; pending=${this._createQueue.length}`);
       return;
@@ -780,7 +800,11 @@ export class S2sRtcRealtimeClient extends EventTarget {
   }
 
   _responseActive() {
-    return this._openResponses > 0 || this._createInFlight;
+    return (
+      Boolean(this._activeResponseId) ||
+      Boolean(this._pendingCreateId) ||
+      this._waitingForResponseAfterCollision
+    );
   }
 
   /** True while a response is active, awaiting confirmation, or queued. */
@@ -792,8 +816,13 @@ export class S2sRtcRealtimeClient extends EventTarget {
   _createResponseNow(opts = {}) {
     if (!this._dc || this._dc.readyState !== "open") return;
     if (opts.image) this.sendUserImage(opts.image);
-    this._createInFlight = true;
-    this._send({ type: "response.create" });
+    const createId = `demo_create_${++this._nextCreateSequence}`;
+    this._pendingCreateId = createId;
+    this._pendingCreateSawResponse = false;
+    this._send({
+      type: "response.create",
+      response: { metadata: { [RESPONSE_CREATE_ID_METADATA_KEY]: createId } },
+    });
   }
 
   _flushQueuedCreate() {

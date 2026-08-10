@@ -271,12 +271,12 @@ const deliverEmptyTranscript = async () => {{
   }}
 }};
 
-client._openResponses = 1;
+client._activeResponseId = "response_1";
 await deliverEmptyTranscript();
-client._openResponses = 0;
-client._createInFlight = true;
+client._activeResponseId = "";
+client._pendingCreateId = "create_1";
 await deliverEmptyTranscript();
-client._createInFlight = false;
+client._pendingCreateId = "";
 client._createQueue.push({{}});
 await deliverEmptyTranscript();
 """
