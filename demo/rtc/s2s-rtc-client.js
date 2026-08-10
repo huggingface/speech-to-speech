@@ -578,6 +578,10 @@ export class S2sRtcRealtimeClient extends EventTarget {
               },
             }),
           );
+        } else if (this._status === "processing" && !this._responsePending()) {
+          // Empty STT results intentionally do not create a response, so there
+          // will be no response.done event to return the UI to listening.
+          this._setStatus("connected");
         }
         break;
       }
@@ -776,6 +780,11 @@ export class S2sRtcRealtimeClient extends EventTarget {
 
   _responseActive() {
     return this._openResponses > 0 || this._createInFlight;
+  }
+
+  /** True while a response is active, awaiting confirmation, or queued. */
+  _responsePending() {
+    return this._responseActive() || this._createQueue.length > 0;
   }
 
   /** @param {{ image?: string }} [opts] */
