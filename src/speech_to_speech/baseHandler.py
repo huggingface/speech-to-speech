@@ -11,6 +11,7 @@ from typing import Any, Generic, Iterator, TypeVar, cast
 import numpy as np
 
 from speech_to_speech.pipeline.control import PipelineControlMessage, is_control_message, SESSION_END
+from speech_to_speech.pipeline.events import PipelineEvent, TokenUsageEvent
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import PIPELINE_END, AudioOutput, EndOfResponse
 
@@ -57,7 +58,7 @@ class BaseHandler(Generic[InT, OutT]):
         if (
             cancel_scope is not None
             and cancel_generation is not None
-            and not isinstance(item, EndOfResponse)
+            and not isinstance(item, (EndOfResponse, TokenUsageEvent))
             and cancel_scope.is_stale(cancel_generation)
         ):
             logger.debug(
@@ -76,9 +77,18 @@ class BaseHandler(Generic[InT, OutT]):
 
     def output_for_queue(self, output: OutT, source_input: InT) -> OutT | AudioOutput:
         cancel_generation = getattr(source_input, "cancel_generation", None)
-        if cancel_generation is not None and (isinstance(output, bytes) or hasattr(output, "tobytes")):
+        response_key = getattr(source_input, "response_key", None)
+        cleanup_only = getattr(source_input, "cleanup_only", False)
+        if (cancel_generation is not None or response_key is not None or cleanup_only) and (
+            isinstance(output, bytes) or hasattr(output, "tobytes")
+        ):
             audio = cast(bytes | np.ndarray, output)
-            return AudioOutput(audio=audio, cancel_generation=cancel_generation)
+            return AudioOutput(
+                audio=audio,
+                cancel_generation=cancel_generation,
+                response_key=response_key,
+                cleanup_only=cleanup_only,
+            )
         return output
 
     def run(self) -> None:
@@ -115,6 +125,12 @@ class BaseHandler(Generic[InT, OutT]):
 
             typed_item = cast(InT, item)
             if not self.should_process_input(typed_item):
+                continue
+
+            # Response events share the TTS queue with their audio. Forwarding
+            # them here preserves the model's exact text/tool/audio order.
+            if isinstance(item, PipelineEvent):
+                self.queue_out.put(cast(OutT, item))
                 continue
 
             start_time = perf_counter()

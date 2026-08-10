@@ -9,6 +9,7 @@ import pytest
 from openai import Stream
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
+    RealtimeConversationItemFunctionCall,
     RealtimeConversationItemFunctionCallOutput,
 )
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
@@ -23,7 +24,7 @@ from openai.types.responses.response_output_text import ResponseOutputText
 
 import speech_to_speech.LLM.base_openai_compatible_language_model as base_openai_compatible_language_model
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.LLM.base_openai_compatible_language_model import WARMUP_MAX_RETRIES
+from speech_to_speech.LLM.base_openai_compatible_language_model import WARMUP_MAX_RETRIES, ToolCall, Usage
 from speech_to_speech.LLM.chat import (
     AUDIO_INPUT_HISTORY_PLACEHOLDER,
     Chat,
@@ -263,7 +264,8 @@ def test_process_flushes_tool_lead_in_before_function_call_with_sentence_batchin
         )
     )
 
-    outputs = list(handler.process(_make_request("What do you see?")))
+    request = _make_request("What do you see?")
+    outputs = list(handler.process(request))
 
     assert len(outputs) == 3
     assert isinstance(outputs[0], LLMResponseChunk)
@@ -336,7 +338,8 @@ def test_process_preserves_nonstreaming_text_tool_text_order():
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: api_response))
 
-    outputs = list(handler.process(_make_request("What do you see?")))
+    request = _make_request("What do you see?")
+    outputs = list(handler.process(request))
 
     assert len(outputs) == 4
     assert isinstance(outputs[0], LLMResponseChunk)
@@ -349,6 +352,31 @@ def test_process_preserves_nonstreaming_text_tool_text_order():
     assert outputs[2].text == "This may take a second."
     assert outputs[2].tools == []
     assert isinstance(outputs[3], EndOfResponse)
+    call_id = outputs[1].tools[0].call_id
+
+    chat = request.runtime_config.chat
+    assert [item.type for item in chat.buffer] == ["message", "message", "function_call", "message"]
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id=call_id,
+            output="camera result",
+        )
+    )
+    assert [item.type for item in chat.buffer] == [
+        "message",
+        "message",
+        "function_call",
+        "message",
+        "function_call_output",
+    ]
+    assert [item["type"] for item in chat.to_responses_api_chat()] == [
+        "message",
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+    ]
 
 
 def test_process_handles_cancellation():
@@ -365,6 +393,145 @@ def test_process_handles_cancellation():
 
     assert len(outputs) == 1
     assert isinstance(outputs[0], EndOfResponse)
+
+
+def test_cancelled_stream_emits_provider_usage_and_rolls_back_history():
+    scope = CancelScope()
+    handler = _make_handler(cancel_scope=scope)
+    handler._iter_stream_events = lambda _: iter(
+        [
+            ToolCall(
+                item=ResponseFunctionToolCall(
+                    type="function_call",
+                    call_id="call_provider",
+                    id="fc_provider",
+                    name="camera",
+                    arguments="{}",
+                )
+            ),
+            Usage(input_tokens=11, output_tokens=7),
+        ]
+    )
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: _make_stream([])))
+    request = _make_request("Use a tool")
+    generation = handler.process(request)
+
+    tool_chunk = next(generation)
+    assert isinstance(tool_chunk, LLMResponseChunk) and tool_chunk.tools
+
+    scope.cancel()
+    remaining = list(generation)
+
+    usage = next(output for output in remaining if isinstance(output, TokenUsage))
+    assert (usage.input_tokens, usage.output_tokens, usage.response_key) == (11, 7, request.response_key)
+    assert any(isinstance(output, EndOfResponse) for output in remaining)
+    assert [item.type for item in request.runtime_config.chat.buffer] == ["message"]
+
+
+def test_cancelled_nonstreaming_response_emits_provider_usage():
+    scope = CancelScope()
+    handler = _make_handler(stream=False, cancel_scope=scope)
+
+    def fake_create(**kwargs):
+        scope.cancel()
+        return _make_response(
+            [
+                ResponseOutputMessage(
+                    id="msg_1",
+                    type="message",
+                    role="assistant",
+                    status="completed",
+                    content=[ResponseOutputText(type="output_text", text="unseen", annotations=[])],
+                )
+            ],
+            usage=SimpleNamespace(input_tokens=11, output_tokens=7),
+        )
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+    request = _make_request("Hi")
+
+    outputs = list(handler.process(request))
+
+    assert not any(isinstance(output, LLMResponseChunk) for output in outputs)
+    usage = next(output for output in outputs if isinstance(output, TokenUsage))
+    assert (usage.input_tokens, usage.output_tokens) == (11, 7)
+    assert isinstance(outputs[-1], EndOfResponse)
+    assert [item.type for item in request.runtime_config.chat.buffer] == ["message"]
+
+
+def test_cancelled_text_tool_turn_rolls_back_ordered_call():
+    scope = CancelScope()
+    handler = _make_handler(cancel_scope=scope)
+    handler.client = SimpleNamespace(
+        responses=SimpleNamespace(create=lambda **kwargs: _make_stream([_make_function_call_done_event()]))
+    )
+    request = _make_request("Use a tool")
+    generation = handler.process(request)
+
+    tool_chunk = next(generation)
+    assert isinstance(tool_chunk, LLMResponseChunk)
+    assert tool_chunk.tools
+    assert request.runtime_config.chat.has_pending_tool_calls()
+
+    scope.cancel()
+    remaining = list(generation)
+
+    assert any(isinstance(output, EndOfResponse) for output in remaining)
+    assert [item.type for item in request.runtime_config.chat.buffer] == ["message"]
+    assert not request.runtime_config.chat.has_pending_tool_calls()
+
+
+def test_provider_error_after_text_tool_rolls_back_ordered_call():
+    handler = _make_handler()
+
+    class FailingStream:
+        def __iter__(self):
+            yield _make_function_call_done_event()
+            raise RuntimeError("provider stream failed")
+
+        def close(self):
+            pass
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: FailingStream()))
+    request = _make_request("Use a tool")
+    outputs = list(handler.process(request))
+
+    end = next(output for output in outputs if isinstance(output, EndOfResponse))
+    assert end.error is not None and "provider stream failed" in end.error
+    assert [item.type for item in request.runtime_config.chat.buffer] == ["message"]
+    assert not request.runtime_config.chat.has_pending_tool_calls()
+
+
+def test_generation_is_rejected_until_ordered_tool_output_arrives():
+    handler = _make_handler()
+    called = False
+
+    def create(**kwargs):
+        nonlocal called
+        called = True
+        return _make_stream([])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    chat = Chat(5)
+    chat.add_item(make_user_message("first"))
+    chat.add_ordered_function_call(
+        RealtimeConversationItemFunctionCall(
+            type="function_call",
+            call_id="call_pending",
+            name="pending",
+            arguments="{}",
+        )
+    )
+    chat.add_item(make_user_message("second"))
+    request = GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat))
+
+    outputs = list(handler.process(request))
+
+    assert called is False
+    assert len(outputs) == 1
+    assert isinstance(outputs[0], EndOfResponse)
+    assert outputs[0].error is not None and "function call outputs are pending" in outputs[0].error
+    assert [item.type for item in chat.buffer] == ["message", "function_call", "message"]
 
 
 def test_responses_api_timing_logs_only_text_chunks():
@@ -450,7 +617,8 @@ def test_process_read_timeout_ends_response_cleanly():
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: make_timeout_stream()))
 
-    outputs = list(handler.process(_make_request("Hi")))
+    request = _make_request("Hi")
+    outputs = list(handler.process(request))
 
     assert len(outputs) == 2
     assert (
@@ -458,6 +626,60 @@ def test_process_read_timeout_ends_response_cleanly():
         and outputs[0].text == "Wow I'm a bit slow today, could you repeat that?"
     )
     assert isinstance(outputs[1], EndOfResponse)
+    assert outputs[1].error is None
+    assert [item.type for item in request.runtime_config.chat.buffer] == ["message", "message"]
+    assistant = request.runtime_config.chat.buffer[-1]
+    assert isinstance(assistant, RealtimeConversationItemAssistantMessage)
+    assert assistant.content[0].text == outputs[0].text
+
+
+def test_read_timeout_after_partial_text_fails_without_apology_or_history_commit():
+    handler = _make_handler()
+
+    class PartialThenTimeoutStream:
+        def __iter__(self):
+            yield _make_text_delta_event("Partial answer. ")
+            raise httpx.ReadTimeout("timed out")
+
+        def close(self):
+            pass
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: PartialThenTimeoutStream()))
+    request = _make_request("Hi")
+    request.response = RealtimeResponseCreateParams(output_modalities=["text"])
+
+    outputs = list(handler.process(request))
+
+    chunks = [output.text for output in outputs if isinstance(output, LLMResponseChunk)]
+    assert chunks == ["Partial answer. "]
+    end = next(output for output in outputs if isinstance(output, EndOfResponse))
+    assert end.error is not None and "timed out" in end.error
+    assert [item.type for item in request.runtime_config.chat.buffer] == ["message"]
+
+
+def test_read_timeout_after_tool_call_fails_and_rolls_back_call():
+    handler = _make_handler()
+
+    class ToolThenTimeoutStream:
+        def __iter__(self):
+            yield _make_function_call_done_event()
+            raise httpx.ReadTimeout("timed out")
+
+        def close(self):
+            pass
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: ToolThenTimeoutStream()))
+    request = _make_request("Use a tool")
+
+    outputs = list(handler.process(request))
+
+    assert isinstance(outputs[0], LLMResponseChunk)
+    assert outputs[0].tools
+    assert not any(isinstance(output, LLMResponseChunk) and "slow today" in output.text for output in outputs)
+    end = next(output for output in outputs if isinstance(output, EndOfResponse))
+    assert end.error is not None and "timed out" in end.error
+    assert [item.type for item in request.runtime_config.chat.buffer] == ["message"]
+    assert not request.runtime_config.chat.has_pending_tool_calls()
 
 
 def test_generation_error_emits_failed_end_of_response():
@@ -945,6 +1167,30 @@ def test_out_of_band_emits_output_but_does_not_commit_to_default_conversation():
     assert not any(isinstance(i, RealtimeConversationItemAssistantMessage) for i in cfg.chat.buffer)
 
 
+def test_out_of_band_timeout_after_tool_call_fails_without_apology():
+    handler = _make_handler()
+
+    class ToolThenTimeoutStream:
+        def __iter__(self):
+            yield _make_function_call_done_event()
+            raise httpx.ReadTimeout("timed out")
+
+        def close(self):
+            pass
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: ToolThenTimeoutStream()))
+    request, cfg = _make_oob_request([make_user_message("OOB tool request")])
+
+    outputs = list(handler.process(request))
+
+    assert isinstance(outputs[0], LLMResponseChunk)
+    assert outputs[0].tools
+    assert not any(isinstance(output, LLMResponseChunk) and "slow today" in output.text for output in outputs)
+    end = next(output for output in outputs if isinstance(output, EndOfResponse))
+    assert end.error is not None and "timed out" in end.error
+    assert [item.type for item in cfg.chat.buffer] == ["message"]
+
+
 def test_out_of_band_input_builds_fresh_context():
     handler = _make_handler()
     req, _cfg = _make_oob_request([make_user_message("OOB question")])
@@ -983,7 +1229,9 @@ def test_out_of_band_absent_input_reads_default_conversation():
 
 
 def test_out_of_band_invalid_input_emits_failed_end_of_response():
-    handler = _make_handler()
+    scope = CancelScope()
+    scope.cancel()
+    handler = _make_handler(cancel_scope=scope)
     called = False
 
     def fake_create(**kwargs):
@@ -1004,3 +1252,4 @@ def test_out_of_band_invalid_input_emits_failed_end_of_response():
     assert len(outputs) == 1
     assert isinstance(outputs[0], EndOfResponse)
     assert outputs[0].error is not None
+    assert outputs[0].cancel_generation == scope.generation

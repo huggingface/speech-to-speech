@@ -162,7 +162,11 @@ class AudioHandler(RealtimeBaseHandler):
 
     # ── Outbound audio encoding ──────────────────
 
-    def begin_audio_response(self, conn_id: str) -> tuple[str, str, list[ServerEvent]]:
+    def begin_audio_response(
+        self,
+        conn_id: str,
+        response_key: str | None = None,
+    ) -> tuple[str, str, list[ServerEvent]]:
         """Ensure a response exists for outbound audio, emitting ResponseCreated once.
 
         When ``handle_response_create`` already allocated the response,
@@ -181,7 +185,7 @@ class AudioHandler(RealtimeBaseHandler):
 
         events: list[ServerEvent] = []
         need_created = st.current_response_id is None
-        resp_id, item_id = response._ensure_response(conn_id)
+        resp_id, item_id = response._ensure_response(conn_id, response_key)
         if need_created:
             events.append(
                 ResponseCreatedEvent(
@@ -190,20 +194,38 @@ class AudioHandler(RealtimeBaseHandler):
                     response=response._build_response(conn_id, "in_progress"),
                 )
             )
+        self._service._apply_pending_token_usage(conn_id, response_key)
         return resp_id, item_id, events
 
-    def begin_audio_output(self, conn_id: str) -> tuple[str, str, int, list[ServerEvent]]:
+    def begin_audio_output(
+        self,
+        conn_id: str,
+        response_key: str | None = None,
+    ) -> tuple[str, str, int, list[ServerEvent]]:
         """Ensure an audio response and reserve its assistant output identity."""
-        resp_id, item_id, events = self.begin_audio_response(conn_id)
-        assistant_item_id, output_index = self._service.response._ensure_assistant_output_item(conn_id, item_id)
+        resp_id, item_id, events = self.begin_audio_response(conn_id, response_key)
+        st = self._state(conn_id)
+        assistant_item_id, output_index = self._service.response._ensure_assistant_output_item(
+            conn_id,
+            item_id,
+        )
+        st.audio_output_started = True
         return resp_id, assistant_item_id, output_index, events
 
-    def encode_audio_chunk(self, conn_id: str, audio: bytes) -> list[ServerEvent]:
+    def encode_audio_chunk(
+        self,
+        conn_id: str,
+        audio: bytes,
+        response_key: str | None = None,
+    ) -> list[ServerEvent]:
         """Encode a raw PCM audio chunk as a base64 delta event for the WebSocket transport."""
         response = self._service.response
         st = self._state(conn_id)
 
-        resp_id, assistant_item_id, assistant_output_index, events = self.begin_audio_output(conn_id)
+        resp_id, assistant_item_id, assistant_output_index, events = self.begin_audio_output(
+            conn_id,
+            response_key,
+        )
         rp = st.current_response_params
         client_out_rate = None
         if rp and rp.audio and rp.audio.output and rp.audio.output.format:

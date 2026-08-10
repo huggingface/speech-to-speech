@@ -255,6 +255,23 @@ class TestAddItemEviction:
         assert "message" in remaining_types
         assert chat.buffer[0].content[0].text == "t2"
 
+    def test_eviction_removes_late_output_with_its_call(self):
+        chat = Chat(size=2)
+        chat.add_item(_user("u0"))
+        chat.add_ordered_function_call(_fc("c1"))
+        chat.add_item(_assistant("a0"))
+        chat.add_item(_user("u1"))
+        chat.add_item(_user("u2"))
+        chat.add_item(_user("u3"))
+        chat.add_item(_fco("c1"))
+        chat.add_item(_assistant("late"))
+
+        chat.trim_if_needed()
+
+        assert not any(isinstance(item, RealtimeConversationItemFunctionCall) for item in chat.buffer)
+        assert not any(isinstance(item, RealtimeConversationItemFunctionCallOutput) for item in chat.buffer)
+        assert all(item["type"] != "function_call_output" for item in chat.to_responses_api_chat())
+
     def test_size_zero_evicts_every_user_message(self):
         chat = Chat(size=0)
         chat.add_item(_user("a"))
@@ -312,6 +329,32 @@ class TestAppendToolOutput:
         chat.append_tool_output("call_c1", fco)
 
         assert fc.status == "incomplete"
+
+    def test_ordered_output_appends_chronologically_and_serializes_adjacent(self):
+        chat = Chat(size=5)
+        before = _assistant("before")
+        call = _fc("c1")
+        after = _assistant("after")
+        output = _fco("c1")
+        chat.add_item(before)
+        chat.add_ordered_function_call(call)
+        chat.add_item(after)
+
+        chat.add_item(output)
+
+        assert chat.buffer == [before, call, after, output]
+        assert [item["type"] for item in chat.to_responses_api_chat()] == [
+            "message",
+            "function_call",
+            "function_call_output",
+            "message",
+        ]
+        assert [item["role"] for item in chat.to_transformers_chat()] == [
+            "assistant",
+            "assistant",
+            "tool",
+            "assistant",
+        ]
 
     def test_reinjection_path(self):
         chat = Chat(size=1)
@@ -486,6 +529,87 @@ class TestAddItem:
         )
         with pytest.raises(ChatItemError, match="call_"):
             chat.add_item(fc)
+
+    def test_cancelled_response_rejects_late_provisional_items_atomically(self):
+        chat = Chat(size=5)
+        response_key = "cancelled_response"
+        chat.rollback_provisional_generation(response_key)
+
+        recorded = chat.add_provisional_generation_items(response_key, [_assistant("late"), _fc("late")])
+
+        assert recorded is None
+        assert chat.buffer == []
+        assert not chat.has_pending_tool_calls()
+        chat.rollback_generation(None, item_ids=set(), call_ids=set(), response_key=response_key)
+        assert chat._cancelled_provisional_generations == {}
+
+    def test_invalid_provisional_batch_rolls_back_earlier_items(self):
+        chat = Chat(size=5)
+        existing = chat.add_item(_user("existing"))
+        invalid_call = RealtimeConversationItemFunctionCall(
+            type="function_call",
+            id="invalid",
+            call_id="call_bad",
+            name="bad",
+            arguments="{}",
+        )
+
+        with pytest.raises(ChatItemError, match="fc_"):
+            chat.add_provisional_generation_items(
+                "failed_response",
+                [_assistant("must roll back"), invalid_call],
+            )
+
+        assert chat.buffer == [existing]
+        assert not chat.has_pending_tool_calls()
+        assert chat._provisional_generations == {}
+
+    def test_generation_stays_provisional_until_response_delivery(self):
+        chat = Chat(size=5)
+        response_key = "completed_response"
+        eager = chat.add_provisional_generation_items(response_key, [_assistant("before"), _fc("final")])
+        assert eager is not None
+
+        trailing = chat.add_provisional_generation_items(response_key, [_assistant("after")])
+        chat.rollback_provisional_generation(response_key)
+
+        assert trailing is not None
+        assert chat.buffer == []
+        assert chat._provisional_generations == {}
+
+    def test_delivered_generation_is_no_longer_rollbackable(self):
+        chat = Chat(size=5)
+        response_key = "completed_response"
+        recorded = chat.add_provisional_generation_items(
+            response_key,
+            [_assistant("before"), _fc("final"), _assistant("after")],
+        )
+
+        chat.finalize_provisional_generation(response_key)
+        chat.rollback_provisional_generation(response_key)
+
+        assert recorded is not None
+        assert [item.type for item in chat.buffer] == ["message", "function_call", "message"]
+        assert chat._provisional_generations == {}
+
+    def test_committed_user_input_survives_response_delivery_cancellation(self):
+        chat = Chat(size=5)
+        response_key = "completed_model_request"
+        user = _user("keep me")
+        assert user.id is None
+        assert chat.add_provisional_generation_items(response_key, [user]) is not None
+        assert user.id is not None
+        recorded = chat.add_provisional_generation_items(
+            response_key,
+            [_assistant("unseen"), _fc("unseen")],
+            committed_item_ids={user.id},
+        )
+        assert recorded is not None
+
+        chat.rollback_provisional_generation(response_key)
+
+        assert chat.buffer == [user]
+        assert not chat.has_pending_tool_calls()
 
     # -- Function call output --
 
@@ -1024,6 +1148,45 @@ def _make_stub_compactor(
 
 
 class TestCompaction:
+    def test_cancelled_provisional_history_is_not_compacted(self):
+        chat = Chat(size=2)
+        captured: list = []
+        compactor = _make_stub_compactor(captured=captured)
+        chat.add_item(_user("u0"))
+        chat.add_item(_assistant("a0"))
+        chat.add_item(_user("u1"))
+        chat.add_provisional_generation_items("response-1", [_assistant("cancelled answer")])
+        chat.add_item(_user("u2"))
+
+        chat.trim_if_needed(compactor)
+
+        assert captured == []
+        assert chat._compact_thread is None
+
+        chat.rollback_provisional_generation("response-1")
+        _wait_thread(chat)
+
+        assert len(captured) == 1
+        assert "cancelled answer" not in str(captured[0])
+        assert "cancelled answer" not in str(chat.to_responses_api_chat())
+
+    def test_finalized_provisional_history_resumes_deferred_compaction(self):
+        chat = Chat(size=2)
+        captured: list = []
+        compactor = _make_stub_compactor(captured=captured)
+        chat.add_item(_user("u0"))
+        chat.add_item(_assistant("a0"))
+        chat.add_item(_user("u1"))
+        chat.add_provisional_generation_items("response-1", [_assistant("delivered answer")])
+        chat.add_item(_user("u2"))
+
+        chat.trim_if_needed(compactor)
+        chat.finalize_provisional_generation("response-1")
+        _wait_thread(chat)
+
+        assert len(captured) == 1
+        assert "delivered answer" in str(captured[0])
+
     def test_compaction_replaces_old_turns(self):
         chat = Chat(size=2)
         compactor = _make_stub_compactor("U", "A")
@@ -1159,6 +1322,33 @@ class TestCompaction:
         # Both fc and fco should be gone.
         assert not any(isinstance(x, RealtimeConversationItemFunctionCall) for x in chat.buffer)
         assert not any(isinstance(x, RealtimeConversationItemFunctionCallOutput) for x in chat.buffer)
+
+    def test_compaction_keeps_late_call_output_pair_out_of_snapshot(self):
+        chat = Chat(size=2)
+        captured: list = []
+        compactor = _make_stub_compactor(captured=captured)
+        chat.add_item(_user("u0"))
+        chat.add_ordered_function_call(_fc("c1"))
+        chat.add_item(_assistant("a0"))
+        chat.add_item(_user("u1"))
+        chat.add_item(_assistant("a1"))
+        chat.add_item(_user("u2"))
+        chat.add_item(_assistant("a2"))
+        chat.add_item(_user("u3"))
+        chat.add_item(_fco("c1"))
+        chat.add_item(_assistant("late"))
+
+        chat.trim_if_needed(compactor)
+        _wait_thread(chat)
+
+        assert len(captured) == 1
+        assert all(item["type"] not in {"function_call", "function_call_output"} for item in captured[0])
+        call_items = [item for item in chat.buffer if isinstance(item, RealtimeConversationItemFunctionCall)]
+        output_items = [item for item in chat.buffer if isinstance(item, RealtimeConversationItemFunctionCallOutput)]
+        assert len(call_items) == len(output_items) == 1
+        serialized_types = [item["type"] for item in chat.to_responses_api_chat()]
+        call_index = serialized_types.index("function_call")
+        assert serialized_types[call_index + 1] == "function_call_output"
 
     def test_keeps_fc_when_fco_arrives_during_compaction(self):
         chat = Chat(size=2)

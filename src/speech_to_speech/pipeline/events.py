@@ -1,9 +1,8 @@
-"""Typed events flowing on ``text_output_queue``.
+"""Typed events flowing from pipeline handlers to the realtime router.
 
-These are internal pipeline events produced by VAD, TranscriptionNotifier, and
-LMOutputProcessor, consumed by the realtime ``WebSocketRouter`` send-loop and
-``RealtimeService.dispatch_pipeline_event``.  They replace the raw ``dict``
-literals that were previously put on the queue.
+VAD and transcription events use ``text_output_queue``; response-dependent
+assistant and token-usage events share the TTS output queue with their audio.
+The router dispatches both through ``RealtimeService``.
 """
 
 from __future__ import annotations
@@ -12,11 +11,16 @@ from typing import Literal, Optional
 
 import numpy as np
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from speech_to_speech.pipeline.messages import (
+    AssistantOutputPart,
+    _normalize_assistant_output_fields,
+)
 
 
 class PipelineEvent(BaseModel):
-    """Base for all text_output_queue events.
+    """Base for protocol-neutral events consumed by the realtime router.
 
     The ``type`` field mirrors the former dict ``"type"`` key and acts as a
     Pydantic discriminator.
@@ -84,9 +88,12 @@ class AudioInputCompletedEvent(PipelineEvent):
 # ── LLM output events (LMOutputProcessor) ────────────────────────────
 
 
-class AssistantTextEvent(PipelineEvent):
+class AssistantOutputEvent(PipelineEvent):
+    """Internal ordered assistant output awaiting API-specific serialization."""
+
     type: Literal["assistant_text"] = "assistant_text"
-    text: str
+    parts: list[AssistantOutputPart] = Field(default_factory=list)
+    text: str = ""
     tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
     turn_id: str | None = None
     turn_revision: int | None = None
@@ -94,6 +101,18 @@ class AssistantTextEvent(PipelineEvent):
     # send loop discard stale assistant text by the same generation-aware rule as
     # audio, instead of blanket-dropping while cancel_scope.discarding is set.
     cancel_generation: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
+
+    @model_validator(mode="after")
+    def _normalize_ordered_parts(self) -> "AssistantOutputEvent":
+        legacy_views = _normalize_assistant_output_fields(self.parts, self.text, self.tools, self.model_fields_set)
+        if legacy_views is not None:
+            self.text, self.tools = legacy_views
+        return self
+
+
+# Kept for callers that imported the original public pipeline symbol.
+AssistantTextEvent = AssistantOutputEvent
 
 
 class TokenUsageEvent(PipelineEvent):
@@ -102,6 +121,18 @@ class TokenUsageEvent(PipelineEvent):
     output_tokens: int = 0
     turn_id: str | None = None
     turn_revision: int | None = None
+    cancel_generation: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
+
+
+class AssistantResponseDoneEvent(PipelineEvent):
+    """Marks the end of ordered assistant output for one response."""
+
+    type: Literal["assistant_response_done"] = "assistant_response_done"
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
+    turn_id: str | None = None
+    turn_revision: int | None = None
+    cancel_generation: int | None = None
 
 
 class ResponseFailedEvent(PipelineEvent):
@@ -115,3 +146,5 @@ class ResponseFailedEvent(PipelineEvent):
     message: str = ""
     turn_id: str | None = None
     turn_revision: int | None = None
+    cancel_generation: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)

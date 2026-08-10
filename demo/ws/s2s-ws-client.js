@@ -113,6 +113,7 @@ function _codedError(message, code, extra) {
 // as soon as a sub-field shape it doesn't know about appears.
 const OUTPUT_SAMPLE_RATE = 16000;
 const MIC_CHUNK_MS = 40;
+const RESPONSE_CREATE_ID_METADATA_KEY = "s2s_demo_create_id";
 
 export class S2sWsRealtimeClient extends EventTarget {
   /** @param {WsClientOptions} options */
@@ -189,14 +190,20 @@ export class S2sWsRealtimeClient extends EventTarget {
     // ── Response lock ────────────────────────────────────────────────────
     // The backend allows only ONE response in flight: creating a second while
     // one is active fails with `conversation_already_has_active_response`. So
-    // we serialize response.create. `_openResponses` counts responses the
-    // server has confirmed (response.created) but not yet finished
-    // (response.done) — it's cumulative, so every create maps to one done.
-    // `_createInFlight` covers the window after we send a create but before its
-    // response.created echo. Any requestResponse() made while locked is queued
-    // and replayed, one at a time, as each response.done frees the slot.
-    this._openResponses = 0;
-    this._createInFlight = false;
+    // we serialize response.create. `_activeResponseId` identifies the one
+    // response the server has confirmed (response.created) but not yet finished
+    // (response.done). Tracking the id makes duplicate lifecycle events
+    // idempotent and lets newer responses replace stale bookkeeping.
+    // `_pendingCreateId` covers the window after we send a create but before
+    // its matching response.created echo. The id travels as response metadata,
+    // so an automatic response cannot accidentally acknowledge our create.
+    // Any requestResponse() made while locked is queued and replayed, one at a
+    // time, as each response.done frees the slot.
+    this._activeResponseId = "";
+    this._pendingCreateId = "";
+    this._pendingCreateSawResponse = false;
+    this._waitingForResponseAfterCollision = false;
+    this._nextCreateSequence = 0;
     /** @type {{ image?: string }[]} Pending response.create payloads, one per
      * queued requestResponse(). A payload may carry an image to send just
      * before its create (so the frame travels with the create, not eagerly). */
@@ -721,10 +728,16 @@ export class S2sWsRealtimeClient extends EventTarget {
         break;
 
       case "response.created":
-        // A response now owns the slot — count it and clear our create guard
-        // (this confirms either our create or a server-initiated one).
-        this._openResponses++;
-        this._createInFlight = false;
+        // A response now owns the slot. Only matching metadata acknowledges
+        // our explicit create; automatic responses carry no such marker.
+        this._waitingForResponseAfterCollision = false;
+        this._activeResponseId = event.response?.id ?? "";
+        if (event.response?.metadata?.[RESPONSE_CREATE_ID_METADATA_KEY] === this._pendingCreateId) {
+          this._pendingCreateId = "";
+          this._pendingCreateSawResponse = false;
+        } else if (this._pendingCreateId) {
+          this._pendingCreateSawResponse = true;
+        }
         if (this._status === "connected" || this._status === "user-speaking") {
           this._setStatus("processing");
         }
@@ -758,9 +771,12 @@ export class S2sWsRealtimeClient extends EventTarget {
 
       case "response.done": {
         this._aiSpeaking = false;
-        // This response freed the slot (completion OR cancellation both arrive
-        // as response.done). Decrement and, if a create was waiting, replay it.
-        this._openResponses = Math.max(0, this._openResponses - 1);
+        // Completion and cancellation both arrive as response.done. Clear only
+        // the matching owner: a late terminal for an older response must not
+        // unlock a newer one.
+        const responseId = event.response?.id ?? "";
+        if (this._activeResponseId === responseId) this._activeResponseId = "";
+        this._waitingForResponseAfterCollision = false;
         if (this._status === "ai-speaking" || this._status === "processing") {
           this._setStatus("connected");
         }
@@ -770,7 +786,6 @@ export class S2sWsRealtimeClient extends EventTarget {
         // `response.cancelled` event). Surface the id + status so the UI can
         // drop a cancelled response's transcript and commit a completed one.
         const status = event.response?.status ?? "completed";
-        const responseId = event.response?.id ?? "";
         // Did this response ever play audio? Distinguishes a barge-in cut (the
         // user heard part of it) from a speculative response that never played.
         const audible = responseId ? this._audibleResponses.has(responseId) : false;
@@ -799,9 +814,10 @@ export class S2sWsRealtimeClient extends EventTarget {
         const name = typeof event.name === "string" ? event.name : "";
         const args = typeof event.arguments === "string" ? event.arguments : "{}";
         const callId = typeof event.call_id === "string" ? event.call_id : "";
+        const responseId = typeof event.response_id === "string" ? event.response_id : "";
         if (name) {
           this.dispatchEvent(new CustomEvent("toolcall", {
-            detail: { name, arguments: args, callId },
+            detail: { name, arguments: args, callId, responseId },
           }));
         } else {
           // A nameless call can't be executed, so no function_call_output is
@@ -834,6 +850,12 @@ export class S2sWsRealtimeClient extends EventTarget {
 
       case "conversation.item.input_audio_transcription.completed": {
         const transcript = typeof event.transcript === "string" ? event.transcript : "";
+        if (this._waitingForResponseAfterCollision) {
+          // New speech can cancel a merely-pending response without emitting
+          // response.done. Retry only after that speech has been transcribed.
+          this._waitingForResponseAfterCollision = false;
+          this._flushQueuedCreate();
+        }
         if (transcript) {
           this.dispatchEvent(
             new CustomEvent("transcript", {
@@ -904,17 +926,19 @@ export class S2sWsRealtimeClient extends EventTarget {
         const err = event.error;
         console.error("[ws] server error:", err);
         // The "another response is already active" race: our optimistic create
-        // collided with a still-running response. Don't surface it — clear the
-        // in-flight guard and re-queue, so the create replays on the next
-        // response.done (never retried immediately, which would just collide
-        // again).
+        // collided with a still-running response. Don't surface it — re-queue
+        // the rejected create and retry as soon as the response slot is free.
         if (err?.type === "conversation_already_has_active_response" ||
             err?.code === "conversation_already_has_active_response") {
-          if (this._createInFlight) {
-            this._createInFlight = false;
-            // Re-queue a BARE create: any image on the original payload was
-            // already sent before this (rejected) create, so don't resend it.
-            this._createQueue.push({});
+          if (this._pendingCreateId) {
+            const responseAlreadyFinished = this._pendingCreateSawResponse && !this._activeResponseId;
+            this._waitingForResponseAfterCollision = !this._pendingCreateSawResponse;
+            this._pendingCreateId = "";
+            this._pendingCreateSawResponse = false;
+            // Any image was sent before the rejected create, so don't resend it.
+            // Put the retry ahead of requests queued after it.
+            this._createQueue.unshift({});
+            if (responseAlreadyFinished) this._flushQueuedCreate();
           }
           break;
         }
@@ -1076,7 +1100,7 @@ export class S2sWsRealtimeClient extends EventTarget {
    *   tool so the model sees the snapshot in the response it's about to speak.
    */
   requestResponse(opts = {}) {
-    if (this._responseActive()) {
+    if (this._responsePending()) {
       this._createQueue.push(opts);
       if (this._debug) console.debug(`[ws] response.create queued (a response is active); pending=${this._createQueue.length}`);
       return;
@@ -1086,7 +1110,11 @@ export class S2sWsRealtimeClient extends EventTarget {
 
   /** True while a response occupies the single backend slot. */
   _responseActive() {
-    return this._openResponses > 0 || this._createInFlight;
+    return (
+      Boolean(this._activeResponseId) ||
+      Boolean(this._pendingCreateId) ||
+      this._waitingForResponseAfterCollision
+    );
   }
 
   /** True while a response is active, awaiting confirmation, or queued. */
@@ -1100,8 +1128,13 @@ export class S2sWsRealtimeClient extends EventTarget {
   _createResponseNow(opts = {}) {
     if (!this._ws || this._ws.readyState !== WebSocket.OPEN) return;
     if (opts.image) this.sendUserImage(opts.image);
-    this._createInFlight = true;
-    this._send({ type: "response.create" });
+    const createId = `demo_create_${++this._nextCreateSequence}`;
+    this._pendingCreateId = createId;
+    this._pendingCreateSawResponse = false;
+    this._send({
+      type: "response.create",
+      response: { metadata: { [RESPONSE_CREATE_ID_METADATA_KEY]: createId } },
+    });
   }
 
   /** Replay one queued response.create if the slot is now free. Called on every

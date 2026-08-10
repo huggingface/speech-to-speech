@@ -9,6 +9,9 @@ from typing import Any, Literal, Optional, Protocol, runtime_checkable
 
 import torch
 from nltk import sent_tokenize
+from openai.types.realtime.realtime_conversation_item_assistant_message import (
+    RealtimeConversationItemAssistantMessage,
+)
 from openai.types.realtime.realtime_conversation_item_function_call import (
     RealtimeConversationItemFunctionCall,
 )
@@ -49,6 +52,9 @@ from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
 from speech_to_speech.pipeline.messages import (
+    AssistantOutputPart,
+    AssistantTextPart,
+    AssistantToolCallPart,
     EndOfResponse,
     GenerateResponseRequest,
     LLMResponseChunk,
@@ -135,6 +141,10 @@ class StreamContext(BaseModel):
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
     cancel_generation: int | None = None
+    output_parts: list[AssistantOutputPart] = Field(default_factory=list)
+    history_parts_committed: int = 0
+    recorded_item_ids: set[str] = Field(default_factory=set)
+    recorded_call_ids: set[str] = Field(default_factory=set)
 
     @property
     def interrupted(self) -> bool:
@@ -307,18 +317,53 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         when the batch reaches ``self.stream_batch_sentences``.
         """
         chunks: list[LLMResponseChunk] = []
+        text_only = not response_wants_audio(response)
 
-        if ctx.enter_code and ctx.enter_code in printable_text:
+        def text_chunk(text: str) -> LLMResponseChunk:
+            return LLMResponseChunk(
+                text=text,
+                language_code=language_code,
+                runtime_config=runtime_config,
+                response=response,
+                turn_id=ctx.turn_id,
+                turn_revision=ctx.turn_revision,
+                speech_stopped_at_s=ctx.speech_stopped_at_s,
+                cancel_generation=ctx.cancel_generation,
+            )
+
+        while ctx.enter_code and ctx.enter_code in printable_text:
             idx = printable_text.index(ctx.enter_code)
             before = printable_text[:idx]
             code_and_after = printable_text[idx:]
-            if before.strip():
+            if text_only and before:
+                chunks.append(text_chunk(before))
+            elif before.strip():
                 for s in sent_tokenize(before):
                     ctx.sentence_batch.append(s)
             if ctx.sentence_batch:
+                chunks.append(text_chunk(" ".join(ctx.sentence_batch)))
+                ctx.sentence_batch = []
+            if not ctx.block_regex or not ctx.end_code or ctx.end_code not in code_and_after:
+                # Preserve the incomplete block until more streamed text arrives.
+                return chunks, tools, code_and_after
+
+            block_end = code_and_after.index(ctx.end_code) + len(ctx.end_code)
+            complete_block = code_and_after[:block_end]
+            printable_text = code_and_after[block_end:]
+            _, func_calls = extract_function_calls_from_text(complete_block, ctx.block_regex)
+            parsed_tools: list[ResponseFunctionToolCall] = []
+            for fc in func_calls:
+                try:
+                    tool_call = fc.to_realtime_function_tool_call(ctx.function_tools)
+                except ValueError as e:
+                    logger.warning("Skipping invalid tool call: %s", e)
+                    continue
+                tools.append(tool_call)
+                parsed_tools.append(tool_call)
+            if parsed_tools:
                 chunks.append(
                     LLMResponseChunk(
-                        text=" ".join(ctx.sentence_batch),
+                        parts=[AssistantToolCallPart(tool=tool_call) for tool_call in parsed_tools],
                         language_code=language_code,
                         runtime_config=runtime_config,
                         response=response,
@@ -328,64 +373,22 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         cancel_generation=ctx.cancel_generation,
                     )
                 )
-                ctx.sentence_batch = []
-            if ctx.block_regex and ctx.end_code and ctx.end_code in code_and_after:
-                stripped, func_calls = extract_function_calls_from_text(
-                    code_and_after,
-                    ctx.block_regex,
-                )
-                parsed_tools: list[ResponseFunctionToolCall] = []
-                for fc in func_calls:
-                    if tools:
-                        logger.warning(
-                            "Skipping extra tool call '%s'; only one tool call is allowed per response",
-                            fc.function_name,
-                        )
-                        continue
-                    try:
-                        tool_call = fc.to_realtime_function_tool_call(ctx.function_tools)
-                    except ValueError as e:
-                        logger.warning("Skipping invalid tool call: %s", e)
-                        continue
-                    tools.append(tool_call)
-                    parsed_tools.append(tool_call)
-                if parsed_tools:
-                    chunks.append(
-                        LLMResponseChunk(
-                            text="",
-                            language_code=language_code,
-                            tools=parsed_tools,
-                            runtime_config=runtime_config,
-                            response=response,
-                            turn_id=ctx.turn_id,
-                            turn_revision=ctx.turn_revision,
-                            speech_stopped_at_s=ctx.speech_stopped_at_s,
-                            cancel_generation=ctx.cancel_generation,
-                        )
-                    )
-                printable_text = stripped
-            else:
-                printable_text = code_and_after
-            return chunks, tools, printable_text
 
-        if printable_text and not response_wants_audio(response) and ctx.enter_code is None:
-            # Text-only with no tool block: stream the raw text immediately. No TTS
-            # means no need to split into sentences, and sent_tokenize would collapse
-            # newlines / markdown. Streaming (vs buffering to the end) keeps the
-            # response interruptible by a new speech turn.
-            chunks.append(
-                LLMResponseChunk(
-                    text=printable_text,
-                    language_code=language_code,
-                    runtime_config=runtime_config,
-                    response=response,
-                    turn_id=ctx.turn_id,
-                    turn_revision=ctx.turn_revision,
-                    speech_stopped_at_s=ctx.speech_stopped_at_s,
-                    cancel_generation=ctx.cancel_generation,
-                )
-            )
-            return chunks, tools, ""
+        if printable_text and text_only:
+            # Stream every character known not to begin a tool block. Retain only
+            # the longest suffix that could become ``<code>`` in the next token.
+            # This keeps text-only output verbatim without exposing tool syntax.
+            pending_marker = ""
+            if ctx.enter_code:
+                max_prefix_length = min(len(ctx.enter_code) - 1, len(printable_text))
+                for prefix_length in range(max_prefix_length, 0, -1):
+                    if printable_text.endswith(ctx.enter_code[:prefix_length]):
+                        pending_marker = printable_text[-prefix_length:]
+                        printable_text = printable_text[:-prefix_length]
+                        break
+            if printable_text:
+                chunks.append(text_chunk(printable_text))
+            return chunks, tools, pending_marker
 
         if printable_text:
             sentences = sent_tokenize(printable_text)
@@ -393,22 +396,74 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 for s in sentences[:-1]:
                     ctx.sentence_batch.append(s)
                     if len(ctx.sentence_batch) >= self.stream_batch_sentences:
-                        chunks.append(
-                            LLMResponseChunk(
-                                text=" ".join(ctx.sentence_batch),
-                                language_code=language_code,
-                                runtime_config=runtime_config,
-                                response=response,
-                                turn_id=ctx.turn_id,
-                                turn_revision=ctx.turn_revision,
-                                speech_stopped_at_s=ctx.speech_stopped_at_s,
-                                cancel_generation=ctx.cancel_generation,
-                            )
-                        )
+                        chunks.append(text_chunk(" ".join(ctx.sentence_batch)))
                         ctx.sentence_batch = []
                 printable_text = sentences[-1]
 
         return chunks, tools, printable_text
+
+    @staticmethod
+    def _commit_ordered_output(
+        chat: Chat,
+        parts: list[AssistantOutputPart],
+        *,
+        wants_audio: bool,
+        response_key: str | None = None,
+        recorded_item_ids: set[str] | None = None,
+        recorded_call_ids: set[str] | None = None,
+    ) -> bool:
+        """Persist exactly the ordered text/tool stream emitted to the client."""
+        text_parts: list[str] = []
+        items: list[RealtimeConversationItemAssistantMessage | RealtimeConversationItemFunctionCall] = []
+
+        def flush_text() -> None:
+            if not text_parts:
+                return
+            separator = " " if wants_audio else ""
+            text = separator.join(part for part in text_parts if part)
+            if text:
+                items.append(make_assistant_message(text))
+            text_parts.clear()
+
+        for part in parts:
+            if isinstance(part, AssistantTextPart):
+                text_parts.append(part.text)
+                continue
+            flush_text()
+            tool = part.tool
+            items.append(
+                RealtimeConversationItemFunctionCall(
+                    type="function_call",
+                    id=tool.id,
+                    call_id=tool.call_id,
+                    name=tool.name,
+                    arguments=tool.arguments,
+                    status=tool.status,
+                )
+            )
+        flush_text()
+
+        if response_key is not None:
+            recorded_items = chat.add_provisional_generation_items(response_key, items)
+            if recorded_items is None:
+                return False
+        else:
+            recorded_items = []
+            for item in items:
+                if isinstance(item, RealtimeConversationItemFunctionCall):
+                    recorded_items.append(chat.add_ordered_function_call(item))
+                else:
+                    recorded_items.append(chat.add_item(item))
+        for recorded in recorded_items:
+            if recorded_item_ids is not None and recorded.id is not None:
+                recorded_item_ids.add(recorded.id)
+            if (
+                recorded_call_ids is not None
+                and isinstance(recorded, RealtimeConversationItemFunctionCall)
+                and recorded.call_id is not None
+            ):
+                recorded_call_ids.add(recorded.call_id)
+        return True
 
     def _check_stop(self, gen: int | None, ctx: StreamContext) -> bool:
         """Check whether generation should be aborted and mark the reason on *ctx*."""
@@ -504,21 +559,43 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         ctx.turn_id = request.turn_id
         ctx.turn_revision = request.turn_revision
         ctx.speech_stopped_at_s = request.speech_stopped_at_s
+        gen = self.cancel_scope.generation if self.cancel_scope else None
+        ctx.cancel_generation = gen
         if not self._turn_is_latest(ctx.turn_id, ctx.turn_revision):
             logger.info("Skipping stale LLM request for turn=%s rev=%s", ctx.turn_id, ctx.turn_revision)
-            yield EndOfResponse(turn_id=ctx.turn_id, turn_revision=ctx.turn_revision)
+            yield EndOfResponse(
+                turn_id=ctx.turn_id,
+                turn_revision=ctx.turn_revision,
+                cancel_generation=gen,
+                response_key=request.response_key,
+            )
             return
 
         runtime_config = request.runtime_config
         response = request.response
         original_chat = runtime_config.chat
         out_of_band = is_out_of_band(response)
+        if not out_of_band and original_chat.has_pending_tool_calls():
+            yield EndOfResponse(
+                turn_id=ctx.turn_id,
+                turn_revision=ctx.turn_revision,
+                cancel_generation=gen,
+                response_key=request.response_key,
+                error="Cannot generate a response while function call outputs are pending.",
+            )
+            return
         if out_of_band:
             try:
                 active_chat = build_active_chat(original_chat, response)
             except ChatItemError as exc:
                 logger.info("Out-of-band response rejected: %s", exc)
-                yield EndOfResponse(turn_id=ctx.turn_id, turn_revision=ctx.turn_revision, error=str(exc))
+                yield EndOfResponse(
+                    turn_id=ctx.turn_id,
+                    turn_revision=ctx.turn_revision,
+                    cancel_generation=gen,
+                    response_key=request.response_key,
+                    error=str(exc),
+                )
                 return
         else:
             active_chat = original_chat.copy()
@@ -540,15 +617,46 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         if lang_name and self.enable_lang_prompt:
             active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
 
-        gen = self.cancel_scope.generation if self.cancel_scope else None
-        ctx.cancel_generation = gen
         # Images the model sees this turn; only these are stripped on write-back,
         # so an image a fast client injects mid-generation for the next turn
         # survives (it is not in this serialized snapshot).
         consumed_image_ids = active_chat.image_message_ids()
+        history_committed = False
+        history_rolled_back = False
+
+        def rollback_history() -> None:
+            nonlocal history_rolled_back
+            if out_of_band or history_committed or history_rolled_back:
+                return
+            if not (ctx.recorded_item_ids or ctx.recorded_call_ids):
+                return
+            original_chat.rollback_generation(
+                None,
+                item_ids=ctx.recorded_item_ids,
+                call_ids=ctx.recorded_call_ids,
+                response_key=request.response_key,
+            )
+            history_rolled_back = True
 
         try:
-            yield from self._generate(active_chat, language_code, gen, ctx, runtime_config, response)
+            for chunk in self._generate(active_chat, language_code, gen, ctx, runtime_config, response):
+                chunk.response_key = request.response_key
+                new_parts = [part.model_copy(deep=True) for part in chunk.parts]
+                ctx.output_parts.extend(new_parts)
+                if not out_of_band and any(isinstance(part, AssistantToolCallPart) for part in new_parts):
+                    recorded = self._commit_ordered_output(
+                        original_chat,
+                        ctx.output_parts[ctx.history_parts_committed :],
+                        wants_audio=response_wants_audio(response),
+                        response_key=request.response_key,
+                        recorded_item_ids=ctx.recorded_item_ids,
+                        recorded_call_ids=ctx.recorded_call_ids,
+                    )
+                    if not recorded:
+                        ctx.cancelled = True
+                        break
+                    ctx.history_parts_committed = len(ctx.output_parts)
+                yield chunk
 
             if ctx.stopped:
                 return
@@ -557,29 +665,11 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             # Out-of-band responses still emit output, but never write back to the default
             # conversation (their context was a throwaway chat).
             commit_allowed = turn_output_allowed and not out_of_band
-            if commit_allowed:
-                original_chat.add_item(make_assistant_message(ctx.generated_text))
-            if commit_allowed and ctx.tools:
-                for t in ctx.tools:
-                    original_chat.add_item(
-                        RealtimeConversationItemFunctionCall(
-                            type="function_call",
-                            id=t.id,
-                            call_id=t.call_id,
-                            name=t.name,
-                            arguments=t.arguments,
-                            status=t.status,
-                        )
-                    )
-            if commit_allowed:
-                original_chat.strip_images(consumed_image_ids)
-                original_chat.trim_if_needed(self.compactor)
-            logger.debug("Clean text: %s", ctx.generated_text)
-            logger.info(f"Tools: {ctx.tools}")
-
-            if turn_output_allowed and ctx.printable_text.strip():
-                yield LLMResponseChunk(
-                    text=ctx.printable_text.strip(),
+            trailing_chunk: LLMResponseChunk | None = None
+            trailing_text = ctx.printable_text.strip() if response_wants_audio(response) else ctx.printable_text
+            if turn_output_allowed and trailing_text:
+                trailing_chunk = LLMResponseChunk(
+                    text=trailing_text,
                     language_code=language_code,
                     runtime_config=runtime_config,
                     response=response,
@@ -587,7 +677,30 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     turn_revision=ctx.turn_revision,
                     speech_stopped_at_s=ctx.speech_stopped_at_s,
                     cancel_generation=ctx.cancel_generation,
+                    response_key=request.response_key,
                 )
+                ctx.output_parts.extend(part.model_copy(deep=True) for part in trailing_chunk.parts)
+            if commit_allowed:
+                commit_allowed = self._commit_ordered_output(
+                    original_chat,
+                    ctx.output_parts[ctx.history_parts_committed :],
+                    wants_audio=response_wants_audio(response),
+                    response_key=request.response_key,
+                    recorded_item_ids=ctx.recorded_item_ids,
+                    recorded_call_ids=ctx.recorded_call_ids,
+                )
+                if commit_allowed:
+                    ctx.history_parts_committed = len(ctx.output_parts)
+                    original_chat.strip_images(consumed_image_ids)
+                    original_chat.trim_if_needed(self.compactor)
+                    history_committed = True
+                else:
+                    trailing_chunk = None
+            logger.debug("Clean text: %s", ctx.generated_text)
+            logger.info(f"Tools: {ctx.tools}")
+
+            if trailing_chunk is not None:
+                yield trailing_chunk
 
             output_tokens = len(self.tokenizer.encode(ctx.raw_generated_text)) if ctx.raw_generated_text else 0
             if turn_output_allowed and (ctx.input_tokens or output_tokens):
@@ -596,23 +709,30 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     output_tokens=output_tokens,
                     turn_id=ctx.turn_id,
                     turn_revision=ctx.turn_revision,
+                    cancel_generation=ctx.cancel_generation,
+                    response_key=request.response_key,
                 )
         except Exception as exc:
             # Any generation failure must still terminate the response. Without this
             # the exception would escape process() and no EndOfResponse would be
             # emitted, leaving st.in_response stuck and locking every later response.
             logger.exception("LLM generation failed; ending the current response")
+            rollback_history()
             yield EndOfResponse(
                 turn_id=ctx.turn_id,
                 turn_revision=ctx.turn_revision,
                 cancel_generation=ctx.cancel_generation,
+                response_key=request.response_key,
                 error=f"Language model generation failed: {exc}",
             )
             return
+        finally:
+            rollback_history()
         yield EndOfResponse(
             turn_id=ctx.turn_id,
             turn_revision=ctx.turn_revision,
             cancel_generation=ctx.cancel_generation,
+            response_key=request.response_key,
         )
 
     def on_session_end(self) -> None:
