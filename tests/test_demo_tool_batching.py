@@ -126,7 +126,7 @@ if (timeline.filter((item) => item === "response.create").length !== 1) {{
             "./demo/ws/s2s-ws-client.js",
             "S2sWsRealtimeClient",
             "_onWsMessage",
-            'client._ws = { readyState: WebSocket.OPEN, send: record };',
+            "client._ws = { readyState: WebSocket.OPEN, send: record };",
         ),
         (
             "./demo/rtc/s2s-rtc-client.js",
@@ -241,7 +241,7 @@ if (client._createQueue.length !== 0) {{
             "./demo/ws/s2s-ws-client.js",
             "S2sWsRealtimeClient",
             "_onWsMessage",
-            'client._ws = { readyState: WebSocket.OPEN, send: record };',
+            "client._ws = { readyState: WebSocket.OPEN, send: record };",
         ),
         (
             "./demo/rtc/s2s-rtc-client.js",
