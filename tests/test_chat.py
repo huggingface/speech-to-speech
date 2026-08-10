@@ -1148,6 +1148,45 @@ def _make_stub_compactor(
 
 
 class TestCompaction:
+    def test_cancelled_provisional_history_is_not_compacted(self):
+        chat = Chat(size=2)
+        captured: list = []
+        compactor = _make_stub_compactor(captured=captured)
+        chat.add_item(_user("u0"))
+        chat.add_item(_assistant("a0"))
+        chat.add_item(_user("u1"))
+        chat.add_provisional_generation_items("response-1", [_assistant("cancelled answer")])
+        chat.add_item(_user("u2"))
+
+        chat.trim_if_needed(compactor)
+
+        assert captured == []
+        assert chat._compact_thread is None
+
+        chat.rollback_provisional_generation("response-1")
+        _wait_thread(chat)
+
+        assert len(captured) == 1
+        assert "cancelled answer" not in str(captured[0])
+        assert "cancelled answer" not in str(chat.to_responses_api_chat())
+
+    def test_finalized_provisional_history_resumes_deferred_compaction(self):
+        chat = Chat(size=2)
+        captured: list = []
+        compactor = _make_stub_compactor(captured=captured)
+        chat.add_item(_user("u0"))
+        chat.add_item(_assistant("a0"))
+        chat.add_item(_user("u1"))
+        chat.add_provisional_generation_items("response-1", [_assistant("delivered answer")])
+        chat.add_item(_user("u2"))
+
+        chat.trim_if_needed(compactor)
+        chat.finalize_provisional_generation("response-1")
+        _wait_thread(chat)
+
+        assert len(captured) == 1
+        assert "delivered answer" in str(captured[0])
+
     def test_compaction_replaces_old_turns(self):
         chat = Chat(size=2)
         compactor = _make_stub_compactor("U", "A")

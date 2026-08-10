@@ -120,6 +120,7 @@ class Chat:
         self._lock = threading.Lock()
         self._compact_in_flight: bool = False
         self._compact_thread: threading.Thread | None = None
+        self._deferred_compactor: CompactFn | None = None
         self._shutdown = threading.Event()
         self._gen_counter = 0
 
@@ -306,6 +307,9 @@ class Chat:
             if self._user_turn_count <= self.size:
                 return
             if compactor is not None:
+                if self._provisional_generations:
+                    self._deferred_compactor = compactor
+                    return
                 self._maybe_trigger_compaction(compactor)
             else:
                 while self._user_turn_count > self.size:
@@ -362,6 +366,7 @@ class Chat:
                 self._provisional_generations.pop(response_key, None)
                 self._cancelled_provisional_generations.pop(response_key, None)
             self._rollback_generation_locked(user_message_id, item_ids=item_ids, call_ids=call_ids)
+            self._run_deferred_compaction_if_ready()
 
     def add_provisional_generation_items(
         self,
@@ -434,6 +439,7 @@ class Chat:
         with self._lock:
             self._provisional_generations.pop(response_key, None)
             self._cancelled_provisional_generations.pop(response_key, None)
+            self._run_deferred_compaction_if_ready()
 
     def rollback_provisional_generation(self, response_key: str | None) -> None:
         """Synchronously remove eager output for a cancelled response, if any."""
@@ -445,10 +451,10 @@ class Chat:
             while len(self._cancelled_provisional_generations) > 128:
                 self._cancelled_provisional_generations.pop(next(iter(self._cancelled_provisional_generations)))
             tracked = self._provisional_generations.pop(response_key, None)
-            if tracked is None:
-                return
-            item_ids, call_ids = tracked
-            self._rollback_generation_locked(None, item_ids=item_ids, call_ids=call_ids)
+            if tracked is not None:
+                item_ids, call_ids = tracked
+                self._rollback_generation_locked(None, item_ids=item_ids, call_ids=call_ids)
+            self._run_deferred_compaction_if_ready()
 
     def _rollback_generation_locked(
         self,
@@ -712,6 +718,7 @@ class Chat:
             self._ordered_pending_call_ids = set()
             self._provisional_generations = {}
             self._cancelled_provisional_generations = {}
+            self._deferred_compactor = None
             self._user_turn_count = 0
 
     def close(self) -> None:
@@ -724,6 +731,7 @@ class Chat:
         with self._lock:
             self._gen_counter += 1
             self._compact_in_flight = False
+            self._deferred_compactor = None
 
     def image_message_ids(self) -> set[str]:
         """IDs of user messages currently carrying ``input_image`` content."""
@@ -766,6 +774,9 @@ class Chat:
         Always leaves the most recent user turn untouched (it may be in-flight).
         Returns an empty result if there are fewer than 2 compactable turns.
         """
+        if self._provisional_generations:
+            return [], set(), 0
+
         n_turns = max(0, self._user_turn_count - 1)
         if n_turns < 2:
             return [], set(), n_turns
@@ -838,6 +849,21 @@ class Chat:
         )
         thread.start()
 
+    def _run_deferred_compaction_if_ready(self) -> None:
+        """Run a trim deferred until all provisional responses are resolved.
+
+        Caller must hold ``_lock``. Keeping the compactor pending while another
+        compaction is in flight lets that worker retry the trim when it exits.
+        """
+        compactor = self._deferred_compactor
+        if compactor is None or self._provisional_generations or self._compact_in_flight:
+            return
+        if self._shutdown.is_set() or self._user_turn_count <= self.size:
+            self._deferred_compactor = None
+            return
+        self._deferred_compactor = None
+        self._maybe_trigger_compaction(compactor)
+
     def _compact_worker(
         self,
         compactor: CompactFn,
@@ -865,6 +891,7 @@ class Chat:
             with self._lock:
                 if self._gen_counter == gen:
                     self._compact_in_flight = False
+                    self._run_deferred_compaction_if_ready()
 
     def _apply_compaction(
         self,
