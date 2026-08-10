@@ -536,9 +536,10 @@ export class S2sRtcRealtimeClient extends EventTarget {
         const name = typeof event.name === "string" ? event.name : "";
         const args = typeof event.arguments === "string" ? event.arguments : "{}";
         const callId = typeof event.call_id === "string" ? event.call_id : "";
+        const responseId = typeof event.response_id === "string" ? event.response_id : "";
         if (name) {
           this.dispatchEvent(new CustomEvent("toolcall", {
-            detail: { name, arguments: args, callId },
+            detail: { name, arguments: args, callId, responseId },
           }));
         } else {
           console.warn(`[rtc] function_call_arguments.done with no name (call_id=${callId}); cannot run tool — turn may stall`);

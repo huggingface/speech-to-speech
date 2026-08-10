@@ -19,6 +19,7 @@
 
 import { S2sWsRealtimeClient } from "./ws/s2s-ws-client.js";
 import { S2sRtcRealtimeClient } from "./rtc/s2s-rtc-client.js";
+import { ToolCallBatcher } from "./tool-call-batcher.js";
 import { $, truncateError, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js";
 import { Account } from "./ui/account.js";
@@ -830,14 +831,14 @@ function flashPreview() {
 }
 
 // ── Tool executor ─────────────────────────────────────────────────────────
-// Runs the function the model called, returns the result, and asks for a
-// response so the model speaks it. Errors come back as the tool output too, so
-// the model can recover gracefully instead of the turn stalling.
+// Runs the function the model called and returns the result. The connection's
+// ToolCallBatcher sends every result from the originating response together,
+// then requests one follow-up. Errors come back as tool output too, so the
+// model can recover gracefully instead of the turn stalling.
 
 /**
- * Run the function the model called, return its result to the backend, and ask
- * for a follow-up response. We also hand the result back to the caller so it
- * can be shown in the conversation once the tool has actually run.
+ * Run the function the model called. The caller batches the returned result
+ * with the other calls from the same response before sending it to the model.
  * @param {string} name @param {string} argsJson @param {string} callId
  * @returns {Promise<{ output: string, image?: string }>}
  */
@@ -855,37 +856,23 @@ async function runTool(name, argsJson, callId) {
     if (name === "web_search") {
       const query = typeof args.query === "string" ? args.query : "";
       result.output = await execWebSearch(query);
-      // Return the result and let the bare response.create (below) trigger the
-      // spoken answer.
-      client.sendToolOutput(callId, result.output);
     } else if (name === "camera_snapshot") {
       const dataUrl = captureSnapshot();
       if (dataUrl) {
         if (DEBUG) console.debug(`[tool] camera_snapshot captured frame (${dataUrl.length} chars), sending image + output`);
         result = { output: "Snapshot captured from the webcam and attached as an image.", image: dataUrl };
-        // Return the tool output; the frame itself rides along with the
-        // response.create below (sent right before it), so the model sees the
-        // snapshot in the very response it's about to speak.
-        client.sendToolOutput(callId, result.output);
         flashPreview();
       } else {
         console.warn("[tool] camera_snapshot: no frame — camera off or not ready");
         result.output = "The camera is not available right now.";
-        client.sendToolOutput(callId, result.output);
       }
     } else {
       result.output = `Unknown tool: ${name}`;
-      client.sendToolOutput(callId, result.output);
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     result.output = `Tool failed: ${msg}`;
-    client.sendToolOutput(callId, result.output);
   }
-  if (DEBUG) console.debug(`[tool] requesting model response after ${name}`);
-  // Camera: the captured frame rides with the response.create (sent just before
-  // it) so it's in context for the reply. Other tools: a bare create.
-  client.requestResponse(result.image ? { image: result.image } : undefined);
   return result;
 }
 
@@ -1463,6 +1450,18 @@ async function doStart(audioContext = null) {
   client = c;
   c.setMuted(micMuted || userAudioReplaying);
 
+  /** @param {{ callId: string; output: string; image?: string }[]} results */
+  const sendToolBatch = (results) => {
+    if (client !== c) return;
+    for (const result of results) c.sendToolOutput(result.callId, result.output);
+    for (const result of results) {
+      if (result.image) c.sendUserImage(result.image);
+    }
+    if (DEBUG) console.debug(`[tool] requesting one follow-up after ${results.length} tool result(s)`);
+    c.requestResponse();
+  };
+  const toolBatches = new ToolCallBatcher(sendToolBatch);
+
   c.addEventListener("queue", (e) => {
     const { position, queueId } = /** @type {CustomEvent<{ position: number; queueId: string }>} */ (e).detail;
     if (queueId) queuedTicketId = queueId;
@@ -1507,16 +1506,24 @@ async function doStart(audioContext = null) {
   c.addEventListener("response-finished", (e) => {
     const detail = /** @type {CustomEvent<{ responseId: string; status: string; audible?: boolean; transcript?: string }>} */ (e).detail;
     chat.onResponseFinished(detail);
+    const flush = toolBatches.finish(detail.responseId, detail.status);
+    if (flush) void flush.catch((err) => onFatalError(err));
   });
 
   c.addEventListener("toolcall", (e) => {
-    const { name, arguments: args, callId } = /** @type {CustomEvent<{ name: string; arguments: string; callId: string }>} */ (e).detail;
+    const { name, arguments: args, callId, responseId } = /** @type {CustomEvent<{ name: string; arguments: string; callId: string; responseId: string }>} */ (e).detail;
+    if (!responseId) {
+      console.warn(`[tool] call ${callId || "<unknown>"} has no response_id; ignoring uncorrelated tool call`);
+      return;
+    }
     chat.onToolCall(name);
     // Execute the tool, then push it to the conversation once the result is in,
     // so the toggle shows both the call input and its output together.
-    void runTool(name, args, callId).then(({ output, image }) => {
-      chat.onToolResult(name, args, output, image);
+    const execution = runTool(name, args, callId).then(({ output, image }) => {
+      if (client === c) chat.onToolResult(name, args, output, image);
+      return { callId, output, ...(image ? { image } : {}) };
     });
+    toolBatches.add(responseId, execution);
   });
   c.addEventListener("error", (e) => {
     const detail = /** @type {CustomEvent<{ error: unknown }>} */ (e).detail;
