@@ -88,6 +88,17 @@ def test_legacy_instance_revalidation_does_not_duplicate_synthesized_parts(model
 
 
 @pytest.mark.parametrize("model_cls", [LLMResponseChunk, AssistantOutputEvent])
+def test_legacy_exclude_unset_dump_round_trip(model_cls):
+    original = model_cls(text="legacy")
+
+    dumped = original.model_dump(exclude_unset=True)
+    restored = model_cls.model_validate(dumped)
+
+    assert dumped == {"text": "legacy"}
+    assert restored.parts == [AssistantTextPart(text="legacy")]
+
+
+@pytest.mark.parametrize("model_cls", [LLMResponseChunk, AssistantOutputEvent])
 def test_ordered_parts_allow_consistent_model_dump_round_trip(model_cls):
     tool = ResponseFunctionToolCall(type="function_call", call_id="call_1", name="tool", arguments="{}")
     original = model_cls(

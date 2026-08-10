@@ -15,8 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from speech_to_speech.pipeline.messages import (
     AssistantOutputPart,
-    AssistantTextPart,
-    AssistantToolCallPart,
+    _normalize_assistant_output_fields,
 )
 
 
@@ -106,19 +105,9 @@ class AssistantOutputEvent(PipelineEvent):
 
     @model_validator(mode="after")
     def _normalize_ordered_parts(self) -> "AssistantOutputEvent":
-        if self.parts or "parts" in self.model_fields_set:
-            derived_text = "".join(part.text for part in self.parts if isinstance(part, AssistantTextPart))
-            derived_tools = [part.tool for part in self.parts if isinstance(part, AssistantToolCallPart)]
-            if "text" in self.model_fields_set and self.text != derived_text:
-                raise ValueError("text must match the ordered parts")
-            if "tools" in self.model_fields_set and self.tools != derived_tools:
-                raise ValueError("tools must match the ordered parts")
-            self.text = derived_text
-            self.tools = derived_tools
-        else:
-            if self.text:
-                self.parts.append(AssistantTextPart(text=self.text))
-            self.parts.extend(AssistantToolCallPart(tool=tool) for tool in self.tools)
+        legacy_views = _normalize_assistant_output_fields(self.parts, self.text, self.tools, self.model_fields_set)
+        if legacy_views is not None:
+            self.text, self.tools = legacy_views
         return self
 
 

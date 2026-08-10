@@ -96,6 +96,29 @@ AssistantOutputPart: TypeAlias = Annotated[
 ]
 
 
+def _normalize_assistant_output_fields(
+    parts: list[AssistantOutputPart],
+    text: str,
+    tools: list[ResponseFunctionToolCall],
+    fields_set: set[str],
+) -> tuple[str, list[ResponseFunctionToolCall]] | None:
+    """Keep ordered parts and their legacy compatibility views consistent."""
+
+    if parts or "parts" in fields_set:
+        derived_text = "".join(part.text for part in parts if isinstance(part, AssistantTextPart))
+        derived_tools = [part.tool for part in parts if isinstance(part, AssistantToolCallPart)]
+        if "text" in fields_set and text != derived_text:
+            raise ValueError("text must match the ordered parts")
+        if "tools" in fields_set and tools != derived_tools:
+            raise ValueError("tools must match the ordered parts")
+        return derived_text, derived_tools
+
+    if text:
+        parts.append(AssistantTextPart(text=text))
+    parts.extend(AssistantToolCallPart(tool=tool) for tool in tools)
+    return None
+
+
 class LLMResponseChunk(PipelineMessage):
     """One ordered group of assistant output parts.
 
@@ -119,19 +142,9 @@ class LLMResponseChunk(PipelineMessage):
 
     @model_validator(mode="after")
     def _normalize_ordered_parts(self) -> "LLMResponseChunk":
-        if self.parts or "parts" in self.model_fields_set:
-            derived_text = "".join(part.text for part in self.parts if isinstance(part, AssistantTextPart))
-            derived_tools = [part.tool for part in self.parts if isinstance(part, AssistantToolCallPart)]
-            if "text" in self.model_fields_set and self.text != derived_text:
-                raise ValueError("text must match the ordered parts")
-            if "tools" in self.model_fields_set and self.tools != derived_tools:
-                raise ValueError("tools must match the ordered parts")
-            self.text = derived_text
-            self.tools = derived_tools
-        else:
-            if self.text:
-                self.parts.append(AssistantTextPart(text=self.text))
-            self.parts.extend(AssistantToolCallPart(tool=tool) for tool in self.tools)
+        legacy_views = _normalize_assistant_output_fields(self.parts, self.text, self.tools, self.model_fields_set)
+        if legacy_views is not None:
+            self.text, self.tools = legacy_views
         return self
 
 
