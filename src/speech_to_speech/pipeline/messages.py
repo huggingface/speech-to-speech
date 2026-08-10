@@ -119,9 +119,15 @@ class LLMResponseChunk(PipelineMessage):
 
     @model_validator(mode="after")
     def _normalize_ordered_parts(self) -> "LLMResponseChunk":
-        if self.parts:
-            self.text = "".join(part.text for part in self.parts if isinstance(part, AssistantTextPart))
-            self.tools = [part.tool for part in self.parts if isinstance(part, AssistantToolCallPart)]
+        if self.parts or "parts" in self.model_fields_set:
+            derived_text = "".join(part.text for part in self.parts if isinstance(part, AssistantTextPart))
+            derived_tools = [part.tool for part in self.parts if isinstance(part, AssistantToolCallPart)]
+            if "text" in self.model_fields_set and self.text != derived_text:
+                raise ValueError("text must match the ordered parts")
+            if "tools" in self.model_fields_set and self.tools != derived_tools:
+                raise ValueError("tools must match the ordered parts")
+            self.text = derived_text
+            self.tools = derived_tools
         else:
             if self.text:
                 self.parts.append(AssistantTextPart(text=self.text))

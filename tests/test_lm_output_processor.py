@@ -4,6 +4,7 @@ from threading import Event, Thread
 import pytest
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses import ResponseFunctionToolCall
+from pydantic import ValidationError
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
@@ -38,6 +39,69 @@ def _tracked_processor(revision: int = 0) -> tuple[SpeculativeTurnTracker, LMOut
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", revision)
     return tracker, _processor(tracker)
+
+
+@pytest.mark.parametrize("model_cls", [LLMResponseChunk, AssistantOutputEvent])
+def test_ordered_parts_reject_inconsistent_legacy_text(model_cls):
+    with pytest.raises(ValidationError, match="text must match the ordered parts"):
+        model_cls(parts=[AssistantTextPart(text="before")], text="after")
+
+
+@pytest.mark.parametrize("model_cls", [LLMResponseChunk, AssistantOutputEvent])
+def test_ordered_parts_reject_inconsistent_legacy_tools(model_cls):
+    tool = ResponseFunctionToolCall(type="function_call", call_id="call_1", name="tool", arguments="{}")
+
+    with pytest.raises(ValidationError, match="tools must match the ordered parts"):
+        model_cls(parts=[AssistantTextPart(text="before")], tools=[tool])
+
+
+@pytest.mark.parametrize("model_cls", [LLMResponseChunk, AssistantOutputEvent])
+def test_explicit_empty_ordered_parts_reject_legacy_text(model_cls):
+    with pytest.raises(ValidationError, match="text must match the ordered parts"):
+        model_cls(parts=[], text="legacy")
+
+
+@pytest.mark.parametrize("model_cls", [LLMResponseChunk, AssistantOutputEvent])
+def test_explicit_empty_ordered_parts_reject_legacy_tools(model_cls):
+    tool = ResponseFunctionToolCall(type="function_call", call_id="call_1", name="tool", arguments="{}")
+
+    with pytest.raises(ValidationError, match="tools must match the ordered parts"):
+        model_cls(parts=[], tools=[tool])
+
+
+@pytest.mark.parametrize("model_cls", [LLMResponseChunk, AssistantOutputEvent])
+def test_omitted_ordered_parts_keep_legacy_compatibility(model_cls):
+    tool = ResponseFunctionToolCall(type="function_call", call_id="call_1", name="tool", arguments="{}")
+
+    model = model_cls(text="legacy", tools=[tool])
+
+    assert model.parts == [AssistantTextPart(text="legacy"), AssistantToolCallPart(tool=tool)]
+
+
+@pytest.mark.parametrize("model_cls", [LLMResponseChunk, AssistantOutputEvent])
+def test_legacy_instance_revalidation_does_not_duplicate_synthesized_parts(model_cls):
+    original = model_cls(text="legacy")
+
+    restored = model_cls.model_validate(original)
+
+    assert restored.parts == [AssistantTextPart(text="legacy")]
+
+
+@pytest.mark.parametrize("model_cls", [LLMResponseChunk, AssistantOutputEvent])
+def test_ordered_parts_allow_consistent_model_dump_round_trip(model_cls):
+    tool = ResponseFunctionToolCall(type="function_call", call_id="call_1", name="tool", arguments="{}")
+    original = model_cls(
+        parts=[
+            AssistantTextPart(text="before"),
+            AssistantToolCallPart(tool=tool),
+        ]
+    )
+
+    restored = model_cls.model_validate(original.model_dump())
+
+    assert restored.parts == original.parts
+    assert restored.text == "before"
+    assert restored.tools == [tool]
 
 
 def test_stale_end_of_response_is_dropped_or_keyed_for_cleanup():
