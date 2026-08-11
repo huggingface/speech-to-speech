@@ -4,6 +4,10 @@ from typing import Optional
 
 @dataclass
 class LocalAudioArguments:
+    local_audio_tool_module: Optional[str] = field(
+        default=None,
+        metadata={"help": "Importable module defining TOOLS and async execute_tool(name, arguments)."},
+    )
     local_audio_input_device: Optional[int] = field(
         default=None,
         metadata={"help": "Optional sounddevice input device index used by the local command."},

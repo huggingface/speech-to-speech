@@ -28,6 +28,7 @@ dependencies = [
     "fastapi>=0.115.0",
     "huggingface-hub>=0.34.0",
     "httpx>=0.28.0",
+    "jsonschema>=4.0",
     "nltk==3.10.0",
     "numpy>=1.26.0,<2.4.4; platform_system == 'Darwin'",
     "numpy>=1.26.0; platform_system != 'Darwin'",

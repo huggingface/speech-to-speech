@@ -161,6 +161,50 @@ Both handlers yield ordered `AssistantTextPart` and `AssistantToolCallPart` valu
 3. If the tool result needs to be spoken to the user, such as camera/search/data results, the client sends `response.create` to trigger follow-up generation.
 4. For fire-and-forget robot actions such as dance, emotion, head movement, stop, or idle tools, the client can stop after `conversation.item.created`; the assistant should already have spoken the natural lead-in before the tool call.
 
+### Packaged Python client tools
+
+The microphone/speaker client used by `talk` and `local` only executes explicitly declared Python tools. An importable tool module provides flattened Realtime function definitions in `TOOLS` and an async `execute_tool(name, arguments)` callback:
+
+```python
+# my_voice_tools.py
+TOOLS = [
+    {
+        "type": "function",
+        "name": "get_temperature",
+        "description": "Read the current room temperature.",
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    }
+]
+
+
+async def execute_tool(name, arguments):
+    if name == "get_temperature":
+        return {"celsius": 21.5}
+    raise ValueError(f"Unknown tool: {name}")
+```
+
+Make the module importable, then opt in from either packaged CLI:
+
+```bash
+speech-to-speech talk --tool-module my_voice_tools --url ws://127.0.0.1:8765/v1/realtime
+speech-to-speech local --local_audio_tool_module my_voice_tools
+```
+
+Set `CREATE_RESPONSE = False` in the module for fire-and-forget tools. The default is `True`, which sends one follow-up `response.create` after all calls from a completed response have returned. Calls run away from the receive loop; multiple outputs retain call order. Unknown tools, malformed JSON, and handler failures are returned as `function_call_output` errors. Calls from cancelled responses are discarded, and outstanding async handlers are cancelled on disconnect or shutdown.
+
+Library users can configure the same contract directly:
+
+```python
+config = RealtimeAudioClientConfig(
+    tools=TOOLS,
+    tool_executor=execute_tool,
+    tool_response_create=True,
+)
+await listen_and_play_realtime(config)
+```
+
+Arguments are validated against the declared `parameters` JSON Schema before the callback runs. String results are sent unchanged; other results must be JSON-serializable. Callbacks receive normal task cancellation on a cancelled response, disconnect, or shutdown, so they should release their own resources in `finally` blocks.
+
 ---
 
 ## Interruption Handling
