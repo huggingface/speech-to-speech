@@ -608,9 +608,11 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             active_chat = original_chat.copy()
         language_code = request.language_code
         instructions = (
-            response.instructions if response and response.instructions else runtime_config.session.instructions
+            response.instructions
+            if response is not None and response.instructions is not None
+            else runtime_config.session.instructions
         )
-        tools = response.tools if response and response.tools else runtime_config.session.tools
+        tools = response.tools if response is not None and response.tools is not None else runtime_config.session.tools
         tool_choice = response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
         self._apply_instructions(
             active_chat,

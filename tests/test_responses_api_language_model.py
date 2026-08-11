@@ -407,8 +407,9 @@ def test_repeated_prefetch_invalidation_bounds_provider_connect_workers():
         assert not handler._prefetch_workers
 
 
-def test_prefetch_provider_handoff_queues_are_bounded(monkeypatch):
+def test_prefetch_uses_one_worker_and_one_bounded_queue(monkeypatch):
     queue_limits: list[int] = []
+    worker_names: list[str] = []
 
     class TrackingQueue(Queue):
         def __init__(self, maxsize=0):
@@ -417,14 +418,26 @@ def test_prefetch_provider_handoff_queues_are_bounded(monkeypatch):
 
     monkeypatch.setattr(base_openai_compatible_language_model, "Queue", TrackingQueue)
     handler = _make_handler(stream=True, cancel_scope=CancelScope())
+    start_worker = handler._start_prefetch_worker
+
+    def track_worker(target, *, name):
+        worker_names.append(name)
+        return start_worker(target, name=name)
+
+    monkeypatch.setattr(handler, "_start_prefetch_worker", track_worker)
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: _make_stream([])))
     request = _make_request()
     request.prefetch_transaction = ResponsePrefetchTransaction()
 
     list(handler.process(request))
 
-    assert queue_limits == [1, base_openai_compatible_language_model.PREFETCH_STREAM_QUEUE_MAXSIZE]
+    assert worker_names == ["realtime-tool-prefetch"]
+    assert queue_limits == [base_openai_compatible_language_model.PREFETCH_STREAM_QUEUE_MAXSIZE]
     assert all(limit > 0 for limit in queue_limits)
+    with handler._prefetch_workers_lock:
+        assert not handler._prefetch_workers
+    assert handler._prefetch_worker_slots.acquire(blocking=False)
+    handler._prefetch_worker_slots.release()
 
 
 def test_warmup_uses_request_scoped_sdk_retries():
@@ -1439,6 +1452,27 @@ def test_out_of_band_emits_output_but_does_not_commit_to_default_conversation():
     # ...but the default conversation keeps only the seeded user turn — no assistant commit.
     assert len(cfg.chat.buffer) == 1
     assert not any(isinstance(i, RealtimeConversationItemAssistantMessage) for i in cfg.chat.buffer)
+
+
+def test_empty_response_overrides_disable_session_instructions_and_tools():
+    handler = _make_handler()
+    cfg = _make_runtime_config(instructions="SESSION INSTRUCTIONS")
+    cfg.session.tools = [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}]
+    cfg.chat.add_item(make_user_message("Answer without tools."))
+    request = GenerateResponseRequest(
+        runtime_config=cfg,
+        response=RealtimeResponseCreateParams(
+            instructions="",
+            tools=[],
+            output_modalities=["text"],
+        ),
+    )
+    captured = _capture_create(handler, [_make_output_item_done_event(content="ok")])
+
+    list(handler.process(request))
+
+    assert captured["tools"] == []
+    assert "SESSION INSTRUCTIONS" not in str(captured["input"])
 
 
 def test_out_of_band_timeout_after_tool_call_fails_without_apology():

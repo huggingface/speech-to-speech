@@ -96,6 +96,7 @@ class ResponseHandler(RealtimeBaseHandler):
             status == "completed"
             and completed_response_key is not None
             and completed_with_tools
+            and not is_out_of_band(st.current_response_params)
             and completed_response_key not in st.generation_done_tool_calls
         ):
             # The side-channel can trail the ordered TTS terminal when its
@@ -320,6 +321,10 @@ class ResponseHandler(RealtimeBaseHandler):
             return []
         if not event.succeeded:
             self.discard_tool_followup_prefetch(conn_id, origin_response_key=event.response_key)
+            return []
+        if st.current_response_key == event.response_key and is_out_of_band(st.current_response_params):
+            # Out-of-band output is absent from the default Chat. It therefore
+            # cannot seed a tool follow-up prefetch against that conversation.
             return []
         events = self._service.conversation.flush_deferred_items(
             conn_id,

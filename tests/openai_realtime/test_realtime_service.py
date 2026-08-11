@@ -1587,7 +1587,10 @@ class TestHandleResponseCreate:
 
         created = service.handle_response_create(
             conn_id,
-            ResponseCreateEvent(type="response.create", response={"output_modalities": ["text"]}),
+            ResponseCreateEvent(
+                type="response.create",
+                response={"output_modalities": ["text"], "instructions": "", "tools": []},
+            ),
         )
 
         assert isinstance(created, ResponseCreatedEvent)
@@ -1595,6 +1598,8 @@ class TestHandleResponseCreate:
         assert request.response_key != prefetch.response_key
         assert request.response is not None
         assert request.response.output_modalities == ["text"]
+        assert request.response.instructions == ""
+        assert request.response.tools == []
         assert prefetch.response_key in st.closed_response_keys
         assert not st.runtime_config.chat.has_pending_tool_calls()
         assert st.current_response_key == request.response_key
@@ -2039,6 +2044,43 @@ class TestHandleResponseCreate:
         assert result.response.conversation_id is None
         done = [e for e in service.finish_response(conn_id) if isinstance(e, ResponseDoneEvent)]
         assert done and done[0].response.conversation_id is None
+
+    @pytest.mark.parametrize("logical_done_before_response_done", [True, False])
+    def test_out_of_band_tool_completion_never_starts_followup_prefetch(
+        self,
+        service,
+        conn_id,
+        text_prompt_queue,
+        logical_done_before_response_done,
+    ):
+        result = service.handle_response_create(
+            conn_id,
+            ResponseCreateEvent(type="response.create", response={"conversation": "none"}),
+        )
+        assert isinstance(result, ResponseCreatedEvent)
+        request = text_prompt_queue.get_nowait()
+        call = RealtimeConversationItemFunctionCall(
+            type="function_call",
+            id="fc_oob",
+            call_id="call_oob",
+            name="lookup",
+            arguments="{}",
+        )
+        state = service._state(conn_id)
+        state.pending_function_calls[0] = call
+
+        if not logical_done_before_response_done:
+            service.finish_response(conn_id, response_key=request.response_key)
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            ResponseGenerationDoneEvent(response_key=request.response_key, call_ids=[call.call_id]),
+        )
+
+        assert events == []
+        assert text_prompt_queue.empty()
+        assert state.tool_followup_prefetch_request is None
+        assert request.response_key not in state.generation_done_tool_calls
+        assert request.response_key not in state.completed_tool_response_keys
 
     def test_response_create_in_band_reports_conversation_id(self, service, conn_id):
         result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))

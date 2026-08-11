@@ -366,10 +366,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             except Exception:
                 pass
 
-    def _start_prefetch_worker(self, target: Callable[[], None], *, name: str) -> bool:
+    def _start_prefetch_worker(self, target: Callable[[], None], *, name: str) -> Thread | None:
         """Start one tracked provider worker without exceeding the fixed cap."""
         if not self._prefetch_worker_slots.acquire(timeout=PREFETCH_WORKER_ACQUIRE_TIMEOUT_S):
-            return False
+            return None
 
         def run() -> None:
             try:
@@ -390,86 +390,22 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 self._prefetch_workers.discard(worker)
             self._prefetch_worker_slots.release()
             raise
-        return True
-
-    def _request_prefetch_interruptibly(
-        self,
-        request: Callable[[], Any],
-        turn: _Turn,
-    ) -> Any | None:
-        """Keep a hidden prefetch's connect wait off the serial LM worker.
-
-        Synchronous SDK calls can block before returning a closable stream. A
-        discarded prefetch must not make the following standard response.create
-        wait for that connect/read timeout, so only that speculative request is
-        isolated in a daemon thread. Any late response is closed without being
-        exposed to the pipeline.
-        """
-        transaction = turn.prefetch_transaction
-        assert transaction is not None
-        results: Queue[tuple[bool, Any]] = Queue(maxsize=1)
-
-        def cancelled() -> bool:
-            return transaction.discarded or self._generation_is_stale(turn.gen)
-
-        def run_request() -> None:
-            try:
-                result = (True, request())
-            except BaseException as exc:
-                result = (False, exc)
-            results.put(result)
-            if cancelled():
-                try:
-                    late_ok, late_value = results.get_nowait()
-                except Empty:
-                    return
-                if late_ok:
-                    self._close_response(late_value)
-
-        if not self._start_prefetch_worker(run_request, name="realtime-tool-prefetch"):
-            # discard() and claim() share one transaction lock. Calling discard
-            # first makes the decision atomic: an already-claimed response stays
-            # claimed, while a still-hidden one becomes permanently unclaimable.
-            transaction.discard()
-            if transaction.claimed:
-                # Once response.create has made this work public, preserve normal
-                # response semantics even if an abandoned speculative worker is
-                # still waiting for an uncooperative provider.
-                return request()
-            logger.warning("Skipping response prefetch while a previous provider worker is still active")
-            return None
-        while not cancelled():
-            try:
-                succeeded, value = results.get(timeout=0.05)
-            except Empty:
-                continue
-            if not succeeded:
-                raise value
-            if hasattr(value, "close"):
-                transaction.register_abort(value.close)
-            if cancelled():
-                self._close_response(value)
-                return None
-            return value
-
-        try:
-            succeeded, value = results.get_nowait()
-        except Empty:
-            return None
-        if succeeded:
-            self._close_response(value)
-        return None
+        return worker
 
     def _iter_prefetch_events_interruptibly(
         self,
-        events: Iterator[ProviderEvent],
+        request: Callable[[], Any],
+        event_iterator: Callable[[Any], Iterator[ProviderEvent]],
         turn: _Turn,
-        api_response: Any,
     ) -> Iterator[ProviderEvent]:
-        """Release the serial LM worker when a claimed provider read stalls."""
+        """Connect and consume one prefetch in a single bounded worker."""
+        transaction = turn.prefetch_transaction
+        assert transaction is not None
         results: Queue[tuple[bool, Any]] = Queue(maxsize=PREFETCH_STREAM_QUEUE_MAXSIZE)
         done = object()
         stop_reader = ThreadingEvent()
+        response_lock = Lock()
+        connected_response: list[Any] = []
 
         def reader_cancelled() -> bool:
             return stop_reader.is_set() or self._turn_is_cancelled(turn)
@@ -483,23 +419,43 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 return True
             return False
 
-        def read_events() -> None:
+        def connect_and_read_events() -> None:
+            api_response: Any = None
             try:
-                for event in events:
+                api_response = request()
+                with response_lock:
+                    connected_response.append(api_response)
+                if hasattr(api_response, "close"):
+                    transaction.register_abort(api_response.close)
+                if reader_cancelled():
+                    return
+                for event in event_iterator(api_response):
                     if not publish((True, event)):
                         return
             except BaseException as exc:
                 publish((False, exc))
                 return
+            finally:
+                self._close_response(api_response)
             publish((True, done))
 
-        if not self._start_prefetch_worker(read_events, name="realtime-tool-prefetch-stream"):
-            if turn.prefetch_transaction is not None:
-                turn.prefetch_transaction.discard()
-            if turn.prefetch_transaction is not None and turn.prefetch_transaction.claimed:
-                yield from events
+        worker = self._start_prefetch_worker(connect_and_read_events, name="realtime-tool-prefetch")
+        if worker is None:
+            # discard() and claim() share one transaction lock. Calling discard
+            # first makes the decision atomic: an already-claimed response stays
+            # claimed, while a still-hidden one becomes permanently unclaimable.
+            transaction.discard()
+            if transaction.claimed:
+                # Once response.create has made this work public, preserve normal
+                # response semantics even if an abandoned speculative worker is
+                # still waiting for an uncooperative provider.
+                api_response = request()
+                try:
+                    yield from event_iterator(api_response)
+                finally:
+                    self._close_response(api_response)
             else:
-                self._close_response(api_response)
+                logger.warning("Skipping response prefetch while a previous provider worker is still active")
             return
 
         try:
@@ -509,14 +465,21 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 except Empty:
                     continue
                 if not succeeded:
+                    worker.join()
                     raise value
                 if value is done:
+                    # Do not expose completion until the worker releases the
+                    # sole provider slot; the next prefetch can then start
+                    # without another scheduling-sensitive handoff.
+                    worker.join()
                     return
                 if self._turn_is_cancelled(turn):
                     break
                 yield value
         finally:
             stop_reader.set()
+            with response_lock:
+                api_response = connected_response[0] if connected_response else None
             self._close_response(api_response)
 
     def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
@@ -765,6 +728,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         history_commit_fn: Callable[[], None] | None = None,
     ) -> Generator[LLMOut, None, bool]:
         api_response: Any = None
+        events: Iterator[ProviderEvent] | None = None
         state = _GenState()
         error_message: str | None = None
         generation_completed = False
@@ -804,16 +768,15 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         return (request_fn or self._request)(api_input, optional_kwargs)
 
                     if turn.prefetch_transaction is not None:
-                        api_response = self._request_prefetch_interruptibly(
+                        events = self._iter_prefetch_events_interruptibly(
                             make_request,
+                            event_iterator_fn or self._iter_events,
                             turn,
                         )
                     else:
                         api_response = make_request()
-                if api_response is not None:
-                    events = (event_iterator_fn or self._iter_events)(api_response)
-                    if turn.prefetch_transaction is not None:
-                        events = self._iter_prefetch_events_interruptibly(events, turn, api_response)
+                        events = (event_iterator_fn or self._iter_events)(api_response)
+                if events is not None:
                     if self.stream:
                         generation_completed = yield from self._consume_streaming(events, state, turn)
                     else:
@@ -987,9 +950,13 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         language_code = request.language_code
         instructions = (
-            response.instructions if response and response.instructions else runtime_config.session.instructions
+            response.instructions
+            if response is not None and response.instructions is not None
+            else runtime_config.session.instructions
         ) or ""
-        req_tools = response.tools if response and response.tools else runtime_config.session.tools
+        req_tools = (
+            response.tools if response is not None and response.tools is not None else runtime_config.session.tools
+        )
         req_tool_choice = (
             response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
         )
@@ -1104,9 +1071,13 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             active_chat = original_chat.copy()
         language_code = request.language_code
         instructions = (
-            response.instructions if response and response.instructions else runtime_config.session.instructions
+            response.instructions
+            if response is not None and response.instructions is not None
+            else runtime_config.session.instructions
         ) or ""
-        req_tools = response.tools if response and response.tools else runtime_config.session.tools
+        req_tools = (
+            response.tools if response is not None and response.tools is not None else runtime_config.session.tools
+        )
         req_tool_choice = (
             response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
         )
