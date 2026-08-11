@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 
 # About 18–24 seconds of default SDK backoff before warmup fails.
 WARMUP_MAX_RETRIES = 6
+PROVIDER_FAILURE_FALLBACK = "I'm having trouble responding right now. Please try again."
 
 
 # ── Normalised provider events ────────────────────────────────────────────────
@@ -590,6 +591,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         generation_completed = False
         history_committed = False
         transaction_rolled_back = False
+        provider_request_started = False
         consumed_image_ids: set[str] = set()
 
         def rollback_transaction() -> None:
@@ -619,6 +621,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     # would reject this; fail with a clear message instead of an opaque error.
                     error_message = "Cannot generate a response: no instructions and no input were provided."
                 else:
+                    provider_request_started = True
                     api_response = (request_fn or self._request)(api_input, optional_kwargs)
                 if api_response is not None:
                     events = (event_iterator_fn or self._iter_events)(api_response)
@@ -631,33 +634,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     "OpenAI API read timed out after %.1fs; ending the current response",
                     self.request_timeout_s,
                 )
-                if state.output_emitted or state.pending:
-                    error_message = f"Language model generation timed out after {self.request_timeout_s:.1f}s."
-                elif not self._generation_is_stale(turn.gen) and self._turn_output_allowed(
-                    turn.turn_id, turn.turn_revision
-                ):
-                    # Canned apology carries no language_code (mirrors the prior handlers).
-                    apology = "Wow I'm a bit slow today, could you repeat that?"
-                    state.clean_text += apology
-                    state.pending.append(
-                        RealtimeConversationItemAssistantMessage(
-                            type="message",
-                            role="assistant",
-                            content=[AssistantContent(type="output_text", text=apology)],
-                        )
-                    )
-                    state.output_emitted = True
-                    generation_completed = True
-                    yield LLMResponseChunk(
-                        text=apology,
-                        runtime_config=turn.runtime_config,
-                        response=turn.response,
-                        turn_id=turn.turn_id,
-                        turn_revision=turn.turn_revision,
-                        speech_stopped_at_s=turn.speech_stopped_at_s,
-                        cancel_generation=turn.gen,
-                        response_key=turn.response_key,
-                    )
+                error_message = f"Language model generation timed out after {self.request_timeout_s:.1f}s."
             except Exception as exc:
                 # Any other generation failure must still terminate the response: record
                 # the error and fall through to the EndOfResponse below. Without this the
@@ -666,6 +643,25 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 logger.exception("LLM generation failed; ending the current response")
                 if error_message is None:
                     error_message = f"Language model generation failed: {exc}"
+
+            if (
+                provider_request_started
+                and error_message is not None
+                and not state.output_emitted
+                and not self._generation_is_stale(turn.gen)
+                and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
+            ):
+                state.output_emitted = True
+                yield LLMResponseChunk(
+                    text=PROVIDER_FAILURE_FALLBACK,
+                    runtime_config=turn.runtime_config,
+                    response=turn.response,
+                    turn_id=turn.turn_id,
+                    turn_revision=turn.turn_revision,
+                    speech_stopped_at_s=turn.speech_stopped_at_s,
+                    cancel_generation=turn.gen,
+                    response_key=turn.response_key,
+                )
 
             can_commit = (
                 error_message is None
