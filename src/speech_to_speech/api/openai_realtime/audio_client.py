@@ -422,6 +422,7 @@ class _ToolCallCoordinator:
         self._default_create_response = config.tool_response_create
         self._batches: dict[str, _ToolBatch] = {}
         self._active_response_id: str | None = None
+        self._pending_tool_batches = 0
         self._queued_follow_ups = 0
         self._pending_create_id: str | None = None
         self._pending_create_follow_ups = 0
@@ -549,6 +550,7 @@ class _ToolCallCoordinator:
 
     def _schedule_flush(self, batch: _ToolBatch) -> None:
         previous = self._flush_tail
+        self._pending_tool_batches += 1
         executions = [
             asyncio.create_task(
                 self._execute_tool(
@@ -563,23 +565,26 @@ class _ToolCallCoordinator:
             self._track(execution)
 
         async def flush_in_order() -> None:
-            if previous is not None:
-                await previous
-            results = await asyncio.gather(*executions)
-            for result in results:
-                await self._conn.send(
-                    {
-                        "type": "conversation.item.create",
-                        "item": {
-                            "type": "function_call_output",
-                            "call_id": result.call_id,
-                            "output": result.output,
-                        },
-                    }
-                )
-            if any(result.create_response for result in results):
-                self._queued_follow_ups += 1
-                await self._maybe_send_follow_up()
+            try:
+                if previous is not None:
+                    await previous
+                results = await asyncio.gather(*executions)
+                for result in results:
+                    await self._conn.send(
+                        {
+                            "type": "conversation.item.create",
+                            "item": {
+                                "type": "function_call_output",
+                                "call_id": result.call_id,
+                                "output": result.output,
+                            },
+                        }
+                    )
+                if any(result.create_response for result in results):
+                    self._queued_follow_ups += 1
+            finally:
+                self._pending_tool_batches -= 1
+            await self._maybe_send_follow_up()
 
         self._flush_tail = asyncio.create_task(flush_in_order())
         self._track(self._flush_tail, report_errors=True)
@@ -626,6 +631,7 @@ class _ToolCallCoordinator:
         async with self._follow_up_lock:
             if (
                 self._closing
+                or self._pending_tool_batches > 0
                 or self._queued_follow_ups == 0
                 or self._active_response_id is not None
                 or self._pending_create_id is not None

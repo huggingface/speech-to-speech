@@ -750,6 +750,46 @@ async def test_audio_client_one_follow_up_covers_all_queued_tool_batches():
     await coordinator.close()
 
 
+async def test_audio_client_waits_for_all_tool_batches_before_follow_up():
+    releases = [asyncio.Event(), asyncio.Event()]
+    calls = []
+
+    async def executor(_name, arguments):
+        index = arguments["index"]
+        calls.append(index)
+        await releases[index].wait()
+        return {"result": index}
+
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn,
+        RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor),
+    )
+
+    coordinator.handle_event(response_created("response_1"))
+    coordinator.handle_event(tool_call("call_1", response_id="response_1", arguments='{"index": 0}'))
+    coordinator.handle_event(response_done("response_1"))
+    coordinator.handle_event(response_created("response_2"))
+    coordinator.handle_event(tool_call("call_2", response_id="response_2", arguments='{"index": 1}'))
+    coordinator.handle_event(response_done("response_2"))
+
+    await wait_until(lambda: len(calls) == 2)
+    releases[0].set()
+    await wait_until(lambda: len(conn.sent) >= 1)
+    await asyncio.sleep(0.01)
+    assert [event["type"] for event in conn.sent] == ["conversation.item.create"]
+
+    releases[1].set()
+    await wait_until(lambda: len(conn.sent) == 3)
+    assert [event["type"] for event in conn.sent] == [
+        "conversation.item.create",
+        "conversation.item.create",
+        "response.create",
+    ]
+    assert [event["item"]["call_id"] for event in conn.sent[:2]] == ["call_1", "call_2"]
+    await coordinator.close()
+
+
 async def test_audio_client_waits_for_response_lifecycle_after_follow_up_collision():
     conn = RecordingConnection()
     coordinator = _ToolCallCoordinator(
