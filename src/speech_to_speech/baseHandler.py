@@ -13,7 +13,7 @@ import numpy as np
 from speech_to_speech.pipeline.control import PipelineControlMessage, is_control_message, SESSION_END
 from speech_to_speech.pipeline.events import PipelineEvent, TokenUsageEvent
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
-from speech_to_speech.pipeline.messages import PIPELINE_END, AudioOutput, EndOfResponse
+from speech_to_speech.pipeline.messages import PIPELINE_END, AudioOutput, EndOfResponse, TTSInput
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,16 @@ class BaseHandler(Generic[InT, OutT]):
         raise NotImplementedError
 
     def should_process_input(self, item: InT) -> bool:
+        if isinstance(item, TTSInput) and item.prefetch_transaction is not None:
+            prefetch_transaction = item.prefetch_transaction
+            # Hidden follow-up LM work may overlap the origin TTS, but synthesis
+            # itself starts only after the standard response.create claims it.
+            # Discard releases this serial worker without entering a TTS backend.
+            while not self.stop_event.is_set() and not prefetch_transaction.wait_until_resolved(0.05):
+                pass
+            if not prefetch_transaction.claimed:
+                logger.debug("%s: dropping unclaimed prefetch input", self.__class__.__name__)
+                return False
         cancel_scope = getattr(self, "cancel_scope", None)
         cancel_generation = getattr(item, "cancel_generation", None)
         if (

@@ -28,11 +28,49 @@ if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import ServerEvent
 
 logger = logging.getLogger(__name__)
-TOOL_FOLLOW_UP_RESPONSE_ID_FIELD = "s2s_tool_follow_up_for_response_id"
 
 
 class ConversationHandler(RealtimeBaseHandler):
     """Owns conversation item injection and pipeline-to-protocol translation."""
+
+    @staticmethod
+    def _is_image_message(item: ConversationItem) -> bool:
+        return (
+            isinstance(item, RealtimeConversationItemUserMessage)
+            and bool(item.content)
+            and all(part.type == "input_image" for part in item.content)
+        )
+
+    def _linked_tool_followup_image_ids(
+        self,
+        conn_id: str,
+        items: list[ConversationItem],
+    ) -> set[str] | None:
+        """Validate standard item ordering and return linked image sidecars.
+
+        Function outputs need no extension to the Realtime protocol: the demo
+        gives a camera image the client item ID ``msg_tool_image_<call_id>``
+        and uses that ID as the output event's standard ``previous_item_id``.
+        The ID convention supplies sidecar identity; ``previous_item_id`` only
+        preserves standard conversation ordering. Other images remain ordinary
+        user input and are never consumed or rolled back as tool sidecars.
+        """
+        st = self._state(conn_id)
+        linked_image_ids: set[str] = set()
+        for index, item in enumerate(items):
+            if isinstance(item, RealtimeConversationItemFunctionCallOutput):
+                continue
+            if not self._is_image_message(item) or item.id is None or index + 1 >= len(items):
+                return None
+            following = items[index + 1]
+            if not isinstance(following, RealtimeConversationItemFunctionCallOutput):
+                return None
+            if item.id != f"msg_tool_image_{following.call_id}":
+                return None
+            if st.deferred_function_output_previous_item_ids.get(following.call_id) != item.id:
+                return None
+            linked_image_ids.add(item.id)
+        return linked_image_ids
 
     def handle_conversation_item_create(
         self,
@@ -45,39 +83,38 @@ class ConversationHandler(RealtimeBaseHandler):
         generation on their own.  A subsequent ``response.create`` event is
         required to trigger the model.
 
-        Most items remain deferred while a response is generating. Tool results
-        and their image-only inputs are safe to apply immediately: function calls
-        are recorded before their events reach the client, and the LLM strips
-        only images present in its serialized input snapshot. This lets a queued
-        tool follow-up start before the originating response finishes TTS.
+        While model generation is active, items remain deferred so a fast tool
+        result cannot overtake later assistant items from the same response.
+        Once logical generation completes, tool outputs can be applied to the
+        internal chat immediately; their wire acknowledgements remain ordered
+        behind the response's still-buffered output.
         """
         st = self._state(conn_id)
-        queued_origin_key = st.queued_tool_followup_origin_response_key
-        is_image_only = (
-            isinstance(event.item, RealtimeConversationItemUserMessage)
-            and bool(event.item.content)
-            and all(part.type == "input_image" for part in event.item.content)
-        )
-        tool_follow_up_for = getattr(event.item, TOOL_FOLLOW_UP_RESPONSE_ID_FIELD, None)
-        if (
-            is_image_only
-            and queued_origin_key is not None
-            and tool_follow_up_for == st.queued_tool_followup_origin_response_id
-            and (not st.in_response or st.current_response_key == queued_origin_key)
-        ):
-            events = self._apply_item(conn_id, event.item)
-            if event.item.id is not None:
-                st.provisional_tool_followup_item_ids.setdefault(queued_origin_key, set()).add(event.item.id)
-            return events
         if st.in_response:
             if isinstance(event.item, RealtimeConversationItemFunctionCallOutput):
-                return self._apply_item(conn_id, event.item)
+                st.deferred_function_output_previous_item_ids[event.item.call_id] = event.previous_item_id
             st.deferred_items.append(event.item)
+            if (
+                st.current_response_key in st.generation_done_tool_calls
+                and any(isinstance(item, RealtimeConversationItemFunctionCallOutput) for item in st.deferred_items)
+                and self._linked_tool_followup_image_ids(conn_id, st.deferred_items) is not None
+            ):
+                return self.flush_deferred_items(
+                    conn_id,
+                    tool_followup_inputs_only=True,
+                    defer_acknowledgements=True,
+                )
             logger.debug("Deferred conversation item until the active response completes")
             return []
         return self._apply_item(conn_id, event.item)
 
-    def _apply_item(self, conn_id: str, item: ConversationItem) -> list[ServerEvent]:
+    def _apply_item(
+        self,
+        conn_id: str,
+        item: ConversationItem,
+        *,
+        defer_acknowledgement: bool = False,
+    ) -> list[ServerEvent]:
         """Add one item to the chat and build its ``conversation.item.created``."""
         try:
             self._append_item(conn_id, item)
@@ -87,6 +124,17 @@ class ConversationHandler(RealtimeBaseHandler):
         if not item:
             return []
         st = self._state(conn_id)
+        if defer_acknowledgement:
+            # The prefetching LM strips consumed images from Chat in place.
+            # Keep the protocol echo immutable until it can be acknowledged in
+            # order behind the origin response.
+            st.pending_item_acks.append(item.model_copy(deep=True))
+            return []
+        return [self._ack_item(conn_id, item)]
+
+    def _ack_item(self, conn_id: str, item: ConversationItem) -> ConversationItemCreatedEvent:
+        """Build one ordered acknowledgement for an item already in the chat."""
+        st = self._state(conn_id)
         event = ConversationItemCreatedEvent(
             type="conversation.item.created",
             event_id=self._next_event_id(),
@@ -94,23 +142,68 @@ class ConversationHandler(RealtimeBaseHandler):
             item=item,
         )
         st.last_item_id = item.id
-        return [event]
+        return event
 
-    def flush_deferred_items(self, conn_id: str) -> list[ServerEvent]:
+    def flush_deferred_items(
+        self,
+        conn_id: str,
+        *,
+        tool_followup_inputs_only: bool = False,
+        defer_acknowledgements: bool = False,
+    ) -> list[ServerEvent]:
         """Apply items buffered during a response, in arrival order.
 
-        Called at response completion (after the generation's own write-back),
-        so a ``function_call_output`` pairs with its now-recorded ``function_call``
-        and an image survives the just-finished response's ``strip_images``.
+        Called as soon as model generation has committed its history, or at
+        response completion as a fallback if the side-channel event is delayed.
         """
         st = self._state(conn_id)
         if not st.deferred_items:
             return []
+        has_function_output = any(
+            isinstance(item, RealtimeConversationItemFunctionCallOutput) for item in st.deferred_items
+        )
+        linked_image_ids = self._linked_tool_followup_image_ids(conn_id, st.deferred_items)
+        if tool_followup_inputs_only and (not has_function_output or linked_image_ids is None):
+            return []
         items = st.deferred_items
         st.deferred_items = []
+        for item in items:
+            if isinstance(item, RealtimeConversationItemFunctionCallOutput):
+                st.deferred_function_output_previous_item_ids.pop(item.call_id, None)
         events: list[ServerEvent] = []
         for item in items:
-            events.extend(self._apply_item(conn_id, item))
+            events.extend(
+                self._apply_item(
+                    conn_id,
+                    item,
+                    defer_acknowledgement=defer_acknowledgements,
+                )
+            )
+        if tool_followup_inputs_only:
+            assert linked_image_ids is not None
+            st.tool_followup_image_item_ids.update(linked_image_ids)
+        return events
+
+    def flush_pending_item_acks(
+        self,
+        conn_id: str,
+        *,
+        revalidate_tool_outputs: bool = False,
+    ) -> list[ServerEvent]:
+        """Emit acknowledgements deferred behind an active response's output."""
+        st = self._state(conn_id)
+        items = st.pending_item_acks
+        st.pending_item_acks = []
+        events: list[ServerEvent] = []
+        for item in items:
+            if revalidate_tool_outputs and isinstance(item, RealtimeConversationItemFunctionCallOutput):
+                events.extend(self._apply_item(conn_id, item))
+            elif revalidate_tool_outputs and item.id in st.tool_followup_image_item_ids:
+                if item.id is not None:
+                    st.runtime_config.chat.remove_user_message(item.id)
+            else:
+                events.append(self._ack_item(conn_id, item))
+        st.tool_followup_image_item_ids.clear()
         return events
 
     def _append_item(self, conn_id: str, item: ConversationItem) -> None:

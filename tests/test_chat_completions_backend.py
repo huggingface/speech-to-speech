@@ -15,6 +15,7 @@ import threading
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemFunctionCall,
     RealtimeConversationItemFunctionCallOutput,
@@ -39,6 +40,7 @@ from speech_to_speech.pipeline.messages import (
     EndOfResponse,
     GenerateResponseRequest,
     LLMResponseChunk,
+    ResponsePrefetchTransaction,
     TokenUsage,
 )
 
@@ -456,6 +458,71 @@ def test_streaming_preserves_text_tool_text_order():
         "tool",
         "assistant",
     ]
+
+
+def test_prefetch_defers_irreversible_chat_cleanup_until_claim():
+    handler = _make_handler(stream=False)
+    chat = Chat(1)
+    old_message = chat.add_item(make_user_message("old turn"))
+    image_message = chat.add_item(
+        RealtimeConversationItemUserMessage(
+            type="message",
+            role="user",
+            content=[UserContent(type="input_image", image_url="data:image/jpeg;base64,abc")],
+        )
+    )
+    session = RealtimeSessionCreateRequest(type="realtime", instructions="Describe the image.")
+    transaction = ResponsePrefetchTransaction()
+    request = GenerateResponseRequest(
+        runtime_config=RuntimeConfig(chat=chat, session=session),
+        prefetch_transaction=transaction,
+    )
+
+    list(handler.process(request))
+
+    assert any(item.id == old_message.id for item in chat.buffer)
+    live_image = next(item for item in chat.buffer if item.id == image_message.id)
+    assert live_image.content[0].type == "input_image"
+
+    transaction.claim()
+
+    assert not any(item.id == old_message.id for item in chat.buffer)
+    live_image = next(item for item in chat.buffer if item.id == image_message.id)
+    assert live_image.content == []
+
+
+def test_prefetch_cleanup_failure_restores_consumed_image_and_history(monkeypatch):
+    handler = _make_handler(stream=False)
+    chat = Chat(1)
+    old_message = chat.add_item(make_user_message("old turn"))
+    image_message = chat.add_item(
+        RealtimeConversationItemUserMessage(
+            type="message",
+            role="user",
+            content=[UserContent(type="input_image", image_url="data:image/jpeg;base64,abc")],
+        )
+    )
+    session = RealtimeSessionCreateRequest(type="realtime", instructions="Describe the image.")
+    transaction = ResponsePrefetchTransaction()
+    request = GenerateResponseRequest(
+        runtime_config=RuntimeConfig(chat=chat, session=session),
+        prefetch_transaction=transaction,
+    )
+    list(handler.process(request))
+
+    def fail_after_image_strip(compactor=None):
+        live_image = next(item for item in chat.buffer if item.id == image_message.id)
+        assert live_image.content == []
+        raise RuntimeError("trim failed")
+
+    monkeypatch.setattr(chat, "trim_if_needed", fail_after_image_strip)
+
+    with pytest.raises(RuntimeError, match="trim failed"):
+        transaction.claim()
+
+    assert any(item.id == old_message.id for item in chat.buffer)
+    live_image = next(item for item in chat.buffer if item.id == image_message.id)
+    assert live_image.content[0].type == "input_image"
 
 
 def test_tool_call_recorded_before_chunk_is_emitted():

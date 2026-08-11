@@ -114,7 +114,6 @@ function _codedError(message, code, extra) {
 const OUTPUT_SAMPLE_RATE = 16000;
 const MIC_CHUNK_MS = 40;
 const RESPONSE_CREATE_ID_METADATA_KEY = "s2s_demo_create_id";
-const TOOL_FOLLOW_UP_RESPONSE_ID_METADATA_KEY = "s2s_tool_follow_up_for_response_id";
 
 export class S2sWsRealtimeClient extends EventTarget {
   /** @param {WsClientOptions} options */
@@ -204,9 +203,6 @@ export class S2sWsRealtimeClient extends EventTarget {
     this._pendingCreateId = "";
     this._pendingCreateSawResponse = false;
     this._waitingForResponseAfterCollision = false;
-    /** @type {{ originResponseId: string; createId: string } | null} */
-    this._queuedToolFollowUp = null;
-    this._interruptResponseEnabled = true;
     this._nextCreateSequence = 0;
     /** @type {{ image?: string }[]} Pending response.create payloads, one per
      * queued requestResponse(). A payload may carry an image to send just
@@ -677,9 +673,6 @@ export class S2sWsRealtimeClient extends EventTarget {
 
     switch (type) {
       case "session.created":
-        if (typeof event.session?.audio?.input?.turn_detection?.interrupt_response === "boolean") {
-          this._interruptResponseEnabled = event.session.audio.input.turn_detection.interrupt_response;
-        }
         // Server-side defaults for the s2s pipeline are already what we
         // want (server_vad, whisper-1 transcription, PCM16 16k in / 24k
         // out). We only push the user-tunable bits: voice + instructions.
@@ -695,9 +688,6 @@ export class S2sWsRealtimeClient extends EventTarget {
       case "session.updated":
         // Some Realtime servers acknowledge session.update; the greeting was
         // already queued from session.created and is guarded against repeats.
-        if (typeof event.session?.audio?.input?.turn_detection?.interrupt_response === "boolean") {
-          this._interruptResponseEnabled = event.session.audio.input.turn_detection.interrupt_response;
-        }
         break;
 
       case "input_audio_buffer.speech_started":
@@ -708,7 +698,6 @@ export class S2sWsRealtimeClient extends EventTarget {
         // otherwise keep playing over the user's barge-in.
         this._playbackNode?.port.postMessage({ kind: "clear" });
         this._aiSpeaking = false;
-        if (this._interruptResponseEnabled) this._queuedToolFollowUp = null;
         this._userAudioRecorder.speechStarted({
           itemId: typeof event.item_id === "string" ? event.item_id : "",
           audioStartMs: Number(event.audio_start_ms),
@@ -716,7 +705,6 @@ export class S2sWsRealtimeClient extends EventTarget {
         this.dispatchEvent(new CustomEvent("user-turn-started", {
           detail: {
             itemId: typeof event.item_id === "string" ? event.item_id : "",
-            interruptResponse: this._interruptResponseEnabled,
           },
         }));
         this._setStatus("user-speaking");
@@ -739,15 +727,12 @@ export class S2sWsRealtimeClient extends EventTarget {
         if (this._status === "user-speaking") this._setStatus("processing");
         break;
 
-      case "response.created": {
+      case "response.created":
         // A response now owns the slot. Only matching metadata acknowledges
         // our explicit create; automatic responses carry no such marker.
         this._waitingForResponseAfterCollision = false;
         this._activeResponseId = event.response?.id ?? "";
-        const createdBy = event.response?.metadata?.[RESPONSE_CREATE_ID_METADATA_KEY];
-        if (createdBy && createdBy === this._queuedToolFollowUp?.createId) {
-          this._queuedToolFollowUp = null;
-        } else if (createdBy === this._pendingCreateId) {
+        if (event.response?.metadata?.[RESPONSE_CREATE_ID_METADATA_KEY] === this._pendingCreateId) {
           this._pendingCreateId = "";
           this._pendingCreateSawResponse = false;
         } else if (this._pendingCreateId) {
@@ -757,7 +742,6 @@ export class S2sWsRealtimeClient extends EventTarget {
           this._setStatus("processing");
         }
         break;
-      }
 
       case "response.output_item.added":
         if (this._status === "connected" || this._status === "user-speaking") {
@@ -802,9 +786,6 @@ export class S2sWsRealtimeClient extends EventTarget {
         // `response.cancelled` event). Surface the id + status so the UI can
         // drop a cancelled response's transcript and commit a completed one.
         const status = event.response?.status ?? "completed";
-        if (status !== "completed" && this._queuedToolFollowUp?.originResponseId === responseId) {
-          this._queuedToolFollowUp = null;
-        }
         // Did this response ever play audio? Distinguishes a barge-in cut (the
         // user heard part of it) from a speculative response that never played.
         const audible = responseId ? this._audibleResponses.has(responseId) : false;
@@ -944,20 +925,11 @@ export class S2sWsRealtimeClient extends EventTarget {
       case "error": {
         const err = event.error;
         console.error("[ws] server error:", err);
-        if ((err?.type === "invalid_tool_follow_up" || err?.code === "invalid_tool_follow_up") &&
-            this._queuedToolFollowUp) {
-          this._queuedToolFollowUp = null;
-          this._flushQueuedCreate();
-        }
         // The "another response is already active" race: our optimistic create
         // collided with a still-running response. Don't surface it — re-queue
         // the rejected create and retry as soon as the response slot is free.
         if (err?.type === "conversation_already_has_active_response" ||
             err?.code === "conversation_already_has_active_response") {
-          if (this._queuedToolFollowUp) {
-            this._queuedToolFollowUp = null;
-            break;
-          }
           if (this._pendingCreateId) {
             const responseAlreadyFinished = this._pendingCreateSawResponse && !this._activeResponseId;
             this._waitingForResponseAfterCollision = !this._pendingCreateSawResponse;
@@ -1066,35 +1038,17 @@ export class S2sWsRealtimeClient extends EventTarget {
 
   /**
    * Return a tool's result to the model. Pairs with the `toolcall` event's
-   * `callId`. ToolCallBatcher has already queued the matching follow-up.
+   * `callId`. Caller follows this with `requestResponse()` so the model speaks.
    * @param {string} callId
    * @param {string} output Plain text / JSON string the model will read.
+   * @param {string} [previousItemId]
    */
-  sendToolOutput(callId, output) {
+  sendToolOutput(callId, output, previousItemId = "") {
     if (!callId) return; // Can't target a result without the call id.
     this._send({
       type: "conversation.item.create",
+      ...(previousItemId ? { previous_item_id: previousItemId } : {}),
       item: { type: "function_call_output", call_id: callId, output },
-    });
-  }
-
-  /** Queue one follow-up behind a tool-producing response without waiting for
-   *  its acknowledgement audio to finish. The server releases it only after
-   *  logical generation and every function output are complete.
-   *  @param {string} originResponseId */
-  requestToolFollowUp(originResponseId) {
-    if (!originResponseId || this._queuedToolFollowUp) return;
-    if (!this._ws || this._ws.readyState !== WebSocket.OPEN) return;
-    const createId = `demo_create_${++this._nextCreateSequence}`;
-    this._queuedToolFollowUp = { originResponseId, createId };
-    this._send({
-      type: "response.create",
-      response: {
-        metadata: {
-          [RESPONSE_CREATE_ID_METADATA_KEY]: createId,
-          [TOOL_FOLLOW_UP_RESPONSE_ID_METADATA_KEY]: originResponseId,
-        },
-      },
     });
   }
 
@@ -1103,18 +1057,16 @@ export class S2sWsRealtimeClient extends EventTarget {
    * model can see it (used by the camera tool). `dataUrl` is a
    * `data:image/jpeg;base64,...` string.
    * @param {string} dataUrl
-   * @param {string} [toolFollowUpForResponseId]
+   * @param {string} [itemId]
    */
-  sendUserImage(dataUrl, toolFollowUpForResponseId = "") {
+  sendUserImage(dataUrl, itemId = "") {
     this._send({
       type: "conversation.item.create",
       item: {
+        ...(itemId ? { id: itemId } : {}),
         type: "message",
         role: "user",
         content: [{ type: "input_image", image_url: dataUrl }],
-        ...(toolFollowUpForResponseId
-          ? { [TOOL_FOLLOW_UP_RESPONSE_ID_METADATA_KEY]: toolFollowUpForResponseId }
-          : {}),
       },
     });
   }
@@ -1165,7 +1117,6 @@ export class S2sWsRealtimeClient extends EventTarget {
     return (
       Boolean(this._activeResponseId) ||
       Boolean(this._pendingCreateId) ||
-      Boolean(this._queuedToolFollowUp) ||
       this._waitingForResponseAfterCollision
     );
   }

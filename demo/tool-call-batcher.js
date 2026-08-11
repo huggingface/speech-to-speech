@@ -7,15 +7,15 @@
  * @property {string} [image]
  */
 
-/** Coordinate one queued follow-up and ordered tool results per response. */
+/** Deliver tool results early, then request one follow-up after response.done. */
 export class ToolCallBatcher {
   /**
-   * @param {(responseId: string, result: ToolExecutionResult) => void | Promise<void>} onResult
-   * @param {(responseId: string) => void} onFollowUp
+   * @param {(result: ToolExecutionResult) => void | Promise<void>} onResult
+   * @param {() => void | Promise<void>} onReady
    */
-  constructor(onResult, onFollowUp) {
+  constructor(onResult, onReady) {
     this._onResult = onResult;
-    this._onFollowUp = onFollowUp;
+    this._onReady = onReady;
     /** @type {Map<string, { delivery: Promise<void>; flush: Promise<void> | null }>} */
     this._batches = new Map();
   }
@@ -30,22 +30,20 @@ export class ToolCallBatcher {
     if (!batch) {
       batch = { delivery: Promise.resolve(), flush: null };
       this._batches.set(responseId, batch);
-      this._onFollowUp(responseId);
     }
-    // Preserve function-call order even when executions finish out of order.
-    // The server releases the queued response only after every call is paired,
-    // so later calls can still extend this chain safely.
+    // Keep protocol items in function-call order even when tools finish out of
+    // order. Each result is still sent as soon as every earlier result is ready.
     batch.delivery = batch.delivery
       .then(() => execution)
       .then(async (result) => {
         if (this._batches.get(responseId) !== batch) return;
-        await this._onResult(responseId, result);
+        await this._onResult(result);
       });
   }
 
   /**
-   * Finish the originating response. Results are already delivered as soon as
-   * they settle; this terminal only cleans up or suppresses late cancelled work.
+   * Finish the originating response. Completed responses flush once all tools
+   * settle; unsuccessful responses discard calls the backend rolled back.
    * @param {string} responseId
    * @param {string} status
    * @returns {Promise<void> | null}
@@ -55,25 +53,18 @@ export class ToolCallBatcher {
     if (!batch) return null;
     if (status !== "completed") {
       this._batches.delete(responseId);
-      // Executions cannot be cancelled, but the identity check above suppresses
-      // their delivery and this catch prevents a discarded rejection leaking.
+      // Executions cannot be cancelled, but a discarded rejection should not
+      // become unhandled after the response is gone.
       void batch.delivery.catch(() => {});
       return null;
     }
     if (batch.flush) return batch.flush;
 
     batch.flush = batch.delivery
+      .then(() => this._onReady())
       .finally(() => {
         if (this._batches.get(responseId) === batch) this._batches.delete(responseId);
       });
     return batch.flush;
-  }
-
-  /** Suppress every outstanding result after barge-in starts a newer turn. */
-  discardAll() {
-    for (const [responseId, batch] of this._batches) {
-      this._batches.delete(responseId);
-      void batch.delivery.catch(() => {});
-    }
   }
 }

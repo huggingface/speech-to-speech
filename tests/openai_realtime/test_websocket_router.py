@@ -27,6 +27,7 @@ from speech_to_speech.pipeline.events import (
     AudioInputCompletedEvent,
     PipelineEvent,
     ResponseFailedEvent,
+    ResponseGenerationDoneEvent,
     SpeechStartedEvent,
     TokenUsageEvent,
 )
@@ -36,6 +37,8 @@ from speech_to_speech.pipeline.messages import (
     AssistantTextPart,
     AssistantToolCallPart,
     AudioOutput,
+    GenerateResponseRequest,
+    ResponsePrefetchTransaction,
 )
 
 # ---------------------------------------------------------------------------
@@ -252,6 +255,71 @@ class TestClientEventDispatch:
                 msg = ws.receive_json()
                 assert msg["type"] == "error"
                 assert "another response is in progress" in msg["error"]["message"].lower()
+
+    def test_prefetched_output_waits_for_standard_response_create(self, setup):
+        app, service, _, output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                conn_id = service.connection_ids[0]
+                st = service._state(conn_id)
+                request = GenerateResponseRequest(runtime_config=st.runtime_config)
+                st.tool_followup_prefetch_request = request
+                st.tool_followup_prefetch_origin_response_key = "response_origin"
+                st.mark_response_pending(request.response_key)
+                output_queue.put(AssistantOutputEvent(text="prefetched", response_key=request.response_key))
+
+                # Give the send loop time to encounter and hold the output.
+                time.sleep(0.1)
+                ws.send_json(
+                    {
+                        "type": "response.create",
+                        "response": {"metadata": {"s2s_demo_create_id": "create_followup"}},
+                    }
+                )
+
+                created = ws.receive_json()
+                delta = ws.receive_json()
+                assert created["type"] == "response.created"
+                assert created["response"]["metadata"] == {"s2s_demo_create_id": "create_followup"}
+                assert delta["type"] == "response.output_audio_transcript.delta"
+                assert delta["delta"] == "prefetched"
+
+    def test_failed_prefetch_logical_done_bypasses_output_gate_and_forces_fresh_create(self, setup):
+        app, service, _, output_queue, text_output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                conn_id = service.connection_ids[0]
+                st = service._state(conn_id)
+                origin_key = "response_origin"
+                st.generation_done_tool_calls[origin_key] = {"call_1"}
+                request = GenerateResponseRequest(
+                    runtime_config=st.runtime_config,
+                    prefetch_transaction=ResponsePrefetchTransaction(),
+                )
+                st.tool_followup_prefetch_request = request
+                st.tool_followup_prefetch_origin_response_key = origin_key
+                st.mark_response_pending(request.response_key)
+
+                # The LM marks failed hidden work unclaimable synchronously;
+                # queue dispatch may still race the client event task.
+                assert request.prefetch_transaction is not None
+                request.prefetch_transaction.discard()
+                output_queue.put(ResponseFailedEvent(message="hidden failure", response_key=request.response_key))
+                text_output_queue.put(
+                    ResponseGenerationDoneEvent(
+                        response_key=request.response_key,
+                        succeeded=False,
+                    )
+                )
+                ws.send_json({"type": "response.create"})
+                created = ws.receive_json()
+                assert created["type"] == "response.created"
+                replacement = service.text_prompt_queue.get_nowait()
+                assert isinstance(replacement, GenerateResponseRequest)
+                assert replacement.response_key != request.response_key
+                assert request.response_key in st.closed_response_keys
 
     def test_response_cancel_returns_events(self, setup):
         app, service, *_ = setup
@@ -1069,6 +1137,37 @@ class TestCleanup:
         assert cancel_scope.generation == 2
         assert not response_playing.is_set()
         assert output_queue.empty()
+
+    def test_disconnect_drains_output_held_for_unclaimed_prefetch(self):
+        unit = _make_unit(0)
+        app = create_app(pool=[unit], stop_event=ThreadingEvent())
+        cleanup: list[str] = []
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                assert unit.session is not None
+                conn_id = unit.session.session_id
+                st = unit.service._state(conn_id)
+                transaction = ResponsePrefetchTransaction()
+                request = GenerateResponseRequest(
+                    runtime_config=st.runtime_config,
+                    prefetch_transaction=transaction,
+                )
+                st.tool_followup_prefetch_request = request
+                st.tool_followup_prefetch_origin_response_key = "response_origin"
+                st.mark_response_pending(request.response_key)
+                transaction.complete(lambda: cleanup.append("committed"))
+                unit.output_queue.put(AssistantOutputEvent(text="held", response_key=request.response_key))
+                time.sleep(0.1)
+                assert unit.session.pending_output_item is not None
+
+            _simulate_session_end_drain(unit.input_queue, unit.output_queue)
+            time.sleep(0.3)
+
+            assert unit.session is None
+            assert unit.service.connection_ids == []
+            transaction.claim()
+            assert cleanup == []
 
 
 # ===================================================================

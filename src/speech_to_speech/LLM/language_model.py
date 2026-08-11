@@ -58,6 +58,7 @@ from speech_to_speech.pipeline.messages import (
     EndOfResponse,
     GenerateResponseRequest,
     LLMResponseChunk,
+    ResponsePrefetchTransaction,
     TokenUsage,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -145,6 +146,7 @@ class StreamContext(BaseModel):
     history_parts_committed: int = 0
     recorded_item_ids: set[str] = Field(default_factory=set)
     recorded_call_ids: set[str] = Field(default_factory=set)
+    prefetch_transaction: ResponsePrefetchTransaction | None = None
 
     @property
     def interrupted(self) -> bool:
@@ -467,6 +469,10 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
     def _check_stop(self, gen: int | None, ctx: StreamContext) -> bool:
         """Check whether generation should be aborted and mark the reason on *ctx*."""
+        if ctx.prefetch_transaction is not None and ctx.prefetch_transaction.discarded:
+            ctx.cancelled = True
+            logger.info("LLM prefetch cancelled")
+            return True
         if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
             ctx.cancelled = True
             logger.info("LLM generation cancelled (interruption)")
@@ -561,6 +567,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         ctx.speech_stopped_at_s = request.speech_stopped_at_s
         gen = self.cancel_scope.generation if self.cancel_scope else None
         ctx.cancel_generation = gen
+        ctx.prefetch_transaction = request.prefetch_transaction
         if not self._turn_is_latest(ctx.turn_id, ctx.turn_revision):
             logger.info("Skipping stale LLM request for turn=%s rev=%s", ctx.turn_id, ctx.turn_revision)
             yield EndOfResponse(
@@ -641,6 +648,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         try:
             for chunk in self._generate(active_chat, language_code, gen, ctx, runtime_config, response):
                 chunk.response_key = request.response_key
+                chunk.prefetch_transaction = request.prefetch_transaction
                 new_parts = [part.model_copy(deep=True) for part in chunk.parts]
                 ctx.output_parts.extend(new_parts)
                 if not out_of_band and any(isinstance(part, AssistantToolCallPart) for part in new_parts):
@@ -678,6 +686,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     speech_stopped_at_s=ctx.speech_stopped_at_s,
                     cancel_generation=ctx.cancel_generation,
                     response_key=request.response_key,
+                    prefetch_transaction=request.prefetch_transaction,
                 )
                 ctx.output_parts.extend(part.model_copy(deep=True) for part in trailing_chunk.parts)
             if commit_allowed:
@@ -691,8 +700,20 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 )
                 if commit_allowed:
                     ctx.history_parts_committed = len(ctx.output_parts)
-                    original_chat.strip_images(consumed_image_ids)
-                    original_chat.trim_if_needed(self.compactor)
+
+                    def cleanup_history() -> None:
+                        snapshot = original_chat.snapshot_history_cleanup()
+                        try:
+                            original_chat.strip_images(consumed_image_ids)
+                            original_chat.trim_if_needed(self.compactor)
+                        except Exception:
+                            original_chat.restore_history_cleanup(snapshot)
+                            raise
+
+                    if request.prefetch_transaction is not None:
+                        request.prefetch_transaction.complete(cleanup_history)
+                    else:
+                        cleanup_history()
                     history_committed = True
                 else:
                     trailing_chunk = None
@@ -718,6 +739,10 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             # emitted, leaving st.in_response stuck and locking every later response.
             logger.exception("LLM generation failed; ending the current response")
             rollback_history()
+            if request.prefetch_transaction is not None:
+                # The terminal is queued before this generator resumes into its
+                # finally block, so publish failure before yielding it.
+                request.prefetch_transaction.discard()
             yield EndOfResponse(
                 turn_id=ctx.turn_id,
                 turn_revision=ctx.turn_revision,
@@ -728,6 +753,10 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return
         finally:
             rollback_history()
+            if request.prefetch_transaction is not None and not history_committed:
+                # Make failed hidden work unclaimable before its asynchronous
+                # logical-done notification reaches the realtime service.
+                request.prefetch_transaction.discard()
         yield EndOfResponse(
             turn_id=ctx.turn_id,
             turn_revision=ctx.turn_revision,
@@ -817,6 +846,18 @@ class LanguageModelHandler(BaseLanguageModelHandler):
                     chat_prompt,  # type: ignore[arg-type]
                     max_tokens=self.gen_kwargs["max_new_tokens"],
                 )
+                if ctx.prefetch_transaction is not None:
+
+                    def abort_mlx_generation() -> None:
+                        try:
+                            token_iter.close()
+                        except (RuntimeError, ValueError):
+                            # A Python generator cannot be closed while its
+                            # current ``next`` call is executing. The discarded
+                            # flag stops it at the next token boundary instead.
+                            pass
+
+                    ctx.prefetch_transaction.register_abort(abort_mlx_generation)
                 yield from self._stream_tokens(token_iter, gen, language_code, ctx, runtime_config, response)
                 self._finish_mlx_generation(token_iter)
             try:
@@ -826,6 +867,8 @@ class LanguageModelHandler(BaseLanguageModelHandler):
             torch.mps.empty_cache()
         else:
             self._cancel_criteria.reset()
+            if ctx.prefetch_transaction is not None:
+                ctx.prefetch_transaction.register_abort(self._cancel_criteria.cancel)
             lock = self._transformers_lock
 
             def _locked_pipe() -> None:
@@ -991,6 +1034,15 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                     max_tokens=self.gen_kwargs.get("max_new_tokens", 1024),
                     enable_thinking=self.enable_thinking,
                 )
+                if ctx.prefetch_transaction is not None:
+
+                    def abort_mlx_generation() -> None:
+                        try:
+                            token_iter.close()
+                        except (RuntimeError, ValueError):
+                            pass
+
+                    ctx.prefetch_transaction.register_abort(abort_mlx_generation)
                 yield from self._stream_tokens(token_iter, gen, language_code, ctx, runtime_config, response)
                 self._finish_mlx_generation(token_iter)
             try:
@@ -1004,6 +1056,8 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             logger.debug("VLM prompt token count: %d", ctx.input_tokens)
 
             self._cancel_criteria.reset()
+            if ctx.prefetch_transaction is not None:
+                ctx.prefetch_transaction.register_abort(self._cancel_criteria.cancel)
             generate_kwargs = {
                 **inputs,
                 "max_new_tokens": self.gen_kwargs.get("max_new_tokens", 1024),

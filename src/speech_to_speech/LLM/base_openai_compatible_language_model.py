@@ -8,6 +8,8 @@ import os
 import wave
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator, Iterator
+from queue import Empty, Queue
+from threading import Thread
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
@@ -44,6 +46,7 @@ from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
 from speech_to_speech.pipeline.messages import (
     EndOfResponse,
     LLMResponseChunk,
+    ResponsePrefetchTransaction,
     TokenUsage,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -107,6 +110,7 @@ class _Turn(BaseModel):
     speech_stopped_at_s: float | None
     wants_audio: bool
     response_key: str
+    prefetch_transaction: ResponsePrefetchTransaction | None = None
 
 
 class _GenState(BaseModel):
@@ -340,6 +344,112 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
     def _generation_is_stale(self, gen: int | None) -> bool:
         return gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen)
 
+    def _turn_is_cancelled(self, turn: _Turn) -> bool:
+        return (
+            turn.prefetch_transaction is not None
+            and turn.prefetch_transaction.discarded
+            or self._generation_is_stale(turn.gen)
+        )
+
+    @staticmethod
+    def _close_response(response: Any) -> None:
+        if response is not None and hasattr(response, "close"):
+            try:
+                response.close()
+            except Exception:
+                pass
+
+    def _request_prefetch_interruptibly(
+        self,
+        request: Callable[[], Any],
+        turn: _Turn,
+    ) -> Any | None:
+        """Keep a hidden prefetch's connect wait off the serial LM worker.
+
+        Synchronous SDK calls can block before returning a closable stream. A
+        discarded prefetch must not make the following standard response.create
+        wait for that connect/read timeout, so only that speculative request is
+        isolated in a daemon thread. Any late response is closed without being
+        exposed to the pipeline.
+        """
+        transaction = turn.prefetch_transaction
+        assert transaction is not None
+        results: Queue[tuple[bool, Any]] = Queue(maxsize=1)
+
+        def cancelled() -> bool:
+            return transaction.discarded or self._generation_is_stale(turn.gen)
+
+        def run_request() -> None:
+            try:
+                result = (True, request())
+            except BaseException as exc:
+                result = (False, exc)
+            results.put(result)
+            if cancelled():
+                try:
+                    late_ok, late_value = results.get_nowait()
+                except Empty:
+                    return
+                if late_ok:
+                    self._close_response(late_value)
+
+        Thread(target=run_request, name="realtime-tool-prefetch", daemon=True).start()
+        while not cancelled():
+            try:
+                succeeded, value = results.get(timeout=0.05)
+            except Empty:
+                continue
+            if not succeeded:
+                raise value
+            if hasattr(value, "close"):
+                transaction.register_abort(value.close)
+            if cancelled():
+                self._close_response(value)
+                return None
+            return value
+
+        try:
+            succeeded, value = results.get_nowait()
+        except Empty:
+            return None
+        if succeeded:
+            self._close_response(value)
+        return None
+
+    def _iter_prefetch_events_interruptibly(
+        self,
+        events: Iterator[ProviderEvent],
+        turn: _Turn,
+        api_response: Any,
+    ) -> Iterator[ProviderEvent]:
+        """Release the serial LM worker when a claimed provider read stalls."""
+        results: Queue[tuple[bool, Any]] = Queue()
+        done = object()
+
+        def read_events() -> None:
+            try:
+                for event in events:
+                    results.put((True, event))
+            except BaseException as exc:
+                results.put((False, exc))
+            finally:
+                results.put((True, done))
+
+        Thread(target=read_events, name="realtime-tool-prefetch-stream", daemon=True).start()
+        while not self._turn_is_cancelled(turn):
+            try:
+                succeeded, value = results.get(timeout=0.05)
+            except Empty:
+                continue
+            if not succeeded:
+                raise value
+            if value is done:
+                return
+            if self._turn_is_cancelled(turn):
+                break
+            yield value
+        self._close_response(api_response)
+
     def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
         if self.speculative_turns is None:
             return True
@@ -377,6 +487,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             speech_stopped_at_s=turn.speech_stopped_at_s,
             cancel_generation=turn.gen,
             response_key=turn.response_key,
+            prefetch_transaction=turn.prefetch_transaction,
         )
 
     def _record_tool_call(self, state: _GenState, turn: _Turn, item: ResponseFunctionToolCall) -> Iterator[LLMOut]:
@@ -402,7 +513,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             id=item.id,
             status=item.status,
         )
-        if self._generation_is_stale(turn.gen) or not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
+        if self._turn_is_cancelled(turn) or not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
             logger.info("LLM generation cancelled (stale speculative turn)")
             return
         if not is_out_of_band(turn.response):
@@ -454,7 +565,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 state.input_tokens = event.input_tokens
                 state.output_tokens = event.output_tokens
                 continue
-            if self._generation_is_stale(turn.gen) or not self._turn_is_latest(turn.turn_id, turn.turn_revision):
+            if self._turn_is_cancelled(turn) or not self._turn_is_latest(turn.turn_id, turn.turn_revision):
                 logger.info("LLM generation cancelled (interruption)")
                 cancelled = True
                 break
@@ -512,7 +623,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if printable_text.strip():
                 sentence_batch.append(printable_text.strip())
             if sentence_batch:
-                if self._generation_is_stale(turn.gen):
+                if self._turn_is_cancelled(turn):
                     logger.info("LLM generation cancelled (interruption)")
                 else:
                     logger.debug(f"Clean text: {state.clean_text}")
@@ -520,7 +631,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             logger.info(f"Tools: {state.tools}")
         return (
             not cancelled
-            and not self._generation_is_stale(turn.gen)
+            and not self._turn_is_cancelled(turn)
             and self._turn_is_latest(turn.turn_id, turn.turn_revision)
             and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
         )
@@ -537,7 +648,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 state.input_tokens = event.input_tokens
                 state.output_tokens = event.output_tokens
                 continue
-            if self._generation_is_stale(turn.gen) or not self._turn_is_latest(turn.turn_id, turn.turn_revision):
+            if self._turn_is_cancelled(turn) or not self._turn_is_latest(turn.turn_id, turn.turn_revision):
                 logger.info("LLM generation cancelled (interruption)")
                 cancelled = True
                 break
@@ -555,7 +666,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 out = spoken if not turn.wants_audio else spoken.strip()
                 if (
                     out
-                    and not self._generation_is_stale(turn.gen)
+                    and not self._turn_is_cancelled(turn)
                     and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
                 ):
                     state.output_emitted = True
@@ -564,7 +675,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         logger.info(f"Tools: {state.tools}")
         return (
             not cancelled
-            and not self._generation_is_stale(turn.gen)
+            and not self._turn_is_cancelled(turn)
             and self._turn_is_latest(turn.turn_id, turn.turn_revision)
             and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
         )
@@ -619,9 +730,21 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     # would reject this; fail with a clear message instead of an opaque error.
                     error_message = "Cannot generate a response: no instructions and no input were provided."
                 else:
-                    api_response = (request_fn or self._request)(api_input, optional_kwargs)
+
+                    def make_request() -> Any:
+                        return (request_fn or self._request)(api_input, optional_kwargs)
+
+                    if turn.prefetch_transaction is not None:
+                        api_response = self._request_prefetch_interruptibly(
+                            make_request,
+                            turn,
+                        )
+                    else:
+                        api_response = make_request()
                 if api_response is not None:
                     events = (event_iterator_fn or self._iter_events)(api_response)
+                    if turn.prefetch_transaction is not None:
+                        events = self._iter_prefetch_events_interruptibly(events, turn, api_response)
                     if self.stream:
                         generation_completed = yield from self._consume_streaming(events, state, turn)
                     else:
@@ -633,9 +756,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 )
                 if state.output_emitted or state.pending:
                     error_message = f"Language model generation timed out after {self.request_timeout_s:.1f}s."
-                elif not self._generation_is_stale(turn.gen) and self._turn_output_allowed(
-                    turn.turn_id, turn.turn_revision
-                ):
+                elif not self._turn_is_cancelled(turn) and self._turn_output_allowed(turn.turn_id, turn.turn_revision):
                     # Canned apology carries no language_code (mirrors the prior handlers).
                     apology = "Wow I'm a bit slow today, could you repeat that?"
                     state.clean_text += apology
@@ -657,6 +778,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         speech_stopped_at_s=turn.speech_stopped_at_s,
                         cancel_generation=turn.gen,
                         response_key=turn.response_key,
+                        prefetch_transaction=turn.prefetch_transaction,
                     )
             except Exception as exc:
                 # Any other generation failure must still terminate the response: record
@@ -670,7 +792,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             can_commit = (
                 error_message is None
                 and generation_completed
-                and not self._generation_is_stale(turn.gen)
+                and not self._turn_is_cancelled(turn)
                 and self._turn_is_latest(turn.turn_id, turn.turn_revision)
                 and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
             )
@@ -694,16 +816,32 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                             if recorded.id is not None:
                                 state.recorded_item_ids.add(recorded.id)
                         if can_commit:
-                            original_chat.strip_images(consumed_image_ids)
-                            if history_commit_fn is not None:
-                                history_commit_fn()
-                            original_chat.trim_if_needed(self.compactor)
+
+                            def cleanup_history() -> None:
+                                snapshot = original_chat.snapshot_history_cleanup()
+                                try:
+                                    original_chat.strip_images(consumed_image_ids)
+                                    if history_commit_fn is not None:
+                                        history_commit_fn()
+                                    original_chat.trim_if_needed(self.compactor)
+                                except Exception:
+                                    original_chat.restore_history_cleanup(snapshot)
+                                    raise
+
+                            if turn.prefetch_transaction is not None:
+                                turn.prefetch_transaction.complete(cleanup_history)
+                            else:
+                                cleanup_history()
                     history_committed = can_commit
                 except Exception as exc:
                     logger.exception("LLM history commit failed; rolling back the current response")
                     error_message = f"Language model history commit failed: {exc}"
 
             rollback_transaction()
+            if turn.prefetch_transaction is not None and not history_committed:
+                # Mark hidden failure before yielding usage/terminal output;
+                # consumers run concurrently between generator resumptions.
+                turn.prefetch_transaction.discard()
             if state.input_tokens or state.output_tokens:
                 yield TokenUsage(
                     input_tokens=state.input_tokens,
@@ -722,6 +860,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             )
             return history_committed
         finally:
+            if turn.prefetch_transaction is not None and not history_committed:
+                # Publish failure to the shared transaction before the queued
+                # logical-done event can race the client's response.create.
+                turn.prefetch_transaction.discard()
             if api_response is not None and hasattr(api_response, "close"):
                 try:
                     api_response.close()
@@ -830,6 +972,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             speech_stopped_at_s=speech_stopped_at_s,
             wants_audio=wants_audio,
             response_key=request.response_key,
+            prefetch_transaction=request.prefetch_transaction,
         )
         yield from self._generate(
             active_chat,
@@ -919,6 +1062,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             speech_stopped_at_s=speech_stopped_at_s,
             wants_audio=wants_audio,
             response_key=request.response_key,
+            prefetch_transaction=request.prefetch_transaction,
         )
         yield from self._generate(active_chat, original_chat, turn, optional_kwargs)
 

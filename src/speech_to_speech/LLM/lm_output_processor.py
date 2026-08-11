@@ -116,12 +116,12 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 lm_output.turn_id,
                 lm_output.turn_revision,
             ):
-                self._notify_generation_done(lm_output, response_key, succeeded=False)
                 logger.debug(
                     "Dropping stale end-of-response for turn=%s rev=%s",
                     lm_output.turn_id,
                     lm_output.turn_revision,
                 )
+                self._notify_generation_done(lm_output, response_key, succeeded=False)
                 self._reset_response()
                 if response_key is not None:
                     # Bypass downstream speculative gates with a lifecycle-only
@@ -201,6 +201,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 speech_stopped_at_s=lm_output.speech_stopped_at_s,
                 cancel_generation=lm_output.cancel_generation,
                 response_key=response_key,
+                prefetch_transaction=lm_output.prefetch_transaction,
             )
 
     def on_session_end(self) -> None:

@@ -152,6 +152,24 @@ def _response_key_is_obsolete(unit: PipelineUnit, session_id: str, response_key:
     )
 
 
+def _output_response_key(item: Any) -> str | None:
+    if isinstance(item, AudioOutput):
+        return item.response_key
+    if isinstance(item, PipelineEvent):
+        return getattr(item, "response_key", None)
+    return None
+
+
+def _response_key_is_unclaimed_prefetch(
+    unit: PipelineUnit,
+    session_id: str,
+    response_key: str | None,
+) -> bool:
+    if response_key is None:
+        return False
+    return unit.service.response.is_tool_followup_prefetch_unclaimed(session_id, response_key)
+
+
 def _discard_obsolete_response_key(unit: PipelineUnit, session_id: str, response_key: str | None) -> None:
     if response_key is None:
         return
@@ -315,6 +333,14 @@ def _release_session(unit: PipelineUnit, session_id: str) -> None:
         # Already released (e.g. duplicate close callbacks racing).
         return
     old_session.released_at = time.monotonic()
+    # The send loop can be parked on output from an unclaimed internal
+    # prefetch. Invalidate that response while its connection state is still
+    # registered, and drop the per-session held item so SESSION_END can drain.
+    try:
+        unit.service.close_pending_responses(session_id)
+    except KeyError:
+        pass
+    old_session.pending_output_item = None
     _clean_unit(unit)
     # Tag SESSION_END with this session's id so that, after a force
     # release, a late arrival can't satisfy the next session's drain.
@@ -797,6 +823,22 @@ def create_app(
                         session.pending_output_item = None
                     else:
                         audio_chunk = unit.output_queue.get_nowait()
+
+                    if (
+                        session is not None
+                        and session_id is not None
+                        and _response_key_is_unclaimed_prefetch(
+                            unit,
+                            session_id,
+                            _output_response_key(audio_chunk),
+                        )
+                    ):
+                        # Generation and TTS may complete before the client sends
+                        # the documented response.create. Keep every lifecycle
+                        # event private until that request claims the prefetch.
+                        session.pending_output_item = audio_chunk
+                        await asyncio.sleep(0.01)
+                        continue
 
                     if isinstance(audio_chunk, TokenUsageEvent):
                         if transport is not None and session_id is not None:

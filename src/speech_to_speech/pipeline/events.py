@@ -136,11 +136,12 @@ class AssistantResponseDoneEvent(PipelineEvent):
 
 
 class ResponseGenerationDoneEvent(PipelineEvent):
-    """Marks logical model completion without waiting for ordered TTS delivery.
+    """Internal signal that LM generation ended before downstream TTS drains.
 
-    This internal side-channel lets the realtime service release a queued tool
-    follow-up once every call result is present. The client-visible response
-    lifecycle remains on the ordered TTS path.
+    This event travels on the side channel and is never serialized to a
+    Realtime client.  ``call_ids`` identifies tool calls produced by the
+    generation so the server can safely precompute a follow-up once their
+    outputs have arrived.
     """
 
     type: Literal["response_generation_done"] = "response_generation_done"

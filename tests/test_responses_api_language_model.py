@@ -1,5 +1,6 @@
 import json
 import logging
+from threading import Event, Thread
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -32,7 +33,13 @@ from speech_to_speech.LLM.chat import (
 )
 from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.messages import EndOfResponse, GenerateResponseRequest, LLMResponseChunk, TokenUsage
+from speech_to_speech.pipeline.messages import (
+    EndOfResponse,
+    GenerateResponseRequest,
+    LLMResponseChunk,
+    ResponsePrefetchTransaction,
+    TokenUsage,
+)
 
 
 def _make_text_delta_event(text):
@@ -151,6 +158,174 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler.audio_content_type = "input_audio"
     handler.audio_history_turns = 1
     return handler
+
+
+def test_discarded_prefetch_aborts_blocked_provider_stream():
+    class BlockingStream:
+        def __init__(self):
+            self.started = Event()
+            self.released = Event()
+            self.closed = False
+
+        def __iter__(self):
+            self.started.set()
+            self.released.wait(timeout=2.0)
+            return iter(())
+
+        def close(self):
+            self.closed = True
+            self.released.set()
+
+    cancel_scope = CancelScope()
+    handler = _make_handler(stream=True, cancel_scope=cancel_scope)
+    stream = BlockingStream()
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: stream))
+    request = _make_request()
+    transaction = ResponsePrefetchTransaction()
+    request.prefetch_transaction = transaction
+    outputs: list[object] = []
+    worker = Thread(target=lambda: outputs.extend(handler.process(request)))
+
+    worker.start()
+    assert stream.started.wait(timeout=1.0)
+    transaction.discard()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert stream.closed
+    assert cancel_scope.generation == 0
+
+
+def test_failed_prefetch_is_discarded_before_terminal_is_yielded():
+    handler = _make_handler(stream=True, cancel_scope=CancelScope())
+
+    def fail_create(**kwargs):
+        raise RuntimeError("provider failed")
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fail_create))
+    request = _make_request()
+    transaction = ResponsePrefetchTransaction()
+    request.prefetch_transaction = transaction
+    generation = handler.process(request)
+
+    terminal = next(generation)
+
+    assert isinstance(terminal, EndOfResponse)
+    assert terminal.error == "Language model generation failed: provider failed"
+    assert transaction.discarded
+    generation.close()
+
+
+def test_discarded_prefetch_does_not_block_on_provider_connect():
+    request_started = Event()
+    release_request = Event()
+    response_closed = Event()
+
+    class LateStream:
+        def __iter__(self):
+            return iter(())
+
+        def close(self):
+            response_closed.set()
+
+    def create(**kwargs):
+        request_started.set()
+        release_request.wait(timeout=2.0)
+        return LateStream()
+
+    cancel_scope = CancelScope()
+    handler = _make_handler(stream=True, cancel_scope=cancel_scope)
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    request = _make_request()
+    transaction = ResponsePrefetchTransaction()
+    request.prefetch_transaction = transaction
+    outputs: list[object] = []
+    worker = Thread(target=lambda: outputs.extend(handler.process(request)))
+
+    worker.start()
+    assert request_started.wait(timeout=1.0)
+    transaction.discard()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert cancel_scope.generation == 0
+
+    release_request.set()
+    assert response_closed.wait(timeout=1.0)
+
+
+def test_claimed_prefetch_cancel_does_not_block_on_provider_connect():
+    request_started = Event()
+    release_request = Event()
+    response_closed = Event()
+
+    class LateStream:
+        def __iter__(self):
+            return iter(())
+
+        def close(self):
+            response_closed.set()
+
+    def create(**kwargs):
+        request_started.set()
+        release_request.wait(timeout=2.0)
+        return LateStream()
+
+    cancel_scope = CancelScope()
+    handler = _make_handler(stream=True, cancel_scope=cancel_scope)
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    request = _make_request()
+    transaction = ResponsePrefetchTransaction()
+    request.prefetch_transaction = transaction
+    outputs: list[object] = []
+    worker = Thread(target=lambda: outputs.extend(handler.process(request)))
+
+    worker.start()
+    assert request_started.wait(timeout=1.0)
+    transaction.claim()
+    cancel_scope.cancel()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+
+    release_request.set()
+    assert response_closed.wait(timeout=1.0)
+
+
+def test_claimed_prefetch_cancel_aborts_blocked_provider_read():
+    class BlockingStream:
+        def __init__(self):
+            self.started = Event()
+            self.released = Event()
+            self.closed = False
+
+        def __iter__(self):
+            self.started.set()
+            self.released.wait(timeout=2.0)
+            return iter(())
+
+        def close(self):
+            self.closed = True
+            self.released.set()
+
+    cancel_scope = CancelScope()
+    handler = _make_handler(stream=True, cancel_scope=cancel_scope)
+    stream = BlockingStream()
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: stream))
+    request = _make_request()
+    transaction = ResponsePrefetchTransaction()
+    request.prefetch_transaction = transaction
+    outputs: list[object] = []
+    worker = Thread(target=lambda: outputs.extend(handler.process(request)))
+
+    worker.start()
+    assert stream.started.wait(timeout=1.0)
+    transaction.claim()
+    cancel_scope.cancel()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert stream.closed
 
 
 def test_warmup_uses_request_scoped_sdk_retries():
