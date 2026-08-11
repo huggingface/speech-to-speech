@@ -332,7 +332,7 @@ The LLM is the most compute-intensive and highest-latency component in the pipel
 
 - **Local inference**: `transformers` on CUDA / CPU and `mlx-lm` on Apple Silicon.
 - **Self-hosted servers**: `responses-api` and `chat-completions` can point at a local [vLLM](https://github.com/vllm-project/vllm) or [llama.cpp](https://github.com/ggerganov/llama.cpp) server.
-- **Provider APIs**: the same backends work with OpenAI, [HF Inference Providers](https://huggingface.co/inference-providers), [OpenRouter](https://openrouter.ai), and other OpenAI-compatible providers.
+- **Provider APIs**: the same backends work with OpenAI, [HF Inference Providers](https://huggingface.co/inference-providers), [OpenRouter](https://openrouter.ai), [OrcaRouter](https://www.orcarouter.ai), and other OpenAI-compatible providers.
 
 Two API backends are available, sharing the same `--responses_api_*` connection flags:
 
@@ -379,6 +379,7 @@ Works with any provider or server that implements the OpenAI Responses API. Poin
 | OpenAI | omit, uses OpenAI default | `$OPENAI_API_KEY` |
 | HF Inference Providers | `https://router.huggingface.co/v1` | `$HF_TOKEN` |
 | OpenRouter | `https://openrouter.ai/api/v1` | `$OPENROUTER_API_KEY` |
+| OrcaRouter | `https://api.orcarouter.ai/v1` | `$ORCAROUTER_API_KEY` |
 | vLLM | `http://localhost:8000/v1` | omit or any string |
 | llama.cpp | `http://127.0.0.1:8080/v1` | empty string |
 
