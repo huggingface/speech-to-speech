@@ -177,7 +177,12 @@ def _discard_obsolete_response_key(unit: PipelineUnit, session_id: str, response
     logger.debug("Pipeline %d: discarded obsolete response %s output", unit.index, response_key)
 
 
-def _flush_queue(q: Queue[QItem], *, preserve: Callable[[QItem], bool] | None = None) -> None:
+def _flush_queue(
+    q: Queue[QItem],
+    *,
+    preserve: Callable[[QItem], bool] | None = None,
+    on_discard: Callable[[QItem], None] | None = None,
+) -> None:
     """Drain a queue, optionally preserving items matching *preserve*.
 
     Preserved items are re-inserted at the **front** of the queue
@@ -190,6 +195,8 @@ def _flush_queue(q: Queue[QItem], *, preserve: Callable[[QItem], bool] | None = 
             item = q.get_nowait()
             if preserve and preserve(item):
                 preserved.append(item)
+            elif on_discard is not None:
+                on_discard(item)
         except Empty:
             break
     if preserved:
@@ -199,7 +206,11 @@ def _flush_queue(q: Queue[QItem], *, preserve: Callable[[QItem], bool] | None = 
             q.not_empty.notify(len(preserved))
 
 
-def _clean_unit(unit: PipelineUnit, preserve: Callable[[Any], bool] | None = None) -> None:
+def _clean_unit(
+    unit: PipelineUnit,
+    preserve: Callable[[Any], bool] | None = None,
+    on_discard: Callable[[Any], None] | None = None,
+) -> None:
     """Cancel in-flight work and flush queues for a single pipeline unit.
 
     All four pipeline queues are drained — input audio, transcript-to-LM,
@@ -212,8 +223,8 @@ def _clean_unit(unit: PipelineUnit, preserve: Callable[[Any], bool] | None = Non
     unit.cancel_scope.cancel()
     _flush_queue(unit.input_queue)
     _flush_queue(unit.text_prompt_queue)
-    _flush_queue(unit.output_queue, preserve=preserve)
-    _flush_queue(unit.text_output_queue, preserve=preserve)
+    _flush_queue(unit.output_queue, preserve=preserve, on_discard=on_discard)
+    _flush_queue(unit.text_output_queue, preserve=preserve, on_discard=on_discard)
     unit.response_playing.clear()
     unit.cancel_scope.reset()
     unit.should_listen.set()
@@ -340,8 +351,20 @@ def _release_session(unit: PipelineUnit, session_id: str) -> None:
         unit.service.close_pending_responses(session_id)
     except KeyError:
         pass
-    old_session.pending_output_item = None
-    _clean_unit(unit)
+
+    def account_usage(item: Any) -> None:
+        if not isinstance(item, TokenUsageEvent):
+            return
+        try:
+            unit.service.dispatch_pipeline_event(session_id, item)
+        except KeyError:
+            # A duplicate close callback may race the drain task's unregister.
+            logger.debug("Skipped late usage for unregistered session %s", session_id)
+
+    if old_session.pending_output_item is not None:
+        account_usage(old_session.pending_output_item)
+        old_session.pending_output_item = None
+    _clean_unit(unit, on_discard=account_usage)
     # Tag SESSION_END with this session's id so that, after a force
     # release, a late arrival can't satisfy the next session's drain.
     unit.input_queue.put(PipelineControlMessage(SESSION_END.kind, session_id=session_id))

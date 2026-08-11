@@ -215,8 +215,7 @@ class ConnState(BaseModel):
     deferred_items: list[ConversationItem] = Field(default_factory=list)
     # Preserve the standard ordering link supplied with deferred function
     # outputs. A preceding image is a tool-result sidecar only when the output
-    # follows the demo's client item-ID convention and the output explicitly
-    # orders itself after that image through ``previous_item_id``.
+    # explicitly orders itself after that image through ``previous_item_id``.
     deferred_function_output_previous_item_ids: dict[str, str | None] = Field(default_factory=dict)
     # Tool outputs may be added to the internal chat at logical LM completion
     # so follow-up generation can overlap TTS. Their protocol acknowledgements

@@ -741,7 +741,7 @@ class TestDeferConversationItemsDuringResponse:
         image_event = ConversationItemCreateEvent(
             type="conversation.item.create",
             item={
-                "id": "msg_tool_image_call_cancelled",
+                "id": "msg_client_camera_frame_cancelled",
                 "type": "message",
                 "role": "user",
                 "content": [{"type": "input_image", "image_url": "data:image/jpeg;base64,abc"}],
@@ -753,7 +753,7 @@ class TestDeferConversationItemsDuringResponse:
                 conn_id,
                 ConversationItemCreateEvent(
                     type="conversation.item.create",
-                    previous_item_id="msg_tool_image_call_cancelled",
+                    previous_item_id="msg_client_camera_frame_cancelled",
                     item={"type": "function_call_output", "call_id": call.call_id, "output": "result"},
                 ),
             )
@@ -907,7 +907,6 @@ class TestDeferConversationItemsDuringResponse:
                 conn_id,
                 ConversationItemCreateEvent(
                     type="conversation.item.create",
-                    previous_item_id="msg_ordinary_user_image",
                     item={"type": "function_call_output", "call_id": "call_2", "output": "second"},
                 ),
             )
@@ -1104,7 +1103,7 @@ class TestHandleResponseCreate:
             ConversationItemCreateEvent(
                 type="conversation.item.create",
                 item={
-                    "id": "msg_tool_image_call_camera",
+                    "id": "msg_client_camera_frame_42",
                     "type": "message",
                     "role": "user",
                     "content": [{"type": "input_image", "image_url": "data:image/jpeg;base64,abc"}],
@@ -1115,7 +1114,7 @@ class TestHandleResponseCreate:
             conn_id,
             ConversationItemCreateEvent(
                 type="conversation.item.create",
-                previous_item_id="msg_tool_image_call_camera",
+                previous_item_id="msg_client_camera_frame_42",
                 item={"type": "function_call_output", "call_id": call.call_id, "output": "snapshot ready"},
             ),
         )

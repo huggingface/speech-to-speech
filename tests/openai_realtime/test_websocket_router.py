@@ -1183,9 +1183,15 @@ class TestCleanup:
                 st.tool_followup_prefetch_origin_response_key = "response_origin"
                 st.mark_response_pending(request.response_key)
                 transaction.complete(lambda: cleanup.append("committed"))
-                unit.output_queue.put(AssistantOutputEvent(text="held", response_key=request.response_key))
+                unit.output_queue.put(
+                    TokenUsageEvent(response_key=request.response_key, input_tokens=11, output_tokens=4)
+                )
+                unit.output_queue.put(
+                    TokenUsageEvent(response_key=request.response_key, input_tokens=6, output_tokens=2)
+                )
+                unit.output_queue.put(AssistantOutputEvent(text="queued", response_key=request.response_key))
                 time.sleep(0.1)
-                assert unit.session.pending_output_item is not None
+                assert isinstance(unit.session.pending_output_item, TokenUsageEvent)
 
             _simulate_session_end_drain(unit.input_queue, unit.output_queue)
             time.sleep(0.3)
@@ -1194,6 +1200,8 @@ class TestCleanup:
             assert unit.service.connection_ids == []
             transaction.claim()
             assert cleanup == []
+            assert unit.service.total_usage.input_tokens == 17
+            assert unit.service.total_usage.output_tokens == 6
 
 
 # ===================================================================

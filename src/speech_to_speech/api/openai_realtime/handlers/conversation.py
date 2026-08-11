@@ -48,12 +48,11 @@ class ConversationHandler(RealtimeBaseHandler):
     ) -> set[str] | None:
         """Validate standard item ordering and return linked image sidecars.
 
-        Function outputs need no extension to the Realtime protocol: the demo
-        gives a camera image the client item ID ``msg_tool_image_<call_id>``
-        and uses that ID as the output event's standard ``previous_item_id``.
-        The ID convention supplies sidecar identity; ``previous_item_id`` only
-        preserves standard conversation ordering. Other images remain ordinary
-        user input and are never consumed or rolled back as tool sidecars.
+        Function outputs need no extension to the Realtime protocol. An image is
+        a tool sidecar only when the following function output explicitly orders
+        itself after that image through the standard ``previous_item_id`` field.
+        Other images remain ordinary user input and are never consumed or rolled
+        back as tool sidecars.
         """
         st = self._state(conn_id)
         linked_image_ids: set[str] = set()
@@ -64,8 +63,6 @@ class ConversationHandler(RealtimeBaseHandler):
                 return None
             following = items[index + 1]
             if not isinstance(following, RealtimeConversationItemFunctionCallOutput):
-                return None
-            if item.id != f"msg_tool_image_{following.call_id}":
                 return None
             if st.deferred_function_output_previous_item_ids.get(following.call_id) != item.id:
                 return None
