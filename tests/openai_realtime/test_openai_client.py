@@ -176,6 +176,7 @@ TRANSCRIPT_DELTA = "response.output_audio_transcript.delta"
 TRANSCRIPT_DONE = "response.output_audio_transcript.done"
 FUNCTION_CALL_DONE = "response.function_call_arguments.done"
 OUTPUT_ITEM_ADDED = "response.output_item.added"
+OUTPUT_ITEM_DONE = "response.output_item.done"
 ERROR = "error"
 
 
@@ -712,11 +713,13 @@ class TestPackagedAudioClient:
             await asyncio.wait_for(follow_up_created.wait(), timeout=2.0)
             assert await asyncio.to_thread(tts_started[1].wait, 1.0)
             await asyncio.wait_for(second_tool_started.wait(), timeout=1.0)
+            await wait_until(lambda: sum(event.type == OUTPUT_ITEM_DONE for event in received_events) == 2)
 
             event_types = [event.type for event in received_events]
             assert event_types.index(FUNCTION_CALL_DONE) < event_types.index(AUDIO_DONE)
             assert event_types.index(AUDIO_DONE) < event_types.index(RESPONSE_DONE)
             assert event_types.count(OUTPUT_ITEM_ADDED) == 2
+            assert event_types.count(OUTPUT_ITEM_DONE) == 2
             assert event_types.count(FUNCTION_CALL_DONE) == 2
             assert event_types.count(RESPONSE_CREATED) == 2
             assert calls == [("lookup", {"index": 7}), ("lookup", {"index": 8})]
@@ -897,6 +900,7 @@ class TestSDKToolCalling:
                     ],
                 )
             )
+            server_env.output_queue.put(AUDIO_RESPONSE_DONE)
 
             event = await _recv(conn)
             assert event.type == RESPONSE_CREATED
@@ -915,6 +919,17 @@ class TestSDKToolCalling:
             assert event.call_id == "call_xyz"
             assert json.loads(event.arguments) == {"city": "Tokyo"}
 
+            event = await _recv(conn)
+            assert event.type == OUTPUT_ITEM_DONE
+            assert event.item.call_id == "call_xyz"
+            assert event.item.status == "completed"
+
+            event = await _recv(conn)
+            assert event.type == TRANSCRIPT_DONE
+
+            event = await _recv(conn)
+            assert event.type == RESPONSE_DONE
+
     @pytest.mark.asyncio
     async def test_multiple_tool_calls_output_index(self, server_env):
         """Multiple tool calls have incrementing output_index."""
@@ -931,17 +946,24 @@ class TestSDKToolCalling:
                     ],
                 )
             )
+            server_env.output_queue.put(AUDIO_RESPONSE_DONE)
 
             created = await _recv(conn)
             added_1 = await _recv(conn)
             e1 = await _recv(conn)
+            done_1 = await _recv(conn)
             added_2 = await _recv(conn)
             e2 = await _recv(conn)
+            done_2 = await _recv(conn)
+            response_terminal = await _recv(conn)
             assert created.type == RESPONSE_CREATED
             assert added_1.type == OUTPUT_ITEM_ADDED
             assert e1.type == FUNCTION_CALL_DONE
+            assert done_1.type == OUTPUT_ITEM_DONE
             assert added_2.type == OUTPUT_ITEM_ADDED
             assert e2.type == FUNCTION_CALL_DONE
+            assert done_2.type == OUTPUT_ITEM_DONE
+            assert response_terminal.type == RESPONSE_DONE
             assert e1.output_index == 0
             assert e2.output_index == 1
 

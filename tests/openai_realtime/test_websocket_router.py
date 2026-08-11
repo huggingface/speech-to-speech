@@ -366,6 +366,9 @@ class TestClientEventDispatch:
                 tool = ws.receive_json()
                 assert tool["type"] == "response.function_call_arguments.done"
                 assert tool["call_id"] == "call_early"
+                item_done = ws.receive_json()
+                assert item_done["type"] == "response.output_item.done"
+                assert item_done["item"]["call_id"] == "call_early"
 
     def test_failed_prefetch_logical_done_bypasses_output_gate_and_forces_fresh_create(self, setup):
         app, service, _, output_queue, text_output_queue, *_ = setup
@@ -1126,6 +1129,7 @@ class TestSendLoop:
                 assert ws.receive_json()["type"] == "response.created"
                 assert ws.receive_json()["type"] == "response.output_item.added"
                 assert ws.receive_json()["type"] == "response.function_call_arguments.done"
+                assert ws.receive_json()["type"] == "response.output_item.done"
                 done = ws.receive_json()
                 assert done["type"] == "response.done"
                 assert done["response"]["usage"]["input_tokens"] == 10

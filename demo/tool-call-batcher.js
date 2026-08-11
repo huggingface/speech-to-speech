@@ -16,29 +16,95 @@ export class ToolCallBatcher {
   constructor(onResult, onReady) {
     this._onResult = onResult;
     this._onReady = onReady;
-    /** @type {Map<string, { delivery: Promise<void>; flush: Promise<void> | null }>} */
+    /** @type {Map<string, {
+     *   calls: Map<string, { outputIndex: number; execution: Promise<ToolExecutionResult> | null; delivered: boolean }>;
+     *   delivery: Promise<void>;
+     *   flush: Promise<void> | null;
+     *   hasItemOrdering: boolean;
+     * }>} */
     this._batches = new Map();
   }
 
   /**
-   * Register a tool execution in the order its call appeared in the response.
+   * Register the protocol position announced by response.output_item.added.
    * @param {string} responseId
+   * @param {string} callId
+   * @param {number} outputIndex
+   */
+  register(responseId, callId, outputIndex) {
+    const batch = this._batch(responseId);
+    this._registerCall(batch, callId, outputIndex);
+    batch.hasItemOrdering = true;
+    this._pump(responseId, batch);
+  }
+
+  /**
+   * Register a tool execution. Execution starts before this method is called;
+   * result delivery follows the output-item order registered above.
+   * @param {string} responseId
+   * @param {string} callId
+   * @param {number} outputIndex
    * @param {Promise<ToolExecutionResult>} execution
    */
-  add(responseId, execution) {
+  add(responseId, callId, outputIndex, execution) {
+    const batch = this._batch(responseId);
+    const call = this._registerCall(batch, callId, outputIndex);
+    if (call.execution) return;
+    call.execution = execution;
+    if (batch.hasItemOrdering) this._pump(responseId, batch);
+  }
+
+  /** @param {string} responseId */
+  _batch(responseId) {
     let batch = this._batches.get(responseId);
     if (!batch) {
-      batch = { delivery: Promise.resolve(), flush: null };
+      batch = {
+        calls: new Map(),
+        delivery: Promise.resolve(),
+        flush: null,
+        hasItemOrdering: false,
+      };
       this._batches.set(responseId, batch);
     }
-    // Keep protocol items in function-call order even when tools finish out of
-    // order. Each result is still sent as soon as every earlier result is ready.
-    batch.delivery = batch.delivery
-      .then(() => execution)
-      .then(async (result) => {
+    return batch;
+  }
+
+  /**
+   * @param {{ calls: Map<string, { outputIndex: number; execution: Promise<ToolExecutionResult> | null; delivered: boolean }> }} batch
+   * @param {string} callId
+   * @param {number} outputIndex
+   */
+  _registerCall(batch, callId, outputIndex) {
+    let call = batch.calls.get(callId);
+    if (!call) {
+      call = { outputIndex, execution: null, delivered: false };
+      batch.calls.set(callId, call);
+    } else {
+      call.outputIndex = outputIndex;
+    }
+    return call;
+  }
+
+  /**
+   * @param {string} responseId
+   * @param {{
+   *   calls: Map<string, { outputIndex: number; execution: Promise<ToolExecutionResult> | null; delivered: boolean }>;
+   *   delivery: Promise<void>;
+   * }} batch
+   */
+  _pump(responseId, batch) {
+    batch.delivery = batch.delivery.then(async () => {
+      while (this._batches.get(responseId) === batch) {
+        const next = [...batch.calls.values()]
+          .filter((call) => !call.delivered)
+          .sort((left, right) => left.outputIndex - right.outputIndex)[0];
+        if (!next?.execution) return;
+        const result = await next.execution;
         if (this._batches.get(responseId) !== batch) return;
         await this._onResult(result);
-      });
+        next.delivered = true;
+      }
+    });
   }
 
   /**
@@ -60,6 +126,11 @@ export class ToolCallBatcher {
     }
     if (batch.flush) return batch.flush;
 
+    // Servers without response.output_item.added cannot release results early,
+    // but response.done guarantees every arguments.done event has arrived, so
+    // output_index is authoritative at this point.
+    batch.hasItemOrdering = true;
+    this._pump(responseId, batch);
     batch.flush = batch.delivery
       .then(() => this._onReady())
       .finally(() => {

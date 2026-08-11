@@ -1494,8 +1494,13 @@ async function doStart(audioContext = null) {
     if (flush) void flush.catch((err) => onFatalError(err));
   });
 
+  c.addEventListener("toolcall-added", (e) => {
+    const { callId, responseId, outputIndex } = /** @type {CustomEvent<{ callId: string; responseId: string; outputIndex: number }>} */ (e).detail;
+    toolBatches.register(responseId, callId, outputIndex);
+  });
+
   c.addEventListener("toolcall", (e) => {
-    const { name, arguments: args, callId, responseId } = /** @type {CustomEvent<{ name: string; arguments: string; callId: string; responseId: string }>} */ (e).detail;
+    const { name, arguments: args, callId, responseId, outputIndex } = /** @type {CustomEvent<{ name: string; arguments: string; callId: string; responseId: string; outputIndex: number }>} */ (e).detail;
     if (!responseId) {
       console.warn(`[tool] call ${callId || "<unknown>"} has no response_id; ignoring uncorrelated tool call`);
       return;
@@ -1507,7 +1512,7 @@ async function doStart(audioContext = null) {
       if (client === c) chat.onToolResult(name, args, output, image);
       return { callId, output, ...(image ? { image } : {}) };
     });
-    toolBatches.add(responseId, execution);
+    toolBatches.add(responseId, callId, outputIndex, execution);
   });
   c.addEventListener("error", (e) => {
     const detail = /** @type {CustomEvent<{ error: unknown }>} */ (e).detail;

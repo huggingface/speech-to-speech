@@ -355,7 +355,7 @@ def handle_server_event(
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()
         print("ASSISTANT: <response started>", flush=True)
-    elif event.type == "response.output_item.added":
+    elif event.type in {"response.output_item.added", "response.output_item.done"}:
         return
     elif event.type == "response.output_audio.delta":
         playback.append(base64.b64decode(event.delta))
@@ -646,6 +646,12 @@ class _ToolCallCoordinator:
                             },
                         }
                     )
+                    # response.done can cancel the batch while send() is
+                    # suspended on transport backpressure. _cancel_batch()
+                    # already releases its counters, so do not account for the
+                    # same delivery a second time when the send resumes.
+                    if batch.cancelled:
+                        return
                     batch.ordered_call_ids.pop(0)
                     batch.authoritative_call_ids.discard(call_id)
                     batch.delivered_call_ids.add(call_id)

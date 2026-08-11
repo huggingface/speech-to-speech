@@ -536,6 +536,50 @@ async def test_audio_client_uses_terminal_output_order_when_item_added_is_absent
     await coordinator.close()
 
 
+async def test_audio_client_cancellation_during_blocked_delivery_releases_counters_once():
+    class BlockingConnection(RecordingConnection):
+        def __init__(self):
+            super().__init__()
+            self.send_started = asyncio.Event()
+            self.release_send = asyncio.Event()
+            self.block_next_output = True
+
+        async def send(self, event):
+            if event["type"] == "conversation.item.create" and self.block_next_output:
+                self.block_next_output = False
+                self.send_started.set()
+                await self.release_send.wait()
+            self.sent.append(event)
+
+    conn = BlockingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn,
+        RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=done_tool_executor),
+    )
+    coordinator.handle_event(output_item_added("call_cancelled", output_index=0))
+    coordinator.handle_event(tool_call("call_cancelled", output_index=0))
+    await asyncio.wait_for(conn.send_started.wait(), timeout=1.0)
+    cancelled_batch = coordinator._tool_batches["response_1"]
+
+    coordinator.handle_event(response_done(status="cancelled"))
+    assert cancelled_batch.pending_deliveries == 0
+    assert coordinator._pending_tool_flushes == 0
+
+    conn.release_send.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert cancelled_batch.pending_deliveries == 0
+    assert coordinator._pending_tool_flushes == 0
+
+    coordinator.handle_event(output_item_added("call_next", response_id="response_2", output_index=0))
+    coordinator.handle_event(tool_call("call_next", response_id="response_2", output_index=0))
+    coordinator.handle_event(response_done(response_id="response_2", output=[function_call("call_next")]))
+    await wait_until(lambda: any(event["type"] == "response.create" for event in conn.sent))
+
+    assert coordinator._pending_tool_flushes == 0
+    await coordinator.close()
+
+
 async def test_audio_client_uses_per_result_follow_up_policy_for_mixed_batch():
     async def executor(_name, arguments):
         return ToolResult(

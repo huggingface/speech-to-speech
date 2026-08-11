@@ -15,6 +15,7 @@ from openai.types.realtime import (
     ResponseDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
 )
@@ -128,6 +129,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.audio_output_started = False
         st.pending_text_outputs = []
         st.pending_function_calls = {}
+        st.finished_function_call_indices = set()
         st.next_assistant_output_sequence = 0
         st.pending_early_tool_calls = {}
 
@@ -709,11 +711,32 @@ class ResponseHandler(RealtimeBaseHandler):
                             text=text,
                         )
                     )
+            terminal_response = self._build_response(conn_id, status, reason)
+            function_outputs = {
+                getattr(item, "call_id", None): item
+                for item in (terminal_response.output or [])
+                if getattr(item, "type", None) == "function_call"
+            }
+            for output_index, call in sorted(st.pending_function_calls.items()):
+                if output_index in st.finished_function_call_indices:
+                    continue
+                item = function_outputs.get(call.call_id)
+                if item is None:
+                    continue
+                events.append(
+                    ResponseOutputItemDoneEvent(
+                        type="response.output_item.done",
+                        event_id=self._next_event_id(),
+                        item=item,
+                        output_index=output_index,
+                        response_id=resp_id,
+                    )
+                )
             events.append(
                 ResponseDoneEvent(
                     type="response.done",
                     event_id=self._next_event_id(),
-                    response=self._build_response(conn_id, status, reason),
+                    response=terminal_response,
                 )
             )
             if status == "completed":
@@ -887,9 +910,21 @@ class ResponseHandler(RealtimeBaseHandler):
                         response_id=resp_id,
                     )
                 )
+                if pending_call.status in ("completed", "incomplete"):
+                    events.append(
+                        ResponseOutputItemDoneEvent(
+                            type="response.output_item.done",
+                            event_id=self._next_event_id(),
+                            item=pending_call,
+                            output_index=output_idx,
+                            response_id=resp_id,
+                        )
+                    )
+                    st.finished_function_call_indices.add(output_idx)
                 # Same item_id as the event above, so a client can correlate the
                 # streamed arguments with the item that lands in response.output.
-                # Status is stamped on at close, once the outcome is known.
+                # Explicitly in-progress calls receive output_item.done at
+                # response close, once the outcome is known.
                 st.pending_function_calls[output_idx] = pending_call
                 st.last_item_id = function_item_id
         if output_sequence is not None:

@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
         ("./demo/rtc/s2s-rtc-client.js", "S2sRtcRealtimeClient", "_onDcMessage"),
     ],
 )
-def test_demo_clients_preserve_tool_call_response_id(module_path, class_name, message_handler):
+def test_demo_clients_preserve_tool_call_ordering_metadata(module_path, class_name, message_handler):
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required for demo client tests")
@@ -36,16 +36,29 @@ const client = new {class_name}({{
   callsUrl: "api/calls",
 }});
 let toolCall = null;
+let toolAdded = null;
 client.addEventListener("toolcall", (event) => {{ toolCall = event.detail; }});
+client.addEventListener("toolcall-added", (event) => {{ toolAdded = event.detail; }});
+await client[{json.dumps(message_handler)}](JSON.stringify({{
+  type: "response.output_item.added",
+  response_id: "response_1",
+  output_index: 3,
+  item: {{ type: "function_call", call_id: "call_1", name: "web_search", arguments: "" }},
+}}));
 await client[{json.dumps(message_handler)}](JSON.stringify({{
   type: "response.function_call_arguments.done",
   response_id: "response_1",
+  output_index: 3,
   call_id: "call_1",
   name: "web_search",
   arguments: "{{}}",
 }}));
-if (toolCall?.responseId !== "response_1") {{
-  throw new Error(`response_id was not preserved: ${{JSON.stringify(toolCall)}}`);
+const expected = {{ callId: "call_1", responseId: "response_1", outputIndex: 3 }};
+if (JSON.stringify(toolAdded) !== JSON.stringify(expected)) {{
+  throw new Error(`output-item ordering was not preserved: ${{JSON.stringify(toolAdded)}}`);
+}}
+if (toolCall?.responseId !== "response_1" || toolCall?.outputIndex !== 3) {{
+  throw new Error(`argument ordering was not preserved: ${{JSON.stringify(toolCall)}}`);
 }}
 """
     subprocess.run(
@@ -129,16 +142,22 @@ const deferred = () => {{
 }};
 const pending = [deferred(), deferred()];
 const executions = [
-  pending[0].promise.then(() => ({{ callId: "call_1", output: "first" }})),
+  pending[0].promise.then(() => ({{ callId: "call_1", output: "first", image: "first-image" }})),
   pending[1].promise.then(() => ({{ callId: "call_2", output: "second" }})),
 ];
 const timeline = [];
 const batches = new ToolCallBatcher(
-  (result) => timeline.push(`output:${{result.callId}}:${{result.output}}`),
+  (result) => {{
+    if (result.image) timeline.push(`image:${{result.callId}}:${{result.image}}`);
+    timeline.push(`output:${{result.callId}}:${{result.output}}`);
+  }},
   () => timeline.push("response.create"),
 );
-batches.add("response_1", executions[0]);
-batches.add("response_1", executions[1]);
+batches.register("response_1", "call_1", 0);
+batches.register("response_1", "call_2", 1);
+// Arguments may finish in a different order from response.output.
+batches.add("response_1", "call_2", 1, executions[1]);
+batches.add("response_1", "call_1", 0, executions[0]);
 
 let flush = null;
 if ({json.dumps(response_finishes_first)}) {{
@@ -151,7 +170,7 @@ for (const index of {json.dumps(completion_order)}) {{
 await Promise.all(executions);
 await new Promise((resolve) => setTimeout(resolve, 0));
 if (!flush) {{
-  const expectedEarly = ["output:call_1:first", "output:call_2:second"];
+  const expectedEarly = ["image:call_1:first-image", "output:call_1:first", "output:call_2:second"];
   if (JSON.stringify(timeline) !== JSON.stringify(expectedEarly)) {{
     throw new Error(`tool outputs were not delivered before response.done: ${{JSON.stringify(timeline)}}`);
   }}
@@ -160,7 +179,7 @@ if (!flush) {{
 if (!flush) throw new Error("response batch was not registered");
 await flush;
 
-const expected = ["output:call_1:first", "output:call_2:second", "response.create"];
+const expected = ["image:call_1:first-image", "output:call_1:first", "output:call_2:second", "response.create"];
 if (JSON.stringify(timeline) !== JSON.stringify(expected)) {{
   throw new Error(`unexpected tool batch: ${{JSON.stringify(timeline)}}`);
 }}
@@ -244,8 +263,14 @@ client.addEventListener("toolcall", (event) => {{
   const detail = event.detail;
   batches.add(
     detail.responseId,
+    detail.callId,
+    detail.outputIndex,
     pending[index].promise.then(() => ({{ callId: detail.callId, output: `output_${{index + 1}}` }})),
   );
+}});
+client.addEventListener("toolcall-added", (event) => {{
+  const detail = event.detail;
+  batches.register(detail.responseId, detail.callId, detail.outputIndex);
 }});
 client.addEventListener("response-finished", (event) => {{
   flush = batches.finish(event.detail.responseId, event.detail.status);
@@ -258,11 +283,20 @@ await deliver({{ type: "response.created", response: {{ id: "response_stale" }} 
 await deliver({{ type: "response.created", response: {{ id: "response_1" }} }});
 for (const [index, callId] of ["call_1", "call_2"].entries()) {{
   await deliver({{
+    type: "response.output_item.added",
+    response_id: "response_1",
+    output_index: index,
+    item: {{ type: "function_call", call_id: callId, name: "web_search", arguments: "" }},
+  }});
+}}
+for (const [callId, outputIndex] of [["call_2", 1], ["call_1", 0]]) {{
+  await deliver({{
     type: "response.function_call_arguments.done",
     response_id: "response_1",
+    output_index: outputIndex,
     call_id: callId,
     name: "web_search",
-    arguments: JSON.stringify({{ query: `query_${{index + 1}}` }}),
+    arguments: JSON.stringify({{ query: `query_${{outputIndex + 1}}` }}),
   }});
 }}
 await deliver({{ type: "response.done", response: {{ id: "response_1", status: "completed" }} }});
@@ -477,7 +511,8 @@ const batches = new ToolCallBatcher(
   () => {{ timeline.push("output"); }},
   () => {{ timeline.push("response.create"); }},
 );
-batches.add("response_1", execution);
+batches.register("response_1", "call_1", 0);
+batches.add("response_1", "call_1", 0, execution);
 const flush = batches.finish("response_1", {json.dumps(status)});
 if (flush !== null) throw new Error("unsuccessful response returned a flush");
 resolveExecution({{ callId: "call_1", output: "unused" }});

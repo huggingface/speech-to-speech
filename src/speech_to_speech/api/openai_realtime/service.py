@@ -29,6 +29,7 @@ from openai.types.realtime import (
     ResponseDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
     SessionCreatedEvent,
@@ -112,6 +113,7 @@ ServerEvent = Union[
     ResponseAudioTranscriptDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
 ]
@@ -201,6 +203,9 @@ class ConnState(BaseModel):
     # Keyed by output index so response.done can preserve interleaving with
     # assistant message items.
     pending_function_calls: dict[int, RealtimeConversationItemFunctionCall] = Field(default_factory=dict)
+    # Function items normally finish with their arguments; explicitly
+    # in-progress items finish only when the enclosing response terminates.
+    finished_function_call_indices: set[int] = Field(default_factory=set)
     # Tool calls can arrive on the LM side channel before preceding text has
     # crossed the ordered TTS queue. Sequence them here so their later ordered
     # events only finalize audio.

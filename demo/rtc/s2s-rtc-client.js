@@ -508,11 +508,20 @@ export class S2sRtcRealtimeClient extends EventTarget {
         }
         break;
 
-      case "response.output_item.added":
+      case "response.output_item.added": {
         if (this._status === "connected" || this._status === "user-speaking") {
           this._setStatus("processing");
         }
+        const item = event.item;
+        const responseId = typeof event.response_id === "string" ? event.response_id : "";
+        const outputIndex = Number.isInteger(event.output_index) ? event.output_index : Number.MAX_SAFE_INTEGER;
+        if (item?.type === "function_call" && typeof item.call_id === "string" && responseId) {
+          this.dispatchEvent(new CustomEvent("toolcall-added", {
+            detail: { callId: item.call_id, responseId, outputIndex },
+          }));
+        }
         break;
+      }
 
       case "response.done": {
         this._aiSpeaking = false;
@@ -546,9 +555,10 @@ export class S2sRtcRealtimeClient extends EventTarget {
         const args = typeof event.arguments === "string" ? event.arguments : "{}";
         const callId = typeof event.call_id === "string" ? event.call_id : "";
         const responseId = typeof event.response_id === "string" ? event.response_id : "";
+        const outputIndex = Number.isInteger(event.output_index) ? event.output_index : Number.MAX_SAFE_INTEGER;
         if (name) {
           this.dispatchEvent(new CustomEvent("toolcall", {
-            detail: { name, arguments: args, callId, responseId },
+            detail: { name, arguments: args, callId, responseId, outputIndex },
           }));
         } else {
           console.warn(`[rtc] function_call_arguments.done with no name (call_id=${callId}); cannot run tool — turn may stall`);
