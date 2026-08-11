@@ -416,6 +416,7 @@ class _ToolCallCoordinator:
         self._active_response_id: str | None = None
         self._queued_follow_ups = 0
         self._pending_create_id: str | None = None
+        self._pending_create_follow_ups = 0
         self._pending_create_saw_response = False
         self._waiting_for_response_after_collision = False
         self._next_create_sequence = 0
@@ -436,7 +437,8 @@ class _ToolCallCoordinator:
             if create_id and create_id == self._pending_create_id:
                 self._pending_create_id = None
                 self._pending_create_saw_response = False
-                self._queued_follow_ups -= 1
+                self._queued_follow_ups -= self._pending_create_follow_ups
+                self._pending_create_follow_ups = 0
             elif self._pending_create_id is not None:
                 self._pending_create_saw_response = True
         elif event.type == "response.function_call_arguments.done":
@@ -523,6 +525,7 @@ class _ToolCallCoordinator:
             logger.debug("Local tool %s failed", display_name, exc_info=True)
             print(f"TOOL ERROR: {display_name} call_id={call_id}: {message}", flush=True)
             output = json.dumps({"error": message})
+            create_response = True
         return _ToolExecutionResult(call_id=call_id, output=output, create_response=create_response)
 
     def _handle_response_done(self, response: Any) -> None:
@@ -582,6 +585,7 @@ class _ToolCallCoordinator:
             return
         rejected_create_id = self._pending_create_id
         self._pending_create_id = None
+        self._pending_create_follow_ups = 0
 
         if not is_collision:
             self._pending_create_saw_response = False
@@ -621,6 +625,7 @@ class _ToolCallCoordinator:
             self._next_create_sequence += 1
             create_id = f"tool_{self._next_create_sequence}"
             self._pending_create_id = create_id
+            self._pending_create_follow_ups = self._queued_follow_ups
             self._pending_create_saw_response = False
             try:
                 await self._conn.send(
@@ -632,6 +637,7 @@ class _ToolCallCoordinator:
                 )
             except BaseException:
                 self._pending_create_id = None
+                self._pending_create_follow_ups = 0
                 self._pending_create_saw_response = False
                 raise
 
