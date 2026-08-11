@@ -213,15 +213,14 @@ class ConnState(BaseModel):
     # write-back (cross-thread), so they are buffered here and flushed in order
     # once the response completes. See ConversationHandler.flush_deferred_items.
     deferred_items: list[ConversationItem] = Field(default_factory=list)
-    # Preserve the standard ordering link supplied with deferred function
-    # outputs. A preceding image is a tool-result sidecar only when the output
-    # explicitly orders itself after that image through ``previous_item_id``.
+    # Preserve the standard insertion anchor supplied with deferred function
+    # outputs so an image/output sequence can be applied in the intended order.
+    # The anchor does not imply that the output owns the preceding image.
     deferred_function_output_previous_item_ids: dict[str, str | None] = Field(default_factory=dict)
     # Tool outputs may be added to the internal chat at logical LM completion
     # so follow-up generation can overlap TTS. Their protocol acknowledgements
     # remain ordered behind the origin response's still-buffered output.
     pending_item_acks: list[ConversationItem] = Field(default_factory=list)
-    tool_followup_image_item_ids: set[str] = Field(default_factory=set)
     generation_done_tool_calls: dict[str, set[str]] = Field(default_factory=dict)
     completed_tool_response_keys: dict[str, None] = Field(default_factory=dict)
     tool_followup_prefetch_request: GenerateResponseRequest | None = None

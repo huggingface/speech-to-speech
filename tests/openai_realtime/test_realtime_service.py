@@ -709,7 +709,7 @@ class TestDeferConversationItemsDuringResponse:
         next_response = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
         assert isinstance(next_response, ResponseCreatedEvent)
 
-    def test_cancel_rolls_back_tool_result_image_applied_for_prefetch(
+    def test_cancel_preserves_image_applied_for_prefetch(
         self,
         service,
         conn_id,
@@ -779,10 +779,12 @@ class TestDeferConversationItemsDuringResponse:
         )
 
         assert any(isinstance(event, RealtimeErrorEvent) for event in events)
-        assert not any(isinstance(event, ConversationItemCreatedEvent) for event in events)
-        assert chat.buffer == [user]
+        created = [event for event in events if isinstance(event, ConversationItemCreatedEvent)]
+        assert len(created) == 1
+        assert created[0].item.id == "msg_client_camera_frame_cancelled"
+        assert created[0].item.content[0].image_url == "data:image/jpeg;base64,abc"
+        assert chat.buffer == [user, created[0].item]
         assert st.pending_item_acks == []
-        assert st.tool_followup_image_item_ids == set()
         assert st.tool_followup_prefetch_request is None
         assert prefetch.response_key in st.closed_response_keys
 
@@ -843,7 +845,12 @@ class TestDeferConversationItemsDuringResponse:
         assert created[0].item.content[0].image_url == "data:image/jpeg;base64,user"
         assert chat.buffer == [user, created[0].item]
 
-    def test_cancel_preserves_unlinked_user_image_before_later_tool_output(self, service, conn_id):
+    def test_cancel_preserves_ordered_user_image_between_tool_outputs(
+        self,
+        service,
+        conn_id,
+        text_prompt_queue,
+    ):
         st = service._state(conn_id)
         chat = st.runtime_config.chat
         user = chat.add_item(
@@ -907,12 +914,19 @@ class TestDeferConversationItemsDuringResponse:
                 conn_id,
                 ConversationItemCreateEvent(
                     type="conversation.item.create",
+                    previous_item_id="msg_ordinary_user_image",
                     item={"type": "function_call_output", "call_id": "call_2", "output": "second"},
                 ),
             )
             == []
         )
-        assert st.tool_followup_image_item_ids == set()
+        prefetch = text_prompt_queue.get_nowait()
+        assert isinstance(prefetch, GenerateResponseRequest)
+        assert st.tool_followup_prefetch_request is prefetch
+        assert st.deferred_items == []
+        assert len(st.pending_item_acks) == 3
+        assert prefetch.prefetch_transaction is not None
+        prefetch.prefetch_transaction.complete(lambda: chat.strip_images({"msg_ordinary_user_image"}))
 
         events = service.finish_response(
             conn_id,
@@ -922,7 +936,9 @@ class TestDeferConversationItemsDuringResponse:
         )
 
         created = [event for event in events if isinstance(event, ConversationItemCreatedEvent)]
+        errors = [event for event in events if isinstance(event, RealtimeErrorEvent)]
         assert len(created) == 1
+        assert len(errors) == 2
         assert created[0].item.id == "msg_ordinary_user_image"
         assert created[0].item.content[0].image_url == "data:image/jpeg;base64,user"
         assert chat.buffer == [user, created[0].item]

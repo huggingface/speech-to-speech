@@ -41,33 +41,30 @@ class ConversationHandler(RealtimeBaseHandler):
             and all(part.type == "input_image" for part in item.content)
         )
 
-    def _linked_tool_followup_image_ids(
+    def _tool_followup_inputs_are_ordered(
         self,
         conn_id: str,
         items: list[ConversationItem],
-    ) -> set[str] | None:
-        """Validate standard item ordering and return linked image sidecars.
+    ) -> bool:
+        """Return whether deferred items form a prefetch-safe tool batch.
 
-        Function outputs need no extension to the Realtime protocol. An image is
-        a tool sidecar only when the following function output explicitly orders
-        itself after that image through the standard ``previous_item_id`` field.
-        Other images remain ordinary user input and are never consumed or rolled
-        back as tool sidecars.
+        Image items are allowed immediately before a function output when
+        ``previous_item_id`` confirms that insertion order. The field does not
+        imply ownership, so every image remains an ordinary conversation item
+        and must survive if the tool response is later rolled back.
         """
         st = self._state(conn_id)
-        linked_image_ids: set[str] = set()
         for index, item in enumerate(items):
             if isinstance(item, RealtimeConversationItemFunctionCallOutput):
                 continue
             if not self._is_image_message(item) or item.id is None or index + 1 >= len(items):
-                return None
+                return False
             following = items[index + 1]
             if not isinstance(following, RealtimeConversationItemFunctionCallOutput):
-                return None
+                return False
             if st.deferred_function_output_previous_item_ids.get(following.call_id) != item.id:
-                return None
-            linked_image_ids.add(item.id)
-        return linked_image_ids
+                return False
+        return True
 
     def handle_conversation_item_create(
         self,
@@ -94,7 +91,7 @@ class ConversationHandler(RealtimeBaseHandler):
             if (
                 st.current_response_key in st.generation_done_tool_calls
                 and any(isinstance(item, RealtimeConversationItemFunctionCallOutput) for item in st.deferred_items)
-                and self._linked_tool_followup_image_ids(conn_id, st.deferred_items) is not None
+                and self._tool_followup_inputs_are_ordered(conn_id, st.deferred_items)
             ):
                 return self.flush_deferred_items(
                     conn_id,
@@ -159,8 +156,8 @@ class ConversationHandler(RealtimeBaseHandler):
         has_function_output = any(
             isinstance(item, RealtimeConversationItemFunctionCallOutput) for item in st.deferred_items
         )
-        linked_image_ids = self._linked_tool_followup_image_ids(conn_id, st.deferred_items)
-        if tool_followup_inputs_only and (not has_function_output or linked_image_ids is None):
+        inputs_are_ordered = self._tool_followup_inputs_are_ordered(conn_id, st.deferred_items)
+        if tool_followup_inputs_only and (not has_function_output or not inputs_are_ordered):
             return []
         items = st.deferred_items
         st.deferred_items = []
@@ -176,9 +173,6 @@ class ConversationHandler(RealtimeBaseHandler):
                     defer_acknowledgement=defer_acknowledgements,
                 )
             )
-        if tool_followup_inputs_only:
-            assert linked_image_ids is not None
-            st.tool_followup_image_item_ids.update(linked_image_ids)
         return events
 
     def flush_pending_item_acks(
@@ -195,12 +189,8 @@ class ConversationHandler(RealtimeBaseHandler):
         for item in items:
             if revalidate_tool_outputs and isinstance(item, RealtimeConversationItemFunctionCallOutput):
                 events.extend(self._apply_item(conn_id, item))
-            elif revalidate_tool_outputs and item.id in st.tool_followup_image_item_ids:
-                if item.id is not None:
-                    st.runtime_config.chat.remove_user_message(item.id)
             else:
                 events.append(self._ack_item(conn_id, item))
-        st.tool_followup_image_item_ids.clear()
         return events
 
     def _append_item(self, conn_id: str, item: ConversationItem) -> None:
