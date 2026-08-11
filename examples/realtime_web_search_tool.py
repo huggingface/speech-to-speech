@@ -15,6 +15,7 @@ from speech_to_speech.api.openai_realtime.audio_client import ToolResult
 logger = logging.getLogger(__name__)
 
 MAX_RESULTS = 5
+CURRENT_UTC_DATE = datetime.now(timezone.utc).date().isoformat()
 
 TOOLS = [
     {
@@ -22,8 +23,10 @@ TOOLS = [
         "name": "web_search",
         "description": (
             "Search the web for current information and return a short list of results with titles, snippets, "
-            "and URLs. Call this directly whenever the user asks to search, check the web, look something up, "
-            "find today's events, or learn what is happening now. Do not just say you'll look it up."
+            f"and URLs. The current UTC date is {CURRENT_UTC_DATE}; resolve relative dates such as today and "
+            "tomorrow from it. Call this whenever the user asks to search, check the web, look something up, "
+            "find current events, or learn what is happening now. Usually make one focused search; search again "
+            "only when the first results are insufficient or conflicting."
         ),
         "parameters": {
             "type": "object",
