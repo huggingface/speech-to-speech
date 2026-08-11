@@ -33,7 +33,7 @@ from aiortc.mediastreams import AudioStreamTrack, MediaStreamError  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
 import speech_to_speech.api.openai_realtime.websocket_router as router_module  # noqa: E402
-from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit  # noqa: E402
+from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit, SessionState  # noqa: E402
 from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService  # noqa: E402
 from speech_to_speech.api.openai_realtime.transports import SessionTransport  # noqa: E402
 from speech_to_speech.api.openai_realtime.webrtc_session import (  # noqa: E402
@@ -261,6 +261,11 @@ class TestWebRTCDispatch:
         unit = _make_unit()
         conn_id = unit.service.register()
         transport = _FakeTransport()
+        unit.session = SessionState(
+            transport=transport,
+            session_id=conn_id,
+            pending_output_item=b"\x02\x00",
+        )
 
         text_event = AssistantOutputEvent(text="before audio", response_key="response_1")
         tool_event = AssistantOutputEvent(
@@ -288,6 +293,7 @@ class TestWebRTCDispatch:
 
         assert transport.sent == []  # no error
         assert transport.discards == 1
+        assert unit.session.pending_output_item is None
         # Only audio is flushed; ordered response state and the terminal survive.
         assert [unit.output_queue.get_nowait() for _ in range(6)] == [
             text_event,
@@ -299,6 +305,54 @@ class TestWebRTCDispatch:
         ]
         with pytest.raises(Empty):
             unit.output_queue.get_nowait()
+
+    @pytest.mark.parametrize(
+        "pending_output_item",
+        [
+            AssistantResponseDoneEvent(response_key="response_1"),
+            AUDIO_RESPONSE_DONE,
+        ],
+    )
+    async def test_output_audio_buffer_clear_preserves_stashed_lifecycle(self, pending_output_item):
+        unit = _make_unit()
+        conn_id = unit.service.register()
+        transport = _FakeTransport()
+        unit.session = SessionState(
+            transport=transport,
+            session_id=conn_id,
+            pending_output_item=pending_output_item,
+        )
+
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {"type": "output_audio_buffer.clear"},
+            transport,
+            transport_kind="webrtc",
+        )
+
+        assert unit.session.pending_output_item is pending_output_item
+
+    async def test_output_audio_buffer_clear_does_not_touch_replacement_session(self):
+        unit = _make_unit()
+        conn_id = unit.service.register()
+        transport = _FakeTransport()
+        replacement_audio = b"\x03\x00"
+        unit.session = SessionState(
+            transport=transport,
+            session_id="replacement-session",
+            pending_output_item=replacement_audio,
+        )
+
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {"type": "output_audio_buffer.clear"},
+            transport,
+            transport_kind="webrtc",
+        )
+
+        assert unit.session.pending_output_item is replacement_audio
 
     async def test_output_audio_buffer_clear_rejected_over_websocket(self):
         unit = _make_unit()

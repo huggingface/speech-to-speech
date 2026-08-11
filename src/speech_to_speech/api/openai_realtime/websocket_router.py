@@ -181,6 +181,16 @@ def _flush_queue(q: Queue[QItem], *, preserve: Callable[[QItem], bool] | None = 
             q.not_empty.notify(len(preserved))
 
 
+def _clear_stashed_audio(unit: PipelineUnit, session_id: str) -> None:
+    """Drop audio stashed by the send loop for the current session only."""
+    session = unit.session
+    if session is None or session.session_id != session_id:
+        return
+    pending = session.pending_output_item
+    if pending is not None and not _keep_non_audio_output(pending):
+        session.pending_output_item = None
+
+
 def _clean_unit(unit: PipelineUnit, preserve: Callable[[Any], bool] | None = None) -> None:
     """Cancel in-flight work and flush queues for a single pipeline unit.
 
@@ -380,6 +390,7 @@ async def _dispatch_client_event(
                 ]
             )
             return
+        _clear_stashed_audio(unit, session_id)
         _flush_queue(unit.output_queue, preserve=_keep_non_audio_output)
         transport.discard_pending_audio()
 
