@@ -14,8 +14,10 @@ import queue
 import threading
 from types import SimpleNamespace
 
+import httpx
 import numpy as np
 import pytest
+from openai import APIConnectionError, InternalServerError, RateLimitError
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemFunctionCall,
     RealtimeConversationItemFunctionCallOutput,
@@ -35,14 +37,18 @@ from speech_to_speech.LLM.chat_completions_language_model import (
     _to_chat_tool_choice,
     _to_chat_tools,
 )
+from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.events import AssistantOutputEvent, ResponseFailedEvent
 from speech_to_speech.pipeline.messages import (
     EndOfResponse,
     GenerateResponseRequest,
     LLMResponseChunk,
     ResponsePrefetchTransaction,
     TokenUsage,
+    TTSInput,
 )
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
 
@@ -808,6 +814,94 @@ def test_generation_error_emits_failed_end_of_response():
     text, tools, usage, chat, end = _drive(h)
     assert end is not None and end.error is not None
     assert "kaboom" in end.error
+    assert text == base_mod.PROVIDER_FAILURE_FALLBACK
+
+
+def _api_error_response(status_code):
+    request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
+    return httpx.Response(status_code, request=request)
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        (APIConnectionError(request=httpx.Request("POST", "https://provider.example")), "Connection error"),
+        (RateLimitError("rate limited", response=_api_error_response(429), body=None), "rate limited"),
+        (InternalServerError("server failed", response=_api_error_response(500), body=None), "server failed"),
+    ],
+)
+def test_provider_failure_before_output_speaks_fallback_then_fails_without_history(error, message):
+    h = _make_handler(stream=True)
+
+    def fail(**kwargs):
+        raise error
+
+    h.client.chat.completions.create = fail
+    chat = Chat(10)
+    chat.add_item(make_user_message("Hallo"))
+    runtime_config = RuntimeConfig(
+        chat=chat,
+        session=RealtimeSessionCreateRequest(type="realtime", instructions="Du bist ein Roboter."),
+    )
+    request = GenerateResponseRequest(
+        runtime_config=runtime_config,
+        language_code="de",
+        turn_id="t",
+        turn_revision=0,
+    )
+
+    outputs = list(h.process(request))
+
+    assert [type(output) for output in outputs] == [LLMResponseChunk, EndOfResponse]
+    assert outputs[0].text == base_mod.PROVIDER_FAILURE_FALLBACK
+    assert outputs[0].language_code is None
+    assert outputs[1].error is not None and message in outputs[1].error
+    assert [getattr(item, "role", None) for item in chat.buffer] == ["user"]
+
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup()
+    pipeline_outputs = [processed for output in outputs for processed in processor.process(output)]
+    assert [type(output) for output in pipeline_outputs] == [
+        AssistantOutputEvent,
+        TTSInput,
+        ResponseFailedEvent,
+        EndOfResponse,
+    ]
+
+
+def test_cancelled_provider_failure_does_not_emit_fallback():
+    scope = CancelScope()
+    h = _make_handler(stream=True)
+    h.cancel_scope = scope
+
+    def fail(**kwargs):
+        scope.cancel()
+        raise RuntimeError("cancelled request failed")
+
+    h.client.chat.completions.create = fail
+    text, tools, usage, chat, end = _drive(h)
+
+    assert text == ""
+    assert end is not None and "cancelled request failed" in end.error
+    assert not any(getattr(item, "role", None) == "assistant" for item in chat.buffer)
+
+
+def test_stale_provider_failure_does_not_emit_fallback():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("t", 0)
+    h = _make_handler(stream=True)
+    h.speculative_turns = tracker
+
+    def fail(**kwargs):
+        tracker.observe("t", 1)
+        raise RuntimeError("stale request failed")
+
+    h.client.chat.completions.create = fail
+    text, tools, usage, chat, end = _drive(h)
+
+    assert text == ""
+    assert end is not None and "stale request failed" in end.error
+    assert not any(getattr(item, "role", None) == "assistant" for item in chat.buffer)
 
 
 # ── Out-of-band (conversation="none") responses ───────────────────────────────
