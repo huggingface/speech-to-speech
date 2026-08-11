@@ -214,7 +214,7 @@ are returned as tool output so the model can recover instead of stalling the tur
 
 Return `ToolResult(output, create_response=False)` for a fire-and-forget action that should not produce another assistant turn. When a response calls multiple tools, the client submits every output and sends one follow-up `response.create` if any result requests one. Plain return values use the module-wide `CREATE_RESPONSE` fallback, which defaults to `True`; set it to `False` when most tools in a module are fire-and-forget and opt individual result-bearing tools back in with `ToolResult`.
 
-Calls run away from the receive loop and multiple outputs retain call order. `execute_tool` may be an async function, an object with async `__call__`, or another callable that returns an awaitable. Unknown tools, malformed JSON, non-awaitable handlers, and handler failures are returned as `function_call_output` errors and always request a recovery response, even when the module default is fire-and-forget. Calls from cancelled responses are discarded, and outstanding async handlers are cancelled on disconnect or shutdown.
+Calls run away from the receive loop and parallel outputs retain the response's canonical `output_index` order. Execution starts only after `response.done` reports `completed`, so calls from cancelled or incomplete responses are discarded before their handlers run. `execute_tool` may be an async function, an object with async `__call__`, or another callable that returns an awaitable. Unknown tools, malformed JSON, non-awaitable handlers, and handler failures are returned as `function_call_output` errors and always request a recovery response, even when the module default is fire-and-forget. Outstanding async handlers are cancelled on disconnect or shutdown.
 
 Library users can configure the same contract directly:
 
@@ -227,7 +227,7 @@ config = RealtimeAudioClientConfig(
 await listen_and_play_realtime(config)
 ```
 
-Arguments are validated against the declared `parameters` JSON Schema before the callback runs. String outputs are sent unchanged; other outputs must be JSON-serializable. Callbacks receive normal task cancellation on a cancelled response, disconnect, or shutdown, so they should release their own resources in `finally` blocks.
+Arguments are validated against the declared `parameters` JSON Schema before the callback runs. String outputs are sent unchanged; other outputs must be JSON-serializable. Callbacks receive normal task cancellation on disconnect or shutdown, so they should release their own resources in `finally` blocks.
 
 ---
 

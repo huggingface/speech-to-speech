@@ -61,10 +61,11 @@ def response_created(response_id, *, metadata=None):
     )
 
 
-def tool_call(call_id, *, response_id="response_1", name="lookup", arguments="{}"):
+def tool_call(call_id, *, response_id="response_1", output_index=0, name="lookup", arguments="{}"):
     return SimpleNamespace(
         type="response.function_call_arguments.done",
         response_id=response_id,
+        output_index=output_index,
         call_id=call_id,
         name=name,
         arguments=arguments,
@@ -406,8 +407,8 @@ async def test_audio_client_executes_multiple_tools_once_and_flushes_in_call_ord
         RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor),
     )
     coordinator.handle_event(response_created("response_1"))
-    coordinator.handle_event(tool_call("call_1", arguments='{"index": 0}'))
-    coordinator.handle_event(tool_call("call_2", arguments='{"index": 1}'))
+    coordinator.handle_event(tool_call("call_1", output_index=0, arguments='{"index": 0}'))
+    coordinator.handle_event(tool_call("call_2", output_index=1, arguments='{"index": 1}'))
     coordinator.handle_event(response_done())
 
     await wait_until(lambda: len(calls) == 2)
@@ -431,6 +432,22 @@ async def test_audio_client_executes_multiple_tools_once_and_flushes_in_call_ord
     await coordinator.close()
 
 
+async def test_audio_client_orders_parallel_tool_outputs_by_output_index():
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn,
+        RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=done_tool_executor),
+    )
+    coordinator.handle_event(tool_call("call_1", output_index=1))
+    coordinator.handle_event(tool_call("call_0", output_index=0))
+    coordinator.handle_event(response_done())
+
+    await wait_until(lambda: len(conn.sent) == 3)
+
+    assert [event["item"]["call_id"] for event in conn.sent[:2]] == ["call_0", "call_1"]
+    await coordinator.close()
+
+
 async def test_audio_client_uses_per_result_follow_up_policy_for_mixed_batch():
     async def executor(_name, arguments):
         return ToolResult(
@@ -447,8 +464,8 @@ async def test_audio_client_uses_per_result_follow_up_policy_for_mixed_batch():
             tool_response_create=False,
         ),
     )
-    coordinator.handle_event(tool_call("call_1", arguments='{"index": 0}'))
-    coordinator.handle_event(tool_call("call_2", arguments='{"index": 1}'))
+    coordinator.handle_event(tool_call("call_1", output_index=0, arguments='{"index": 0}'))
+    coordinator.handle_event(tool_call("call_2", output_index=1, arguments='{"index": 1}'))
     coordinator.handle_event(response_done())
 
     await wait_until(lambda: len(conn.sent) == 3)
@@ -640,18 +657,13 @@ async def test_audio_client_deduplicates_repeated_tool_call_events(capsys):
     await coordinator.close()
 
 
-@pytest.mark.parametrize("finish", ["cancel", "close"])
-async def test_audio_client_cancels_outstanding_async_tools_without_sending_output(finish):
-    started = asyncio.Event()
-    cancelled = asyncio.Event()
+@pytest.mark.parametrize("status", ["cancelled", "incomplete"])
+async def test_audio_client_does_not_execute_tools_from_unsuccessful_responses(status):
+    calls = []
 
-    async def executor(_name, _arguments):
-        started.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            cancelled.set()
-            raise
+    async def executor(name, arguments):
+        calls.append((name, arguments))
+        return "done"
 
     conn = RecordingConnection()
     coordinator = _ToolCallCoordinator(
@@ -659,16 +671,14 @@ async def test_audio_client_cancels_outstanding_async_tools_without_sending_outp
         RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor),
     )
     coordinator.handle_event(tool_call("call_1"))
-    await started.wait()
+    await asyncio.sleep(0)
+    assert calls == []
 
-    if finish == "cancel":
-        coordinator.handle_event(response_done(status="cancelled"))
-        await cancelled.wait()
-        await coordinator.close()
-    else:
-        await coordinator.close()
+    coordinator.handle_event(response_done(status=status))
+    await asyncio.sleep(0)
+    await coordinator.close()
 
-    assert cancelled.is_set()
+    assert calls == []
     assert conn.sent == []
 
 

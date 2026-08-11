@@ -394,9 +394,17 @@ class _ToolExecutionResult:
     create_response: bool
 
 
+@dataclass(frozen=True)
+class _PendingToolCall:
+    call_id: str
+    output_index: int
+    name: Any
+    raw_arguments: Any
+
+
 @dataclass
 class _ToolBatch:
-    executions: list[asyncio.Task[_ToolExecutionResult]] = field(default_factory=list)
+    calls: list[_PendingToolCall] = field(default_factory=list)
     call_ids: set[str] = field(default_factory=set)
 
 
@@ -459,28 +467,27 @@ class _ToolCallCoordinator:
             return
 
         response_id = getattr(event, "response_id", None) or self._active_response_id
-        batch = self._batches.setdefault(response_id, _ToolBatch()) if response_id else _ToolBatch()
+        if not isinstance(response_id, str) or not response_id:
+            print(f"TOOL ERROR: call_id={call_id} has no response_id; call ignored", flush=True)
+            return
+        output_index = getattr(event, "output_index", None)
+        if not isinstance(output_index, int) or isinstance(output_index, bool) or output_index < 0:
+            print(f"TOOL ERROR: call_id={call_id} has an invalid output_index; call ignored", flush=True)
+            return
+
+        batch = self._batches.setdefault(response_id, _ToolBatch())
         if call_id in batch.call_ids:
             print(f"TOOL ERROR: duplicate call_id={call_id} ignored", flush=True)
             return
         batch.call_ids.add(call_id)
-
-        execution = asyncio.create_task(
-            self._execute_tool(
-                call_id,
-                getattr(event, "name", None),
-                getattr(event, "arguments", None),
+        batch.calls.append(
+            _PendingToolCall(
+                call_id=call_id,
+                output_index=output_index,
+                name=getattr(event, "name", None),
+                raw_arguments=getattr(event, "arguments", None),
             )
         )
-        self._track(execution)
-        batch.executions.append(execution)
-        if response_id:
-            self._batches[response_id] = batch
-        else:
-            # A conforming event has response_id. If an implementation omits it
-            # while no response is active, returning the result immediately is
-            # safer than silently leaving the function call unresolved.
-            self._schedule_flush(batch)
 
     async def _execute_tool(self, call_id: str, name: Any, raw_arguments: Any) -> _ToolExecutionResult:
         display_name = name if isinstance(name, str) and name else "<unnamed>"
@@ -538,24 +545,27 @@ class _ToolCallCoordinator:
             batch.call_ids.clear()
             if getattr(response, "status", None) == "completed":
                 self._schedule_flush(batch)
-            else:
-                for execution in batch.executions:
-                    execution.cancel()
-
-                async def discard_cancelled_executions() -> None:
-                    await asyncio.gather(*batch.executions, return_exceptions=True)
-
-                cleanup = asyncio.create_task(discard_cancelled_executions())
-                self._track(cleanup)
         self._kick_follow_up()
 
     def _schedule_flush(self, batch: _ToolBatch) -> None:
         previous = self._flush_tail
+        executions = [
+            asyncio.create_task(
+                self._execute_tool(
+                    call.call_id,
+                    call.name,
+                    call.raw_arguments,
+                )
+            )
+            for call in sorted(batch.calls, key=lambda call: call.output_index)
+        ]
+        for execution in executions:
+            self._track(execution)
 
         async def flush_in_order() -> None:
             if previous is not None:
                 await previous
-            results = await asyncio.gather(*batch.executions)
+            results = await asyncio.gather(*executions)
             for result in results:
                 await self._conn.send(
                     {
