@@ -365,9 +365,9 @@ def _release_session(unit: PipelineUnit, session_id: str) -> None:
     if old_session.pending_output_item is not None:
         account_usage(old_session.pending_output_item)
         old_session.pending_output_item = None
-    if old_session.pending_text_output_item is not None:
-        account_usage(old_session.pending_text_output_item)
-        old_session.pending_text_output_item = None
+    for item in old_session.pending_text_output_items:
+        account_usage(item)
+    old_session.pending_text_output_items.clear()
     _clean_unit(unit, on_discard=account_usage)
     # Tag SESSION_END with this session's id so that, after a force
     # release, a late arrival can't satisfy the next session's drain.
@@ -809,10 +809,17 @@ def create_app(
 
                 # Text events first (speech_started cancels active response).
                 try:
-                    if session is not None and session.pending_text_output_item is not None:
-                        text_msg = session.pending_text_output_item
-                        session.pending_text_output_item = None
-                    else:
+                    text_msg = None
+                    if session is not None and session_id is not None:
+                        for index, pending in enumerate(session.pending_text_output_items):
+                            if not _response_key_output_is_blocked(
+                                unit,
+                                session_id,
+                                _output_response_key(pending),
+                            ):
+                                text_msg = session.pending_text_output_items.pop(index)
+                                break
+                    if text_msg is None:
                         text_msg = unit.text_output_queue.get_nowait()
 
                     if (
@@ -827,9 +834,12 @@ def create_app(
                         # Response-dependent side-channel events share the same
                         # exposure barrier as audio/output events. In particular,
                         # an early tool call must never overtake response.created.
-                        session.pending_text_output_item = text_msg
-                        await asyncio.sleep(0.01)
-                        continue
+                        # Unlike the serial output hold, this list does not stall
+                        # the origin response whose completion enables the claim.
+                        session.pending_text_output_items.append(text_msg)
+                        text_msg = None
+                    if text_msg is None:
+                        raise Empty
                     if isinstance(text_msg, AssistantToolCallReadyEvent):
                         generation = text_msg.cancel_generation
                         response_key = text_msg.response_key
@@ -852,7 +862,7 @@ def create_app(
                         if events:
                             await transport.send_events(events)
 
-                    if is_speech_start and session_id:
+                    if isinstance(text_msg, SpeechStartedEvent) and session_id:
                         active_cfg = unit.service._state(session_id).runtime_config
                         interrupt_enabled = text_msg.interrupt_response and (
                             active_cfg is None or active_cfg.interrupt_response_enabled

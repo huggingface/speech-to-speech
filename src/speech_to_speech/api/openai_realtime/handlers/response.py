@@ -14,6 +14,7 @@ from openai.types.realtime import (
     ResponseCreateEvent,
     ResponseDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
+    ResponseOutputItemAddedEvent,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
 )
@@ -856,6 +857,24 @@ class ResponseHandler(RealtimeBaseHandler):
                     preferred_item_id=function_item_id,
                 )
                 st.response_usage.tool_calls += 1
+                pending_call = RealtimeConversationItemFunctionCall(
+                    type="function_call",
+                    object="realtime.item",
+                    id=function_item_id,
+                    call_id=tool.call_id,
+                    name=tool.name,
+                    arguments=tool.arguments,
+                    status=tool.status or "completed",
+                )
+                events.append(
+                    ResponseOutputItemAddedEvent(
+                        type="response.output_item.added",
+                        event_id=self._next_event_id(),
+                        item=pending_call.model_copy(update={"arguments": "", "status": "in_progress"}),
+                        output_index=output_idx,
+                        response_id=resp_id,
+                    )
+                )
                 events.append(
                     ResponseFunctionCallArgumentsDoneEvent(
                         type="response.function_call_arguments.done",
@@ -871,15 +890,7 @@ class ResponseHandler(RealtimeBaseHandler):
                 # Same item_id as the event above, so a client can correlate the
                 # streamed arguments with the item that lands in response.output.
                 # Status is stamped on at close, once the outcome is known.
-                st.pending_function_calls[output_idx] = RealtimeConversationItemFunctionCall(
-                    type="function_call",
-                    object="realtime.item",
-                    id=function_item_id,
-                    call_id=tool.call_id,
-                    name=tool.name,
-                    arguments=tool.arguments,
-                    status=tool.status or "completed",
-                )
+                st.pending_function_calls[output_idx] = pending_call
                 st.last_item_id = function_item_id
         if output_sequence is not None:
             st.pending_early_tool_calls.pop(output_sequence, None)

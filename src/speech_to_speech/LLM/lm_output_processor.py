@@ -181,8 +181,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             self._output_sequence += 1
             if isinstance(part, AssistantToolCallPart) and part.tool.call_id not in self._tool_call_ids:
                 self._tool_call_ids.append(part.tool.call_id)
-                transaction = lm_output.prefetch_transaction
-                if self.text_output_queue is not None and (transaction is None or transaction.claimed):
+                if self.text_output_queue is not None:
                     self.text_output_queue.put(
                         AssistantToolCallReadyEvent(
                             part=part,

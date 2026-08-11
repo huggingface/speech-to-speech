@@ -360,6 +360,9 @@ class TestClientEventDispatch:
                     release_created_send.set()
 
                 assert ws.receive_json()["type"] == "response.created"
+                added = ws.receive_json()
+                assert added["type"] == "response.output_item.added"
+                assert added["item"]["call_id"] == "call_early"
                 tool = ws.receive_json()
                 assert tool["type"] == "response.function_call_arguments.done"
                 assert tool["call_id"] == "call_early"
@@ -1121,6 +1124,7 @@ class TestSendLoop:
                 output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key))
 
                 assert ws.receive_json()["type"] == "response.created"
+                assert ws.receive_json()["type"] == "response.output_item.added"
                 assert ws.receive_json()["type"] == "response.function_call_arguments.done"
                 done = ws.receive_json()
                 assert done["type"] == "response.done"

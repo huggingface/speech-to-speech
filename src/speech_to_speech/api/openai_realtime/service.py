@@ -28,6 +28,7 @@ from openai.types.realtime import (
     ResponseCreateEvent,
     ResponseDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
+    ResponseOutputItemAddedEvent,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
     SessionCreatedEvent,
@@ -110,6 +111,7 @@ ServerEvent = Union[
     ResponseAudioTranscriptDeltaEvent,
     ResponseAudioTranscriptDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
+    ResponseOutputItemAddedEvent,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
 ]

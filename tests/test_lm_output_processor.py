@@ -196,6 +196,32 @@ def test_generation_done_side_channel_does_not_wait_for_tts_delivery():
     assert [item.output_sequence for item in ordered if isinstance(item, AssistantOutputEvent)] == [0, 1]
 
 
+def test_unclaimed_prefetch_emits_tool_ready_side_channel_before_tts_delivery():
+    side_events = Queue()
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup(speculative_turns=SpeculativeTurnTracker(), text_output_queue=side_events)
+    transaction = ResponsePrefetchTransaction()
+    tool = ResponseFunctionToolCall(type="function_call", call_id="call_2", name="lookup", arguments="{}")
+
+    ordered = list(
+        processor.process(
+            LLMResponseChunk(
+                parts=[AssistantTextPart(text="One more check."), AssistantToolCallPart(tool=tool)],
+                response_key="response_prefetch",
+                prefetch_transaction=transaction,
+            )
+        )
+    )
+
+    tool_ready = side_events.get_nowait()
+    assert isinstance(tool_ready, AssistantToolCallReadyEvent)
+    assert tool_ready.response_key == "response_prefetch"
+    assert tool_ready.output_sequence == 1
+    assert tool_ready.part.tool == tool
+    assert not transaction.claimed
+    assert [type(item) for item in ordered] == [AssistantOutputEvent, TTSInput, AssistantOutputEvent]
+
+
 def test_failed_response_event_precedes_terminal_and_keeps_identity():
     _, processor = _tracked_processor()
 
