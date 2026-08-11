@@ -34,6 +34,7 @@ from speech_to_speech.LLM.chat_completions_language_model import (
     _to_chat_tool_choice,
     _to_chat_tools,
 )
+from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.messages import (
     EndOfResponse,
     GenerateResponseRequest,
@@ -413,6 +414,50 @@ def test_streaming_tool_call_accumulates_arguments():
     assert chat._pending_tool_calls, "tool call should be recorded in chat history"
 
 
+def test_streaming_preserves_text_tool_text_order():
+    h = _make_handler(stream=True)
+    h.client.chat.completions.create = lambda **kwargs: _FakeStream(
+        [
+            _chunk(content="Before."),
+            _chunk(tool_calls=[_tc_delta(0, id="srv_1", name="lookup", arguments='{"q":')]),
+            _chunk(content="After.", tool_calls=[_tc_delta(0, arguments='"x"}')]),
+        ]
+    )
+    chat = Chat(10)
+    chat.add_item(make_user_message("go"))
+    session = RealtimeSessionCreateRequest(type="realtime", instructions="Use tools.")
+    session.tools = [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}]
+    request = GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat, session=session))
+
+    outputs = list(h.process(request))
+
+    output_parts = [part.type for output in outputs if isinstance(output, LLMResponseChunk) for part in output.parts]
+    assert output_parts == ["text", "tool_call", "text"]
+    call = next(item for item in chat.buffer if isinstance(item, RealtimeConversationItemFunctionCall))
+    assert json.loads(call.arguments) == {"q": "x"}
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id=call.call_id,
+            output="done",
+        )
+    )
+    assert [item.type for item in chat.buffer] == [
+        "message",
+        "message",
+        "function_call",
+        "message",
+        "function_call_output",
+    ]
+    assert [message["role"] for message in h._serialize(chat)] == [
+        "user",
+        "assistant",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+
+
 def test_tool_call_recorded_before_chunk_is_emitted():
     """Regression: a fast client can return function_call_output before the
     deferred end-of-turn write-back runs. The call must already be in history
@@ -449,6 +494,43 @@ def test_tool_call_recorded_before_chunk_is_emitted():
             )
     assert emitted_call_id is not None, "a tool call should have been emitted"
     assert chat._has_call_id_in_buffer(emitted_call_id), "call+output should be paired in the buffer"
+    assert req.response_key in chat._provisional_generations
+    chat.finalize_provisional_generation(req.response_key)
+    assert chat._provisional_generations == {}
+
+
+def test_cancelled_text_tool_turn_rolls_back_ordered_call():
+    h = _make_handler(stream=True)
+    scope = CancelScope()
+    h.cancel_scope = scope
+    h.client.chat.completions.create = lambda **kwargs: _FakeStream(
+        [_chunk(tool_calls=[_tc_delta(0, id="srv_1", name="camera_snapshot", arguments="{}")])]
+    )
+    chat = Chat(10)
+    user = chat.add_item(make_user_message("take a photo"))
+    session = RealtimeSessionCreateRequest(type="realtime", instructions="Use tools.")
+    session.tools = [{"type": "function", "name": "camera_snapshot", "parameters": {"type": "object"}}]
+    request = GenerateResponseRequest(
+        runtime_config=RuntimeConfig(chat=chat, session=session),
+        turn_id="t",
+        turn_revision=0,
+    )
+    generation = h.process(request)
+
+    while True:
+        output = next(generation)
+        if isinstance(output, LLMResponseChunk) and output.tools:
+            break
+    assert chat.has_pending_tool_calls()
+    assert request.response_key in chat._provisional_generations
+
+    scope.cancel()
+    remaining = list(generation)
+
+    assert any(isinstance(output, EndOfResponse) for output in remaining)
+    assert chat.buffer == [user]
+    assert not chat.has_pending_tool_calls()
+    assert chat._provisional_generations == {}
 
 
 def test_non_streaming_tool_call():

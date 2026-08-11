@@ -10,7 +10,7 @@ import pytest
 
 import speech_to_speech.TTS.qwen3_tts_handler as qwen3_tts_module
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 
@@ -528,6 +528,30 @@ def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     assert end_outputs == [AUDIO_RESPONSE_DONE]
 
 
+def test_stale_keyed_terminal_becomes_cleanup_after_lm_tts_handoff():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.speculative_turns = tracker
+    terminal = EndOfResponse(
+        response_key="response_1",
+        turn_id="turn_1",
+        turn_revision=0,
+        cancel_generation=7,
+    )
+    tracker.observe("turn_1", 1)
+
+    outputs = list(handler.process(terminal))
+    queued = handler.output_for_queue(outputs[0], terminal)
+
+    assert outputs == [AUDIO_RESPONSE_DONE]
+    assert terminal.cleanup_only is True
+    assert isinstance(queued, AudioOutput)
+    assert queued.response_key == "response_1"
+    assert queued.cancel_generation == 7
+    assert queued.cleanup_only is True
+
+
 def test_process_waits_for_pending_reopen_and_drops_stale_tts_input():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
@@ -901,6 +925,23 @@ def test_estimate_max_new_tokens_scales_with_utterance_length():
     assert long_budget > short_budget
     assert long_budget % handler.streaming_chunk_size == 0
     assert long_budget <= handler.max_new_tokens
+
+
+def test_estimate_max_new_tokens_uses_cjk_speaking_rate():
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.streaming_chunk_size = 8
+    handler.max_new_tokens = 1536
+
+    short_text = "我懂，心情不好时会让人特别疲惫。"
+    long_text = (
+        "上海是一座充满活力的现代化大都市，既有繁华的金融中心和摩天大楼，也有老城厢的弄堂风情"
+        "和江南水乡的韵味。这里交通便利，餐饮选择丰富，从精致西餐到地道小馆应有尽有。同时，上海"
+        "还是文化与创新的交汇点，艺术展览、科技展会和国际活动频繁。如果你喜欢快节奏的生活和多元"
+        "的氛围，上海会是个很吸引人的地方。你想了解哪方面的具体信息呢？"
+    )
+
+    assert handler._estimate_max_new_tokens(short_text) == 360
+    assert handler._estimate_max_new_tokens(long_text) == 576
 
 
 def test_estimate_max_new_tokens_respects_configured_cap():

@@ -4,56 +4,38 @@ import logging
 import os
 import signal
 import sys
-from copy import copy, deepcopy
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from queue import Queue
 from sys import platform
 from threading import Event
 from types import FrameType
-from typing import Any, Optional
+from typing import Any, Literal, Optional, Sequence
 
 import nltk
 import torch
-from openai.types.realtime import RealtimeSessionCreateRequest
 from rich.console import Console
 from transformers import HfArgumentParser
 
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
-from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.arguments_classes.chat_completions_language_model_arguments import (
-    ChatCompletionsLanguageModelHandlerArguments,
-)
-from speech_to_speech.arguments_classes.chat_tts_arguments import ChatTTSHandlerArguments
-from speech_to_speech.arguments_classes.facebookmms_tts_arguments import FacebookMMSTTSHandlerArguments
-from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import (
-    FasterWhisperSTTHandlerArguments,
-)
-from speech_to_speech.arguments_classes.kokoro_tts_arguments import KokoroTTSHandlerArguments
-from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
-from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
-    MLXAudioWhisperSTTHandlerArguments,
-)
+from speech_to_speech.arguments_classes.local_audio_arguments import LocalAudioArguments
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
-from speech_to_speech.arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
-from speech_to_speech.arguments_classes.parakeet_tdt_arguments import (
-    ParakeetTDTSTTHandlerArguments,
+from speech_to_speech.arguments_classes.realtime_server_arguments import (
+    LocalRealtimeServerArguments,
+    RealtimeServerArguments,
 )
-from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
-from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
-from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
-    ResponsesApiLanguageModelHandlerArguments,
-)
-from speech_to_speech.arguments_classes.sense_voice_stt_arguments import SenseVoiceSTTHandlerArguments
-from speech_to_speech.arguments_classes.socket_receiver_arguments import SocketReceiverArguments
-from speech_to_speech.arguments_classes.socket_sender_arguments import SocketSenderArguments
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
-from speech_to_speech.arguments_classes.websocket_streamer_arguments import WebSocketStreamerArguments
-from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
-from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.LLM.chat import Chat
+from speech_to_speech.backend_registry import (
+    LLM_BACKENDS,
+    STT_BACKENDS,
+    TTS_BACKENDS,
+    BackendSelection,
+    BackendSpec,
+    HandlerContext,
+    create_backend_handler,
+)
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut, STTIn, STTOut, TTSIn, TTSOut
 from speech_to_speech.pipeline.queue_types import (
     AudioInItem,
     AudioOutItem,
@@ -88,151 +70,214 @@ console = Console()
 logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.WARNING)  # quiet down numba logs
 
+MLX_DEFAULT_LM_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-bf16"
+
+
+def _mac_preset_defaults(llm_backend: str) -> dict[str, Any]:
+    """Return macOS parser defaults, leaving explicit arguments free to override them."""
+
+    defaults: dict[str, Any] = {
+        "stt": "parakeet-tdt",
+        "llm_backend": "mlx-lm",
+        "tts": "qwen3",
+        "stt_device": "mps",
+        "paraformer_stt_device": "mps",
+        "facebook_mms_device": "mps",
+        "qwen3_tts_device": "mps",
+    }
+    if llm_backend not in {"responses-api", "chat-completions"}:
+        defaults["llm_device"] = "mps"
+        if llm_backend == "mlx-lm":
+            defaults["model_name"] = MLX_DEFAULT_LM_MODEL
+    return defaults
+
 
 @dataclass
 class ParsedArguments:
     module_kwargs: ModuleArguments
-    socket_receiver_kwargs: SocketReceiverArguments
-    socket_sender_kwargs: SocketSenderArguments
-    websocket_streamer_kwargs: WebSocketStreamerArguments
+    realtime_server_kwargs: RealtimeServerArguments
+    local_audio_kwargs: LocalAudioArguments
     vad_handler_kwargs: VADHandlerArguments
-    whisper_stt_handler_kwargs: WhisperSTTHandlerArguments
-    paraformer_stt_handler_kwargs: ParaformerSTTHandlerArguments
-    sense_voice_stt_handler_kwargs: SenseVoiceSTTHandlerArguments
-    faster_whisper_stt_handler_kwargs: FasterWhisperSTTHandlerArguments
-    mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments
-    parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments
-    language_model_handler_kwargs: LanguageModelHandlerArguments
-    responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments
-    chat_tts_handler_kwargs: ChatTTSHandlerArguments
-    facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments
-    pocket_tts_handler_kwargs: PocketTTSHandlerArguments
-    kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments
-    qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments
-
-
-def rename_args(args: Any, prefix: str) -> None:
-    """
-    Rename arguments by removing the prefix and prepares the gen_kwargs.
-    """
-    gen_kwargs = {}
-    for key in copy(args.__dict__):
-        if key.startswith(prefix):
-            value = args.__dict__.pop(key)
-            new_key = key[len(prefix) + 1 :]  # Remove prefix and underscore
-            if new_key.startswith("gen_"):
-                gen_kwargs[new_key[4:]] = value  # Remove 'gen_' and add to dict
-            else:
-                args.__dict__[new_key] = value
-
-    args.__dict__["gen_kwargs"] = gen_kwargs
+    stt_backend: BackendSelection
+    llm_backend: BackendSelection
+    tts_backend: BackendSelection
 
 
 def build_llm_proxy_config(
     module_kwargs: ModuleArguments,
-    responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
+    llm_backend: BackendSelection,
 ) -> Any:
-    """Proxy upstream settings, read from the same fields the pipeline LM uses.
-
-    Both remote backends read their connection settings from the responses-api
-    argument class (see get_llm_handler), so the proxy reuses the upstream URL,
-    key, and model the pipeline LM runs with. Must be called after
-    prepare_all_args(): rename_args() has popped the raw ``responses_api_*``
-    fields into their handler names (``base_url``, ``api_key``), and reading
-    the raw names after that silently returns the dataclass class defaults
-    (None) — which pointed the proxy at the OpenAI default upstream with no
-    key, whatever the flags said. Indexing vars() keeps that failure loud.
-    """
+    """Build proxy settings from the selected LLM's normalized configuration."""
     from speech_to_speech.api.openai_realtime.llm_proxy import LLMProxyConfig
 
-    lm_vars = vars(responses_api_language_model_handler_kwargs)
+    if not llm_backend.spec.capabilities.supports_llm_proxy:
+        supported = ", ".join(name for name, spec in LLM_BACKENDS.items() if spec.capabilities.supports_llm_proxy)
+        raise ValueError(
+            f"The LLM proxy requires a backend with proxy support; choose one of: {supported}. "
+            f"Got {llm_backend.name!r}."
+        )
+    config = llm_backend.config
     return LLMProxyConfig(
         enabled=module_kwargs.enable_llm_proxy,
         llm_backend=module_kwargs.llm_backend,
-        upstream_base_url=lm_vars["base_url"],
-        upstream_api_key=lm_vars["api_key"],
-        model_name=lm_vars["model_name"],
+        upstream_base_url=config["base_url"],
+        upstream_api_key=config["api_key"],
+        model_name=config["model_name"],
         connect_timeout_s=module_kwargs.llm_proxy_connect_timeout_s,
     )
 
 
-def parse_arguments() -> ParsedArguments:
-    # Pre-parse to determine which LM backend is selected, so only one of the
-    # mutually exclusive LM argument classes is registered with HfArgumentParser
-    # (avoids duplicate field names from the shared LanguageModelBaseArguments base).
-    # chat-completions reuses the responses-api connection fields via subclassing.
-    _backend_lm_class = {
-        "responses-api": ResponsesApiLanguageModelHandlerArguments,
-        "chat-completions": ChatCompletionsLanguageModelHandlerArguments,
-    }
-    _is_json = len(sys.argv) == 2 and sys.argv[1].endswith(".json")
+def _parse_selected_cli_configs(
+    parser: HfArgumentParser,
+    pipeline_args: list[str],
+    selected_specs: Sequence[BackendSpec],
+) -> tuple[Any, ...]:
+    """Parse selected configs while accepting legacy options for inactive backends."""
+
+    *parsed, remaining = parser.parse_args_into_dataclasses(
+        args=pipeline_args,
+        return_remaining_strings=True,
+    )
+    if not remaining:
+        return tuple(parsed)
+
+    selected_types = {spec.config_type for spec in selected_specs}
+    inactive_types: list[type[Any]] = []
+    for registry in (STT_BACKENDS, LLM_BACKENDS, TTS_BACKENDS):
+        for spec in registry.values():
+            if spec.config_type not in selected_types and spec.config_type not in inactive_types:
+                inactive_types.append(spec.config_type)
+
+    compatibility_parser = HfArgumentParser(
+        tuple(inactive_types),  # type: ignore[arg-type]
+        add_help=False,
+        allow_abbrev=False,
+        conflict_handler="resolve",
+    )
+    known_options = compatibility_parser._option_string_actions
+    _, unknown = compatibility_parser.parse_known_args(remaining)
+    if unknown:
+        raise ValueError(f"Some specified arguments are not used by the HfArgumentParser: {unknown}")
+
+    ignored_options = sorted({token.split("=", 1)[0] for token in remaining if token.split("=", 1)[0] in known_options})
+    logger.warning(
+        "Ignoring options for inactive backends: %s",
+        ", ".join(ignored_options),
+    )
+    return tuple(parsed)
+
+
+def parse_arguments(
+    argv: Sequence[str] | None = None,
+    *,
+    command: Literal["serve", "local"] = "serve",
+) -> ParsedArguments:
+    module_defaults = ModuleArguments()
+    assert module_defaults.stt is not None
+    assert module_defaults.llm_backend is not None
+    assert module_defaults.tts is not None
+
+    pipeline_args = list(sys.argv[1:] if argv is None else argv)
+    _is_json = len(pipeline_args) == 1 and pipeline_args[0].endswith(".json")
+    pipeline_json: dict[str, Any] | None = None
     if _is_json:
-        with open(sys.argv[1]) as _f:
-            _backend = json.load(_f).get("llm_backend")
-    else:
-        _pre = argparse.ArgumentParser(add_help=False)
-        _pre.add_argument("--llm_backend", default="responses-api")
-        _backend = _pre.parse_known_args()[0].llm_backend
-
-    _lm_class = _backend_lm_class.get(_backend, LanguageModelHandlerArguments)
-    logger.debug("LLM backend pre-parse: backend=%s, registering %s", _backend, _lm_class.__name__)
-
-    parser = HfArgumentParser(
-        (  # type: ignore[arg-type]
-            ModuleArguments,
-            SocketReceiverArguments,
-            SocketSenderArguments,
-            WebSocketStreamerArguments,
-            VADHandlerArguments,
-            WhisperSTTHandlerArguments,
-            ParaformerSTTHandlerArguments,
-            SenseVoiceSTTHandlerArguments,
-            FasterWhisperSTTHandlerArguments,
-            MLXAudioWhisperSTTHandlerArguments,
-            ParakeetTDTSTTHandlerArguments,
-            _lm_class,
-            ChatTTSHandlerArguments,
-            FacebookMMSTTSHandlerArguments,
-            PocketTTSHandlerArguments,
-            KokoroTTSHandlerArguments,
-            Qwen3TTSHandlerArguments,
+        with open(pipeline_args[0]) as _f:
+            pipeline_json = json.load(_f)
+        _mac_preset_enabled = bool(pipeline_json.get("mac_optimal_settings", False))
+        _llm_name = pipeline_json.get("llm_backend") or (
+            "mlx-lm" if _mac_preset_enabled else module_defaults.llm_backend
         )
+        if _mac_preset_enabled:
+            pipeline_json = {**_mac_preset_defaults(_llm_name), **pipeline_json}
+        _stt_name = pipeline_json.get("stt") or module_defaults.stt
+        _tts_name = pipeline_json.get("tts") or module_defaults.tts
+    else:
+        _pre = argparse.ArgumentParser(prog=f"speech-to-speech {command}", add_help=False)
+        _pre.add_argument("--mac-optimal-settings", action="store_true")
+        _pre.add_argument("--stt", choices=tuple(STT_BACKENDS))
+        _pre.add_argument("--llm_backend", "--llm-backend", choices=tuple(LLM_BACKENDS))
+        _pre.add_argument("--tts", choices=tuple(TTS_BACKENDS))
+        _pre_args = _pre.parse_known_args(pipeline_args)[0]
+        _mac_preset_enabled = _pre_args.mac_optimal_settings
+        _stt_name = _pre_args.stt or module_defaults.stt
+        _llm_name = _pre_args.llm_backend or ("mlx-lm" if _mac_preset_enabled else module_defaults.llm_backend)
+        _tts_name = _pre_args.tts or module_defaults.tts
+
+    selected_specs = []
+    for registry, name in (
+        (STT_BACKENDS, _stt_name),
+        (LLM_BACKENDS, _llm_name),
+        (TTS_BACKENDS, _tts_name),
+    ):
+        try:
+            selected_specs.append(registry[name])
+        except KeyError as exc:
+            choices = ", ".join(registry)
+            raise ValueError(f"Unsupported backend {name!r}; choose one of: {choices}.") from exc
+
+    logger.debug(
+        "Backend pre-parse: stt=%s, llm=%s, tts=%s",
+        _stt_name,
+        _llm_name,
+        _tts_name,
     )
 
+    server_arguments_class = RealtimeServerArguments if command == "serve" else LocalRealtimeServerArguments
+    argument_classes: list[type[Any]] = [
+        ModuleArguments,
+        server_arguments_class,
+    ]
+    if command == "local":
+        argument_classes.append(LocalAudioArguments)
+    argument_classes.extend(
+        [
+            VADHandlerArguments,
+            *(spec.config_type for spec in selected_specs),
+        ]
+    )
+    parser = HfArgumentParser(tuple(argument_classes), prog=f"speech-to-speech {command}")  # type: ignore[arg-type]
+    mac_action = parser._option_string_actions.pop("--mac_optimal_settings")
+    mac_action.option_strings = [option for option in mac_action.option_strings if option != "--mac_optimal_settings"]
+    if _mac_preset_enabled:
+        parser.set_defaults(**_mac_preset_defaults(_llm_name))
+
     if _is_json:
-        parsed = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]), allow_extra_keys=True)
+        assert pipeline_json is not None
+        parsed = parser.parse_dict(pipeline_json, allow_extra_keys=True)
     else:
-        parsed = parser.parse_args_into_dataclasses()
+        parsed = _parse_selected_cli_configs(parser, pipeline_args, selected_specs)
 
     # Build a {type: instance} lookup so field assignment is order-independent.
     by_type: dict[type, Any] = {type(obj): obj for obj in parsed}
     logger.debug("Parsed %d argument classes: %s", len(by_type), [t.__name__ for t in by_type])
+    if command == "serve":
+        realtime_server_kwargs = by_type[RealtimeServerArguments]
+    else:
+        realtime_server_kwargs = RealtimeServerArguments(
+            host="127.0.0.1",
+            port=by_type[LocalRealtimeServerArguments].port,
+        )
 
-    return ParsedArguments(
-        module_kwargs=by_type[ModuleArguments],
-        socket_receiver_kwargs=by_type[SocketReceiverArguments],
-        socket_sender_kwargs=by_type[SocketSenderArguments],
-        websocket_streamer_kwargs=by_type[WebSocketStreamerArguments],
+    module_kwargs = by_type[ModuleArguments]
+    module_kwargs.stt = _stt_name
+    module_kwargs.llm_backend = _llm_name
+    module_kwargs.tts = _tts_name
+    args = ParsedArguments(
+        module_kwargs=module_kwargs,
+        realtime_server_kwargs=realtime_server_kwargs,
+        local_audio_kwargs=by_type.get(LocalAudioArguments, LocalAudioArguments()),
         vad_handler_kwargs=by_type[VADHandlerArguments],
-        whisper_stt_handler_kwargs=by_type[WhisperSTTHandlerArguments],
-        paraformer_stt_handler_kwargs=by_type[ParaformerSTTHandlerArguments],
-        sense_voice_stt_handler_kwargs=by_type[SenseVoiceSTTHandlerArguments],
-        faster_whisper_stt_handler_kwargs=by_type[FasterWhisperSTTHandlerArguments],
-        mlx_audio_whisper_stt_handler_kwargs=by_type[MLXAudioWhisperSTTHandlerArguments],
-        parakeet_tdt_stt_handler_kwargs=by_type[ParakeetTDTSTTHandlerArguments],
-        language_model_handler_kwargs=by_type.get(LanguageModelHandlerArguments, LanguageModelHandlerArguments()),
-        # The OpenAI-compatible slot holds whichever class was registered:
-        # ChatCompletions... (a subclass) for chat-completions, else ResponsesApi....
-        responses_api_language_model_handler_kwargs=by_type.get(
-            ChatCompletionsLanguageModelHandlerArguments,
-            by_type.get(ResponsesApiLanguageModelHandlerArguments, ResponsesApiLanguageModelHandlerArguments()),
+        stt_backend=BackendSelection(
+            selected_specs[0], selected_specs[0].normalize(by_type[selected_specs[0].config_type])
         ),
-        chat_tts_handler_kwargs=by_type[ChatTTSHandlerArguments],
-        facebook_mms_tts_handler_kwargs=by_type[FacebookMMSTTSHandlerArguments],
-        pocket_tts_handler_kwargs=by_type[PocketTTSHandlerArguments],
-        kokoro_tts_handler_kwargs=by_type[KokoroTTSHandlerArguments],
-        qwen3_tts_handler_kwargs=by_type[Qwen3TTSHandlerArguments],
+        llm_backend=BackendSelection(
+            selected_specs[1], selected_specs[1].normalize(by_type[selected_specs[1].config_type])
+        ),
+        tts_backend=BackendSelection(
+            selected_specs[2], selected_specs[2].normalize(by_type[selected_specs[2].config_type])
+        ),
     )
+    return args
 
 
 def setup_logger(log_level: str) -> None:
@@ -256,28 +301,6 @@ def setup_logger(log_level: str) -> None:
         torch._logging.set_logs(graph_breaks=True, recompiles=True, cudagraphs=True)
 
 
-MLX_DEFAULT_LM_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-bf16"
-TRANSFORMERS_DEFAULT_LM_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
-
-
-def optimal_mac_settings(mac_optimal_settings: bool, *handler_kwargs: Any) -> None:
-    if mac_optimal_settings:
-        for kwargs in handler_kwargs:
-            if hasattr(kwargs, "device"):
-                kwargs.device = "mps"
-            if hasattr(kwargs, "mode"):
-                kwargs.mode = "local"
-            if hasattr(kwargs, "stt"):
-                kwargs.stt = "parakeet-tdt"
-            if hasattr(kwargs, "llm_backend"):
-                kwargs.llm_backend = "mlx-lm"
-            if hasattr(kwargs, "tts"):
-                kwargs.tts = "qwen3"
-            if hasattr(kwargs, "model_name"):
-                if kwargs.model_name == TRANSFORMERS_DEFAULT_LM_MODEL:
-                    kwargs.model_name = MLX_DEFAULT_LM_MODEL
-
-
 def check_mac_settings(module_kwargs: ModuleArguments) -> None:
     if platform == "darwin":
         if module_kwargs.device == "cuda":
@@ -292,102 +315,37 @@ def check_mac_settings(module_kwargs: ModuleArguments) -> None:
             )
 
 
-def overwrite_device_argument(common_device: Optional[str], *handler_kwargs: Any) -> None:
-    if common_device:
-        for kwargs in handler_kwargs:
-            if hasattr(kwargs, "llm_device"):
-                kwargs.llm_device = common_device
-            if hasattr(kwargs, "tts_device"):
-                kwargs.tts_device = common_device
-            if hasattr(kwargs, "stt_device"):
-                kwargs.stt_device = common_device
-            if hasattr(kwargs, "paraformer_stt_device"):
-                kwargs.paraformer_stt_device = common_device
-            if hasattr(kwargs, "sense_voice_stt_device"):
-                kwargs.sense_voice_stt_device = common_device
-            if hasattr(kwargs, "facebook_mms_device"):
-                kwargs.facebook_mms_device = common_device
-            if hasattr(kwargs, "qwen3_tts_device"):
-                kwargs.qwen3_tts_device = common_device
-
-
-def prepare_module_args(module_kwargs: ModuleArguments, *handler_kwargs: Any) -> None:
-    optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs, *handler_kwargs)
+def prepare_module_args(module_kwargs: ModuleArguments, llm_backend: BackendSelection) -> None:
     if module_kwargs.tts is None:
         module_kwargs.tts = "qwen3"
-    if module_kwargs.stt == "none" and module_kwargs.llm_backend != "chat-completions":
-        raise ValueError("--stt none requires --llm_backend chat-completions for audio-input LLM requests.")
+    if module_kwargs.stt == "none" and not llm_backend.spec.capabilities.supports_audio_input:
+        supported = ", ".join(name for name, spec in LLM_BACKENDS.items() if spec.capabilities.supports_audio_input)
+        raise ValueError(f"--stt none requires an audio-input LLM backend; choose one of: {supported}.")
+    if module_kwargs.enable_llm_proxy and not llm_backend.spec.capabilities.supports_llm_proxy:
+        supported = ", ".join(name for name, spec in LLM_BACKENDS.items() if spec.capabilities.supports_llm_proxy)
+        raise ValueError(
+            f"The LLM proxy requires a backend with proxy support; choose one of: {supported}. "
+            f"Got {llm_backend.name!r}."
+        )
     if platform == "darwin":
         check_mac_settings(module_kwargs)
-    overwrite_device_argument(module_kwargs.device, *handler_kwargs)
 
 
-def prepare_all_args(
-    module_kwargs: ModuleArguments,
-    whisper_stt_handler_kwargs: WhisperSTTHandlerArguments,
-    paraformer_stt_handler_kwargs: ParaformerSTTHandlerArguments,
-    sense_voice_stt_handler_kwargs: SenseVoiceSTTHandlerArguments,
-    faster_whisper_stt_handler_kwargs: FasterWhisperSTTHandlerArguments,
-    mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments,
-    parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
-    language_model_handler_kwargs: LanguageModelHandlerArguments,
-    responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
-    chat_tts_handler_kwargs: ChatTTSHandlerArguments,
-    facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
-    pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
-    kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
-    qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
-) -> None:
-    prepare_module_args(
-        module_kwargs,
-        whisper_stt_handler_kwargs,
-        faster_whisper_stt_handler_kwargs,
-        paraformer_stt_handler_kwargs,
-        sense_voice_stt_handler_kwargs,
-        mlx_audio_whisper_stt_handler_kwargs,
-        parakeet_tdt_stt_handler_kwargs,
-        language_model_handler_kwargs,
-        responses_api_language_model_handler_kwargs,
-        chat_tts_handler_kwargs,
-        facebook_mms_tts_handler_kwargs,
-        pocket_tts_handler_kwargs,
-        kokoro_tts_handler_kwargs,
-        qwen3_tts_handler_kwargs,
-    )
+def prepare_all_args(args: ParsedArguments) -> None:
+    """Validate selectors and apply the global device to selected configs only."""
 
-    rename_args(whisper_stt_handler_kwargs, "stt")
-    rename_args(faster_whisper_stt_handler_kwargs, "faster_whisper_stt")
-    rename_args(paraformer_stt_handler_kwargs, "paraformer_stt")
-    rename_args(sense_voice_stt_handler_kwargs, "sense_voice_stt")
-    rename_args(mlx_audio_whisper_stt_handler_kwargs, "mlx_audio_whisper")
-    rename_args(parakeet_tdt_stt_handler_kwargs, "parakeet_tdt")
-    rename_args(language_model_handler_kwargs, "llm")
-    rename_args(responses_api_language_model_handler_kwargs, "responses_api")
-    rename_args(chat_tts_handler_kwargs, "chat_tts")
-    rename_args(facebook_mms_tts_handler_kwargs, "facebook_mms")
-    rename_args(pocket_tts_handler_kwargs, "pocket_tts")
-    rename_args(kokoro_tts_handler_kwargs, "kokoro")
-    rename_args(qwen3_tts_handler_kwargs, "qwen3_tts")
+    prepare_module_args(args.module_kwargs, args.llm_backend)
+    if args.module_kwargs.device is None:
+        return
+    for field_name in ("stt_backend", "llm_backend", "tts_backend"):
+        selection = getattr(args, field_name)
+        if "device" not in selection.config:
+            continue
+        config = {**selection.config, "device": args.module_kwargs.device}
+        setattr(args, field_name, replace(selection, config=config))
 
 
-def initialize_queues_and_events() -> dict[str, Any]:
-    return {
-        "stop_event": Event(),
-        "should_listen": Event(),
-        "response_playing": Event(),
-        "cancel_scope": CancelScope(),
-        "recv_audio_chunks_queue": Queue[AudioInItem](),
-        "send_audio_chunks_queue": Queue[AudioOutItem](),
-        "spoken_prompt_queue": Queue[VADOutItem](),
-        "stt_output_queue": Queue[STTOutItem](),
-        "text_prompt_queue": Queue[TextPromptItem](),
-        "lm_response_queue": Queue[LMOutItem](),
-        "lm_processed_queue": Queue[TTSInItem](),  # NEW: LLM -> LM processor -> TTS
-        "text_output_queue": Queue[TextEventItem](),  # NEW: for text messages to WebSocket
-    }
-
-
-def _build_pipeline_handlers(
+def _build_handlers(
     *,
     stop_event: Event,
     should_listen: Event,
@@ -398,31 +356,17 @@ def _build_pipeline_handlers(
     lm_response_queue: Queue[LMOutItem],
     lm_processed_queue: Queue[TTSInItem],
     send_audio_chunks_queue: Queue[AudioOutItem],
-    text_output_queue: Optional[Queue[TextEventItem]],
-    transcription_notifier_setup: dict[str, Any],
+    text_output_queue: Queue[TextEventItem],
     module_kwargs: ModuleArguments,
     vad_handler_kwargs: VADHandlerArguments,
-    whisper_stt_handler_kwargs: WhisperSTTHandlerArguments,
-    faster_whisper_stt_handler_kwargs: FasterWhisperSTTHandlerArguments,
-    paraformer_stt_handler_kwargs: ParaformerSTTHandlerArguments,
-    sense_voice_stt_handler_kwargs: SenseVoiceSTTHandlerArguments,
-    mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments,
-    parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
-    language_model_handler_kwargs: LanguageModelHandlerArguments,
-    responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
-    chat_tts_handler_kwargs: ChatTTSHandlerArguments,
-    facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
-    pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
-    kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
-    qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
-    speculative_turns: SpeculativeTurnTracker | None = None,
+    stt_backend: BackendSelection,
+    llm_backend: BackendSelection,
+    tts_backend: BackendSelection,
+    speculative_turns: SpeculativeTurnTracker,
+    cancel_scope: CancelScope,
+    pipeline_index: int,
 ) -> list[Any]:
-    """Build the shared handler chain: VAD → STT/AudioInput → LM → LMOutputProcessor → TTS.
-
-    Callers own the queues, events, and any per-mode mutations to handler kwargs (cancel_scope,
-    text_output_queue, live transcription flags). `transcription_notifier_setup` differs by mode:
-    realtime mode passes a service-driven setup; non-realtime modes inject a RuntimeConfig.
-    """
+    """Build a handler chain: VAD → STT/AudioInput → LM → TTS."""
     from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 
     vad = VADHandler(
@@ -430,103 +374,94 @@ def _build_pipeline_handlers(
         queue_in=recv_audio_chunks_queue,
         queue_out=spoken_prompt_queue,
         setup_args=(should_listen,),
-        setup_kwargs=vars(vad_handler_kwargs),
+        setup_kwargs={
+            **{
+                config_field.name: deepcopy(getattr(vad_handler_kwargs, config_field.name))
+                for config_field in fields(vad_handler_kwargs)
+            },
+            "text_output_queue": text_output_queue,
+            "speculative_turns": speculative_turns,
+        },
     )
 
-    speech_input_handlers: list[Any]
-    if module_kwargs.stt == "none":
-        from speech_to_speech.LLM.audio_input_notifier import AudioInputNotifier
-
-        speech_input_handlers = [
-            AudioInputNotifier(
-                stop_event,
-                queue_in=spoken_prompt_queue,
-                queue_out=text_prompt_queue,
-                setup_kwargs={
-                    "runtime_config": transcription_notifier_setup.get("runtime_config"),
-                    "should_listen": should_listen,
-                    "sample_rate": vad_handler_kwargs.sample_rate,
-                    "speculative_turns": speculative_turns,
-                    "text_output_queue": text_output_queue,
-                },
-            )
-        ]
-    else:
+    needs_notifier = not stt_backend.spec.capabilities.bypasses_transcription_notifier
+    stt_queue_out: Queue[Any] = stt_output_queue if needs_notifier else text_prompt_queue
+    stt_context = HandlerContext(
+        stop_event=stop_event,
+        queue_in=spoken_prompt_queue,
+        queue_out=stt_queue_out,
+        text_output_queue=text_output_queue,
+        should_listen=should_listen,
+        cancel_scope=cancel_scope,
+        speculative_turns=speculative_turns,
+        pipeline_index=pipeline_index,
+        sample_rate=vad_handler_kwargs.sample_rate,
+        enable_live_transcription=module_kwargs.enable_live_transcription,
+        live_transcription_update_interval=module_kwargs.live_transcription_update_interval,
+    )
+    speech_input_handlers = [create_backend_handler(stt_backend, stt_context)]
+    if needs_notifier:
         transcription_notifier = TranscriptionNotifier(
             stop_event,
             queue_in=stt_output_queue,
             queue_out=text_prompt_queue,  # type: ignore[arg-type]
-            setup_kwargs=transcription_notifier_setup,
+            setup_kwargs={
+                "text_output_queue": text_output_queue,
+                "should_listen": should_listen,
+            },
+        )
+        speech_input_handlers.append(transcription_notifier)
+
+    def handler_context(queue_in: Queue[Any], queue_out: Queue[Any]) -> HandlerContext:
+        return HandlerContext(
+            stop_event=stop_event,
+            queue_in=queue_in,
+            queue_out=queue_out,
+            text_output_queue=text_output_queue,
+            should_listen=should_listen,
+            cancel_scope=cancel_scope,
+            speculative_turns=speculative_turns,
+            pipeline_index=pipeline_index,
+            sample_rate=vad_handler_kwargs.sample_rate,
+            enable_live_transcription=module_kwargs.enable_live_transcription,
+            live_transcription_update_interval=module_kwargs.live_transcription_update_interval,
         )
 
-        stt = get_stt_handler(
-            module_kwargs,
-            stop_event,
-            spoken_prompt_queue,
-            stt_output_queue,
-            speculative_turns,
-            whisper_stt_handler_kwargs,
-            faster_whisper_stt_handler_kwargs,
-            paraformer_stt_handler_kwargs,
-            sense_voice_stt_handler_kwargs,
-            mlx_audio_whisper_stt_handler_kwargs,
-            parakeet_tdt_stt_handler_kwargs,
-        )
-        speech_input_handlers = [stt, transcription_notifier]
-
-    lm = get_llm_handler(
-        module_kwargs,
-        stop_event,
-        text_prompt_queue,
-        lm_response_queue,
-        language_model_handler_kwargs,
-        responses_api_language_model_handler_kwargs,
+    lm_context = handler_context(text_prompt_queue, lm_response_queue)
+    lm = create_backend_handler(
+        llm_backend,
+        lm_context,
     )
 
     lm_processor = LMOutputProcessor(
         stop_event,
         queue_in=lm_response_queue,
         queue_out=lm_processed_queue,
-        setup_kwargs={"text_output_queue": text_output_queue, "speculative_turns": speculative_turns},
+        setup_kwargs={
+            "speculative_turns": speculative_turns,
+        },
     )
 
-    tts = get_tts_handler(
-        module_kwargs,
-        stop_event,
-        lm_processed_queue,
-        send_audio_chunks_queue,
-        should_listen,
-        chat_tts_handler_kwargs,
-        facebook_mms_tts_handler_kwargs,
-        pocket_tts_handler_kwargs,
-        kokoro_tts_handler_kwargs,
-        qwen3_tts_handler_kwargs,
+    tts_context = handler_context(lm_processed_queue, send_audio_chunks_queue)
+    tts = create_backend_handler(
+        tts_backend,
+        tts_context,
     )
 
     return [vad, *speech_input_handlers, lm, lm_processor, tts]
 
 
-def _build_realtime_pipeline_unit(
+def _build_pipeline_unit(
     *,
     index: int,
     stop_event: Event,
     module_kwargs: ModuleArguments,
     vad_handler_kwargs: VADHandlerArguments,
-    whisper_stt_handler_kwargs: WhisperSTTHandlerArguments,
-    faster_whisper_stt_handler_kwargs: FasterWhisperSTTHandlerArguments,
-    paraformer_stt_handler_kwargs: ParaformerSTTHandlerArguments,
-    sense_voice_stt_handler_kwargs: SenseVoiceSTTHandlerArguments,
-    mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments,
-    parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
-    language_model_handler_kwargs: LanguageModelHandlerArguments,
-    responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
-    chat_tts_handler_kwargs: ChatTTSHandlerArguments,
-    facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
-    pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
-    kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
-    qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
+    stt_backend: BackendSelection,
+    llm_backend: BackendSelection,
+    tts_backend: BackendSelection,
 ) -> "PipelineUnit":
-    """Build one isolated realtime pipeline (own queues, events, service, handlers).
+    """Build one isolated pipeline with its own state and queues.
 
     Returns a PipelineUnit that lives inside RealtimeServer's pool. Handler instances
     are returned in `unit.handlers`; the caller threads them via ThreadManager. No uvicorn
@@ -534,21 +469,11 @@ def _build_realtime_pipeline_unit(
     """
     from speech_to_speech.api.openai_realtime.service import RealtimeService
 
-    # Per-unit deep copies so mutations (cancel_scope, text_output_queue) don't bleed across pipelines.
+    # Per-unit copies isolate any setup-time mutation performed by third-party libraries.
     vad_kw = deepcopy(vad_handler_kwargs)
-    whisper_kw = deepcopy(whisper_stt_handler_kwargs)
-    faster_whisper_kw = deepcopy(faster_whisper_stt_handler_kwargs)
-    paraformer_kw = deepcopy(paraformer_stt_handler_kwargs)
-    sense_voice_kw = deepcopy(sense_voice_stt_handler_kwargs)
-    mlx_audio_whisper_kw = deepcopy(mlx_audio_whisper_stt_handler_kwargs)
-    parakeet_kw = deepcopy(parakeet_tdt_stt_handler_kwargs)
-    lm_kw = deepcopy(language_model_handler_kwargs)
-    responses_api_kw = deepcopy(responses_api_language_model_handler_kwargs)
-    chat_tts_kw = deepcopy(chat_tts_handler_kwargs)
-    facebook_mms_kw = deepcopy(facebook_mms_tts_handler_kwargs)
-    pocket_tts_kw = deepcopy(pocket_tts_handler_kwargs)
-    kokoro_tts_kw = deepcopy(kokoro_tts_handler_kwargs)
-    qwen3_tts_kw = deepcopy(qwen3_tts_handler_kwargs)
+    stt_selection = stt_backend.copy_for_pipeline()
+    llm_selection = llm_backend.copy_for_pipeline()
+    tts_selection = tts_backend.copy_for_pipeline()
 
     should_listen = Event()
     response_playing = Event()
@@ -563,37 +488,22 @@ def _build_realtime_pipeline_unit(
     lm_processed_queue: Queue[TTSInItem] = Queue()
     text_output_queue: Queue[TextEventItem] = Queue()
 
-    vars(vad_kw)["text_output_queue"] = text_output_queue
-    vars(vad_kw)["speculative_turns"] = speculative_turns
-    for kw in (
-        lm_kw,
-        responses_api_kw,
-        kokoro_tts_kw,
-        qwen3_tts_kw,
-        pocket_tts_kw,
-        chat_tts_kw,
-        facebook_mms_kw,
-    ):
-        vars(kw)["cancel_scope"] = cancel_scope
-        vars(kw)["speculative_turns"] = speculative_turns
-
-    if module_kwargs.llm_backend in ("responses-api", "chat-completions"):
-        chat_size = vars(responses_api_kw).get("chat_size", 10)
-    else:
-        chat_size = vars(lm_kw).get("chat_size", 10)
+    chat_size = llm_selection.config.get("chat_size", 10)
+    default_instructions = llm_selection.config.get("init_chat_prompt")
 
     service = RealtimeService(
         text_prompt_queue=text_prompt_queue,
         should_listen=should_listen,
         chat_size=chat_size,
         speculative_turns=speculative_turns,
+        default_instructions=default_instructions,
     )
 
     if module_kwargs.enable_live_transcription:
         vad_kw.enable_realtime_transcription = True
         vad_kw.realtime_processing_pause = module_kwargs.live_transcription_update_interval
 
-    handlers = _build_pipeline_handlers(
+    handlers = _build_handlers(
         stop_event=stop_event,
         should_listen=should_listen,
         recv_audio_chunks_queue=recv_audio_chunks_queue,
@@ -604,26 +514,14 @@ def _build_realtime_pipeline_unit(
         lm_processed_queue=lm_processed_queue,
         send_audio_chunks_queue=send_audio_chunks_queue,
         text_output_queue=text_output_queue,
-        transcription_notifier_setup={
-            "text_output_queue": text_output_queue,
-            "should_listen": should_listen,
-        },
         module_kwargs=module_kwargs,
         vad_handler_kwargs=vad_kw,
-        whisper_stt_handler_kwargs=whisper_kw,
-        faster_whisper_stt_handler_kwargs=faster_whisper_kw,
-        paraformer_stt_handler_kwargs=paraformer_kw,
-        sense_voice_stt_handler_kwargs=sense_voice_kw,
-        mlx_audio_whisper_stt_handler_kwargs=mlx_audio_whisper_kw,
-        parakeet_tdt_stt_handler_kwargs=parakeet_kw,
-        language_model_handler_kwargs=lm_kw,
-        responses_api_language_model_handler_kwargs=responses_api_kw,
-        chat_tts_handler_kwargs=chat_tts_kw,
-        facebook_mms_tts_handler_kwargs=facebook_mms_kw,
-        pocket_tts_handler_kwargs=pocket_tts_kw,
-        kokoro_tts_handler_kwargs=kokoro_tts_kw,
-        qwen3_tts_handler_kwargs=qwen3_tts_kw,
+        stt_backend=stt_selection,
+        llm_backend=llm_selection,
+        tts_backend=tts_selection,
         speculative_turns=speculative_turns,
+        cancel_scope=cancel_scope,
+        pipeline_index=index,
     )
     for h in handlers:
         h.pipeline_index = index
@@ -643,460 +541,81 @@ def _build_realtime_pipeline_unit(
 
 
 def build_pipeline(
-    module_kwargs: ModuleArguments,
-    socket_receiver_kwargs: SocketReceiverArguments,
-    socket_sender_kwargs: SocketSenderArguments,
-    websocket_streamer_kwargs: WebSocketStreamerArguments,
-    vad_handler_kwargs: VADHandlerArguments,
-    whisper_stt_handler_kwargs: WhisperSTTHandlerArguments,
-    faster_whisper_stt_handler_kwargs: FasterWhisperSTTHandlerArguments,
-    paraformer_stt_handler_kwargs: ParaformerSTTHandlerArguments,
-    sense_voice_stt_handler_kwargs: SenseVoiceSTTHandlerArguments,
-    mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments,
-    parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
-    language_model_handler_kwargs: LanguageModelHandlerArguments,
-    responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
-    chat_tts_handler_kwargs: ChatTTSHandlerArguments,
-    facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
-    pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
-    kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
-    qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
-    queues_and_events: dict[str, Any],
+    args: ParsedArguments,
+    stop_event: Event,
+    *,
+    host: str | None = None,
 ) -> ThreadManager:
-    stop_event = queues_and_events["stop_event"]
-    should_listen = queues_and_events["should_listen"]
-    recv_audio_chunks_queue = queues_and_events["recv_audio_chunks_queue"]
-    send_audio_chunks_queue = queues_and_events["send_audio_chunks_queue"]
-    spoken_prompt_queue = queues_and_events["spoken_prompt_queue"]
-    stt_output_queue = queues_and_events["stt_output_queue"]
-    text_prompt_queue = queues_and_events["text_prompt_queue"]
-    lm_response_queue = queues_and_events["lm_response_queue"]
-    lm_processed_queue = queues_and_events["lm_processed_queue"]
-    text_output_queue = (
-        None  # Only set for raw WebSocket and Realtime modes; kept None otherwise to avoid unbounded queue growth
-    )
+    """Build a pool of pipeline units behind one server."""
+    from speech_to_speech.api.openai_realtime.server import RealtimeServer
 
-    comms_handlers: list[Any] = []
-    if module_kwargs.mode == "local":
-        from speech_to_speech.connections.local_audio_streamer import LocalAudioStreamer
-
-        local_audio_streamer = LocalAudioStreamer(
-            input_queue=recv_audio_chunks_queue,
-            output_queue=send_audio_chunks_queue,
-            should_listen=should_listen,
-        )
-        comms_handlers = [local_audio_streamer]
-        should_listen.set()
-    elif module_kwargs.mode == "raw-websocket":
-        from speech_to_speech.connections.websocket_streamer import WebSocketStreamer
-
-        text_output_queue = queues_and_events["text_output_queue"]
-        websocket_streamer = WebSocketStreamer(
-            stop_event,
-            input_queue=recv_audio_chunks_queue,
-            output_queue=send_audio_chunks_queue,
-            should_listen=should_listen,
-            text_output_queue=text_output_queue,
-            host=websocket_streamer_kwargs.ws_host,
-            port=websocket_streamer_kwargs.ws_port,
-        )
-        comms_handlers = [websocket_streamer]
-    elif module_kwargs.mode == "realtime":
-        from speech_to_speech.api.openai_realtime.server import RealtimeServer
-
-        pool_size = max(1, module_kwargs.num_pipelines)
-        pool = [
-            _build_realtime_pipeline_unit(
-                index=i,
-                stop_event=stop_event,
-                module_kwargs=module_kwargs,
-                vad_handler_kwargs=vad_handler_kwargs,
-                whisper_stt_handler_kwargs=whisper_stt_handler_kwargs,
-                faster_whisper_stt_handler_kwargs=faster_whisper_stt_handler_kwargs,
-                paraformer_stt_handler_kwargs=paraformer_stt_handler_kwargs,
-                sense_voice_stt_handler_kwargs=sense_voice_stt_handler_kwargs,
-                mlx_audio_whisper_stt_handler_kwargs=mlx_audio_whisper_stt_handler_kwargs,
-                parakeet_tdt_stt_handler_kwargs=parakeet_tdt_stt_handler_kwargs,
-                language_model_handler_kwargs=language_model_handler_kwargs,
-                responses_api_language_model_handler_kwargs=responses_api_language_model_handler_kwargs,
-                chat_tts_handler_kwargs=chat_tts_handler_kwargs,
-                facebook_mms_tts_handler_kwargs=facebook_mms_tts_handler_kwargs,
-                pocket_tts_handler_kwargs=pocket_tts_handler_kwargs,
-                kokoro_tts_handler_kwargs=kokoro_tts_handler_kwargs,
-                qwen3_tts_handler_kwargs=qwen3_tts_handler_kwargs,
-            )
-            for i in range(pool_size)
-        ]
-
-        llm_proxy_config = build_llm_proxy_config(module_kwargs, responses_api_language_model_handler_kwargs)
-
-        realtime_server = RealtimeServer(
+    module_kwargs = args.module_kwargs
+    pool = [
+        _build_pipeline_unit(
+            index=index,
             stop_event=stop_event,
-            pool=pool,
-            host=websocket_streamer_kwargs.ws_host,
-            port=websocket_streamer_kwargs.ws_port,
-            llm_proxy_config=llm_proxy_config,
+            module_kwargs=module_kwargs,
+            vad_handler_kwargs=args.vad_handler_kwargs,
+            stt_backend=args.stt_backend,
+            llm_backend=args.llm_backend,
+            tts_backend=args.tts_backend,
         )
+        for index in range(module_kwargs.num_pipelines)
+    ]
 
-        all_handlers: list[Any] = [realtime_server]
-        for unit in pool:
-            all_handlers.extend(unit.handlers)
-        return ThreadManager(all_handlers)
-    else:
-        from speech_to_speech.connections.socket_receiver import SocketReceiver
-        from speech_to_speech.connections.socket_sender import SocketSender
-
-        comms_handlers = [
-            SocketReceiver(
-                stop_event,
-                recv_audio_chunks_queue,
-                should_listen,
-                host=socket_receiver_kwargs.recv_host,
-                port=socket_receiver_kwargs.recv_port,
-                chunk_size=socket_receiver_kwargs.chunk_size,
-            ),
-            SocketSender(
-                stop_event,
-                send_audio_chunks_queue,
-                should_listen,
-                host=socket_sender_kwargs.send_host,
-                port=socket_sender_kwargs.send_port,
-            ),
-        ]
-
-    # Set VAD realtime transcription parameters from module_kwargs
-    if module_kwargs.enable_live_transcription:
-        vad_handler_kwargs.enable_realtime_transcription = True
-        vad_handler_kwargs.realtime_processing_pause = module_kwargs.live_transcription_update_interval
-
-    if module_kwargs.llm_backend in ("responses-api", "chat-completions"):
-        _lm_vars = vars(responses_api_language_model_handler_kwargs)
-    else:
-        _lm_vars = vars(language_model_handler_kwargs)
-    transcription_notifier_setup: dict[str, Any] = {
-        "text_output_queue": text_output_queue,
-        "should_listen": should_listen,
-        "runtime_config": RuntimeConfig(
-            chat=Chat(_lm_vars.get("chat_size", 30)),
-            session=RealtimeSessionCreateRequest(
-                type="realtime",
-                instructions=_lm_vars.get("init_chat_prompt"),
-            ),
-        ),
-    }
-
-    pipeline_handlers = _build_pipeline_handlers(
+    server = RealtimeServer(
         stop_event=stop_event,
-        should_listen=should_listen,
-        recv_audio_chunks_queue=recv_audio_chunks_queue,
-        spoken_prompt_queue=spoken_prompt_queue,
-        stt_output_queue=stt_output_queue,
-        text_prompt_queue=text_prompt_queue,
-        lm_response_queue=lm_response_queue,
-        lm_processed_queue=lm_processed_queue,
-        send_audio_chunks_queue=send_audio_chunks_queue,
-        text_output_queue=text_output_queue,
-        transcription_notifier_setup=transcription_notifier_setup,
-        module_kwargs=module_kwargs,
-        vad_handler_kwargs=vad_handler_kwargs,
-        whisper_stt_handler_kwargs=whisper_stt_handler_kwargs,
-        faster_whisper_stt_handler_kwargs=faster_whisper_stt_handler_kwargs,
-        paraformer_stt_handler_kwargs=paraformer_stt_handler_kwargs,
-        sense_voice_stt_handler_kwargs=sense_voice_stt_handler_kwargs,
-        mlx_audio_whisper_stt_handler_kwargs=mlx_audio_whisper_stt_handler_kwargs,
-        parakeet_tdt_stt_handler_kwargs=parakeet_tdt_stt_handler_kwargs,
-        language_model_handler_kwargs=language_model_handler_kwargs,
-        responses_api_language_model_handler_kwargs=responses_api_language_model_handler_kwargs,
-        chat_tts_handler_kwargs=chat_tts_handler_kwargs,
-        facebook_mms_tts_handler_kwargs=facebook_mms_tts_handler_kwargs,
-        pocket_tts_handler_kwargs=pocket_tts_handler_kwargs,
-        kokoro_tts_handler_kwargs=kokoro_tts_handler_kwargs,
-        qwen3_tts_handler_kwargs=qwen3_tts_handler_kwargs,
+        pool=pool,
+        host=host or args.realtime_server_kwargs.host,
+        port=args.realtime_server_kwargs.port,
+        llm_proxy_config=(
+            build_llm_proxy_config(module_kwargs, args.llm_backend) if module_kwargs.enable_llm_proxy else None
+        ),
     )
 
-    return ThreadManager([*comms_handlers, *pipeline_handlers])
+    handlers: list[Any] = []
+    for unit in pool:
+        handlers.extend(unit.handlers)
+    handlers.append(server)
+    return ThreadManager(handlers)
 
 
-def get_stt_handler(
-    module_kwargs: ModuleArguments,
-    stop_event: Event,
-    spoken_prompt_queue: Queue[VADOutItem],
-    text_prompt_queue: Queue[STTOutItem],
-    speculative_turns: SpeculativeTurnTracker | None,
-    whisper_stt_handler_kwargs: WhisperSTTHandlerArguments,
-    faster_whisper_stt_handler_kwargs: FasterWhisperSTTHandlerArguments,
-    paraformer_stt_handler_kwargs: ParaformerSTTHandlerArguments,
-    sense_voice_stt_handler_kwargs: SenseVoiceSTTHandlerArguments,
-    mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments,
-    parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
-) -> BaseHandler[STTIn, STTOut]:
-    from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadManager:
+    """Compose the canonical server and audio client over a forced loopback URL."""
 
-    def with_speculative_turns(handler: BaseSTTHandler) -> BaseSTTHandler:
-        if speculative_turns is not None:
-            handler.speculative_turns = speculative_turns
-        return handler
+    from speech_to_speech.api.openai_realtime.audio_client import (
+        RealtimeAudioClient,
+        RealtimeAudioClientConfig,
+    )
 
-    if module_kwargs.stt == "whisper":
-        from speech_to_speech.STT.whisper_stt_handler import WhisperSTTHandler
-
-        return with_speculative_turns(
-            WhisperSTTHandler(
-                stop_event,
-                queue_in=spoken_prompt_queue,
-                queue_out=text_prompt_queue,
-                setup_kwargs=vars(whisper_stt_handler_kwargs),
-            )
-        )
-    elif module_kwargs.stt == "whisper-mlx":
-        from speech_to_speech.STT.lightning_whisper_mlx_handler import LightningWhisperSTTHandler
-
-        return with_speculative_turns(
-            LightningWhisperSTTHandler(
-                stop_event,
-                queue_in=spoken_prompt_queue,
-                queue_out=text_prompt_queue,
-                setup_kwargs=vars(whisper_stt_handler_kwargs),
-            )
-        )
-    elif module_kwargs.stt == "mlx-audio-whisper":
-        from speech_to_speech.STT.mlx_audio_whisper_handler import MLXAudioWhisperSTTHandler
-
-        # Merge MLX Audio Whisper kwargs with shared language parameter from Whisper kwargs
-        setup_kwargs = {**vars(mlx_audio_whisper_stt_handler_kwargs), "language": whisper_stt_handler_kwargs.language}
-        return with_speculative_turns(
-            MLXAudioWhisperSTTHandler(
-                stop_event,
-                queue_in=spoken_prompt_queue,
-                queue_out=text_prompt_queue,
-                setup_kwargs=setup_kwargs,
-            )
-        )
-    elif module_kwargs.stt == "paraformer":
-        from speech_to_speech.STT.paraformer_handler import ParaformerSTTHandler
-
-        return with_speculative_turns(
-            ParaformerSTTHandler(
-                stop_event,
-                queue_in=spoken_prompt_queue,
-                queue_out=text_prompt_queue,
-                setup_kwargs=vars(paraformer_stt_handler_kwargs),
-            )
-        )
-    elif module_kwargs.stt == "sense-voice":
-        from speech_to_speech.STT.sense_voice_handler import SenseVoiceSTTHandler
-
-        return with_speculative_turns(
-            SenseVoiceSTTHandler(
-                stop_event,
-                queue_in=spoken_prompt_queue,
-                queue_out=text_prompt_queue,
-                setup_kwargs=vars(sense_voice_stt_handler_kwargs),
-            )
-        )
-    elif module_kwargs.stt == "faster-whisper":
-        from speech_to_speech.STT.faster_whisper_handler import FasterWhisperSTTHandler
-
-        return with_speculative_turns(
-            FasterWhisperSTTHandler(
-                stop_event,
-                queue_in=spoken_prompt_queue,
-                queue_out=text_prompt_queue,
-                setup_kwargs=vars(faster_whisper_stt_handler_kwargs),
-            )
-        )
-    elif module_kwargs.stt == "parakeet-tdt":
-        from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
-
-        # Add live transcription parameters to setup_kwargs
-        setup_kwargs = {
-            **vars(parakeet_tdt_stt_handler_kwargs),
-            "enable_live_transcription": module_kwargs.enable_live_transcription,
-            "live_transcription_update_interval": module_kwargs.live_transcription_update_interval,
-        }
-
-        return with_speculative_turns(
-            ParakeetTDTSTTHandler(
-                stop_event,
-                queue_in=spoken_prompt_queue,
-                queue_out=text_prompt_queue,
-                setup_kwargs=setup_kwargs,
-            )
-        )
-    else:
-        raise ValueError(
-            "The STT should be either none, whisper, whisper-mlx, mlx-audio-whisper, faster-whisper, parakeet-tdt, or paraformer."
-        )
+    server_manager = build_pipeline(args, stop_event, host="127.0.0.1")
+    local_audio = args.local_audio_kwargs
+    client = RealtimeAudioClient(
+        stop_event,
+        RealtimeAudioClientConfig(
+            url=f"ws://127.0.0.1:{args.realtime_server_kwargs.port}/v1/realtime",
+            api_key="local",
+            chunk_size=local_audio.local_audio_chunk_size,
+            input_device=local_audio.local_audio_input_device,
+            output_device=local_audio.local_audio_output_device,
+            print_json=local_audio.local_audio_print_json,
+            block_mic_during_playback=local_audio.local_audio_block_mic_during_playback,
+        ),
+    )
+    return ThreadManager([*server_manager.handlers, client])
 
 
-def get_llm_handler(
-    module_kwargs: ModuleArguments,
-    stop_event: Event,
-    text_prompt_queue: Queue[TextPromptItem],
-    lm_response_queue: Queue[LMOutItem],
-    language_model_handler_kwargs: LanguageModelHandlerArguments,
-    responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
-) -> BaseHandler[LLMIn, LLMOut]:
-    if module_kwargs.llm_backend == "responses-api":
-        from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
+def run_pipeline_command(command: Literal["serve", "local"], argv: Sequence[str]) -> None:
+    """Run the server alone or compose it with the loopback audio client."""
 
-        return ResponsesApiModelHandler(
-            stop_event,
-            queue_in=text_prompt_queue,
-            queue_out=lm_response_queue,
-            setup_kwargs=vars(responses_api_language_model_handler_kwargs),
-        )
-
-    if module_kwargs.llm_backend == "chat-completions":
-        from speech_to_speech.LLM.chat_completions_language_model import ChatCompletionsApiModelHandler
-
-        # Reuses the responses-api argument class (identical fields: model_name,
-        # base_url, api_key, stream, disable_thinking, ...).
-        return ChatCompletionsApiModelHandler(
-            stop_event,
-            queue_in=text_prompt_queue,
-            queue_out=lm_response_queue,
-            setup_kwargs=vars(responses_api_language_model_handler_kwargs),
-        )
-
-    if module_kwargs.llm_backend in ("transformers", "mlx-lm"):
-        lm_kwargs = vars(language_model_handler_kwargs)
-        is_vlm = lm_kwargs.pop("is_vlm", False)
-        if module_kwargs.llm_backend == "mlx-lm":
-            lm_kwargs["backend"] = "mlx"
-
-        if is_vlm:
-            from speech_to_speech.LLM.language_model import VisionLanguageModelHandler
-
-            return VisionLanguageModelHandler(
-                stop_event,
-                queue_in=text_prompt_queue,
-                queue_out=lm_response_queue,
-                setup_kwargs=lm_kwargs,
-            )
-        from speech_to_speech.LLM.language_model import LanguageModelHandler
-
-        return LanguageModelHandler(
-            stop_event,
-            queue_in=text_prompt_queue,
-            queue_out=lm_response_queue,
-            setup_kwargs=lm_kwargs,
-        )
-
-    raise ValueError("The LLM should be either transformers, mlx-lm, responses-api or chat-completions")
-
-
-def get_tts_handler(
-    module_kwargs: ModuleArguments,
-    stop_event: Event,
-    lm_response_queue: Queue[TTSInItem],
-    send_audio_chunks_queue: Queue[AudioOutItem],
-    should_listen: Event,
-    chat_tts_handler_kwargs: ChatTTSHandlerArguments,
-    facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
-    pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
-    kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
-    qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
-) -> BaseHandler[TTSIn, TTSOut]:
-    if module_kwargs.tts == "chatTTS":
-        try:
-            from speech_to_speech.TTS.chatTTS_handler import ChatTTSHandler
-        except (ImportError, RuntimeError) as e:
-            logger.error('Error importing ChatTTSHandler. Install it with `pip install "speech-to-speech[chattts]"`.')
-            raise e
-        return ChatTTSHandler(
-            stop_event,
-            queue_in=lm_response_queue,
-            queue_out=send_audio_chunks_queue,
-            setup_args=(should_listen,),
-            setup_kwargs=vars(chat_tts_handler_kwargs),
-        )
-    elif module_kwargs.tts == "facebookMMS":
-        from speech_to_speech.TTS.facebookmms_handler import FacebookMMSTTSHandler
-
-        return FacebookMMSTTSHandler(
-            stop_event,
-            queue_in=lm_response_queue,
-            queue_out=send_audio_chunks_queue,
-            setup_args=(should_listen,),
-            setup_kwargs=vars(facebook_mms_tts_handler_kwargs),
-        )
-    elif module_kwargs.tts == "pocket":
-        try:
-            from speech_to_speech.TTS.pocket_tts_handler import PocketTTSHandler
-        except ImportError as e:
-            raise ImportError(
-                'Pocket TTS is optional. Install it with `pip install "speech-to-speech[pocket]"`.'
-            ) from e
-
-        return PocketTTSHandler(
-            stop_event,
-            queue_in=lm_response_queue,
-            queue_out=send_audio_chunks_queue,
-            setup_args=(should_listen,),
-            setup_kwargs=vars(pocket_tts_handler_kwargs),
-        )
-    elif module_kwargs.tts == "kokoro":
-        try:
-            from speech_to_speech.TTS.kokoro_handler import KokoroTTSHandler
-        except ImportError as e:
-            raise ImportError('Kokoro is optional. Install it with `pip install "speech-to-speech[kokoro]"`.') from e
-
-        return KokoroTTSHandler(
-            stop_event,
-            queue_in=lm_response_queue,
-            queue_out=send_audio_chunks_queue,
-            setup_args=(should_listen,),
-            setup_kwargs=vars(kokoro_tts_handler_kwargs),
-        )
-    elif module_kwargs.tts == "qwen3":
-        from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
-
-        return Qwen3TTSHandler(
-            stop_event,
-            queue_in=lm_response_queue,
-            queue_out=send_audio_chunks_queue,
-            setup_args=(should_listen,),
-            setup_kwargs=vars(qwen3_tts_handler_kwargs),
-        )
-    else:
-        raise ValueError("The TTS should be either chatTTS, facebookMMS, pocket, kokoro, or qwen3")
-
-
-def main() -> None:
-    args = parse_arguments()
+    args = parse_arguments(argv, command=command)
 
     setup_logger(args.module_kwargs.log_level)
 
     if args.module_kwargs.num_pipelines < 1:
         raise ValueError(f"--num_pipelines must be >= 1, got {args.module_kwargs.num_pipelines}")
 
-    prepare_all_args(
-        args.module_kwargs,
-        args.whisper_stt_handler_kwargs,
-        args.paraformer_stt_handler_kwargs,
-        args.sense_voice_stt_handler_kwargs,
-        args.faster_whisper_stt_handler_kwargs,
-        args.mlx_audio_whisper_stt_handler_kwargs,
-        args.parakeet_tdt_stt_handler_kwargs,
-        args.language_model_handler_kwargs,
-        args.responses_api_language_model_handler_kwargs,
-        args.chat_tts_handler_kwargs,
-        args.facebook_mms_tts_handler_kwargs,
-        args.pocket_tts_handler_kwargs,
-        args.kokoro_tts_handler_kwargs,
-        args.qwen3_tts_handler_kwargs,
-    )
-
-    # Validate after prepare_all_args(): --local_mac_optimal_settings mutates
-    # module_kwargs.mode to "local", so checking before would let
-    # --local_mac_optimal_settings --num_pipelines 2 sneak past this guard.
-    if args.module_kwargs.num_pipelines > 1 and args.module_kwargs.mode != "realtime":
-        raise ValueError(
-            f"--num_pipelines > 1 is only supported with --mode realtime "
-            f"(got mode={args.module_kwargs.mode!r}, num_pipelines={args.module_kwargs.num_pipelines})"
-        )
-
+    prepare_all_args(args)
     # On Apple Silicon, all MLX inference serializes through a global lock (utils/mlx_lock.py).
     # The progressive STT path uses a short timeout and drops work under contention, producing
     # a flood of warnings without affecting final transcripts. With a pool, pre-emptively turn
@@ -1110,28 +629,9 @@ def main() -> None:
         )
         args.module_kwargs.enable_live_transcription = False
 
-    queues_and_events = initialize_queues_and_events()
-
-    pipeline_manager = build_pipeline(
-        args.module_kwargs,
-        args.socket_receiver_kwargs,
-        args.socket_sender_kwargs,
-        args.websocket_streamer_kwargs,
-        args.vad_handler_kwargs,
-        args.whisper_stt_handler_kwargs,
-        args.faster_whisper_stt_handler_kwargs,
-        args.paraformer_stt_handler_kwargs,
-        args.sense_voice_stt_handler_kwargs,
-        args.mlx_audio_whisper_stt_handler_kwargs,
-        args.parakeet_tdt_stt_handler_kwargs,
-        args.language_model_handler_kwargs,
-        args.responses_api_language_model_handler_kwargs,
-        args.chat_tts_handler_kwargs,
-        args.facebook_mms_tts_handler_kwargs,
-        args.pocket_tts_handler_kwargs,
-        args.kokoro_tts_handler_kwargs,
-        args.qwen3_tts_handler_kwargs,
-        queues_and_events,
+    stop_event = Event()
+    pipeline_manager = (
+        build_local_pipeline(args, stop_event) if command == "local" else build_pipeline(args, stop_event)
     )
 
     # Set up graceful shutdown handler
@@ -1155,6 +655,14 @@ def main() -> None:
             console.print("\n[yellow]Shutting down gracefully...[/yellow]")
             pipeline_manager.stop()
             console.print("[green]✓ Pipeline stopped successfully[/green]")
+
+
+def main() -> None:
+    """Compatibility entry point for direct module execution."""
+
+    from speech_to_speech.cli import main as cli_main
+
+    cli_main()
 
 
 if __name__ == "__main__":

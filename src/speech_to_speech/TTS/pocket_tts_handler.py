@@ -29,7 +29,7 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
         should_listen: Event,
         device: str = "cpu",
         voice: str = "alba",  # Default voice from catalog
-        sample_rate: int = 16000,  # Match the pipeline's audio output (LocalAudioStreamer uses 16kHz)
+        sample_rate: int = 16000,  # Match the pipeline's native audio output rate.
         blocksize: int = 512,
         max_tokens: int = 50,
         gen_kwargs: dict[str, Any] | None = None,  # For compatibility with pipeline, not used
@@ -102,7 +102,9 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 tts_input.turn_id,
                 tts_input.turn_revision,
             ):
-                return
+                if tts_input.response_key is None:
+                    return
+                tts_input.cleanup_only = True
             yield AUDIO_RESPONSE_DONE
             return
 

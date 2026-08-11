@@ -96,7 +96,8 @@ import { OrbVisualiser, VIS_FFT_SIZE } from "./orb-visualizer.js";
 import { SentAudioRecorder } from "./user-audio-recorder.js";
 
 /** Build an Error carrying a `code` (and optional extra fields) so callers can
- *  branch on the failure kind: "limit" | "queue-full" | "queue-expired" | "aborted".
+ *  branch on the failure kind: "login-required" | "limit" | "queue-full" |
+ *  "queue-expired" | "aborted".
  *  @param {string} message @param {string} code @param {object} [extra] */
 function _codedError(message, code, extra) {
   const err = /** @type {Error & { code?: string }} */ (new Error(message));
@@ -112,6 +113,7 @@ function _codedError(message, code, extra) {
 // as soon as a sub-field shape it doesn't know about appears.
 const OUTPUT_SAMPLE_RATE = 16000;
 const MIC_CHUNK_MS = 40;
+const RESPONSE_CREATE_ID_METADATA_KEY = "s2s_demo_create_id";
 
 export class S2sWsRealtimeClient extends EventTarget {
   /** @param {WsClientOptions} options */
@@ -177,25 +179,31 @@ export class S2sWsRealtimeClient extends EventTarget {
      * UI can tell a barge-in cut (keep it) from a never-heard speculative
      * response (drop it). */
     this._audibleResponses = new Set();
-    /** @type {Map<string, string>} The CURRENT assistant transcript segment per
-     * response, accumulated from streamed deltas (reset on each segment's done). */
+    /** @type {Map<string, string>} The in-progress assistant transcript per
+     * response, accumulated from streamed deltas until the terminal done. */
     this._asstTranscriptByResp = new Map();
-    /** @type {Map<string, string>} Completed assistant transcript segments per
-     * response, space-joined. A single response can emit several
-     * `*.transcript.done` events; we concatenate them until response.done. */
+    /** @type {Map<string, string>} Terminal assistant transcript per response.
+     * Realtime emits one `*.transcript.done`; appending remains for compatibility
+     * with legacy endpoints that emitted a done event for every text segment. */
     this._asstFullByResp = new Map();
     this._muted = false;
     // ── Response lock ────────────────────────────────────────────────────
     // The backend allows only ONE response in flight: creating a second while
     // one is active fails with `conversation_already_has_active_response`. So
-    // we serialize response.create. `_openResponses` counts responses the
-    // server has confirmed (response.created) but not yet finished
-    // (response.done) — it's cumulative, so every create maps to one done.
-    // `_createInFlight` covers the window after we send a create but before its
-    // response.created echo. Any requestResponse() made while locked is queued
-    // and replayed, one at a time, as each response.done frees the slot.
-    this._openResponses = 0;
-    this._createInFlight = false;
+    // we serialize response.create. `_activeResponseId` identifies the one
+    // response the server has confirmed (response.created) but not yet finished
+    // (response.done). Tracking the id makes duplicate lifecycle events
+    // idempotent and lets newer responses replace stale bookkeeping.
+    // `_pendingCreateId` covers the window after we send a create but before
+    // its matching response.created echo. The id travels as response metadata,
+    // so an automatic response cannot accidentally acknowledge our create.
+    // Any requestResponse() made while locked is queued and replayed, one at a
+    // time, as each response.done frees the slot.
+    this._activeResponseId = "";
+    this._pendingCreateId = "";
+    this._pendingCreateSawResponse = false;
+    this._waitingForResponseAfterCollision = false;
+    this._nextCreateSequence = 0;
     /** @type {{ image?: string }[]} Pending response.create payloads, one per
      * queued requestResponse(). A payload may carry an image to send just
      * before its create (so the frame travels with the create, not eagerly). */
@@ -222,8 +230,8 @@ export class S2sWsRealtimeClient extends EventTarget {
     this.dispatchEvent(new CustomEvent("status", { detail: { status } }));
   }
 
-  /** Full assistant transcript so far for a response: the completed segments
-   *  plus the in-progress one, all space-joined.
+  /** Full assistant transcript so far for a response: a terminal transcript,
+   *  when present, plus any in-progress deltas from a legacy segmented stream.
    *  @param {string} rid @returns {string} */
   _asstDisplay(rid) {
     const full = this._asstFullByResp.get(rid) || "";
@@ -362,6 +370,12 @@ export class S2sWsRealtimeClient extends EventTarget {
       const body = await response.json().catch(() => ({}));
       throw _codedError("Daily conversation limit reached", "limit", { tier: body?.tier });
     }
+    if (response.status === 401) {
+      const body = await response.json().catch(() => ({}));
+      throw _codedError("Sign in again to continue", "login-required", {
+        loginUrl: body?.loginUrl,
+      });
+    }
     if (response.status === 503) {
       const body = await response.json().catch(() => ({}));
       if (body?.state === "at_capacity") {
@@ -413,6 +427,12 @@ export class S2sWsRealtimeClient extends EventTarget {
       if (response.status === 402) {
         const body = await response.json().catch(() => ({}));
         throw _codedError("Daily conversation limit reached", "limit", { tier: body?.tier });
+      }
+      if (response.status === 401) {
+        const body = await response.json().catch(() => ({}));
+        throw _codedError("Sign in again to continue", "login-required", {
+          loginUrl: body?.loginUrl,
+        });
       }
       if (response.status === 404) {
         throw _codedError("Queue timed out", "queue-expired");
@@ -708,10 +728,16 @@ export class S2sWsRealtimeClient extends EventTarget {
         break;
 
       case "response.created":
-        // A response now owns the slot — count it and clear our create guard
-        // (this confirms either our create or a server-initiated one).
-        this._openResponses++;
-        this._createInFlight = false;
+        // A response now owns the slot. Only matching metadata acknowledges
+        // our explicit create; automatic responses carry no such marker.
+        this._waitingForResponseAfterCollision = false;
+        this._activeResponseId = event.response?.id ?? "";
+        if (event.response?.metadata?.[RESPONSE_CREATE_ID_METADATA_KEY] === this._pendingCreateId) {
+          this._pendingCreateId = "";
+          this._pendingCreateSawResponse = false;
+        } else if (this._pendingCreateId) {
+          this._pendingCreateSawResponse = true;
+        }
         if (this._status === "connected" || this._status === "user-speaking") {
           this._setStatus("processing");
         }
@@ -745,9 +771,12 @@ export class S2sWsRealtimeClient extends EventTarget {
 
       case "response.done": {
         this._aiSpeaking = false;
-        // This response freed the slot (completion OR cancellation both arrive
-        // as response.done). Decrement and, if a create was waiting, replay it.
-        this._openResponses = Math.max(0, this._openResponses - 1);
+        // Completion and cancellation both arrive as response.done. Clear only
+        // the matching owner: a late terminal for an older response must not
+        // unlock a newer one.
+        const responseId = event.response?.id ?? "";
+        if (this._activeResponseId === responseId) this._activeResponseId = "";
+        this._waitingForResponseAfterCollision = false;
         if (this._status === "ai-speaking" || this._status === "processing") {
           this._setStatus("connected");
         }
@@ -757,15 +786,14 @@ export class S2sWsRealtimeClient extends EventTarget {
         // `response.cancelled` event). Surface the id + status so the UI can
         // drop a cancelled response's transcript and commit a completed one.
         const status = event.response?.status ?? "completed";
-        const responseId = event.response?.id ?? "";
         // Did this response ever play audio? Distinguishes a barge-in cut (the
         // user heard part of it) from a speculative response that never played.
         const audible = responseId ? this._audibleResponses.has(responseId) : false;
         this._audibleResponses.delete(responseId);
         // Pull whatever transcript the response carries, falling back to the
-        // segments we concatenated from the `*.transcript.done` events (plus any
-        // in-progress delta). For an interrupted reply the response payload may
-        // be empty, so this is the last chance to capture the text.
+        // terminal `*.transcript.done` value (plus any in-progress delta from a
+        // legacy segmented stream). For an interrupted reply the response
+        // payload may be empty, so this is the last chance to capture the text.
         const transcript =
           extractResponseTranscript(event.response) ||
           this._asstDisplay(responseId) ||
@@ -786,9 +814,10 @@ export class S2sWsRealtimeClient extends EventTarget {
         const name = typeof event.name === "string" ? event.name : "";
         const args = typeof event.arguments === "string" ? event.arguments : "{}";
         const callId = typeof event.call_id === "string" ? event.call_id : "";
+        const responseId = typeof event.response_id === "string" ? event.response_id : "";
         if (name) {
           this.dispatchEvent(new CustomEvent("toolcall", {
-            detail: { name, arguments: args, callId },
+            detail: { name, arguments: args, callId, responseId },
           }));
         } else {
           // A nameless call can't be executed, so no function_call_output is
@@ -821,6 +850,12 @@ export class S2sWsRealtimeClient extends EventTarget {
 
       case "conversation.item.input_audio_transcription.completed": {
         const transcript = typeof event.transcript === "string" ? event.transcript : "";
+        if (this._waitingForResponseAfterCollision) {
+          // New speech can cancel a merely-pending response without emitting
+          // response.done. Retry only after that speech has been transcribed.
+          this._waitingForResponseAfterCollision = false;
+          this._flushQueuedCreate();
+        }
         if (transcript) {
           this.dispatchEvent(
             new CustomEvent("transcript", {
@@ -832,6 +867,10 @@ export class S2sWsRealtimeClient extends EventTarget {
               },
             }),
           );
+        } else if (this._status === "processing" && !this._responsePending()) {
+          // Empty STT results intentionally do not create a response, so there
+          // will be no response.done event to return the UI to listening.
+          this._setStatus("connected");
         }
         break;
       }
@@ -847,7 +886,7 @@ export class S2sWsRealtimeClient extends EventTarget {
         const delta = typeof event.delta === "string" ? event.delta : "";
         if (delta) {
           this._asstTranscriptByResp.set(rid, (this._asstTranscriptByResp.get(rid) || "") + delta);
-          // Show completed segments + the segment streaming in right now.
+          // Show the complete transcript accumulated from deltas so far.
           this.dispatchEvent(
             new CustomEvent("transcript", {
               detail: { role: "assistant", text: this._asstDisplay(rid), partial: true, responseId: rid },
@@ -860,13 +899,14 @@ export class S2sWsRealtimeClient extends EventTarget {
       case "response.audio_transcript.done":
       case "response.output_audio_transcript.done": {
         const rid = typeof event.response_id === "string" ? event.response_id : "";
-        // This is ONE completed segment. A response can emit several; concatenate
-        // them, space-separated, until response.done clears the accumulator.
+        // This terminalizes the assistant transcript for the response. Realtime
+        // emits it once after all deltas; retain space-joining only for legacy
+        // endpoints that emitted a done event for every text segment.
         const segment =
           (typeof event.transcript === "string" && event.transcript) ||
           this._asstTranscriptByResp.get(rid) ||
           "";
-        this._asstTranscriptByResp.delete(rid); // segment finished; next one starts fresh
+        this._asstTranscriptByResp.delete(rid);
         if (segment) {
           const prev = this._asstFullByResp.get(rid) || "";
           this._asstFullByResp.set(rid, prev ? `${prev} ${segment}` : segment);
@@ -886,17 +926,19 @@ export class S2sWsRealtimeClient extends EventTarget {
         const err = event.error;
         console.error("[ws] server error:", err);
         // The "another response is already active" race: our optimistic create
-        // collided with a still-running response. Don't surface it — clear the
-        // in-flight guard and re-queue, so the create replays on the next
-        // response.done (never retried immediately, which would just collide
-        // again).
+        // collided with a still-running response. Don't surface it — re-queue
+        // the rejected create and retry as soon as the response slot is free.
         if (err?.type === "conversation_already_has_active_response" ||
             err?.code === "conversation_already_has_active_response") {
-          if (this._createInFlight) {
-            this._createInFlight = false;
-            // Re-queue a BARE create: any image on the original payload was
-            // already sent before this (rejected) create, so don't resend it.
-            this._createQueue.push({});
+          if (this._pendingCreateId) {
+            const responseAlreadyFinished = this._pendingCreateSawResponse && !this._activeResponseId;
+            this._waitingForResponseAfterCollision = !this._pendingCreateSawResponse;
+            this._pendingCreateId = "";
+            this._pendingCreateSawResponse = false;
+            // Any image was sent before the rejected create, so don't resend it.
+            // Put the retry ahead of requests queued after it.
+            this._createQueue.unshift({});
+            if (responseAlreadyFinished) this._flushQueuedCreate();
           }
           break;
         }
@@ -1058,7 +1100,7 @@ export class S2sWsRealtimeClient extends EventTarget {
    *   tool so the model sees the snapshot in the response it's about to speak.
    */
   requestResponse(opts = {}) {
-    if (this._responseActive()) {
+    if (this._responsePending()) {
       this._createQueue.push(opts);
       if (this._debug) console.debug(`[ws] response.create queued (a response is active); pending=${this._createQueue.length}`);
       return;
@@ -1068,7 +1110,16 @@ export class S2sWsRealtimeClient extends EventTarget {
 
   /** True while a response occupies the single backend slot. */
   _responseActive() {
-    return this._openResponses > 0 || this._createInFlight;
+    return (
+      Boolean(this._activeResponseId) ||
+      Boolean(this._pendingCreateId) ||
+      this._waitingForResponseAfterCollision
+    );
+  }
+
+  /** True while a response is active, awaiting confirmation, or queued. */
+  _responsePending() {
+    return this._responseActive() || this._createQueue.length > 0;
   }
 
   /** Send a response.create immediately and arm the in-flight guard. Any image
@@ -1077,8 +1128,13 @@ export class S2sWsRealtimeClient extends EventTarget {
   _createResponseNow(opts = {}) {
     if (!this._ws || this._ws.readyState !== WebSocket.OPEN) return;
     if (opts.image) this.sendUserImage(opts.image);
-    this._createInFlight = true;
-    this._send({ type: "response.create" });
+    const createId = `demo_create_${++this._nextCreateSequence}`;
+    this._pendingCreateId = createId;
+    this._pendingCreateSawResponse = false;
+    this._send({
+      type: "response.create",
+      response: { metadata: { [RESPONSE_CREATE_ID_METADATA_KEY]: createId } },
+    });
   }
 
   /** Replay one queued response.create if the slot is now free. Called on every

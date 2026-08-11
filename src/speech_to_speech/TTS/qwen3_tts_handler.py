@@ -17,7 +17,7 @@ from pathlib import Path
 from sys import platform
 from threading import Event
 from time import perf_counter
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, Optional, cast
 
 import numpy as np
 import torch
@@ -28,8 +28,15 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, is_control_message
+from speech_to_speech.pipeline.events import AssistantOutputEvent
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.messages import (
+    AUDIO_RESPONSE_DONE,
+    PIPELINE_END,
+    AssistantTextPart,
+    EndOfResponse,
+    TTSInput,
+)
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 
@@ -50,9 +57,14 @@ MLX_STREAMING_TOKENS_PER_SECOND = 12.5
 PIPELINE_SR = 16000
 ESTIMATED_QWEN3_WORDS_PER_SECOND = 2.6
 ESTIMATED_QWEN3_CHARS_PER_SECOND = 14.0
+ESTIMATED_QWEN3_CJK_CHARS_PER_SECOND = 5.5
 QWEN3_TOKEN_SAFETY_MARGIN = 1.35
 QWEN3_BASE_PROMPT_SECONDS = 1.0
 QWEN3_PUNCTUATION_PAUSE_SECONDS = 0.5
+CJK_CHARACTER_PATTERN = re.compile(
+    r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff"
+    r"\U00020000-\U0002fa1f]"
+)
 QWEN3_LANGUAGE_ALIASES = {
     "zh": "chinese",
     "zh-cn": "chinese",
@@ -610,11 +622,15 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         word_count = len(re.findall(r"\w+", text, flags=re.UNICODE))
         char_count = len(re.sub(r"\s+", "", text))
+        cjk_char_count = len(CJK_CHARACTER_PATTERN.findall(text))
         word_seconds = word_count / ESTIMATED_QWEN3_WORDS_PER_SECOND if word_count else 0.0
         char_seconds = char_count / ESTIMATED_QWEN3_CHARS_PER_SECOND if char_count else 0.0
+        cjk_seconds = cjk_char_count / ESTIMATED_QWEN3_CJK_CHARS_PER_SECOND if cjk_char_count else 0.0
         punctuation_count = sum(unicodedata.category(ch).startswith("P") for ch in text)
         punctuation_seconds = punctuation_count * QWEN3_PUNCTUATION_PAUSE_SECONDS
-        estimated_seconds = max(word_seconds, char_seconds) + punctuation_seconds + QWEN3_BASE_PROMPT_SECONDS
+        estimated_seconds = (
+            max(word_seconds, char_seconds, cjk_seconds) + punctuation_seconds + QWEN3_BASE_PROMPT_SECONDS
+        )
         estimated_tokens = math.ceil(estimated_seconds * MLX_STREAMING_TOKENS_PER_SECOND * QWEN3_TOKEN_SAFETY_MARGIN)
         aligned_tokens = max(
             chunk_size,
@@ -633,10 +649,11 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             )
 
         logger.debug(
-            "Qwen3-TTS using max_new_tokens=%d for utterance with %d words and %d chars",
+            "Qwen3-TTS using max_new_tokens=%d for utterance with %d words, %d chars, and %d CJK chars",
             resolved_tokens,
             word_count,
             char_count,
+            cjk_char_count,
         )
         return resolved_tokens
 
@@ -731,16 +748,24 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             f"Qwen3-TTS generated {audio_duration:.2f}s audio in {generation_time:.2f}s (RTF: {rtf:.2f}, {label})"
         )
 
-    def _coalesce_pending_tts_input(self, current_input: TTSInput) -> tuple[str, Optional[str], bool]:
+    def _coalesce_pending_tts_input(self, current_input: TTSInput) -> tuple[str, Optional[str]]:
         """Combine already-queued text chunks before the next TTS synthesis call."""
         if not hasattr(self.queue_in, "mutex") or not hasattr(self.queue_in, "queue"):
-            return current_input.text, current_input.language_code, False
+            return current_input.text, current_input.language_code
 
         text = current_input.text
         language_code = current_input.language_code
 
         parts = [text.strip()] if text and text.strip() else []
-        saw_end_of_response = False
+        text_events: list[AssistantOutputEvent] = []
+
+        def same_response(item: TTSInput | AssistantOutputEvent) -> bool:
+            return (
+                item.turn_id == current_input.turn_id
+                and item.turn_revision == current_input.turn_revision
+                and item.cancel_generation == current_input.cancel_generation
+                and item.response_key == current_input.response_key
+            )
 
         with self.queue_in.mutex:
             while self.queue_in.queue:
@@ -750,11 +775,17 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 if isinstance(next_item, bytes) and next_item == PIPELINE_END:
                     break
                 if isinstance(next_item, EndOfResponse):
-                    saw_end_of_response = True
                     break
+                if isinstance(next_item, AssistantOutputEvent):
+                    if not same_response(next_item) or any(
+                        not isinstance(part, AssistantTextPart) for part in next_item.parts
+                    ):
+                        break
+                    text_events.append(self.queue_in.queue.popleft())
+                    continue
                 if not isinstance(next_item, TTSInput):
                     break
-                if current_input.turn_id != next_item.turn_id or current_input.turn_revision != next_item.turn_revision:
+                if not same_response(next_item):
                     break
                 if (
                     language_code is not None
@@ -769,8 +800,14 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 if language_code is None:
                     language_code = next_item.language_code
 
+        # These events preceded the inputs absorbed above. Forward them before
+        # synthesis so protocol ordering remains text -> audio while Qwen still
+        # gets to combine consecutive text chunks.
+        for event in text_events:
+            self.queue_out.put(cast(TTSOut, event))
+
         combined_text = " ".join(parts).strip()
-        return combined_text, language_code, saw_end_of_response
+        return combined_text, language_code
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         speculative_turns = getattr(self, "speculative_turns", None)
@@ -779,7 +816,9 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 tts_input.turn_id,
                 tts_input.turn_revision,
             ):
-                return
+                if tts_input.response_key is None:
+                    return
+                tts_input.cleanup_only = True
             yield AUDIO_RESPONSE_DONE
             return
 
@@ -795,7 +834,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         runtime_config = tts_input.runtime_config
         response = tts_input.response
 
-        coalesced_text, _language_code, _saw_end_of_response = self._coalesce_pending_tts_input(tts_input)
+        coalesced_text, _language_code = self._coalesce_pending_tts_input(tts_input)
 
         text = coalesced_text or "Hello."
 

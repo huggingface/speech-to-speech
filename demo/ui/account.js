@@ -38,6 +38,7 @@ export class Account {
 
     /** @type {{enabled:boolean, auth?:boolean, loggedIn?:boolean, username?:string, avatar?:string, tier?:string, remainingSec?:number|null, limitSec?:number|null, loginUrl?:string|null, logoutUrl?:string|null}} */
     this._me = { enabled: false };
+    this._refreshId = 0;
     this._popoverOpen = false;
 
     $("#limit-close").addEventListener("click", () => this._modal.close());
@@ -59,12 +60,16 @@ export class Account {
   /** Fetch `/api/me` and (re)render the chip. Safe to call repeatedly (load,
    *  after the OAuth redirect, after a conversation ends). */
   async refresh() {
+    const refreshId = ++this._refreshId;
+    let me;
     try {
       const res = await fetch("api/me");
-      this._me = res.ok ? await res.json() : { enabled: false };
+      me = res.ok ? await res.json() : { enabled: false };
     } catch {
-      this._me = { enabled: false };
+      me = { enabled: false };
     }
+    if (refreshId !== this._refreshId) return;
+    this._me = me;
     this._render();
   }
 
@@ -172,6 +177,37 @@ export class Account {
       this._modalCta.innerHTML = "<span>Upgrade to PRO</span>";
       this._modalCta.href = PRO_URL;
       this._modalCta.hidden = false;
+    }
+    if (!this._modal.open) this._modal.showModal();
+  }
+
+  /** Replace a stale signed-in chip and ask the user to authenticate again.
+   *  @param {string | null | undefined} loginUrl */
+  showLoginRequired(loginUrl) {
+    // Teardown starts an account refresh before this runs. Invalidate that
+    // request so a revoked-but-not-yet-expired token cannot restore the stale
+    // signed-in chip when `/api/me` eventually responds.
+    this._refreshId += 1;
+    const url = loginUrl || this._me.loginUrl;
+    this._me = {
+      ...this._me,
+      enabled: true,
+      auth: !!url,
+      loggedIn: false,
+      tier: "anon",
+      loginUrl: url,
+    };
+    this._render();
+    this._modalTitle.textContent = "Sign in again";
+    this._modalMsg.textContent =
+      "Your Hugging Face session expired or was revoked. Sign in again to start a conversation.";
+    this._modalNote.textContent = "This keeps your account and conversation time secure.";
+    if (url) {
+      this._modalCta.innerHTML = `${HF_MARK}<span>Sign in with Hugging Face</span>`;
+      this._modalCta.href = url;
+      this._modalCta.hidden = false;
+    } else {
+      this._modalCta.hidden = true;
     }
     if (!this._modal.open) this._modal.showModal();
   }

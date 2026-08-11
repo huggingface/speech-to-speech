@@ -1,5 +1,12 @@
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Optional
+
+from speech_to_speech.backend_registry import LLM_BACKENDS, STT_BACKENDS, TTS_BACKENDS
+
+_AUDIO_INPUT_LLM_BACKENDS = ", ".join(
+    name for name, spec in LLM_BACKENDS.items() if spec.capabilities.supports_audio_input
+)
+_PROXY_LLM_BACKENDS = ", ".join(name for name, spec in LLM_BACKENDS.items() if spec.capabilities.supports_llm_proxy)
 
 
 @dataclass
@@ -8,51 +15,35 @@ class ModuleArguments:
         default=None,
         metadata={"help": "If specified, overrides the device for all handlers."},
     )
-    mode: Optional[Literal["local", "socket", "raw-websocket", "realtime"]] = field(
-        default="realtime",
-        metadata={
-            "help": "The mode to run the pipeline in. Either 'local', 'socket', 'raw-websocket', or "
-            "'realtime'. Default is 'realtime'."
-        },
-    )
-    local_mac_optimal_settings: bool = field(
+    mac_optimal_settings: bool = field(
         default=False,
         metadata={
-            "help": "If specified, sets the optimal settings for Mac OS. Sets Parakeet TDT for STT, MLX LM for language model, and Qwen3-TTS for TTS, with MPS device and local mode."
+            "help": "If specified, provides macOS defaults: Parakeet TDT for STT, MLX LM for the language "
+            "model, Qwen3-TTS for TTS, and MPS for supported component devices. Explicit component, model, "
+            "global-device, and component-device flags override these defaults. It does not select a command.",
         },
     )
-    stt: Optional[
-        Literal[
-            "none",
-            "whisper",
-            "whisper-mlx",
-            "mlx-audio-whisper",
-            "faster-whisper",
-            "parakeet-tdt",
-            "paraformer",
-            "sense-voice",
-        ]
-    ] = field(
+    stt: Optional[str] = field(
         default="parakeet-tdt",
         metadata={
+            "choices": tuple(STT_BACKENDS),
             "help": "The STT to use. Use 'none' to send VAD audio directly to an audio-input LLM. "
-            "This requires --llm_backend chat-completions and an explicitly selected audio-capable "
-            "API model with --model_name. "
-            "Otherwise choose 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', "
-            "'parakeet-tdt', 'paraformer', or 'sense-voice'. Default is 'parakeet-tdt'."
+            f"Audio-input LLM backends: {_AUDIO_INPUT_LLM_BACKENDS}. Select an explicitly audio-capable "
+            "model with --model_name. Default is 'parakeet-tdt'.",
         },
     )
-    llm_backend: Optional[Literal["transformers", "mlx-lm", "responses-api", "chat-completions"]] = field(
+    llm_backend: Optional[str] = field(
         default="responses-api",
         metadata={
-            "help": "The LLM backend to use. Either 'transformers', 'mlx-lm', 'responses-api', or "
-            "'chat-completions' (OpenAI-compatible /v1/chat/completions). Default is 'responses-api'."
+            "choices": tuple(LLM_BACKENDS),
+            "help": "The LLM backend to use. Default is 'responses-api'.",
         },
     )
-    tts: Optional[Literal["chatTTS", "facebookMMS", "pocket", "kokoro", "qwen3"]] = field(
+    tts: Optional[str] = field(
         default="qwen3",
         metadata={
-            "help": "The TTS to use. Either 'chatTTS', 'facebookMMS', 'pocket', 'kokoro', or 'qwen3'. Default is 'qwen3'."
+            "choices": tuple(TTS_BACKENDS),
+            "help": "The TTS backend to use. Default is 'qwen3'.",
         },
     )
     log_level: str = field(
@@ -78,10 +69,10 @@ class ModuleArguments:
     enable_llm_proxy: bool = field(
         default=False,
         metadata={
-            "help": "Expose the configured remote LLM (--llm_backend chat-completions or responses-api) as an "
+            "help": f"Expose a proxy-capable LLM backend ({_PROXY_LLM_BACKENDS}) as an "
             "OpenAI-compatible HTTP endpoint on the realtime server. The server performs no authentication of "
             "its own: enable it only on a trusted network or behind a gateway that owns access control. Off by "
-            "default. Only valid for --mode realtime."
+            "default."
         },
     )
     llm_proxy_connect_timeout_s: float = field(
@@ -94,9 +85,9 @@ class ModuleArguments:
     num_pipelines: int = field(
         default=1,
         metadata={
-            "help": "Number of isolated realtime pipelines in the pool. One uvicorn server listens on "
-            "--ws_port and routes each incoming WebSocket or WebRTC session to the next free pipeline (each "
-            "has its own VAD/STT/LM/TTS handlers and conversation state). Max concurrent Realtime sessions equals "
-            "num_pipelines; further connections are rejected. Only valid for --mode realtime. Default is 1."
+            "help": "Number of isolated pipeline instances in the pool. One uvicorn server listens on "
+            "--port and routes each incoming client to the next free pipeline (each has its own "
+            "VAD/STT/LM/TTS handlers and conversation state). Max concurrent websocket sessions equals "
+            "num_pipelines; further connections are rejected. Default is 1."
         },
     )

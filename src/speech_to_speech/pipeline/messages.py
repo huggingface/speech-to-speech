@@ -9,12 +9,13 @@ constants.
 from __future__ import annotations
 
 from time import perf_counter
-from typing import Final, Literal, Optional, TypeAlias
+from typing import Annotated, Final, Literal, Optional, TypeAlias
+from uuid import uuid4
 
 import numpy as np
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 
@@ -45,6 +46,7 @@ class VADAudio(PipelineMessage):
     mode: Literal["progressive", "final"] | None = None
     turn_id: str | None = None
     turn_revision: int | None = None
+    processing_delay_s: float = 0.0
     created_at_s: float = Field(default_factory=perf_counter)
 
 
@@ -74,11 +76,60 @@ class Transcription(PipelineMessage):
 # ── LLM → LMOutputProcessor ──────────────────────────────────────────
 
 
+class AssistantTextPart(BaseModel):
+    """One ordered assistant text part."""
+
+    type: Literal["text"] = "text"
+    text: str
+
+
+class AssistantToolCallPart(BaseModel):
+    """One ordered assistant function-call part."""
+
+    type: Literal["tool_call"] = "tool_call"
+    tool: ResponseFunctionToolCall
+
+
+AssistantOutputPart: TypeAlias = Annotated[
+    AssistantTextPart | AssistantToolCallPart,
+    Field(discriminator="type"),
+]
+
+
+def _normalize_assistant_output_fields(
+    parts: list[AssistantOutputPart],
+    text: str,
+    tools: list[ResponseFunctionToolCall],
+    fields_set: set[str],
+) -> tuple[str, list[ResponseFunctionToolCall]] | None:
+    """Keep ordered parts and their legacy compatibility views consistent."""
+
+    if parts or "parts" in fields_set:
+        derived_text = "".join(part.text for part in parts if isinstance(part, AssistantTextPart))
+        derived_tools = [part.tool for part in parts if isinstance(part, AssistantToolCallPart)]
+        if "text" in fields_set and text != derived_text:
+            raise ValueError("text must match the ordered parts")
+        if "tools" in fields_set and tools != derived_tools:
+            raise ValueError("tools must match the ordered parts")
+        return derived_text, derived_tools
+
+    if text:
+        parts.append(AssistantTextPart(text=text))
+    parts.extend(AssistantToolCallPart(tool=tool) for tool in tools)
+    return None
+
+
 class LLMResponseChunk(PipelineMessage):
-    """One sentence/chunk of the LLM response."""
+    """One ordered group of assistant output parts.
+
+    ``text`` and ``tools`` remain as compatibility views for callers that
+    still construct the legacy shape. New code can populate ``parts`` to
+    represent arbitrary text/tool interleaving without losing order.
+    """
 
     tag: Literal["llm_response_chunk"] = "llm_response_chunk"
-    text: str
+    parts: list[AssistantOutputPart] = Field(default_factory=list)
+    text: str = ""
     language_code: Optional[str] = None
     tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
     runtime_config: RuntimeConfig | None = None
@@ -87,6 +138,14 @@ class LLMResponseChunk(PipelineMessage):
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
     cancel_generation: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
+
+    @model_validator(mode="after")
+    def _normalize_ordered_parts(self) -> "LLMResponseChunk":
+        legacy_views = _normalize_assistant_output_fields(self.parts, self.text, self.tools, self.model_fields_set)
+        if legacy_views is not None:
+            self.text, self.tools = legacy_views
+        return self
 
 
 class TokenUsage(PipelineMessage):
@@ -97,6 +156,8 @@ class TokenUsage(PipelineMessage):
     output_tokens: int
     turn_id: str | None = None
     turn_revision: int | None = None
+    cancel_generation: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
 
 
 class EndOfResponse(PipelineMessage):
@@ -112,7 +173,9 @@ class EndOfResponse(PipelineMessage):
     turn_id: str | None = None
     turn_revision: int | None = None
     cancel_generation: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
     error: str | None = None
+    cleanup_only: bool = False
 
 
 # ── LMOutputProcessor → TTS ──────────────────────────────────────────
@@ -130,6 +193,7 @@ class TTSInput(PipelineMessage):
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
     cancel_generation: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
 
 
 class AudioOutput(PipelineMessage):
@@ -138,6 +202,8 @@ class AudioOutput(PipelineMessage):
     tag: Literal["audio_output"] = "audio_output"
     audio: bytes | np.ndarray
     cancel_generation: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
+    cleanup_only: bool = False
 
 
 # ── Realtime service → LLM ────────────────────────────────────────────
@@ -155,6 +221,7 @@ class GenerateResponseRequest(PipelineMessage):
     """
 
     tag: Literal["generate_response"] = "generate_response"
+    response_key: str = Field(default_factory=lambda: uuid4().hex, exclude=True, repr=False)
     runtime_config: RuntimeConfig
     response: RealtimeResponseCreateParams | None = None
     audio: np.ndarray | None = None

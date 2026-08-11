@@ -297,10 +297,19 @@ class WebRTCSession(SessionTransport):
             except Exception as e:  # noqa: BLE001
                 logger.error(f"[WebRTC] Data channel send error: {e}")
 
-    async def send_audio_chunk(self, service: RealtimeService, session_id: str, pcm: bytes) -> None:
+    async def send_audio_chunk(
+        self,
+        service: RealtimeService,
+        session_id: str,
+        pcm: bytes,
+        response_key: str | None = None,
+    ) -> None:
         # Bookkeeping events (response.created on the implicit VAD path) go
         # over the data channel; the audio itself goes on the media track.
-        _resp_id, _item_id, events = service.begin_audio_response(session_id)
+        _resp_id, _item_id, _output_index, events = service.begin_audio_output(
+            session_id,
+            response_key,
+        )
         if events:
             await self.send_events(events)
         self._track.write(self._out_resampler.resample_pcm(pcm, PIPELINE_SAMPLE_RATE))
