@@ -188,7 +188,7 @@ Select implementations with `--stt`, `--llm_backend`, and `--tts`. The CLI const
 
 `serve` binds to `127.0.0.1` by default; pass `--host 0.0.0.0` explicitly for network exposure. `local` always binds to loopback and connects the same packaged client at `ws://127.0.0.1:<port>/v1/realtime`.
 
-The packaged client can opt in to local Python tools with `talk --tool-module <module>` or `local --local_audio_tool_module <module>`. The module contract and programmatic API are documented in [Tool calling design](./src/speech_to_speech/api/openai_realtime/README.md#packaged-python-client-tools).
+The packaged client can opt in to local Python tools with `talk --tool-module <module>` or `local --local_audio_tool_module <module>`. The module contract, programmatic API, and a keyless DuckDuckGo search example are documented in [Tool calling design](./src/speech_to_speech/api/openai_realtime/README.md#packaged-python-client-tools).
 
 ### Migrating from `--mode`
 
