@@ -49,9 +49,7 @@ async def test_serper_search_returns_answer_and_organic_results(monkeypatch):
     result = await realtime_web_search_tool.execute_tool("web_search", {"query": "weather in Bern"})
 
     assert result.output["answer"] == "21°C"
-    assert result.output["results"] == [
-        {"title": "Forecast", "snippet": "Sunny", "url": "https://example.com/weather"}
-    ]
+    assert result.output["results"] == [{"title": "Forecast", "snippet": "Sunny", "url": "https://example.com/weather"}]
     assert captured == {
         "url": realtime_web_search_tool.SERPER_URL,
         "headers": {"X-API-KEY": "test-key", "Content-Type": "application/json"},
