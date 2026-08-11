@@ -382,8 +382,12 @@ def test_local_accepts_audio_flags_but_rejects_host():
         parse_arguments(["--host", "0.0.0.0"], command="local")
 
 
-def test_local_accepts_opt_in_tool_module():
-    args = parse_arguments(["--local_audio_tool_module", "my_voice_tools"], command="local")
+@pytest.mark.parametrize(
+    "flag",
+    ["--tool-module", "--local_audio_tool_module", "--local-audio-tool-module"],
+)
+def test_local_accepts_opt_in_tool_module(flag):
+    args = parse_arguments([flag, "my_voice_tools"], command="local")
 
     assert args.local_audio_kwargs.local_audio_tool_module == "my_voice_tools"
 
