@@ -343,10 +343,7 @@ class WebRTCSession(SessionTransport):
                     await self._await_ice_connect_tasks()
 
     def _ice_transports(self) -> set:
-        ice_transports = {
-            transceiver.receiver.transport.transport
-            for transceiver in self._pc.getTransceivers()
-        }
+        ice_transports = {transceiver.receiver.transport.transport for transceiver in self._pc.getTransceivers()}
         if self._pc.sctp is not None:
             ice_transports.add(self._pc.sctp.transport.transport)
         return ice_transports
