@@ -341,16 +341,25 @@ async def _dispatch_client_event(
     audio sits client-side).
     """
     service = unit.service
+    client_event_id = raw.get("event_id")
+
+    async def send_correlated(events: list[Any]) -> None:
+        if isinstance(client_event_id, str):
+            for outgoing in events:
+                if getattr(outgoing, "type", None) == "error":
+                    outgoing.error.event_id = client_event_id
+        await transport.send_events(events)
+
     event = service.parse_client_event(raw)
     if event is None:
-        await transport.send_events(
+        await send_correlated(
             [service.make_error(f"Unknown or invalid event: {raw.get('type')}", "unknown_or_invalid_event")]
         )
         return
 
     if isinstance(event, InputAudioBufferAppendEvent):
         if transport_kind == "webrtc":
-            await transport.send_events(
+            await send_correlated(
                 [
                     service.make_error(
                         "In WebRTC mode audio arrives via the media track; input_audio_buffer.append is not supported.",
@@ -367,11 +376,11 @@ async def _dispatch_client_event(
     elif isinstance(event, InputAudioBufferCommitEvent):
         err = service.handle_audio_commit(session_id)
         if err:
-            await transport.send_events([err])
+            await send_correlated([err])
 
     elif isinstance(event, OutputAudioBufferClearEvent):
         if transport_kind != "webrtc":
-            await transport.send_events(
+            await send_correlated(
                 [
                     service.make_error(
                         "output_audio_buffer.clear is only supported on the WebRTC transport.",
@@ -386,21 +395,21 @@ async def _dispatch_client_event(
     elif isinstance(event, SessionUpdateEvent):
         err = service.handle_session_update(session_id, event)
         if err:
-            await transport.send_events([err])
+            await send_correlated([err])
         else:
-            await transport.send_events([service.build_session_updated(session_id)])
+            await send_correlated([service.build_session_updated(session_id)])
 
     elif isinstance(event, ConversationItemCreateEvent):
         events = service.handle_conversation_item_create(session_id, event)
         if events:
-            await transport.send_events(events)
+            await send_correlated(events)
 
     elif isinstance(event, ResponseCreateEvent):
         result = service.handle_response_create(session_id, event)
         if result:
             if result.type != "error":
                 unit.cancel_scope.new_response()
-            await transport.send_events([result])
+            await send_correlated([result])
 
     elif isinstance(event, ResponseCancelEvent):
         st = service._state(session_id)
@@ -413,7 +422,7 @@ async def _dispatch_client_event(
         transport.discard_pending_audio()
         events = service.handle_response_cancel(session_id)
         if events:
-            await transport.send_events(events)
+            await send_correlated(events)
         unit.response_playing.clear()
 
 

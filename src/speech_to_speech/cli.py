@@ -3,10 +3,11 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
-from typing import Literal
+from typing import Any, Literal
 
 from speech_to_speech.api.openai_realtime.audio_client import (
     RealtimeAudioClientConfig,
+    load_realtime_tool_module,
     run_realtime_audio_client,
 )
 
@@ -119,6 +120,10 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
     parser.add_argument("--output-device", type=int, default=defaults.output_device)
     parser.add_argument("--instructions", default=defaults.instructions)
     parser.add_argument(
+        "--tool-module",
+        help="Importable module defining TOOLS and async execute_tool(name, arguments).",
+    )
+    parser.add_argument(
         "--voice",
         default=defaults.voice,
         help="session.audio.output.voice (for example bm_fable, marin, or alloy).",
@@ -136,6 +141,11 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         help="Seconds to wait for the Realtime endpoint to become available.",
     )
     namespace = parser.parse_args(list(argv))
+    tools: list[dict[str, Any]] = []
+    tool_executor = None
+    tool_response_create = defaults.tool_response_create
+    if namespace.tool_module:
+        tools, tool_executor, tool_response_create = load_realtime_tool_module(namespace.tool_module)
     return RealtimeAudioClientConfig(
         url=namespace.url,
         model=namespace.model,
@@ -150,6 +160,9 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         print_json=namespace.print_json,
         block_mic_during_playback=namespace.block_mic_during_playback,
         connection_retry_timeout_s=namespace.connection_retry_timeout,
+        tools=tools,
+        tool_executor=tool_executor,
+        tool_response_create=tool_response_create,
     )
 
 

@@ -9,21 +9,37 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
+import json
 import logging
 import signal
 import time
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
+from importlib import import_module
 from ipaddress import ip_address
 from queue import Empty, Full, Queue
 from threading import Event, Lock
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
+from jsonschema import SchemaError, ValidationError
+from jsonschema.validators import validator_for
 from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
 _AssistantTranscriptStream = tuple[str | None, str | None, int | None, int | None]
+ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[Any]]
+_TOOL_CREATE_ID_METADATA_KEY = "s2s_local_tool_create_id"
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    """A local tool output with a per-call follow-up response policy."""
+
+    output: Any
+    create_response: bool = True
 
 
 @dataclass
@@ -43,6 +59,55 @@ class RealtimeAudioClientConfig:
     print_json: bool = False
     block_mic_during_playback: bool = False
     connection_retry_timeout_s: float = 30.0
+    tools: list[dict[str, Any]] = field(default_factory=list)
+    tool_executor: ToolExecutor | None = None
+    tool_response_create: bool = True
+
+
+def load_realtime_tool_module(module_name: str) -> tuple[list[dict[str, Any]], ToolExecutor, bool]:
+    """Load the explicit tool contract used by the ``talk`` and ``local`` CLIs."""
+
+    if not module_name or not module_name.strip():
+        raise ValueError("Tool module name must not be empty")
+    module = import_module(module_name)
+    try:
+        tools = list(module.TOOLS)
+    except AttributeError as exc:
+        raise ValueError(f"Tool module {module_name!r} must define TOOLS") from exc
+    executor = getattr(module, "execute_tool", None)
+    if not callable(executor):
+        raise ValueError(f"Tool module {module_name!r} must define callable execute_tool(name, arguments)")
+    create_response = getattr(module, "CREATE_RESPONSE", True)
+    if not isinstance(create_response, bool):
+        raise ValueError(f"Tool module {module_name!r} CREATE_RESPONSE must be a boolean")
+    _validate_tool_config(tools, executor)
+    return tools, executor, create_response
+
+
+def _validate_tool_config(tools: list[dict[str, Any]], executor: ToolExecutor | None) -> dict[str, Any]:
+    if tools and executor is None:
+        raise ValueError("A tool_executor is required when tools are configured")
+    if tools and not callable(executor):
+        raise ValueError("tool_executor must be callable")
+    validators: dict[str, Any] = {}
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            raise ValueError("Each local client tool must be a function tool definition")
+        name = tool.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("Each local client tool must have a non-empty name")
+        if name in validators:
+            raise ValueError(f"Duplicate local client tool name: {name}")
+        parameters = tool.get("parameters", {})
+        if not isinstance(parameters, dict):
+            raise ValueError(f"Tool {name!r} parameters must be a JSON Schema object")
+        validator_class = validator_for(parameters)
+        try:
+            validator_class.check_schema(parameters)
+        except SchemaError as exc:
+            raise ValueError(f"Tool {name!r} parameters are not a valid JSON Schema: {exc}") from exc
+        validators[name] = validator_class(parameters)
+    return validators
 
 
 def normalize_realtime_url(url: str) -> tuple[str, str]:
@@ -90,6 +155,8 @@ def _make_client(config: RealtimeAudioClientConfig) -> AsyncOpenAI:
 def build_session_update(config: RealtimeAudioClientConfig) -> dict[str, Any]:
     """Build the Realtime session update used by local and standalone clients."""
 
+    _validate_tool_config(config.tools, config.tool_executor)
+
     def maybe_pcm_format(rate: int) -> Optional[dict[str, Any]]:
         # The OpenAI SDK models only validate explicit PCM formats at 24 kHz.
         # Omitting the format selects this server's native 16 kHz pipeline rate.
@@ -125,6 +192,9 @@ def build_session_update(config: RealtimeAudioClientConfig) -> dict[str, Any]:
     }
     if config.instructions:
         session["instructions"] = config.instructions
+    if config.tools:
+        session["tools"] = config.tools
+        session["tool_choice"] = "auto"
     return {"type": "session.update", "session": session}
 
 
@@ -317,6 +387,266 @@ def handle_server_event(
         print(f"EVENT: {event.type}", flush=True)
 
 
+@dataclass(frozen=True)
+class _ToolExecutionResult:
+    call_id: str
+    output: str
+    create_response: bool
+
+
+class _ToolCoordinatorError(RuntimeError):
+    """Raised when the server rejects a tool follow-up response permanently."""
+
+
+class _ToolCallCoordinator:
+    """Execute declared tools without blocking event reception or racing responses."""
+
+    def __init__(self, conn: Any, config: RealtimeAudioClientConfig) -> None:
+        self._conn = conn
+        self._executor = config.tool_executor
+        self._tool_validators = _validate_tool_config(config.tools, self._executor)
+        self._default_create_response = config.tool_response_create
+        self._active_response_id: str | None = None
+        self._pending_tool_flushes = 0
+        self._queued_follow_ups = 0
+        self._pending_create_id: str | None = None
+        self._pending_create_follow_ups = 0
+        self._pending_create_saw_response = False
+        self._waiting_for_response_after_collision = False
+        self._next_create_sequence = 0
+        self._flush_tail: asyncio.Task[None] | None = None
+        self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._follow_up_lock = asyncio.Lock()
+        self._failure: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._closing = False
+
+    def handle_event(self, event: Any) -> None:
+        if self._closing:
+            return
+        if event.type == "response.created":
+            response = event.response
+            self._active_response_id = getattr(response, "id", None)
+            metadata = getattr(response, "metadata", None)
+            create_id = metadata.get(_TOOL_CREATE_ID_METADATA_KEY) if isinstance(metadata, Mapping) else None
+            if create_id and create_id == self._pending_create_id:
+                self._pending_create_id = None
+                self._pending_create_saw_response = False
+                self._queued_follow_ups -= self._pending_create_follow_ups
+                self._pending_create_follow_ups = 0
+            elif self._pending_create_id is not None:
+                self._pending_create_saw_response = True
+        elif event.type == "response.done":
+            self._handle_response_done(event.response)
+        elif event.type == "error":
+            self._handle_error(event.error)
+        elif event.type == "conversation.item.input_audio_transcription.completed":
+            if self._waiting_for_response_after_collision:
+                self._waiting_for_response_after_collision = False
+                self._kick_follow_up()
+
+    async def _execute_tool(self, call_id: str, name: Any, raw_arguments: Any) -> _ToolExecutionResult:
+        display_name = name if isinstance(name, str) and name else "<unnamed>"
+        create_response = self._default_create_response
+        try:
+            if not isinstance(name, str) or name not in self._tool_validators:
+                raise ValueError(f"unknown tool {display_name!r}")
+            if not isinstance(raw_arguments, str):
+                raise ValueError("arguments must be a JSON string")
+            try:
+                arguments = json.loads(raw_arguments)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"arguments are not valid JSON: {exc.msg}") from exc
+            if not isinstance(arguments, dict):
+                raise ValueError("arguments must decode to a JSON object")
+            try:
+                self._tool_validators[name].validate(arguments)
+            except ValidationError as exc:
+                raise ValueError(f"arguments do not match the declared schema: {exc.message}") from exc
+
+            assert self._executor is not None
+            pending_result = self._executor(name, arguments)
+            if not inspect.isawaitable(pending_result):
+                raise TypeError("tool_executor must return an awaitable")
+            result = await pending_result
+            if isinstance(result, ToolResult):
+                if not isinstance(result.create_response, bool):
+                    raise TypeError("ToolResult.create_response must be a boolean")
+                create_response = result.create_response
+                result = result.output
+            if isinstance(result, str):
+                output = result
+            else:
+                try:
+                    output = json.dumps(result)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("tool result is not JSON serializable") from exc
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            logger.debug("Local tool %s failed", display_name, exc_info=True)
+            print(f"TOOL ERROR: {display_name} call_id={call_id}: {message}", flush=True)
+            output = json.dumps({"error": message})
+            create_response = True
+        return _ToolExecutionResult(call_id=call_id, output=output, create_response=create_response)
+
+    def _handle_response_done(self, response: Any) -> None:
+        response_id = getattr(response, "id", None)
+        if response_id == self._active_response_id:
+            self._active_response_id = None
+        self._waiting_for_response_after_collision = False
+        if getattr(response, "status", None) == "completed":
+            calls = [
+                item
+                for item in (getattr(response, "output", None) or [])
+                if getattr(item, "type", None) == "function_call"
+            ]
+            if calls:
+                self._schedule_flush(calls)
+        self._kick_follow_up()
+
+    def _schedule_flush(self, calls: list[Any]) -> None:
+        executions = []
+        for call in calls:
+            call_id = getattr(call, "call_id", None)
+            if not isinstance(call_id, str) or not call_id:
+                print("TOOL ERROR: received a call without call_id; cannot return an output", flush=True)
+                continue
+            executions.append(
+                asyncio.create_task(
+                    self._execute_tool(
+                        call_id,
+                        getattr(call, "name", None),
+                        getattr(call, "arguments", None),
+                    )
+                )
+            )
+        if not executions:
+            return
+        previous = self._flush_tail
+        self._pending_tool_flushes += 1
+        for execution in executions:
+            self._track(execution)
+
+        async def flush_in_order() -> None:
+            try:
+                if previous is not None:
+                    await previous
+                results = await asyncio.gather(*executions)
+                for result in results:
+                    await self._conn.send(
+                        {
+                            "type": "conversation.item.create",
+                            "item": {
+                                "type": "function_call_output",
+                                "call_id": result.call_id,
+                                "output": result.output,
+                            },
+                        }
+                    )
+                if any(result.create_response for result in results):
+                    self._queued_follow_ups += 1
+            finally:
+                self._pending_tool_flushes -= 1
+            await self._maybe_send_follow_up()
+
+        self._flush_tail = asyncio.create_task(flush_in_order())
+        self._track(self._flush_tail, report_errors=True)
+
+    def _handle_error(self, error: Any) -> None:
+        if getattr(error, "event_id", None) != self._pending_create_id:
+            return
+        is_collision = "conversation_already_has_active_response" in {
+            getattr(error, "type", None),
+            getattr(error, "code", None),
+        }
+        if self._pending_create_id is None:
+            return
+        rejected_create_id = self._pending_create_id
+        self._pending_create_id = None
+        self._pending_create_follow_ups = 0
+
+        if not is_collision:
+            self._pending_create_saw_response = False
+            self._closing = True
+            message = getattr(error, "message", None) or "unknown error"
+            error_type = getattr(error, "type", None) or "unknown_error"
+            code = getattr(error, "code", None)
+            detail = f"{error_type}/{code}" if code else error_type
+            if not self._failure.done():
+                self._failure.set_exception(
+                    _ToolCoordinatorError(
+                        f"Tool follow-up response.create {rejected_create_id!r} was rejected ({detail}): {message}"
+                    )
+                )
+            return
+
+        response_already_finished = self._pending_create_saw_response and self._active_response_id is None
+        self._waiting_for_response_after_collision = not self._pending_create_saw_response
+        self._pending_create_saw_response = False
+        if response_already_finished:
+            self._kick_follow_up()
+
+    def _kick_follow_up(self) -> None:
+        task = asyncio.create_task(self._maybe_send_follow_up())
+        self._track(task, report_errors=True)
+
+    async def _maybe_send_follow_up(self) -> None:
+        async with self._follow_up_lock:
+            if (
+                self._closing
+                or self._pending_tool_flushes > 0
+                or self._queued_follow_ups == 0
+                or self._active_response_id is not None
+                or self._pending_create_id is not None
+                or self._waiting_for_response_after_collision
+            ):
+                return
+            self._next_create_sequence += 1
+            create_id = f"tool_{self._next_create_sequence}"
+            self._pending_create_id = create_id
+            self._pending_create_follow_ups = self._queued_follow_ups
+            self._pending_create_saw_response = False
+            try:
+                await self._conn.send(
+                    {
+                        "event_id": create_id,
+                        "type": "response.create",
+                        "response": {"metadata": {_TOOL_CREATE_ID_METADATA_KEY: create_id}},
+                    }
+                )
+            except BaseException:
+                self._pending_create_id = None
+                self._pending_create_follow_ups = 0
+                self._pending_create_saw_response = False
+                raise
+
+    def _track(self, task: asyncio.Task[Any], *, report_errors: bool = False) -> None:
+        self._background_tasks.add(task)
+
+        def done(completed: asyncio.Task[Any]) -> None:
+            self._background_tasks.discard(completed)
+            if report_errors and not completed.cancelled():
+                exception = completed.exception()
+                if exception is not None and not self._failure.done():
+                    self._failure.set_exception(exception)
+
+        task.add_done_callback(done)
+
+    async def wait_for_failure(self) -> None:
+        await asyncio.shield(self._failure)
+
+    async def close(self) -> None:
+        self._closing = True
+        tasks = list(self._background_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if not self._failure.done():
+            self._failure.cancel()
+
+
 async def _wait_for_stop(stop_event: Event) -> None:
     while not stop_event.is_set():
         await asyncio.to_thread(stop_event.wait, 0.1)
@@ -332,6 +662,7 @@ async def _run_audio_session(
     mic_queue: Queue[bytes] = Queue(maxsize=128)
     playback = PlaybackBuffer(config.recv_rate)
     renderer = _FriendlyEventRenderer()
+    tool_calls = _ToolCallCoordinator(conn, config)
 
     def callback_recv(outdata: Any, _frames: int, _time_info: Any, status: Any) -> None:
         if status:
@@ -364,6 +695,7 @@ async def _run_audio_session(
     async def receive_events() -> None:
         while not stop_event.is_set():
             event = await conn.recv()
+            tool_calls.handle_event(event)
             handle_server_event(
                 event,
                 playback=playback,
@@ -401,6 +733,7 @@ async def _run_audio_session(
             asyncio.create_task(send_audio()),
             asyncio.create_task(receive_events()),
             asyncio.create_task(_wait_for_stop(stop_event)),
+            asyncio.create_task(tool_calls.wait_for_failure()),
         }
 
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -413,6 +746,7 @@ async def _run_audio_session(
                 raise task.exception()  # type: ignore[misc]
     finally:
         stop_event.set()
+        await tool_calls.close()
         renderer.clear_live_user_text()
         renderer.reset_assistant_text()
         for stream in reversed(started_streams):
@@ -453,6 +787,8 @@ async def listen_and_play_realtime(
                     )
                     return
             except asyncio.CancelledError:
+                raise
+            except _ToolCoordinatorError:
                 raise
             except Exception as exc:
                 if stop_event.is_set():

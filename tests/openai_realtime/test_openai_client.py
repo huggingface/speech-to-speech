@@ -29,6 +29,7 @@ import numpy as np
 import pytest
 import uvicorn
 from openai import AsyncOpenAI
+from openai.types.realtime import RealtimeConversationItemFunctionCall
 
 import speech_to_speech.api.openai_realtime.audio_client as audio_client_module
 from speech_to_speech.api.openai_realtime.audio_client import (
@@ -483,6 +484,114 @@ class TestPackagedAudioClient:
         assert transcript_deltas == ["fresh revision one"]
         capsys.readouterr()
 
+    @pytest.mark.asyncio
+    async def test_tool_loop_runs_through_sdk_server_and_follow_up_response(
+        self,
+        server_env,
+        monkeypatch,
+        capsys,
+    ):
+        """A real SDK connection completes the packaged client's full local tool loop."""
+
+        class FakeStream:
+            def __init__(self, **_kwargs):
+                pass
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
+
+        monkeypatch.setitem(
+            sys.modules,
+            "sounddevice",
+            SimpleNamespace(RawInputStream=FakeStream, RawOutputStream=FakeStream),
+        )
+
+        calls = []
+
+        async def executor(name, arguments):
+            calls.append((name, arguments))
+            return {"value": "ok"}
+
+        client_stop = ThreadingEvent()
+        config = RealtimeAudioClientConfig(
+            url=f"ws://127.0.0.1:{server_env.port}/v1/realtime",
+            api_key="local",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "lookup",
+                    "description": "Look up a value.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"index": {"type": "integer"}},
+                        "required": ["index"],
+                    },
+                }
+            ],
+            tool_executor=executor,
+        )
+
+        async def wait_until(predicate, timeout: float = 3.0):
+            deadline = asyncio.get_running_loop().time() + timeout
+            while asyncio.get_running_loop().time() < deadline:
+                if predicate():
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError("Timed out waiting for the packaged tool loop")
+
+        client_task = asyncio.create_task(listen_and_play_realtime(config, stop_event=client_stop))
+        try:
+            await wait_until(
+                lambda: (
+                    bool(server_env.service.connection_ids)
+                    and bool(
+                        server_env.service._state(server_env.service.connection_ids[0]).runtime_config.session.tools
+                    )
+                )
+            )
+            conn_id = server_env.service.connection_ids[0]
+            chat = server_env.service._state(conn_id).runtime_config.chat
+            chat.add_item(
+                RealtimeConversationItemFunctionCall(
+                    type="function_call",
+                    call_id="call_integration",
+                    name="lookup",
+                    arguments='{"index": 7}',
+                )
+            )
+
+            server_env.text_output_queue.put(
+                AssistantOutputEvent(
+                    tools=[
+                        {
+                            "type": "function_call",
+                            "call_id": "call_integration",
+                            "name": "lookup",
+                            "arguments": '{"index": 7}',
+                        }
+                    ]
+                )
+            )
+            server_env.output_queue.put(AUDIO_RESPONSE_DONE)
+
+            await wait_until(lambda: not server_env.text_prompt_queue.empty())
+            follow_up = server_env.text_prompt_queue.get_nowait()
+
+            assert isinstance(follow_up, GenerateResponseRequest)
+            assert calls == [("lookup", {"index": 7})]
+            assert [item.type for item in chat.buffer[-2:]] == ["function_call", "function_call_output"]
+            assert json.loads(chat.buffer[-1].output) == {"value": "ok"}
+        finally:
+            client_stop.set()
+            await asyncio.wait_for(client_task, timeout=3.0)
+            capsys.readouterr()
+
 
 # ===================================================================
 # 4. Interruption (barge-in)
@@ -768,10 +877,11 @@ class TestSDKErrorHandling:
         async with client.realtime.connect(model="test") as conn:
             await _recv(conn)
 
-            await conn.send({"type": "bogus.nonexistent"})
+            await conn.send({"type": "bogus.nonexistent", "event_id": "client_bogus_1"})
             event = await _recv(conn)
             assert event.type == ERROR
             assert event.error is not None
+            assert event.error.event_id == "client_bogus_1"
 
     @pytest.mark.asyncio
     async def test_duplicate_response_create_error(self, server_env):
@@ -784,10 +894,12 @@ class TestSDKErrorHandling:
             await _recv(conn)  # response.created
             await _recv(conn)  # audio delta
 
-            await conn.send({"type": "response.create"})
+            await conn.send({"type": "response.create", "event_id": "client_create_1"})
             event = await _recv(conn)
             assert event.type == ERROR
             assert event.error.type == "conversation_already_has_active_response"
+            assert event.error.event_id == "client_create_1"
+            assert event.event_id != "client_create_1"
 
 
 # ===================================================================
