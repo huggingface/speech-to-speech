@@ -607,7 +607,7 @@ def test_setup_does_not_inject_dummy_key_for_remote_custom_url(monkeypatch):
     }
 
 
-def test_process_read_timeout_ends_response_cleanly():
+def test_process_read_timeout_speaks_fallback_and_preserves_failure():
     handler = _make_handler()
 
     def make_timeout_stream():
@@ -621,16 +621,11 @@ def test_process_read_timeout_ends_response_cleanly():
     outputs = list(handler.process(request))
 
     assert len(outputs) == 2
-    assert (
-        isinstance(outputs[0], LLMResponseChunk)
-        and outputs[0].text == "Wow I'm a bit slow today, could you repeat that?"
-    )
+    assert isinstance(outputs[0], LLMResponseChunk)
+    assert outputs[0].text == base_openai_compatible_language_model.PROVIDER_FAILURE_FALLBACK
     assert isinstance(outputs[1], EndOfResponse)
-    assert outputs[1].error is None
-    assert [item.type for item in request.runtime_config.chat.buffer] == ["message", "message"]
-    assistant = request.runtime_config.chat.buffer[-1]
-    assert isinstance(assistant, RealtimeConversationItemAssistantMessage)
-    assert assistant.content[0].text == outputs[0].text
+    assert outputs[1].error is not None and "timed out" in outputs[1].error
+    assert [getattr(item, "role", None) for item in request.runtime_config.chat.buffer] == ["user"]
 
 
 def test_read_timeout_after_partial_text_fails_without_apology_or_history_commit():
@@ -693,14 +688,16 @@ def test_generation_error_emits_failed_end_of_response():
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=boom))
 
-    outputs = list(handler.process(_make_request("Hi")))
+    request = _make_request("Hi")
+    outputs = list(handler.process(request))
 
     eors = [o for o in outputs if isinstance(o, EndOfResponse)]
     assert len(eors) == 1
     assert eors[0].error is not None
     assert "input must not be empty" in eors[0].error
-    # No partial output committed; the only thing emitted is the failed EndOfResponse.
-    assert all(isinstance(o, EndOfResponse) for o in outputs)
+    chunks = [o for o in outputs if isinstance(o, LLMResponseChunk)]
+    assert [chunk.text for chunk in chunks] == [base_openai_compatible_language_model.PROVIDER_FAILURE_FALLBACK]
+    assert [getattr(item, "role", None) for item in request.runtime_config.chat.buffer] == ["user"]
 
 
 def test_empty_context_fails_with_clear_message_without_calling_provider():
@@ -1081,15 +1078,13 @@ def test_failed_audio_request_rolls_back_provisional_history():
     )
     cfg = _make_runtime_config(chat_size=5)
 
-    generation = handler.process(_make_audio_request(cfg))
-    output = next(generation)
+    outputs = list(handler.process(_make_audio_request(cfg)))
 
-    assert isinstance(output, EndOfResponse)
-    assert output.error is not None and "provider rejected audio" in output.error
+    assert [type(output) for output in outputs] == [LLMResponseChunk, EndOfResponse]
+    assert outputs[0].text == base_openai_compatible_language_model.PROVIDER_FAILURE_FALLBACK
+    assert outputs[1].error is not None and "provider rejected audio" in outputs[1].error
     assert cfg.chat.buffer == []
     assert cfg.chat._user_turn_count == 0
-    with pytest.raises(StopIteration):
-        next(generation)
 
 
 def test_interrupted_audio_tool_turn_rolls_back_user_call_and_fast_output():
