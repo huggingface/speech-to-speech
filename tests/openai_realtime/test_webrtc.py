@@ -417,6 +417,57 @@ class _DataChannelInbox:
 
 
 class TestWebRTCLoopback:
+    async def test_cancelled_close_keeps_teardown_running(self, monkeypatch):
+        server_pc = RTCPeerConnection()
+        teardown_started = asyncio.Event()
+        release_teardown = asyncio.Event()
+        closed_calls = []
+
+        async def _on_client_event(_raw):
+            pass
+
+        async def _on_open():
+            pass
+
+        session = WebRTCSession(
+            server_pc,
+            on_client_event=_on_client_event,
+            on_audio=lambda _pcm: None,
+            on_open=_on_open,
+            on_closed=lambda: closed_calls.append(None),
+        )
+        session.setup()
+        close_peer_connection = session._close_peer_connection
+
+        async def _pause_peer_close():
+            teardown_started.set()
+            await release_teardown.wait()
+            await close_peer_connection()
+
+        monkeypatch.setattr(session, "_close_peer_connection", _pause_peer_close)
+        first_close = asyncio.create_task(session.close())
+        second_close = None
+        try:
+            await asyncio.wait_for(teardown_started.wait(), timeout=1.0)
+            first_close.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first_close
+
+            second_close = asyncio.create_task(session.close())
+            await asyncio.sleep(0)
+            assert not second_close.done()
+
+            release_teardown.set()
+            await second_close
+            assert server_pc.connectionState == "closed"
+            assert len(closed_calls) == 1
+        finally:
+            release_teardown.set()
+            close_tasks = [task for task in (first_close, second_close) if task is not None]
+            await asyncio.gather(*close_tasks, return_exceptions=True)
+            await session.close()
+            await server_pc.close()
+
     async def test_close_awaits_pending_ice_checks(self, monkeypatch):
         client_pc = RTCPeerConnection()
         server_pc = RTCPeerConnection()

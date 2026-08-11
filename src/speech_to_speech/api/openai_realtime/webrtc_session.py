@@ -180,7 +180,7 @@ class WebRTCSession(SessionTransport):
         self._on_closed = on_closed
         self._dc = None
         self._closed = False
-        self._close_complete = asyncio.Event()
+        self._close_task: asyncio.Task[None] | None = None
         self._track = PipelineAudioTrack()
         self._out_resampler = PcmResampler(WEBRTC_SAMPLE_RATE)
         self._in_resampler = PcmResampler(PIPELINE_SAMPLE_RATE)
@@ -269,27 +269,10 @@ class WebRTCSession(SessionTransport):
         return self._pc.localDescription.sdp
 
     async def close(self) -> None:
-        if self._closed:
-            await self._close_complete.wait()
-            return
-        self._closed = True
-        try:
-            # close() itself often runs as a _spawn()ed task (dc close handler),
-            # so it is in _tasks — cancelling the current task here would abort
-            # this method before the release callback runs.
-            current = asyncio.current_task()
-            for task in self._tasks:
-                if task is not current:
-                    task.cancel()
-            self._track.stop()
-            try:
-                await self._close_peer_connection()
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"[WebRTC] Error closing peer connection: {e}")
-            self._on_closed()
-            logger.info("[WebRTC] Session closed")
-        finally:
-            self._close_complete.set()
+        if self._close_task is None:
+            self._closed = True
+            self._close_task = asyncio.create_task(self._run_close())
+        await asyncio.shield(self._close_task)
 
     # ── SessionTransport interface ────────────────
 
@@ -328,6 +311,20 @@ class WebRTCSession(SessionTransport):
     def _spawn(self, coro: Awaitable[None]) -> None:
         task = asyncio.ensure_future(coro)
         self._tasks.append(task)
+
+    async def _run_close(self) -> None:
+        # close() often runs as a _spawn()ed task (dc close handler). The
+        # separate cleanup task lets us cancel session work without cancelling
+        # teardown, even when the close() caller itself is cancelled.
+        for task in self._tasks:
+            task.cancel()
+        self._track.stop()
+        try:
+            await self._close_peer_connection()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[WebRTC] Error closing peer connection: {e}")
+        self._on_closed()
+        logger.info("[WebRTC] Session closed")
 
     async def _close_peer_connection(self) -> None:
         try:
