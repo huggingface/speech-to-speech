@@ -34,6 +34,14 @@ ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[Any]]
 _TOOL_CREATE_ID_METADATA_KEY = "s2s_local_tool_create_id"
 
 
+@dataclass(frozen=True)
+class ToolResult:
+    """A local tool output with a per-call follow-up response policy."""
+
+    output: Any
+    create_response: bool = True
+
+
 @dataclass
 class RealtimeAudioClientConfig:
     """Configuration for the packaged microphone/speaker Realtime client."""
@@ -79,8 +87,8 @@ def load_realtime_tool_module(module_name: str) -> tuple[list[dict[str, Any]], T
 def _validate_tool_config(tools: list[dict[str, Any]], executor: ToolExecutor | None) -> dict[str, Any]:
     if tools and executor is None:
         raise ValueError("A tool_executor is required when tools are configured")
-    if tools and not inspect.iscoroutinefunction(executor):
-        raise ValueError("tool_executor must be an async function so it can be cancelled safely")
+    if tools and not callable(executor):
+        raise ValueError("tool_executor must be callable")
     validators: dict[str, Any] = {}
     for tool in tools:
         if not isinstance(tool, dict) or tool.get("type") != "function":
@@ -383,11 +391,17 @@ def handle_server_event(
 class _ToolExecutionResult:
     call_id: str
     output: str
+    create_response: bool
 
 
 @dataclass
 class _ToolBatch:
     executions: list[asyncio.Task[_ToolExecutionResult]] = field(default_factory=list)
+    call_ids: set[str] = field(default_factory=set)
+
+
+class _ToolCoordinatorError(RuntimeError):
+    """Raised when the server rejects a tool follow-up response permanently."""
 
 
 class _ToolCallCoordinator:
@@ -397,9 +411,8 @@ class _ToolCallCoordinator:
         self._conn = conn
         self._executor = config.tool_executor
         self._tool_validators = _validate_tool_config(config.tools, self._executor)
-        self._create_response = config.tool_response_create
+        self._default_create_response = config.tool_response_create
         self._batches: dict[str, _ToolBatch] = {}
-        self._seen_call_ids: set[str] = set()
         self._active_response_id: str | None = None
         self._queued_follow_ups = 0
         self._pending_create_id: str | None = None
@@ -442,12 +455,14 @@ class _ToolCallCoordinator:
         if not isinstance(call_id, str) or not call_id:
             print("TOOL ERROR: received a call without call_id; cannot return an output", flush=True)
             return
-        if call_id in self._seen_call_ids:
-            print(f"TOOL ERROR: duplicate call_id={call_id} ignored", flush=True)
-            return
-        self._seen_call_ids.add(call_id)
 
         response_id = getattr(event, "response_id", None) or self._active_response_id
+        batch = self._batches.setdefault(response_id, _ToolBatch()) if response_id else _ToolBatch()
+        if call_id in batch.call_ids:
+            print(f"TOOL ERROR: duplicate call_id={call_id} ignored", flush=True)
+            return
+        batch.call_ids.add(call_id)
+
         execution = asyncio.create_task(
             self._execute_tool(
                 call_id,
@@ -456,16 +471,18 @@ class _ToolCallCoordinator:
             )
         )
         self._track(execution)
+        batch.executions.append(execution)
         if response_id:
-            self._batches.setdefault(response_id, _ToolBatch()).executions.append(execution)
+            self._batches[response_id] = batch
         else:
             # A conforming event has response_id. If an implementation omits it
             # while no response is active, returning the result immediately is
             # safer than silently leaving the function call unresolved.
-            self._schedule_flush(_ToolBatch(executions=[execution]))
+            self._schedule_flush(batch)
 
     async def _execute_tool(self, call_id: str, name: Any, raw_arguments: Any) -> _ToolExecutionResult:
         display_name = name if isinstance(name, str) and name else "<unnamed>"
+        create_response = self._default_create_response
         try:
             if not isinstance(name, str) or name not in self._tool_validators:
                 raise ValueError(f"unknown tool {display_name!r}")
@@ -483,7 +500,15 @@ class _ToolCallCoordinator:
                 raise ValueError(f"arguments do not match the declared schema: {exc.message}") from exc
 
             assert self._executor is not None
-            result = await self._executor(name, arguments)
+            pending_result = self._executor(name, arguments)
+            if not inspect.isawaitable(pending_result):
+                raise TypeError("tool_executor must return an awaitable")
+            result = await pending_result
+            if isinstance(result, ToolResult):
+                if not isinstance(result.create_response, bool):
+                    raise TypeError("ToolResult.create_response must be a boolean")
+                create_response = result.create_response
+                result = result.output
             if isinstance(result, str):
                 output = result
             else:
@@ -498,7 +523,7 @@ class _ToolCallCoordinator:
             logger.debug("Local tool %s failed", display_name, exc_info=True)
             print(f"TOOL ERROR: {display_name} call_id={call_id}: {message}", flush=True)
             output = json.dumps({"error": message})
-        return _ToolExecutionResult(call_id=call_id, output=output)
+        return _ToolExecutionResult(call_id=call_id, output=output, create_response=create_response)
 
     def _handle_response_done(self, response: Any) -> None:
         response_id = getattr(response, "id", None)
@@ -507,6 +532,7 @@ class _ToolCallCoordinator:
         self._waiting_for_response_after_collision = False
         batch = self._batches.pop(response_id, None) if isinstance(response_id, str) else None
         if batch is not None:
+            batch.call_ids.clear()
             if getattr(response, "status", None) == "completed":
                 self._schedule_flush(batch)
             else:
@@ -538,7 +564,7 @@ class _ToolCallCoordinator:
                         },
                     }
                 )
-            if results and self._create_response:
+            if any(result.create_response for result in results):
                 self._queued_follow_ups += 1
                 await self._maybe_send_follow_up()
 
@@ -546,15 +572,34 @@ class _ToolCallCoordinator:
         self._track(self._flush_tail, report_errors=True)
 
     def _handle_error(self, error: Any) -> None:
+        if getattr(error, "event_id", None) != self._pending_create_id:
+            return
         is_collision = "conversation_already_has_active_response" in {
             getattr(error, "type", None),
             getattr(error, "code", None),
         }
-        if not is_collision or self._pending_create_id is None:
+        if self._pending_create_id is None:
             return
+        rejected_create_id = self._pending_create_id
+        self._pending_create_id = None
+
+        if not is_collision:
+            self._pending_create_saw_response = False
+            self._closing = True
+            message = getattr(error, "message", None) or "unknown error"
+            error_type = getattr(error, "type", None) or "unknown_error"
+            code = getattr(error, "code", None)
+            detail = f"{error_type}/{code}" if code else error_type
+            if not self._failure.done():
+                self._failure.set_exception(
+                    _ToolCoordinatorError(
+                        f"Tool follow-up response.create {rejected_create_id!r} was rejected ({detail}): {message}"
+                    )
+                )
+            return
+
         response_already_finished = self._pending_create_saw_response and self._active_response_id is None
         self._waiting_for_response_after_collision = not self._pending_create_saw_response
-        self._pending_create_id = None
         self._pending_create_saw_response = False
         if response_already_finished:
             self._kick_follow_up()
@@ -580,6 +625,7 @@ class _ToolCallCoordinator:
             try:
                 await self._conn.send(
                     {
+                        "event_id": create_id,
                         "type": "response.create",
                         "response": {"metadata": {_TOOL_CREATE_ID_METADATA_KEY: create_id}},
                     }
@@ -755,6 +801,8 @@ async def listen_and_play_realtime(
                     )
                     return
             except asyncio.CancelledError:
+                raise
+            except _ToolCoordinatorError:
                 raise
             except Exception as exc:
                 if stop_event.is_set():

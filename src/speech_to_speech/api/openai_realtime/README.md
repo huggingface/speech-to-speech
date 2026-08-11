@@ -167,6 +167,9 @@ The microphone/speaker client used by `talk` and `local` only executes explicitl
 
 ```python
 # my_voice_tools.py
+from speech_to_speech.api.openai_realtime.audio_client import ToolResult
+
+
 TOOLS = [
     {
         "type": "function",
@@ -179,7 +182,7 @@ TOOLS = [
 
 async def execute_tool(name, arguments):
     if name == "get_temperature":
-        return {"celsius": 21.5}
+        return ToolResult({"celsius": 21.5}, create_response=True)
     raise ValueError(f"Unknown tool: {name}")
 ```
 
@@ -190,7 +193,9 @@ speech-to-speech talk --tool-module my_voice_tools --url ws://127.0.0.1:8765/v1/
 speech-to-speech local --local_audio_tool_module my_voice_tools
 ```
 
-Set `CREATE_RESPONSE = False` in the module for fire-and-forget tools. The default is `True`, which sends one follow-up `response.create` after all calls from a completed response have returned. Calls run away from the receive loop; multiple outputs retain call order. Unknown tools, malformed JSON, and handler failures are returned as `function_call_output` errors. Calls from cancelled responses are discarded, and outstanding async handlers are cancelled on disconnect or shutdown.
+Return `ToolResult(output, create_response=False)` for a fire-and-forget action that should not produce another assistant turn. When a response calls multiple tools, the client submits every output and sends one follow-up `response.create` if any result requests one. Plain return values use the module-wide `CREATE_RESPONSE` fallback, which defaults to `True`; set it to `False` when most tools in a module are fire-and-forget and opt individual result-bearing tools back in with `ToolResult`.
+
+Calls run away from the receive loop and multiple outputs retain call order. `execute_tool` may be an async function, an object with async `__call__`, or another callable that returns an awaitable. Unknown tools, malformed JSON, non-awaitable handlers, and handler failures are returned as `function_call_output` errors. Calls from cancelled responses are discarded, and outstanding async handlers are cancelled on disconnect or shutdown.
 
 Library users can configure the same contract directly:
 
@@ -203,7 +208,7 @@ config = RealtimeAudioClientConfig(
 await listen_and_play_realtime(config)
 ```
 
-Arguments are validated against the declared `parameters` JSON Schema before the callback runs. String results are sent unchanged; other results must be JSON-serializable. Callbacks receive normal task cancellation on a cancelled response, disconnect, or shutdown, so they should release their own resources in `finally` blocks.
+Arguments are validated against the declared `parameters` JSON Schema before the callback runs. String outputs are sent unchanged; other outputs must be JSON-serializable. Callbacks receive normal task cancellation on a cancelled response, disconnect, or shutdown, so they should release their own resources in `finally` blocks.
 
 ---
 

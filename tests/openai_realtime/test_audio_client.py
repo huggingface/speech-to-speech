@@ -11,8 +11,10 @@ import speech_to_speech.api.openai_realtime.audio_client as audio_client_module
 from speech_to_speech.api.openai_realtime.audio_client import (
     PlaybackBuffer,
     RealtimeAudioClientConfig,
+    ToolResult,
     _FriendlyEventRenderer,
     _ToolCallCoordinator,
+    _ToolCoordinatorError,
     build_session_update,
     handle_server_event,
     load_realtime_tool_module,
@@ -52,8 +54,11 @@ async def wait_until(predicate):
     raise AssertionError("condition was not reached")
 
 
-def response_created(response_id):
-    return SimpleNamespace(type="response.created", response=SimpleNamespace(id=response_id, metadata={}))
+def response_created(response_id, *, metadata=None):
+    return SimpleNamespace(
+        type="response.created",
+        response=SimpleNamespace(id=response_id, metadata=metadata or {}),
+    )
 
 
 def tool_call(call_id, *, response_id="response_1", name="lookup", arguments="{}"):
@@ -165,11 +170,12 @@ def test_audio_client_rejects_tools_without_an_executor():
         build_session_update(RealtimeAudioClientConfig(tools=[TOOL_DEFINITION]))
 
 
-def test_audio_client_rejects_synchronous_tool_executor():
-    with pytest.raises(ValueError, match="async function"):
-        build_session_update(
-            RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=lambda _name, _arguments: None)
-        )
+def test_audio_client_defers_executor_awaitable_validation_until_invocation():
+    session = build_session_update(
+        RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=lambda _name, _arguments: None)
+    )["session"]
+
+    assert session["tools"] == [TOOL_DEFINITION]
 
 
 def test_audio_client_loads_explicit_tool_module_contract(monkeypatch):
@@ -425,6 +431,111 @@ async def test_audio_client_executes_multiple_tools_once_and_flushes_in_call_ord
     await coordinator.close()
 
 
+async def test_audio_client_uses_per_result_follow_up_policy_for_mixed_batch():
+    async def executor(_name, arguments):
+        return ToolResult(
+            {"result": arguments["index"]},
+            create_response=arguments["index"] == 1,
+        )
+
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn,
+        RealtimeAudioClientConfig(
+            tools=[TOOL_DEFINITION],
+            tool_executor=executor,
+            tool_response_create=False,
+        ),
+    )
+    coordinator.handle_event(tool_call("call_1", arguments='{"index": 0}'))
+    coordinator.handle_event(tool_call("call_2", arguments='{"index": 1}'))
+    coordinator.handle_event(response_done())
+
+    await wait_until(lambda: len(conn.sent) == 3)
+
+    assert [event["type"] for event in conn.sent] == [
+        "conversation.item.create",
+        "conversation.item.create",
+        "response.create",
+    ]
+    assert conn.sent[-1]["event_id"] == "tool_1"
+    await coordinator.close()
+
+
+async def test_audio_client_per_result_policy_can_disable_all_follow_ups():
+    async def executor(_name, _arguments):
+        return ToolResult("done", create_response=False)
+
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn,
+        RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor),
+    )
+    coordinator.handle_event(tool_call("call_1"))
+    coordinator.handle_event(response_done())
+
+    await wait_until(lambda: len(conn.sent) == 1)
+
+    assert conn.sent[0]["type"] == "conversation.item.create"
+    await coordinator.close()
+
+
+@pytest.mark.parametrize("executor_kind", ["async-call", "decorated"])
+async def test_audio_client_accepts_callable_executors_returning_awaitables(executor_kind):
+    calls = []
+
+    if executor_kind == "async-call":
+
+        class AsyncCallable:
+            async def __call__(self, name, arguments):
+                calls.append((name, arguments))
+                return "done"
+
+        executor = AsyncCallable()
+    else:
+
+        async def async_handler(name, arguments):
+            calls.append((name, arguments))
+            return "done"
+
+        def executor(name, arguments):
+            return async_handler(name, arguments)
+
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn,
+        RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor),
+    )
+    coordinator.handle_event(tool_call("call_1"))
+    coordinator.handle_event(response_done())
+
+    await wait_until(lambda: len(conn.sent) == 2)
+
+    assert calls == [("lookup", {})]
+    assert conn.sent[0]["item"]["output"] == "done"
+    await coordinator.close()
+
+
+async def test_audio_client_returns_error_when_executor_result_is_not_awaitable(capsys):
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn,
+        RealtimeAudioClientConfig(
+            tools=[TOOL_DEFINITION],
+            tool_executor=lambda _name, _arguments: "not-awaitable",
+        ),
+    )
+    coordinator.handle_event(tool_call("call_1"))
+    coordinator.handle_event(response_done())
+
+    await wait_until(lambda: len(conn.sent) == 2)
+
+    output = json.loads(conn.sent[0]["item"]["output"])
+    assert "must return an awaitable" in output["error"]
+    assert "must return an awaitable" in capsys.readouterr().out
+    await coordinator.close()
+
+
 async def test_audio_client_returns_unknown_malformed_and_handler_failures(capsys):
     calls = []
 
@@ -498,15 +609,25 @@ async def test_audio_client_deduplicates_repeated_tool_call_events(capsys):
     conn = RecordingConnection()
     coordinator = _ToolCallCoordinator(
         conn,
-        RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor),
+        RealtimeAudioClientConfig(
+            tools=[TOOL_DEFINITION],
+            tool_executor=executor,
+            tool_response_create=False,
+        ),
     )
     coordinator.handle_event(tool_call("call_1"))
     coordinator.handle_event(tool_call("call_1"))
     coordinator.handle_event(response_done())
 
+    await wait_until(lambda: len(conn.sent) == 1)
+    assert "response_1" not in coordinator._batches
+
+    coordinator.handle_event(response_created("response_2"))
+    coordinator.handle_event(tool_call("call_1", response_id="response_2"))
+    coordinator.handle_event(response_done("response_2"))
     await wait_until(lambda: len(conn.sent) == 2)
 
-    assert calls == [("lookup", {})]
+    assert calls == [("lookup", {}), ("lookup", {})]
     assert "duplicate call_id=call_1 ignored" in capsys.readouterr().out
     await coordinator.close()
 
@@ -579,11 +700,16 @@ async def test_audio_client_waits_for_response_lifecycle_after_follow_up_collisi
     coordinator.handle_event(tool_call("call_1"))
     coordinator.handle_event(response_done())
     await wait_until(lambda: len(conn.sent) == 2)
+    create_id = conn.sent[-1]["event_id"]
 
     coordinator.handle_event(
         SimpleNamespace(
             type="error",
-            error=SimpleNamespace(type="conversation_already_has_active_response", code=None),
+            error=SimpleNamespace(
+                type="conversation_already_has_active_response",
+                code=None,
+                event_id=create_id,
+            ),
         )
     )
     await asyncio.sleep(0.01)
@@ -605,18 +731,86 @@ async def test_audio_client_retries_when_collision_arrives_after_response_finish
     coordinator.handle_event(tool_call("call_1"))
     coordinator.handle_event(response_done())
     await wait_until(lambda: len(conn.sent) == 2)
+    create_id = conn.sent[-1]["event_id"]
 
     coordinator.handle_event(response_created("response_implicit"))
     coordinator.handle_event(response_done("response_implicit"))
     coordinator.handle_event(
         SimpleNamespace(
             type="error",
-            error=SimpleNamespace(type="invalid_request_error", code="conversation_already_has_active_response"),
+            error=SimpleNamespace(
+                type="invalid_request_error",
+                code="conversation_already_has_active_response",
+                event_id=create_id,
+            ),
         )
     )
 
     await wait_until(lambda: len(conn.sent) == 3)
     assert conn.sent[-1]["type"] == "response.create"
+    await coordinator.close()
+
+
+async def test_audio_client_surfaces_correlated_non_collision_follow_up_rejection():
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn,
+        RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=done_tool_executor),
+    )
+    coordinator.handle_event(tool_call("call_1"))
+    coordinator.handle_event(response_done())
+    await wait_until(lambda: len(conn.sent) == 2)
+    create_id = conn.sent[-1]["event_id"]
+
+    coordinator.handle_event(
+        SimpleNamespace(
+            type="error",
+            error=SimpleNamespace(
+                type="invalid_request_error",
+                code="invalid_value",
+                message="Invalid response metadata",
+                event_id=create_id,
+            ),
+        )
+    )
+
+    with pytest.raises(_ToolCoordinatorError, match="invalid_value"):
+        await coordinator.wait_for_failure()
+    assert coordinator._pending_create_id is None
+    await coordinator.close()
+
+
+async def test_audio_client_ignores_uncorrelated_error_while_follow_up_is_pending():
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn,
+        RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=done_tool_executor),
+    )
+    coordinator.handle_event(tool_call("call_1"))
+    coordinator.handle_event(response_done())
+    await wait_until(lambda: len(conn.sent) == 2)
+    create_event = conn.sent[-1]
+
+    coordinator.handle_event(
+        SimpleNamespace(
+            type="error",
+            error=SimpleNamespace(
+                type="invalid_request_error",
+                code="invalid_value",
+                message="Unrelated error",
+                event_id="another_client_event",
+            ),
+        )
+    )
+
+    assert coordinator._pending_create_id == create_event["event_id"]
+    coordinator.handle_event(
+        response_created(
+            "response_follow_up",
+            metadata={"s2s_local_tool_create_id": create_event["event_id"]},
+        )
+    )
+    assert coordinator._pending_create_id is None
     await coordinator.close()
 
 
