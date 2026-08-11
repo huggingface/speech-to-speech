@@ -181,6 +181,52 @@ def _flush_queue(q: Queue[QItem], *, preserve: Callable[[QItem], bool] | None = 
             q.not_empty.notify(len(preserved))
 
 
+def _drain_token_usage(q: Queue[Any]) -> list[TokenUsageEvent]:
+    """Remove and return queued ``TokenUsageEvent``s, leaving every other item in place.
+
+    Non-matching items are re-inserted at the front in their original order (atomically
+    under the queue's mutex), mirroring :func:`_flush_queue`, so this is safe to call
+    independently of a flush.
+    """
+    usage: list[TokenUsageEvent] = []
+    remaining: list[Any] = []
+    while True:
+        try:
+            item = q.get_nowait()
+        except Empty:
+            break
+        if isinstance(item, TokenUsageEvent):
+            usage.append(item)
+        else:
+            remaining.append(item)
+    if remaining:
+        with q.mutex:
+            for item in reversed(remaining):
+                q.queue.appendleft(item)
+            q.not_empty.notify(len(remaining))
+    return usage
+
+
+def _account_queued_token_usage(unit: PipelineUnit, session_id: str) -> None:
+    """Fold queued provider usage into session accounting before release discards it.
+
+    Releasing a session calls :func:`_clean_unit`, which drains the output queues, and by
+    then the send loop is gone — so a ``TokenUsageEvent`` that reached a queue but was
+    never dispatched would be dropped before ``unregister()`` rolls this session's usage
+    into the global totals. Billable usage the provider already reported must survive a
+    client disconnect, so account it directly here.
+
+    The returned server events are discarded: the client is gone, and only the accounting
+    side effect matters.
+    """
+    for q in (unit.output_queue, unit.text_output_queue):
+        for event in _drain_token_usage(q):
+            try:
+                unit.service.dispatch_pipeline_event(session_id, event)
+            except Exception:  # noqa: BLE001 - release must not fail on accounting
+                logger.exception("Failed to account queued token usage for session %s", session_id)
+
+
 def _clean_unit(unit: PipelineUnit, preserve: Callable[[Any], bool] | None = None) -> None:
     """Cancel in-flight work and flush queues for a single pipeline unit.
 
@@ -315,6 +361,9 @@ def _release_session(unit: PipelineUnit, session_id: str) -> None:
         # Already released (e.g. duplicate close callbacks racing).
         return
     old_session.released_at = time.monotonic()
+    # Before the flush: queued usage is billable and the session is still registered,
+    # so it can still be folded into this connection's totals.
+    _account_queued_token_usage(unit, session_id)
     _clean_unit(unit)
     # Tag SESSION_END with this session's id so that, after a force
     # release, a late arrival can't satisfy the next session's drain.
