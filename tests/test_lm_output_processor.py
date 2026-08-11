@@ -13,6 +13,7 @@ from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
     ResponseFailedEvent,
+    ResponseGenerationDoneEvent,
     TokenUsageEvent,
 )
 from speech_to_speech.pipeline.messages import (
@@ -148,6 +149,40 @@ def test_latest_end_of_response_follows_ordered_done_event():
 
     assert [type(output) for output in outputs] == [AssistantResponseDoneEvent, EndOfResponse]
     assert all(output.turn_id == "turn_1" and output.turn_revision == 1 for output in outputs)
+
+
+def test_generation_done_side_channel_does_not_wait_for_tts_delivery():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    side_events = Queue()
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup(speculative_turns=tracker, text_output_queue=side_events)
+    tool = ResponseFunctionToolCall(type="function_call", call_id="call_1", name="lookup", arguments="{}")
+
+    ordered = [
+        *processor.process(
+            LLMResponseChunk(
+                parts=[AssistantTextPart(text="One moment."), AssistantToolCallPart(tool=tool)],
+                response_key="response_1",
+                turn_id="turn_1",
+                turn_revision=0,
+            )
+        ),
+        *processor.process(EndOfResponse(response_key="response_1", turn_id="turn_1", turn_revision=0)),
+    ]
+
+    logical_done = side_events.get_nowait()
+    assert isinstance(logical_done, ResponseGenerationDoneEvent)
+    assert logical_done.response_key == "response_1"
+    assert logical_done.call_ids == ["call_1"]
+    assert logical_done.succeeded is True
+    assert [type(item) for item in ordered] == [
+        AssistantOutputEvent,
+        TTSInput,
+        AssistantOutputEvent,
+        AssistantResponseDoneEvent,
+        EndOfResponse,
+    ]
 
 
 def test_failed_response_event_precedes_terminal_and_keeps_identity():

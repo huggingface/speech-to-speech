@@ -26,7 +26,11 @@ from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
 from speech_to_speech.LLM.chat import ChatItemError, add_supported_item
-from speech_to_speech.pipeline.events import AssistantOutputEvent, AssistantResponseDoneEvent
+from speech_to_speech.pipeline.events import (
+    AssistantOutputEvent,
+    AssistantResponseDoneEvent,
+    ResponseGenerationDoneEvent,
+)
 from speech_to_speech.pipeline.messages import AssistantTextPart, AssistantToolCallPart, GenerateResponseRequest
 from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
 
@@ -34,6 +38,7 @@ if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import ServerEvent, _ResponseStatus, _StatusReason
 
 logger = logging.getLogger(__name__)
+TOOL_FOLLOW_UP_RESPONSE_ID_METADATA_KEY = "s2s_tool_follow_up_for_response_id"
 
 
 class ResponseHandler(RealtimeBaseHandler):
@@ -55,6 +60,8 @@ class ResponseHandler(RealtimeBaseHandler):
         if st.current_response_id is None:
             st.current_response_id = _generate_id("resp")
             st.current_response_key = response_key
+            if response_key is not None:
+                st.current_response_params = st.pending_response_params.pop(response_key, None)
             self._start_item(conn_id)
             st.in_response = True
         elif st.current_response_key is None:
@@ -82,6 +89,49 @@ class ResponseHandler(RealtimeBaseHandler):
         )
         st.response_usage.reset()
         completed_response_key = st.current_response_key
+        completed_response_id = st.current_response_id
+        if status != "completed":
+            self.discard_queued_tool_followup(conn_id, origin_response_key=completed_response_key)
+        else:
+            completed_call_ids = {
+                call.call_id for call in st.pending_function_calls.values() if call.call_id is not None
+            }
+            followup_already_released = (
+                completed_response_id in st.accepted_tool_followup_response_ids
+                and completed_response_id != st.queued_tool_followup_origin_response_id
+            )
+            if (
+                completed_response_id is not None
+                and completed_response_key is not None
+                and completed_call_ids
+                and not followup_already_released
+            ):
+                # The client can receive the tool call before ``response.done``
+                # while its tagged follow-up crosses the wire in the other
+                # direction. Retain identity and rollback data from the ordered
+                # response; logical generation-done remains the release gate.
+                st.completed_tool_response_keys[completed_response_id] = completed_response_key
+                st.completed_tool_response_call_ids[completed_response_key] = completed_call_ids
+                while len(st.completed_tool_response_keys) > 128:
+                    expired_response_id = next(iter(st.completed_tool_response_keys))
+                    expired_response_key = st.completed_tool_response_keys.pop(expired_response_id)
+                    expired_call_ids = st.completed_tool_response_call_ids.pop(expired_response_key, set())
+                    expired_call_ids.update(st.generation_done_tool_calls.pop(expired_response_key, set()))
+                    if expired_call_ids:
+                        st.runtime_config.chat.rollback_generation(
+                            None,
+                            item_ids=set(),
+                            call_ids=expired_call_ids,
+                            response_key=expired_response_key,
+                        )
+                    for item_id in st.provisional_tool_followup_item_ids.pop(expired_response_key, set()):
+                        st.runtime_config.chat.remove_user_message(item_id)
+                    st.accepted_tool_followup_response_ids.discard(expired_response_id)
+            elif completed_response_key != st.queued_tool_followup_origin_response_key:
+                st.generation_done_tool_calls.pop(completed_response_key or "", None)
+                st.provisional_tool_followup_item_ids.pop(completed_response_key or "", None)
+        if completed_response_id is not None and completed_response_id != st.queued_tool_followup_origin_response_id:
+            st.accepted_tool_followup_response_ids.discard(completed_response_id)
         st.current_response_id = None
         st.current_response_key = None
         st.response_failed = False
@@ -99,6 +149,150 @@ class ResponseHandler(RealtimeBaseHandler):
         st.audio_output_started = False
         st.pending_text_outputs = []
         st.pending_function_calls = {}
+
+    def _queue_tool_followup(
+        self,
+        conn_id: str,
+        event: ResponseCreateEvent,
+        origin_response_id: str,
+    ) -> ServerEvent | None:
+        """Queue one response-scoped follow-up behind the active response's audio."""
+        st = self._state(conn_id)
+        if origin_response_id in st.accepted_tool_followup_response_ids:
+            return None
+        active_origin_key = None
+        if (
+            st.in_response
+            and st.current_response_id == origin_response_id
+            and st.current_response_key is not None
+            and st.pending_function_calls
+        ):
+            active_origin_key = st.current_response_key
+        origin_response_key = active_origin_key or st.completed_tool_response_keys.get(origin_response_id)
+        if origin_response_key is None:
+            return self.make_error(
+                message="Tool follow-up does not match an active or recently completed response.",
+                _type="invalid_tool_follow_up",
+            )
+        if is_out_of_band(event.response) or (event.response and event.response.input):
+            return self.make_error(
+                message="Queued tool follow-ups cannot be out of band or carry response input.",
+                _type="invalid_tool_follow_up",
+            )
+        if st.queued_tool_followup_request is not None:
+            return self.make_error(
+                message="A tool follow-up is already queued for the active response.",
+                _type="conversation_already_has_active_response",
+            )
+
+        request = GenerateResponseRequest(
+            runtime_config=st.runtime_config,
+            response=event.response,
+            turn_id=st.speculative_user_turn_id,
+            turn_revision=st.speculative_user_turn_revision,
+            speech_stopped_at_s=st.speculative_user_speech_stopped_at_s,
+        )
+        st.queued_tool_followup_request = request
+        st.queued_tool_followup_origin_response_id = origin_response_id
+        st.queued_tool_followup_origin_response_key = origin_response_key
+        st.accepted_tool_followup_response_ids.add(origin_response_id)
+        st.pending_response_params[request.response_key] = event.response
+        st.mark_response_pending(request.response_key)
+        self.maybe_start_queued_tool_followup(conn_id)
+        logger.debug("Queued tool follow-up for response %s", origin_response_id)
+        return None
+
+    def maybe_start_queued_tool_followup(self, conn_id: str) -> bool:
+        """Start a queued follow-up once model output and every tool result are ready."""
+        st = self._state(conn_id)
+        request = st.queued_tool_followup_request
+        origin_response_key = st.queued_tool_followup_origin_response_key
+        if request is None or origin_response_key is None:
+            return False
+        call_ids = st.generation_done_tool_calls.get(origin_response_key)
+        if not call_ids or st.runtime_config.chat.has_pending_tool_calls():
+            return False
+        queue = self._queue(conn_id)
+        if queue is None:
+            return False
+
+        queue.put(request)
+        st.queued_tool_followup_request = None
+        st.queued_tool_followup_origin_response_id = None
+        st.queued_tool_followup_origin_response_key = None
+        st.generation_done_tool_calls.pop(origin_response_key, None)
+        st.completed_tool_response_call_ids.pop(origin_response_key, None)
+        if origin_response_key in st.closed_response_keys:
+            st.provisional_tool_followup_item_ids.pop(origin_response_key, None)
+        logger.debug("Tool follow-up generation released after %d result(s)", len(call_ids))
+        return True
+
+    def discard_queued_tool_followup(
+        self,
+        conn_id: str,
+        *,
+        origin_response_key: str | None = None,
+    ) -> None:
+        """Discard a queued tool follow-up and its provisional image inputs."""
+        st = self._state(conn_id)
+        queued_origin_key = st.queued_tool_followup_origin_response_key
+        request = st.queued_tool_followup_request
+        origin_response_id = st.queued_tool_followup_origin_response_id
+        tracked_keys = {origin_response_key} if origin_response_key is not None else set()
+        if queued_origin_key is not None and (origin_response_key is None or queued_origin_key == origin_response_key):
+            tracked_keys.add(queued_origin_key)
+        if origin_response_key is None:
+            tracked_keys.update(st.completed_tool_response_keys.values())
+        for tracked_key in tracked_keys:
+            call_ids = st.generation_done_tool_calls.pop(tracked_key, set())
+            call_ids.update(st.completed_tool_response_call_ids.pop(tracked_key, set()))
+            if call_ids and tracked_key in st.closed_response_keys:
+                st.runtime_config.chat.rollback_generation(
+                    None,
+                    item_ids=set(),
+                    call_ids=call_ids,
+                    response_key=tracked_key,
+                )
+            for item_id in st.provisional_tool_followup_item_ids.pop(tracked_key, set()):
+                st.runtime_config.chat.remove_user_message(item_id)
+        completed_ids = {
+            response_id
+            for response_id, response_key in st.completed_tool_response_keys.items()
+            if response_key in tracked_keys
+        }
+        for response_id in completed_ids:
+            st.completed_tool_response_keys.pop(response_id, None)
+            st.accepted_tool_followup_response_ids.discard(response_id)
+        discard_queued = queued_origin_key in tracked_keys
+        if request is not None and discard_queued:
+            self._service.close_response_key(conn_id, request.response_key)
+        if origin_response_id is not None and discard_queued:
+            st.accepted_tool_followup_response_ids.discard(origin_response_id)
+        if discard_queued:
+            st.queued_tool_followup_request = None
+            st.queued_tool_followup_origin_response_id = None
+            st.queued_tool_followup_origin_response_key = None
+
+    def on_response_generation_done(
+        self,
+        conn_id: str,
+        event: ResponseGenerationDoneEvent,
+    ) -> list[ServerEvent]:
+        """Record logical completion on the non-TTS side channel."""
+        if event.response_key is None:
+            return []
+        st = self._state(conn_id)
+        if (
+            event.response_key in st.closed_response_keys
+            and event.response_key not in st.completed_tool_response_keys.values()
+        ):
+            return []
+        if not event.succeeded:
+            self.discard_queued_tool_followup(conn_id, origin_response_key=event.response_key)
+            return []
+        st.generation_done_tool_calls[event.response_key] = set(event.call_ids)
+        self.maybe_start_queued_tool_followup(conn_id)
+        return []
 
     def _start_item(self, conn_id: str) -> str:
         """Generate a new item ID, reset content index, and store it."""
@@ -277,6 +471,10 @@ class ResponseHandler(RealtimeBaseHandler):
                     message="Only string tool_choice values are supported for now (auto, required, none).",
                     _type="tool_choice_not_supported",
                 )
+            metadata = event.response.metadata or {}
+            follow_up_for = metadata.get(TOOL_FOLLOW_UP_RESPONSE_ID_METADATA_KEY)
+            if isinstance(follow_up_for, str):
+                return self._queue_tool_followup(conn_id, event, follow_up_for)
         if st.in_response or st.response_pending:
             return self.make_error(
                 message="Cannot create response while another response is in progress or pending.",

@@ -13,6 +13,12 @@ from openai.types.realtime import (
 from openai.types.realtime.conversation_item_input_audio_transcription_completed_event import (
     UsageTranscriptTextUsageDuration,
 )
+from openai.types.realtime.realtime_conversation_item_function_call_output import (
+    RealtimeConversationItemFunctionCallOutput,
+)
+from openai.types.realtime.realtime_conversation_item_user_message import (
+    RealtimeConversationItemUserMessage,
+)
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
 from speech_to_speech.LLM.chat import ChatItemError, add_supported_item
@@ -22,6 +28,7 @@ if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import ServerEvent
 
 logger = logging.getLogger(__name__)
+TOOL_FOLLOW_UP_RESPONSE_ID_FIELD = "s2s_tool_follow_up_for_response_id"
 
 
 class ConversationHandler(RealtimeBaseHandler):
@@ -38,15 +45,33 @@ class ConversationHandler(RealtimeBaseHandler):
         generation on their own.  A subsequent ``response.create`` event is
         required to trigger the model.
 
-        While a response is generating, the item is *deferred*: applying it now
-        would race the LLM handler's end-of-turn chat write-back, which runs on
-        the pipeline thread (e.g. a ``function_call_output`` arriving before its
-        ``function_call`` is recorded, or an image stripped before the next
-        turn reads it). Deferred items are flushed, in order, once the response
-        completes — see :meth:`flush_deferred_items`.
+        Most items remain deferred while a response is generating. Tool results
+        and their image-only inputs are safe to apply immediately: function calls
+        are recorded before their events reach the client, and the LLM strips
+        only images present in its serialized input snapshot. This lets a queued
+        tool follow-up start before the originating response finishes TTS.
         """
         st = self._state(conn_id)
+        queued_origin_key = st.queued_tool_followup_origin_response_key
+        is_image_only = (
+            isinstance(event.item, RealtimeConversationItemUserMessage)
+            and bool(event.item.content)
+            and all(part.type == "input_image" for part in event.item.content)
+        )
+        tool_follow_up_for = getattr(event.item, TOOL_FOLLOW_UP_RESPONSE_ID_FIELD, None)
+        if (
+            is_image_only
+            and queued_origin_key is not None
+            and tool_follow_up_for == st.queued_tool_followup_origin_response_id
+            and (not st.in_response or st.current_response_key == queued_origin_key)
+        ):
+            events = self._apply_item(conn_id, event.item)
+            if event.item.id is not None:
+                st.provisional_tool_followup_item_ids.setdefault(queued_origin_key, set()).add(event.item.id)
+            return events
         if st.in_response:
+            if isinstance(event.item, RealtimeConversationItemFunctionCallOutput):
+                return self._apply_item(conn_id, event.item)
             st.deferred_items.append(event.item)
             logger.debug("Deferred conversation item until the active response completes")
             return []

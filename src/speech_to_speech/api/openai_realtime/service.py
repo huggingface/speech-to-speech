@@ -52,6 +52,7 @@ from speech_to_speech.pipeline.events import (
     PartialTranscriptionEvent,
     PipelineEvent,
     ResponseFailedEvent,
+    ResponseGenerationDoneEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TokenUsageEvent,
@@ -68,7 +69,6 @@ PIPELINE_SAMPLE_RATE = 16000
 CHUNK_SAMPLES = 512
 BYTES_PER_SAMPLE = 2
 CHUNK_SIZE_BYTES = CHUNK_SAMPLES * BYTES_PER_SAMPLE
-
 _ResponseStatus = Literal["completed", "cancelled", "failed", "incomplete", "in_progress"]
 _StatusReason = Literal["turn_detected", "client_cancelled", "max_output_tokens", "content_filter"]
 
@@ -171,6 +171,7 @@ class ConnState(BaseModel):
     in_response: bool = False
     response_pending: bool = False
     pending_response_keys: set[str] = Field(default_factory=set)
+    pending_response_params: dict[str, RealtimeResponseCreateParams | None] = Field(default_factory=dict)
     closed_response_keys: dict[str, None] = Field(default_factory=dict)
     audio_buffer_has_data: bool = False
     audio_remainder: bytes = b""
@@ -212,6 +213,14 @@ class ConnState(BaseModel):
     # write-back (cross-thread), so they are buffered here and flushed in order
     # once the response completes. See ConversationHandler.flush_deferred_items.
     deferred_items: list[ConversationItem] = Field(default_factory=list)
+    generation_done_tool_calls: dict[str, set[str]] = Field(default_factory=dict)
+    completed_tool_response_keys: dict[str, str] = Field(default_factory=dict)
+    completed_tool_response_call_ids: dict[str, set[str]] = Field(default_factory=dict)
+    queued_tool_followup_request: GenerateResponseRequest | None = None
+    queued_tool_followup_origin_response_id: str | None = None
+    queued_tool_followup_origin_response_key: str | None = None
+    accepted_tool_followup_response_ids: set[str] = Field(default_factory=set)
+    provisional_tool_followup_item_ids: dict[str, set[str]] = Field(default_factory=dict)
 
     def mark_response_pending(self, response_key: str) -> None:
         """Track an implicit response from queueing until its first output."""
@@ -233,6 +242,7 @@ class ConnState(BaseModel):
             self.response_pending = bool(self.pending_response_keys)
             return
         self.pending_response_keys.discard(response_key)
+        self.pending_response_params.pop(response_key, None)
         self.pending_token_usage.pop(response_key, None)
         self.closed_response_keys[response_key] = None
         while len(self.closed_response_keys) > 128:
@@ -275,6 +285,7 @@ class RealtimeService:
             PartialTranscriptionEvent: self.conversation.on_partial_transcription,
             TranscriptionCompletedEvent: self._on_transcription_completed,
             AudioInputCompletedEvent: self._on_audio_input_completed,
+            ResponseGenerationDoneEvent: self.response.on_response_generation_done,
             ResponseFailedEvent: self._on_response_failed,
         }
 
@@ -412,7 +423,9 @@ class RealtimeService:
     def close_pending_responses(self, conn_id: str) -> None:
         """Cancel queued responses without losing usage already reported by their LMs."""
         st = self._state(conn_id)
+        self.response.discard_queued_tool_followup(conn_id)
         for response_key in tuple(st.pending_response_keys):
+            st.generation_done_tool_calls.pop(response_key, None)
             st.runtime_config.chat.rollback_provisional_generation(response_key)
             self.close_response_key(conn_id, response_key)
         st.response_pending = bool(st.pending_response_keys)
@@ -427,7 +440,9 @@ class RealtimeService:
         st.close_response_key(response_key)
 
     def handle_conversation_item_create(self, conn_id: str, event: ConversationItemCreateEvent) -> list[ServerEvent]:
-        return self.conversation.handle_conversation_item_create(conn_id, event)
+        events = self.conversation.handle_conversation_item_create(conn_id, event)
+        self.response.maybe_start_queued_tool_followup(conn_id)
+        return events
 
     def dispatch_pipeline_event(self, conn_id: str, event: PipelineEvent) -> list[ServerEvent]:
         """Route an internal pipeline event to the appropriate handler."""
@@ -445,7 +460,7 @@ class RealtimeService:
     def should_defer_pipeline_event(self, event: PipelineEvent) -> bool:
         if self.speculative_turns is None or not isinstance(
             event,
-            (AssistantOutputEvent, AssistantResponseDoneEvent),
+            (AssistantOutputEvent, AssistantResponseDoneEvent, ResponseGenerationDoneEvent),
         ):
             return False
         return self.speculative_turns.has_pending_reopen_or_grace(
@@ -503,12 +518,13 @@ class RealtimeService:
                 AudioInputCompletedEvent,
                 AssistantOutputEvent,
                 AssistantResponseDoneEvent,
+                ResponseGenerationDoneEvent,
             ),
         ):
             return False
         turn_id = getattr(event, "turn_id", None)
         turn_revision = getattr(event, "turn_revision", None)
-        if isinstance(event, (AssistantOutputEvent, AssistantResponseDoneEvent)):
+        if isinstance(event, (AssistantOutputEvent, AssistantResponseDoneEvent, ResponseGenerationDoneEvent)):
             is_latest: bool | None
             if wait_for_pending_reopen:
                 is_latest = self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)

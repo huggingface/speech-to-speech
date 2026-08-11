@@ -110,8 +110,13 @@ class AudioHandler(RealtimeBaseHandler):
         response = self._service.response
         events: list[ServerEvent] = []
         st = self._state(conn_id)
-        if st.in_response and event.interrupt_response and st.runtime_config.interrupt_response_enabled:
+        interrupt_enabled = event.interrupt_response and st.runtime_config.interrupt_response_enabled
+        if st.in_response and interrupt_enabled:
             events.extend(response.finish_response(conn_id, status="cancelled", reason="turn_detected"))
+        if interrupt_enabled:
+            # Also invalidate a tool follow-up whose response completed just
+            # before its tagged response.create reached the server.
+            response.discard_queued_tool_followup(conn_id)
         is_reopen = bool(event.reopened and event.turn_id is not None and event.turn_id == st.speculative_turn_id)
         preserve_active_response = st.in_response
         if is_reopen:

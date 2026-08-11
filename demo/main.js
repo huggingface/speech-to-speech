@@ -812,9 +812,9 @@ function flashPreview() {
 
 // ── Tool executor ─────────────────────────────────────────────────────────
 // Runs the function the model called and returns the result. The connection's
-// ToolCallBatcher sends every result from the originating response together,
-// then requests one follow-up. Errors come back as tool output too, so the
-// model can recover gracefully instead of the turn stalling.
+// ToolCallBatcher queues one response-scoped follow-up, then sends results in
+// call order as soon as they settle. The backend starts that generation only
+// after the originating model turn and all calls are complete.
 
 /**
  * Run the function the model called. The caller batches the returned result
@@ -1430,17 +1430,21 @@ async function doStart(audioContext = null) {
   client = c;
   c.setMuted(micMuted || userAudioReplaying);
 
-  /** @param {{ callId: string; output: string; image?: string }[]} results */
-  const sendToolBatch = (results) => {
+  /** @param {string} responseId @param {{ callId: string; output: string; image?: string }} result */
+  const sendToolResult = (responseId, result) => {
     if (client !== c) return;
-    for (const result of results) c.sendToolOutput(result.callId, result.output);
-    for (const result of results) {
-      if (result.image) c.sendUserImage(result.image);
-    }
-    if (DEBUG) console.debug(`[tool] requesting one follow-up after ${results.length} tool result(s)`);
-    c.requestResponse();
+    // Put supplemental input before the function output: the final outstanding
+    // output is the server's release gate for follow-up generation.
+    if (result.image) c.sendUserImage(result.image, responseId);
+    c.sendToolOutput(result.callId, result.output);
   };
-  const toolBatches = new ToolCallBatcher(sendToolBatch);
+  /** @param {string} responseId */
+  const queueToolFollowUp = (responseId) => {
+    if (client !== c) return;
+    if (DEBUG) console.debug(`[tool] queueing one follow-up for response ${responseId}`);
+    c.requestToolFollowUp(responseId);
+  };
+  const toolBatches = new ToolCallBatcher(sendToolResult, queueToolFollowUp);
 
   c.addEventListener("queue", (e) => {
     const { position, queueId } = /** @type {CustomEvent<{ position: number; queueId: string }>} */ (e).detail;
@@ -1471,7 +1475,8 @@ async function doStart(audioContext = null) {
     chat.onTranscript(d);
   });
   c.addEventListener("user-turn-started", (e) => {
-    const detail = /** @type {CustomEvent<{ itemId?: string }>} */ (e).detail;
+    const detail = /** @type {CustomEvent<{ itemId?: string; interruptResponse?: boolean }>} */ (e).detail;
+    if (detail.interruptResponse !== false) toolBatches.discardAll();
     chat.onUserTurnStarted(detail);
   });
   c.addEventListener("user-turn-stopped", (e) => {

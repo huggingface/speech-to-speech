@@ -53,6 +53,7 @@ from speech_to_speech.pipeline.events import (
     AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     ResponseFailedEvent,
+    ResponseGenerationDoneEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TokenUsageEvent,
@@ -468,7 +469,7 @@ class TestDeferConversationItemsDuringResponse:
         created = [e for e in events if isinstance(e, ConversationItemCreatedEvent)]
         assert len(created) == 2
 
-    def test_function_call_output_deferred_then_pairs_after_response(self, service, conn_id):
+    def test_function_call_output_applied_immediately_after_call_is_emitted(self, service, conn_id):
         from openai.types.realtime.realtime_conversation_item_function_call import (
             RealtimeConversationItemFunctionCall,
         )
@@ -486,16 +487,49 @@ class TestDeferConversationItemsDuringResponse:
             type="conversation.item.create",
             item={"type": "function_call_output", "output": "ok", "call_id": "call_1"},
         )
-        # Output arrives mid-response: deferred (applying now could race), no error.
-        assert service.handle_conversation_item_create(conn_id, evt) == []
-        assert len(st.deferred_items) == 1
+        # Calls are recorded before their event is emitted, so a fast output can
+        # pair immediately without racing end-of-generation write-back.
+        created = service.handle_conversation_item_create(conn_id, evt)
+        assert len(created) == 1
+        assert isinstance(created[0], ConversationItemCreatedEvent)
+        assert st.deferred_items == []
+        assert chat.buffer[-1].type == "function_call_output"
 
         finish_events = service.finish_response(conn_id)
 
-        # Flushed after completion → pairs cleanly, no invalid_conversation_item error.
+        # Completion remains clean and does not duplicate the early acknowledgement.
         assert not any(isinstance(e, RealtimeErrorEvent) for e in finish_events)
         assert chat._has_call_id_in_buffer("call_1")
         assert chat.buffer[-1].type == "function_call_output"
+
+    def test_ordinary_image_only_message_during_queued_tool_followup_is_deferred(self, service, conn_id):
+        st = service._state(conn_id)
+        st.in_response = True
+        st.current_response_id = "resp_origin"
+        st.current_response_key = "response_origin"
+        st.queued_tool_followup_origin_response_id = "resp_origin"
+        st.queued_tool_followup_origin_response_key = "response_origin"
+        st.pending_function_calls = {
+            0: RealtimeConversationItemFunctionCall(
+                type="function_call",
+                id="fc_camera",
+                call_id="call_camera",
+                name="camera_snapshot",
+                arguments="{}",
+            )
+        }
+        event = ConversationItemCreateEvent(
+            type="conversation.item.create",
+            item={
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_image", "image_url": "data:image/jpeg;base64,aW1hZ2U="}],
+            },
+        )
+
+        assert service.handle_conversation_item_create(conn_id, event) == []
+        assert st.deferred_items == [event.item]
+        assert st.provisional_tool_followup_item_ids == {}
 
     def test_cancel_rolls_back_provisional_call_before_flushing_deferred_output(self, service, conn_id):
         st = service._state(conn_id)
@@ -536,12 +570,14 @@ class TestDeferConversationItemsDuringResponse:
             ),
         )
 
-        assert service.handle_conversation_item_create(conn_id, result_event) == []
+        created = service.handle_conversation_item_create(conn_id, result_event)
+        assert len(created) == 1
+        assert isinstance(created[0], ConversationItemCreatedEvent)
 
         events = service.finish_response(conn_id, status="cancelled", reason="client_cancelled")
 
         assert any(isinstance(event, ResponseDoneEvent) for event in events)
-        assert any(isinstance(event, RealtimeErrorEvent) for event in events), events
+        assert not any(isinstance(event, RealtimeErrorEvent) for event in events), events
         assert not any(isinstance(event, ConversationItemCreatedEvent) for event in events)
         assert chat.buffer == [user]
         assert not chat.has_pending_tool_calls()
@@ -631,6 +667,334 @@ class TestHandleResponseCreate:
         err = service.handle_response_create(conn_id, evt)
         assert isinstance(err, RealtimeErrorEvent)
         assert err.error.type == "conversation_already_has_active_response"
+
+    def test_tool_followup_generation_starts_before_originating_response_done(
+        self, service, conn_id, text_prompt_queue
+    ):
+        st = service._state(conn_id)
+        chat = st.runtime_config.chat
+        response_key = "response_origin"
+        calls = [
+            RealtimeConversationItemFunctionCall(
+                type="function_call",
+                id=f"fc_{index}",
+                call_id=f"call_{index}",
+                name="lookup",
+                arguments="{}",
+            )
+            for index in range(2)
+        ]
+        recorded = chat.add_provisional_generation_items(response_key, calls)
+        assert recorded is not None
+        st.in_response = True
+        st.current_response_id = "resp_origin"
+        st.current_response_key = response_key
+        st.pending_function_calls = {index: call for index, call in enumerate(calls)}
+
+        service.dispatch_pipeline_event(
+            conn_id,
+            ResponseGenerationDoneEvent(response_key=response_key, call_ids=[call.call_id for call in calls]),
+        )
+        queued = service.handle_response_create(
+            conn_id,
+            ResponseCreateEvent(
+                type="response.create",
+                response={
+                    "metadata": {
+                        "s2s_demo_create_id": "create_followup",
+                        "s2s_tool_follow_up_for_response_id": "resp_origin",
+                    }
+                },
+            ),
+        )
+
+        assert queued is None
+        assert st.in_response is True
+        assert st.current_response_id == "resp_origin"
+        assert st.response_pending is True
+        assert text_prompt_queue.empty()
+
+        for index, call in enumerate(calls):
+            created = service.handle_conversation_item_create(
+                conn_id,
+                ConversationItemCreateEvent(
+                    type="conversation.item.create",
+                    item={"type": "function_call_output", "call_id": call.call_id, "output": f"result {index}"},
+                ),
+            )
+            assert len(created) == 1
+            if index == 0:
+                assert text_prompt_queue.empty()
+
+        followup_request = text_prompt_queue.get_nowait()
+        assert isinstance(followup_request, GenerateResponseRequest)
+        assert st.in_response is True
+        assert st.current_response_id == "resp_origin"
+        assert followup_request.response_key in st.pending_response_keys
+
+        service.finish_response(conn_id, response_key=response_key)
+        followup_events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(text="Final answer.", response_key=followup_request.response_key),
+        )
+        created = next(event for event in followup_events if isinstance(event, ResponseCreatedEvent))
+        assert created.response.metadata == {
+            "s2s_demo_create_id": "create_followup",
+            "s2s_tool_follow_up_for_response_id": "resp_origin",
+        }
+
+    def test_tool_followup_is_accepted_just_after_originating_response_done(self, service, conn_id, text_prompt_queue):
+        st = service._state(conn_id)
+        chat = st.runtime_config.chat
+        response_key = "response_origin"
+        call = RealtimeConversationItemFunctionCall(
+            type="function_call",
+            id="fc_lookup",
+            call_id="call_lookup",
+            name="lookup",
+            arguments="{}",
+        )
+        assert chat.add_provisional_generation_items(response_key, [call]) is not None
+        st.in_response = True
+        st.current_response_id = "resp_origin"
+        st.current_response_key = response_key
+        st.pending_function_calls = {0: call}
+
+        service.finish_response(conn_id, response_key=response_key)
+        assert st.in_response is False
+        assert st.completed_tool_response_keys == {"resp_origin": response_key}
+
+        queued = service.handle_response_create(
+            conn_id,
+            ResponseCreateEvent(
+                type="response.create",
+                response={"metadata": {"s2s_tool_follow_up_for_response_id": "resp_origin"}},
+            ),
+        )
+        assert queued is None
+        assert st.response_pending is True
+        assert text_prompt_queue.empty()
+
+        service.handle_conversation_item_create(
+            conn_id,
+            ConversationItemCreateEvent(
+                type="conversation.item.create",
+                item={"type": "function_call_output", "call_id": call.call_id, "output": "result"},
+            ),
+        )
+        assert text_prompt_queue.empty()
+
+        service.dispatch_pipeline_event(
+            conn_id,
+            ResponseGenerationDoneEvent(response_key=response_key, call_ids=[call.call_id]),
+        )
+
+        followup_request = text_prompt_queue.get_nowait()
+        assert isinstance(followup_request, GenerateResponseRequest)
+        assert st.completed_tool_response_keys == {"resp_origin": response_key}
+        assert st.queued_tool_followup_request is None
+
+        # Replaying the same tagged create remains idempotent after release.
+        assert (
+            service.handle_response_create(
+                conn_id,
+                ResponseCreateEvent(
+                    type="response.create",
+                    response={"metadata": {"s2s_tool_follow_up_for_response_id": "resp_origin"}},
+                ),
+            )
+            is None
+        )
+        assert text_prompt_queue.empty()
+
+    def test_new_speech_invalidates_late_tool_followup_candidate(self, service, conn_id):
+        st = service._state(conn_id)
+        chat = st.runtime_config.chat
+        response_key = "response_origin"
+        call = RealtimeConversationItemFunctionCall(
+            type="function_call",
+            id="fc_lookup",
+            call_id="call_lookup",
+            name="lookup",
+            arguments="{}",
+        )
+        assert chat.add_provisional_generation_items(response_key, [call]) is not None
+        st.in_response = True
+        st.current_response_id = "resp_origin"
+        st.current_response_key = response_key
+        st.pending_function_calls = {0: call}
+        service.dispatch_pipeline_event(
+            conn_id,
+            ResponseGenerationDoneEvent(response_key=response_key, call_ids=[call.call_id]),
+        )
+        service.finish_response(conn_id, response_key=response_key)
+
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+
+        assert not chat.has_pending_tool_calls()
+        assert st.completed_tool_response_keys == {}
+        rejected = service.handle_response_create(
+            conn_id,
+            ResponseCreateEvent(
+                type="response.create",
+                response={"metadata": {"s2s_tool_follow_up_for_response_id": "resp_origin"}},
+            ),
+        )
+        assert isinstance(rejected, RealtimeErrorEvent)
+        assert rejected.error.type == "invalid_tool_follow_up"
+
+    def test_cancelling_pending_response_clears_generation_done_state(self, service, conn_id):
+        st = service._state(conn_id)
+        response_key = "pending_followup"
+        st.mark_response_pending(response_key)
+        service.dispatch_pipeline_event(
+            conn_id,
+            ResponseGenerationDoneEvent(response_key=response_key, call_ids=["nested_call"]),
+        )
+        assert st.generation_done_tool_calls == {response_key: {"nested_call"}}
+
+        service.close_pending_responses(conn_id)
+
+        assert response_key in st.closed_response_keys
+        assert st.generation_done_tool_calls == {}
+
+    def test_completed_tool_response_eviction_clears_all_origin_state(self, service, conn_id):
+        st = service._state(conn_id)
+        for index in range(128):
+            response_id = f"resp_{index}"
+            response_key = f"response_{index}"
+            call_id = f"call_{index}"
+            st.completed_tool_response_keys[response_id] = response_key
+            st.completed_tool_response_call_ids[response_key] = {call_id}
+            st.generation_done_tool_calls[response_key] = {call_id}
+            st.provisional_tool_followup_item_ids[response_key] = {f"image_{index}"}
+
+        newest_call = RealtimeConversationItemFunctionCall(
+            type="function_call",
+            id="fc_new",
+            call_id="call_new",
+            name="lookup",
+            arguments="{}",
+        )
+        st.in_response = True
+        st.current_response_id = "resp_new"
+        st.current_response_key = "response_new"
+        st.pending_function_calls = {0: newest_call}
+        service.response._end_response(conn_id)
+
+        assert len(st.completed_tool_response_keys) == 128
+        assert "resp_0" not in st.completed_tool_response_keys
+        assert "response_0" not in st.completed_tool_response_call_ids
+        assert "response_0" not in st.generation_done_tool_calls
+        assert "response_0" not in st.provisional_tool_followup_item_ids
+
+    @pytest.mark.parametrize("origin_done", [False, True])
+    def test_cancel_discards_queued_tool_followup_and_its_fast_image(self, service, conn_id, origin_done):
+        st = service._state(conn_id)
+        chat = st.runtime_config.chat
+        user = chat.add_item(
+            RealtimeConversationItemUserMessage(
+                type="message",
+                role="user",
+                content=[{"type": "input_text", "text": "take a picture"}],
+            )
+        )
+        response_key = "response_origin"
+        call = RealtimeConversationItemFunctionCall(
+            type="function_call",
+            id="fc_camera",
+            call_id="call_camera",
+            name="camera_snapshot",
+            arguments="{}",
+        )
+        assert chat.add_provisional_generation_items(response_key, [call]) is not None
+        st.in_response = True
+        st.current_response_id = "resp_origin"
+        st.current_response_key = response_key
+        st.pending_function_calls = {0: call}
+        service.dispatch_pipeline_event(
+            conn_id,
+            ResponseGenerationDoneEvent(response_key=response_key, call_ids=["call_camera"]),
+        )
+        assert (
+            service.handle_response_create(
+                conn_id,
+                ResponseCreateEvent(
+                    type="response.create",
+                    response={"metadata": {"s2s_tool_follow_up_for_response_id": "resp_origin"}},
+                ),
+            )
+            is None
+        )
+        if origin_done:
+            service.finish_response(conn_id, response_key=response_key)
+        image_events = service.handle_conversation_item_create(
+            conn_id,
+            ConversationItemCreateEvent(
+                type="conversation.item.create",
+                item={
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_image", "image_url": "data:image/jpeg;base64,aW1hZ2U="}],
+                    "s2s_tool_follow_up_for_response_id": "resp_origin",
+                },
+            ),
+        )
+        assert len(image_events) == 1
+        assert len(chat.buffer) == 3
+
+        service.handle_response_cancel(conn_id)
+
+        assert chat.buffer == [user]
+        assert st.queued_tool_followup_request is None
+        assert st.response_pending is False
+        assert st.provisional_tool_followup_item_ids == {}
+
+    def test_barge_in_after_origin_done_discards_unanswered_tool_calls(self, service, conn_id):
+        st = service._state(conn_id)
+        chat = st.runtime_config.chat
+        user = chat.add_item(
+            RealtimeConversationItemUserMessage(
+                type="message",
+                role="user",
+                content=[{"type": "input_text", "text": "look this up"}],
+            )
+        )
+        response_key = "response_origin"
+        call = RealtimeConversationItemFunctionCall(
+            type="function_call",
+            id="fc_lookup",
+            call_id="call_lookup",
+            name="lookup",
+            arguments="{}",
+        )
+        assert chat.add_provisional_generation_items(response_key, [call]) is not None
+        st.in_response = True
+        st.current_response_id = "resp_origin"
+        st.current_response_key = response_key
+        st.pending_function_calls = {0: call}
+        service.dispatch_pipeline_event(
+            conn_id,
+            ResponseGenerationDoneEvent(response_key=response_key, call_ids=["call_lookup"]),
+        )
+        assert (
+            service.handle_response_create(
+                conn_id,
+                ResponseCreateEvent(
+                    type="response.create",
+                    response={"metadata": {"s2s_tool_follow_up_for_response_id": "resp_origin"}},
+                ),
+            )
+            is None
+        )
+
+        service.finish_response(conn_id, response_key=response_key)
+        assert chat.has_pending_tool_calls()
+        service.close_pending_responses(conn_id)
+
+        assert chat.buffer == [user]
+        assert not chat.has_pending_tool_calls()
+        assert st.response_pending is False
 
     def test_response_create_while_implicit_response_pending(self, service, conn_id, text_prompt_queue):
         service.dispatch_pipeline_event(

@@ -135,6 +135,23 @@ class AssistantResponseDoneEvent(PipelineEvent):
     cancel_generation: int | None = None
 
 
+class ResponseGenerationDoneEvent(PipelineEvent):
+    """Marks logical model completion without waiting for ordered TTS delivery.
+
+    This internal side-channel lets the realtime service release a queued tool
+    follow-up once every call result is present. The client-visible response
+    lifecycle remains on the ordered TTS path.
+    """
+
+    type: Literal["response_generation_done"] = "response_generation_done"
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
+    call_ids: list[str] = Field(default_factory=list)
+    succeeded: bool = True
+    turn_id: str | None = None
+    turn_revision: int | None = None
+    cancel_generation: int | None = None
+
+
 class ResponseFailedEvent(PipelineEvent):
     """Signals that a response could not be generated (e.g. invalid out-of-band input).
 

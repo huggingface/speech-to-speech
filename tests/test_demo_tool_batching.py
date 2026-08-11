@@ -79,12 +79,15 @@ const executions = [
   pending[1].promise.then(() => ({{ callId: "call_2", output: "second" }})),
 ];
 const timeline = [];
-const batches = new ToolCallBatcher((results) => {{
-  for (const result of results) timeline.push(`output:${{result.callId}}:${{result.output}}`);
-  timeline.push("response.create");
-}});
+const batches = new ToolCallBatcher(
+  (_responseId, result) => timeline.push(`output:${{result.callId}}:${{result.output}}`),
+  () => timeline.push("response.create"),
+);
 batches.add("response_1", executions[0]);
 batches.add("response_1", executions[1]);
+if (JSON.stringify(timeline) !== JSON.stringify(["response.create"])) {{
+  throw new Error(`follow-up was not queued immediately: ${{JSON.stringify(timeline)}}`);
+}}
 
 let flush = null;
 if ({json.dumps(response_finishes_first)}) {{
@@ -93,16 +96,13 @@ if ({json.dumps(response_finishes_first)}) {{
 for (const index of {json.dumps(completion_order)}) {{
   pending[index].resolve();
   await Promise.resolve();
-  if (timeline.length !== 0) {{
-    throw new Error(`batch flushed before both response and tools completed: ${{JSON.stringify(timeline)}}`);
-  }}
 }}
 await Promise.all(executions);
 if (!flush) flush = batches.finish("response_1", "completed");
 if (!flush) throw new Error("response batch was not registered");
 await flush;
 
-const expected = ["output:call_1:first", "output:call_2:second", "response.create"];
+const expected = ["response.create", "output:call_1:first", "output:call_2:second"];
 if (JSON.stringify(timeline) !== JSON.stringify(expected)) {{
   throw new Error(`unexpected tool batch: ${{JSON.stringify(timeline)}}`);
 }}
@@ -177,10 +177,10 @@ const deferred = () => {{
 const pending = [deferred(), deferred()];
 let executionIndex = 0;
 let flush = null;
-const batches = new ToolCallBatcher((results) => {{
-  for (const result of results) client.sendToolOutput(result.callId, result.output);
-  client.requestResponse();
-}});
+const batches = new ToolCallBatcher(
+  (_responseId, result) => client.sendToolOutput(result.callId, result.output),
+  (responseId) => client.requestToolFollowUp(responseId),
+);
 client.addEventListener("toolcall", (event) => {{
   const index = executionIndex++;
   const detail = event.detail;
@@ -213,16 +213,224 @@ for (const index of {json.dumps(completion_order)}) pending[index].resolve();
 await flush;
 
 const eventTypes = sent.map((event) => event.type);
-const expected = ["conversation.item.create", "conversation.item.create", "response.create"];
+const expected = ["response.create", "conversation.item.create", "conversation.item.create"];
 if (JSON.stringify(eventTypes) !== JSON.stringify(expected)) {{
   throw new Error(`tool follow-up was not transmitted: ${{JSON.stringify(sent)}}`);
 }}
-const outputs = sent.slice(0, 2).map((event) => event.item.call_id);
+const outputs = sent.slice(1).map((event) => event.item.call_id);
 if (JSON.stringify(outputs) !== JSON.stringify(["call_1", "call_2"])) {{
   throw new Error(`tool outputs lost call order: ${{JSON.stringify(outputs)}}`);
 }}
 if (client._createQueue.length !== 0) {{
   throw new Error(`follow-up remained queued: ${{client._createQueue.length}}`);
+}}
+const followUpMetadata = sent[0].response.metadata;
+await deliver({{
+  type: "response.created",
+  response: {{ id: "response_2", metadata: followUpMetadata }},
+}});
+if (client._queuedToolFollowUp !== null) {{
+  throw new Error("follow-up response.created did not clear the queued marker");
+}}
+"""
+    subprocess.run(
+        [node, "--input-type=module", "-e", script],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("module_path", "class_name", "message_handler", "attach_transport"),
+    [
+        (
+            "./demo/ws/s2s-ws-client.js",
+            "S2sWsRealtimeClient",
+            "_onWsMessage",
+            "client._ws = { readyState: WebSocket.OPEN, send: record };",
+        ),
+        (
+            "./demo/rtc/s2s-rtc-client.js",
+            "S2sRtcRealtimeClient",
+            "_onDcMessage",
+            'client._dc = { readyState: "open", send: record };',
+        ),
+    ],
+)
+def test_demo_clients_unlock_after_invalid_tool_follow_up(
+    module_path,
+    class_name,
+    message_handler,
+    attach_transport,
+):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for demo client tests")
+
+    script = f"""
+globalThis.localStorage = {{ getItem() {{ return null; }} }};
+globalThis.CustomEvent = class CustomEvent extends Event {{
+  constructor(type, init = {{}}) {{
+    super(type);
+    this.detail = init.detail;
+  }}
+}};
+globalThis.WebSocket = {{ OPEN: 1 }};
+const {{ {class_name} }} = await import({json.dumps(module_path)});
+const client = new {class_name}({{
+  voice: "Aiden",
+  instructions: "Be helpful.",
+  directUrl: "ws://unused",
+  callsUrl: "api/calls",
+}});
+const sent = [];
+const record = (raw) => sent.push(JSON.parse(raw));
+{attach_transport}
+
+client.requestToolFollowUp("response_1");
+client.requestResponse();
+await client[{json.dumps(message_handler)}](JSON.stringify({{
+  type: "error",
+  error: {{ type: "invalid_tool_follow_up", message: "stale origin" }},
+}}));
+
+if (client._queuedToolFollowUp !== null || client._createQueue.length !== 0) {{
+  throw new Error("invalid tool follow-up left the client response-locked");
+}}
+if (!client._pendingCreateId || sent.length !== 2) {{
+  throw new Error(`queued response did not resume: ${{JSON.stringify(sent)}}`);
+}}
+"""
+    subprocess.run(
+        [node, "--input-type=module", "-e", script],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("module_path", "class_name", "message_handler", "attach_transport"),
+    [
+        (
+            "./demo/ws/s2s-ws-client.js",
+            "S2sWsRealtimeClient",
+            "_onWsMessage",
+            "client._ws = { readyState: WebSocket.OPEN, send() {} };",
+        ),
+        (
+            "./demo/rtc/s2s-rtc-client.js",
+            "S2sRtcRealtimeClient",
+            "_onDcMessage",
+            'client._dc = { readyState: "open", send() {} };',
+        ),
+    ],
+)
+def test_demo_clients_preserve_tool_follow_up_when_interrupts_are_disabled(
+    module_path,
+    class_name,
+    message_handler,
+    attach_transport,
+):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for demo client tests")
+
+    script = f"""
+globalThis.localStorage = {{ getItem() {{ return null; }} }};
+globalThis.CustomEvent = class CustomEvent extends Event {{
+  constructor(type, init = {{}}) {{
+    super(type);
+    this.detail = init.detail;
+  }}
+}};
+globalThis.WebSocket = {{ OPEN: 1 }};
+const {{ {class_name} }} = await import({json.dumps(module_path)});
+const client = new {class_name}({{
+  voice: "Aiden",
+  instructions: "Be helpful.",
+  directUrl: "ws://unused",
+  callsUrl: "api/calls",
+}});
+{attach_transport}
+let turnStarted = null;
+client.addEventListener("user-turn-started", (event) => {{ turnStarted = event.detail; }});
+await client[{json.dumps(message_handler)}](JSON.stringify({{
+  type: "session.created",
+  session: {{
+    audio: {{ input: {{ turn_detection: {{ type: "server_vad", interrupt_response: false }} }} }},
+  }},
+}}));
+client.requestToolFollowUp("response_1");
+await client[{json.dumps(message_handler)}](JSON.stringify({{
+  type: "input_audio_buffer.speech_started",
+  item_id: "item_1",
+  audio_start_ms: 0,
+}}));
+
+if (!client._queuedToolFollowUp) {{
+  throw new Error("non-interrupting speech discarded the queued tool follow-up");
+}}
+if (turnStarted?.interruptResponse !== false) {{
+  throw new Error(`interrupt setting was not exposed: ${{JSON.stringify(turnStarted)}}`);
+}}
+"""
+    subprocess.run(
+        [node, "--input-type=module", "-e", script],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("module_path", "class_name", "attach_transport"),
+    [
+        (
+            "./demo/ws/s2s-ws-client.js",
+            "S2sWsRealtimeClient",
+            "client._ws = { readyState: WebSocket.OPEN, send: record };",
+        ),
+        (
+            "./demo/rtc/s2s-rtc-client.js",
+            "S2sRtcRealtimeClient",
+            'client._dc = { readyState: "open", send: record };',
+        ),
+    ],
+)
+def test_demo_clients_tag_tool_follow_up_images(module_path, class_name, attach_transport):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for demo client tests")
+
+    script = f"""
+globalThis.localStorage = {{ getItem() {{ return null; }} }};
+globalThis.CustomEvent = class CustomEvent extends Event {{
+  constructor(type, init = {{}}) {{
+    super(type);
+    this.detail = init.detail;
+  }}
+}};
+globalThis.WebSocket = {{ OPEN: 1 }};
+const {{ {class_name} }} = await import({json.dumps(module_path)});
+const client = new {class_name}({{
+  voice: "Aiden",
+  instructions: "Be helpful.",
+  directUrl: "ws://unused",
+  callsUrl: "api/calls",
+}});
+const sent = [];
+const record = (raw) => sent.push(JSON.parse(raw));
+{attach_transport}
+client.sendUserImage("data:image/jpeg;base64,aW1hZ2U=", "response_1");
+
+const item = sent[0]?.item;
+if (item?.s2s_tool_follow_up_for_response_id !== "response_1") {{
+  throw new Error(`tool image origin was not tagged: ${{JSON.stringify(sent)}}`);
 }}
 """
     subprocess.run(
@@ -415,14 +623,17 @@ const {{ ToolCallBatcher }} = await import("./demo/tool-call-batcher.js");
 let resolveExecution;
 const execution = new Promise((resolve) => {{ resolveExecution = resolve; }});
 const timeline = [];
-const batches = new ToolCallBatcher(() => {{ timeline.push("response.create"); }});
+const batches = new ToolCallBatcher(
+  () => {{ timeline.push("output"); }},
+  () => {{ timeline.push("response.create"); }},
+);
 batches.add("response_1", execution);
 const flush = batches.finish("response_1", {json.dumps(status)});
 if (flush !== null) throw new Error("unsuccessful response returned a flush");
 resolveExecution({{ callId: "call_1", output: "unused" }});
 await execution;
 await Promise.resolve();
-if (timeline.length !== 0) {{
+if (JSON.stringify(timeline) !== JSON.stringify(["response.create"])) {{
   throw new Error(`discarded response unexpectedly flushed: ${{JSON.stringify(timeline)}}`);
 }}
 if (batches.finish("response_1", "completed") !== null) {{

@@ -75,6 +75,7 @@ const SPEAKING_OPEN_DB = -50;
 const SPEAKING_HANG_MS = 250;
 const LEVEL_POLL_MS = 50;
 const RESPONSE_CREATE_ID_METADATA_KEY = "s2s_demo_create_id";
+const TOOL_FOLLOW_UP_RESPONSE_ID_METADATA_KEY = "s2s_tool_follow_up_for_response_id";
 
 /** Build an Error carrying a `code` so callers can branch on the failure kind.
  *  @param {string} message @param {string} code */
@@ -150,6 +151,9 @@ export class S2sRtcRealtimeClient extends EventTarget {
     this._pendingCreateId = "";
     this._pendingCreateSawResponse = false;
     this._waitingForResponseAfterCollision = false;
+    /** @type {{ originResponseId: string; createId: string } | null} */
+    this._queuedToolFollowUp = null;
+    this._interruptResponseEnabled = true;
     this._nextCreateSequence = 0;
     /** @type {{ image?: string }[]} */
     this._createQueue = [];
@@ -456,6 +460,9 @@ export class S2sRtcRealtimeClient extends EventTarget {
 
     switch (type) {
       case "session.created":
+        if (typeof event.session?.audio?.input?.turn_detection?.interrupt_response === "boolean") {
+          this._interruptResponseEnabled = event.session.audio.input.turn_detection.interrupt_response;
+        }
         // Server-side defaults are already what we want; push only the
         // user-tunable bits (voice, instructions, tools) — same as WS.
         this._sendSessionUpdate();
@@ -470,6 +477,9 @@ export class S2sRtcRealtimeClient extends EventTarget {
         break;
 
       case "session.updated":
+        if (typeof event.session?.audio?.input?.turn_detection?.interrupt_response === "boolean") {
+          this._interruptResponseEnabled = event.session.audio.input.turn_detection.interrupt_response;
+        }
         break;
 
       case "input_audio_buffer.speech_started":
@@ -477,9 +487,11 @@ export class S2sRtcRealtimeClient extends EventTarget {
         // the server flushes its track buffer — so this is UI state only.
         this._aiSpeaking = false;
         this._lastAudibleAt = 0;
+        if (this._interruptResponseEnabled) this._queuedToolFollowUp = null;
         this.dispatchEvent(new CustomEvent("user-turn-started", {
           detail: {
             itemId: typeof event.item_id === "string" ? event.item_id : "",
+            interruptResponse: this._interruptResponseEnabled,
           },
         }));
         this._setStatus("user-speaking");
@@ -494,10 +506,13 @@ export class S2sRtcRealtimeClient extends EventTarget {
         if (this._status === "user-speaking") this._setStatus("processing");
         break;
 
-      case "response.created":
+      case "response.created": {
         this._waitingForResponseAfterCollision = false;
         this._activeResponseId = event.response?.id ?? "";
-        if (event.response?.metadata?.[RESPONSE_CREATE_ID_METADATA_KEY] === this._pendingCreateId) {
+        const createdBy = event.response?.metadata?.[RESPONSE_CREATE_ID_METADATA_KEY];
+        if (createdBy && createdBy === this._queuedToolFollowUp?.createId) {
+          this._queuedToolFollowUp = null;
+        } else if (createdBy === this._pendingCreateId) {
           this._pendingCreateId = "";
           this._pendingCreateSawResponse = false;
         } else if (this._pendingCreateId) {
@@ -507,6 +522,7 @@ export class S2sRtcRealtimeClient extends EventTarget {
           this._setStatus("processing");
         }
         break;
+      }
 
       case "response.output_item.added":
         if (this._status === "connected" || this._status === "user-speaking") {
@@ -524,6 +540,9 @@ export class S2sRtcRealtimeClient extends EventTarget {
         // "cancelled") — same contract the WS client documents.
         const status = event.response?.status ?? "completed";
         const responseId = event.response?.id ?? "";
+        if (status !== "completed" && this._queuedToolFollowUp?.originResponseId === responseId) {
+          this._queuedToolFollowUp = null;
+        }
         if (this._activeResponseId === responseId) this._activeResponseId = "";
         this._waitingForResponseAfterCollision = false;
         const audible = responseId ? this._audibleResponses.has(responseId) : false;
@@ -647,10 +666,19 @@ export class S2sRtcRealtimeClient extends EventTarget {
       case "error": {
         const err = event.error;
         console.error("[rtc] server error:", err);
+        if ((err?.type === "invalid_tool_follow_up" || err?.code === "invalid_tool_follow_up") &&
+            this._queuedToolFollowUp) {
+          this._queuedToolFollowUp = null;
+          this._flushQueuedCreate();
+        }
         // Our optimistic create collided with a still-running response: re-queue
         // the rejected create and retry as soon as the response slot is free.
         if (err?.type === "conversation_already_has_active_response" ||
             err?.code === "conversation_already_has_active_response") {
+          if (this._queuedToolFollowUp) {
+            this._queuedToolFollowUp = null;
+            break;
+          }
           if (this._pendingCreateId) {
             const responseAlreadyFinished = this._pendingCreateSawResponse && !this._activeResponseId;
             this._waitingForResponseAfterCollision = !this._pendingCreateSawResponse;
@@ -752,17 +780,39 @@ export class S2sRtcRealtimeClient extends EventTarget {
     });
   }
 
+  /** Queue one response-scoped tool follow-up while acknowledgement audio is
+   *  still active. @param {string} originResponseId */
+  requestToolFollowUp(originResponseId) {
+    if (!originResponseId || this._queuedToolFollowUp) return;
+    if (!this._dc || this._dc.readyState !== "open") return;
+    const createId = `demo_create_${++this._nextCreateSequence}`;
+    this._queuedToolFollowUp = { originResponseId, createId };
+    this._send({
+      type: "response.create",
+      response: {
+        metadata: {
+          [RESPONSE_CREATE_ID_METADATA_KEY]: createId,
+          [TOOL_FOLLOW_UP_RESPONSE_ID_METADATA_KEY]: originResponseId,
+        },
+      },
+    });
+  }
+
   /** Add an image to the conversation as user content (camera tool). The
    *  caller keeps `dataUrl` under the data-channel message budget — SCTP
    *  messages above the negotiated max (64 KiB on aiortc) fail to send.
-   *  @param {string} dataUrl */
-  sendUserImage(dataUrl) {
+   *  @param {string} dataUrl
+   *  @param {string} [toolFollowUpForResponseId] */
+  sendUserImage(dataUrl, toolFollowUpForResponseId = "") {
     this._send({
       type: "conversation.item.create",
       item: {
         type: "message",
         role: "user",
         content: [{ type: "input_image", image_url: dataUrl }],
+        ...(toolFollowUpForResponseId
+          ? { [TOOL_FOLLOW_UP_RESPONSE_ID_METADATA_KEY]: toolFollowUpForResponseId }
+          : {}),
       },
     });
   }
@@ -803,6 +853,7 @@ export class S2sRtcRealtimeClient extends EventTarget {
     return (
       Boolean(this._activeResponseId) ||
       Boolean(this._pendingCreateId) ||
+      Boolean(this._queuedToolFollowUp) ||
       this._waitingForResponseAfterCollision
     );
   }
