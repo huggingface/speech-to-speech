@@ -394,20 +394,6 @@ class _ToolExecutionResult:
     create_response: bool
 
 
-@dataclass(frozen=True)
-class _PendingToolCall:
-    call_id: str
-    output_index: int
-    name: Any
-    raw_arguments: Any
-
-
-@dataclass
-class _ToolBatch:
-    calls: list[_PendingToolCall] = field(default_factory=list)
-    call_ids: set[str] = field(default_factory=set)
-
-
 class _ToolCoordinatorError(RuntimeError):
     """Raised when the server rejects a tool follow-up response permanently."""
 
@@ -420,9 +406,8 @@ class _ToolCallCoordinator:
         self._executor = config.tool_executor
         self._tool_validators = _validate_tool_config(config.tools, self._executor)
         self._default_create_response = config.tool_response_create
-        self._batches: dict[str, _ToolBatch] = {}
         self._active_response_id: str | None = None
-        self._pending_tool_batches = 0
+        self._pending_tool_flushes = 0
         self._queued_follow_ups = 0
         self._pending_create_id: str | None = None
         self._pending_create_follow_ups = 0
@@ -450,8 +435,6 @@ class _ToolCallCoordinator:
                 self._pending_create_follow_ups = 0
             elif self._pending_create_id is not None:
                 self._pending_create_saw_response = True
-        elif event.type == "response.function_call_arguments.done":
-            self._handle_tool_call(event)
         elif event.type == "response.done":
             self._handle_response_done(event.response)
         elif event.type == "error":
@@ -460,35 +443,6 @@ class _ToolCallCoordinator:
             if self._waiting_for_response_after_collision:
                 self._waiting_for_response_after_collision = False
                 self._kick_follow_up()
-
-    def _handle_tool_call(self, event: Any) -> None:
-        call_id = getattr(event, "call_id", None)
-        if not isinstance(call_id, str) or not call_id:
-            print("TOOL ERROR: received a call without call_id; cannot return an output", flush=True)
-            return
-
-        response_id = getattr(event, "response_id", None) or self._active_response_id
-        if not isinstance(response_id, str) or not response_id:
-            print(f"TOOL ERROR: call_id={call_id} has no response_id; call ignored", flush=True)
-            return
-        output_index = getattr(event, "output_index", None)
-        if not isinstance(output_index, int) or isinstance(output_index, bool) or output_index < 0:
-            print(f"TOOL ERROR: call_id={call_id} has an invalid output_index; call ignored", flush=True)
-            return
-
-        batch = self._batches.setdefault(response_id, _ToolBatch())
-        if call_id in batch.call_ids:
-            print(f"TOOL ERROR: duplicate call_id={call_id} ignored", flush=True)
-            return
-        batch.call_ids.add(call_id)
-        batch.calls.append(
-            _PendingToolCall(
-                call_id=call_id,
-                output_index=output_index,
-                name=getattr(event, "name", None),
-                raw_arguments=getattr(event, "arguments", None),
-            )
-        )
 
     async def _execute_tool(self, call_id: str, name: Any, raw_arguments: Any) -> _ToolExecutionResult:
         display_name = name if isinstance(name, str) and name else "<unnamed>"
@@ -541,26 +495,36 @@ class _ToolCallCoordinator:
         if response_id == self._active_response_id:
             self._active_response_id = None
         self._waiting_for_response_after_collision = False
-        batch = self._batches.pop(response_id, None) if isinstance(response_id, str) else None
-        if batch is not None:
-            batch.call_ids.clear()
-            if getattr(response, "status", None) == "completed":
-                self._schedule_flush(batch)
+        if getattr(response, "status", None) == "completed":
+            calls = [
+                item
+                for item in (getattr(response, "output", None) or [])
+                if getattr(item, "type", None) == "function_call"
+            ]
+            if calls:
+                self._schedule_flush(calls)
         self._kick_follow_up()
 
-    def _schedule_flush(self, batch: _ToolBatch) -> None:
-        previous = self._flush_tail
-        self._pending_tool_batches += 1
-        executions = [
-            asyncio.create_task(
-                self._execute_tool(
-                    call.call_id,
-                    call.name,
-                    call.raw_arguments,
+    def _schedule_flush(self, calls: list[Any]) -> None:
+        executions = []
+        for call in calls:
+            call_id = getattr(call, "call_id", None)
+            if not isinstance(call_id, str) or not call_id:
+                print("TOOL ERROR: received a call without call_id; cannot return an output", flush=True)
+                continue
+            executions.append(
+                asyncio.create_task(
+                    self._execute_tool(
+                        call_id,
+                        getattr(call, "name", None),
+                        getattr(call, "arguments", None),
+                    )
                 )
             )
-            for call in sorted(batch.calls, key=lambda call: call.output_index)
-        ]
+        if not executions:
+            return
+        previous = self._flush_tail
+        self._pending_tool_flushes += 1
         for execution in executions:
             self._track(execution)
 
@@ -583,7 +547,7 @@ class _ToolCallCoordinator:
                 if any(result.create_response for result in results):
                     self._queued_follow_ups += 1
             finally:
-                self._pending_tool_batches -= 1
+                self._pending_tool_flushes -= 1
             await self._maybe_send_follow_up()
 
         self._flush_tail = asyncio.create_task(flush_in_order())
@@ -631,7 +595,7 @@ class _ToolCallCoordinator:
         async with self._follow_up_lock:
             if (
                 self._closing
-                or self._pending_tool_batches > 0
+                or self._pending_tool_flushes > 0
                 or self._queued_follow_ups == 0
                 or self._active_response_id is not None
                 or self._pending_create_id is not None

@@ -54,7 +54,7 @@ async def execute_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
         return ToolResult(
             {
                 "query": query,
-                "error": "SERPER_API_KEY is not set. Get a free API key at https://serper.dev/.",
+                "error": "SERPER_API_KEY is not set. Get an API key at https://serper.dev/.",
             }
         )
 

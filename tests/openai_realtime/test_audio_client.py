@@ -72,8 +72,20 @@ def tool_call(call_id, *, response_id="response_1", output_index=0, name="lookup
     )
 
 
-def response_done(response_id="response_1", status="completed"):
-    return SimpleNamespace(type="response.done", response=SimpleNamespace(id=response_id, status=status))
+def function_call(call_id, *, name="lookup", arguments="{}"):
+    return SimpleNamespace(
+        type="function_call",
+        call_id=call_id,
+        name=name,
+        arguments=arguments,
+    )
+
+
+def response_done(response_id="response_1", status="completed", output=()):
+    return SimpleNamespace(
+        type="response.done",
+        response=SimpleNamespace(id=response_id, status=status, output=list(output)),
+    )
 
 
 @pytest.mark.parametrize(
@@ -392,7 +404,28 @@ def test_audio_client_keeps_tool_event_off_live_transcript_line(capsys):
     assert capsys.readouterr().out == "ASSISTANT: Checking.\nTOOL: lookup call_id=call_1 arguments={}\n"
 
 
-async def test_audio_client_executes_multiple_tools_once_and_flushes_in_call_order():
+async def test_audio_client_executes_tools_from_completed_response_output():
+    calls = []
+
+    async def executor(name, arguments):
+        calls.append((name, arguments))
+        return "done"
+
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn,
+        RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor),
+    )
+    coordinator.handle_event(response_done(output=[function_call("call_1")]))
+
+    await wait_until(lambda: len(conn.sent) == 2)
+
+    assert calls == [("lookup", {})]
+    assert [event["type"] for event in conn.sent] == ["conversation.item.create", "response.create"]
+    await coordinator.close()
+
+
+async def test_audio_client_executes_multiple_tools_once_and_flushes_in_response_output_order():
     gates = [asyncio.Event(), asyncio.Event()]
     calls = []
 
@@ -407,9 +440,14 @@ async def test_audio_client_executes_multiple_tools_once_and_flushes_in_call_ord
         RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor),
     )
     coordinator.handle_event(response_created("response_1"))
-    coordinator.handle_event(tool_call("call_1", output_index=0, arguments='{"index": 0}'))
-    coordinator.handle_event(tool_call("call_2", output_index=1, arguments='{"index": 1}'))
-    coordinator.handle_event(response_done())
+    coordinator.handle_event(
+        response_done(
+            output=[
+                function_call("call_1", arguments='{"index": 0}'),
+                function_call("call_2", arguments='{"index": 1}'),
+            ]
+        )
+    )
 
     await wait_until(lambda: len(calls) == 2)
     gates[1].set()
@@ -432,7 +470,7 @@ async def test_audio_client_executes_multiple_tools_once_and_flushes_in_call_ord
     await coordinator.close()
 
 
-async def test_audio_client_orders_parallel_tool_outputs_by_output_index():
+async def test_audio_client_uses_terminal_output_order_instead_of_argument_event_order():
     conn = RecordingConnection()
     coordinator = _ToolCallCoordinator(
         conn,
@@ -440,7 +478,7 @@ async def test_audio_client_orders_parallel_tool_outputs_by_output_index():
     )
     coordinator.handle_event(tool_call("call_1", output_index=1))
     coordinator.handle_event(tool_call("call_0", output_index=0))
-    coordinator.handle_event(response_done())
+    coordinator.handle_event(response_done(output=[function_call("call_0"), function_call("call_1")]))
 
     await wait_until(lambda: len(conn.sent) == 3)
 
@@ -464,9 +502,14 @@ async def test_audio_client_uses_per_result_follow_up_policy_for_mixed_batch():
             tool_response_create=False,
         ),
     )
-    coordinator.handle_event(tool_call("call_1", output_index=0, arguments='{"index": 0}'))
-    coordinator.handle_event(tool_call("call_2", output_index=1, arguments='{"index": 1}'))
-    coordinator.handle_event(response_done())
+    coordinator.handle_event(
+        response_done(
+            output=[
+                function_call("call_1", arguments='{"index": 0}'),
+                function_call("call_2", arguments='{"index": 1}'),
+            ]
+        )
+    )
 
     await wait_until(lambda: len(conn.sent) == 3)
 
@@ -488,8 +531,7 @@ async def test_audio_client_per_result_policy_can_disable_all_follow_ups():
         conn,
         RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor),
     )
-    coordinator.handle_event(tool_call("call_1"))
-    coordinator.handle_event(response_done())
+    coordinator.handle_event(response_done(output=[function_call("call_1")]))
 
     await wait_until(lambda: len(conn.sent) == 1)
 
@@ -523,8 +565,7 @@ async def test_audio_client_accepts_callable_executors_returning_awaitables(exec
         conn,
         RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor),
     )
-    coordinator.handle_event(tool_call("call_1"))
-    coordinator.handle_event(response_done())
+    coordinator.handle_event(response_done(output=[function_call("call_1")]))
 
     await wait_until(lambda: len(conn.sent) == 2)
 
@@ -542,8 +583,7 @@ async def test_audio_client_returns_error_when_executor_result_is_not_awaitable(
             tool_executor=lambda _name, _arguments: "not-awaitable",
         ),
     )
-    coordinator.handle_event(tool_call("call_1"))
-    coordinator.handle_event(response_done())
+    coordinator.handle_event(response_done(output=[function_call("call_1")]))
 
     await wait_until(lambda: len(conn.sent) == 2)
 
@@ -570,10 +610,15 @@ async def test_audio_client_returns_unknown_malformed_and_handler_failures_and_f
         ),
     )
     coordinator.handle_event(response_created("response_1"))
-    coordinator.handle_event(tool_call("call_unknown", name="not_declared"))
-    coordinator.handle_event(tool_call("call_malformed", arguments="{"))
-    coordinator.handle_event(tool_call("call_failed"))
-    coordinator.handle_event(response_done())
+    coordinator.handle_event(
+        response_done(
+            output=[
+                function_call("call_unknown", name="not_declared"),
+                function_call("call_malformed", arguments="{"),
+                function_call("call_failed"),
+            ]
+        )
+    )
 
     await wait_until(lambda: len(conn.sent) == 4)
 
@@ -612,8 +657,9 @@ async def test_audio_client_validates_arguments_against_declared_schema_and_forc
             tool_response_create=False,
         ),
     )
-    coordinator.handle_event(tool_call("call_1", arguments='{"index": "wrong", "extra": true}'))
-    coordinator.handle_event(response_done())
+    coordinator.handle_event(
+        response_done(output=[function_call("call_1", arguments='{"index": "wrong", "extra": true}')])
+    )
 
     await wait_until(lambda: len(conn.sent) == 2)
 
@@ -624,7 +670,7 @@ async def test_audio_client_validates_arguments_against_declared_schema_and_forc
     await coordinator.close()
 
 
-async def test_audio_client_deduplicates_repeated_tool_call_events(capsys):
+async def test_audio_client_ignores_repeated_argument_events_and_uses_terminal_output_once():
     calls = []
 
     async def executor(name, arguments):
@@ -642,18 +688,16 @@ async def test_audio_client_deduplicates_repeated_tool_call_events(capsys):
     )
     coordinator.handle_event(tool_call("call_1"))
     coordinator.handle_event(tool_call("call_1"))
-    coordinator.handle_event(response_done())
+    coordinator.handle_event(response_done(output=[function_call("call_1")]))
 
     await wait_until(lambda: len(conn.sent) == 1)
-    assert "response_1" not in coordinator._batches
 
     coordinator.handle_event(response_created("response_2"))
     coordinator.handle_event(tool_call("call_1", response_id="response_2"))
-    coordinator.handle_event(response_done("response_2"))
+    coordinator.handle_event(response_done("response_2", output=[function_call("call_1")]))
     await wait_until(lambda: len(conn.sent) == 2)
 
     assert calls == [("lookup", {}), ("lookup", {})]
-    assert "duplicate call_id=call_1 ignored" in capsys.readouterr().out
     await coordinator.close()
 
 
@@ -674,7 +718,7 @@ async def test_audio_client_does_not_execute_tools_from_unsuccessful_responses(s
     await asyncio.sleep(0)
     assert calls == []
 
-    coordinator.handle_event(response_done(status=status))
+    coordinator.handle_event(response_done(status=status, output=[function_call("call_1")]))
     await asyncio.sleep(0)
     await coordinator.close()
 
@@ -695,8 +739,7 @@ async def test_audio_client_waits_for_an_active_response_before_tool_follow_up()
         RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor),
     )
     coordinator.handle_event(response_created("response_1"))
-    coordinator.handle_event(tool_call("call_1"))
-    coordinator.handle_event(response_done())
+    coordinator.handle_event(response_done(output=[function_call("call_1")]))
     coordinator.handle_event(response_created("response_2"))
     release.set()
 
@@ -709,7 +752,7 @@ async def test_audio_client_waits_for_an_active_response_before_tool_follow_up()
     await coordinator.close()
 
 
-async def test_audio_client_one_follow_up_covers_all_queued_tool_batches():
+async def test_audio_client_one_follow_up_covers_all_queued_tool_outputs():
     conn = RecordingConnection()
     coordinator = _ToolCallCoordinator(
         conn,
@@ -717,15 +760,13 @@ async def test_audio_client_one_follow_up_covers_all_queued_tool_batches():
     )
 
     coordinator.handle_event(response_created("response_1"))
-    coordinator.handle_event(tool_call("call_1", response_id="response_1"))
-    coordinator.handle_event(response_done("response_1"))
+    coordinator.handle_event(response_done("response_1", output=[function_call("call_1")]))
     coordinator.handle_event(response_created("response_2"))
 
     await wait_until(lambda: len(conn.sent) == 1)
     assert conn.sent[0]["item"]["call_id"] == "call_1"
 
-    coordinator.handle_event(tool_call("call_2", response_id="response_2"))
-    coordinator.handle_event(response_done("response_2"))
+    coordinator.handle_event(response_done("response_2", output=[function_call("call_2")]))
 
     await wait_until(lambda: len(conn.sent) == 3)
     assert [event["type"] for event in conn.sent] == [
@@ -750,7 +791,7 @@ async def test_audio_client_one_follow_up_covers_all_queued_tool_batches():
     await coordinator.close()
 
 
-async def test_audio_client_waits_for_all_tool_batches_before_follow_up():
+async def test_audio_client_waits_for_all_tool_flushes_before_follow_up():
     releases = [asyncio.Event(), asyncio.Event()]
     calls = []
 
@@ -767,11 +808,9 @@ async def test_audio_client_waits_for_all_tool_batches_before_follow_up():
     )
 
     coordinator.handle_event(response_created("response_1"))
-    coordinator.handle_event(tool_call("call_1", response_id="response_1", arguments='{"index": 0}'))
-    coordinator.handle_event(response_done("response_1"))
+    coordinator.handle_event(response_done("response_1", output=[function_call("call_1", arguments='{"index": 0}')]))
     coordinator.handle_event(response_created("response_2"))
-    coordinator.handle_event(tool_call("call_2", response_id="response_2", arguments='{"index": 1}'))
-    coordinator.handle_event(response_done("response_2"))
+    coordinator.handle_event(response_done("response_2", output=[function_call("call_2", arguments='{"index": 1}')]))
 
     await wait_until(lambda: len(calls) == 2)
     releases[0].set()
@@ -796,8 +835,7 @@ async def test_audio_client_waits_for_response_lifecycle_after_follow_up_collisi
         conn,
         RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=done_tool_executor),
     )
-    coordinator.handle_event(tool_call("call_1"))
-    coordinator.handle_event(response_done())
+    coordinator.handle_event(response_done(output=[function_call("call_1")]))
     await wait_until(lambda: len(conn.sent) == 2)
     create_id = conn.sent[-1]["event_id"]
 
@@ -828,8 +866,7 @@ async def test_audio_client_retries_when_collision_arrives_after_response_finish
         conn,
         RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=done_tool_executor),
     )
-    coordinator.handle_event(tool_call("call_1"))
-    coordinator.handle_event(response_done())
+    coordinator.handle_event(response_done(output=[function_call("call_1")]))
     await wait_until(lambda: len(conn.sent) == 2)
     create_id = conn.sent[-1]["event_id"]
 
@@ -857,8 +894,7 @@ async def test_audio_client_surfaces_correlated_non_collision_follow_up_rejectio
         conn,
         RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=done_tool_executor),
     )
-    coordinator.handle_event(tool_call("call_1"))
-    coordinator.handle_event(response_done())
+    coordinator.handle_event(response_done(output=[function_call("call_1")]))
     await wait_until(lambda: len(conn.sent) == 2)
     create_id = conn.sent[-1]["event_id"]
 
@@ -886,8 +922,7 @@ async def test_audio_client_ignores_uncorrelated_error_while_follow_up_is_pendin
         conn,
         RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=done_tool_executor),
     )
-    coordinator.handle_event(tool_call("call_1"))
-    coordinator.handle_event(response_done())
+    coordinator.handle_event(response_done(output=[function_call("call_1")]))
     await wait_until(lambda: len(conn.sent) == 2)
     create_event = conn.sent[-1]
 
@@ -924,8 +959,7 @@ async def test_audio_client_can_disable_tool_follow_up_response():
             tool_response_create=False,
         ),
     )
-    coordinator.handle_event(tool_call("call_1"))
-    coordinator.handle_event(response_done())
+    coordinator.handle_event(response_done(output=[function_call("call_1")]))
 
     await wait_until(lambda: len(conn.sent) == 1)
     assert conn.sent[0]["type"] == "conversation.item.create"

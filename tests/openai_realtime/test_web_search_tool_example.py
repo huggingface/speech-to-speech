@@ -65,5 +65,5 @@ async def test_serper_search_reports_missing_api_key(monkeypatch):
 
     assert result.output == {
         "query": "latest news",
-        "error": "SERPER_API_KEY is not set. Get a free API key at https://serper.dev/.",
+        "error": "SERPER_API_KEY is not set. Get an API key at https://serper.dev/.",
     }
