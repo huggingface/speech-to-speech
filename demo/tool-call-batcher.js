@@ -49,6 +49,10 @@ export class ToolCallBatcher {
   add(responseId, callId, outputIndex, execution) {
     const batch = this._batch(responseId);
     const call = this._registerCall(batch, callId, outputIndex);
+    // A later call can reject while delivery is still waiting for an earlier
+    // result. Observe it now without replacing the original promise, so the
+    // ordered delivery chain still receives and surfaces the rejection.
+    void execution.catch(() => {});
     if (call.execution) return;
     call.execution = execution;
     if (batch.hasItemOrdering) this._pump(responseId, batch);
@@ -105,6 +109,10 @@ export class ToolCallBatcher {
         next.delivered = true;
       }
     });
+    // finish() exposes this rejection to its caller, but the response may not
+    // be terminal yet when a tool fails. Mark the current chain as observed in
+    // the meantime without changing its eventual rejected state.
+    void batch.delivery.catch(() => {});
   }
 
   /**

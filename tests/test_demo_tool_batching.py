@@ -532,3 +532,35 @@ if (batches.finish("response_1", "completed") !== null) {{
         capture_output=True,
         text=True,
     )
+
+
+def test_cancelled_tool_batch_observes_rejection_blocked_behind_earlier_call():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for demo client tests")
+
+    script = """
+const { ToolCallBatcher } = await import("./demo/tool-call-batcher.js");
+let resolveFirst;
+const first = new Promise((resolve) => { resolveFirst = resolve; });
+const second = Promise.reject(new Error("call_2 failed"));
+const batches = new ToolCallBatcher(() => {}, () => {});
+batches.register("response_1", "call_1", 0);
+batches.register("response_1", "call_2", 1);
+batches.add("response_1", "call_1", 0, first);
+batches.add("response_1", "call_2", 1, second);
+
+if (batches.finish("response_1", "cancelled") !== null) {
+  throw new Error("cancelled response returned a flush");
+}
+resolveFirst({ callId: "call_1", output: "unused" });
+await new Promise((resolve) => setImmediate(resolve));
+await new Promise((resolve) => setImmediate(resolve));
+"""
+    subprocess.run(
+        [node, "--unhandled-rejections=strict", "--input-type=module", "-e", script],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
