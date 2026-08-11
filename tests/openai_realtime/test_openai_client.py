@@ -548,8 +548,12 @@ class TestPackagedAudioClient:
         client_task = asyncio.create_task(listen_and_play_realtime(config, stop_event=client_stop))
         try:
             await wait_until(
-                lambda: bool(server_env.service.connection_ids)
-                and bool(server_env.service._state(server_env.service.connection_ids[0]).runtime_config.session.tools)
+                lambda: (
+                    bool(server_env.service.connection_ids)
+                    and bool(
+                        server_env.service._state(server_env.service.connection_ids[0]).runtime_config.session.tools
+                    )
+                )
             )
             conn_id = server_env.service.connection_ids[0]
             chat = server_env.service._state(conn_id).runtime_config.chat
