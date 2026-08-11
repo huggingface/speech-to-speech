@@ -1,5 +1,6 @@
 import sys
 from dataclasses import fields
+from types import SimpleNamespace
 
 import pytest
 
@@ -335,6 +336,24 @@ def test_talk_leaves_api_key_unset_for_sdk_environment_authentication():
     assert parse_talk_arguments(["--api-key", "explicit-secret"]).api_key == "explicit-secret"
 
 
+def test_talk_loads_opt_in_tool_module(monkeypatch):
+    async def executor(_name, _arguments):
+        return None
+
+    tool = {"type": "function", "name": "lookup", "parameters": {"type": "object"}}
+    monkeypatch.setitem(
+        sys.modules,
+        "test_cli_voice_tools",
+        SimpleNamespace(TOOLS=[tool], execute_tool=executor, CREATE_RESPONSE=False),
+    )
+
+    config = parse_talk_arguments(["--tool-module", "test_cli_voice_tools"])
+
+    assert config.tools == [tool]
+    assert config.tool_executor is executor
+    assert config.tool_response_create is False
+
+
 @pytest.mark.parametrize("flag", ["--host", "--port", "--base-url", "--websocket-base-url", "--stt"])
 def test_talk_rejects_server_and_overlapping_connection_flags(flag):
     with pytest.raises(SystemExit):
@@ -361,6 +380,16 @@ def test_local_accepts_audio_flags_but_rejects_host():
     assert args.local_audio_kwargs.local_audio_input_device == 2
     with pytest.raises(ValueError, match="--host"):
         parse_arguments(["--host", "0.0.0.0"], command="local")
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["--tool-module", "--local_audio_tool_module", "--local-audio-tool-module"],
+)
+def test_local_accepts_opt_in_tool_module(flag):
+    args = parse_arguments([flag, "my_voice_tools"], command="local")
+
+    assert args.local_audio_kwargs.local_audio_tool_module == "my_voice_tools"
 
 
 def test_parse_arguments_transformers_backend():

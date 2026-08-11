@@ -252,10 +252,12 @@ class TestClientEventDispatch:
                 ws.receive_json()
                 conn_id = list(service._conns.keys())[0]
                 service.response._ensure_response(conn_id)
-                ws.send_json({"type": "response.create"})
+                ws.send_json({"type": "response.create", "event_id": "client_create_1"})
                 msg = ws.receive_json()
                 assert msg["type"] == "error"
                 assert "another response is in progress" in msg["error"]["message"].lower()
+                assert msg["error"]["event_id"] == "client_create_1"
+                assert msg["event_id"] != "client_create_1"
 
     def test_prefetched_output_waits_until_response_created_send_completes(self, setup, monkeypatch):
         app, service, _, output_queue, *_ = setup
