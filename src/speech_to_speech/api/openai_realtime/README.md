@@ -197,7 +197,7 @@ For a keyless web-search example, use the included DuckDuckGo-backed module. The
 installed only for this invocation and the search runs in a worker thread so it does not block Realtime event handling:
 
 ```bash
-uv run --with ddgs speech-to-speech local \
+uv run --with ddgs python -m speech_to_speech.cli local \
   --tool-module examples.realtime_web_search_tool \
   --local_audio_print_json \
   --init_chat_prompt \
