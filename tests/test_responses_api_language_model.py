@@ -1,6 +1,7 @@
 import json
 import logging
-from threading import Event, Thread
+from queue import Queue
+from threading import BoundedSemaphore, Event, Lock, Thread
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -157,6 +158,11 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler.audio_temperature = 0.0
     handler.audio_content_type = "input_audio"
     handler.audio_history_turns = 1
+    handler._prefetch_worker_slots = BoundedSemaphore(
+        base_openai_compatible_language_model.PREFETCH_PROVIDER_WORKER_LIMIT
+    )
+    handler._prefetch_workers_lock = Lock()
+    handler._prefetch_workers = set()
     return handler
 
 
@@ -326,6 +332,99 @@ def test_claimed_prefetch_cancel_aborts_blocked_provider_read():
 
     assert not worker.is_alive()
     assert stream.closed
+
+
+def test_repeated_prefetch_invalidation_bounds_provider_connect_workers():
+    request_started = Event()
+    release_request = Event()
+    response_closed = Event()
+    create_calls = 0
+
+    class LateStream:
+        def __iter__(self):
+            return iter(())
+
+        def close(self):
+            response_closed.set()
+
+    def create(**kwargs):
+        nonlocal create_calls
+        create_calls += 1
+        request_started.set()
+        release_request.wait(timeout=2.0)
+        return LateStream()
+
+    handler = _make_handler(stream=True, cancel_scope=CancelScope())
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    first_request = _make_request()
+    first_transaction = ResponsePrefetchTransaction()
+    first_request.prefetch_transaction = first_transaction
+    first_outputs: list[object] = []
+    request_worker = Thread(target=lambda: first_outputs.extend(handler.process(first_request)))
+
+    request_worker.start()
+    assert request_started.wait(timeout=1.0)
+    first_transaction.discard()
+    request_worker.join(timeout=1.0)
+    assert not request_worker.is_alive()
+
+    with handler._prefetch_workers_lock:
+        provider_worker = next(iter(handler._prefetch_workers))
+
+    for _ in range(5):
+        request = _make_request()
+        transaction = ResponsePrefetchTransaction()
+        request.prefetch_transaction = transaction
+
+        list(handler.process(request))
+
+        assert transaction.discarded
+    assert create_calls == 1
+    with handler._prefetch_workers_lock:
+        assert handler._prefetch_workers == {provider_worker}
+
+    # Capacity only disables hidden speculation. Once response.create claims a
+    # later prefetch, it must still execute with ordinary response semantics.
+    claimed_request = _make_request()
+    claimed_transaction = ResponsePrefetchTransaction()
+    assert claimed_transaction.claim()
+    claimed_request.prefetch_transaction = claimed_transaction
+    handler.client.responses.create = lambda **kwargs: _make_stream(
+        [
+            _make_text_delta_event("public"),
+            _make_output_item_done_event(content="public"),
+        ]
+    )
+
+    claimed_outputs = list(handler.process(claimed_request))
+
+    assert any(isinstance(output, LLMResponseChunk) and output.text == "public" for output in claimed_outputs)
+
+    release_request.set()
+    assert response_closed.wait(timeout=1.0)
+    provider_worker.join(timeout=1.0)
+    with handler._prefetch_workers_lock:
+        assert not handler._prefetch_workers
+
+
+def test_prefetch_provider_handoff_queues_are_bounded(monkeypatch):
+    queue_limits: list[int] = []
+
+    class TrackingQueue(Queue):
+        def __init__(self, maxsize=0):
+            queue_limits.append(maxsize)
+            super().__init__(maxsize=maxsize)
+
+    monkeypatch.setattr(base_openai_compatible_language_model, "Queue", TrackingQueue)
+    handler = _make_handler(stream=True, cancel_scope=CancelScope())
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: _make_stream([])))
+    request = _make_request()
+    request.prefetch_transaction = ResponsePrefetchTransaction()
+
+    list(handler.process(request))
+
+    assert queue_limits == [1, base_openai_compatible_language_model.PREFETCH_STREAM_QUEUE_MAXSIZE]
+    assert all(limit > 0 for limit in queue_limits)
 
 
 def test_warmup_uses_request_scoped_sdk_retries():

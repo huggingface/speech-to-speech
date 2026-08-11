@@ -12,6 +12,7 @@ and hands client-visible traffic to the transport attached to the current
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
@@ -86,10 +87,12 @@ class WebSocketTransport(SessionTransport):
 
     def __init__(self, websocket: WebSocket) -> None:
         self.websocket = websocket
+        self._send_lock = asyncio.Lock()
 
     async def send_events(self, events: list[ServerEvent]) -> None:
-        for event in events:
-            await send_ws_event(self.websocket, event)
+        async with self._send_lock:
+            for event in events:
+                await send_ws_event(self.websocket, event)
 
     async def send_audio_chunk(
         self,

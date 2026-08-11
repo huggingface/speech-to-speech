@@ -137,10 +137,21 @@ class ResponseHandler(RealtimeBaseHandler):
         # output. Any other per-response override requires a fresh generation.
         return set(fields).issubset({"metadata"})
 
-    def is_tool_followup_prefetch_unclaimed(self, conn_id: str, response_key: str | None) -> bool:
-        """Return whether output must remain private until ``response.create``."""
-        request = self._state(conn_id).tool_followup_prefetch_request
-        return request is not None and response_key == request.response_key
+    def is_response_output_blocked(self, conn_id: str, response_key: str | None) -> bool:
+        """Return whether output must remain private from the client."""
+        st = self._state(conn_id)
+        request = st.tool_followup_prefetch_request
+        return response_key is not None and (
+            request is not None
+            and response_key == request.response_key
+            or response_key == st.response_created_pending_key
+        )
+
+    def mark_response_created_sent(self, conn_id: str, response_key: str | None) -> None:
+        """Release output only after the matching response.created send completes."""
+        st = self._state(conn_id)
+        if response_key is not None and st.response_created_pending_key == response_key:
+            st.response_created_pending_key = None
 
     def maybe_start_tool_followup_prefetch(self, conn_id: str) -> bool:
         """Speculatively generate after every tool output, without opening a response."""
@@ -260,6 +271,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_response_params = event.response
         st.current_response_id = _generate_id("resp")
         st.current_response_key = request.response_key
+        st.response_created_pending_key = request.response_key
         self._start_item(conn_id)
         logger.debug("Standard response.create claimed internal tool follow-up prefetch")
         return ResponseCreatedEvent(
@@ -573,6 +585,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_response_params = event.response
         st.current_response_id = _generate_id("resp")
         st.current_response_key = request.response_key
+        st.response_created_pending_key = request.response_key
         self._start_item(conn_id)
 
         if queue:

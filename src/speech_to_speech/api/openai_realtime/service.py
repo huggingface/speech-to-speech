@@ -227,6 +227,10 @@ class ConnState(BaseModel):
     completed_tool_response_keys: dict[str, None] = Field(default_factory=dict)
     tool_followup_prefetch_request: GenerateResponseRequest | None = None
     tool_followup_prefetch_origin_response_key: str | None = None
+    # A client-triggered response is not visible until its response.created
+    # frame has finished sending. Pipeline output is held behind this key so a
+    # fast or already-buffered generation cannot overtake that lifecycle event.
+    response_created_pending_key: str | None = None
 
     def mark_response_pending(self, response_key: str) -> None:
         """Track an implicit response from queueing until its first output."""

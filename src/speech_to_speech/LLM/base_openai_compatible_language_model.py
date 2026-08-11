@@ -8,8 +8,9 @@ import os
 import wave
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator, Iterator
-from queue import Empty, Queue
-from threading import Thread
+from queue import Empty, Full, Queue
+from threading import BoundedSemaphore, Lock, Thread, current_thread
+from threading import Event as ThreadingEvent
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
@@ -56,6 +57,9 @@ logger = logging.getLogger(__name__)
 
 # About 18–24 seconds of default SDK backoff before warmup fails.
 WARMUP_MAX_RETRIES = 6
+PREFETCH_PROVIDER_WORKER_LIMIT = 1
+PREFETCH_STREAM_QUEUE_MAXSIZE = 16
+PREFETCH_WORKER_ACQUIRE_TIMEOUT_S = 0.05
 
 
 # ── Normalised provider events ────────────────────────────────────────────────
@@ -194,6 +198,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             api_key = "none"
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self._extra_body = self._build_extra_body(base_url, disable_thinking, reasoning_effort)
+        self._prefetch_worker_slots = BoundedSemaphore(PREFETCH_PROVIDER_WORKER_LIMIT)
+        self._prefetch_workers_lock = Lock()
+        self._prefetch_workers: set[Thread] = set()
         self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
         self.warmup()
 
@@ -359,6 +366,32 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             except Exception:
                 pass
 
+    def _start_prefetch_worker(self, target: Callable[[], None], *, name: str) -> bool:
+        """Start one tracked provider worker without exceeding the fixed cap."""
+        if not self._prefetch_worker_slots.acquire(timeout=PREFETCH_WORKER_ACQUIRE_TIMEOUT_S):
+            return False
+
+        def run() -> None:
+            try:
+                target()
+            finally:
+                worker = current_thread()
+                with self._prefetch_workers_lock:
+                    self._prefetch_workers.discard(worker)
+                self._prefetch_worker_slots.release()
+
+        worker = Thread(target=run, name=name, daemon=True)
+        with self._prefetch_workers_lock:
+            self._prefetch_workers.add(worker)
+        try:
+            worker.start()
+        except BaseException:
+            with self._prefetch_workers_lock:
+                self._prefetch_workers.discard(worker)
+            self._prefetch_worker_slots.release()
+            raise
+        return True
+
     def _request_prefetch_interruptibly(
         self,
         request: Callable[[], Any],
@@ -393,7 +426,18 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 if late_ok:
                     self._close_response(late_value)
 
-        Thread(target=run_request, name="realtime-tool-prefetch", daemon=True).start()
+        if not self._start_prefetch_worker(run_request, name="realtime-tool-prefetch"):
+            # discard() and claim() share one transaction lock. Calling discard
+            # first makes the decision atomic: an already-claimed response stays
+            # claimed, while a still-hidden one becomes permanently unclaimable.
+            transaction.discard()
+            if transaction.claimed:
+                # Once response.create has made this work public, preserve normal
+                # response semantics even if an abandoned speculative worker is
+                # still waiting for an uncooperative provider.
+                return request()
+            logger.warning("Skipping response prefetch while a previous provider worker is still active")
+            return None
         while not cancelled():
             try:
                 succeeded, value = results.get(timeout=0.05)
@@ -423,32 +467,57 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         api_response: Any,
     ) -> Iterator[ProviderEvent]:
         """Release the serial LM worker when a claimed provider read stalls."""
-        results: Queue[tuple[bool, Any]] = Queue()
+        results: Queue[tuple[bool, Any]] = Queue(maxsize=PREFETCH_STREAM_QUEUE_MAXSIZE)
         done = object()
+        stop_reader = ThreadingEvent()
+
+        def reader_cancelled() -> bool:
+            return stop_reader.is_set() or self._turn_is_cancelled(turn)
+
+        def publish(result: tuple[bool, Any]) -> bool:
+            while not reader_cancelled():
+                try:
+                    results.put(result, timeout=0.05)
+                except Full:
+                    continue
+                return True
+            return False
 
         def read_events() -> None:
             try:
                 for event in events:
-                    results.put((True, event))
+                    if not publish((True, event)):
+                        return
             except BaseException as exc:
-                results.put((False, exc))
-            finally:
-                results.put((True, done))
-
-        Thread(target=read_events, name="realtime-tool-prefetch-stream", daemon=True).start()
-        while not self._turn_is_cancelled(turn):
-            try:
-                succeeded, value = results.get(timeout=0.05)
-            except Empty:
-                continue
-            if not succeeded:
-                raise value
-            if value is done:
+                publish((False, exc))
                 return
-            if self._turn_is_cancelled(turn):
-                break
-            yield value
-        self._close_response(api_response)
+            publish((True, done))
+
+        if not self._start_prefetch_worker(read_events, name="realtime-tool-prefetch-stream"):
+            if turn.prefetch_transaction is not None:
+                turn.prefetch_transaction.discard()
+            if turn.prefetch_transaction is not None and turn.prefetch_transaction.claimed:
+                yield from events
+            else:
+                self._close_response(api_response)
+            return
+
+        try:
+            while not self._turn_is_cancelled(turn):
+                try:
+                    succeeded, value = results.get(timeout=0.05)
+                except Empty:
+                    continue
+                if not succeeded:
+                    raise value
+                if value is done:
+                    return
+                if self._turn_is_cancelled(turn):
+                    break
+                yield value
+        finally:
+            stop_reader.set()
+            self._close_response(api_response)
 
     def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
         if self.speculative_turns is None:

@@ -160,14 +160,14 @@ def _output_response_key(item: Any) -> str | None:
     return None
 
 
-def _response_key_is_unclaimed_prefetch(
+def _response_key_output_is_blocked(
     unit: PipelineUnit,
     session_id: str,
     response_key: str | None,
 ) -> bool:
     if response_key is None:
         return False
-    return unit.service.response.is_tool_followup_prefetch_unclaimed(session_id, response_key)
+    return unit.service.response.is_response_output_blocked(session_id, response_key)
 
 
 def _discard_obsolete_response_key(unit: PipelineUnit, session_id: str, response_key: str | None) -> None:
@@ -424,9 +424,13 @@ async def _dispatch_client_event(
     elif isinstance(event, ResponseCreateEvent):
         result = service.handle_response_create(session_id, event)
         if result:
+            response_key = None
             if result.type != "error":
                 unit.cancel_scope.new_response()
+                response_key = service._state(session_id).current_response_key
             await transport.send_events([result])
+            if result.type == "response.created":
+                service.response.mark_response_created_sent(session_id, response_key)
 
     elif isinstance(event, ResponseCancelEvent):
         st = service._state(session_id)
@@ -827,15 +831,16 @@ def create_app(
                     if (
                         session is not None
                         and session_id is not None
-                        and _response_key_is_unclaimed_prefetch(
+                        and _response_key_output_is_blocked(
                             unit,
                             session_id,
                             _output_response_key(audio_chunk),
                         )
                     ):
                         # Generation and TTS may complete before the client sends
-                        # the documented response.create. Keep every lifecycle
-                        # event private until that request claims the prefetch.
+                        # response.create, or before response.created finishes
+                        # sending. Keep every lifecycle event private until the
+                        # response is publicly announced.
                         session.pending_output_item = audio_chunk
                         await asyncio.sleep(0.01)
                         continue

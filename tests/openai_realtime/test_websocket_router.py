@@ -6,6 +6,7 @@ PipelineUnit pool (size 1, matching the single-session semantics of the
 old tests) so there is no cross-test state.
 """
 
+import asyncio
 import base64
 import time
 from queue import Empty, Queue
@@ -256,8 +257,23 @@ class TestClientEventDispatch:
                 assert msg["type"] == "error"
                 assert "another response is in progress" in msg["error"]["message"].lower()
 
-    def test_prefetched_output_waits_for_standard_response_create(self, setup):
+    def test_prefetched_output_waits_until_response_created_send_completes(self, setup, monkeypatch):
         app, service, _, output_queue, *_ = setup
+        created_send_started = ThreadingEvent()
+        release_created_send = ThreadingEvent()
+        send_attempts: list[list[str]] = []
+        original_send_events = router_module.WebSocketTransport.send_events
+
+        async def blocked_send_events(transport, events):
+            event_types = [event.type for event in events]
+            send_attempts.append(event_types)
+            if event_types == ["response.created"]:
+                created_send_started.set()
+                while not release_created_send.is_set():
+                    await asyncio.sleep(0.001)
+            await original_send_events(transport, events)
+
+        monkeypatch.setattr(router_module.WebSocketTransport, "send_events", blocked_send_events)
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
@@ -277,6 +293,16 @@ class TestClientEventDispatch:
                         "response": {"metadata": {"s2s_demo_create_id": "create_followup"}},
                     }
                 )
+
+                assert created_send_started.wait(timeout=1.0)
+                try:
+                    # Keep the transport blocked long enough for the independent
+                    # send loop to run. It must not even attempt the buffered
+                    # delta until response.created has reached the transport.
+                    time.sleep(0.1)
+                    assert send_attempts == [["response.created"]]
+                finally:
+                    release_created_send.set()
 
                 created = ws.receive_json()
                 delta = ws.receive_json()
