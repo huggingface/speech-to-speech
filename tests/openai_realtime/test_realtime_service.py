@@ -50,6 +50,7 @@ from speech_to_speech.api.openai_realtime.service import (
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
+    AssistantToolCallReadyEvent,
     AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     ResponseFailedEvent,
@@ -2917,6 +2918,56 @@ class TestDispatchPipelineEvent:
         assert [event.output_index for event in audio_done] == [0, 2]
         assert [item.id for item in response_done.response.output] == [event.item_id for event in output_events]
 
+    def test_early_tool_call_waits_for_preceding_text_but_not_its_tts(self, service, conn_id):
+        response_key = "response_1"
+        tool = AssistantToolCallPart(tool={"type": "function_call", "call_id": "c1", "name": "tool", "arguments": "{}"})
+
+        # The side channel may outrun the TTS queue, but cannot overtake the
+        # preceding assistant part in the public response.
+        assert (
+            service.dispatch_pipeline_event(
+                conn_id,
+                AssistantToolCallReadyEvent(
+                    response_key=response_key,
+                    output_sequence=1,
+                    part=tool,
+                ),
+            )
+            == []
+        )
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(
+                response_key=response_key,
+                output_sequence=0,
+                parts=[AssistantTextPart(text="One moment.")],
+            ),
+        )
+
+        assert [event.type for event in events] == [
+            "response.created",
+            "response.output_audio_transcript.delta",
+            "response.function_call_arguments.done",
+        ]
+        assert [event.output_index for event in events[1:]] == [0, 1]
+
+        # Audio can continue after the function event. The ordered copy of the
+        # tool call closes it later without exposing a duplicate call.
+        service.encode_audio_chunk(conn_id, _pcm_bytes(256), response_key)
+        ordered_tool = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(
+                response_key=response_key,
+                output_sequence=1,
+                parts=[tool],
+            ),
+        )
+        assert [event.type for event in ordered_tool] == ["response.output_audio.done"]
+
+        terminal = service.finish_response(conn_id)
+        response_done = next(event for event in terminal if isinstance(event, ResponseDoneEvent))
+        assert [item.type for item in response_done.response.output] == ["message", "function_call"]
+
     def test_later_audio_does_not_close_silent_intermediate_outputs(self, service, conn_id):
         response_key = "response_1"
         service.dispatch_pipeline_event(
@@ -3888,10 +3939,23 @@ class TestUsageMetricsTracking:
             conn_id,
             TokenUsageEvent(response_key=response_key, input_tokens=13, output_tokens=5),
         )
+        service.dispatch_pipeline_event(
+            conn_id,
+            AssistantToolCallReadyEvent(
+                response_key=response_key,
+                output_sequence=1,
+                part=AssistantToolCallPart(
+                    tool={"type": "function_call", "call_id": "call_stale", "name": "lookup", "arguments": "{}"}
+                ),
+            ),
+        )
+        assert state.pending_early_tool_calls
 
         service.close_pending_responses(conn_id)
 
         assert state.pending_token_usage == {}
+        assert state.pending_early_tool_calls == {}
+        assert state.next_assistant_output_sequence == 0
         assert service.total_usage.input_tokens == 13
         assert service.total_usage.output_tokens == 5
 

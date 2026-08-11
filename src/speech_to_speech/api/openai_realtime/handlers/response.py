@@ -29,6 +29,7 @@ from speech_to_speech.LLM.chat import ChatItemError, add_supported_item
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
+    AssistantToolCallReadyEvent,
     ResponseGenerationDoneEvent,
 )
 from speech_to_speech.pipeline.messages import (
@@ -126,6 +127,8 @@ class ResponseHandler(RealtimeBaseHandler):
         st.audio_output_started = False
         st.pending_text_outputs = []
         st.pending_function_calls = {}
+        st.next_assistant_output_sequence = 0
+        st.pending_early_tool_calls = {}
 
     @staticmethod
     def _prefetch_matches(event: ResponseCreateEvent) -> bool:
@@ -740,6 +743,7 @@ class ResponseHandler(RealtimeBaseHandler):
         event: AssistantOutputEvent,
         *,
         wait_for_pending_reopen: bool = True,
+        _early_tool_call: bool = False,
     ) -> list[ServerEvent] | None:
         """Translate ordered assistant output into OpenAI Realtime events."""
         if self._service.speculative_turns:
@@ -761,6 +765,24 @@ class ResponseHandler(RealtimeBaseHandler):
                 return []
         st = self._state(conn_id)
         events: list[ServerEvent] = []
+        output_sequence = event.output_sequence
+        if output_sequence is not None:
+            if output_sequence < st.next_assistant_output_sequence:
+                # The side channel already exposed this tool call. Its ordered
+                # copy still marks the point where preceding audio is complete.
+                if any(isinstance(part, AssistantToolCallPart) for part in event.parts):
+                    return self.finish_audio_output(conn_id, event.response_key)
+                logger.debug("Dropping duplicate assistant output sequence %d", output_sequence)
+                return events
+            if output_sequence > st.next_assistant_output_sequence:
+                # Ordered output should not skip a model part. Holding it would
+                # deadlock the TTS queue, so preserve legacy delivery and make
+                # the discontinuity visible in logs.
+                logger.warning(
+                    "Assistant output sequence jumped from %d to %d",
+                    st.next_assistant_output_sequence,
+                    output_sequence,
+                )
         wants_audio = response_wants_audio(st.current_response_params)
         meaningful_parts = [
             part
@@ -768,19 +790,18 @@ class ResponseHandler(RealtimeBaseHandler):
             if isinstance(part, AssistantToolCallPart)
             or (isinstance(part, AssistantTextPart) and (bool(part.text.strip()) if wants_audio else bool(part.text)))
         ]
-        if not meaningful_parts:
-            return events
-        response_was_missing = st.current_response_id is None
-        resp_id, _ = self._ensure_response(conn_id, event.response_key)
-        if response_was_missing:
-            events.append(
-                ResponseCreatedEvent(
-                    type="response.created",
-                    event_id=self._next_event_id(),
-                    response=self._build_response(conn_id, "in_progress"),
+        if meaningful_parts:
+            response_was_missing = st.current_response_id is None
+            resp_id, _ = self._ensure_response(conn_id, event.response_key)
+            if response_was_missing:
+                events.append(
+                    ResponseCreatedEvent(
+                        type="response.created",
+                        event_id=self._next_event_id(),
+                        response=self._build_response(conn_id, "in_progress"),
+                    )
                 )
-            )
-        self._service._apply_pending_token_usage(conn_id, event.response_key)
+            self._service._apply_pending_token_usage(conn_id, event.response_key)
         for part in meaningful_parts:
             if isinstance(part, AssistantTextPart):
                 text = part.text.strip() if wants_audio else part.text
@@ -825,7 +846,8 @@ class ResponseHandler(RealtimeBaseHandler):
                     )
                 st.last_item_id = item_id
             elif isinstance(part, AssistantToolCallPart):
-                events.extend(self.finish_audio_output(conn_id, event.response_key))
+                if not _early_tool_call:
+                    events.extend(self.finish_audio_output(conn_id, event.response_key))
                 tool = part.tool
                 function_item_id = tool.id or _generate_id("item")
                 output_idx, function_item_id = self._output_part_context(
@@ -859,6 +881,57 @@ class ResponseHandler(RealtimeBaseHandler):
                     status=tool.status or "completed",
                 )
                 st.last_item_id = function_item_id
+        if output_sequence is not None:
+            st.pending_early_tool_calls.pop(output_sequence, None)
+            st.next_assistant_output_sequence = max(st.next_assistant_output_sequence, output_sequence + 1)
+            if not _early_tool_call:
+                events.extend(
+                    self._flush_early_tool_calls(
+                        conn_id,
+                        wait_for_pending_reopen=wait_for_pending_reopen,
+                    )
+                )
+        return events
+
+    def on_assistant_tool_call_ready(
+        self,
+        conn_id: str,
+        event: AssistantToolCallReadyEvent,
+    ) -> list[ServerEvent]:
+        """Expose a sequenced tool call while preceding TTS is still running."""
+        st = self._state(conn_id)
+        if event.output_sequence < st.next_assistant_output_sequence:
+            return []
+        st.pending_early_tool_calls[event.output_sequence] = event
+        return self._flush_early_tool_calls(conn_id)
+
+    def _flush_early_tool_calls(
+        self,
+        conn_id: str,
+        *,
+        wait_for_pending_reopen: bool = True,
+    ) -> list[ServerEvent]:
+        st = self._state(conn_id)
+        events: list[ServerEvent] = []
+        while st.next_assistant_output_sequence in st.pending_early_tool_calls:
+            ready = st.pending_early_tool_calls[st.next_assistant_output_sequence]
+            assert isinstance(ready, AssistantToolCallReadyEvent)
+            emitted = self.on_assistant_output(
+                conn_id,
+                AssistantOutputEvent(
+                    parts=[ready.part],
+                    turn_id=ready.turn_id,
+                    turn_revision=ready.turn_revision,
+                    cancel_generation=ready.cancel_generation,
+                    response_key=ready.response_key,
+                    output_sequence=ready.output_sequence,
+                ),
+                wait_for_pending_reopen=wait_for_pending_reopen,
+                _early_tool_call=True,
+            )
+            if emitted is None:
+                break
+            events.extend(emitted)
         return events
 
     def on_assistant_response_done(

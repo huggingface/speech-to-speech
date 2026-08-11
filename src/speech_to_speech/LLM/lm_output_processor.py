@@ -17,6 +17,7 @@ from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
+    AssistantToolCallReadyEvent,
     PipelineEvent,
     ResponseFailedEvent,
     ResponseGenerationDoneEvent,
@@ -55,6 +56,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         self.text_output_queue = text_output_queue
         self._response_key: str | None = None
         self._tool_call_ids: list[str] = []
+        self._output_sequence = 0
 
     def _start_response(self, response_key: str | None) -> str:
         key = response_key or self._response_key or uuid4().hex
@@ -64,6 +66,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
     def _reset_response(self) -> None:
         self._response_key = None
         self._tool_call_ids = []
+        self._output_sequence = 0
 
     def _notify_generation_done(
         self,
@@ -174,14 +177,29 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         response_key = self._start_response(lm_output.response_key)
 
         for part in lm_output.parts:
+            output_sequence = self._output_sequence
+            self._output_sequence += 1
             if isinstance(part, AssistantToolCallPart) and part.tool.call_id not in self._tool_call_ids:
                 self._tool_call_ids.append(part.tool.call_id)
+                transaction = lm_output.prefetch_transaction
+                if self.text_output_queue is not None and (transaction is None or transaction.claimed):
+                    self.text_output_queue.put(
+                        AssistantToolCallReadyEvent(
+                            part=part,
+                            output_sequence=output_sequence,
+                            turn_id=lm_output.turn_id,
+                            turn_revision=lm_output.turn_revision,
+                            cancel_generation=lm_output.cancel_generation,
+                            response_key=response_key,
+                        )
+                    )
             event = AssistantOutputEvent(
                 parts=[part],
                 turn_id=lm_output.turn_id,
                 turn_revision=lm_output.turn_revision,
                 cancel_generation=lm_output.cancel_generation,
                 response_key=response_key,
+                output_sequence=output_sequence,
             )
             yield event
             if (

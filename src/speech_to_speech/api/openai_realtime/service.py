@@ -48,6 +48,7 @@ from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
+    AssistantToolCallReadyEvent,
     AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     PipelineEvent,
@@ -198,6 +199,11 @@ class ConnState(BaseModel):
     # Keyed by output index so response.done can preserve interleaving with
     # assistant message items.
     pending_function_calls: dict[int, RealtimeConversationItemFunctionCall] = Field(default_factory=dict)
+    # Tool calls can arrive on the LM side channel before preceding text has
+    # crossed the ordered TTS queue. Sequence them here so their later ordered
+    # events only finalize audio.
+    next_assistant_output_sequence: int = 0
+    pending_early_tool_calls: dict[int, Any] = Field(default_factory=dict)
     response_usage: UsageMetrics = Field(default_factory=UsageMetrics)
     pending_token_usage: dict[str, tuple[int, int]] = Field(default_factory=dict)
     speculative_turn_id: Optional[str] = None
@@ -293,6 +299,7 @@ class RealtimeService:
             TranscriptionCompletedEvent: self._on_transcription_completed,
             AudioInputCompletedEvent: self._on_audio_input_completed,
             ResponseGenerationDoneEvent: self.response.on_response_generation_done,
+            AssistantToolCallReadyEvent: self.response.on_assistant_tool_call_ready,
             ResponseFailedEvent: self._on_response_failed,
         }
 
@@ -441,6 +448,12 @@ class RealtimeService:
             self.close_response_key(conn_id, response_key)
         st.generation_done_tool_calls.clear()
         st.completed_tool_response_keys.clear()
+        if not st.in_response:
+            # A side-channel tool call can be waiting for the first ordered
+            # output of an implicit response. Do not let it attach to the next
+            # response after that queued generation is cancelled.
+            st.next_assistant_output_sequence = 0
+            st.pending_early_tool_calls.clear()
         st.response_pending = bool(st.pending_response_keys)
 
     def close_response_key(self, conn_id: str, response_key: str | None) -> None:
@@ -478,7 +491,12 @@ class RealtimeService:
     def should_defer_pipeline_event(self, event: PipelineEvent) -> bool:
         if self.speculative_turns is None or not isinstance(
             event,
-            (AssistantOutputEvent, AssistantResponseDoneEvent, ResponseGenerationDoneEvent),
+            (
+                AssistantOutputEvent,
+                AssistantResponseDoneEvent,
+                AssistantToolCallReadyEvent,
+                ResponseGenerationDoneEvent,
+            ),
         ):
             return False
         return self.speculative_turns.has_pending_reopen_or_grace(
@@ -536,13 +554,22 @@ class RealtimeService:
                 AudioInputCompletedEvent,
                 AssistantOutputEvent,
                 AssistantResponseDoneEvent,
+                AssistantToolCallReadyEvent,
                 ResponseGenerationDoneEvent,
             ),
         ):
             return False
         turn_id = getattr(event, "turn_id", None)
         turn_revision = getattr(event, "turn_revision", None)
-        if isinstance(event, (AssistantOutputEvent, AssistantResponseDoneEvent, ResponseGenerationDoneEvent)):
+        if isinstance(
+            event,
+            (
+                AssistantOutputEvent,
+                AssistantResponseDoneEvent,
+                AssistantToolCallReadyEvent,
+                ResponseGenerationDoneEvent,
+            ),
+        ):
             is_latest: bool | None
             if wait_for_pending_reopen:
                 is_latest = self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)

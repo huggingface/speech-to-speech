@@ -25,6 +25,7 @@ from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessag
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
+    AssistantToolCallReadyEvent,
     AudioInputCompletedEvent,
     PipelineEvent,
     ResponseFailedEvent,
@@ -312,6 +313,56 @@ class TestClientEventDispatch:
                 assert created["response"]["metadata"] == {"s2s_demo_create_id": "create_followup"}
                 assert delta["type"] == "response.output_audio_transcript.delta"
                 assert delta["delta"] == "prefetched"
+
+    def test_early_tool_call_waits_until_response_created_send_completes(self, setup, monkeypatch):
+        app, service, _, _, text_output_queue, *_ = setup
+        created_send_started = ThreadingEvent()
+        release_created_send = ThreadingEvent()
+        send_attempts: list[list[str]] = []
+        original_send_events = router_module.WebSocketTransport.send_events
+
+        async def blocked_send_events(transport, events):
+            event_types = [event.type for event in events]
+            send_attempts.append(event_types)
+            if event_types == ["response.created"]:
+                created_send_started.set()
+                while not release_created_send.is_set():
+                    await asyncio.sleep(0.001)
+            await original_send_events(transport, events)
+
+        monkeypatch.setattr(router_module.WebSocketTransport, "send_events", blocked_send_events)
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                ws.send_json({"type": "response.create"})
+                assert created_send_started.wait(timeout=1.0)
+                conn_id = service.connection_ids[0]
+                response_key = service._state(conn_id).current_response_key
+                text_output_queue.put(
+                    AssistantToolCallReadyEvent(
+                        response_key=response_key,
+                        output_sequence=0,
+                        part=AssistantToolCallPart(
+                            tool={
+                                "type": "function_call",
+                                "call_id": "call_early",
+                                "name": "lookup",
+                                "arguments": "{}",
+                            }
+                        ),
+                    )
+                )
+
+                try:
+                    time.sleep(0.1)
+                    assert send_attempts == [["response.created"]]
+                finally:
+                    release_created_send.set()
+
+                assert ws.receive_json()["type"] == "response.created"
+                tool = ws.receive_json()
+                assert tool["type"] == "response.function_call_arguments.done"
+                assert tool["call_id"] == "call_early"
 
     def test_failed_prefetch_logical_done_bypasses_output_gate_and_forces_fresh_create(self, setup):
         app, service, _, output_queue, text_output_queue, *_ = setup

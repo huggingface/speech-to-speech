@@ -394,6 +394,19 @@ class _ToolExecutionResult:
     create_response: bool
 
 
+@dataclass
+class _ToolResponseBatch:
+    """Execution and delivery state scoped to one Realtime response."""
+
+    call_ids: set[str] = field(default_factory=set)
+    delivery_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    pending_deliveries: int = 0
+    completed: bool = False
+    successful: bool = False
+    cancelled: bool = False
+    create_response: bool = False
+
+
 class _ToolCoordinatorError(RuntimeError):
     """Raised when the server rejects a tool follow-up response permanently."""
 
@@ -415,6 +428,7 @@ class _ToolCallCoordinator:
         self._waiting_for_response_after_collision = False
         self._next_create_sequence = 0
         self._flush_tail: asyncio.Task[None] | None = None
+        self._tool_batches: dict[str, _ToolResponseBatch] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._follow_up_lock = asyncio.Lock()
         self._failure: asyncio.Future[None] = asyncio.get_running_loop().create_future()
@@ -435,6 +449,10 @@ class _ToolCallCoordinator:
                 self._pending_create_follow_ups = 0
             elif self._pending_create_id is not None:
                 self._pending_create_saw_response = True
+        elif event.type == "response.function_call_arguments.done":
+            response_id = getattr(event, "response_id", None) or self._active_response_id
+            if isinstance(response_id, str) and response_id:
+                self._schedule_calls(response_id, [event])
         elif event.type == "response.done":
             self._handle_response_done(event.response)
         elif event.type == "error":
@@ -495,45 +513,63 @@ class _ToolCallCoordinator:
         if response_id == self._active_response_id:
             self._active_response_id = None
         self._waiting_for_response_after_collision = False
-        if getattr(response, "status", None) == "completed":
+        status = getattr(response, "status", None)
+        if isinstance(response_id, str) and response_id and status == "completed":
             calls = [
                 item
                 for item in (getattr(response, "output", None) or [])
                 if getattr(item, "type", None) == "function_call"
             ]
             if calls:
-                self._schedule_flush(calls)
+                self._schedule_calls(response_id, calls)
+            batch = self._tool_batches.get(response_id)
+            if batch is not None:
+                batch.completed = True
+                batch.successful = True
+                self._finalize_batch_if_ready(response_id, batch)
+        elif isinstance(response_id, str) and response_id:
+            batch = self._tool_batches.pop(response_id, None)
+            if batch is not None:
+                batch.cancelled = True
+                for task in tuple(batch.delivery_tasks):
+                    task.cancel()
         self._kick_follow_up()
 
-    def _schedule_flush(self, calls: list[Any]) -> None:
-        executions = []
+    def _schedule_calls(self, response_id: str, calls: list[Any]) -> None:
+        batch = self._tool_batches.setdefault(response_id, _ToolResponseBatch())
         for call in calls:
             call_id = getattr(call, "call_id", None)
             if not isinstance(call_id, str) or not call_id:
                 print("TOOL ERROR: received a call without call_id; cannot return an output", flush=True)
                 continue
-            executions.append(
-                asyncio.create_task(
-                    self._execute_tool(
-                        call_id,
-                        getattr(call, "name", None),
-                        getattr(call, "arguments", None),
-                    )
+            if call_id in batch.call_ids:
+                continue
+            batch.call_ids.add(call_id)
+            execution = asyncio.create_task(
+                self._execute_tool(
+                    call_id,
+                    getattr(call, "name", None),
+                    getattr(call, "arguments", None),
                 )
             )
-        if not executions:
-            return
-        previous = self._flush_tail
-        self._pending_tool_flushes += 1
-        for execution in executions:
-            self._track(execution)
+            previous = self._flush_tail
+            batch.pending_deliveries += 1
+            self._pending_tool_flushes += 1
 
-        async def flush_in_order() -> None:
-            try:
-                if previous is not None:
-                    await previous
-                results = await asyncio.gather(*executions)
-                for result in results:
+            async def deliver_in_order(
+                execution: asyncio.Task[_ToolExecutionResult] = execution,
+                previous: asyncio.Task[None] | None = previous,
+                batch: _ToolResponseBatch = batch,
+                response_id: str = response_id,
+            ) -> None:
+                try:
+                    result = await execution
+                    if previous is not None:
+                        # A cancelled response must not break the ordering chain
+                        # for a later, independent response.
+                        await asyncio.gather(previous, return_exceptions=True)
+                    if batch.cancelled:
+                        return
                     await self._conn.send(
                         {
                             "type": "conversation.item.create",
@@ -544,14 +580,26 @@ class _ToolCallCoordinator:
                             },
                         }
                     )
-                if any(result.create_response for result in results):
-                    self._queued_follow_ups += 1
-            finally:
-                self._pending_tool_flushes -= 1
-            await self._maybe_send_follow_up()
+                    batch.create_response = batch.create_response or result.create_response
+                finally:
+                    batch.pending_deliveries -= 1
+                    self._pending_tool_flushes -= 1
+                    self._finalize_batch_if_ready(response_id, batch)
 
-        self._flush_tail = asyncio.create_task(flush_in_order())
-        self._track(self._flush_tail, report_errors=True)
+            delivery = asyncio.create_task(deliver_in_order())
+            batch.delivery_tasks.add(delivery)
+            delivery.add_done_callback(batch.delivery_tasks.discard)
+            self._flush_tail = delivery
+            self._track(delivery, report_errors=True)
+
+    def _finalize_batch_if_ready(self, response_id: str, batch: _ToolResponseBatch) -> None:
+        if not batch.completed or batch.pending_deliveries > 0:
+            return
+        if self._tool_batches.get(response_id) is batch:
+            self._tool_batches.pop(response_id, None)
+        if batch.successful and not batch.cancelled and batch.create_response:
+            self._queued_follow_ups += 1
+        self._kick_follow_up()
 
     def _handle_error(self, error: Any) -> None:
         if getattr(error, "event_id", None) != self._pending_create_id:

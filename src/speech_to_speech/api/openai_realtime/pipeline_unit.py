@@ -34,6 +34,7 @@ class SessionState(BaseModel):
     transport: Optional[SessionTransport] = None
     session_id: str = ""
     pending_output_item: Any = None
+    pending_text_output_item: Any = None
     drained: asyncio.Event = Field(default_factory=asyncio.Event)
     # Wall-clock time when the client disconnected (route handler released its
     # claim). `None` while the client is still active. Used by /v1/pool to

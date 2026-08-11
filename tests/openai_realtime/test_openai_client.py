@@ -39,6 +39,8 @@ from speech_to_speech.api.openai_realtime.audio_client import (
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
+from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -48,7 +50,16 @@ from speech_to_speech.pipeline.events import (
     SpeechStoppedEvent,
     TranscriptionCompletedEvent,
 )
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, GenerateResponseRequest
+from speech_to_speech.pipeline.messages import (
+    AUDIO_RESPONSE_DONE,
+    PIPELINE_END,
+    AssistantTextPart,
+    AssistantToolCallPart,
+    EndOfResponse,
+    GenerateResponseRequest,
+    LLMResponseChunk,
+    TTSInput,
+)
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 # ---------------------------------------------------------------------------
@@ -491,7 +502,7 @@ class TestPackagedAudioClient:
         monkeypatch,
         capsys,
     ):
-        """A real SDK connection completes the packaged client's full local tool loop."""
+        """The SDK client starts tool follow-up generation while TTS is blocked."""
 
         class FakeStream:
             def __init__(self, **_kwargs):
@@ -513,10 +524,27 @@ class TestPackagedAudioClient:
         )
 
         calls = []
+        tool_started = asyncio.Event()
+        follow_up_created = asyncio.Event()
+        tts_started = ThreadingEvent()
+        release_tts = ThreadingEvent()
+        received_events = []
 
         async def executor(name, arguments):
             calls.append((name, arguments))
+            tool_started.set()
             return {"value": "ok"}
+
+        class BlockingTTS(BaseHandler):
+            def process(self, item):
+                if isinstance(item, TTSInput):
+                    tts_started.set()
+                    while not release_tts.wait(0.01):
+                        if self.stop_event.is_set():
+                            return
+                    yield _pcm_bytes(256)
+                elif isinstance(item, EndOfResponse):
+                    yield AUDIO_RESPONSE_DONE
 
         client_stop = ThreadingEvent()
         config = RealtimeAudioClientConfig(
@@ -545,6 +573,35 @@ class TestPackagedAudioClient:
                 await asyncio.sleep(0.01)
             raise AssertionError("Timed out waiting for the packaged tool loop")
 
+        original_handle_server_event = audio_client_module.handle_server_event
+
+        def record_server_event(event, **kwargs):
+            received_events.append(event)
+            original_handle_server_event(event, **kwargs)
+            metadata = getattr(getattr(event, "response", None), "metadata", None)
+            if event.type == RESPONSE_CREATED and isinstance(metadata, dict) and "s2s_local_tool_create_id" in metadata:
+                follow_up_created.set()
+
+        monkeypatch.setattr(audio_client_module, "handle_server_event", record_server_event)
+
+        lm_output_queue: Queue = Queue()
+        tts_input_queue: Queue = Queue()
+        lm_output_processor = LMOutputProcessor(
+            server_env.stop_event,
+            lm_output_queue,
+            tts_input_queue,
+            setup_kwargs={"text_output_queue": server_env.text_output_queue},
+        )
+        blocking_tts = BlockingTTS(
+            server_env.stop_event,
+            tts_input_queue,
+            server_env.output_queue,
+        )
+        processor_thread = threading.Thread(target=lm_output_processor.run, daemon=True)
+        tts_thread = threading.Thread(target=blocking_tts.run, daemon=True)
+        processor_thread.start()
+        tts_thread.start()
+
         client_task = asyncio.create_task(listen_and_play_realtime(config, stop_event=client_stop))
         try:
             await wait_until(
@@ -566,30 +623,53 @@ class TestPackagedAudioClient:
                 )
             )
 
-            server_env.text_output_queue.put(
-                AssistantOutputEvent(
-                    tools=[
-                        {
-                            "type": "function_call",
-                            "call_id": "call_integration",
-                            "name": "lookup",
-                            "arguments": '{"index": 7}',
-                        }
-                    ]
+            response_key = "response_blocked_tts"
+            lm_output_queue.put(
+                LLMResponseChunk(
+                    response_key=response_key,
+                    parts=[
+                        AssistantTextPart(text="One moment."),
+                        AssistantToolCallPart(
+                            tool={
+                                "type": "function_call",
+                                "call_id": "call_integration",
+                                "name": "lookup",
+                                "arguments": '{"index": 7}',
+                            }
+                        ),
+                    ],
                 )
             )
-            server_env.output_queue.put(AUDIO_RESPONSE_DONE)
+            lm_output_queue.put(EndOfResponse(response_key=response_key))
 
+            assert await asyncio.to_thread(tts_started.wait, 1.0)
+            await asyncio.wait_for(tool_started.wait(), timeout=1.0)
             await wait_until(lambda: not server_env.text_prompt_queue.empty())
             follow_up = server_env.text_prompt_queue.get_nowait()
 
             assert isinstance(follow_up, GenerateResponseRequest)
+            assert follow_up.prefetch_transaction is not None
             assert calls == [("lookup", {"index": 7})]
             assert [item.type for item in chat.buffer[-2:]] == ["function_call", "function_call_output"]
             assert json.loads(chat.buffer[-1].output) == {"value": "ok"}
+            assert not release_tts.is_set()
+            assert not any(event.type == RESPONSE_DONE for event in received_events)
+
+            release_tts.set()
+            await asyncio.wait_for(follow_up_created.wait(), timeout=2.0)
+            event_types = [event.type for event in received_events]
+            assert event_types.index(FUNCTION_CALL_DONE) < event_types.index(AUDIO_DONE)
+            assert event_types.index(AUDIO_DONE) < event_types.index(RESPONSE_DONE)
+            assert event_types.count(RESPONSE_CREATED) == 2
         finally:
+            release_tts.set()
             client_stop.set()
             await asyncio.wait_for(client_task, timeout=3.0)
+            lm_output_queue.put(PIPELINE_END)
+            processor_thread.join(timeout=1.0)
+            tts_thread.join(timeout=1.0)
+            assert not processor_thread.is_alive()
+            assert not tts_thread.is_alive()
             capsys.readouterr()
 
 

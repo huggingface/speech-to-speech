@@ -14,6 +14,7 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
+    AssistantToolCallReadyEvent,
     ResponseFailedEvent,
     ResponseGenerationDoneEvent,
     TokenUsageEvent,
@@ -175,7 +176,12 @@ def test_generation_done_side_channel_does_not_wait_for_tts_delivery():
         *processor.process(EndOfResponse(response_key="response_1", turn_id="turn_1", turn_revision=0)),
     ]
 
+    tool_ready = side_events.get_nowait()
     logical_done = side_events.get_nowait()
+    assert isinstance(tool_ready, AssistantToolCallReadyEvent)
+    assert tool_ready.response_key == "response_1"
+    assert tool_ready.output_sequence == 1
+    assert tool_ready.part.tool == tool
     assert isinstance(logical_done, ResponseGenerationDoneEvent)
     assert logical_done.response_key == "response_1"
     assert logical_done.call_ids == ["call_1"]
@@ -187,6 +193,7 @@ def test_generation_done_side_channel_does_not_wait_for_tts_delivery():
         AssistantResponseDoneEvent,
         EndOfResponse,
     ]
+    assert [item.output_sequence for item in ordered if isinstance(item, AssistantOutputEvent)] == [0, 1]
 
 
 def test_failed_response_event_precedes_terminal_and_keeps_identity():

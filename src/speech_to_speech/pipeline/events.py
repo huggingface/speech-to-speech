@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from speech_to_speech.pipeline.messages import (
     AssistantOutputPart,
+    AssistantToolCallPart,
     _normalize_assistant_output_fields,
 )
 
@@ -102,6 +103,11 @@ class AssistantOutputEvent(PipelineEvent):
     # audio, instead of blanket-dropping while cancel_scope.discarding is set.
     cancel_generation: int | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
+    # Monotonic part position assigned by LMOutputProcessor. It lets the
+    # realtime side channel expose a later tool call as soon as every earlier
+    # model part has reached the ordered TTS path, without letting it overtake
+    # a preceding assistant message.
+    output_sequence: int | None = Field(default=None, exclude=True, repr=False)
 
     @model_validator(mode="after")
     def _normalize_ordered_parts(self) -> "AssistantOutputEvent":
@@ -113,6 +119,24 @@ class AssistantOutputEvent(PipelineEvent):
 
 # Kept for callers that imported the original public pipeline symbol.
 AssistantTextEvent = AssistantOutputEvent
+
+
+class AssistantToolCallReadyEvent(PipelineEvent):
+    """A tool call that can be exposed without waiting for preceding TTS.
+
+    The matching :class:`AssistantOutputEvent` still travels through the TTS
+    queue and owns audio-finalization order. This side-channel event only
+    makes the standard function-call arguments event available early enough
+    for clients to execute the tool while speech synthesis continues.
+    """
+
+    type: Literal["assistant_tool_call_ready"] = "assistant_tool_call_ready"
+    part: AssistantToolCallPart
+    output_sequence: int
+    turn_id: str | None = None
+    turn_revision: int | None = None
+    cancel_generation: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
 
 
 class TokenUsageEvent(PipelineEvent):

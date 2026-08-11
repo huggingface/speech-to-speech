@@ -34,6 +34,7 @@ from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessag
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
+    AssistantToolCallReadyEvent,
     AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     PipelineEvent,
@@ -364,6 +365,9 @@ def _release_session(unit: PipelineUnit, session_id: str) -> None:
     if old_session.pending_output_item is not None:
         account_usage(old_session.pending_output_item)
         old_session.pending_output_item = None
+    if old_session.pending_text_output_item is not None:
+        account_usage(old_session.pending_text_output_item)
+        old_session.pending_text_output_item = None
     _clean_unit(unit, on_discard=account_usage)
     # Tag SESSION_END with this session's id so that, after a force
     # release, a late arrival can't satisfy the next session's drain.
@@ -805,7 +809,35 @@ def create_app(
 
                 # Text events first (speech_started cancels active response).
                 try:
-                    text_msg = unit.text_output_queue.get_nowait()
+                    if session is not None and session.pending_text_output_item is not None:
+                        text_msg = session.pending_text_output_item
+                        session.pending_text_output_item = None
+                    else:
+                        text_msg = unit.text_output_queue.get_nowait()
+
+                    if (
+                        session is not None
+                        and session_id is not None
+                        and _response_key_output_is_blocked(
+                            unit,
+                            session_id,
+                            _output_response_key(text_msg),
+                        )
+                    ):
+                        # Response-dependent side-channel events share the same
+                        # exposure barrier as audio/output events. In particular,
+                        # an early tool call must never overtake response.created.
+                        session.pending_text_output_item = text_msg
+                        await asyncio.sleep(0.01)
+                        continue
+                    if isinstance(text_msg, AssistantToolCallReadyEvent):
+                        generation = text_msg.cancel_generation
+                        response_key = text_msg.response_key
+                        if _generation_is_discardable(unit, generation):
+                            continue
+                        if session_id is not None and _response_key_is_obsolete(unit, session_id, response_key):
+                            _discard_obsolete_response_key(unit, session_id, response_key)
+                            continue
                     is_speech_start = isinstance(text_msg, SpeechStartedEvent)
 
                     was_in_response = False
