@@ -6,13 +6,17 @@ from openai.types.realtime.realtime_response_create_params import RealtimeRespon
 from openai.types.responses import ResponseFunctionToolCall
 from pydantic import ValidationError
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.LLM.chat import Chat
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
+    AssistantToolCallReadyEvent,
     ResponseFailedEvent,
+    ResponseGenerationDoneEvent,
     TokenUsageEvent,
 )
 from speech_to_speech.pipeline.messages import (
@@ -22,7 +26,9 @@ from speech_to_speech.pipeline.messages import (
     AssistantToolCallPart,
     AudioOutput,
     EndOfResponse,
+    GenerateResponseRequest,
     LLMResponseChunk,
+    ResponsePrefetchTransaction,
     TokenUsage,
     TTSInput,
 )
@@ -148,6 +154,72 @@ def test_latest_end_of_response_follows_ordered_done_event():
 
     assert [type(output) for output in outputs] == [AssistantResponseDoneEvent, EndOfResponse]
     assert all(output.turn_id == "turn_1" and output.turn_revision == 1 for output in outputs)
+
+
+def test_generation_done_side_channel_does_not_wait_for_tts_delivery():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    side_events = Queue()
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup(speculative_turns=tracker, text_output_queue=side_events)
+    tool = ResponseFunctionToolCall(type="function_call", call_id="call_1", name="lookup", arguments="{}")
+
+    ordered = [
+        *processor.process(
+            LLMResponseChunk(
+                parts=[AssistantTextPart(text="One moment."), AssistantToolCallPart(tool=tool)],
+                response_key="response_1",
+                turn_id="turn_1",
+                turn_revision=0,
+            )
+        ),
+        *processor.process(EndOfResponse(response_key="response_1", turn_id="turn_1", turn_revision=0)),
+    ]
+
+    tool_ready = side_events.get_nowait()
+    logical_done = side_events.get_nowait()
+    assert isinstance(tool_ready, AssistantToolCallReadyEvent)
+    assert tool_ready.response_key == "response_1"
+    assert tool_ready.output_sequence == 1
+    assert tool_ready.part.tool == tool
+    assert isinstance(logical_done, ResponseGenerationDoneEvent)
+    assert logical_done.response_key == "response_1"
+    assert logical_done.call_ids == ["call_1"]
+    assert logical_done.succeeded is True
+    assert [type(item) for item in ordered] == [
+        AssistantOutputEvent,
+        TTSInput,
+        AssistantOutputEvent,
+        AssistantResponseDoneEvent,
+        EndOfResponse,
+    ]
+    assert [item.output_sequence for item in ordered if isinstance(item, AssistantOutputEvent)] == [0, 1]
+
+
+def test_unclaimed_prefetch_emits_tool_ready_side_channel_before_tts_delivery():
+    side_events = Queue()
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup(speculative_turns=SpeculativeTurnTracker(), text_output_queue=side_events)
+    transaction = ResponsePrefetchTransaction()
+    tool = ResponseFunctionToolCall(type="function_call", call_id="call_2", name="lookup", arguments="{}")
+
+    ordered = list(
+        processor.process(
+            LLMResponseChunk(
+                parts=[AssistantTextPart(text="One more check."), AssistantToolCallPart(tool=tool)],
+                response_key="response_prefetch",
+                prefetch_transaction=transaction,
+            )
+        )
+    )
+
+    tool_ready = side_events.get_nowait()
+    assert isinstance(tool_ready, AssistantToolCallReadyEvent)
+    assert tool_ready.response_key == "response_prefetch"
+    assert tool_ready.output_sequence == 1
+    assert tool_ready.part.tool == tool
+    assert not transaction.claimed
+    assert [type(item) for item in ordered] == [AssistantOutputEvent, TTSInput, AssistantOutputEvent]
 
 
 def test_failed_response_event_precedes_terminal_and_keeps_identity():
@@ -276,6 +348,99 @@ def test_audio_output_keeps_response_identity():
 
     assert isinstance(queued, AudioOutput)
     assert (queued.audio, queued.response_key) == (b"audio", "response_1")
+
+
+def test_prefetch_transaction_propagates_to_tts_input():
+    processor = _processor(SpeculativeTurnTracker())
+    transaction = ResponsePrefetchTransaction()
+
+    outputs = list(
+        processor.process(
+            LLMResponseChunk(
+                text="hidden audio",
+                prefetch_transaction=transaction,
+            )
+        )
+    )
+
+    tts_input = next(output for output in outputs if isinstance(output, TTSInput))
+    assert tts_input.prefetch_transaction is transaction
+
+
+def test_prefetch_transaction_does_not_gate_lm_worker():
+    started = Event()
+
+    class RecordingLMHandler(BaseHandler):
+        def process(self, item):
+            started.set()
+            yield EndOfResponse(response_key=item.response_key)
+
+    queue_in, queue_out = Queue(), Queue()
+    handler = RecordingLMHandler(Event(), queue_in, queue_out)
+    transaction = ResponsePrefetchTransaction()
+    request = GenerateResponseRequest(
+        runtime_config=RuntimeConfig(chat=Chat(2)),
+        prefetch_transaction=transaction,
+    )
+    queue_in.put(request)
+    queue_in.put(PIPELINE_END)
+    worker = Thread(target=handler.run)
+    worker.start()
+
+    assert started.wait(timeout=1.0)
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert not transaction.claimed
+    assert isinstance(queue_out.get_nowait(), EndOfResponse)
+    assert queue_out.get_nowait() == PIPELINE_END
+
+
+def test_discarded_prefetch_releases_tts_worker_without_synthesis():
+    class RecordingTTSHandler(BaseHandler):
+        def process(self, item):
+            yield item.text.encode()
+
+    queue_in, queue_out = Queue(), Queue()
+    handler = RecordingTTSHandler(Event(), queue_in, queue_out)
+    transaction = ResponsePrefetchTransaction()
+    queue_in.put(TTSInput(text="hidden", prefetch_transaction=transaction))
+    worker = Thread(target=handler.run)
+    worker.start()
+
+    Event().wait(0.1)
+    assert queue_out.empty()
+    transaction.discard()
+    queue_in.put(TTSInput(text="fresh"))
+    queue_in.put(PIPELINE_END)
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert queue_out.get_nowait() == b"fresh"
+    assert queue_out.get_nowait() == PIPELINE_END
+
+
+def test_claimed_prefetch_releases_tts_worker_for_synthesis():
+    class RecordingTTSHandler(BaseHandler):
+        def process(self, item):
+            yield item.text.encode()
+
+    queue_in, queue_out = Queue(), Queue()
+    handler = RecordingTTSHandler(Event(), queue_in, queue_out)
+    transaction = ResponsePrefetchTransaction()
+    queue_in.put(TTSInput(text="hidden", prefetch_transaction=transaction))
+    worker = Thread(target=handler.run)
+    worker.start()
+
+    Event().wait(0.1)
+    assert queue_out.empty()
+    assert transaction.claim()
+    queue_in.put(PIPELINE_END)
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert queue_out.get_nowait() == b"hidden"
+    assert queue_out.get_nowait() == PIPELINE_END
 
 
 def test_tts_handler_forwards_response_events_without_processing_them():

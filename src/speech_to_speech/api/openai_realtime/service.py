@@ -28,6 +28,8 @@ from openai.types.realtime import (
     ResponseCreateEvent,
     ResponseDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
+    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
     SessionCreatedEvent,
@@ -48,10 +50,12 @@ from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
+    AssistantToolCallReadyEvent,
     AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     PipelineEvent,
     ResponseFailedEvent,
+    ResponseGenerationDoneEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TokenUsageEvent,
@@ -108,6 +112,8 @@ ServerEvent = Union[
     ResponseAudioTranscriptDeltaEvent,
     ResponseAudioTranscriptDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
+    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
 ]
@@ -197,6 +203,14 @@ class ConnState(BaseModel):
     # Keyed by output index so response.done can preserve interleaving with
     # assistant message items.
     pending_function_calls: dict[int, RealtimeConversationItemFunctionCall] = Field(default_factory=dict)
+    # Function items normally finish with their arguments; explicitly
+    # in-progress items finish only when the enclosing response terminates.
+    finished_function_call_indices: set[int] = Field(default_factory=set)
+    # Tool calls can arrive on the LM side channel before preceding text has
+    # crossed the ordered TTS queue. Sequence them here so their later ordered
+    # events only finalize audio.
+    next_assistant_output_sequence: int = 0
+    pending_early_tool_calls: dict[int, Any] = Field(default_factory=dict)
     response_usage: UsageMetrics = Field(default_factory=UsageMetrics)
     pending_token_usage: dict[str, tuple[int, int]] = Field(default_factory=dict)
     speculative_turn_id: Optional[str] = None
@@ -212,6 +226,22 @@ class ConnState(BaseModel):
     # write-back (cross-thread), so they are buffered here and flushed in order
     # once the response completes. See ConversationHandler.flush_deferred_items.
     deferred_items: list[ConversationItem] = Field(default_factory=list)
+    # Preserve the standard insertion anchor supplied with deferred function
+    # outputs so an image/output sequence can be applied in the intended order.
+    # The anchor does not imply that the output owns the preceding image.
+    deferred_function_output_previous_item_ids: dict[str, str | None] = Field(default_factory=dict)
+    # Tool outputs may be added to the internal chat at logical LM completion
+    # so follow-up generation can overlap TTS. Their protocol acknowledgements
+    # remain ordered behind the origin response's still-buffered output.
+    pending_item_acks: list[ConversationItem] = Field(default_factory=list)
+    generation_done_tool_calls: dict[str, set[str]] = Field(default_factory=dict)
+    completed_tool_response_keys: dict[str, None] = Field(default_factory=dict)
+    tool_followup_prefetch_request: GenerateResponseRequest | None = None
+    tool_followup_prefetch_origin_response_key: str | None = None
+    # A client-triggered response is not visible until its response.created
+    # frame has finished sending. Pipeline output is held behind this key so a
+    # fast or already-buffered generation cannot overtake that lifecycle event.
+    response_created_pending_key: str | None = None
 
     def mark_response_pending(self, response_key: str) -> None:
         """Track an implicit response from queueing until its first output."""
@@ -275,6 +305,8 @@ class RealtimeService:
             PartialTranscriptionEvent: self.conversation.on_partial_transcription,
             TranscriptionCompletedEvent: self._on_transcription_completed,
             AudioInputCompletedEvent: self._on_audio_input_completed,
+            ResponseGenerationDoneEvent: self.response.on_response_generation_done,
+            AssistantToolCallReadyEvent: self.response.on_assistant_tool_call_ready,
             ResponseFailedEvent: self._on_response_failed,
         }
 
@@ -354,7 +386,12 @@ class RealtimeService:
         return self.session.build_session_updated(conn_id)
 
     def handle_session_update(self, conn_id: str, event: SessionUpdateEvent) -> Optional[RealtimeErrorEvent]:
-        return self.session.handle_session_update(conn_id, event)
+        error = self.session.handle_session_update(conn_id, event)
+        if error is None:
+            # A prefetch captured the previous session configuration.
+            self.response.discard_tool_followup_prefetch(conn_id)
+            self.response.maybe_start_tool_followup_prefetch(conn_id)
+        return error
 
     def handle_audio_append(self, conn_id: str, event: InputAudioBufferAppendEvent) -> list[bytes]:
         return self.audio.handle_audio_append(conn_id, event)
@@ -412,9 +449,18 @@ class RealtimeService:
     def close_pending_responses(self, conn_id: str) -> None:
         """Cancel queued responses without losing usage already reported by their LMs."""
         st = self._state(conn_id)
+        self.response.discard_tool_followup_prefetch(conn_id)
         for response_key in tuple(st.pending_response_keys):
             st.runtime_config.chat.rollback_provisional_generation(response_key)
             self.close_response_key(conn_id, response_key)
+        st.generation_done_tool_calls.clear()
+        st.completed_tool_response_keys.clear()
+        if not st.in_response:
+            # A side-channel tool call can be waiting for the first ordered
+            # output of an implicit response. Do not let it attach to the next
+            # response after that queued generation is cancelled.
+            st.next_assistant_output_sequence = 0
+            st.pending_early_tool_calls.clear()
         st.response_pending = bool(st.pending_response_keys)
 
     def close_response_key(self, conn_id: str, response_key: str | None) -> None:
@@ -427,7 +473,14 @@ class RealtimeService:
         st.close_response_key(response_key)
 
     def handle_conversation_item_create(self, conn_id: str, event: ConversationItemCreateEvent) -> list[ServerEvent]:
-        return self.conversation.handle_conversation_item_create(conn_id, event)
+        if self._state(conn_id).tool_followup_prefetch_request is not None:
+            # Any item after the final tool output changes the context captured
+            # by the speculative request. The eventual response.create must
+            # generate from the updated conversation instead.
+            self.response.discard_tool_followup_prefetch(conn_id)
+        events = self.conversation.handle_conversation_item_create(conn_id, event)
+        self.response.maybe_start_tool_followup_prefetch(conn_id)
+        return events
 
     def dispatch_pipeline_event(self, conn_id: str, event: PipelineEvent) -> list[ServerEvent]:
         """Route an internal pipeline event to the appropriate handler."""
@@ -445,7 +498,12 @@ class RealtimeService:
     def should_defer_pipeline_event(self, event: PipelineEvent) -> bool:
         if self.speculative_turns is None or not isinstance(
             event,
-            (AssistantOutputEvent, AssistantResponseDoneEvent),
+            (
+                AssistantOutputEvent,
+                AssistantResponseDoneEvent,
+                AssistantToolCallReadyEvent,
+                ResponseGenerationDoneEvent,
+            ),
         ):
             return False
         return self.speculative_turns.has_pending_reopen_or_grace(
@@ -503,12 +561,22 @@ class RealtimeService:
                 AudioInputCompletedEvent,
                 AssistantOutputEvent,
                 AssistantResponseDoneEvent,
+                AssistantToolCallReadyEvent,
+                ResponseGenerationDoneEvent,
             ),
         ):
             return False
         turn_id = getattr(event, "turn_id", None)
         turn_revision = getattr(event, "turn_revision", None)
-        if isinstance(event, (AssistantOutputEvent, AssistantResponseDoneEvent)):
+        if isinstance(
+            event,
+            (
+                AssistantOutputEvent,
+                AssistantResponseDoneEvent,
+                AssistantToolCallReadyEvent,
+                ResponseGenerationDoneEvent,
+            ),
+        ):
             is_latest: bool | None
             if wait_for_pending_reopen:
                 is_latest = self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
@@ -532,6 +600,9 @@ class RealtimeService:
     def _on_transcription_completed(self, conn_id: str, event: TranscriptionCompletedEvent) -> list[ServerEvent]:
         """Handle a final STT transcription: emit protocol event, append to chat, trigger LM."""
         st = self._state(conn_id)
+        self.response.discard_tool_followup_prefetch(conn_id)
+        st.generation_done_tool_calls.clear()
+        st.completed_tool_response_keys.clear()
         same_speculative_turn = event.turn_id is not None and event.turn_id == st.speculative_user_turn_id
         if same_speculative_turn:
             st.response_usage.audio_duration_s -= st.speculative_audio_duration_s
@@ -581,6 +652,9 @@ class RealtimeService:
     def _on_audio_input_completed(self, conn_id: str, event: AudioInputCompletedEvent) -> list[ServerEvent]:
         """Record final input audio and queue its realtime LM request."""
         st = self._state(conn_id)
+        self.response.discard_tool_followup_prefetch(conn_id)
+        st.generation_done_tool_calls.clear()
+        st.completed_tool_response_keys.clear()
         same_speculative_turn = event.turn_id is not None and event.turn_id == st.speculative_user_turn_id
         if same_speculative_turn:
             st.response_usage.audio_duration_s -= st.speculative_audio_duration_s

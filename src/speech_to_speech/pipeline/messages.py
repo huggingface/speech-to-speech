@@ -8,8 +8,11 @@ constants.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
+from threading import Event, Lock
 from time import perf_counter
-from typing import Annotated, Final, Literal, Optional, TypeAlias
+from typing import Annotated, Any, Final, Literal, Optional, TypeAlias
 from uuid import uuid4
 
 import numpy as np
@@ -18,6 +21,8 @@ from openai.types.responses.response_function_tool_call import ResponseFunctionT
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+
+logger = logging.getLogger(__name__)
 
 # ── Base class ────────────────────────────────────────────────────────
 
@@ -139,6 +144,7 @@ class LLMResponseChunk(PipelineMessage):
     speech_stopped_at_s: float | None = None
     cancel_generation: int | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
+    prefetch_transaction: Any = Field(default=None, exclude=True, repr=False)
 
     @model_validator(mode="after")
     def _normalize_ordered_parts(self) -> "LLMResponseChunk":
@@ -194,6 +200,7 @@ class TTSInput(PipelineMessage):
     speech_stopped_at_s: float | None = None
     cancel_generation: int | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
+    prefetch_transaction: Any = Field(default=None, exclude=True, repr=False)
 
 
 class AudioOutput(PipelineMessage):
@@ -207,6 +214,111 @@ class AudioOutput(PipelineMessage):
 
 
 # ── Realtime service → LLM ────────────────────────────────────────────
+
+
+class ResponsePrefetchTransaction:
+    """Commit irreversible chat cleanup only after a prefetch is claimed.
+
+    Generated assistant items are already provisional and can be rolled back
+    by response key. Image stripping and history trimming are not reversible,
+    so an unclaimed prefetch parks those operations here until the matching
+    standard ``response.create`` arrives.
+    """
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._cleanup: Callable[[], None] | None = None
+        self._abort_callbacks: list[Callable[[], None]] = []
+        self._claimed = False
+        self._discarded = False
+        self._resolved = Event()
+
+    def register_abort(self, abort: Callable[[], None]) -> None:
+        """Abort immediately if discarded, otherwise arm an active prefetch."""
+        run_abort = False
+        with self._lock:
+            if self._discarded:
+                run_abort = True
+            elif not self._claimed:
+                self._abort_callbacks.append(abort)
+        if run_abort:
+            self._run_abort(abort)
+
+    @staticmethod
+    def _run_abort(abort: Callable[[], None]) -> None:
+        try:
+            abort()
+        except Exception:
+            # Cancellation must still reach response rollback and tombstoning
+            # when a provider or backend raises while releasing its stream.
+            logger.exception("Failed to abort discarded response prefetch")
+
+    @property
+    def discarded(self) -> bool:
+        """Whether this speculative request has been invalidated."""
+        with self._lock:
+            return self._discarded
+
+    @property
+    def claimed(self) -> bool:
+        with self._lock:
+            return self._claimed
+
+    def wait_until_resolved(self, timeout: float) -> bool:
+        """Wait until public claim or internal discard decides this prefetch."""
+        return self._resolved.wait(timeout)
+
+    def complete(self, cleanup: Callable[[], None]) -> None:
+        """Store cleanup, or run it immediately when already claimed."""
+        run_cleanup = False
+        with self._lock:
+            if self._discarded:
+                return
+            self._abort_callbacks = []
+            if self._claimed:
+                run_cleanup = True
+            else:
+                self._cleanup = cleanup
+        if run_cleanup:
+            cleanup()
+
+    def claim(self) -> bool:
+        """Commit cleanup or return false when speculative work already failed."""
+        cleanup: Callable[[], None] | None
+        with self._lock:
+            if self._discarded:
+                return False
+            if self._claimed:
+                return True
+            self._claimed = True
+            self._abort_callbacks = []
+            cleanup = self._cleanup
+            self._cleanup = None
+        if cleanup is not None:
+            try:
+                cleanup()
+            except Exception:
+                with self._lock:
+                    self._claimed = False
+                    self._discarded = True
+                self._resolved.set()
+                raise
+        self._resolved.set()
+        return True
+
+    def discard(self) -> None:
+        """Prevent cleanup from mutating chat after speculation is invalidated."""
+        abort_callbacks: list[Callable[[], None]]
+        with self._lock:
+            if self._discarded or self._claimed:
+                return
+            self._discarded = True
+            self._cleanup = None
+            abort_callbacks = self._abort_callbacks
+            self._abort_callbacks = []
+            self._resolved.set()
+        for abort in abort_callbacks:
+            self._run_abort(abort)
 
 
 class GenerateResponseRequest(PipelineMessage):
@@ -230,6 +342,7 @@ class GenerateResponseRequest(PipelineMessage):
     turn_id: str | None = None
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
+    prefetch_transaction: ResponsePrefetchTransaction | None = Field(default=None, exclude=True, repr=False)
 
 
 # ── Binary sentinels (audio/output queue) ─────────────────────────────

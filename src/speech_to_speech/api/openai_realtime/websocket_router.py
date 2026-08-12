@@ -34,6 +34,7 @@ from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessag
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
+    AssistantToolCallReadyEvent,
     AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     PipelineEvent,
@@ -152,6 +153,24 @@ def _response_key_is_obsolete(unit: PipelineUnit, session_id: str, response_key:
     )
 
 
+def _output_response_key(item: Any) -> str | None:
+    if isinstance(item, AudioOutput):
+        return item.response_key
+    if isinstance(item, PipelineEvent):
+        return getattr(item, "response_key", None)
+    return None
+
+
+def _response_key_output_is_blocked(
+    unit: PipelineUnit,
+    session_id: str,
+    response_key: str | None,
+) -> bool:
+    if response_key is None:
+        return False
+    return unit.service.response.is_response_output_blocked(session_id, response_key)
+
+
 def _discard_obsolete_response_key(unit: PipelineUnit, session_id: str, response_key: str | None) -> None:
     if response_key is None:
         return
@@ -159,7 +178,12 @@ def _discard_obsolete_response_key(unit: PipelineUnit, session_id: str, response
     logger.debug("Pipeline %d: discarded obsolete response %s output", unit.index, response_key)
 
 
-def _flush_queue(q: Queue[QItem], *, preserve: Callable[[QItem], bool] | None = None) -> None:
+def _flush_queue(
+    q: Queue[QItem],
+    *,
+    preserve: Callable[[QItem], bool] | None = None,
+    on_discard: Callable[[QItem], None] | None = None,
+) -> None:
     """Drain a queue, optionally preserving items matching *preserve*.
 
     Preserved items are re-inserted at the **front** of the queue
@@ -172,6 +196,8 @@ def _flush_queue(q: Queue[QItem], *, preserve: Callable[[QItem], bool] | None = 
             item = q.get_nowait()
             if preserve and preserve(item):
                 preserved.append(item)
+            elif on_discard is not None:
+                on_discard(item)
         except Empty:
             break
     if preserved:
@@ -191,7 +217,11 @@ def _clear_stashed_audio(unit: PipelineUnit, session_id: str) -> None:
         session.pending_output_item = None
 
 
-def _clean_unit(unit: PipelineUnit, preserve: Callable[[Any], bool] | None = None) -> None:
+def _clean_unit(
+    unit: PipelineUnit,
+    preserve: Callable[[Any], bool] | None = None,
+    on_discard: Callable[[Any], None] | None = None,
+) -> None:
     """Cancel in-flight work and flush queues for a single pipeline unit.
 
     All four pipeline queues are drained — input audio, transcript-to-LM,
@@ -204,8 +234,8 @@ def _clean_unit(unit: PipelineUnit, preserve: Callable[[Any], bool] | None = Non
     unit.cancel_scope.cancel()
     _flush_queue(unit.input_queue)
     _flush_queue(unit.text_prompt_queue)
-    _flush_queue(unit.output_queue, preserve=preserve)
-    _flush_queue(unit.text_output_queue, preserve=preserve)
+    _flush_queue(unit.output_queue, preserve=preserve, on_discard=on_discard)
+    _flush_queue(unit.text_output_queue, preserve=preserve, on_discard=on_discard)
     unit.response_playing.clear()
     unit.cancel_scope.reset()
     unit.should_listen.set()
@@ -325,7 +355,30 @@ def _release_session(unit: PipelineUnit, session_id: str) -> None:
         # Already released (e.g. duplicate close callbacks racing).
         return
     old_session.released_at = time.monotonic()
-    _clean_unit(unit)
+    # The send loop can be parked on output from an unclaimed internal
+    # prefetch. Invalidate that response while its connection state is still
+    # registered, and drop the per-session held item so SESSION_END can drain.
+    try:
+        unit.service.close_pending_responses(session_id)
+    except KeyError:
+        pass
+
+    def account_usage(item: Any) -> None:
+        if not isinstance(item, TokenUsageEvent):
+            return
+        try:
+            unit.service.dispatch_pipeline_event(session_id, item)
+        except KeyError:
+            # A duplicate close callback may race the drain task's unregister.
+            logger.debug("Skipped late usage for unregistered session %s", session_id)
+
+    if old_session.pending_output_item is not None:
+        account_usage(old_session.pending_output_item)
+        old_session.pending_output_item = None
+    for item in old_session.pending_text_output_items:
+        account_usage(item)
+    old_session.pending_text_output_items.clear()
+    _clean_unit(unit, on_discard=account_usage)
     # Tag SESSION_END with this session's id so that, after a force
     # release, a late arrival can't satisfy the next session's drain.
     unit.input_queue.put(PipelineControlMessage(SESSION_END.kind, session_id=session_id))
@@ -351,16 +404,25 @@ async def _dispatch_client_event(
     audio sits client-side).
     """
     service = unit.service
+    client_event_id = raw.get("event_id")
+
+    async def send_correlated(events: list[Any]) -> None:
+        if isinstance(client_event_id, str):
+            for outgoing in events:
+                if getattr(outgoing, "type", None) == "error":
+                    outgoing.error.event_id = client_event_id
+        await transport.send_events(events)
+
     event = service.parse_client_event(raw)
     if event is None:
-        await transport.send_events(
+        await send_correlated(
             [service.make_error(f"Unknown or invalid event: {raw.get('type')}", "unknown_or_invalid_event")]
         )
         return
 
     if isinstance(event, InputAudioBufferAppendEvent):
         if transport_kind == "webrtc":
-            await transport.send_events(
+            await send_correlated(
                 [
                     service.make_error(
                         "In WebRTC mode audio arrives via the media track; input_audio_buffer.append is not supported.",
@@ -377,11 +439,11 @@ async def _dispatch_client_event(
     elif isinstance(event, InputAudioBufferCommitEvent):
         err = service.handle_audio_commit(session_id)
         if err:
-            await transport.send_events([err])
+            await send_correlated([err])
 
     elif isinstance(event, OutputAudioBufferClearEvent):
         if transport_kind != "webrtc":
-            await transport.send_events(
+            await send_correlated(
                 [
                     service.make_error(
                         "output_audio_buffer.clear is only supported on the WebRTC transport.",
@@ -397,21 +459,25 @@ async def _dispatch_client_event(
     elif isinstance(event, SessionUpdateEvent):
         err = service.handle_session_update(session_id, event)
         if err:
-            await transport.send_events([err])
+            await send_correlated([err])
         else:
-            await transport.send_events([service.build_session_updated(session_id)])
+            await send_correlated([service.build_session_updated(session_id)])
 
     elif isinstance(event, ConversationItemCreateEvent):
         events = service.handle_conversation_item_create(session_id, event)
         if events:
-            await transport.send_events(events)
+            await send_correlated(events)
 
     elif isinstance(event, ResponseCreateEvent):
         result = service.handle_response_create(session_id, event)
         if result:
+            response_key = None
             if result.type != "error":
                 unit.cancel_scope.new_response()
-            await transport.send_events([result])
+                response_key = service._state(session_id).current_response_key
+            await send_correlated([result])
+            if result.type == "response.created":
+                service.response.mark_response_created_sent(session_id, response_key)
 
     elif isinstance(event, ResponseCancelEvent):
         st = service._state(session_id)
@@ -424,7 +490,7 @@ async def _dispatch_client_event(
         transport.discard_pending_audio()
         events = service.handle_response_cancel(session_id)
         if events:
-            await transport.send_events(events)
+            await send_correlated(events)
         unit.response_playing.clear()
 
 
@@ -754,7 +820,45 @@ def create_app(
 
                 # Text events first (speech_started cancels active response).
                 try:
-                    text_msg = unit.text_output_queue.get_nowait()
+                    text_msg = None
+                    if session is not None and session_id is not None:
+                        for index, pending in enumerate(session.pending_text_output_items):
+                            if not _response_key_output_is_blocked(
+                                unit,
+                                session_id,
+                                _output_response_key(pending),
+                            ):
+                                text_msg = session.pending_text_output_items.pop(index)
+                                break
+                    if text_msg is None:
+                        text_msg = unit.text_output_queue.get_nowait()
+
+                    if (
+                        session is not None
+                        and session_id is not None
+                        and _response_key_output_is_blocked(
+                            unit,
+                            session_id,
+                            _output_response_key(text_msg),
+                        )
+                    ):
+                        # Response-dependent side-channel events share the same
+                        # exposure barrier as audio/output events. In particular,
+                        # an early tool call must never overtake response.created.
+                        # Unlike the serial output hold, this list does not stall
+                        # the origin response whose completion enables the claim.
+                        session.pending_text_output_items.append(text_msg)
+                        text_msg = None
+                    if text_msg is None:
+                        raise Empty
+                    if isinstance(text_msg, AssistantToolCallReadyEvent):
+                        generation = text_msg.cancel_generation
+                        response_key = text_msg.response_key
+                        if _generation_is_discardable(unit, generation):
+                            continue
+                        if session_id is not None and _response_key_is_obsolete(unit, session_id, response_key):
+                            _discard_obsolete_response_key(unit, session_id, response_key)
+                            continue
                     is_speech_start = isinstance(text_msg, SpeechStartedEvent)
 
                     was_in_response = False
@@ -769,7 +873,7 @@ def create_app(
                         if events:
                             await transport.send_events(events)
 
-                    if is_speech_start and session_id:
+                    if isinstance(text_msg, SpeechStartedEvent) and session_id:
                         active_cfg = unit.service._state(session_id).runtime_config
                         interrupt_enabled = text_msg.interrupt_response and (
                             active_cfg is None or active_cfg.interrupt_response_enabled
@@ -808,6 +912,23 @@ def create_app(
                         session.pending_output_item = None
                     else:
                         audio_chunk = unit.output_queue.get_nowait()
+
+                    if (
+                        session is not None
+                        and session_id is not None
+                        and _response_key_output_is_blocked(
+                            unit,
+                            session_id,
+                            _output_response_key(audio_chunk),
+                        )
+                    ):
+                        # Generation and TTS may complete before the client sends
+                        # response.create, or before response.created finishes
+                        # sending. Keep every lifecycle event private until the
+                        # response is publicly announced.
+                        session.pending_output_item = audio_chunk
+                        await asyncio.sleep(0.01)
+                        continue
 
                     if isinstance(audio_chunk, TokenUsageEvent):
                         if transport is not None and session_id is not None:

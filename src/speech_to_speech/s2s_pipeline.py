@@ -439,6 +439,7 @@ def _build_handlers(
         queue_out=lm_processed_queue,
         setup_kwargs={
             "speculative_turns": speculative_turns,
+            "text_output_queue": text_output_queue,
         },
     )
 
@@ -586,10 +587,16 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
     from speech_to_speech.api.openai_realtime.audio_client import (
         RealtimeAudioClient,
         RealtimeAudioClientConfig,
+        load_realtime_tool_module,
     )
 
-    server_manager = build_pipeline(args, stop_event, host="127.0.0.1")
     local_audio = args.local_audio_kwargs
+    tools: list[dict[str, Any]] = []
+    tool_executor = None
+    tool_response_create = True
+    if local_audio.local_audio_tool_module:
+        tools, tool_executor, tool_response_create = load_realtime_tool_module(local_audio.local_audio_tool_module)
+    server_manager = build_pipeline(args, stop_event, host="127.0.0.1")
     client = RealtimeAudioClient(
         stop_event,
         RealtimeAudioClientConfig(
@@ -600,6 +607,9 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
             output_device=local_audio.local_audio_output_device,
             print_json=local_audio.local_audio_print_json,
             block_mic_during_playback=local_audio.local_audio_block_mic_during_playback,
+            tools=tools,
+            tool_executor=tool_executor,
+            tool_response_create=tool_response_create,
         ),
     )
     return ThreadManager([*server_manager.handlers, client])

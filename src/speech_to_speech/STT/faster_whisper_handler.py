@@ -8,7 +8,7 @@ from faster_whisper import WhisperModel
 from rich.console import Console
 
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
-from speech_to_speech.pipeline.messages import Transcription
+from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 
 console = Console()
@@ -48,6 +48,14 @@ class FasterWhisperSTTHandler(BaseSTTHandler):
         logger.debug("finished whisper inference")
         if pred_text:
             console.print(f"[yellow]USER: {pred_text}")
+
+            if vad_audio.mode == "progressive":
+                yield PartialTranscription(
+                    text=pred_text,
+                    turn_id=vad_audio.turn_id,
+                    turn_revision=vad_audio.turn_revision,
+                )
+                return
 
             yield Transcription(
                 text=pred_text,
