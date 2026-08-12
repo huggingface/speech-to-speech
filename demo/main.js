@@ -812,13 +812,13 @@ function flashPreview() {
 
 // ── Tool executor ─────────────────────────────────────────────────────────
 // Runs the function the model called and returns the result. The connection's
-// ToolCallBatcher sends every result from the originating response together,
-// then requests one follow-up. Errors come back as tool output too, so the
+// ToolCallBatcher sends ordered results as they become ready, then requests one
+// follow-up after response.done. Errors come back as tool output too, so the
 // model can recover gracefully instead of the turn stalling.
 
 /**
- * Run the function the model called. The caller batches the returned result
- * with the other calls from the same response before sending it to the model.
+ * Run the function the model called. The caller preserves call order while
+ * returning results from the same response as early as possible.
  * @param {string} name @param {string} argsJson @param {string} callId
  * @returns {Promise<{ output: string, image?: string }>}
  */
@@ -1430,17 +1430,21 @@ async function doStart(audioContext = null) {
   client = c;
   c.setMuted(micMuted || userAudioReplaying);
 
-  /** @param {{ callId: string; output: string; image?: string }[]} results */
-  const sendToolBatch = (results) => {
+  /** @param {{ callId: string; output: string; image?: string }} result */
+  const sendToolResult = (result) => {
     if (client !== c) return;
-    for (const result of results) c.sendToolOutput(result.callId, result.output);
-    for (const result of results) {
-      if (result.image) c.sendUserImage(result.image);
-    }
-    if (DEBUG) console.debug(`[tool] requesting one follow-up after ${results.length} tool result(s)`);
+    // Supplemental standard input precedes the output that may complete the
+    // tool batch and release the server's internal follow-up prefetch.
+    const imageItemId = result.image ? `msg_tool_image_${result.callId}` : "";
+    if (result.image) c.sendUserImage(result.image, imageItemId);
+    c.sendToolOutput(result.callId, result.output, imageItemId);
+  };
+  const requestToolFollowUp = () => {
+    if (client !== c) return;
+    if (DEBUG) console.debug("[tool] requesting one follow-up after response.done");
     c.requestResponse();
   };
-  const toolBatches = new ToolCallBatcher(sendToolBatch);
+  const toolBatches = new ToolCallBatcher(sendToolResult, requestToolFollowUp);
 
   c.addEventListener("queue", (e) => {
     const { position, queueId } = /** @type {CustomEvent<{ position: number; queueId: string }>} */ (e).detail;
@@ -1490,8 +1494,13 @@ async function doStart(audioContext = null) {
     if (flush) void flush.catch((err) => onFatalError(err));
   });
 
+  c.addEventListener("toolcall-added", (e) => {
+    const { callId, responseId, outputIndex } = /** @type {CustomEvent<{ callId: string; responseId: string; outputIndex: number }>} */ (e).detail;
+    toolBatches.register(responseId, callId, outputIndex);
+  });
+
   c.addEventListener("toolcall", (e) => {
-    const { name, arguments: args, callId, responseId } = /** @type {CustomEvent<{ name: string; arguments: string; callId: string; responseId: string }>} */ (e).detail;
+    const { name, arguments: args, callId, responseId, outputIndex } = /** @type {CustomEvent<{ name: string; arguments: string; callId: string; responseId: string; outputIndex: number }>} */ (e).detail;
     if (!responseId) {
       console.warn(`[tool] call ${callId || "<unknown>"} has no response_id; ignoring uncorrelated tool call`);
       return;
@@ -1503,7 +1512,7 @@ async function doStart(audioContext = null) {
       if (client === c) chat.onToolResult(name, args, output, image);
       return { callId, output, ...(image ? { image } : {}) };
     });
-    toolBatches.add(responseId, execution);
+    toolBatches.add(responseId, callId, outputIndex, execution);
   });
   c.addEventListener("error", (e) => {
     const detail = /** @type {CustomEvent<{ error: unknown }>} */ (e).detail;

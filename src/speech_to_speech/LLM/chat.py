@@ -75,6 +75,14 @@ SupportedItem = Union[
 
 
 CompactFn = Callable[[ResponseInputParam], CompactionResult]
+HistoryCleanupSnapshot = tuple[
+    RealtimeConversationItemSystemMessage | None,
+    list[SupportedItem],
+    dict[str, RealtimeConversationItemFunctionCall],
+    set[str],
+    int,
+    CompactFn | None,
+]
 
 
 class Chat:
@@ -706,6 +714,64 @@ class Chat:
                 clone._user_turn_count,
             ) = state
             return clone
+
+    def snapshot_history_cleanup(self) -> HistoryCleanupSnapshot:
+        """Capture state changed by deferred image/history cleanup."""
+        with self._lock:
+            init_message, buffer, pending_calls, ordered_call_ids, user_turn_count = deepcopy(
+                (
+                    self.init_chat_message,
+                    self.buffer,
+                    self._pending_tool_calls,
+                    self._ordered_pending_call_ids,
+                    self._user_turn_count,
+                )
+            )
+            return (
+                init_message,
+                buffer,
+                pending_calls,
+                ordered_call_ids,
+                user_turn_count,
+                self._deferred_compactor,
+            )
+
+    def restore_history_cleanup(self, snapshot: HistoryCleanupSnapshot) -> None:
+        """Restore a cleanup snapshot after a later cleanup step fails."""
+        with self._lock:
+            (
+                self.init_chat_message,
+                self.buffer,
+                self._pending_tool_calls,
+                self._ordered_pending_call_ids,
+                self._user_turn_count,
+                self._deferred_compactor,
+            ) = snapshot
+
+    def copy_without_provisional_generation(self, response_key: str) -> Chat:
+        """Return a deep snapshot excluding one response's reversible output."""
+        with self._lock:
+            clone = Chat(self.size)
+            (
+                clone.init_chat_message,
+                clone.buffer,
+                clone._pending_tool_calls,
+                clone._ordered_pending_call_ids,
+                clone._user_turn_count,
+            ) = deepcopy(
+                (
+                    self.init_chat_message,
+                    self.buffer,
+                    self._pending_tool_calls,
+                    self._ordered_pending_call_ids,
+                    self._user_turn_count,
+                )
+            )
+            tracked = deepcopy(self._provisional_generations.get(response_key))
+        if tracked is not None:
+            item_ids, call_ids = tracked
+            clone._rollback_generation_locked(None, item_ids=item_ids, call_ids=call_ids)
+        return clone
 
     def reset(self) -> None:
         """Clear all conversation state. Cancels any in-flight compaction splice."""

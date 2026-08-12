@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
         ("./demo/rtc/s2s-rtc-client.js", "S2sRtcRealtimeClient", "_onDcMessage"),
     ],
 )
-def test_demo_clients_preserve_tool_call_response_id(module_path, class_name, message_handler):
+def test_demo_clients_preserve_tool_call_ordering_metadata(module_path, class_name, message_handler):
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required for demo client tests")
@@ -36,16 +36,83 @@ const client = new {class_name}({{
   callsUrl: "api/calls",
 }});
 let toolCall = null;
+let toolAdded = null;
 client.addEventListener("toolcall", (event) => {{ toolCall = event.detail; }});
+client.addEventListener("toolcall-added", (event) => {{ toolAdded = event.detail; }});
+await client[{json.dumps(message_handler)}](JSON.stringify({{
+  type: "response.output_item.added",
+  response_id: "response_1",
+  output_index: 3,
+  item: {{ type: "function_call", call_id: "call_1", name: "web_search", arguments: "" }},
+}}));
 await client[{json.dumps(message_handler)}](JSON.stringify({{
   type: "response.function_call_arguments.done",
   response_id: "response_1",
+  output_index: 3,
   call_id: "call_1",
   name: "web_search",
   arguments: "{{}}",
 }}));
-if (toolCall?.responseId !== "response_1") {{
-  throw new Error(`response_id was not preserved: ${{JSON.stringify(toolCall)}}`);
+const expected = {{ callId: "call_1", responseId: "response_1", outputIndex: 3 }};
+if (JSON.stringify(toolAdded) !== JSON.stringify(expected)) {{
+  throw new Error(`output-item ordering was not preserved: ${{JSON.stringify(toolAdded)}}`);
+}}
+if (toolCall?.responseId !== "response_1" || toolCall?.outputIndex !== 3) {{
+  throw new Error(`argument ordering was not preserved: ${{JSON.stringify(toolCall)}}`);
+}}
+"""
+    subprocess.run(
+        [node, "--input-type=module", "-e", script],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("module_path", "class_name", "attach_transport"),
+    [
+        (
+            "./demo/ws/s2s-ws-client.js",
+            "S2sWsRealtimeClient",
+            "globalThis.WebSocket = { OPEN: 1 }; client._ws = { readyState: WebSocket.OPEN, send: record };",
+        ),
+        (
+            "./demo/rtc/s2s-rtc-client.js",
+            "S2sRtcRealtimeClient",
+            'client._dc = { readyState: "open", send: record };',
+        ),
+    ],
+)
+def test_demo_clients_link_tool_images_with_standard_item_ordering(module_path, class_name, attach_transport):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for demo client tests")
+
+    script = f"""
+globalThis.localStorage = {{ getItem() {{ return null; }} }};
+const {{ {class_name} }} = await import({json.dumps(module_path)});
+const client = new {class_name}({{
+  voice: "Aiden",
+  instructions: "Be helpful.",
+  directUrl: "ws://unused",
+  callsUrl: "api/calls",
+}});
+const sent = [];
+const record = (raw) => sent.push(JSON.parse(raw));
+{attach_transport}
+client.sendUserImage("data:image/jpeg;base64,abc", "msg_tool_image_call_1");
+client.sendToolOutput("call_1", "snapshot ready", "msg_tool_image_call_1");
+if (sent.length !== 2) throw new Error(`unexpected event count: ${{JSON.stringify(sent)}}`);
+if (sent[0].item.id !== "msg_tool_image_call_1") {{
+  throw new Error(`image has no standard client item id: ${{JSON.stringify(sent)}}`);
+}}
+if (sent[1].previous_item_id !== "msg_tool_image_call_1") {{
+  throw new Error(`output does not follow the image: ${{JSON.stringify(sent)}}`);
+}}
+if (sent.some((event) => "origin_response_id" in event || "tool_batch_id" in event)) {{
+  throw new Error(`non-standard correlation field emitted: ${{JSON.stringify(sent)}}`);
 }}
 """
     subprocess.run(
@@ -75,16 +142,22 @@ const deferred = () => {{
 }};
 const pending = [deferred(), deferred()];
 const executions = [
-  pending[0].promise.then(() => ({{ callId: "call_1", output: "first" }})),
+  pending[0].promise.then(() => ({{ callId: "call_1", output: "first", image: "first-image" }})),
   pending[1].promise.then(() => ({{ callId: "call_2", output: "second" }})),
 ];
 const timeline = [];
-const batches = new ToolCallBatcher((results) => {{
-  for (const result of results) timeline.push(`output:${{result.callId}}:${{result.output}}`);
-  timeline.push("response.create");
-}});
-batches.add("response_1", executions[0]);
-batches.add("response_1", executions[1]);
+const batches = new ToolCallBatcher(
+  (result) => {{
+    if (result.image) timeline.push(`image:${{result.callId}}:${{result.image}}`);
+    timeline.push(`output:${{result.callId}}:${{result.output}}`);
+  }},
+  () => timeline.push("response.create"),
+);
+batches.register("response_1", "call_1", 0);
+batches.register("response_1", "call_2", 1);
+// Arguments may finish in a different order from response.output.
+batches.add("response_1", "call_2", 1, executions[1]);
+batches.add("response_1", "call_1", 0, executions[0]);
 
 let flush = null;
 if ({json.dumps(response_finishes_first)}) {{
@@ -93,16 +166,20 @@ if ({json.dumps(response_finishes_first)}) {{
 for (const index of {json.dumps(completion_order)}) {{
   pending[index].resolve();
   await Promise.resolve();
-  if (timeline.length !== 0) {{
-    throw new Error(`batch flushed before both response and tools completed: ${{JSON.stringify(timeline)}}`);
-  }}
 }}
 await Promise.all(executions);
-if (!flush) flush = batches.finish("response_1", "completed");
+await new Promise((resolve) => setTimeout(resolve, 0));
+if (!flush) {{
+  const expectedEarly = ["image:call_1:first-image", "output:call_1:first", "output:call_2:second"];
+  if (JSON.stringify(timeline) !== JSON.stringify(expectedEarly)) {{
+    throw new Error(`tool outputs were not delivered before response.done: ${{JSON.stringify(timeline)}}`);
+  }}
+  flush = batches.finish("response_1", "completed");
+}}
 if (!flush) throw new Error("response batch was not registered");
 await flush;
 
-const expected = ["output:call_1:first", "output:call_2:second", "response.create"];
+const expected = ["image:call_1:first-image", "output:call_1:first", "output:call_2:second", "response.create"];
 if (JSON.stringify(timeline) !== JSON.stringify(expected)) {{
   throw new Error(`unexpected tool batch: ${{JSON.stringify(timeline)}}`);
 }}
@@ -177,17 +254,23 @@ const deferred = () => {{
 const pending = [deferred(), deferred()];
 let executionIndex = 0;
 let flush = null;
-const batches = new ToolCallBatcher((results) => {{
-  for (const result of results) client.sendToolOutput(result.callId, result.output);
-  client.requestResponse();
-}});
+const batches = new ToolCallBatcher(
+  (result) => client.sendToolOutput(result.callId, result.output),
+  () => client.requestResponse(),
+);
 client.addEventListener("toolcall", (event) => {{
   const index = executionIndex++;
   const detail = event.detail;
   batches.add(
     detail.responseId,
+    detail.callId,
+    detail.outputIndex,
     pending[index].promise.then(() => ({{ callId: detail.callId, output: `output_${{index + 1}}` }})),
   );
+}});
+client.addEventListener("toolcall-added", (event) => {{
+  const detail = event.detail;
+  batches.register(detail.responseId, detail.callId, detail.outputIndex);
 }});
 client.addEventListener("response-finished", (event) => {{
   flush = batches.finish(event.detail.responseId, event.detail.status);
@@ -200,11 +283,20 @@ await deliver({{ type: "response.created", response: {{ id: "response_stale" }} 
 await deliver({{ type: "response.created", response: {{ id: "response_1" }} }});
 for (const [index, callId] of ["call_1", "call_2"].entries()) {{
   await deliver({{
+    type: "response.output_item.added",
+    response_id: "response_1",
+    output_index: index,
+    item: {{ type: "function_call", call_id: callId, name: "web_search", arguments: "" }},
+  }});
+}}
+for (const [callId, outputIndex] of [["call_2", 1], ["call_1", 0]]) {{
+  await deliver({{
     type: "response.function_call_arguments.done",
     response_id: "response_1",
+    output_index: outputIndex,
     call_id: callId,
     name: "web_search",
-    arguments: JSON.stringify({{ query: `query_${{index + 1}}` }}),
+    arguments: JSON.stringify({{ query: `query_${{outputIndex + 1}}` }}),
   }});
 }}
 await deliver({{ type: "response.done", response: {{ id: "response_1", status: "completed" }} }});
@@ -415,8 +507,12 @@ const {{ ToolCallBatcher }} = await import("./demo/tool-call-batcher.js");
 let resolveExecution;
 const execution = new Promise((resolve) => {{ resolveExecution = resolve; }});
 const timeline = [];
-const batches = new ToolCallBatcher(() => {{ timeline.push("response.create"); }});
-batches.add("response_1", execution);
+const batches = new ToolCallBatcher(
+  () => {{ timeline.push("output"); }},
+  () => {{ timeline.push("response.create"); }},
+);
+batches.register("response_1", "call_1", 0);
+batches.add("response_1", "call_1", 0, execution);
 const flush = batches.finish("response_1", {json.dumps(status)});
 if (flush !== null) throw new Error("unsuccessful response returned a flush");
 resolveExecution({{ callId: "call_1", output: "unused" }});
@@ -431,6 +527,38 @@ if (batches.finish("response_1", "completed") !== null) {{
 """
     subprocess.run(
         [node, "--input-type=module", "-e", script],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_cancelled_tool_batch_observes_rejection_blocked_behind_earlier_call():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for demo client tests")
+
+    script = """
+const { ToolCallBatcher } = await import("./demo/tool-call-batcher.js");
+let resolveFirst;
+const first = new Promise((resolve) => { resolveFirst = resolve; });
+const second = Promise.reject(new Error("call_2 failed"));
+const batches = new ToolCallBatcher(() => {}, () => {});
+batches.register("response_1", "call_1", 0);
+batches.register("response_1", "call_2", 1);
+batches.add("response_1", "call_1", 0, first);
+batches.add("response_1", "call_2", 1, second);
+
+if (batches.finish("response_1", "cancelled") !== null) {
+  throw new Error("cancelled response returned a flush");
+}
+resolveFirst({ callId: "call_1", output: "unused" });
+await new Promise((resolve) => setImmediate(resolve));
+await new Promise((resolve) => setImmediate(resolve));
+"""
+    subprocess.run(
+        [node, "--unhandled-rejections=strict", "--input-type=module", "-e", script],
         cwd=REPO_ROOT,
         check=True,
         capture_output=True,

@@ -6,6 +6,7 @@ PipelineUnit pool (size 1, matching the single-session semantics of the
 old tests) so there is no cross-test state.
 """
 
+import asyncio
 import base64
 import time
 from queue import Empty, Queue
@@ -24,9 +25,11 @@ from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessag
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
+    AssistantToolCallReadyEvent,
     AudioInputCompletedEvent,
     PipelineEvent,
     ResponseFailedEvent,
+    ResponseGenerationDoneEvent,
     SpeechStartedEvent,
     TokenUsageEvent,
 )
@@ -36,6 +39,8 @@ from speech_to_speech.pipeline.messages import (
     AssistantTextPart,
     AssistantToolCallPart,
     AudioOutput,
+    GenerateResponseRequest,
+    ResponsePrefetchTransaction,
 )
 
 # ---------------------------------------------------------------------------
@@ -254,6 +259,152 @@ class TestClientEventDispatch:
                 assert "another response is in progress" in msg["error"]["message"].lower()
                 assert msg["error"]["event_id"] == "client_create_1"
                 assert msg["event_id"] != "client_create_1"
+
+    def test_prefetched_output_waits_until_response_created_send_completes(self, setup, monkeypatch):
+        app, service, _, output_queue, *_ = setup
+        created_send_started = ThreadingEvent()
+        release_created_send = ThreadingEvent()
+        send_attempts: list[list[str]] = []
+        original_send_events = router_module.WebSocketTransport.send_events
+
+        async def blocked_send_events(transport, events):
+            event_types = [event.type for event in events]
+            send_attempts.append(event_types)
+            if event_types == ["response.created"]:
+                created_send_started.set()
+                while not release_created_send.is_set():
+                    await asyncio.sleep(0.001)
+            await original_send_events(transport, events)
+
+        monkeypatch.setattr(router_module.WebSocketTransport, "send_events", blocked_send_events)
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                conn_id = service.connection_ids[0]
+                st = service._state(conn_id)
+                request = GenerateResponseRequest(runtime_config=st.runtime_config)
+                st.tool_followup_prefetch_request = request
+                st.tool_followup_prefetch_origin_response_key = "response_origin"
+                st.mark_response_pending(request.response_key)
+                output_queue.put(AssistantOutputEvent(text="prefetched", response_key=request.response_key))
+
+                # Give the send loop time to encounter and hold the output.
+                time.sleep(0.1)
+                ws.send_json(
+                    {
+                        "type": "response.create",
+                        "response": {"metadata": {"s2s_demo_create_id": "create_followup"}},
+                    }
+                )
+
+                assert created_send_started.wait(timeout=1.0)
+                try:
+                    # Keep the transport blocked long enough for the independent
+                    # send loop to run. It must not even attempt the buffered
+                    # delta until response.created has reached the transport.
+                    time.sleep(0.1)
+                    assert send_attempts == [["response.created"]]
+                finally:
+                    release_created_send.set()
+
+                created = ws.receive_json()
+                delta = ws.receive_json()
+                assert created["type"] == "response.created"
+                assert created["response"]["metadata"] == {"s2s_demo_create_id": "create_followup"}
+                assert delta["type"] == "response.output_audio_transcript.delta"
+                assert delta["delta"] == "prefetched"
+
+    def test_early_tool_call_waits_until_response_created_send_completes(self, setup, monkeypatch):
+        app, service, _, _, text_output_queue, *_ = setup
+        created_send_started = ThreadingEvent()
+        release_created_send = ThreadingEvent()
+        send_attempts: list[list[str]] = []
+        original_send_events = router_module.WebSocketTransport.send_events
+
+        async def blocked_send_events(transport, events):
+            event_types = [event.type for event in events]
+            send_attempts.append(event_types)
+            if event_types == ["response.created"]:
+                created_send_started.set()
+                while not release_created_send.is_set():
+                    await asyncio.sleep(0.001)
+            await original_send_events(transport, events)
+
+        monkeypatch.setattr(router_module.WebSocketTransport, "send_events", blocked_send_events)
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                ws.send_json({"type": "response.create"})
+                assert created_send_started.wait(timeout=1.0)
+                conn_id = service.connection_ids[0]
+                response_key = service._state(conn_id).current_response_key
+                text_output_queue.put(
+                    AssistantToolCallReadyEvent(
+                        response_key=response_key,
+                        output_sequence=0,
+                        part=AssistantToolCallPart(
+                            tool={
+                                "type": "function_call",
+                                "call_id": "call_early",
+                                "name": "lookup",
+                                "arguments": "{}",
+                            }
+                        ),
+                    )
+                )
+
+                try:
+                    time.sleep(0.1)
+                    assert send_attempts == [["response.created"]]
+                finally:
+                    release_created_send.set()
+
+                assert ws.receive_json()["type"] == "response.created"
+                added = ws.receive_json()
+                assert added["type"] == "response.output_item.added"
+                assert added["item"]["call_id"] == "call_early"
+                tool = ws.receive_json()
+                assert tool["type"] == "response.function_call_arguments.done"
+                assert tool["call_id"] == "call_early"
+                item_done = ws.receive_json()
+                assert item_done["type"] == "response.output_item.done"
+                assert item_done["item"]["call_id"] == "call_early"
+
+    def test_failed_prefetch_logical_done_bypasses_output_gate_and_forces_fresh_create(self, setup):
+        app, service, _, output_queue, text_output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                conn_id = service.connection_ids[0]
+                st = service._state(conn_id)
+                origin_key = "response_origin"
+                st.generation_done_tool_calls[origin_key] = {"call_1"}
+                request = GenerateResponseRequest(
+                    runtime_config=st.runtime_config,
+                    prefetch_transaction=ResponsePrefetchTransaction(),
+                )
+                st.tool_followup_prefetch_request = request
+                st.tool_followup_prefetch_origin_response_key = origin_key
+                st.mark_response_pending(request.response_key)
+
+                # The LM marks failed hidden work unclaimable synchronously;
+                # queue dispatch may still race the client event task.
+                assert request.prefetch_transaction is not None
+                request.prefetch_transaction.discard()
+                output_queue.put(ResponseFailedEvent(message="hidden failure", response_key=request.response_key))
+                text_output_queue.put(
+                    ResponseGenerationDoneEvent(
+                        response_key=request.response_key,
+                        succeeded=False,
+                    )
+                )
+                ws.send_json({"type": "response.create"})
+                created = ws.receive_json()
+                assert created["type"] == "response.created"
+                replacement = service.text_prompt_queue.get_nowait()
+                assert isinstance(replacement, GenerateResponseRequest)
+                assert replacement.response_key != request.response_key
+                assert request.response_key in st.closed_response_keys
 
     def test_response_cancel_returns_events(self, setup):
         app, service, *_ = setup
@@ -976,7 +1127,9 @@ class TestSendLoop:
                 output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key))
 
                 assert ws.receive_json()["type"] == "response.created"
+                assert ws.receive_json()["type"] == "response.output_item.added"
                 assert ws.receive_json()["type"] == "response.function_call_arguments.done"
+                assert ws.receive_json()["type"] == "response.output_item.done"
                 done = ws.receive_json()
                 assert done["type"] == "response.done"
                 assert done["response"]["usage"]["input_tokens"] == 10
@@ -1071,6 +1224,45 @@ class TestCleanup:
         assert cancel_scope.generation == 2
         assert not response_playing.is_set()
         assert output_queue.empty()
+
+    def test_disconnect_drains_output_held_for_unclaimed_prefetch(self):
+        unit = _make_unit(0)
+        app = create_app(pool=[unit], stop_event=ThreadingEvent())
+        cleanup: list[str] = []
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                assert unit.session is not None
+                conn_id = unit.session.session_id
+                st = unit.service._state(conn_id)
+                transaction = ResponsePrefetchTransaction()
+                request = GenerateResponseRequest(
+                    runtime_config=st.runtime_config,
+                    prefetch_transaction=transaction,
+                )
+                st.tool_followup_prefetch_request = request
+                st.tool_followup_prefetch_origin_response_key = "response_origin"
+                st.mark_response_pending(request.response_key)
+                transaction.complete(lambda: cleanup.append("committed"))
+                unit.output_queue.put(
+                    TokenUsageEvent(response_key=request.response_key, input_tokens=11, output_tokens=4)
+                )
+                unit.output_queue.put(
+                    TokenUsageEvent(response_key=request.response_key, input_tokens=6, output_tokens=2)
+                )
+                unit.output_queue.put(AssistantOutputEvent(text="queued", response_key=request.response_key))
+                time.sleep(0.1)
+                assert isinstance(unit.session.pending_output_item, TokenUsageEvent)
+
+            _simulate_session_end_drain(unit.input_queue, unit.output_queue)
+            time.sleep(0.3)
+
+            assert unit.session is None
+            assert unit.service.connection_ids == []
+            transaction.claim()
+            assert cleanup == []
+            assert unit.service.total_usage.input_tokens == 17
+            assert unit.service.total_usage.output_tokens == 6
 
 
 # ===================================================================

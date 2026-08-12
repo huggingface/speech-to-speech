@@ -508,11 +508,20 @@ export class S2sRtcRealtimeClient extends EventTarget {
         }
         break;
 
-      case "response.output_item.added":
+      case "response.output_item.added": {
         if (this._status === "connected" || this._status === "user-speaking") {
           this._setStatus("processing");
         }
+        const item = event.item;
+        const responseId = typeof event.response_id === "string" ? event.response_id : "";
+        const outputIndex = Number.isInteger(event.output_index) ? event.output_index : Number.MAX_SAFE_INTEGER;
+        if (item?.type === "function_call" && typeof item.call_id === "string" && responseId) {
+          this.dispatchEvent(new CustomEvent("toolcall-added", {
+            detail: { callId: item.call_id, responseId, outputIndex },
+          }));
+        }
         break;
+      }
 
       case "response.done": {
         this._aiSpeaking = false;
@@ -546,9 +555,10 @@ export class S2sRtcRealtimeClient extends EventTarget {
         const args = typeof event.arguments === "string" ? event.arguments : "{}";
         const callId = typeof event.call_id === "string" ? event.call_id : "";
         const responseId = typeof event.response_id === "string" ? event.response_id : "";
+        const outputIndex = Number.isInteger(event.output_index) ? event.output_index : Number.MAX_SAFE_INTEGER;
         if (name) {
           this.dispatchEvent(new CustomEvent("toolcall", {
-            detail: { name, arguments: args, callId, responseId },
+            detail: { name, arguments: args, callId, responseId, outputIndex },
           }));
         } else {
           console.warn(`[rtc] function_call_arguments.done with no name (call_id=${callId}); cannot run tool — turn may stall`);
@@ -743,11 +753,13 @@ export class S2sRtcRealtimeClient extends EventTarget {
     });
   }
 
-  /** Return a tool's result to the model. @param {string} callId @param {string} output */
-  sendToolOutput(callId, output) {
+  /** Return a tool's result to the model.
+   *  @param {string} callId @param {string} output @param {string} [previousItemId] */
+  sendToolOutput(callId, output, previousItemId = "") {
     if (!callId) return;
     this._send({
       type: "conversation.item.create",
+      ...(previousItemId ? { previous_item_id: previousItemId } : {}),
       item: { type: "function_call_output", call_id: callId, output },
     });
   }
@@ -755,11 +767,12 @@ export class S2sRtcRealtimeClient extends EventTarget {
   /** Add an image to the conversation as user content (camera tool). The
    *  caller keeps `dataUrl` under the data-channel message budget — SCTP
    *  messages above the negotiated max (64 KiB on aiortc) fail to send.
-   *  @param {string} dataUrl */
-  sendUserImage(dataUrl) {
+   *  @param {string} dataUrl @param {string} [itemId] */
+  sendUserImage(dataUrl, itemId = "") {
     this._send({
       type: "conversation.item.create",
       item: {
+        ...(itemId ? { id: itemId } : {}),
         type: "message",
         role: "user",
         content: [{ type: "input_image", image_url: dataUrl }],

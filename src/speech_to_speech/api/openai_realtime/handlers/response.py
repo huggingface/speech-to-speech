@@ -14,6 +14,8 @@ from openai.types.realtime import (
     ResponseCreateEvent,
     ResponseDoneEvent,
     ResponseFunctionCallArgumentsDoneEvent,
+    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
 )
@@ -26,8 +28,18 @@ from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
 from speech_to_speech.LLM.chat import ChatItemError, add_supported_item
-from speech_to_speech.pipeline.events import AssistantOutputEvent, AssistantResponseDoneEvent
-from speech_to_speech.pipeline.messages import AssistantTextPart, AssistantToolCallPart, GenerateResponseRequest
+from speech_to_speech.pipeline.events import (
+    AssistantOutputEvent,
+    AssistantResponseDoneEvent,
+    AssistantToolCallReadyEvent,
+    ResponseGenerationDoneEvent,
+)
+from speech_to_speech.pipeline.messages import (
+    AssistantTextPart,
+    AssistantToolCallPart,
+    GenerateResponseRequest,
+    ResponsePrefetchTransaction,
+)
 from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
 
 if TYPE_CHECKING:
@@ -82,6 +94,24 @@ class ResponseHandler(RealtimeBaseHandler):
         )
         st.response_usage.reset()
         completed_response_key = st.current_response_key
+        completed_with_tools = bool(st.pending_function_calls)
+        if (
+            status == "completed"
+            and completed_response_key is not None
+            and completed_with_tools
+            and not is_out_of_band(st.current_response_params)
+            and completed_response_key not in st.generation_done_tool_calls
+        ):
+            # The side-channel can trail the ordered TTS terminal when its
+            # queue is backlogged. Remember only successfully completed tool
+            # responses so that late logical completion remains actionable.
+            st.completed_tool_response_keys[completed_response_key] = None
+            while len(st.completed_tool_response_keys) > 128:
+                st.completed_tool_response_keys.pop(next(iter(st.completed_tool_response_keys)))
+        elif status != "completed":
+            self.discard_tool_followup_prefetch(conn_id, origin_response_key=completed_response_key)
+            if completed_response_key is not None:
+                st.completed_tool_response_keys.pop(completed_response_key, None)
         st.current_response_id = None
         st.current_response_key = None
         st.response_failed = False
@@ -99,6 +129,220 @@ class ResponseHandler(RealtimeBaseHandler):
         st.audio_output_started = False
         st.pending_text_outputs = []
         st.pending_function_calls = {}
+        st.finished_function_call_indices = set()
+        st.next_assistant_output_sequence = 0
+        st.pending_early_tool_calls = {}
+
+    @staticmethod
+    def _prefetch_matches(event: ResponseCreateEvent) -> bool:
+        """Whether a standard create can adopt generation made from session defaults."""
+        response = event.response
+        if response is None:
+            return True
+        fields = response.model_dump(exclude_unset=True)
+        # Metadata is response bookkeeping and does not affect model or TTS
+        # output. Any other per-response override requires a fresh generation.
+        return set(fields).issubset({"metadata"})
+
+    def is_response_output_blocked(self, conn_id: str, response_key: str | None) -> bool:
+        """Return whether output must remain private from the client."""
+        st = self._state(conn_id)
+        request = st.tool_followup_prefetch_request
+        return response_key is not None and (
+            request is not None
+            and response_key == request.response_key
+            or response_key == st.response_created_pending_key
+        )
+
+    def mark_response_created_sent(self, conn_id: str, response_key: str | None) -> None:
+        """Release output only after the matching response.created send completes."""
+        st = self._state(conn_id)
+        if response_key is not None and st.response_created_pending_key == response_key:
+            st.response_created_pending_key = None
+
+    def maybe_start_tool_followup_prefetch(self, conn_id: str) -> bool:
+        """Speculatively generate after every tool output, without opening a response."""
+        st = self._state(conn_id)
+        if (
+            st.tool_followup_prefetch_request is not None
+            or st.deferred_items
+            or st.runtime_config.chat.has_pending_tool_calls()
+        ):
+            return False
+
+        origin_response_key = next(
+            (key for key, call_ids in st.generation_done_tool_calls.items() if call_ids),
+            None,
+        )
+        queue = self._queue(conn_id)
+        if origin_response_key is None or queue is None:
+            return False
+
+        request = GenerateResponseRequest(
+            runtime_config=st.runtime_config,
+            turn_id=st.speculative_user_turn_id,
+            turn_revision=st.speculative_user_turn_revision,
+            speech_stopped_at_s=st.speculative_user_speech_stopped_at_s,
+            prefetch_transaction=ResponsePrefetchTransaction(),
+        )
+        st.tool_followup_prefetch_request = request
+        st.tool_followup_prefetch_origin_response_key = origin_response_key
+        st.mark_response_pending(request.response_key)
+        queue.put(request)
+        logger.debug("Started internal tool follow-up prefetch")
+        return True
+
+    def discard_tool_followup_prefetch(
+        self,
+        conn_id: str,
+        *,
+        origin_response_key: str | None = None,
+    ) -> None:
+        """Invalidate unclaimed speculative work while preserving tool inputs."""
+        st = self._state(conn_id)
+        request = st.tool_followup_prefetch_request
+        if request is None:
+            if origin_response_key is not None:
+                st.generation_done_tool_calls.pop(origin_response_key, None)
+                st.completed_tool_response_keys.pop(origin_response_key, None)
+            return
+        if origin_response_key is not None and st.tool_followup_prefetch_origin_response_key != origin_response_key:
+            st.generation_done_tool_calls.pop(origin_response_key, None)
+            st.completed_tool_response_keys.pop(origin_response_key, None)
+            return
+
+        queue = self._queue(conn_id)
+        if queue is not None:
+            # Avoid making a replacement response wait behind speculation that
+            # has not reached the LM worker yet. If the worker already owns it,
+            # response-key tombstoning below still suppresses every output.
+            with queue.mutex:
+                try:
+                    queue.queue.remove(request)
+                except ValueError:
+                    pass
+                else:
+                    queue.not_full.notify()
+        if request.prefetch_transaction is not None:
+            request.prefetch_transaction.discard()
+        st.runtime_config.chat.rollback_provisional_generation(request.response_key)
+        self._service.close_response_key(conn_id, request.response_key)
+        st.generation_done_tool_calls.pop(request.response_key, None)
+        st.completed_tool_response_keys.pop(request.response_key, None)
+        st.tool_followup_prefetch_request = None
+        st.tool_followup_prefetch_origin_response_key = None
+        if origin_response_key is not None:
+            st.generation_done_tool_calls.pop(origin_response_key, None)
+            st.completed_tool_response_keys.pop(origin_response_key, None)
+
+    def _claim_tool_followup_prefetch(
+        self,
+        conn_id: str,
+        event: ResponseCreateEvent,
+    ) -> ServerEvent | None:
+        """Expose an internal prefetch as the response requested by the client."""
+        st = self._state(conn_id)
+        request = st.tool_followup_prefetch_request
+        assert request is not None
+        if request.prefetch_transaction is not None:
+            try:
+                claim_succeeded = request.prefetch_transaction.claim()
+            except Exception:
+                # Deferred image/history cleanup runs at the standard create
+                # boundary. A failure must not escape the transport or leave
+                # the hidden response occupying the session indefinitely.
+                logger.exception("Failed to commit tool follow-up prefetch history")
+                self.discard_tool_followup_prefetch(
+                    conn_id,
+                    origin_response_key=st.tool_followup_prefetch_origin_response_key,
+                )
+                # The failure belongs to invisible speculative work. Returning
+                # None lets this same standard response.create fall through to
+                # fresh generation without exposing the prefetch failure.
+                return None
+            if not claim_succeeded:
+                self.discard_tool_followup_prefetch(
+                    conn_id,
+                    origin_response_key=st.tool_followup_prefetch_origin_response_key,
+                )
+                return None
+
+        origin_response_key = st.tool_followup_prefetch_origin_response_key
+        st.tool_followup_prefetch_request = None
+        st.tool_followup_prefetch_origin_response_key = None
+        if origin_response_key is not None:
+            st.generation_done_tool_calls.pop(origin_response_key, None)
+            st.completed_tool_response_keys.pop(origin_response_key, None)
+        st.in_response = True
+        st.clear_pending_response(request.response_key)
+        st.current_response_params = event.response
+        st.current_response_id = _generate_id("resp")
+        st.current_response_key = request.response_key
+        st.response_created_pending_key = request.response_key
+        self._start_item(conn_id)
+        logger.debug("Standard response.create claimed internal tool follow-up prefetch")
+        return ResponseCreatedEvent(
+            type="response.created",
+            event_id=self._next_event_id(),
+            response=self._build_response(conn_id, "in_progress"),
+        )
+
+    def on_response_generation_done(
+        self,
+        conn_id: str,
+        event: ResponseGenerationDoneEvent,
+    ) -> list[ServerEvent]:
+        """Record logical LM completion independently of downstream TTS."""
+        if event.response_key is None:
+            return []
+        st = self._state(conn_id)
+        prefetch_request = st.tool_followup_prefetch_request
+        if not event.succeeded and prefetch_request is not None and prefetch_request.response_key == event.response_key:
+            # A hidden failure must remain invisible. Remove it now so the
+            # client's later standard response.create starts fresh generation
+            # instead of claiming an already-failed speculative response.
+            self.discard_tool_followup_prefetch(
+                conn_id,
+                origin_response_key=st.tool_followup_prefetch_origin_response_key,
+            )
+            return []
+        if event.response_key in st.closed_response_keys:
+            if event.response_key not in st.completed_tool_response_keys:
+                return []
+            st.completed_tool_response_keys.pop(event.response_key, None)
+        if st.in_response and st.current_response_key not in (None, event.response_key):
+            if prefetch_request is not None and prefetch_request.response_key == event.response_key:
+                # A prefetched follow-up can finish its own LM pass while the
+                # origin response is still delivering TTS. Remember its tool
+                # calls for the next round, but do not touch the origin's
+                # deferred inputs or start another speculative response.
+                if event.succeeded and event.call_ids:
+                    st.generation_done_tool_calls[event.response_key] = set(event.call_ids)
+                    while len(st.generation_done_tool_calls) > 128:
+                        st.generation_done_tool_calls.pop(next(iter(st.generation_done_tool_calls)))
+                return []
+            # A newer response already owns the slot and its deferred items.
+            # This late signal cannot open another follow-up or flush that
+            # response's conversation inputs.
+            return []
+        if not event.succeeded:
+            self.discard_tool_followup_prefetch(conn_id, origin_response_key=event.response_key)
+            return []
+        if st.current_response_key == event.response_key and is_out_of_band(st.current_response_params):
+            # Out-of-band output is absent from the default Chat. It therefore
+            # cannot seed a tool follow-up prefetch against that conversation.
+            return []
+        events = self._service.conversation.flush_deferred_items(
+            conn_id,
+            tool_followup_inputs_only=True,
+            defer_acknowledgements=True,
+        )
+        if event.call_ids:
+            st.generation_done_tool_calls[event.response_key] = set(event.call_ids)
+            while len(st.generation_done_tool_calls) > 128:
+                st.generation_done_tool_calls.pop(next(iter(st.generation_done_tool_calls)))
+            self.maybe_start_tool_followup_prefetch(conn_id)
+        return events
 
     def _start_item(self, conn_id: str) -> str:
         """Generate a new item ID, reset content index, and store it."""
@@ -277,7 +521,15 @@ class ResponseHandler(RealtimeBaseHandler):
                     message="Only string tool_choice values are supported for now (auto, required, none).",
                     _type="tool_choice_not_supported",
                 )
-        if st.in_response or st.response_pending:
+        prefetch_request = st.tool_followup_prefetch_request if not st.in_response else None
+        if prefetch_request is not None:
+            if self._prefetch_matches(event):
+                claimed = self._claim_tool_followup_prefetch(conn_id, event)
+                if claimed is not None:
+                    return claimed
+                prefetch_request = None
+        replacing_prefetch = prefetch_request is not None
+        if st.in_response or (st.response_pending and not replacing_prefetch):
             return self.make_error(
                 message="Cannot create response while another response is in progress or pending.",
                 _type="conversation_already_has_active_response",
@@ -288,9 +540,14 @@ class ResponseHandler(RealtimeBaseHandler):
         # In-band: response.input items are added to the default conversation here so
         # they appear in history. Out-of-band: leave the default conversation untouched —
         # the input rides along on the request and seeds a throwaway chat in the LM.
+        input_items: list[ConversationItem] = []
         if not out_of_band:
             input_items = list(event.response.input) if event.response and event.response.input else []
-            candidate_chat = st.runtime_config.chat.copy(deep=True)
+            candidate_chat = (
+                st.runtime_config.chat.copy_without_provisional_generation(prefetch_request.response_key)
+                if prefetch_request is not None
+                else st.runtime_config.chat.copy(deep=True)
+            )
             try:
                 for input_item in input_items:
                     add_supported_item(candidate_chat, input_item.model_copy(deep=True))
@@ -301,8 +558,29 @@ class ResponseHandler(RealtimeBaseHandler):
                     message="Cannot create a response while function call outputs are pending.",
                     _type="function_call_output_pending",
                 )
+
+        if replacing_prefetch:
+            # The speculative request used session defaults. Validate a
+            # replacement before discarding otherwise reusable work.
+            origin_response_key = st.tool_followup_prefetch_origin_response_key
+            self.discard_tool_followup_prefetch(conn_id)
+            if origin_response_key is not None:
+                st.generation_done_tool_calls.pop(origin_response_key, None)
+                st.completed_tool_response_keys.pop(origin_response_key, None)
+            if st.response_pending:
+                return self.make_error(
+                    message="Cannot create response while another response is pending.",
+                    _type="conversation_already_has_active_response",
+                )
+
+        if not out_of_band:
             for input_item in input_items:
                 self._service.conversation._append_item(conn_id, input_item)
+            # A normal in-band create has consumed the current conversation.
+            # Any delayed logical-done marker for the prior tool response must
+            # not manufacture a second follow-up behind this one.
+            st.completed_tool_response_keys.clear()
+            st.generation_done_tool_calls.clear()
 
         cfg = st.runtime_config
         queue = self._queue(conn_id)
@@ -318,6 +596,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_response_params = event.response
         st.current_response_id = _generate_id("resp")
         st.current_response_key = request.response_key
+        st.response_created_pending_key = request.response_key
         self._start_item(conn_id)
 
         if queue:
@@ -432,11 +711,32 @@ class ResponseHandler(RealtimeBaseHandler):
                             text=text,
                         )
                     )
+            terminal_response = self._build_response(conn_id, status, reason)
+            function_outputs = {
+                getattr(item, "call_id", None): item
+                for item in (terminal_response.output or [])
+                if getattr(item, "type", None) == "function_call"
+            }
+            for output_index, call in sorted(st.pending_function_calls.items()):
+                if output_index in st.finished_function_call_indices:
+                    continue
+                item = function_outputs.get(call.call_id)
+                if item is None:
+                    continue
+                events.append(
+                    ResponseOutputItemDoneEvent(
+                        type="response.output_item.done",
+                        event_id=self._next_event_id(),
+                        item=item,
+                        output_index=output_index,
+                        response_id=resp_id,
+                    )
+                )
             events.append(
                 ResponseDoneEvent(
                     type="response.done",
                     event_id=self._next_event_id(),
-                    response=self._build_response(conn_id, status, reason),
+                    response=terminal_response,
                 )
             )
             if status == "completed":
@@ -450,6 +750,12 @@ class ResponseHandler(RealtimeBaseHandler):
         # Apply any client items that arrived mid-generation now that in_response
         # is cleared and the generation's own write-back has landed. Done outside
         # the in_response guard so a stray terminal call still drains the buffer.
+        events.extend(
+            self._service.conversation.flush_pending_item_acks(
+                conn_id,
+                revalidate_tool_outputs=status in ("cancelled", "failed", "incomplete"),
+            )
+        )
         events.extend(self._service.conversation.flush_deferred_items(conn_id))
         return events
 
@@ -461,6 +767,7 @@ class ResponseHandler(RealtimeBaseHandler):
         event: AssistantOutputEvent,
         *,
         wait_for_pending_reopen: bool = True,
+        _early_tool_call: bool = False,
     ) -> list[ServerEvent] | None:
         """Translate ordered assistant output into OpenAI Realtime events."""
         if self._service.speculative_turns:
@@ -482,6 +789,24 @@ class ResponseHandler(RealtimeBaseHandler):
                 return []
         st = self._state(conn_id)
         events: list[ServerEvent] = []
+        output_sequence = event.output_sequence
+        if output_sequence is not None:
+            if output_sequence < st.next_assistant_output_sequence:
+                # The side channel already exposed this tool call. Its ordered
+                # copy still marks the point where preceding audio is complete.
+                if any(isinstance(part, AssistantToolCallPart) for part in event.parts):
+                    return self.finish_audio_output(conn_id, event.response_key)
+                logger.debug("Dropping duplicate assistant output sequence %d", output_sequence)
+                return events
+            if output_sequence > st.next_assistant_output_sequence:
+                # Ordered output should not skip a model part. Holding it would
+                # deadlock the TTS queue, so preserve legacy delivery and make
+                # the discontinuity visible in logs.
+                logger.warning(
+                    "Assistant output sequence jumped from %d to %d",
+                    st.next_assistant_output_sequence,
+                    output_sequence,
+                )
         wants_audio = response_wants_audio(st.current_response_params)
         meaningful_parts = [
             part
@@ -489,19 +814,18 @@ class ResponseHandler(RealtimeBaseHandler):
             if isinstance(part, AssistantToolCallPart)
             or (isinstance(part, AssistantTextPart) and (bool(part.text.strip()) if wants_audio else bool(part.text)))
         ]
-        if not meaningful_parts:
-            return events
-        response_was_missing = st.current_response_id is None
-        resp_id, _ = self._ensure_response(conn_id, event.response_key)
-        if response_was_missing:
-            events.append(
-                ResponseCreatedEvent(
-                    type="response.created",
-                    event_id=self._next_event_id(),
-                    response=self._build_response(conn_id, "in_progress"),
+        if meaningful_parts:
+            response_was_missing = st.current_response_id is None
+            resp_id, _ = self._ensure_response(conn_id, event.response_key)
+            if response_was_missing:
+                events.append(
+                    ResponseCreatedEvent(
+                        type="response.created",
+                        event_id=self._next_event_id(),
+                        response=self._build_response(conn_id, "in_progress"),
+                    )
                 )
-            )
-        self._service._apply_pending_token_usage(conn_id, event.response_key)
+            self._service._apply_pending_token_usage(conn_id, event.response_key)
         for part in meaningful_parts:
             if isinstance(part, AssistantTextPart):
                 text = part.text.strip() if wants_audio else part.text
@@ -546,7 +870,8 @@ class ResponseHandler(RealtimeBaseHandler):
                     )
                 st.last_item_id = item_id
             elif isinstance(part, AssistantToolCallPart):
-                events.extend(self.finish_audio_output(conn_id, event.response_key))
+                if not _early_tool_call:
+                    events.extend(self.finish_audio_output(conn_id, event.response_key))
                 tool = part.tool
                 function_item_id = tool.id or _generate_id("item")
                 output_idx, function_item_id = self._output_part_context(
@@ -555,6 +880,24 @@ class ResponseHandler(RealtimeBaseHandler):
                     preferred_item_id=function_item_id,
                 )
                 st.response_usage.tool_calls += 1
+                pending_call = RealtimeConversationItemFunctionCall(
+                    type="function_call",
+                    object="realtime.item",
+                    id=function_item_id,
+                    call_id=tool.call_id,
+                    name=tool.name,
+                    arguments=tool.arguments,
+                    status=tool.status or "completed",
+                )
+                events.append(
+                    ResponseOutputItemAddedEvent(
+                        type="response.output_item.added",
+                        event_id=self._next_event_id(),
+                        item=pending_call.model_copy(update={"arguments": "", "status": "in_progress"}),
+                        output_index=output_idx,
+                        response_id=resp_id,
+                    )
+                )
                 events.append(
                     ResponseFunctionCallArgumentsDoneEvent(
                         type="response.function_call_arguments.done",
@@ -567,19 +910,74 @@ class ResponseHandler(RealtimeBaseHandler):
                         response_id=resp_id,
                     )
                 )
+                if pending_call.status in ("completed", "incomplete"):
+                    events.append(
+                        ResponseOutputItemDoneEvent(
+                            type="response.output_item.done",
+                            event_id=self._next_event_id(),
+                            item=pending_call,
+                            output_index=output_idx,
+                            response_id=resp_id,
+                        )
+                    )
+                    st.finished_function_call_indices.add(output_idx)
                 # Same item_id as the event above, so a client can correlate the
                 # streamed arguments with the item that lands in response.output.
-                # Status is stamped on at close, once the outcome is known.
-                st.pending_function_calls[output_idx] = RealtimeConversationItemFunctionCall(
-                    type="function_call",
-                    object="realtime.item",
-                    id=function_item_id,
-                    call_id=tool.call_id,
-                    name=tool.name,
-                    arguments=tool.arguments,
-                    status=tool.status or "completed",
-                )
+                # Explicitly in-progress calls receive output_item.done at
+                # response close, once the outcome is known.
+                st.pending_function_calls[output_idx] = pending_call
                 st.last_item_id = function_item_id
+        if output_sequence is not None:
+            st.pending_early_tool_calls.pop(output_sequence, None)
+            st.next_assistant_output_sequence = max(st.next_assistant_output_sequence, output_sequence + 1)
+            if not _early_tool_call:
+                events.extend(
+                    self._flush_early_tool_calls(
+                        conn_id,
+                        wait_for_pending_reopen=wait_for_pending_reopen,
+                    )
+                )
+        return events
+
+    def on_assistant_tool_call_ready(
+        self,
+        conn_id: str,
+        event: AssistantToolCallReadyEvent,
+    ) -> list[ServerEvent]:
+        """Expose a sequenced tool call while preceding TTS is still running."""
+        st = self._state(conn_id)
+        if event.output_sequence < st.next_assistant_output_sequence:
+            return []
+        st.pending_early_tool_calls[event.output_sequence] = event
+        return self._flush_early_tool_calls(conn_id)
+
+    def _flush_early_tool_calls(
+        self,
+        conn_id: str,
+        *,
+        wait_for_pending_reopen: bool = True,
+    ) -> list[ServerEvent]:
+        st = self._state(conn_id)
+        events: list[ServerEvent] = []
+        while st.next_assistant_output_sequence in st.pending_early_tool_calls:
+            ready = st.pending_early_tool_calls[st.next_assistant_output_sequence]
+            assert isinstance(ready, AssistantToolCallReadyEvent)
+            emitted = self.on_assistant_output(
+                conn_id,
+                AssistantOutputEvent(
+                    parts=[ready.part],
+                    turn_id=ready.turn_id,
+                    turn_revision=ready.turn_revision,
+                    cancel_generation=ready.cancel_generation,
+                    response_key=ready.response_key,
+                    output_sequence=ready.output_sequence,
+                ),
+                wait_for_pending_reopen=wait_for_pending_reopen,
+                _early_tool_call=True,
+            )
+            if emitted is None:
+                break
+            events.extend(emitted)
         return events
 
     def on_assistant_response_done(
