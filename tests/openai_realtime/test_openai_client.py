@@ -268,7 +268,7 @@ class TestSDKVoiceTurn:
             assert event.audio_start_ms == 0
             item_id = event.item_id
 
-            server_env.text_output_queue.put(PartialTranscriptionEvent(delta="hel"))
+            server_env.text_output_queue.put(PartialTranscriptionEvent(transcript="hel"))
             event = await _recv(conn)
             assert event.type == TRANSCRIPTION_DELTA
             assert event.delta == "hel"
