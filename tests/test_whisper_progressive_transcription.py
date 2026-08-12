@@ -222,3 +222,21 @@ def test_absent_mode_still_yields_transcription(backend, monkeypatch):
     assert len(outputs) == 1
     assert isinstance(outputs[0], Transcription)
     assert outputs[0].text == FULL_UTTERANCE
+
+
+def test_lightning_whisper_mlx_keeps_unsupported_language_transcription(monkeypatch):
+    handler = build_lightning_whisper_mlx(monkeypatch)
+    handler.start_language = "auto"
+    calls = []
+
+    def transcribe(audio, **kwargs):
+        calls.append(kwargs)
+        return {"text": "Privet, kak dela?", "language": "ru"}
+
+    handler.model = SimpleNamespace(transcribe=transcribe)
+
+    outputs = list(handler.process(vad_chunk("final", 3)))
+
+    assert outputs[0].text == "Privet, kak dela?"
+    assert outputs[0].language_code == "ru-auto"
+    assert calls == [{}]
