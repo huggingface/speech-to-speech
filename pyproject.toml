@@ -73,6 +73,11 @@ faster-whisper = [
 ]
 kokoro = [
     "kokoro>=0.9.2; platform_system != 'Darwin'",
+    # On Apple Silicon the handler goes through mlx-audio's Kokoro pipeline,
+    # which imports misaki -> num2words. mlx-audio does not declare either, so
+    # without these `--tts kokoro` fails at import time on macOS.
+    "misaki>=0.9.3; platform_system == 'Darwin'",
+    "num2words>=0.5.14; platform_system == 'Darwin'",
 ]
 mlx-lm = [
     "mlx-lm==0.31.1; platform_system == 'Darwin'",

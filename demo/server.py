@@ -128,6 +128,16 @@ def _webrtc_calls_url(s2s_url: str) -> str:
     return urlunsplit((scheme, parts.netloc, path.rstrip("/") + "/calls", parts.query, ""))
 
 
+def _s2s_http_url(s2s_url: str, path: str) -> str:
+    """``ws://host:port/v1/realtime`` + ``/v1/voices`` -> ``http://host:port/v1/voices``."""
+    s = s2s_url.strip()
+    if not s.startswith(("ws://", "wss://", "http://", "https://")):
+        s = "http://" + s
+    parts = urlsplit(s)
+    scheme = {"ws": "http", "wss": "https"}.get(parts.scheme, parts.scheme)
+    return urlunsplit((scheme, parts.netloc, path, "", ""))
+
+
 SERPER_URL = "https://google.serper.dev/search"
 # Cap results so the tool output stays small enough to feed back to the model.
 MAX_RESULTS = 5
@@ -270,6 +280,38 @@ async def search(req: SearchRequest):
         answer = kg.get("description") or None
 
     return JSONResponse({"query": query, "answer": answer, "results": results})
+
+
+async def _s2s_get(path: str, empty: dict):
+    """GET a JSON endpoint on the pinned s2s server, degrading to ``empty``.
+
+    Proxied server-side for the same reason as /api/calls: the s2s server has
+    no CORS middleware. Forwards only to SPEECH_TO_SPEECH_URL, never to a
+    client-supplied target, so this can't be used as an open proxy.
+    """
+    if not SPEECH_TO_SPEECH_URL:
+        return empty
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            resp = await http.get(_s2s_http_url(SPEECH_TO_SPEECH_URL, path))
+        if resp.status_code != 200:
+            return empty
+        return resp.json()
+    except (httpx.RequestError, ValueError) as exc:
+        logger.warning("s2s %s unavailable: %r", path, exc)
+        return empty
+
+
+@app.get("/api/voices")
+async def voices():
+    """Voice names the backend's TTS accepts, for the Settings picker."""
+    return await _s2s_get("/v1/voices", {"backend": None, "voices": [], "current": None})
+
+
+@app.get("/api/models")
+async def models():
+    """Locally cached LLM checkpoints the backend can switch to."""
+    return await _s2s_get("/v1/models", {"backend": None, "models": [], "current": None})
 
 
 @app.post("/api/calls")

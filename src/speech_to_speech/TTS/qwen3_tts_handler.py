@@ -579,6 +579,22 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         inner = getattr(getattr(self.model, "model", None), "model", None)
         return getattr(inner, "tts_model_type", None) or self._infer_model_type_from_name()
 
+    #: Registry name, so ``GET /v1/voices`` can say which backend answered.
+    backend_name = "qwen3"
+
+    def available_voices(self) -> list[str]:
+        """Voice names this handler accepts, for clients building a picker.
+
+        CustomVoice checkpoints expose their speaker table at runtime; other
+        variants (voice clone / voice design) have no fixed list, so the picker
+        is left empty and the server-side default stands.
+        """
+        speakers = self._supported_speakers()
+        return sorted(speakers, key=str.lower) if speakers else []
+
+    def current_voice(self) -> str:
+        return self.speaker or ""
+
     def _supported_speakers(self) -> list[str] | None:
         for candidate in (
             self.model,

@@ -714,6 +714,9 @@ export class S2sRtcRealtimeClient extends EventTarget {
         output: { voice: this.options.voice },
       },
     };
+    // Only sent when the user picked one; otherwise the server keeps whatever
+    // model it was started with.
+    if (this.options.model) session.model = this.options.model;
     if (this._tools.length) {
       session.tools = this._tools;
       session.tool_choice = "auto";
@@ -728,6 +731,7 @@ export class S2sRtcRealtimeClient extends EventTarget {
     const session = { type: "realtime" };
     if (patch.instructions) session.instructions = patch.instructions;
     if (patch.voice) session.audio = { output: { voice: patch.voice } };
+    if (patch.model) session.model = patch.model;
     if (Object.keys(session).length > 1) {
       this._send({ type: "session.update", session });
     }

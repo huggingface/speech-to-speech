@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Sized
 from queue import Empty
 from threading import Lock, Thread
+from time import perf_counter
 from typing import Any, Literal, Optional, Protocol, runtime_checkable
 
 import torch
@@ -43,6 +44,7 @@ from speech_to_speech.LLM.chat import (
     make_user_message,
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
+from speech_to_speech.LLM.local_models import list_local_language_models
 from speech_to_speech.LLM.text_prompt import build_text_system_prompt
 from speech_to_speech.LLM.tool_call.function_call import extract_function_calls_from_text
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
@@ -188,6 +190,12 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.enable_thinking = enable_thinking
         self.stream_batch_sentences = max(1, stream_batch_sentences)
         self.enable_lang_prompt = enable_lang_prompt
+        # Kept so switch_model() can reload a different checkpoint with the
+        # same device/dtype/generation settings the server was started with.
+        self._torch_dtype = torch_dtype
+        self._gen_kwargs = gen_kwargs
+        # Names we already refused, so an unusable pick warns once per name.
+        self._unavailable_models: set[str] = set()
 
         self._load_model(model_name, device, torch_dtype, gen_kwargs)
 
@@ -197,6 +205,73 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         # MLXLockContext instead.
         self._transformers_lock = Lock()
         self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
+
+    #: Registry-facing name, so ``GET /v1/models`` can report who answered.
+    backend_name = "local"
+
+    def available_models(self) -> list[str]:
+        """Cached checkpoints this handler could switch to.
+
+        Always includes the model the server was started with, even if it was
+        loaded from a path outside the Hugging Face cache — otherwise a client
+        picker would not be able to show what is currently running.
+        """
+        models = list_local_language_models()
+        if self.model_name and self.model_name not in models:
+            models.append(self.model_name)
+        return sorted(models)
+
+    def current_model(self) -> str:
+        return self.model_name
+
+    def switch_model(self, model_name: str) -> bool:
+        """Load a different checkpoint in place. Returns True if it took.
+
+        Reloading is measured in seconds and gigabytes, so this is only called
+        when the name actually changes. A failed load leaves the previous model
+        in place: the conversation continues on the old weights rather than
+        dying, and the caller is told so it can stop retrying.
+        """
+        if not model_name or model_name == self.model_name:
+            return False
+        if model_name not in self.available_models():
+            logger.warning(
+                "Ignoring request for model %r: not in the local cache. Available: %s",
+                model_name,
+                ", ".join(self.available_models()) or "(none)",
+            )
+            return False
+
+        previous = self.model_name
+        logger.info("Switching LLM: %s -> %s", previous, model_name)
+        started = perf_counter()
+        try:
+            self._load_model(model_name, self.device, self._torch_dtype, self._gen_kwargs)
+        except Exception as exc:
+            logger.error("Failed to load %r (%r); keeping %r", model_name, exc, previous)
+            # _load_model may have partially rebound self.model/self.tokenizer;
+            # restore the known-good checkpoint so the pipeline stays usable.
+            try:
+                self._load_model(previous, self.device, self._torch_dtype, self._gen_kwargs)
+            except Exception:
+                logger.exception("Could not restore %r after a failed switch", previous)
+            return False
+        self.model_name = model_name
+        logger.info("LLM switched to %s in %.2fs", model_name, perf_counter() - started)
+        return True
+
+    def _apply_requested_model(self, runtime_config: RuntimeConfig | None) -> None:
+        """Honour a client's ``session.model`` before generating."""
+        session = getattr(runtime_config, "session", None) if runtime_config else None
+        requested = getattr(session, "model", None) if session is not None else None
+        if not isinstance(requested, str) or not requested:
+            return
+        if requested == self.model_name:
+            return
+        if requested in self._unavailable_models:
+            return  # Already refused once; don't re-log every turn.
+        if not self.switch_model(requested):
+            self._unavailable_models.add(requested)
 
     def _turn_is_latest(self, turn_id: str | None, turn_revision: int | None) -> bool:
         return self.speculative_turns is None or self.speculative_turns.is_latest(turn_id, turn_revision)
@@ -572,6 +647,10 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return
 
         runtime_config = request.runtime_config
+        # Before any generation: a client may have picked a different local
+        # checkpoint via session.update. Loading it stalls this turn (seconds,
+        # gigabytes) but every following turn uses the new model.
+        self._apply_requested_model(runtime_config)
         response = request.response
         original_chat = runtime_config.chat
         out_of_band = is_out_of_band(response)

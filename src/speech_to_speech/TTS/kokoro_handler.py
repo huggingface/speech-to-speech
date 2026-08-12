@@ -72,6 +72,30 @@ KOKORO_LANG_DEFAULT_VOICES = {
     "z": "zf_xiaobei",  # Chinese female
 }
 
+# Every voice Kokoro ships (the per-language listing above, as data). A client
+# may send any string as `session.audio.output.voice` — notably the demo UI
+# offers Qwen3-TTS speaker names ("Aiden", "Ryan", ...) regardless of which TTS
+# backend is running. Loading an unknown name raises inside mlx-audio and kills
+# every response, so unknown names are ignored rather than assigned.
+KOKORO_VOICES = frozenset(
+    {
+        "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore",
+        "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
+        "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael",
+        "am_onyx", "am_puck", "am_santa",
+        "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
+        "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
+        "ef_dora", "em_alex", "em_santa",
+        "ff_siwis",
+        "hf_alpha", "hf_beta", "hm_omega", "hm_psi",
+        "if_sara", "im_nicola",
+        "jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo",
+        "pf_dora", "pm_alex", "pm_santa",
+        "zf_xiaobei", "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi",
+        "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang",
+    }
+)
+
 
 class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
     """
@@ -118,6 +142,9 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.blocksize = blocksize
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
+        # Client-requested voice names we have already warned about, so an
+        # unusable name is logged once instead of once per response.
+        self._rejected_voices: set[str] = set()
 
         # Determine device
         if device == "auto":
@@ -271,13 +298,32 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
             audio_cfg = runtime_config.session.audio
             audio_output = audio_cfg.output if audio_cfg is not None else None
             voice = str(audio_output.voice) if audio_output is not None and audio_output.voice else None
-        if voice:
-            self.voice = voice
+        if voice and voice != self.voice:
+            if voice in KOKORO_VOICES:
+                self.voice = voice
+            elif voice not in self._rejected_voices:
+                self._rejected_voices.add(voice)
+                logger.warning(
+                    "Ignoring unknown Kokoro voice %r (client-requested); keeping %r. "
+                    "Valid names look like 'bm_fable' or 'af_heart'.",
+                    voice,
+                    self.voice,
+                )
 
         if self.backend == "mlx":
             yield from self._process_mlx(text, language_code)
         else:
             yield from self._process_kokoro(text, language_code)
+
+    #: Registry name, so ``GET /v1/voices`` can say which backend answered.
+    backend_name = "kokoro"
+
+    def available_voices(self) -> list[str]:
+        """Voice names this handler accepts, for clients building a picker."""
+        return sorted(KOKORO_VOICES)
+
+    def current_voice(self) -> str:
+        return self.voice
 
     def _process_mlx(self, llm_sentence: str, language_code: Optional[str] = None) -> Iterator[np.ndarray]:
         """Process using MLX backend with Apple Silicon optimizations."""

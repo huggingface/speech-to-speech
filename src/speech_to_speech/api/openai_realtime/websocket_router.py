@@ -589,6 +589,62 @@ def create_app(
             "units": [_state(u) for u in pool],
         }
 
+    @app.get("/v1/voices")
+    async def voices_endpoint() -> dict[str, Any]:
+        """Voice names the running TTS backend accepts.
+
+        Clients otherwise have to hardcode a list, which silently breaks when
+        the server runs a different TTS backend: the names are per-backend
+        (Qwen3 speakers vs. Kokoro voice ids) and an unknown name is ignored.
+        An empty ``voices`` means "not selectable" — the backend has no fixed
+        table (voice cloning) or does not expose one; clients should hide the
+        picker rather than offer names that will be dropped.
+        """
+        for unit in pool:
+            for handler in unit.handlers:
+                lister = getattr(handler, "available_voices", None)
+                if not callable(lister):
+                    continue
+                try:
+                    voices = [str(v) for v in lister()]
+                except Exception as exc:  # a model that can't answer must not 500 the endpoint
+                    logger.warning("TTS handler failed to list voices: %r", exc)
+                    voices = []
+                current = getattr(handler, "current_voice", None)
+                return {
+                    "backend": getattr(handler, "backend_name", None),
+                    "voices": voices,
+                    "current": str(current()) if callable(current) else None,
+                }
+        return {"backend": None, "voices": [], "current": None}
+
+    @app.get("/v1/models")
+    async def models_endpoint() -> dict[str, Any]:
+        """Locally cached checkpoints the running LLM handler can switch to.
+
+        Empty ``models`` means the picker should be hidden: either the LLM runs
+        remotely (an API backend has nothing local to enumerate) or nothing
+        usable is cached. Selection is applied by sending ``session.model`` in
+        a ``session.update``.
+        """
+        for unit in pool:
+            for handler in unit.handlers:
+                lister = getattr(handler, "available_models", None)
+                if not callable(lister):
+                    continue
+                try:
+                    models = [str(m) for m in lister()]
+                except Exception as exc:
+                    logger.warning("LLM handler failed to list models: %r", exc)
+                    models = []
+                current = getattr(handler, "current_model", None)
+                return {
+                    "backend": getattr(handler, "backend_name", None),
+                    "models": models,
+                    "current": str(current()) if callable(current) else None,
+                }
+        return {"backend": None, "models": [], "current": None}
+
     @app.post("/v1/realtime/calls")
     async def webrtc_calls_endpoint(request: Request) -> Response:
         """WebRTC SDP handshake (OpenAI GA Realtime 'calls' endpoint).
