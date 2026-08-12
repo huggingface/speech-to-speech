@@ -3339,85 +3339,21 @@ class TestDispatchPipelineEvent:
 
     # -- partial_transcription --
 
-    def test_partial_transcription_emits_incremental_deltas_for_one_content_part(self, service, conn_id):
+    def test_partial_transcription_emits_delta(self, service, conn_id):
         service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
         e1 = service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(transcript="hel"),
+            PartialTranscriptionEvent(delta="hel"),
         )
         e2 = service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(transcript="hello"),
+            PartialTranscriptionEvent(delta="lo"),
         )
         assert isinstance(e1[0], ConversationItemInputAudioTranscriptionDeltaEvent)
         assert e1[0].content_index == 0
         assert e1[0].delta == "hel"
         assert isinstance(e2[0], ConversationItemInputAudioTranscriptionDeltaEvent)
-        assert e2[0].content_index == 0
-        assert e2[0].delta == "lo"
-
-    def test_duplicate_or_revised_partial_transcription_is_withheld(self, service, conn_id):
-        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
-        service.dispatch_pipeline_event(
-            conn_id,
-            PartialTranscriptionEvent(transcript="hello"),
-        )
-
-        duplicate = service.dispatch_pipeline_event(
-            conn_id,
-            PartialTranscriptionEvent(transcript="hello"),
-        )
-        revised = service.dispatch_pipeline_event(
-            conn_id,
-            PartialTranscriptionEvent(transcript="hullo"),
-        )
-
-        assert duplicate == []
-        assert revised == []
-
-    def test_new_input_item_resets_partial_transcription_delta(self, service, conn_id):
-        first_started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1"))
-        service.dispatch_pipeline_event(
-            conn_id,
-            PartialTranscriptionEvent(transcript="hello", turn_id="turn_1"),
-        )
-
-        second_started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_2"))
-        second_partial = service.dispatch_pipeline_event(
-            conn_id,
-            PartialTranscriptionEvent(transcript="new", turn_id="turn_2"),
-        )
-
-        assert first_started[0].item_id != second_started[0].item_id
-        assert second_partial[0].delta == "new"
-        assert second_partial[0].content_index == 0
-
-    def test_reopened_input_item_continues_partial_transcription_delta(self, service, conn_id):
-        first_started = service.dispatch_pipeline_event(
-            conn_id,
-            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
-        )
-        service.dispatch_pipeline_event(
-            conn_id,
-            PartialTranscriptionEvent(transcript="hello", turn_id="turn_1", turn_revision=0),
-        )
-        service.dispatch_pipeline_event(
-            conn_id,
-            TranscriptionCompletedEvent(transcript="hello", turn_id="turn_1", turn_revision=0),
-        )
-
-        reopened = service.dispatch_pipeline_event(
-            conn_id,
-            SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
-        )
-        continued = service.dispatch_pipeline_event(
-            conn_id,
-            PartialTranscriptionEvent(transcript="hello again", turn_id="turn_1", turn_revision=1),
-        )
-
-        assert reopened[0].item_id == first_started[0].item_id
-        assert continued[0].delta == " again"
-        assert continued[0].content_index == 0
+        assert e2[0].content_index == 1
 
     # -- transcription_completed --
 

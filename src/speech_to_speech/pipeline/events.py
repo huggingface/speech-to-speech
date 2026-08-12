@@ -54,10 +54,8 @@ class SpeechStoppedEvent(PipelineEvent):
 
 
 class PartialTranscriptionEvent(PipelineEvent):
-    """Latest cumulative STT hypothesis for one input-audio item."""
-
     type: Literal["partial_transcription"] = "partial_transcription"
-    transcript: str
+    delta: str
     turn_id: str | None = None
     turn_revision: int | None = None
 

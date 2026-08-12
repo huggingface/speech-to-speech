@@ -239,7 +239,6 @@ class PlaybackBuffer:
 
 class _FriendlyEventRenderer:
     def __init__(self) -> None:
-        self.partial_user_item_id: str | None = None
         self.partial_user_text = ""
         self.live_user_width = 0
         self.saw_user_speech = False
@@ -336,30 +335,22 @@ def handle_server_event(
     elif event.type == "input_audio_buffer.speech_started":
         renderer.finish_live_assistant_text()
         playback.clear()
-        item_id = getattr(event, "item_id", None)
-        if item_id is None or item_id != renderer.partial_user_item_id:
-            renderer.partial_user_text = ""
-        renderer.partial_user_item_id = item_id
+        renderer.partial_user_text = ""
         if renderer.saw_user_speech:
             print("", flush=True)
         renderer.saw_user_speech = True
     elif event.type == "input_audio_buffer.speech_stopped":
         return
     elif event.type == "conversation.item.input_audio_transcription.delta":
+        # This server emits the latest partial hypothesis, not a token suffix.
         renderer.finish_live_assistant_text()
-        item_id = getattr(event, "item_id", None)
-        if item_id != renderer.partial_user_item_id:
-            renderer.partial_user_item_id = item_id
-            renderer.partial_user_text = ""
-        renderer.partial_user_text += event.delta or ""
-        display_text = renderer.partial_user_text.strip()
-        if display_text:
-            renderer.render_live_user_text(display_text)
+        renderer.partial_user_text = event.delta.strip()
+        if renderer.partial_user_text:
+            renderer.render_live_user_text(renderer.partial_user_text)
     elif event.type == "conversation.item.input_audio_transcription.completed":
         renderer.finish_live_assistant_text()
-        renderer.partial_user_item_id = getattr(event, "item_id", None)
-        renderer.partial_user_text = event.transcript or ""
-        renderer.render_live_user_text(renderer.partial_user_text.strip(), final=True)
+        renderer.partial_user_text = ""
+        renderer.render_live_user_text(event.transcript.strip(), final=True)
     elif event.type == "response.created":
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()
