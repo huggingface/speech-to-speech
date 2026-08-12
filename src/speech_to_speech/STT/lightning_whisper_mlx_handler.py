@@ -80,11 +80,6 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
             language_code = transcription_dict["language"]
             if language_code not in SUPPORTED_LANGUAGES:
                 logger.warning(f"Whisper detected unsupported language: {language_code}")
-                if self.last_language in SUPPORTED_LANGUAGES:  # reprocess with the last language
-                    with MLXLockContext(handler_name=self.__class__.__name__):
-                        transcription_dict = self.model.transcribe(audio, language=self.last_language)
-                else:
-                    transcription_dict = {"text": "", "language": "en"}
             else:
                 self.last_language = language_code
 
