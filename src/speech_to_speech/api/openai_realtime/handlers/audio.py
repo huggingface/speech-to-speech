@@ -26,7 +26,7 @@ PIPELINE_SAMPLE_RATE = 16000
 CHUNK_SAMPLES = 512
 BYTES_PER_SAMPLE = 2
 CHUNK_SIZE_BYTES = CHUNK_SAMPLES * BYTES_PER_SAMPLE
-MAX_ACTIVE_INPUT_ITEMS = 128
+MAX_BUFFERED_INPUT_ITEMS = 128
 
 
 class AudioHandler(RealtimeBaseHandler):
@@ -56,7 +56,7 @@ class AudioHandler(RealtimeBaseHandler):
         st.completed_input_item_ids.pop(item_id, None)
         if turn_id is not None:
             st.input_item_by_turn_revision[(turn_id, turn_revision)] = item_id
-        self._bound_active_input_item_state(conn_id)
+        self.bound_input_item_buffers(conn_id)
         return item_id
 
     def _reuse_input_item(
@@ -106,12 +106,13 @@ class AudioHandler(RealtimeBaseHandler):
         if st.current_input_item_id == item_id:
             st.current_input_item_id = None
 
-    def _bound_active_input_item_state(self, conn_id: str) -> None:
-        """Silently discard oldest unresolved items when a pipeline emits no terminal."""
+    def bound_input_item_buffers(self, conn_id: str) -> None:
+        """Discard old transcript buffers while retaining routes for late terminals."""
         st = self._state(conn_id)
-        while len(st.input_transcription_by_item) > MAX_ACTIVE_INPUT_ITEMS:
+        while len(st.input_transcription_by_item) > MAX_BUFFERED_INPUT_ITEMS:
             oldest_item_id = next(iter(st.input_transcription_by_item))
-            self._release_input_item_state_by_id(conn_id, oldest_item_id)
+            st.input_transcription_by_item.pop(oldest_item_id)
+            st.input_audio_duration_by_item.pop(oldest_item_id, None)
 
     def handle_audio_append(self, conn_id: str, event: InputAudioBufferAppendEvent) -> list[bytes]:
         """Decode base64 audio, resample to pipeline rate, and split into 512-sample PCM16 chunks for the VAD."""
@@ -186,21 +187,6 @@ class AudioHandler(RealtimeBaseHandler):
             st.generation_done_tool_calls.clear()
             st.completed_tool_response_keys.clear()
         is_reopen = bool(event.reopened and event.turn_id is not None and event.turn_id == st.speculative_turn_id)
-        if (
-            is_reopen
-            and self._service.speculative_turns is not None
-            and self._service.speculative_turns.is_committed(event.turn_id, st.speculative_turn_revision)
-        ):
-            # A published transcription terminal makes this a new logical
-            # message even if an upstream producer incorrectly labels it as a
-            # reopen. Keep the model conversation aligned with the fresh wire
-            # item instead of replacing the already-visible user message.
-            is_reopen = False
-            st.speculative_user_turn_id = None
-            st.speculative_user_turn_revision = None
-            st.speculative_user_speech_stopped_at_s = None
-            st.speculative_user_item_id = None
-            st.speculative_audio_duration_s = 0.0
         preserve_active_response = st.in_response
         previous_input_item_id = (
             st.input_item_by_turn_revision.get((event.turn_id, st.speculative_turn_revision))
@@ -251,7 +237,8 @@ class AudioHandler(RealtimeBaseHandler):
             return []
         if event.duration_s:
             st.input_audio_duration_s = event.duration_s
-            st.input_audio_duration_by_item[item_id] = event.duration_s
+            if item_id in st.input_transcription_by_item:
+                st.input_audio_duration_by_item[item_id] = event.duration_s
         return [
             InputAudioBufferSpeechStoppedEvent(
                 type="input_audio_buffer.speech_stopped",

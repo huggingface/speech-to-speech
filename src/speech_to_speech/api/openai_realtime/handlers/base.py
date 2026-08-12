@@ -48,7 +48,7 @@ class RealtimeBaseHandler:
         st = self._state(conn_id)
         if turn_id is not None:
             return st.input_item_by_turn_revision.get((turn_id, turn_revision))
-        return st.current_input_item_id or self._service.response._current_item_id(conn_id)
+        return st.current_input_item_id
 
     @staticmethod
     def _next_event_id() -> str:

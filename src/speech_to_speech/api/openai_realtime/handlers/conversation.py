@@ -234,6 +234,7 @@ class ConversationHandler(RealtimeBaseHandler):
 
         delta = hypothesis[len(emitted) :]
         st.input_transcription_by_item[item_id] = hypothesis
+        self._service.audio.bound_input_item_buffers(conn_id)
         return [
             ConversationItemInputAudioTranscriptionDeltaEvent(
                 type="conversation.item.input_audio_transcription.delta",
@@ -263,7 +264,7 @@ class ConversationHandler(RealtimeBaseHandler):
         if item_id in st.completed_input_item_ids:
             logger.debug("Ignoring duplicate input terminal for item=%s", item_id)
             return None
-        duration_s = st.input_audio_duration_by_item.pop(item_id, st.input_audio_duration_s)
+        duration_s = st.input_audio_duration_by_item.pop(item_id, 0.0)
         st.input_transcription_by_item.pop(item_id, None)
         st.completed_input_item_ids[item_id] = None
         while len(st.completed_input_item_ids) > 128:
@@ -285,6 +286,14 @@ class ConversationHandler(RealtimeBaseHandler):
     ) -> list[ConversationItemInputAudioTranscriptionCompletedEvent]:
         """Terminalize one transcript item and emit its authoritative final event."""
         st = self._state(conn_id)
+        if event.turn_id is None and st.current_input_item_id is None:
+            # Some pipelines do not publish speech lifecycle events. Give their
+            # authoritative terminal its own input item instead of borrowing a
+            # concurrently active assistant item.
+            self._service.audio._start_input_item(
+                conn_id,
+                preserve_active_response=st.in_response,
+            )
         terminal = self.terminalize_input_item(conn_id, event.turn_id, event.turn_revision)
         if terminal is None:
             return []

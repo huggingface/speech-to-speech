@@ -511,7 +511,6 @@ class RealtimeService:
                 AssistantResponseDoneEvent,
                 AssistantToolCallReadyEvent,
                 ResponseGenerationDoneEvent,
-                TranscriptionCompletedEvent,
             ),
         ):
             return False
@@ -580,7 +579,6 @@ class RealtimeService:
         if isinstance(
             event,
             (
-                TranscriptionCompletedEvent,
                 AssistantOutputEvent,
                 AssistantResponseDoneEvent,
                 AssistantToolCallReadyEvent,
@@ -613,8 +611,6 @@ class RealtimeService:
         completed_events = self.conversation.on_transcription_completed(conn_id, event)
         if not completed_events:
             return []
-        if self.speculative_turns is not None:
-            self.speculative_turns.commit(event.turn_id, event.turn_revision)
         input_duration_s = cast(UsageTranscriptTextUsageDuration, completed_events[0].usage).seconds
         self.response.discard_tool_followup_prefetch(conn_id)
         st.generation_done_tool_calls.clear()
