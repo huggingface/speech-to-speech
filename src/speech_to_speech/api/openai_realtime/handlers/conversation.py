@@ -203,14 +203,33 @@ class ConversationHandler(RealtimeBaseHandler):
     # ── Pipeline event handlers ────────────────────
 
     def on_partial_transcription(self, conn_id: str, event: PartialTranscriptionEvent) -> list[ServerEvent]:
-        """Handle partial_transcription: emit transcription delta event."""
+        """Translate a cumulative STT hypothesis into an append-only Realtime delta."""
+        st = self._state(conn_id)
+        hypothesis = event.transcript
+        emitted = st.input_transcription_text
+        if not hypothesis or hypothesis == emitted:
+            return []
+        if not hypothesis.startswith(emitted):
+            # Batch STT over a growing audio window can revise earlier words.
+            # Realtime has no retraction event, so preserve the append-only wire
+            # stream and let the completed event replace it with the final text.
+            logger.debug(
+                "Withholding revised partial transcription for item=%s (emitted=%r, hypothesis=%r)",
+                self._input_item_id(conn_id),
+                emitted[-40:],
+                hypothesis[-40:],
+            )
+            return []
+
+        delta = hypothesis[len(emitted) :]
+        st.input_transcription_text = hypothesis
         return [
             ConversationItemInputAudioTranscriptionDeltaEvent(
                 type="conversation.item.input_audio_transcription.delta",
                 event_id=self._next_event_id(),
-                content_index=self._next_input_content_index(conn_id),
+                content_index=0,
                 item_id=self._input_item_id(conn_id),
-                delta=event.delta,
+                delta=delta,
             )
         ]
 
@@ -218,6 +237,7 @@ class ConversationHandler(RealtimeBaseHandler):
         """Handle transcription_completed: accumulate duration and emit completed event."""
         st = self._state(conn_id)
         st.response_usage.audio_duration_s += st.input_audio_duration_s
+        st.input_transcription_text = event.transcript
         return [
             ConversationItemInputAudioTranscriptionCompletedEvent(
                 type="conversation.item.input_audio_transcription.completed",

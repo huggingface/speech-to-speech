@@ -42,7 +42,7 @@ class AudioHandler(RealtimeBaseHandler):
             item_id = response._start_item(conn_id)
             st.current_item_id = response_item_id
             st.content_index = response_content_index
-        st.input_content_index = 0
+        st.input_transcription_text = ""
         return item_id
 
     def handle_audio_append(self, conn_id: str, event: InputAudioBufferAppendEvent) -> list[bytes]:
@@ -131,7 +131,6 @@ class AudioHandler(RealtimeBaseHandler):
                 st.current_item_id = input_item_id
                 st.content_index = 0
             st.input_audio_duration_s = 0.0
-            st.input_content_index = 0
         else:
             input_item_id = self._start_input_item(
                 conn_id,

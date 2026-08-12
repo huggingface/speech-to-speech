@@ -27,7 +27,7 @@ def test_empty_final_transcription_still_emits_completion_after_partial():
     completed = text_output_queue.get_nowait()
 
     assert isinstance(partial, PartialTranscriptionEvent)
-    assert partial.delta == "Yeah."
+    assert partial.transcript == "Yeah."
     assert isinstance(completed, TranscriptionCompletedEvent)
     assert completed.transcript == ""
     assert completed.language_code == "en"

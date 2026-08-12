@@ -353,6 +353,34 @@ def test_audio_client_separates_alternating_assistant_and_user_partial_text(caps
     )
 
 
+def test_audio_client_accumulates_incremental_user_transcription_deltas(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    for event in (
+        SimpleNamespace(type="input_audio_buffer.speech_started", item_id="item_1"),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="item_1",
+            delta="user",
+        ),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="item_1",
+            delta=" partial",
+        ),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="item_1",
+            transcript="user partial",
+        ),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    assert renderer.partial_user_text == "user partial"
+    assert "USER: user partial" in capsys.readouterr().out
+
+
 def test_audio_client_response_done_preserves_other_response_transcripts(capsys):
     playback = PlaybackBuffer(16000)
     renderer = _FriendlyEventRenderer()
