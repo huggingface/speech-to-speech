@@ -7,12 +7,7 @@ from typing import Any
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
-from speech_to_speech.pipeline.messages import (
-    PartialTranscription,
-    Transcription,
-    TranscriptionFailure,
-    VADAudio,
-)
+from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 logger = logging.getLogger(__name__)
@@ -25,28 +20,6 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
 
     speculative_turns: SpeculativeTurnTracker | None = None
     final_revision_settle_s: float = 0.0
-
-    def before_process_input(self, item: STTIn) -> None:
-        self._final_transcription_emitted = False
-
-    def after_process_input(self, item: STTIn) -> None:
-        if item.mode != "progressive" and not self._final_transcription_emitted:
-            self._emit_transcription_failure(item)
-
-    def on_process_error(self, item: STTIn, _error: Exception) -> None:
-        if item.mode != "progressive":
-            self._emit_transcription_failure(item)
-
-    def _emit_transcription_failure(self, item: STTIn) -> None:
-        if not self._is_latest_turn_item(item, wait_for_pending_reopen=True, wait_for_stability=False):
-            self._log_stale_turn_item(item, "failure")
-            return
-        self.queue_out.put(
-            TranscriptionFailure(
-                turn_id=item.turn_id,
-                turn_revision=item.turn_revision,
-            )
-        )
 
     def should_process_input(self, item: STTIn) -> bool:
         mode = getattr(item, "mode", None)
@@ -99,7 +72,6 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
 
     def before_emit_output(self, output: STTOut) -> None:
         if isinstance(output, Transcription):
-            self._final_transcription_emitted = True
             self._mark_completed_final_revision(output)
 
     def _is_latest_turn_item(

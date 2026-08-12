@@ -16,7 +16,6 @@ from speech_to_speech.pipeline.events import (
     SpeechStoppedEvent,
     TokenUsageEvent,
     TranscriptionCompletedEvent,
-    TranscriptionFailedEvent,
 )
 from speech_to_speech.pipeline.messages import (
     AUDIO_RESPONSE_DONE,
@@ -31,7 +30,6 @@ from speech_to_speech.pipeline.messages import (
     PipelineMessage,
     TokenUsage,
     Transcription,
-    TranscriptionFailure,
     TTSInput,
     VADAudio,
 )
@@ -64,8 +62,6 @@ __all__ = [
     "TokenUsageEvent",
     "Transcription",
     "TranscriptionCompletedEvent",
-    "TranscriptionFailedEvent",
-    "TranscriptionFailure",
     "VADAudio",
     "is_control_message",
 ]

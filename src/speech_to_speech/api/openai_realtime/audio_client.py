@@ -355,16 +355,6 @@ def handle_server_event(
         transcript = event.transcript or ""
         renderer.render_live_user_text(transcript.strip(), final=True)
         renderer.user_transcript_by_item.pop(item_id, None)
-    elif event.type == "conversation.item.input_audio_transcription.failed":
-        renderer.finish_live_assistant_text()
-        item_id = getattr(event, "item_id", None)
-        had_partial = bool(renderer.user_transcript_by_item.pop(item_id, ""))
-        if had_partial:
-            renderer.render_live_user_text("", final=True)
-        error = getattr(event, "error", None)
-        error_type = getattr(error, "type", None) or "transcription_error"
-        message = getattr(error, "message", None) or "Input audio transcription failed."
-        print(f"ERROR: {error_type}: {message}", flush=True)
     elif event.type == "response.created":
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()

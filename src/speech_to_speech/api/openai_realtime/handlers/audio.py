@@ -80,6 +80,27 @@ class AudioHandler(RealtimeBaseHandler):
         st.input_item_by_turn_revision[(turn_id, turn_revision)] = item_id
         return item_id
 
+    def release_input_item_state(
+        self,
+        conn_id: str,
+        turn_id: str | None,
+        turn_revision: int | None,
+    ) -> None:
+        """Drop routing state for a direct-audio item without publishing a transcription terminal."""
+        st = self._state(conn_id)
+        item_id = self._input_item_id(conn_id, turn_id, turn_revision)
+        if item_id is None:
+            return
+        st.input_item_by_turn_revision = {
+            turn: tracked_item_id
+            for turn, tracked_item_id in st.input_item_by_turn_revision.items()
+            if tracked_item_id != item_id
+        }
+        st.input_transcription_by_item.pop(item_id, None)
+        st.input_audio_duration_by_item.pop(item_id, None)
+        if st.current_input_item_id == item_id:
+            st.current_input_item_id = None
+
     def handle_audio_append(self, conn_id: str, event: InputAudioBufferAppendEvent) -> list[bytes]:
         """Decode base64 audio, resample to pipeline rate, and split into 512-sample PCM16 chunks for the VAD."""
         try:
@@ -195,12 +216,6 @@ class AudioHandler(RealtimeBaseHandler):
         st.speculative_turn_id = event.turn_id
         st.speculative_turn_revision = event.turn_revision
         st.last_item_id = input_item_id
-        events.extend(
-            self._service.conversation.bound_active_input_items(
-                conn_id,
-                emit_transcription_failure=self._service.input_transcription_enabled,
-            )
-        )
         events.append(
             InputAudioBufferSpeechStartedEvent(
                 type="input_audio_buffer.speech_started",

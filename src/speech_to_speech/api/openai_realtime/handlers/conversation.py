@@ -9,12 +9,10 @@ from openai.types.realtime import (
     ConversationItemCreateEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
-    ConversationItemInputAudioTranscriptionFailedEvent,
 )
 from openai.types.realtime.conversation_item_input_audio_transcription_completed_event import (
     UsageTranscriptTextUsageDuration,
 )
-from openai.types.realtime.conversation_item_input_audio_transcription_failed_event import Error as TranscriptionError
 from openai.types.realtime.realtime_conversation_item_function_call_output import (
     RealtimeConversationItemFunctionCallOutput,
 )
@@ -24,11 +22,7 @@ from openai.types.realtime.realtime_conversation_item_user_message import (
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
 from speech_to_speech.LLM.chat import ChatItemError, add_supported_item
-from speech_to_speech.pipeline.events import (
-    PartialTranscriptionEvent,
-    TranscriptionCompletedEvent,
-    TranscriptionFailedEvent,
-)
+from speech_to_speech.pipeline.events import PartialTranscriptionEvent, TranscriptionCompletedEvent
 
 if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import ServerEvent
@@ -269,28 +263,9 @@ class ConversationHandler(RealtimeBaseHandler):
         if item_id in st.completed_input_item_ids:
             logger.debug("Ignoring duplicate input terminal for item=%s", item_id)
             return None
-        return self._terminalize_input_item_id(conn_id, item_id)
-
-    def _terminalize_input_item_id(
-        self,
-        conn_id: str,
-        item_id: str,
-        *,
-        retain_route: bool = True,
-    ) -> tuple[str, float] | None:
-        st = self._state(conn_id)
-        if item_id in st.completed_input_item_ids:
-            logger.debug("Ignoring duplicate input terminal for item=%s", item_id)
-            return None
         duration_s = st.input_audio_duration_by_item.pop(item_id, st.input_audio_duration_s)
         st.input_transcription_by_item.pop(item_id, None)
         st.completed_input_item_ids[item_id] = None
-        if not retain_route:
-            st.input_item_by_turn_revision = {
-                turn: tracked_item_id
-                for turn, tracked_item_id in st.input_item_by_turn_revision.items()
-                if tracked_item_id != item_id
-            }
         while len(st.completed_input_item_ids) > 128:
             expired_item_id = next(iter(st.completed_input_item_ids))
             st.completed_input_item_ids.pop(expired_item_id)
@@ -302,74 +277,6 @@ class ConversationHandler(RealtimeBaseHandler):
         if st.current_input_item_id == item_id:
             st.current_input_item_id = None
         return item_id, duration_s
-
-    def _transcription_failed_event(
-        self,
-        item_id: str,
-        *,
-        message: str,
-        code: str,
-    ) -> ConversationItemInputAudioTranscriptionFailedEvent:
-        return ConversationItemInputAudioTranscriptionFailedEvent(
-            type="conversation.item.input_audio_transcription.failed",
-            event_id=self._next_event_id(),
-            content_index=0,
-            item_id=item_id,
-            error=TranscriptionError(
-                type="transcription_error",
-                code=code,
-                message=message,
-                param=None,
-            ),
-        )
-
-    def on_transcription_failed(
-        self,
-        conn_id: str,
-        event: TranscriptionFailedEvent,
-    ) -> list[ConversationItemInputAudioTranscriptionFailedEvent]:
-        """Terminalize one failed STT item and identify it to protocol clients."""
-        item_id = self._input_item_id(conn_id, event.turn_id, event.turn_revision)
-        if item_id is None:
-            logger.debug(
-                "Ignoring transcription failure for unknown turn=%s rev=%s",
-                event.turn_id,
-                event.turn_revision,
-            )
-            return []
-        if self._terminalize_input_item_id(conn_id, item_id, retain_route=False) is None:
-            return []
-        return [
-            self._transcription_failed_event(
-                item_id,
-                message=event.message,
-                code=event.code,
-            )
-        ]
-
-    def bound_active_input_items(
-        self,
-        conn_id: str,
-        *,
-        emit_transcription_failure: bool,
-        max_active: int = 128,
-    ) -> list[ConversationItemInputAudioTranscriptionFailedEvent]:
-        """Abandon oldest unterminated items so missing pipeline terminals cannot leak state."""
-        st = self._state(conn_id)
-        events: list[ConversationItemInputAudioTranscriptionFailedEvent] = []
-        while len(st.input_transcription_by_item) > max_active:
-            item_id = next(iter(st.input_transcription_by_item))
-            if self._terminalize_input_item_id(conn_id, item_id, retain_route=False) is None:
-                continue
-            if emit_transcription_failure:
-                events.append(
-                    self._transcription_failed_event(
-                        item_id,
-                        message="Input audio transcription did not reach a terminal state.",
-                        code="transcription_abandoned",
-                    )
-                )
-        return events
 
     def on_transcription_completed(
         self,

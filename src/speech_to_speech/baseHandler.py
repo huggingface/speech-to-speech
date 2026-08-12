@@ -79,15 +79,6 @@ class BaseHandler(Generic[InT, OutT]):
             return False
         return True
 
-    def before_process_input(self, item: InT) -> None:
-        """Hook invoked immediately before ``process`` for an accepted input."""
-
-    def after_process_input(self, item: InT) -> None:
-        """Hook invoked after ``process`` exhausts without raising."""
-
-    def on_process_error(self, item: InT, error: Exception) -> None:
-        """Hook invoked after ``process`` raises and the error is logged."""
-
     def should_emit_output(self, output: OutT) -> bool:
         return True
 
@@ -154,7 +145,6 @@ class BaseHandler(Generic[InT, OutT]):
 
             start_time = perf_counter()
             try:
-                self.before_process_input(typed_item)
                 for output in self.process(typed_item):
                     if not self.should_emit_output(output):
                         start_time = perf_counter()
@@ -169,10 +159,8 @@ class BaseHandler(Generic[InT, OutT]):
                     )
                     self.queue_out.put(queued_output)
                     start_time = perf_counter()
-                self.after_process_input(typed_item)
             except Exception as e:
                 logger.error(f"{self.__class__.__name__}: Error in process(): {type(e).__name__}: {e}", exc_info=True)
-                self.on_process_error(typed_item, e)
 
         self.cleanup()
         self.queue_out.put(PIPELINE_END)

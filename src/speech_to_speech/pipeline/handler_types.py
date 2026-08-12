@@ -22,7 +22,6 @@ from speech_to_speech.pipeline.messages import (
     TTSInput,
     TokenUsage,
     Transcription,
-    TranscriptionFailure,
     VADAudio,
 )
 
@@ -34,7 +33,7 @@ VADOut: TypeAlias = VADAudio
 
 # ── STT stage ─────────────────────────────────────────────────────────
 STTIn: TypeAlias = VADAudio
-STTOut: TypeAlias = PartialTranscription | Transcription | TranscriptionFailure
+STTOut: TypeAlias = PartialTranscription | Transcription
 
 # ── LLM stage ─────────────────────────────────────────────────────────
 LLMIn: TypeAlias = GenerateResponseRequest

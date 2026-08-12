@@ -6,13 +6,9 @@ from threading import Event
 from typing import Iterator
 
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.pipeline.events import (
-    PartialTranscriptionEvent,
-    TranscriptionCompletedEvent,
-    TranscriptionFailedEvent,
-)
+from speech_to_speech.pipeline.events import PartialTranscriptionEvent, TranscriptionCompletedEvent
 from speech_to_speech.pipeline.handler_types import LLMIn, STTOut
-from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, TranscriptionFailure
+from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.pipeline.queue_types import TextEventItem
 
 logger = logging.getLogger(__name__)
@@ -35,20 +31,6 @@ class TranscriptionNotifier(BaseHandler[STTOut, LLMIn]):
         self.should_listen = should_listen
 
     def process(self, transcription: STTOut) -> Iterator[LLMIn]:
-        if isinstance(transcription, TranscriptionFailure):
-            if self.text_output_queue is not None:
-                self.text_output_queue.put(
-                    TranscriptionFailedEvent(
-                        message=transcription.message,
-                        code=transcription.code,
-                        turn_id=transcription.turn_id,
-                        turn_revision=transcription.turn_revision,
-                    )
-                )
-            if self.should_listen is not None:
-                self.should_listen.set()
-            return
-
         if isinstance(transcription, PartialTranscription):
             if self.text_output_queue and transcription.text:
                 self.text_output_queue.put(

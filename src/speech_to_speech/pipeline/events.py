@@ -75,16 +75,6 @@ class TranscriptionCompletedEvent(PipelineEvent):
     speech_stopped_at_s: float | None = Field(default=None, exclude=True)
 
 
-class TranscriptionFailedEvent(PipelineEvent):
-    """Final signal that one input-audio transcription could not complete."""
-
-    type: Literal["transcription_failed"] = "transcription_failed"
-    message: str = "Input audio transcription failed."
-    code: str = "transcription_failed"
-    turn_id: str | None = None
-    turn_revision: int | None = None
-
-
 # ── Direct audio events (AudioInputNotifier) ─────────────────────────
 
 
