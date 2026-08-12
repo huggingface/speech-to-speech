@@ -438,6 +438,29 @@ def test_audio_client_tracks_overlapping_user_transcriptions_by_item(capsys):
     assert "USER: world" in output
 
 
+def test_audio_client_silently_discards_oldest_unterminated_transcript(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    for index in range(130):
+        handle_server_event(
+            SimpleNamespace(
+                type="conversation.item.input_audio_transcription.delta",
+                item_id=f"item_{index}",
+                delta=str(index),
+            ),
+            playback=playback,
+            renderer=renderer,
+            print_json=False,
+        )
+
+    assert len(renderer.user_transcript_by_item) == 128
+    assert "item_0" not in renderer.user_transcript_by_item
+    assert "item_1" not in renderer.user_transcript_by_item
+    assert renderer.user_transcript_by_item["item_129"] == "129"
+    capsys.readouterr()
+
+
 def test_audio_client_response_done_preserves_other_response_transcripts(capsys):
     playback = PlaybackBuffer(16000)
     renderer = _FriendlyEventRenderer()

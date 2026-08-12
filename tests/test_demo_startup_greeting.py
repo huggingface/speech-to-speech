@@ -403,6 +403,69 @@ if (client._userTranscriptByItem.size !== 0) {{
         ("./demo/rtc/s2s-rtc-client.js", "S2sRtcRealtimeClient", "_onDcMessage"),
     ],
 )
+def test_demo_clients_silently_discard_oldest_unterminated_transcript(
+    module_path,
+    class_name,
+    message_handler,
+):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for demo client tests")
+
+    script = f"""
+globalThis.localStorage = {{ getItem() {{ return null; }} }};
+globalThis.CustomEvent = class CustomEvent extends Event {{
+  constructor(type, init = {{}}) {{
+    super(type);
+    this.detail = init.detail;
+  }}
+}};
+const {{ {class_name} }} = await import({json.dumps(module_path)});
+const client = new {class_name}({{
+  voice: "Aiden",
+  instructions: "Be helpful.",
+  directUrl: "ws://unused",
+  callsUrl: "api/calls",
+}});
+const deliver = async (event) => {{
+  await client[{json.dumps(message_handler)}](JSON.stringify(event));
+}};
+
+for (let index = 0; index < 130; index += 1) {{
+  await deliver({{
+    type: "conversation.item.input_audio_transcription.delta",
+    item_id: `item_${{index}}`,
+    content_index: 0,
+    delta: String(index),
+  }});
+}}
+
+if (client._userTranscriptByItem.size !== 128) {{
+  throw new Error(`retained ${{client._userTranscriptByItem.size}} transcript entries`);
+}}
+if (client._userTranscriptByItem.has("item_0") || client._userTranscriptByItem.has("item_1")) {{
+  throw new Error("oldest transcript entries were not discarded");
+}}
+if (client._userTranscriptByItem.get("item_129") !== "129") {{
+  throw new Error("newest transcript entry was not retained");
+}}
+"""
+    subprocess.run(
+        [node, "--input-type=module", "-e", script],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "module_path,class_name,message_handler",
+    [
+        ("./demo/ws/s2s-ws-client.js", "S2sWsRealtimeClient", "_onWsMessage"),
+        ("./demo/rtc/s2s-rtc-client.js", "S2sRtcRealtimeClient", "_onDcMessage"),
+    ],
+)
 def test_demo_clients_leave_processing_after_empty_transcript(module_path, class_name, message_handler):
     node = shutil.which("node")
     if node is None:

@@ -75,6 +75,7 @@ const SPEAKING_OPEN_DB = -50;
 const SPEAKING_HANG_MS = 250;
 const LEVEL_POLL_MS = 50;
 const RESPONSE_CREATE_ID_METADATA_KEY = "s2s_demo_create_id";
+const MAX_ACTIVE_USER_TRANSCRIPTS = 128;
 
 /** Build an Error carrying a `code` so callers can branch on the failure kind.
  *  @param {string} message @param {string} code */
@@ -578,6 +579,9 @@ export class S2sRtcRealtimeClient extends EventTarget {
           const itemId = typeof event.item_id === "string" ? event.item_id : "";
           const transcript = (this._userTranscriptByItem.get(itemId) || "") + delta;
           this._userTranscriptByItem.set(itemId, transcript);
+          while (this._userTranscriptByItem.size > MAX_ACTIVE_USER_TRANSCRIPTS) {
+            this._userTranscriptByItem.delete(this._userTranscriptByItem.keys().next().value);
+          }
           this.dispatchEvent(
             new CustomEvent("transcript", {
               detail: {

@@ -92,7 +92,7 @@ flowchart LR
 
 ### Input transcription semantics
 
-Internal partial transcriptions are cumulative hypotheses. The Realtime server emits only the newly appended suffix as `conversation.item.input_audio_transcription.delta`. If a later hypothesis revises text that was already emitted, that partial is withheld because the protocol has no transcript-retraction event. Clients should treat `conversation.item.input_audio_transcription.completed` as authoritative and replace any rendered partial for the same `item_id` with its final `transcript`.
+Internal partial transcriptions are cumulative hypotheses. The Realtime server emits only the newly appended suffix as `conversation.item.input_audio_transcription.delta`. If a later hypothesis revises text that was already emitted, that partial is withheld because the protocol has no transcript-retraction event. Clients should treat `conversation.item.input_audio_transcription.completed` as authoritative and replace any rendered partial for the same `item_id` with its final `transcript`. Server and bundled-client state for unresolved transcription items is capped at 128 entries; the oldest entry is silently discarded if a backend never produces a terminal event.
 
 ### Transcript event compatibility
 

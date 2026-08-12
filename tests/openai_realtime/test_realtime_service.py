@@ -3595,6 +3595,42 @@ class TestDispatchPipelineEvent:
         assert state.input_transcription_by_item == {}
         assert state.input_audio_duration_by_item == {}
 
+    def test_unterminated_input_item_state_silently_discards_oldest(self, service, conn_id):
+        started_item_ids = []
+
+        for index in range(130):
+            events = service.dispatch_pipeline_event(
+                conn_id,
+                SpeechStartedEvent(turn_id=f"turn_{index}", turn_revision=0),
+            )
+            assert len(events) == 1
+            started_item_ids.append(events[0].item_id)
+
+        state = service._state(conn_id)
+        assert len(state.input_item_by_turn_revision) == 128
+        assert len(state.input_transcription_by_item) == 128
+        assert len(state.input_audio_duration_by_item) == 128
+        assert state.completed_input_item_ids == {}
+        assert started_item_ids[0] not in state.input_transcription_by_item
+        assert started_item_ids[1] not in state.input_transcription_by_item
+        assert started_item_ids[-1] in state.input_transcription_by_item
+        assert state.current_input_item_id == started_item_ids[-1]
+
+        assert (
+            service.dispatch_pipeline_event(
+                conn_id,
+                PartialTranscriptionEvent(delta="late", turn_id="turn_0", turn_revision=0),
+            )
+            == []
+        )
+        assert (
+            service.dispatch_pipeline_event(
+                conn_id,
+                TranscriptionCompletedEvent(transcript="late", turn_id="turn_0", turn_revision=0),
+            )
+            == []
+        )
+
     # -- transcription_completed --
 
     def test_transcription_completed_emits_event(self, service, conn_id):

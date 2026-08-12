@@ -26,6 +26,7 @@ PIPELINE_SAMPLE_RATE = 16000
 CHUNK_SAMPLES = 512
 BYTES_PER_SAMPLE = 2
 CHUNK_SIZE_BYTES = CHUNK_SAMPLES * BYTES_PER_SAMPLE
+MAX_ACTIVE_INPUT_ITEMS = 128
 
 
 class AudioHandler(RealtimeBaseHandler):
@@ -55,6 +56,7 @@ class AudioHandler(RealtimeBaseHandler):
         st.completed_input_item_ids.pop(item_id, None)
         if turn_id is not None:
             st.input_item_by_turn_revision[(turn_id, turn_revision)] = item_id
+        self._bound_active_input_item_state(conn_id)
         return item_id
 
     def _reuse_input_item(
@@ -87,10 +89,13 @@ class AudioHandler(RealtimeBaseHandler):
         turn_revision: int | None,
     ) -> None:
         """Drop routing state for a direct-audio item without publishing a transcription terminal."""
-        st = self._state(conn_id)
         item_id = self._input_item_id(conn_id, turn_id, turn_revision)
         if item_id is None:
             return
+        self._release_input_item_state_by_id(conn_id, item_id)
+
+    def _release_input_item_state_by_id(self, conn_id: str, item_id: str) -> None:
+        st = self._state(conn_id)
         st.input_item_by_turn_revision = {
             turn: tracked_item_id
             for turn, tracked_item_id in st.input_item_by_turn_revision.items()
@@ -100,6 +105,13 @@ class AudioHandler(RealtimeBaseHandler):
         st.input_audio_duration_by_item.pop(item_id, None)
         if st.current_input_item_id == item_id:
             st.current_input_item_id = None
+
+    def _bound_active_input_item_state(self, conn_id: str) -> None:
+        """Silently discard oldest unresolved items when a pipeline emits no terminal."""
+        st = self._state(conn_id)
+        while len(st.input_transcription_by_item) > MAX_ACTIVE_INPUT_ITEMS:
+            oldest_item_id = next(iter(st.input_transcription_by_item))
+            self._release_input_item_state_by_id(conn_id, oldest_item_id)
 
     def handle_audio_append(self, conn_id: str, event: InputAudioBufferAppendEvent) -> list[bytes]:
         """Decode base64 audio, resample to pipeline rate, and split into 512-sample PCM16 chunks for the VAD."""
