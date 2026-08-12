@@ -6,8 +6,15 @@ from time import sleep
 from typing import Iterator, Literal
 
 import numpy as np
+import pytest
 
-from speech_to_speech.pipeline.messages import PIPELINE_END, PartialTranscription, Transcription, VADAudio
+from speech_to_speech.pipeline.messages import (
+    PIPELINE_END,
+    PartialTranscription,
+    Transcription,
+    TranscriptionFailure,
+    VADAudio,
+)
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 
@@ -34,6 +41,22 @@ class RecordingSTTHandler(BaseSTTHandler):
             turn_id=vad_audio.turn_id,
             turn_revision=vad_audio.turn_revision,
         )
+
+
+class FailingSTTHandler(BaseSTTHandler):
+    def setup(self, speculative_turns: SpeculativeTurnTracker) -> None:
+        self.speculative_turns = speculative_turns
+
+    def process(self, vad_audio: VADAudio) -> Iterator[Transcription]:
+        raise RuntimeError("backend failed")
+
+
+class NoResultSTTHandler(BaseSTTHandler):
+    def setup(self, speculative_turns: SpeculativeTurnTracker) -> None:
+        self.speculative_turns = speculative_turns
+
+    def process(self, vad_audio: VADAudio) -> Iterator[Transcription]:
+        yield from ()
 
 
 def _vad_audio(
@@ -84,6 +107,29 @@ def test_stt_handler_drops_stale_queued_audio_without_processing():
     handler.run()
 
     assert handler.processed == []
+    assert queue_out.get_nowait() == PIPELINE_END
+
+
+@pytest.mark.parametrize("handler_class", [FailingSTTHandler, NoResultSTTHandler])
+def test_final_stt_without_result_emits_failure_terminal(handler_class):
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    queue_in = Queue()
+    queue_out = Queue()
+    handler = handler_class(
+        Event(),
+        queue_in=queue_in,
+        queue_out=queue_out,
+        setup_kwargs={"speculative_turns": tracker},
+    )
+    queue_in.put(_vad_audio(mode="final"))
+    queue_in.put(PIPELINE_END)
+
+    handler.run()
+
+    failed = queue_out.get_nowait()
+    assert isinstance(failed, TranscriptionFailure)
+    assert (failed.turn_id, failed.turn_revision) == ("turn_1", 0)
     assert queue_out.get_nowait() == PIPELINE_END
 
 

@@ -78,6 +78,16 @@ class Transcription(PipelineMessage):
     speech_stopped_at_s: float | None = None
 
 
+class TranscriptionFailure(PipelineMessage):
+    """STT terminal consumed by TranscriptionNotifier's Realtime side channel."""
+
+    tag: Literal["transcription_failure"] = "transcription_failure"
+    message: str = "Input audio transcription failed."
+    code: str = "transcription_failed"
+    turn_id: str | None = None
+    turn_revision: int | None = None
+
+
 # ── LLM → LMOutputProcessor ──────────────────────────────────────────
 
 

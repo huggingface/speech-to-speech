@@ -623,6 +623,32 @@ export class S2sRtcRealtimeClient extends EventTarget {
         break;
       }
 
+      case "conversation.item.input_audio_transcription.failed": {
+        const itemId = typeof event.item_id === "string" ? event.item_id : "";
+        const hadPartial = Boolean(this._userTranscriptByItem.get(itemId));
+        this._userTranscriptByItem.delete(itemId);
+        if (this._waitingForResponseAfterCollision) {
+          this._waitingForResponseAfterCollision = false;
+          this._flushQueuedCreate();
+        }
+        if (hadPartial) {
+          this.dispatchEvent(
+            new CustomEvent("transcript", {
+              detail: {
+                role: "user",
+                text: "",
+                partial: false,
+                itemId,
+              },
+            }),
+          );
+        }
+        if (this._status === "processing" && !this._responsePending()) {
+          this._setStatus("connected");
+        }
+        break;
+      }
+
       case "response.audio_transcript.delta":
       case "response.output_audio_transcript.delta": {
         this._markAudible();

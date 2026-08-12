@@ -10,6 +10,7 @@ from openai.types.realtime import (
     ConversationItemCreateEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
+    ConversationItemInputAudioTranscriptionFailedEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferCommitEvent,
     InputAudioBufferSpeechStartedEvent,
@@ -63,6 +64,7 @@ from speech_to_speech.pipeline.events import (
     SpeechStoppedEvent,
     TokenUsageEvent,
     TranscriptionCompletedEvent,
+    TranscriptionFailedEvent,
 )
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
 from speech_to_speech.pipeline.queue_types import TextPromptItem
@@ -108,6 +110,7 @@ ServerEvent = Union[
     ConversationItemCreatedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
+    ConversationItemInputAudioTranscriptionFailedEvent,
     ResponseCreatedEvent,
     ResponseDoneEvent,
     ResponseAudioDeltaEvent,
@@ -293,12 +296,14 @@ class RealtimeService:
         chat_size: int = 10,
         speculative_turns: SpeculativeTurnTracker | None = None,
         default_instructions: str | None = None,
+        input_transcription_enabled: bool = True,
     ) -> None:
         self.text_prompt_queue = text_prompt_queue
         self.should_listen = should_listen
         self._chat_size = chat_size
         self.speculative_turns = speculative_turns
         self._default_instructions = default_instructions
+        self.input_transcription_enabled = input_transcription_enabled
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
 
@@ -312,6 +317,7 @@ class RealtimeService:
             SpeechStoppedEvent: self.audio.on_speech_stopped,
             PartialTranscriptionEvent: self.conversation.on_partial_transcription,
             TranscriptionCompletedEvent: self._on_transcription_completed,
+            TranscriptionFailedEvent: self._on_transcription_failed,
             AudioInputCompletedEvent: self._on_audio_input_completed,
             ResponseGenerationDoneEvent: self.response.on_response_generation_done,
             AssistantToolCallReadyEvent: self.response.on_assistant_tool_call_ready,
@@ -511,6 +517,8 @@ class RealtimeService:
                 AssistantResponseDoneEvent,
                 AssistantToolCallReadyEvent,
                 ResponseGenerationDoneEvent,
+                TranscriptionCompletedEvent,
+                TranscriptionFailedEvent,
             ),
         ):
             return False
@@ -566,6 +574,7 @@ class RealtimeService:
             (
                 PartialTranscriptionEvent,
                 TranscriptionCompletedEvent,
+                TranscriptionFailedEvent,
                 AudioInputCompletedEvent,
                 AssistantOutputEvent,
                 AssistantResponseDoneEvent,
@@ -579,6 +588,8 @@ class RealtimeService:
         if isinstance(
             event,
             (
+                TranscriptionCompletedEvent,
+                TranscriptionFailedEvent,
                 AssistantOutputEvent,
                 AssistantResponseDoneEvent,
                 AssistantToolCallReadyEvent,
@@ -611,6 +622,8 @@ class RealtimeService:
         completed_events = self.conversation.on_transcription_completed(conn_id, event)
         if not completed_events:
             return []
+        if self.speculative_turns is not None:
+            self.speculative_turns.commit(event.turn_id, event.turn_revision)
         input_duration_s = cast(UsageTranscriptTextUsageDuration, completed_events[0].usage).seconds
         self.response.discard_tool_followup_prefetch(conn_id)
         st.generation_done_tool_calls.clear()
@@ -659,6 +672,13 @@ class RealtimeService:
             queue.put(request)
 
         return [*completed_events]
+
+    def _on_transcription_failed(self, conn_id: str, event: TranscriptionFailedEvent) -> list[ServerEvent]:
+        """Close one failed STT item without mutating chat or starting a response."""
+        failed_events = self.conversation.on_transcription_failed(conn_id, event)
+        if failed_events and self.speculative_turns is not None:
+            self.speculative_turns.commit(event.turn_id, event.turn_revision)
+        return [*failed_events]
 
     def _on_audio_input_completed(self, conn_id: str, event: AudioInputCompletedEvent) -> list[ServerEvent]:
         """Record final input audio and queue its realtime LM request."""

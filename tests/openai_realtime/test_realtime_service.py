@@ -17,6 +17,7 @@ from openai.types.realtime import (
     ConversationItemCreateEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
+    ConversationItemInputAudioTranscriptionFailedEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferSpeechStartedEvent,
     InputAudioBufferSpeechStoppedEvent,
@@ -61,6 +62,7 @@ from speech_to_speech.pipeline.events import (
     SpeechStoppedEvent,
     TokenUsageEvent,
     TranscriptionCompletedEvent,
+    TranscriptionFailedEvent,
 )
 from speech_to_speech.pipeline.messages import (
     AssistantTextPart,
@@ -3428,6 +3430,91 @@ class TestDispatchPipelineEvent:
         assert continued[0].delta == "hello again"
         assert continued[0].content_index == 0
 
+    def test_transcription_terminal_waits_for_reopen_and_keeps_one_wire_item(
+        self,
+        runtime_config,
+        should_listen,
+    ):
+        text_prompt_queue = Queue()
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(
+            text_prompt_queue=text_prompt_queue,
+            should_listen=should_listen,
+            speculative_turns=tracker,
+        )
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+
+        started = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+        )
+        first_delta = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hel", turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=1.0, turn_id="turn_1", turn_revision=0),
+        )
+        tracker.start_reopen_grace("turn_1", 0, grace_s=0.5)
+
+        done = Event()
+        result = {}
+
+        def complete_first_revision():
+            result["events"] = service.dispatch_pipeline_event(
+                conn_id,
+                TranscriptionCompletedEvent(transcript="hello", turn_id="turn_1", turn_revision=0),
+            )
+            done.set()
+
+        thread = Thread(target=complete_first_revision)
+        thread.start()
+        assert not done.wait(0.05)
+
+        candidate = tracker.begin_reopen_candidate("turn_1", 0)
+        assert candidate == 1
+        assert tracker.confirm_reopen_candidate("turn_1", 0, candidate)
+        reopened = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
+        )
+
+        assert done.wait(1.0)
+        thread.join(timeout=1.0)
+        assert result["events"] == []
+
+        continued_delta = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello again", turn_id="turn_1", turn_revision=1),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=2.0, turn_id="turn_1", turn_revision=1),
+        )
+        completed = service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="hello again", turn_id="turn_1", turn_revision=1),
+        )
+
+        item_id = started[0].item_id
+        assert reopened[0].item_id == item_id
+        assert first_delta[0].item_id == item_id
+        assert first_delta[0].delta == "hel"
+        assert continued_delta[0].item_id == item_id
+        assert continued_delta[0].delta == "lo again"
+        assert completed[0].item_id == item_id
+        assert completed[0].transcript == "hello again"
+        assert tracker.is_committed("turn_1", 1)
+        assert tracker.begin_reopen_candidate("turn_1", 1) is None
+        user_items = [item for item in runtime_config.chat.buffer if getattr(item, "role", None) == "user"]
+        assert len(user_items) == 1
+        assert user_items[0].content[0].text == "hello again"
+        assert text_prompt_queue.get_nowait().turn_revision == 1
+        assert text_prompt_queue.empty()
+        service.unregister(conn_id)
+
     def test_completed_input_item_does_not_emit_later_deltas(self, service, conn_id):
         service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1"))
         service.dispatch_pipeline_event(
@@ -3509,6 +3596,93 @@ class TestDispatchPipelineEvent:
         assert len(state.input_item_by_turn_revision) == 128
         assert state.input_transcription_by_item == {}
         assert state.input_audio_duration_by_item == {}
+
+    def test_unterminated_input_item_state_is_bounded_with_failed_terminals(self):
+        service = RealtimeService()
+        conn_id = service.register()
+        failed = []
+
+        for index in range(130):
+            events = service.dispatch_pipeline_event(
+                conn_id,
+                SpeechStartedEvent(turn_id=f"turn_{index}", turn_revision=0),
+            )
+            failed.extend(
+                event for event in events if isinstance(event, ConversationItemInputAudioTranscriptionFailedEvent)
+            )
+
+        state = service._state(conn_id)
+        assert len(failed) == 2
+        assert all(event.content_index == 0 for event in failed)
+        assert all(event.error.code == "transcription_abandoned" for event in failed)
+        assert len(state.input_item_by_turn_revision) == 128
+        assert len(state.input_transcription_by_item) == 128
+        assert len(state.input_audio_duration_by_item) == 128
+        assert len(state.completed_input_item_ids) == 2
+        service.unregister(conn_id)
+
+    def test_unterminated_direct_audio_state_is_bounded_without_transcription_failures(self):
+        service = RealtimeService(input_transcription_enabled=False)
+        conn_id = service.register()
+
+        events = []
+        for index in range(130):
+            events.extend(
+                service.dispatch_pipeline_event(
+                    conn_id,
+                    SpeechStartedEvent(turn_id=f"turn_{index}", turn_revision=0),
+                )
+            )
+
+        state = service._state(conn_id)
+        assert not any(isinstance(event, ConversationItemInputAudioTranscriptionFailedEvent) for event in events)
+        assert len(state.input_item_by_turn_revision) == 128
+        assert len(state.input_transcription_by_item) == 128
+        assert len(state.input_audio_duration_by_item) == 128
+        service.unregister(conn_id)
+
+    def test_transcription_failure_terminalizes_item_without_mutating_chat(
+        self,
+        runtime_config,
+        should_listen,
+    ):
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+
+        started = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="partial", turn_id="turn_1", turn_revision=0),
+        )
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionFailedEvent(
+                message="Input audio transcription failed.",
+                code="transcription_failed",
+                turn_id="turn_1",
+                turn_revision=0,
+            ),
+        )
+
+        assert len(events) == 1
+        failed = events[0]
+        assert isinstance(failed, ConversationItemInputAudioTranscriptionFailedEvent)
+        assert failed.item_id == started[0].item_id
+        assert failed.content_index == 0
+        assert failed.error.type == "transcription_error"
+        assert failed.error.code == "transcription_failed"
+        state = service._state(conn_id)
+        assert state.input_item_by_turn_revision == {}
+        assert state.input_transcription_by_item == {}
+        assert state.input_audio_duration_by_item == {}
+        assert runtime_config.chat.buffer == []
+        assert tracker.is_committed("turn_1", 0)
+        service.unregister(conn_id)
 
     # -- transcription_completed --
 
@@ -3686,7 +3860,11 @@ class TestDispatchPipelineEvent:
         assert runtime_config.chat.buffer == []
         assert service._state(conn_id).response_pending is False
 
-    def test_revised_transcription_replaces_speculative_user_message(self, runtime_config, should_listen):
+    def test_late_reopen_after_completed_transcription_keeps_wire_and_chat_aligned(
+        self,
+        runtime_config,
+        should_listen,
+    ):
         text_prompt_queue = Queue()
         tracker = SpeculativeTurnTracker()
         service = RealtimeService(
@@ -3697,7 +3875,7 @@ class TestDispatchPipelineEvent:
         conn_id = service.register()
         service._state(conn_id).runtime_config = runtime_config
 
-        service.dispatch_pipeline_event(
+        first_started = service.dispatch_pipeline_event(
             conn_id,
             SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
         )
@@ -3711,7 +3889,7 @@ class TestDispatchPipelineEvent:
         )
 
         tracker.observe("turn_1", 1)
-        service.dispatch_pipeline_event(
+        second_started = service.dispatch_pipeline_event(
             conn_id,
             SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
         )
@@ -3725,16 +3903,16 @@ class TestDispatchPipelineEvent:
         )
 
         user_items = [item for item in runtime_config.chat.buffer if getattr(item, "role", None) == "user"]
-        assert len(user_items) == 1
-        assert user_items[0].content[0].text == "hello again"
+        assert second_started[0].item_id != first_started[0].item_id
+        assert [item.content[0].text for item in user_items] == ["hello", "hello again"]
         first_req = text_prompt_queue.get_nowait()
         second_req = text_prompt_queue.get_nowait()
         assert first_req.turn_revision == 0
         assert second_req.turn_revision == 1
-        assert service._state(conn_id).response_usage.audio_duration_s == 2.0
+        assert service._state(conn_id).response_usage.audio_duration_s == 3.0
         service.unregister(conn_id)
 
-    def test_empty_revised_transcription_removes_speculative_user_message(self, runtime_config, should_listen):
+    def test_empty_late_reopen_does_not_remove_completed_user_message(self, runtime_config, should_listen):
         text_prompt_queue = Queue()
         tracker = SpeculativeTurnTracker()
         service = RealtimeService(
@@ -3773,14 +3951,15 @@ class TestDispatchPipelineEvent:
         )
 
         user_items = [item for item in runtime_config.chat.buffer if getattr(item, "role", None) == "user"]
-        assert user_items == []
+        assert len(user_items) == 1
+        assert user_items[0].content[0].text == "hello"
         first_req = text_prompt_queue.get_nowait()
         assert first_req.turn_revision == 0
         assert text_prompt_queue.empty()
-        assert service._state(conn_id).response_usage.audio_duration_s == 2.0
+        assert service._state(conn_id).response_usage.audio_duration_s == 3.0
         service.unregister(conn_id)
 
-    def test_empty_first_revision_tracks_audio_for_later_nonempty_reopen(self, runtime_config, should_listen):
+    def test_empty_completed_turn_and_late_reopen_count_as_separate_audio(self, runtime_config, should_listen):
         text_prompt_queue = Queue()
         tracker = SpeculativeTurnTracker()
         service = RealtimeService(
@@ -3824,7 +4003,7 @@ class TestDispatchPipelineEvent:
         req = text_prompt_queue.get_nowait()
         assert req.turn_revision == 1
         assert text_prompt_queue.empty()
-        assert service._state(conn_id).response_usage.audio_duration_s == 2.0
+        assert service._state(conn_id).response_usage.audio_duration_s == 3.0
         service.unregister(conn_id)
 
     def test_reopened_stt_reuses_item_when_old_completion_is_dropped(
@@ -3916,7 +4095,7 @@ class TestDispatchPipelineEvent:
         assert text_prompt_queue.empty()
         service.unregister(conn_id)
 
-    def test_stale_assistant_text_dropped_after_unanswered_reopen(self, runtime_config, should_listen):
+    def test_completed_transcription_prevents_late_unanswered_reopen(self, runtime_config, should_listen):
         text_prompt_queue = Queue()
         tracker = SpeculativeTurnTracker()
         service = RealtimeService(
@@ -3935,41 +4114,19 @@ class TestDispatchPipelineEvent:
             conn_id,
             SpeechStoppedEvent(duration_s=1.0, turn_id="turn_1", turn_revision=0),
         )
-        service.dispatch_pipeline_event(
+        completed = service.dispatch_pipeline_event(
             conn_id,
             TranscriptionCompletedEvent(transcript="hello", turn_id="turn_1", turn_revision=0),
         )
 
-        # The VAD reopens an unanswered turn past the grace window through the
-        # same candidate protocol it uses for an in-grace reopen.
-        candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
-        assert candidate_revision == 1
-        assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
-
-        events = service.dispatch_pipeline_event(
-            conn_id,
-            AssistantOutputEvent(text="stale", turn_id="turn_1", turn_revision=0),
-        )
-
-        assert events == []
-        assert service._state(conn_id).current_response_id is None
-
-        service.dispatch_pipeline_event(
-            conn_id,
-            SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
-        )
-        service.dispatch_pipeline_event(
-            conn_id,
-            SpeechStoppedEvent(duration_s=2.5, turn_id="turn_1", turn_revision=1),
-        )
-        service.dispatch_pipeline_event(
-            conn_id,
-            TranscriptionCompletedEvent(transcript="hello and more", turn_id="turn_1", turn_revision=1),
-        )
-
+        assert len(completed) == 1
+        assert tracker.is_committed("turn_1", 0)
+        assert tracker.begin_reopen_candidate("turn_1", 0) is None
         user_items = [item for item in runtime_config.chat.buffer if getattr(item, "role", None) == "user"]
         assert len(user_items) == 1
-        assert user_items[0].content[0].text == "hello and more"
+        assert user_items[0].content[0].text == "hello"
+        assert text_prompt_queue.get_nowait().turn_revision == 0
+        assert text_prompt_queue.empty()
         service.unregister(conn_id)
 
     # -- response_failed --

@@ -438,6 +438,30 @@ def test_audio_client_tracks_overlapping_user_transcriptions_by_item(capsys):
     assert "USER: world" in output
 
 
+def test_audio_client_clears_partial_transcription_on_failure(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    for event in (
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="item_1",
+            delta="hallucinated",
+        ),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.failed",
+            item_id="item_1",
+            error=SimpleNamespace(type="transcription_error", message="failed"),
+        ),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    assert renderer.user_transcript_by_item == {}
+    output = capsys.readouterr().out
+    assert "USER: hallucinated" in output
+    assert "ERROR: transcription_error: failed" in output
+
+
 def test_audio_client_response_done_preserves_other_response_transcripts(capsys):
     playback = PlaybackBuffer(16000)
     renderer = _FriendlyEventRenderer()

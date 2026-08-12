@@ -153,6 +153,21 @@ class AudioHandler(RealtimeBaseHandler):
             st.generation_done_tool_calls.clear()
             st.completed_tool_response_keys.clear()
         is_reopen = bool(event.reopened and event.turn_id is not None and event.turn_id == st.speculative_turn_id)
+        if (
+            is_reopen
+            and self._service.speculative_turns is not None
+            and self._service.speculative_turns.is_committed(event.turn_id, st.speculative_turn_revision)
+        ):
+            # A published transcription terminal makes this a new logical
+            # message even if an upstream producer incorrectly labels it as a
+            # reopen. Keep the model conversation aligned with the fresh wire
+            # item instead of replacing the already-visible user message.
+            is_reopen = False
+            st.speculative_user_turn_id = None
+            st.speculative_user_turn_revision = None
+            st.speculative_user_speech_stopped_at_s = None
+            st.speculative_user_item_id = None
+            st.speculative_audio_duration_s = 0.0
         preserve_active_response = st.in_response
         previous_input_item_id = (
             st.input_item_by_turn_revision.get((event.turn_id, st.speculative_turn_revision))
@@ -180,6 +195,12 @@ class AudioHandler(RealtimeBaseHandler):
         st.speculative_turn_id = event.turn_id
         st.speculative_turn_revision = event.turn_revision
         st.last_item_id = input_item_id
+        events.extend(
+            self._service.conversation.bound_active_input_items(
+                conn_id,
+                emit_transcription_failure=self._service.input_transcription_enabled,
+            )
+        )
         events.append(
             InputAudioBufferSpeechStartedEvent(
                 type="input_audio_buffer.speech_started",
