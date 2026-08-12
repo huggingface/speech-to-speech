@@ -2,7 +2,7 @@ import logging
 from collections.abc import Mapping
 from queue import Queue
 from threading import Event as ThreadingEvent
-from typing import Any, Callable, Literal, Optional, TypeVar, Union
+from typing import Any, Callable, Literal, Optional, TypeVar, Union, cast
 
 from openai.types.realtime import (
     ConversationItem,
@@ -35,6 +35,9 @@ from openai.types.realtime import (
     SessionCreatedEvent,
     SessionUpdatedEvent,
     SessionUpdateEvent,
+)
+from openai.types.realtime.conversation_item_input_audio_transcription_completed_event import (
+    UsageTranscriptTextUsageDuration,
 )
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -532,6 +535,28 @@ class RealtimeService:
         if is_stale is None:
             return None
         if is_stale:
+            if isinstance(event, TranscriptionCompletedEvent):
+                logger.info(
+                    "Terminalizing stale transcription for turn=%s rev=%s without conversation effects",
+                    event.turn_id,
+                    event.turn_revision,
+                )
+                stale_events: list[ServerEvent] = [
+                    *self.conversation.on_transcription_completed(
+                        conn_id,
+                        event,
+                        account_usage=False,
+                    )
+                ]
+                return stale_events
+            if isinstance(event, AudioInputCompletedEvent):
+                logger.info(
+                    "Terminalizing stale direct audio for turn=%s rev=%s without conversation effects",
+                    event.turn_id,
+                    event.turn_revision,
+                )
+                self.conversation.terminalize_input_item(conn_id, event.turn_id, event.turn_revision)
+                return []
             logger.info(
                 "Ignoring stale %s for turn=%s rev=%s",
                 event.type,
@@ -605,19 +630,10 @@ class RealtimeService:
     def _on_transcription_completed(self, conn_id: str, event: TranscriptionCompletedEvent) -> list[ServerEvent]:
         """Handle a final STT transcription: emit protocol event, append to chat, trigger LM."""
         st = self._state(conn_id)
-        input_item_id = (
-            st.input_item_by_turn_revision.get((event.turn_id, event.turn_revision))
-            if event.turn_id is not None
-            else st.current_input_item_id or self.response._current_item_id(conn_id)
-        )
-        if input_item_id is None or input_item_id in st.completed_input_item_ids:
-            logger.debug(
-                "Ignoring transcription completion for unknown or completed turn=%s rev=%s",
-                event.turn_id,
-                event.turn_revision,
-            )
+        completed_events = self.conversation.on_transcription_completed(conn_id, event)
+        if not completed_events:
             return []
-        input_duration_s = st.input_audio_duration_by_item.get(input_item_id, st.input_audio_duration_s)
+        input_duration_s = cast(UsageTranscriptTextUsageDuration, completed_events[0].usage).seconds
         self.response.discard_tool_followup_prefetch(conn_id)
         st.generation_done_tool_calls.clear()
         st.completed_tool_response_keys.clear()
@@ -627,9 +643,6 @@ class RealtimeService:
         else:
             st.speculative_audio_duration_s = 0.0
 
-        events = self.conversation.on_transcription_completed(conn_id, event)
-        if not events:
-            return []
         if event.turn_id is not None:
             st.speculative_audio_duration_s = input_duration_s
 
@@ -667,11 +680,12 @@ class RealtimeService:
             st.mark_response_pending(request.response_key)
             queue.put(request)
 
-        return events
+        return [*completed_events]
 
     def _on_audio_input_completed(self, conn_id: str, event: AudioInputCompletedEvent) -> list[ServerEvent]:
         """Record final input audio and queue its realtime LM request."""
         st = self._state(conn_id)
+        self.conversation.terminalize_input_item(conn_id, event.turn_id, event.turn_revision)
         self.response.discard_tool_followup_prefetch(conn_id)
         st.generation_done_tool_calls.clear()
         st.completed_tool_response_keys.clear()

@@ -244,22 +244,26 @@ class ConversationHandler(RealtimeBaseHandler):
             )
         ]
 
-    def on_transcription_completed(self, conn_id: str, event: TranscriptionCompletedEvent) -> list[ServerEvent]:
-        """Handle transcription_completed: accumulate duration and emit completed event."""
+    def terminalize_input_item(
+        self,
+        conn_id: str,
+        turn_id: str | None,
+        turn_revision: int | None,
+    ) -> tuple[str, float] | None:
+        """Release one input item's active state and retain a bounded tombstone."""
         st = self._state(conn_id)
-        item_id = self._input_item_id(conn_id, event.turn_id, event.turn_revision)
+        item_id = self._input_item_id(conn_id, turn_id, turn_revision)
         if item_id is None:
             logger.debug(
-                "Ignoring transcription completion for unknown turn=%s rev=%s",
-                event.turn_id,
-                event.turn_revision,
+                "Ignoring input terminal for unknown turn=%s rev=%s",
+                turn_id,
+                turn_revision,
             )
-            return []
+            return None
         if item_id in st.completed_input_item_ids:
-            logger.debug("Ignoring duplicate transcription completion for item=%s", item_id)
-            return []
+            logger.debug("Ignoring duplicate input terminal for item=%s", item_id)
+            return None
         duration_s = st.input_audio_duration_by_item.pop(item_id, st.input_audio_duration_s)
-        st.response_usage.audio_duration_s += duration_s
         st.input_transcription_by_item.pop(item_id, None)
         st.completed_input_item_ids[item_id] = None
         while len(st.completed_input_item_ids) > 128:
@@ -272,6 +276,23 @@ class ConversationHandler(RealtimeBaseHandler):
             }
         if st.current_input_item_id == item_id:
             st.current_input_item_id = None
+        return item_id, duration_s
+
+    def on_transcription_completed(
+        self,
+        conn_id: str,
+        event: TranscriptionCompletedEvent,
+        *,
+        account_usage: bool = True,
+    ) -> list[ConversationItemInputAudioTranscriptionCompletedEvent]:
+        """Terminalize one transcript item and emit its authoritative final event."""
+        st = self._state(conn_id)
+        terminal = self.terminalize_input_item(conn_id, event.turn_id, event.turn_revision)
+        if terminal is None:
+            return []
+        item_id, duration_s = terminal
+        if account_usage:
+            st.response_usage.audio_duration_s += duration_s
         return [
             ConversationItemInputAudioTranscriptionCompletedEvent(
                 type="conversation.item.input_audio_transcription.completed",

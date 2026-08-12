@@ -3539,8 +3539,14 @@ class TestDispatchPipelineEvent:
         text_prompt_queue,
     ):
         audio = np.zeros(40000, dtype=np.float32)
-        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
-        service.dispatch_pipeline_event(conn_id, SpeechStoppedEvent(duration_s=2.5))
+        started = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=2.5, turn_id="turn_1", turn_revision=0),
+        )
 
         events = service.dispatch_pipeline_event(
             conn_id,
@@ -3557,6 +3563,10 @@ class TestDispatchPipelineEvent:
         state = service._state(conn_id)
         assert state.response_pending is True
         assert state.response_usage.audio_duration_s == 2.5
+        assert state.current_input_item_id is None
+        assert state.input_transcription_by_item == {}
+        assert state.input_audio_duration_by_item == {}
+        assert started[0].item_id in state.completed_input_item_ids
         request = text_prompt_queue.get_nowait()
         assert isinstance(request, GenerateResponseRequest)
         assert request.runtime_config is runtime_config
@@ -3568,6 +3578,78 @@ class TestDispatchPipelineEvent:
         service.response._ensure_response(conn_id)
         assert state.input_audio_duration_s == 0.0
         assert state.response_usage.audio_duration_s == 2.5
+
+    def test_direct_audio_input_item_state_is_bounded(self):
+        service = RealtimeService()
+        conn_id = service.register()
+
+        for index in range(130):
+            turn_id = f"turn_{index}"
+            service.dispatch_pipeline_event(
+                conn_id,
+                SpeechStartedEvent(turn_id=turn_id, turn_revision=0),
+            )
+            service.dispatch_pipeline_event(
+                conn_id,
+                SpeechStoppedEvent(duration_s=0.1, turn_id=turn_id, turn_revision=0),
+            )
+            service.dispatch_pipeline_event(
+                conn_id,
+                AudioInputCompletedEvent(
+                    audio=np.zeros(1600, dtype=np.float32),
+                    audio_duration_s=0.1,
+                    turn_id=turn_id,
+                    turn_revision=0,
+                ),
+            )
+
+        state = service._state(conn_id)
+        assert len(state.completed_input_item_ids) == 128
+        assert len(state.input_item_by_turn_revision) == 128
+        assert state.input_transcription_by_item == {}
+        assert state.input_audio_duration_by_item == {}
+        assert state.current_input_item_id is None
+        service.unregister(conn_id)
+
+    def test_stale_direct_audio_releases_item_without_queuing_response(self):
+        text_prompt_queue = Queue()
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(text_prompt_queue=text_prompt_queue, speculative_turns=tracker)
+        conn_id = service.register()
+
+        first_started = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=0.1, turn_id="turn_1", turn_revision=0),
+        )
+        tracker.observe("turn_1", 1)
+        second_started = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
+        )
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            AudioInputCompletedEvent(
+                audio=np.zeros(1600, dtype=np.float32),
+                audio_duration_s=0.1,
+                turn_id="turn_1",
+                turn_revision=0,
+            ),
+        )
+
+        state = service._state(conn_id)
+        assert events == []
+        assert first_started[0].item_id in state.completed_input_item_ids
+        assert first_started[0].item_id not in state.input_transcription_by_item
+        assert first_started[0].item_id not in state.input_audio_duration_by_item
+        assert state.current_input_item_id == second_started[0].item_id
+        assert state.response_usage.audio_duration_s == 0.0
+        assert text_prompt_queue.empty()
+        service.unregister(conn_id)
 
     def test_empty_transcription_completed_emits_event_without_response(
         self,
@@ -3734,6 +3816,80 @@ class TestDispatchPipelineEvent:
         assert req.turn_revision == 1
         assert text_prompt_queue.empty()
         assert service._state(conn_id).response_usage.audio_duration_s == 2.0
+        service.unregister(conn_id)
+
+    def test_stale_transcription_closes_originating_item_without_conversation_effects(
+        self,
+        runtime_config,
+        should_listen,
+    ):
+        text_prompt_queue = Queue()
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(
+            text_prompt_queue=text_prompt_queue,
+            should_listen=should_listen,
+            speculative_turns=tracker,
+        )
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+
+        first_started = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello", turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=1.0, turn_id="turn_1", turn_revision=0),
+        )
+
+        tracker.observe("turn_1", 1)
+        second_started = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
+        )
+        stale_completed = service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="hello", turn_id="turn_1", turn_revision=0),
+        )
+
+        first_item_id = first_started[0].item_id
+        second_item_id = second_started[0].item_id
+        assert len(stale_completed) == 1
+        assert isinstance(stale_completed[0], ConversationItemInputAudioTranscriptionCompletedEvent)
+        assert stale_completed[0].item_id == first_item_id
+        assert stale_completed[0].transcript == "hello"
+        assert stale_completed[0].usage.seconds == 1.0
+        state = service._state(conn_id)
+        assert first_item_id in state.completed_input_item_ids
+        assert first_item_id not in state.input_transcription_by_item
+        assert first_item_id not in state.input_audio_duration_by_item
+        assert state.current_input_item_id == second_item_id
+        assert runtime_config.chat.buffer == []
+        assert text_prompt_queue.empty()
+        assert state.response_usage.audio_duration_s == 0.0
+
+        second_partial = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="world", turn_id="turn_1", turn_revision=1),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=2.0, turn_id="turn_1", turn_revision=1),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="world", turn_id="turn_1", turn_revision=1),
+        )
+
+        assert second_partial[0].item_id == second_item_id
+        assert second_partial[0].delta == "world"
+        assert service._state(conn_id).response_usage.audio_duration_s == 2.0
+        assert text_prompt_queue.get_nowait().turn_revision == 1
+        assert text_prompt_queue.empty()
         service.unregister(conn_id)
 
     def test_stale_transcription_revision_is_ignored(self, runtime_config, should_listen):
