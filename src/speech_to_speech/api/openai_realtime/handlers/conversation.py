@@ -205,8 +205,19 @@ class ConversationHandler(RealtimeBaseHandler):
     def on_partial_transcription(self, conn_id: str, event: PartialTranscriptionEvent) -> list[ServerEvent]:
         """Translate a cumulative STT hypothesis into an append-only Realtime delta."""
         st = self._state(conn_id)
+        item_id = self._input_item_id(conn_id, event.turn_id, event.turn_revision)
+        if item_id is None:
+            logger.debug(
+                "Ignoring partial transcription for unknown turn=%s rev=%s",
+                event.turn_id,
+                event.turn_revision,
+            )
+            return []
+        if item_id in st.completed_input_item_ids:
+            logger.debug("Ignoring partial transcription after completion for item=%s", item_id)
+            return []
         hypothesis = event.delta
-        emitted = st.input_transcription_text
+        emitted = st.input_transcription_by_item.get(item_id, "")
         if not hypothesis or hypothesis == emitted:
             return []
         if not hypothesis.startswith(emitted):
@@ -215,20 +226,20 @@ class ConversationHandler(RealtimeBaseHandler):
             # stream and let the completed event replace it with the final text.
             logger.debug(
                 "Withholding revised partial transcription for item=%s (emitted=%r, hypothesis=%r)",
-                self._input_item_id(conn_id),
+                item_id,
                 emitted[-40:],
                 hypothesis[-40:],
             )
             return []
 
         delta = hypothesis[len(emitted) :]
-        st.input_transcription_text = hypothesis
+        st.input_transcription_by_item[item_id] = hypothesis
         return [
             ConversationItemInputAudioTranscriptionDeltaEvent(
                 type="conversation.item.input_audio_transcription.delta",
                 event_id=self._next_event_id(),
                 content_index=0,
-                item_id=self._input_item_id(conn_id),
+                item_id=item_id,
                 delta=delta,
             )
         ]
@@ -236,17 +247,40 @@ class ConversationHandler(RealtimeBaseHandler):
     def on_transcription_completed(self, conn_id: str, event: TranscriptionCompletedEvent) -> list[ServerEvent]:
         """Handle transcription_completed: accumulate duration and emit completed event."""
         st = self._state(conn_id)
-        st.response_usage.audio_duration_s += st.input_audio_duration_s
-        st.input_transcription_text = event.transcript
+        item_id = self._input_item_id(conn_id, event.turn_id, event.turn_revision)
+        if item_id is None:
+            logger.debug(
+                "Ignoring transcription completion for unknown turn=%s rev=%s",
+                event.turn_id,
+                event.turn_revision,
+            )
+            return []
+        if item_id in st.completed_input_item_ids:
+            logger.debug("Ignoring duplicate transcription completion for item=%s", item_id)
+            return []
+        duration_s = st.input_audio_duration_by_item.pop(item_id, st.input_audio_duration_s)
+        st.response_usage.audio_duration_s += duration_s
+        st.input_transcription_by_item.pop(item_id, None)
+        st.completed_input_item_ids[item_id] = None
+        while len(st.completed_input_item_ids) > 128:
+            expired_item_id = next(iter(st.completed_input_item_ids))
+            st.completed_input_item_ids.pop(expired_item_id)
+            st.input_item_by_turn_revision = {
+                turn: tracked_item_id
+                for turn, tracked_item_id in st.input_item_by_turn_revision.items()
+                if tracked_item_id != expired_item_id
+            }
+        if st.current_input_item_id == item_id:
+            st.current_input_item_id = None
         return [
             ConversationItemInputAudioTranscriptionCompletedEvent(
                 type="conversation.item.input_audio_transcription.completed",
                 event_id=self._next_event_id(),
                 content_index=0,
-                item_id=self._input_item_id(conn_id),
+                item_id=item_id,
                 transcript=event.transcript,
                 usage=UsageTranscriptTextUsageDuration(
-                    seconds=st.input_audio_duration_s,
+                    seconds=duration_s,
                     type="duration",
                 ),
             )

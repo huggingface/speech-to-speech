@@ -355,8 +355,8 @@ def handle_server_event(
         renderer.finish_live_assistant_text()
         item_id = getattr(event, "item_id", None)
         transcript = event.transcript or ""
-        renderer.user_transcript_by_item[item_id] = transcript
         renderer.render_live_user_text(transcript.strip(), final=True)
+        renderer.user_transcript_by_item.pop(item_id, None)
     elif event.type == "response.created":
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()

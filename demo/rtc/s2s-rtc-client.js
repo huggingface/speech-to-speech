@@ -141,8 +141,8 @@ export class S2sRtcRealtimeClient extends EventTarget {
      * with legacy endpoints that emitted a done event for every text segment. */
     this._asstFullByResp = new Map();
     /** @type {Map<string, string>} Accumulated input-transcription deltas by
-     * item id. Events from different speech turns may arrive out of order, and
-     * an item is retained across a speculative continuation that reuses its id. */
+     * item id. Events from different speech turns may arrive out of order;
+     * completed entries are removed after the authoritative final event. */
     this._userTranscriptByItem = new Map();
     this._muted = false;
     // ── Response lock ────────────────────────────────────────────────────
@@ -599,7 +599,7 @@ export class S2sRtcRealtimeClient extends EventTarget {
         const transcript = typeof event.transcript === "string" ? event.transcript : "";
         const itemId = typeof event.item_id === "string" ? event.item_id : "";
         const hadPartial = Boolean(this._userTranscriptByItem.get(itemId));
-        this._userTranscriptByItem.set(itemId, transcript);
+        this._userTranscriptByItem.delete(itemId);
         if (this._waitingForResponseAfterCollision) {
           // A pending response interrupted by new speech has no response.done;
           // the final transcript is the first safe retry point.

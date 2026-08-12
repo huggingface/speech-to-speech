@@ -377,7 +377,7 @@ def test_audio_client_accumulates_incremental_user_transcription_deltas(capsys):
     ):
         handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
 
-    assert renderer.user_transcript_by_item == {"item_1": "user partial"}
+    assert renderer.user_transcript_by_item == {}
     assert "USER: user partial" in capsys.readouterr().out
 
 
@@ -416,10 +416,7 @@ def test_audio_client_tracks_overlapping_user_transcriptions_by_item(capsys):
     ):
         handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
 
-    assert renderer.user_transcript_by_item == {
-        "item_1": "hello",
-        "item_2": "world",
-    }
+    assert renderer.user_transcript_by_item == {"item_2": "world"}
     output = capsys.readouterr().out
     assert "USER: hello" in output
     assert "USER: world" in output

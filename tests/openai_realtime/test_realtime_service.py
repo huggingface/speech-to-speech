@@ -1763,6 +1763,10 @@ class TestHandleResponseCreate:
     def test_response_create_preserves_latest_user_turn_timing(self, service, conn_id, text_prompt_queue):
         service.dispatch_pipeline_event(
             conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=2),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
             TranscriptionCompletedEvent(
                 transcript="hello",
                 language_code="en",
@@ -2015,6 +2019,10 @@ class TestHandleResponseCreate:
         assert len(chat.buffer) == 1  # in-band input is threaded into the conversation
 
     def test_response_create_out_of_band_carries_null_turn(self, service, conn_id, text_prompt_queue):
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=2),
+        )
         service.dispatch_pipeline_event(
             conn_id,
             TranscriptionCompletedEvent(
@@ -3392,7 +3400,7 @@ class TestDispatchPipelineEvent:
         assert second_partial[0].delta == "new"
         assert second_partial[0].content_index == 0
 
-    def test_reopened_input_item_continues_partial_transcription_delta(self, service, conn_id):
+    def test_reopened_turn_starts_a_new_transcription_item(self, service, conn_id):
         first_started = service.dispatch_pipeline_event(
             conn_id,
             SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
@@ -3415,9 +3423,92 @@ class TestDispatchPipelineEvent:
             PartialTranscriptionEvent(delta="hello again", turn_id="turn_1", turn_revision=1),
         )
 
-        assert reopened[0].item_id == first_started[0].item_id
-        assert continued[0].delta == " again"
+        assert reopened[0].item_id != first_started[0].item_id
+        assert continued[0].item_id == reopened[0].item_id
+        assert continued[0].delta == "hello again"
         assert continued[0].content_index == 0
+
+    def test_completed_input_item_does_not_emit_later_deltas(self, service, conn_id):
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1"))
+        service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello", turn_id="turn_1"),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="hello", turn_id="turn_1"),
+        )
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello again", turn_id="turn_1"),
+        )
+
+        assert events == []
+
+    def test_late_completion_and_overlapping_partial_keep_originating_item(self, service, conn_id):
+        first_started = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1"),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello", turn_id="turn_1"),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=1.0, turn_id="turn_1"),
+        )
+
+        second_started = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_2"),
+        )
+        first_second_partial = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="wor", turn_id="turn_2"),
+        )
+        late_first_completion = service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="hello", turn_id="turn_1"),
+        )
+        second_second_partial = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="world", turn_id="turn_2"),
+        )
+
+        first_item_id = first_started[0].item_id
+        second_item_id = second_started[0].item_id
+        assert first_item_id != second_item_id
+        assert late_first_completion[0].item_id == first_item_id
+        assert late_first_completion[0].usage.seconds == 1.0
+        assert first_second_partial[0].item_id == second_item_id
+        assert first_second_partial[0].delta == "wor"
+        assert second_second_partial[0].item_id == second_item_id
+        assert second_second_partial[0].delta == "ld"
+        assert service._state(conn_id).input_transcription_by_item == {second_item_id: "world"}
+
+    def test_completed_input_item_state_is_bounded(self, service, conn_id):
+        for index in range(130):
+            turn_id = f"turn_{index}"
+            service.dispatch_pipeline_event(
+                conn_id,
+                SpeechStartedEvent(turn_id=turn_id, turn_revision=0),
+            )
+            service.dispatch_pipeline_event(
+                conn_id,
+                TranscriptionCompletedEvent(
+                    transcript=f"text {index}",
+                    turn_id=turn_id,
+                    turn_revision=0,
+                ),
+            )
+
+        state = service._state(conn_id)
+        assert len(state.completed_input_item_ids) == 128
+        assert len(state.input_item_by_turn_revision) == 128
+        assert state.input_transcription_by_item == {}
+        assert state.input_audio_duration_by_item == {}
 
     # -- transcription_completed --
 

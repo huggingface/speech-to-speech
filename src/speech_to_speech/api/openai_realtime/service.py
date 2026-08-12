@@ -186,10 +186,13 @@ class ConnState(BaseModel):
     response_error_type: Optional[str] = None
     current_item_id: Optional[str] = None
     content_index: int = 0
-    # Text already exposed to the client for the active input-audio content
-    # part. Internal STT partials are cumulative hypotheses; the Realtime wire
-    # protocol requires append-only deltas.
-    input_transcription_text: str = ""
+    current_input_item_id: Optional[str] = None
+    # Input transcription can overlap across turns. Route pipeline events back
+    # to their originating protocol item and keep append-only state per item.
+    input_item_by_turn_revision: dict[tuple[str, int | None], str] = Field(default_factory=dict)
+    input_transcription_by_item: dict[str, str] = Field(default_factory=dict)
+    input_audio_duration_by_item: dict[str, float] = Field(default_factory=dict)
+    completed_input_item_ids: dict[str, None] = Field(default_factory=dict)
     input_audio_duration_s: float = 0.0
     last_item_id: Optional[str] = None
     current_response_params: RealtimeResponseCreateParams | None = None
@@ -222,7 +225,6 @@ class ConnState(BaseModel):
     speculative_user_turn_revision: Optional[int] = None
     speculative_user_speech_stopped_at_s: Optional[float] = None
     speculative_user_item_id: Optional[str] = None
-    speculative_input_item_id: Optional[str] = None
     speculative_audio_duration_s: float = 0.0
     # Client conversation.item.create items that arrived while a response was
     # generating. Applying them mid-generation races the LLM handler's chat
@@ -603,6 +605,19 @@ class RealtimeService:
     def _on_transcription_completed(self, conn_id: str, event: TranscriptionCompletedEvent) -> list[ServerEvent]:
         """Handle a final STT transcription: emit protocol event, append to chat, trigger LM."""
         st = self._state(conn_id)
+        input_item_id = (
+            st.input_item_by_turn_revision.get((event.turn_id, event.turn_revision))
+            if event.turn_id is not None
+            else st.current_input_item_id or self.response._current_item_id(conn_id)
+        )
+        if input_item_id is None or input_item_id in st.completed_input_item_ids:
+            logger.debug(
+                "Ignoring transcription completion for unknown or completed turn=%s rev=%s",
+                event.turn_id,
+                event.turn_revision,
+            )
+            return []
+        input_duration_s = st.input_audio_duration_by_item.get(input_item_id, st.input_audio_duration_s)
         self.response.discard_tool_followup_prefetch(conn_id)
         st.generation_done_tool_calls.clear()
         st.completed_tool_response_keys.clear()
@@ -613,8 +628,10 @@ class RealtimeService:
             st.speculative_audio_duration_s = 0.0
 
         events = self.conversation.on_transcription_completed(conn_id, event)
+        if not events:
+            return []
         if event.turn_id is not None:
-            st.speculative_audio_duration_s = st.input_audio_duration_s
+            st.speculative_audio_duration_s = input_duration_s
 
         cfg = st.runtime_config
         transcript = event.transcript

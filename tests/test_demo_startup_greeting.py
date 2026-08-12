@@ -177,7 +177,7 @@ if (client._asstTranscriptByResp.size !== 0 || client._asstFullByResp.size !== 0
         ("./demo/rtc/s2s-rtc-client.js", "S2sRtcRealtimeClient", "_onDcMessage"),
     ],
 )
-def test_demo_clients_accumulate_user_transcription_deltas_across_reopen(module_path, class_name, message_handler):
+def test_demo_clients_start_a_new_transcript_stream_after_completion(module_path, class_name, message_handler):
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required for demo client tests")
@@ -222,19 +222,19 @@ await deliver({{
   content_index: 0,
   transcript: "hello",
 }});
-await deliver({{ type: "input_audio_buffer.speech_started", item_id: "item_1" }});
+await deliver({{ type: "input_audio_buffer.speech_started", item_id: "item_2" }});
 await deliver({{
   type: "conversation.item.input_audio_transcription.delta",
-  item_id: "item_1",
+  item_id: "item_2",
   content_index: 0,
-  delta: " again",
+  delta: "hello again",
 }});
 
 const expected = [
   {{ role: "user", text: "hel", partial: true, itemId: "item_1" }},
   {{ role: "user", text: "hello", partial: true, itemId: "item_1" }},
   {{ role: "user", text: "hello", partial: false, itemId: "item_1" }},
-  {{ role: "user", text: "hello again", partial: true, itemId: "item_1" }},
+  {{ role: "user", text: "hello again", partial: true, itemId: "item_2" }},
 ];
 if (JSON.stringify(transcripts) !== JSON.stringify(expected)) {{
   throw new Error(`unexpected transcript events: ${{JSON.stringify(transcripts)}}`);
@@ -325,8 +325,8 @@ const expected = [
 if (JSON.stringify(transcripts) !== JSON.stringify(expected)) {{
   throw new Error(`unexpected transcript events: ${{JSON.stringify(transcripts)}}`);
 }}
-if (client._userTranscriptByItem.get("item_1") !== "hello") {{
-  throw new Error("item_1 transcript was not preserved");
+if (client._userTranscriptByItem.has("item_1")) {{
+  throw new Error("completed item_1 transcript was not pruned");
 }}
 if (client._userTranscriptByItem.get("item_2") !== "world") {{
   throw new Error("item_2 transcript lost its prefix");
@@ -458,8 +458,8 @@ const expected = [
 if (JSON.stringify(transcripts) !== JSON.stringify(expected)) {{
   throw new Error(`unexpected transcript events: ${{JSON.stringify(transcripts)}}`);
 }}
-if (client._userTranscriptByItem.get("item_1") !== "") {{
-  throw new Error("empty completion did not replace the partial transcript");
+if (client._userTranscriptByItem.has("item_1")) {{
+  throw new Error("empty completion did not prune the partial transcript");
 }}
 """
     subprocess.run(
