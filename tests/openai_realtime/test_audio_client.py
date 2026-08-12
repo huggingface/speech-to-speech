@@ -240,6 +240,22 @@ def test_audio_client_clears_unplayed_audio_on_barge_in(capsys):
     capsys.readouterr()
 
 
+def test_audio_client_does_not_allocate_transcript_state_for_direct_audio_turns(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    for index in range(130):
+        handle_server_event(
+            SimpleNamespace(type="input_audio_buffer.speech_started", item_id=f"item_{index}"),
+            playback=playback,
+            renderer=renderer,
+            print_json=False,
+        )
+
+    assert renderer.user_transcript_by_item == {}
+    capsys.readouterr()
+
+
 def test_audio_client_clears_unplayed_audio_when_response_is_cancelled(capsys):
     playback = PlaybackBuffer(16000)
     renderer = _FriendlyEventRenderer()

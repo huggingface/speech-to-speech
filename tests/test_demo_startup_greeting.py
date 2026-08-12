@@ -348,6 +348,61 @@ if (client._userTranscriptByItem.get("item_2") !== "world") {{
         ("./demo/rtc/s2s-rtc-client.js", "S2sRtcRealtimeClient", "_onDcMessage"),
     ],
 )
+def test_demo_clients_do_not_allocate_transcript_state_for_direct_audio_turns(
+    module_path,
+    class_name,
+    message_handler,
+):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for demo client tests")
+
+    script = f"""
+globalThis.localStorage = {{ getItem() {{ return null; }} }};
+globalThis.CustomEvent = class CustomEvent extends Event {{
+  constructor(type, init = {{}}) {{
+    super(type);
+    this.detail = init.detail;
+  }}
+}};
+const {{ {class_name} }} = await import({json.dumps(module_path)});
+const client = new {class_name}({{
+  voice: "Aiden",
+  instructions: "Be helpful.",
+  directUrl: "ws://unused",
+  callsUrl: "api/calls",
+}});
+const deliver = async (event) => {{
+  await client[{json.dumps(message_handler)}](JSON.stringify(event));
+}};
+
+for (let index = 0; index < 130; index += 1) {{
+  await deliver({{
+    type: "input_audio_buffer.speech_started",
+    item_id: `item_${{index}}`,
+  }});
+}}
+
+if (client._userTranscriptByItem.size !== 0) {{
+  throw new Error(`direct-audio turns retained ${{client._userTranscriptByItem.size}} transcript entries`);
+}}
+"""
+    subprocess.run(
+        [node, "--input-type=module", "-e", script],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "module_path,class_name,message_handler",
+    [
+        ("./demo/ws/s2s-ws-client.js", "S2sWsRealtimeClient", "_onWsMessage"),
+        ("./demo/rtc/s2s-rtc-client.js", "S2sRtcRealtimeClient", "_onDcMessage"),
+    ],
+)
 def test_demo_clients_leave_processing_after_empty_transcript(module_path, class_name, message_handler):
     node = shutil.which("node")
     if node is None:

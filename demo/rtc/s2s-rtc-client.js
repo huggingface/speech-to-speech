@@ -478,9 +478,6 @@ export class S2sRtcRealtimeClient extends EventTarget {
 
       case "input_audio_buffer.speech_started": {
         const itemId = typeof event.item_id === "string" ? event.item_id : "";
-        if (!this._userTranscriptByItem.has(itemId)) {
-          this._userTranscriptByItem.set(itemId, "");
-        }
         // Barge-in: unlike WS there is no client playback buffer to clear —
         // the server flushes its track buffer — so this is UI state only.
         this._aiSpeaking = false;

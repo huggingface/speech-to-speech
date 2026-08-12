@@ -336,8 +336,6 @@ def handle_server_event(
     elif event.type == "input_audio_buffer.speech_started":
         renderer.finish_live_assistant_text()
         playback.clear()
-        item_id = getattr(event, "item_id", None)
-        renderer.user_transcript_by_item.setdefault(item_id, "")
         if renderer.saw_user_speech:
             print("", flush=True)
         renderer.saw_user_speech = True

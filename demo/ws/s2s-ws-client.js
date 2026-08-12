@@ -696,9 +696,6 @@ export class S2sWsRealtimeClient extends EventTarget {
 
       case "input_audio_buffer.speech_started": {
         const itemId = typeof event.item_id === "string" ? event.item_id : "";
-        if (!this._userTranscriptByItem.has(itemId)) {
-          this._userTranscriptByItem.set(itemId, "");
-        }
         // User started speaking — stop any audio still playing OR queued, every
         // time. We clear unconditionally (not just when `_aiSpeaking`): after a
         // reply or a tool result the worklet's ring buffer can still be draining
