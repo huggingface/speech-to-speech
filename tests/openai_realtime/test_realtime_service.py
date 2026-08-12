@@ -3544,6 +3544,13 @@ class TestDispatchPipelineEvent:
             )
             assert len(events) == 1
             started_item_ids.append(events[0].item_id)
+            if index == 0:
+                partial = service.dispatch_pipeline_event(
+                    conn_id,
+                    PartialTranscriptionEvent(delta="hel", turn_id="turn_0", turn_revision=0),
+                )
+                assert len(partial) == 1
+                assert partial[0].delta == "hel"
 
         state = service._state(conn_id)
         assert len(state.input_item_by_turn_revision) == 130
@@ -3555,17 +3562,24 @@ class TestDispatchPipelineEvent:
         assert started_item_ids[-1] in state.input_transcription_by_item
         assert state.current_input_item_id == started_item_ids[-1]
 
+        late_partial = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello", turn_id="turn_0", turn_revision=0),
+        )
+        assert late_partial == []
+        assert started_item_ids[0] not in state.input_transcription_by_item
+
         late_completion = service.dispatch_pipeline_event(
             conn_id,
-            TranscriptionCompletedEvent(transcript="late", turn_id="turn_0", turn_revision=0),
+            TranscriptionCompletedEvent(transcript="hello", turn_id="turn_0", turn_revision=0),
         )
 
         assert len(late_completion) == 1
         assert late_completion[0].item_id == started_item_ids[0]
-        assert late_completion[0].transcript == "late"
+        assert late_completion[0].transcript == "hello"
         assert late_completion[0].usage.seconds == 0.0
         user_items = [item for item in runtime_config.chat.buffer if getattr(item, "role", None) == "user"]
-        assert [item.content[0].text for item in user_items] == ["late"]
+        assert [item.content[0].text for item in user_items] == ["hello"]
         assert text_prompt_queue.get_nowait().turn_id == "turn_0"
 
     # -- transcription_completed --

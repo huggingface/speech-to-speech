@@ -216,8 +216,14 @@ class ConversationHandler(RealtimeBaseHandler):
         if item_id in st.completed_input_item_ids:
             logger.debug("Ignoring partial transcription after completion for item=%s", item_id)
             return []
+        if item_id not in st.input_transcription_by_item:
+            # The bounded buffer no longer contains the emitted prefix. Keep
+            # the wire stream append-only by waiting for the authoritative
+            # completion instead of replaying a cumulative hypothesis.
+            logger.debug("Ignoring partial transcription after buffer eviction for item=%s", item_id)
+            return []
         hypothesis = event.delta
-        emitted = st.input_transcription_by_item.get(item_id, "")
+        emitted = st.input_transcription_by_item[item_id]
         if not hypothesis or hypothesis == emitted:
             return []
         if not hypothesis.startswith(emitted):
