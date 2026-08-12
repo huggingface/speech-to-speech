@@ -598,6 +598,7 @@ export class S2sRtcRealtimeClient extends EventTarget {
       case "conversation.item.input_audio_transcription.completed": {
         const transcript = typeof event.transcript === "string" ? event.transcript : "";
         const itemId = typeof event.item_id === "string" ? event.item_id : "";
+        const hadPartial = Boolean(this._userTranscriptByItem.get(itemId));
         this._userTranscriptByItem.set(itemId, transcript);
         if (this._waitingForResponseAfterCollision) {
           // A pending response interrupted by new speech has no response.done;
@@ -605,7 +606,7 @@ export class S2sRtcRealtimeClient extends EventTarget {
           this._waitingForResponseAfterCollision = false;
           this._flushQueuedCreate();
         }
-        if (transcript) {
+        if (transcript || hadPartial) {
           this.dispatchEvent(
             new CustomEvent("transcript", {
               detail: {
@@ -616,7 +617,8 @@ export class S2sRtcRealtimeClient extends EventTarget {
               },
             }),
           );
-        } else if (this._status === "processing" && !this._responsePending()) {
+        }
+        if (!transcript && this._status === "processing" && !this._responsePending()) {
           // Empty STT results intentionally do not create a response, so there
           // will be no response.done event to return the UI to listening.
           this._setStatus("connected");

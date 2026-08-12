@@ -54,10 +54,14 @@ class SpeechStoppedEvent(PipelineEvent):
 
 
 class PartialTranscriptionEvent(PipelineEvent):
-    """Latest cumulative STT hypothesis for one input-audio item."""
+    """Latest cumulative STT hypothesis for one input-audio item.
+
+    ``delta`` is retained for public API compatibility. Its value is a
+    cumulative internal hypothesis, not an incremental wire-protocol delta.
+    """
 
     type: Literal["partial_transcription"] = "partial_transcription"
-    transcript: str
+    delta: str
     turn_id: str | None = None
     turn_revision: int | None = None
 

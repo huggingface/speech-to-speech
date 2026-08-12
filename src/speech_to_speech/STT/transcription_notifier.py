@@ -35,7 +35,7 @@ class TranscriptionNotifier(BaseHandler[STTOut, LLMIn]):
             if self.text_output_queue and transcription.text:
                 self.text_output_queue.put(
                     PartialTranscriptionEvent(
-                        transcript=str(transcription.text),
+                        delta=str(transcription.text),
                         turn_id=transcription.turn_id,
                         turn_revision=transcription.turn_revision,
                     )

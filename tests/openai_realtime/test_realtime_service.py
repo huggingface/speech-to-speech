@@ -3343,11 +3343,11 @@ class TestDispatchPipelineEvent:
         service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
         e1 = service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(transcript="hel"),
+            PartialTranscriptionEvent(delta="hel"),
         )
         e2 = service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(transcript="hello"),
+            PartialTranscriptionEvent(delta="hello"),
         )
         assert isinstance(e1[0], ConversationItemInputAudioTranscriptionDeltaEvent)
         assert e1[0].content_index == 0
@@ -3360,16 +3360,16 @@ class TestDispatchPipelineEvent:
         service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
         service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(transcript="hello"),
+            PartialTranscriptionEvent(delta="hello"),
         )
 
         duplicate = service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(transcript="hello"),
+            PartialTranscriptionEvent(delta="hello"),
         )
         revised = service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(transcript="hullo"),
+            PartialTranscriptionEvent(delta="hullo"),
         )
 
         assert duplicate == []
@@ -3379,13 +3379,13 @@ class TestDispatchPipelineEvent:
         first_started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1"))
         service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(transcript="hello", turn_id="turn_1"),
+            PartialTranscriptionEvent(delta="hello", turn_id="turn_1"),
         )
 
         second_started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_2"))
         second_partial = service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(transcript="new", turn_id="turn_2"),
+            PartialTranscriptionEvent(delta="new", turn_id="turn_2"),
         )
 
         assert first_started[0].item_id != second_started[0].item_id
@@ -3399,7 +3399,7 @@ class TestDispatchPipelineEvent:
         )
         service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(transcript="hello", turn_id="turn_1", turn_revision=0),
+            PartialTranscriptionEvent(delta="hello", turn_id="turn_1", turn_revision=0),
         )
         service.dispatch_pipeline_event(
             conn_id,
@@ -3412,7 +3412,7 @@ class TestDispatchPipelineEvent:
         )
         continued = service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(transcript="hello again", turn_id="turn_1", turn_revision=1),
+            PartialTranscriptionEvent(delta="hello again", turn_id="turn_1", turn_revision=1),
         )
 
         assert reopened[0].item_id == first_started[0].item_id

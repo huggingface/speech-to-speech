@@ -205,7 +205,7 @@ class ConversationHandler(RealtimeBaseHandler):
     def on_partial_transcription(self, conn_id: str, event: PartialTranscriptionEvent) -> list[ServerEvent]:
         """Translate a cumulative STT hypothesis into an append-only Realtime delta."""
         st = self._state(conn_id)
-        hypothesis = event.transcript
+        hypothesis = event.delta
         emitted = st.input_transcription_text
         if not hypothesis or hypothesis == emitted:
             return []
