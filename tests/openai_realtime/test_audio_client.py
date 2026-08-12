@@ -377,8 +377,52 @@ def test_audio_client_accumulates_incremental_user_transcription_deltas(capsys):
     ):
         handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
 
-    assert renderer.partial_user_text == "user partial"
+    assert renderer.user_transcript_by_item == {"item_1": "user partial"}
     assert "USER: user partial" in capsys.readouterr().out
+
+
+def test_audio_client_tracks_overlapping_user_transcriptions_by_item(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    for event in (
+        SimpleNamespace(type="input_audio_buffer.speech_started", item_id="item_1"),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="item_1",
+            delta="hel",
+        ),
+        SimpleNamespace(type="input_audio_buffer.speech_started", item_id="item_2"),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="item_2",
+            delta="wor",
+        ),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="item_1",
+            delta="lo",
+        ),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="item_1",
+            transcript="hello",
+        ),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="item_2",
+            delta="ld",
+        ),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    assert renderer.user_transcript_by_item == {
+        "item_1": "hello",
+        "item_2": "world",
+    }
+    output = capsys.readouterr().out
+    assert "USER: hello" in output
+    assert "USER: world" in output
 
 
 def test_audio_client_response_done_preserves_other_response_transcripts(capsys):

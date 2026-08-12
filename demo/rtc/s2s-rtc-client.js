@@ -140,9 +140,9 @@ export class S2sRtcRealtimeClient extends EventTarget {
      * Realtime emits one `*.transcript.done`; appending remains for compatibility
      * with legacy endpoints that emitted a done event for every text segment. */
     this._asstFullByResp = new Map();
-    /** @type {Map<string, string>} Accumulated input-transcription deltas for
-     * the active user item. Preserved when a speculative continuation reuses
-     * the same item id. */
+    /** @type {Map<string, string>} Accumulated input-transcription deltas by
+     * item id. Events from different speech turns may arrive out of order, and
+     * an item is retained across a speculative continuation that reuses its id. */
     this._userTranscriptByItem = new Map();
     this._muted = false;
     // ── Response lock ────────────────────────────────────────────────────
@@ -479,7 +479,6 @@ export class S2sRtcRealtimeClient extends EventTarget {
       case "input_audio_buffer.speech_started": {
         const itemId = typeof event.item_id === "string" ? event.item_id : "";
         if (!this._userTranscriptByItem.has(itemId)) {
-          this._userTranscriptByItem.clear();
           this._userTranscriptByItem.set(itemId, "");
         }
         // Barge-in: unlike WS there is no client playback buffer to clear —
