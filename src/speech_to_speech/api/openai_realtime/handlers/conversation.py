@@ -282,8 +282,6 @@ class ConversationHandler(RealtimeBaseHandler):
         self,
         conn_id: str,
         event: TranscriptionCompletedEvent,
-        *,
-        account_usage: bool = True,
     ) -> list[ConversationItemInputAudioTranscriptionCompletedEvent]:
         """Terminalize one transcript item and emit its authoritative final event."""
         st = self._state(conn_id)
@@ -291,8 +289,7 @@ class ConversationHandler(RealtimeBaseHandler):
         if terminal is None:
             return []
         item_id, duration_s = terminal
-        if account_usage:
-            st.response_usage.audio_duration_s += duration_s
+        st.response_usage.audio_duration_s += duration_s
         return [
             ConversationItemInputAudioTranscriptionCompletedEvent(
                 type="conversation.item.input_audio_transcription.completed",

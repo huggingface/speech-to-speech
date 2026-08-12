@@ -436,8 +436,8 @@ export class ChatView {
    */
   onUserTurnStarted(detail = {}) {
     const id = detail.itemId || `_u${++this._anonSeq}`;
-    // A fresh start supersedes any tombstone left by prior assistant activity.
-    // Reusing an id remains tolerated for compatibility with older servers.
+    // A speculative continuation can reuse an incomplete item, so a fresh
+    // start supersedes any tombstone left by prior assistant activity.
     this._assistantDismissedUserItemId = "";
     const reusable = this._activeUserItemId === id
       && this._activeUserBubble?.isConnected
@@ -531,8 +531,8 @@ export class ChatView {
   /**
    * Attach the browser-local recording to its user turn. This also creates an
    * audio-only row when STT is disabled and no transcript events arrive.
-   * Reused item IDs from older servers replace the existing WAV; current
-   * protocol items normally receive one recording each.
+   * Speculative continuations can reuse an incomplete item ID; their
+   * accumulated replacement WAV keeps one player on that item's row.
    * @param {{ itemId?: string, audio: Blob, durationMs?: number, truncated?: boolean }} detail
    */
   onUserAudio(detail) {

@@ -57,6 +57,29 @@ class AudioHandler(RealtimeBaseHandler):
             st.input_item_by_turn_revision[(turn_id, turn_revision)] = item_id
         return item_id
 
+    def _reuse_input_item(
+        self,
+        conn_id: str,
+        item_id: str,
+        *,
+        turn_id: str,
+        turn_revision: int | None,
+        preserve_active_response: bool,
+    ) -> str:
+        """Move an incomplete input item to the latest speculative revision."""
+        st = self._state(conn_id)
+        if not preserve_active_response:
+            st.current_item_id = item_id
+            st.content_index = 0
+        st.current_input_item_id = item_id
+        st.input_item_by_turn_revision = {
+            turn: tracked_item_id
+            for turn, tracked_item_id in st.input_item_by_turn_revision.items()
+            if tracked_item_id != item_id
+        }
+        st.input_item_by_turn_revision[(turn_id, turn_revision)] = item_id
+        return item_id
+
     def handle_audio_append(self, conn_id: str, event: InputAudioBufferAppendEvent) -> list[bytes]:
         """Decode base64 audio, resample to pipeline rate, and split into 512-sample PCM16 chunks for the VAD."""
         try:
@@ -131,12 +154,27 @@ class AudioHandler(RealtimeBaseHandler):
             st.completed_tool_response_keys.clear()
         is_reopen = bool(event.reopened and event.turn_id is not None and event.turn_id == st.speculative_turn_id)
         preserve_active_response = st.in_response
-        input_item_id = self._start_input_item(
-            conn_id,
-            turn_id=event.turn_id,
-            turn_revision=event.turn_revision,
-            preserve_active_response=preserve_active_response,
+        previous_input_item_id = (
+            st.input_item_by_turn_revision.get((event.turn_id, st.speculative_turn_revision))
+            if is_reopen and event.turn_id is not None
+            else None
         )
+        if previous_input_item_id is not None and previous_input_item_id not in st.completed_input_item_ids:
+            assert event.turn_id is not None
+            input_item_id = self._reuse_input_item(
+                conn_id,
+                previous_input_item_id,
+                turn_id=event.turn_id,
+                turn_revision=event.turn_revision,
+                preserve_active_response=preserve_active_response,
+            )
+        else:
+            input_item_id = self._start_input_item(
+                conn_id,
+                turn_id=event.turn_id,
+                turn_revision=event.turn_revision,
+                preserve_active_response=preserve_active_response,
+            )
         if not is_reopen:
             st.response_usage.turns += 1
         st.speculative_turn_id = event.turn_id

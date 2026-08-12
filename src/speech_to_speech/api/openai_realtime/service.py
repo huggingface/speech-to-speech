@@ -535,28 +535,6 @@ class RealtimeService:
         if is_stale is None:
             return None
         if is_stale:
-            if isinstance(event, TranscriptionCompletedEvent):
-                logger.info(
-                    "Terminalizing stale transcription for turn=%s rev=%s without conversation effects",
-                    event.turn_id,
-                    event.turn_revision,
-                )
-                stale_events: list[ServerEvent] = [
-                    *self.conversation.on_transcription_completed(
-                        conn_id,
-                        event,
-                        account_usage=False,
-                    )
-                ]
-                return stale_events
-            if isinstance(event, AudioInputCompletedEvent):
-                logger.info(
-                    "Terminalizing stale direct audio for turn=%s rev=%s without conversation effects",
-                    event.turn_id,
-                    event.turn_revision,
-                )
-                self.conversation.terminalize_input_item(conn_id, event.turn_id, event.turn_revision)
-                return []
             logger.info(
                 "Ignoring stale %s for turn=%s rev=%s",
                 event.type,
