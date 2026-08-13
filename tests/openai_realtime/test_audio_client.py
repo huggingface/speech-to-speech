@@ -438,7 +438,7 @@ def test_audio_client_tracks_overlapping_user_transcriptions_by_item(capsys):
     assert "USER: world" in output
 
 
-def test_audio_client_silently_discards_oldest_unterminated_transcript(capsys):
+def test_audio_client_retains_unterminated_transcripts_until_completion(capsys):
     playback = PlaybackBuffer(16000)
     renderer = _FriendlyEventRenderer()
 
@@ -454,10 +454,34 @@ def test_audio_client_silently_discards_oldest_unterminated_transcript(capsys):
             print_json=False,
         )
 
-    assert len(renderer.user_transcript_by_item) == 128
-    assert "item_0" not in renderer.user_transcript_by_item
-    assert "item_1" not in renderer.user_transcript_by_item
+    assert len(renderer.user_transcript_by_item) == 130
+    assert renderer.user_transcript_by_item["item_0"] == "0"
+    assert renderer.user_transcript_by_item["item_1"] == "1"
     assert renderer.user_transcript_by_item["item_129"] == "129"
+
+    handle_server_event(
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="item_0",
+            delta=" more",
+        ),
+        playback=playback,
+        renderer=renderer,
+        print_json=False,
+    )
+    assert renderer.user_transcript_by_item["item_0"] == "0 more"
+
+    handle_server_event(
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="item_0",
+            transcript="",
+        ),
+        playback=playback,
+        renderer=renderer,
+        print_json=False,
+    )
+    assert "item_0" not in renderer.user_transcript_by_item
     capsys.readouterr()
 
 

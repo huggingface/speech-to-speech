@@ -403,7 +403,7 @@ if (client._userTranscriptByItem.size !== 0) {{
         ("./demo/rtc/s2s-rtc-client.js", "S2sRtcRealtimeClient", "_onDcMessage"),
     ],
 )
-def test_demo_clients_silently_discard_oldest_unterminated_transcript(
+def test_demo_clients_retain_unterminated_transcripts_until_completion(
     module_path,
     class_name,
     message_handler,
@@ -427,6 +427,8 @@ const client = new {class_name}({{
   directUrl: "ws://unused",
   callsUrl: "api/calls",
 }});
+const transcripts = [];
+client.addEventListener("transcript", (event) => transcripts.push(event.detail));
 const deliver = async (event) => {{
   await client[{json.dumps(message_handler)}](JSON.stringify(event));
 }};
@@ -440,14 +442,39 @@ for (let index = 0; index < 130; index += 1) {{
   }});
 }}
 
-if (client._userTranscriptByItem.size !== 128) {{
+if (client._userTranscriptByItem.size !== 130) {{
   throw new Error(`retained ${{client._userTranscriptByItem.size}} transcript entries`);
 }}
-if (client._userTranscriptByItem.has("item_0") || client._userTranscriptByItem.has("item_1")) {{
-  throw new Error("oldest transcript entries were not discarded");
+if (client._userTranscriptByItem.get("item_0") !== "0" || client._userTranscriptByItem.get("item_1") !== "1") {{
+  throw new Error("oldest transcript entries were not retained");
 }}
 if (client._userTranscriptByItem.get("item_129") !== "129") {{
   throw new Error("newest transcript entry was not retained");
+}}
+
+await deliver({{
+  type: "conversation.item.input_audio_transcription.delta",
+  item_id: "item_0",
+  content_index: 0,
+  delta: " more",
+}});
+const continued = transcripts.at(-1);
+if (continued.text !== "0 more" || !continued.partial || continued.itemId !== "item_0") {{
+  throw new Error(`oldest transcript did not accumulate its late delta: ${{JSON.stringify(continued)}}`);
+}}
+
+await deliver({{
+  type: "conversation.item.input_audio_transcription.completed",
+  item_id: "item_0",
+  content_index: 0,
+  transcript: "",
+}});
+const completed = transcripts.at(-1);
+if (completed.text !== "" || completed.partial || completed.itemId !== "item_0") {{
+  throw new Error(`empty completion did not clear the oldest transcript: ${{JSON.stringify(completed)}}`);
+}}
+if (client._userTranscriptByItem.has("item_0") || client._userTranscriptByItem.size !== 129) {{
+  throw new Error("completed oldest transcript was not pruned");
 }}
 """
     subprocess.run(

@@ -3551,11 +3551,15 @@ class TestDispatchPipelineEvent:
                 )
                 assert len(partial) == 1
                 assert partial[0].delta == "hel"
+                service.dispatch_pipeline_event(
+                    conn_id,
+                    SpeechStoppedEvent(duration_s=1.0, turn_id="turn_0", turn_revision=0),
+                )
 
         state = service._state(conn_id)
         assert len(state.input_item_by_turn_revision) == 130
         assert len(state.input_transcription_by_item) == 128
-        assert len(state.input_audio_duration_by_item) == 128
+        assert len(state.input_audio_duration_by_item) == 130
         assert state.completed_input_item_ids == {}
         assert started_item_ids[0] not in state.input_transcription_by_item
         assert started_item_ids[1] not in state.input_transcription_by_item
@@ -3577,7 +3581,8 @@ class TestDispatchPipelineEvent:
         assert len(late_completion) == 1
         assert late_completion[0].item_id == started_item_ids[0]
         assert late_completion[0].transcript == "hello"
-        assert late_completion[0].usage.seconds == 0.0
+        assert late_completion[0].usage.seconds == 1.0
+        assert state.response_usage.audio_duration_s == 1.0
         user_items = [item for item in runtime_config.chat.buffer if getattr(item, "role", None) == "user"]
         assert [item.content[0].text for item in user_items] == ["hello"]
         assert text_prompt_queue.get_nowait().turn_id == "turn_0"

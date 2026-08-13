@@ -238,8 +238,6 @@ class PlaybackBuffer:
 
 
 class _FriendlyEventRenderer:
-    _MAX_ACTIVE_USER_TRANSCRIPTS = 128
-
     def __init__(self) -> None:
         # Input transcription events can arrive out of order across items.
         self.user_transcript_by_item: dict[str | None, str] = {}
@@ -348,8 +346,6 @@ def handle_server_event(
         item_id = getattr(event, "item_id", None)
         transcript = renderer.user_transcript_by_item.get(item_id, "") + (event.delta or "")
         renderer.user_transcript_by_item[item_id] = transcript
-        while len(renderer.user_transcript_by_item) > renderer._MAX_ACTIVE_USER_TRANSCRIPTS:
-            renderer.user_transcript_by_item.pop(next(iter(renderer.user_transcript_by_item)))
         display_text = transcript.strip()
         if display_text:
             renderer.render_live_user_text(display_text)

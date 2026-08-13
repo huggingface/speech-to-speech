@@ -107,12 +107,11 @@ class AudioHandler(RealtimeBaseHandler):
             st.current_input_item_id = None
 
     def bound_input_item_buffers(self, conn_id: str) -> None:
-        """Discard old transcript buffers while retaining routes for late terminals."""
+        """Discard old transcript prefixes while retaining terminal state."""
         st = self._state(conn_id)
         while len(st.input_transcription_by_item) > MAX_BUFFERED_INPUT_ITEMS:
             oldest_item_id = next(iter(st.input_transcription_by_item))
             st.input_transcription_by_item.pop(oldest_item_id)
-            st.input_audio_duration_by_item.pop(oldest_item_id, None)
 
     def handle_audio_append(self, conn_id: str, event: InputAudioBufferAppendEvent) -> list[bytes]:
         """Decode base64 audio, resample to pipeline rate, and split into 512-sample PCM16 chunks for the VAD."""
@@ -237,8 +236,7 @@ class AudioHandler(RealtimeBaseHandler):
             return []
         if event.duration_s:
             st.input_audio_duration_s = event.duration_s
-            if item_id in st.input_transcription_by_item:
-                st.input_audio_duration_by_item[item_id] = event.duration_s
+            st.input_audio_duration_by_item[item_id] = event.duration_s
         return [
             InputAudioBufferSpeechStoppedEvent(
                 type="input_audio_buffer.speech_stopped",
