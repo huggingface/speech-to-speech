@@ -57,7 +57,7 @@ jobs:
           cache: npm
           cache-dependency-path: demo/package-lock.json
       - run: uv sync --group dev
-      - run: npm ci --prefix demo
+      - run: npm ci --prefix demo --no-audit --no-fund
       - run: npx --prefix demo playwright install --with-deps chromium
       - run: npm --prefix demo run test:agents:adapter
       - run: npm --prefix demo run test:agents:ws
@@ -76,7 +76,7 @@ jobs:
           cache: npm
           cache-dependency-path: demo/package-lock.json
       - run: uv sync --group dev
-      - run: npm ci --prefix demo
+      - run: npm ci --prefix demo --no-audit --no-fund
       - run: npx --prefix demo playwright install --with-deps chromium
       - run: npm --prefix demo run test:agents:webrtc
 
