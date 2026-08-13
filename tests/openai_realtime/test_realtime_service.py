@@ -1763,10 +1763,6 @@ class TestHandleResponseCreate:
     def test_response_create_preserves_latest_user_turn_timing(self, service, conn_id, text_prompt_queue):
         service.dispatch_pipeline_event(
             conn_id,
-            SpeechStartedEvent(turn_id="turn_1", turn_revision=2),
-        )
-        service.dispatch_pipeline_event(
-            conn_id,
             TranscriptionCompletedEvent(
                 transcript="hello",
                 language_code="en",
@@ -2019,10 +2015,6 @@ class TestHandleResponseCreate:
         assert len(chat.buffer) == 1  # in-band input is threaded into the conversation
 
     def test_response_create_out_of_band_carries_null_turn(self, service, conn_id, text_prompt_queue):
-        service.dispatch_pipeline_event(
-            conn_id,
-            SpeechStartedEvent(turn_id="turn_1", turn_revision=2),
-        )
         service.dispatch_pipeline_event(
             conn_id,
             TranscriptionCompletedEvent(
@@ -3589,6 +3581,32 @@ class TestDispatchPipelineEvent:
 
     # -- transcription_completed --
 
+    def test_transcription_completed_with_turn_metadata_without_speech_start(
+        self,
+        service,
+        conn_id,
+        runtime_config,
+        text_prompt_queue,
+    ):
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(
+                transcript="standalone final",
+                turn_id="turn_1",
+                turn_revision=2,
+            ),
+        )
+
+        assert len(events) == 1
+        assert isinstance(events[0], ConversationItemInputAudioTranscriptionCompletedEvent)
+        assert events[0].transcript == "standalone final"
+        assert service._state(conn_id).input_item_by_turn_revision[("turn_1", 2)] == events[0].item_id
+        user_items = [item for item in runtime_config.chat.buffer if getattr(item, "role", None) == "user"]
+        assert [item.content[0].text for item in user_items] == ["standalone final"]
+        request = text_prompt_queue.get_nowait()
+        assert request.turn_id == "turn_1"
+        assert request.turn_revision == 2
+
     def test_transcription_completed_emits_event(self, service, conn_id):
         service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
         service.dispatch_pipeline_event(
@@ -3911,6 +3929,8 @@ class TestDispatchPipelineEvent:
         assert events == []
         assert runtime_config.chat.buffer == []
         assert text_prompt_queue.empty()
+        assert service._state(conn_id).input_item_by_turn_revision == {}
+        assert service._state(conn_id).input_transcription_by_item == {}
         service.unregister(conn_id)
 
     def test_stale_assistant_text_dropped_after_unanswered_reopen(self, runtime_config, should_listen):

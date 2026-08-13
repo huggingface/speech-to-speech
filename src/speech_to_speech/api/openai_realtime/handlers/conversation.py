@@ -292,12 +292,14 @@ class ConversationHandler(RealtimeBaseHandler):
     ) -> list[ConversationItemInputAudioTranscriptionCompletedEvent]:
         """Terminalize one transcript item and emit its authoritative final event."""
         st = self._state(conn_id)
-        if event.turn_id is None and st.current_input_item_id is None:
+        if self._input_item_id(conn_id, event.turn_id, event.turn_revision) is None:
             # Some pipelines do not publish speech lifecycle events. Give their
-            # authoritative terminal its own input item instead of borrowing a
-            # concurrently active assistant item.
+            # authoritative terminal a registered input item instead of
+            # borrowing a concurrently active assistant item.
             self._service.audio._start_input_item(
                 conn_id,
+                turn_id=event.turn_id,
+                turn_revision=event.turn_revision,
                 preserve_active_response=st.in_response,
             )
         terminal = self.terminalize_input_item(conn_id, event.turn_id, event.turn_revision)
