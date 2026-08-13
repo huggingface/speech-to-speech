@@ -10,6 +10,7 @@ from openai.types.realtime import (
     ConversationItemCreateEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
+    ConversationItemTruncateEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferCommitEvent,
     InputAudioBufferSpeechStartedEvent,
@@ -86,6 +87,7 @@ _EVENT_TYPE_TO_MODEL: dict[str, type[BaseModel]] = {
     "output_audio_buffer.clear": OutputAudioBufferClearEvent,
     "session.update": SessionUpdateEvent,
     "conversation.item.create": ConversationItemCreateEvent,
+    "conversation.item.truncate": ConversationItemTruncateEvent,
     "response.create": ResponseCreateEvent,
     "response.cancel": ResponseCancelEvent,
 }
@@ -96,6 +98,7 @@ ClientEvent = Union[
     OutputAudioBufferClearEvent,
     SessionUpdateEvent,
     ConversationItemCreateEvent,
+    ConversationItemTruncateEvent,
     ResponseCreateEvent,
     ResponseCancelEvent,
 ]

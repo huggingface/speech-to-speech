@@ -7,8 +7,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CLIENTS = [
-    ("./demo/ws/s2s-ws-client.js", "S2sWsRealtimeClient", "_onWsMessage"),
-    ("./demo/rtc/s2s-rtc-client.js", "S2sRtcRealtimeClient", "_onDcMessage"),
+    ("./demo/s2s-realtime-client.js", "S2sRealtimeClient", "_onTransportEvent"),
 ]
 
 CASES = [
@@ -123,11 +122,9 @@ const assertPendingStatus = async () => {
 client._activeResponseId = "response_1";
 await assertPendingStatus();
 client._activeResponseId = "";
-client._pendingCreateId = "create_1";
+client._responseRequested = true;
 await assertPendingStatus();
-client._pendingCreateId = "";
-client._createQueue.push({});
-await assertPendingStatus();
+client._responseRequested = false;
 """,
         id="empty-final-status",
     ),
@@ -138,7 +135,6 @@ await deliver({ type: "input_audio_buffer.speech_started", item_id: "item_old" }
 await deliver({ type: "input_audio_buffer.speech_stopped", item_id: "item_old" });
 await deliver({ type: "input_audio_buffer.speech_started", item_id: "item_current" });
 await deliver({ type: "input_audio_buffer.speech_stopped", item_id: "item_current" });
-client._waitingForResponseAfterCollision = true;
 
 await deliver({
   type: "conversation.item.input_audio_transcription.completed",
@@ -148,9 +144,6 @@ await deliver({
 if (client.status !== "processing") {
   throw new Error(`late empty final overwrote current status: ${client.status}`);
 }
-if (!client._waitingForResponseAfterCollision) {
-  throw new Error("late completion released the current response collision");
-}
 
 await deliver({
   type: "conversation.item.input_audio_transcription.completed",
@@ -159,9 +152,6 @@ await deliver({
 });
 if (client.status !== "connected") {
   throw new Error(`current empty final did not restore status: ${client.status}`);
-}
-if (client._waitingForResponseAfterCollision) {
-  throw new Error("current completion did not release the response collision");
 }
 """,
         id="late-empty-final-keeps-current-status",
@@ -206,6 +196,7 @@ globalThis.CustomEvent = class CustomEvent extends Event {{
 }};
 const {{ {class_name} }} = await import({json.dumps(module_path)});
 const client = new {class_name}({{
+  transport: "websocket",
   voice: "Aiden",
   instructions: "Be helpful.",
   directUrl: "ws://unused",
@@ -216,7 +207,7 @@ const statuses = [];
 client.addEventListener("transcript", (event) => transcripts.push(event.detail));
 client.addEventListener("status", (event) => statuses.push(event.detail.status));
 const deliver = async (event) => {{
-  await client[{json.dumps(message_handler)}](JSON.stringify(event));
+  await client[{json.dumps(message_handler)}](event);
 }};
 const assertEqual = (actual, expected, label) => {{
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {{

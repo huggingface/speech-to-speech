@@ -8,18 +8,16 @@
  * audio. The orb visually reflects the live state (idle, connecting,
  * listening, user-speaking, processing, ai-speaking).
  *
- * The two client classes expose the same events and methods, so everything
- * below except the constructor pick is transport-agnostic. WebRTC is offered
- * only in env-pinned direct mode (the /api/calls proxy forwards exclusively
- * to SPEECH_TO_SPEECH_URL); LB mode and user-typed URLs stay on WebSocket.
+ * One adapter drives the official Agents SDK RealtimeSession over either stock
+ * transport. WebRTC is offered only in env-pinned direct mode (the /api/calls
+ * proxy forwards exclusively to SPEECH_TO_SPEECH_URL); LB mode and user-typed
+ * URLs stay on WebSocket.
  *
  * @typedef {"idle" | "connecting" | "queued" | "your-turn" | "listening" | "user-speaking" | "processing" | "ai-speaking" | "error"} AppState
- * @typedef {S2sWsRealtimeClient | S2sRtcRealtimeClient} RealtimeClient
+ * @typedef {S2sRealtimeClient} RealtimeClient
  */
 
-import { S2sWsRealtimeClient } from "./ws/s2s-ws-client.js";
-import { S2sRtcRealtimeClient } from "./rtc/s2s-rtc-client.js";
-import { ToolCallBatcher } from "./tool-call-batcher.js";
+import { S2sRealtimeClient } from "./s2s-realtime-client.js";
 import { $, truncateError, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js";
 import { Account } from "./ui/account.js";
@@ -55,7 +53,7 @@ const GATE_OFF_DB = -66; // slider minimum = off / bottom of the meter axis
 const GATE_MAX_DB = -3; // slider maximum = most aggressive / top of the meter axis
 const GATE_DEFAULT_DB = -50; // first-run default: a gentle gate, enabled
 
-/** @param {number} thresholdDb @returns {import("./ws/s2s-ws-client.js").NoiseGate} */
+/** @param {number} thresholdDb @returns {import("./s2s-realtime-client.js").NoiseGate} */
 function gateParams(thresholdDb) {
   return { enabled: thresholdDb > GATE_OFF_DB, thresholdDb };
 }
@@ -63,7 +61,7 @@ function gateParams(thresholdDb) {
 // ── Tools ─────────────────────────────────────────────────────────────────
 // Function tools we declare to the backend. The model decides when to call
 // one; the executor below runs it and returns the result (see runTool).
-/** @type {Record<string, import("./ws/s2s-ws-client.js").ToolDef>} */
+/** @type {Record<string, import("./s2s-realtime-client.js").ToolDef>} */
 const TOOL_DEFS = {
   web_search: {
     type: "function",
@@ -811,14 +809,13 @@ function flashPreview() {
 }
 
 // ── Tool executor ─────────────────────────────────────────────────────────
-// Runs the function the model called and returns the result. The connection's
-// ToolCallBatcher sends ordered results as they become ready, then requests one
-// follow-up after response.done. Errors come back as tool output too, so the
-// model can recover gracefully instead of the turn stalling.
+// Runs the function the model called and returns the result. RealtimeSession
+// owns function output ordering and the follow-up response. Errors come back as
+// tool output too, so the model can recover gracefully instead of stalling.
 
 /**
- * Run the function the model called. The caller preserves call order while
- * returning results from the same response as early as possible.
+ * Run the function the model called. The Agents SDK preserves call order and
+ * submits the returned value to the session.
  * @param {string} name @param {string} argsJson @param {string} callId
  * @returns {Promise<{ output: string, image?: string }>}
  */
@@ -1414,37 +1411,29 @@ async function doStart(audioContext = null) {
     acquireMic: acquireMicStream,
     tools: activeToolDefs(),
     audioOutputId: settings.audioOutputId || "",
+    executeTool: async ({ name, arguments: args, callId }) => {
+      chat.onToolCall(name);
+      const result = await runTool(name, args, callId);
+      if (client === c) chat.onToolResult(name, args, result.output, result.image);
+      return result;
+    },
     ...(audioContext ? { audioContext } : {}),
   };
   const c = target === null
-    ? new S2sRtcRealtimeClient({
+    ? new S2sRealtimeClient({
+        transport: "webrtc",
         callsUrl: "api/calls",
         iceServers,
         ...common,
       })
-    : new S2sWsRealtimeClient({
+    : new S2sRealtimeClient({
+        transport: "websocket",
         ...target,
         noiseGate: gateParams(settings.noiseGate),
         ...common,
       });
   client = c;
   c.setMuted(micMuted || userAudioReplaying);
-
-  /** @param {{ callId: string; output: string; image?: string }} result */
-  const sendToolResult = (result) => {
-    if (client !== c) return;
-    // Supplemental standard input precedes the output that may complete the
-    // tool batch and release the server's internal follow-up prefetch.
-    const imageItemId = result.image ? `msg_tool_image_${result.callId}` : "";
-    if (result.image) c.sendUserImage(result.image, imageItemId);
-    c.sendToolOutput(result.callId, result.output, imageItemId);
-  };
-  const requestToolFollowUp = () => {
-    if (client !== c) return;
-    if (DEBUG) console.debug("[tool] requesting one follow-up after response.done");
-    c.requestResponse();
-  };
-  const toolBatches = new ToolCallBatcher(sendToolResult, requestToolFollowUp);
 
   c.addEventListener("queue", (e) => {
     const { position, queueId } = /** @type {CustomEvent<{ position: number; queueId: string }>} */ (e).detail;
@@ -1453,7 +1442,7 @@ async function doStart(audioContext = null) {
   });
 
   c.addEventListener("ready-to-join", (e) => {
-    const { info, expiresSec } = /** @type {CustomEvent<{ info: import("./ws/s2s-ws-client.js").WsSessionInfo; expiresSec: number }>} */ (e).detail;
+    const { info, expiresSec } = /** @type {CustomEvent<{ info: import("./s2s-realtime-client.js").SessionInfo; expiresSec: number }>} */ (e).detail;
     // A slot is held for us. We're out of the queue now, so drop the ticket ref.
     // Track the granted session id already so that leaving (or letting the timer
     // lapse) refunds the budget the server reserved at claim, even before we dial.
@@ -1490,29 +1479,6 @@ async function doStart(audioContext = null) {
   c.addEventListener("response-finished", (e) => {
     const detail = /** @type {CustomEvent<{ responseId: string; status: string; audible?: boolean; transcript?: string }>} */ (e).detail;
     chat.onResponseFinished(detail);
-    const flush = toolBatches.finish(detail.responseId, detail.status);
-    if (flush) void flush.catch((err) => onFatalError(err));
-  });
-
-  c.addEventListener("toolcall-added", (e) => {
-    const { callId, responseId, outputIndex } = /** @type {CustomEvent<{ callId: string; responseId: string; outputIndex: number }>} */ (e).detail;
-    toolBatches.register(responseId, callId, outputIndex);
-  });
-
-  c.addEventListener("toolcall", (e) => {
-    const { name, arguments: args, callId, responseId, outputIndex } = /** @type {CustomEvent<{ name: string; arguments: string; callId: string; responseId: string; outputIndex: number }>} */ (e).detail;
-    if (!responseId) {
-      console.warn(`[tool] call ${callId || "<unknown>"} has no response_id; ignoring uncorrelated tool call`);
-      return;
-    }
-    chat.onToolCall(name);
-    // Execute the tool, then push it to the conversation once the result is in,
-    // so the toggle shows both the call input and its output together.
-    const execution = runTool(name, args, callId).then(({ output, image }) => {
-      if (client === c) chat.onToolResult(name, args, output, image);
-      return { callId, output, ...(image ? { image } : {}) };
-    });
-    toolBatches.add(responseId, callId, outputIndex, execution);
   });
   c.addEventListener("error", (e) => {
     const detail = /** @type {CustomEvent<{ error: unknown }>} */ (e).detail;
@@ -1526,7 +1492,7 @@ async function doStart(audioContext = null) {
     console.warn("[main] server error (non-fatal):", msg);
   });
   c.addEventListener("session", (e) => {
-    const info = /** @type {CustomEvent<{ info: import("./ws/s2s-ws-client.js").WsSessionInfo }>} */ (e).detail.info;
+    const info = /** @type {CustomEvent<{ info: import("./s2s-realtime-client.js").SessionInfo }>} */ (e).detail.info;
     console.log("[ws] session created:", info.sessionId);
     // A slot was granted — we're out of the queue; drop the ticket reference so
     // teardown doesn't try to leave a line we already left.

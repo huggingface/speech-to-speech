@@ -167,8 +167,9 @@ globalThis.fetch = async () => ({
     return { reason: "token_invalid", loginUrl: "/oauth/huggingface/login" };
   },
 });
-const { S2sWsRealtimeClient } = await import("./demo/ws/s2s-ws-client.js");
-const client = new S2sWsRealtimeClient({
+const { S2sRealtimeClient } = await import("./demo/s2s-realtime-client.js");
+const client = new S2sRealtimeClient({
+  transport: "websocket",
   voice: "Aiden",
   instructions: "Be helpful.",
   sessionUrl: "api/session",

@@ -148,6 +148,20 @@ class TestConnection:
                 assert msg["event_id"].startswith("event_")
                 assert msg["session"]["id"].startswith("session_")
 
+    def test_selects_realtime_subprotocol_for_browser_sdk(self, setup):
+        app, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect(
+                "/v1/realtime",
+                subprotocols=[
+                    "realtime",
+                    "openai-insecure-api-key.test-key",
+                    "openai-agents-sdk.0.14.3",
+                ],
+            ) as ws:
+                assert ws.accepted_subprotocol == "realtime"
+                assert ws.receive_json()["type"] == "session.created"
+
     def test_second_connection_rejected(self, setup):
         app, *_ = setup
         with TestClient(app) as client:

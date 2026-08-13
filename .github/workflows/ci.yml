@@ -43,6 +43,43 @@ jobs:
       - name: Pytest
         run: uv run pytest tests/ -x -q
 
+  agents-sdk-websocket:
+    name: Agents SDK / WebSocket
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "latest"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: demo/package-lock.json
+      - run: uv sync --group dev
+      - run: npm ci --prefix demo --no-audit --no-fund
+      - run: npx --prefix demo playwright install --with-deps chromium
+      - run: npm --prefix demo run test:agents:adapter
+      - run: npm --prefix demo run test:agents:ws
+
+  agents-sdk-webrtc:
+    name: Agents SDK / WebRTC
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "latest"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: demo/package-lock.json
+      - run: uv sync --group dev
+      - run: npm ci --prefix demo --no-audit --no-fund
+      - run: npx --prefix demo playwright install --with-deps chromium
+      - run: npm --prefix demo run test:agents:webrtc
+
   package:
     runs-on: ubuntu-latest
     steps:
