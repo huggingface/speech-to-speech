@@ -186,6 +186,11 @@ export class S2sWsRealtimeClient extends EventTarget {
      * Realtime emits one `*.transcript.done`; appending remains for compatibility
      * with legacy endpoints that emitted a done event for every text segment. */
     this._asstFullByResp = new Map();
+    /** @type {Map<string, string>} Accumulated input-transcription deltas by
+     * item id. Events from different speech turns may arrive out of order;
+     * completed entries are removed after the authoritative final event. */
+    this._userTranscriptByItem = new Map();
+    this._currentUserItemId = "";
     this._muted = false;
     // ── Response lock ────────────────────────────────────────────────────
     // The backend allows only ONE response in flight: creating a second while
@@ -690,7 +695,9 @@ export class S2sWsRealtimeClient extends EventTarget {
         // already queued from session.created and is guarded against repeats.
         break;
 
-      case "input_audio_buffer.speech_started":
+      case "input_audio_buffer.speech_started": {
+        const itemId = typeof event.item_id === "string" ? event.item_id : "";
+        this._currentUserItemId = itemId;
         // User started speaking — stop any audio still playing OR queued, every
         // time. We clear unconditionally (not just when `_aiSpeaking`): after a
         // reply or a tool result the worklet's ring buffer can still be draining
@@ -699,16 +706,17 @@ export class S2sWsRealtimeClient extends EventTarget {
         this._playbackNode?.port.postMessage({ kind: "clear" });
         this._aiSpeaking = false;
         this._userAudioRecorder.speechStarted({
-          itemId: typeof event.item_id === "string" ? event.item_id : "",
+          itemId,
           audioStartMs: Number(event.audio_start_ms),
         });
         this.dispatchEvent(new CustomEvent("user-turn-started", {
           detail: {
-            itemId: typeof event.item_id === "string" ? event.item_id : "",
+            itemId,
           },
         }));
         this._setStatus("user-speaking");
         break;
+      }
 
       case "input_audio_buffer.speech_stopped":
         {
@@ -841,16 +849,16 @@ export class S2sWsRealtimeClient extends EventTarget {
       case "conversation.item.input_audio_transcription.delta": {
         const delta = typeof event.delta === "string" ? event.delta : "";
         if (delta) {
-          // `itemId` is REUSED across a speculative continuation, so the UI
-          // groups both segments into one message. The delta carries the full
-          // cumulative transcript so far (not an increment).
+          const itemId = typeof event.item_id === "string" ? event.item_id : "";
+          const transcript = (this._userTranscriptByItem.get(itemId) || "") + delta;
+          this._userTranscriptByItem.set(itemId, transcript);
           this.dispatchEvent(
             new CustomEvent("transcript", {
               detail: {
                 role: "user",
-                text: delta,
+                text: transcript,
                 partial: true,
-                itemId: typeof event.item_id === "string" ? event.item_id : "",
+                itemId,
               },
             }),
           );
@@ -860,28 +868,39 @@ export class S2sWsRealtimeClient extends EventTarget {
 
       case "conversation.item.input_audio_transcription.completed": {
         const transcript = typeof event.transcript === "string" ? event.transcript : "";
-        if (this._waitingForResponseAfterCollision) {
+        const itemId = typeof event.item_id === "string" ? event.item_id : "";
+        const hadPartial = Boolean(this._userTranscriptByItem.get(itemId));
+        this._userTranscriptByItem.delete(itemId);
+        const isCurrentUserItem = Boolean(itemId) && itemId === this._currentUserItemId;
+        if (this._waitingForResponseAfterCollision && isCurrentUserItem) {
           // New speech can cancel a merely-pending response without emitting
           // response.done. Retry only after that speech has been transcribed.
           this._waitingForResponseAfterCollision = false;
           this._flushQueuedCreate();
         }
-        if (transcript) {
+        if (transcript || hadPartial) {
           this.dispatchEvent(
             new CustomEvent("transcript", {
               detail: {
                 role: "user",
                 text: transcript,
                 partial: false,
-                itemId: typeof event.item_id === "string" ? event.item_id : "",
+                itemId,
               },
             }),
           );
-        } else if (this._status === "processing" && !this._responsePending()) {
+        }
+        if (
+          !transcript
+          && isCurrentUserItem
+          && this._status === "processing"
+          && !this._responsePending()
+        ) {
           // Empty STT results intentionally do not create a response, so there
           // will be no response.done event to return the UI to listening.
           this._setStatus("connected");
         }
+        if (isCurrentUserItem) this._currentUserItemId = "";
         break;
       }
 

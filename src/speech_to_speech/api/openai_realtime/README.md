@@ -80,7 +80,7 @@ flowchart LR
 | `input_audio_buffer.speech_started` | VAD detected user speech. |
 | `input_audio_buffer.speech_stopped` | End of user speech segment. |
 | `conversation.item.created` | Acknowledges injected `input_text` from `conversation.item.create`. |
-| `conversation.item.input_audio_transcription.delta` | Streaming partial transcript (when live transcription is enabled). |
+| `conversation.item.input_audio_transcription.delta` | Incremental transcript text for the active input-audio content part (when live transcription is enabled). |
 | `conversation.item.input_audio_transcription.completed` | Final transcript for the user turn (with duration usage). |
 | `response.created` | Emitted when an explicit response is accepted or before the first implicit text, tool, audio, or terminal event (response is `in_progress`). |
 | `response.output_audio.delta` | Base64 PCM audio chunk from TTS. |
@@ -89,6 +89,10 @@ flowchart LR
 | `response.output_audio_transcript.done` | Full assistant transcript, emitted once when the output item closes. On cancellation, it contains the accumulated partial transcript. |
 | `response.function_call_arguments.done` | Tool call with `call_id`, `name`, and JSON `arguments`. |
 | `response.done` | Response finished (`completed`, `cancelled` with reason `turn_detected` or `client_cancelled`). |
+
+### Input transcription semantics
+
+Internal partial transcriptions are cumulative hypotheses. Before emitting `conversation.item.input_audio_transcription.delta`, the Realtime server compares consecutive hypotheses at normalized word boundaries and holds back the newest matching word. Only confirmed growth beyond the per-item committed prefix reaches the append-only wire stream; unstable casing and edge punctuation are left to the final transcript. If a later hypothesis revises a word that was already emitted, that partial is withheld because the protocol has no transcript-retraction event, but subsequent hypotheses can resume the stream when they extend the committed prefix. Clients should treat `conversation.item.input_audio_transcription.completed` as authoritative and replace any rendered partial for the same `item_id` with its final `transcript`. Turn metadata routes out-of-order completions to their originating item, and bundled clients retain each unresolved item's transcript until completion so later deltas and empty authoritative completions remain correct.
 
 ### Transcript event compatibility
 

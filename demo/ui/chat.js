@@ -10,9 +10,8 @@
  *   - persistent history (`.hist-msg` / `.hist-*`)  the durable panel log
  *
  * Keying:
- *   - user transcripts by the server's `item_id` — a speculative continuation
- *     REUSES it, so both segments land in one row/bubble; deltas are CUMULATIVE
- *     (each carries the full sentence so far), so we replace text wholesale.
+ *   - user transcripts by the server's `item_id`; each item owns one row and
+ *     receives cumulative UI updates assembled from incremental wire deltas.
  *   - assistant transcripts by `response_id`, so a cancelled speculative reply
  *     can be marked interrupted without erasing what was already shown.
  */
@@ -437,8 +436,8 @@ export class ChatView {
    */
   onUserTurnStarted(detail = {}) {
     const id = detail.itemId || `_u${++this._anonSeq}`;
-    // A reopened turn may legitimately reuse the same item id, so a fresh start
-    // supersedes any tombstone left by the prior assistant activity.
+    // A speculative continuation can reuse an incomplete item, so a fresh
+    // start supersedes any tombstone left by prior assistant activity.
     this._assistantDismissedUserItemId = "";
     const reusable = this._activeUserItemId === id
       && this._activeUserBubble?.isConnected
@@ -485,10 +484,8 @@ export class ChatView {
     if (DEBUG) console.debug(`[ui] transcript role=${d.role} partial=${d.partial} item=${d.itemId} resp=${d.responseId} text=${JSON.stringify(d.text)}`);
 
     if (d.role === "user") {
-      // Group by item_id: a speculative continuation reuses the same id, so it
-      // updates the same row/bubble. A missing id falls back to the active item
-      // (same utterance) or a fresh unique key, never a shared sentinel that
-      // would collapse distinct turns into one row.
+      // Group by item_id. A missing id falls back to the active item or a fresh
+      // unique key, never a shared sentinel that would collapse distinct turns.
       const id = d.itemId || this._activeUserItemId || `_u${++this._anonSeq}`;
       const text = d.text;
 
@@ -534,8 +531,8 @@ export class ChatView {
   /**
    * Attach the browser-local recording to its user turn. This also creates an
    * audio-only row when STT is disabled and no transcript events arrive.
-   * Reopened VAD segments reuse item_id; the client sends a replacement WAV
-   * containing the accumulated utterance, so the row keeps one player.
+   * Speculative continuations can reuse an incomplete item ID; their
+   * accumulated replacement WAV keeps one player on that item's row.
    * @param {{ itemId?: string, audio: Blob, durationMs?: number, truncated?: boolean }} detail
    */
   onUserAudio(detail) {

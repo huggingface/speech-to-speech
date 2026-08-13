@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
+from unicodedata import category
 
 from openai.types.realtime import (
     ConversationItem,
@@ -28,6 +29,37 @@ if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import ServerEvent
 
 logger = logging.getLogger(__name__)
+
+
+def _transcript_words(transcript: str) -> list[tuple[str, str]]:
+    """Return display and comparison forms for whitespace-delimited words."""
+    words: list[tuple[str, str]] = []
+    for token in transcript.split():
+        start = 0
+        end = len(token)
+        while start < end and category(token[start]).startswith("P"):
+            start += 1
+        while end > start and category(token[end - 1]).startswith("P"):
+            end -= 1
+        display = token[start:end]
+        if display:
+            words.append((display, display.casefold()))
+    return words
+
+
+def _stable_transcript_words(previous: str, current: str) -> list[tuple[str, str]]:
+    """Find words confirmed by two hypotheses, excluding their unstable tail."""
+    previous_words = _transcript_words(previous)
+    current_words = _transcript_words(current)
+    common_count = 0
+    for previous_word, current_word in zip(previous_words, current_words):
+        if previous_word[1] != current_word[1]:
+            break
+        common_count += 1
+
+    # The last matching word was at the speculative edge of the previous
+    # hypothesis. Hold it back until another update adds context after it.
+    return current_words[: max(0, common_count - 1)]
 
 
 class ConversationHandler(RealtimeBaseHandler):
@@ -203,30 +235,125 @@ class ConversationHandler(RealtimeBaseHandler):
     # ── Pipeline event handlers ────────────────────
 
     def on_partial_transcription(self, conn_id: str, event: PartialTranscriptionEvent) -> list[ServerEvent]:
-        """Handle partial_transcription: emit transcription delta event."""
+        """Stabilize a cumulative STT hypothesis into an append-only Realtime delta."""
+        st = self._state(conn_id)
+        item_id = self._input_item_id(conn_id, event.turn_id, event.turn_revision)
+        if item_id is None:
+            logger.debug(
+                "Ignoring partial transcription for unknown turn=%s rev=%s",
+                event.turn_id,
+                event.turn_revision,
+            )
+            return []
+        input_item = st.input_items.get(item_id)
+        if input_item is None:
+            logger.debug("Ignoring partial transcription for released item=%s", item_id)
+            return []
+        hypothesis = event.delta.strip()
+        if not hypothesis or hypothesis == input_item.latest_transcript:
+            return []
+
+        previous = input_item.latest_transcript
+        input_item.latest_transcript = hypothesis
+        if not previous:
+            return []
+
+        stable_words = _stable_transcript_words(previous, hypothesis)
+        emitted_words = _transcript_words(input_item.transcript_prefix)
+        emitted_comparison = [word[1] for word in emitted_words]
+        stable_comparison = [word[1] for word in stable_words]
+        if stable_comparison[: len(emitted_comparison)] != emitted_comparison:
+            # A word that already reached the wire was later revised. Realtime
+            # has no retraction event, so wait for a future hypothesis that
+            # extends the committed prefix or for the authoritative completion.
+            logger.debug(
+                "Withholding revised stable transcription for item=%s (emitted=%r, hypothesis=%r)",
+                item_id,
+                input_item.transcript_prefix[-40:],
+                hypothesis[-40:],
+            )
+            return []
+
+        new_words = stable_words[len(emitted_words) :]
+        if not new_words:
+            return []
+
+        delta = (" " if emitted_words else "") + " ".join(word[0] for word in new_words)
+        input_item.transcript_prefix += delta
         return [
             ConversationItemInputAudioTranscriptionDeltaEvent(
                 type="conversation.item.input_audio_transcription.delta",
                 event_id=self._next_event_id(),
-                content_index=self._next_input_content_index(conn_id),
-                item_id=self._input_item_id(conn_id),
-                delta=event.delta,
+                content_index=0,
+                item_id=item_id,
+                delta=delta,
             )
         ]
 
-    def on_transcription_completed(self, conn_id: str, event: TranscriptionCompletedEvent) -> list[ServerEvent]:
-        """Handle transcription_completed: accumulate duration and emit completed event."""
+    def terminalize_input_item(
+        self,
+        conn_id: str,
+        item_id: str,
+    ) -> tuple[str, float] | None:
+        """Release one input item's active transcript and routing state."""
         st = self._state(conn_id)
-        st.response_usage.audio_duration_s += st.input_audio_duration_s
+        input_item = st.input_items.pop(item_id, None)
+        if input_item is None:
+            logger.debug("Ignoring input terminal for released item=%s", item_id)
+            return None
+        duration_s = input_item.audio_duration_s
+        st.input_item_by_turn_revision = {
+            turn: tracked_item_id
+            for turn, tracked_item_id in st.input_item_by_turn_revision.items()
+            if tracked_item_id != item_id
+        }
+        if st.current_input_item_id == item_id:
+            st.current_input_item_id = None
+        return item_id, duration_s
+
+    def _completion_input_item_id(
+        self,
+        conn_id: str,
+        turn_id: str | None,
+        turn_revision: int | None,
+    ) -> str | None:
+        """Resolve a final to its routed item, falling back to the active input."""
+        st = self._state(conn_id)
+        if turn_id is not None:
+            routed_item_id = st.input_item_by_turn_revision.get((turn_id, turn_revision))
+            if routed_item_id is not None:
+                return routed_item_id
+        return st.current_input_item_id
+
+    def on_transcription_completed(
+        self,
+        conn_id: str,
+        event: TranscriptionCompletedEvent,
+    ) -> list[ConversationItemInputAudioTranscriptionCompletedEvent]:
+        """Terminalize one transcript item and emit its authoritative final event."""
+        st = self._state(conn_id)
+        item_id = self._completion_input_item_id(conn_id, event.turn_id, event.turn_revision)
+        if item_id is None:
+            # Preserve the pre-routing fallback for protocol-neutral pipelines
+            # that do not publish speech lifecycle metadata. #485 tracks a
+            # stricter standalone/ambiguous-terminal policy.
+            item_id = self._service.response._current_item_id(conn_id)
+            duration_s = st.input_audio_duration_s
+        else:
+            terminal = self.terminalize_input_item(conn_id, item_id)
+            if terminal is None:
+                return []
+            item_id, duration_s = terminal
+        st.response_usage.audio_duration_s += duration_s
         return [
             ConversationItemInputAudioTranscriptionCompletedEvent(
                 type="conversation.item.input_audio_transcription.completed",
                 event_id=self._next_event_id(),
                 content_index=0,
-                item_id=self._input_item_id(conn_id),
+                item_id=item_id,
                 transcript=event.transcript,
                 usage=UsageTranscriptTextUsageDuration(
-                    seconds=st.input_audio_duration_s,
+                    seconds=duration_s,
                     type="duration",
                 ),
             )

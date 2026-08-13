@@ -240,6 +240,22 @@ def test_audio_client_clears_unplayed_audio_on_barge_in(capsys):
     capsys.readouterr()
 
 
+def test_audio_client_does_not_allocate_transcript_state_for_direct_audio_turns(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    for index in range(130):
+        handle_server_event(
+            SimpleNamespace(type="input_audio_buffer.speech_started", item_id=f"item_{index}"),
+            playback=playback,
+            renderer=renderer,
+            print_json=False,
+        )
+
+    assert renderer.user_transcript_by_item == {}
+    capsys.readouterr()
+
+
 def test_audio_client_clears_unplayed_audio_when_response_is_cancelled(capsys):
     playback = PlaybackBuffer(16000)
     renderer = _FriendlyEventRenderer()
@@ -351,6 +367,122 @@ def test_audio_client_separates_alternating_assistant_and_user_partial_text(caps
     assert capsys.readouterr().out == (
         f"ASSISTANT: assistant\n\r{user_line}\r{' ' * len(user_line)}\rASSISTANT: continues\n"
     )
+
+
+def test_audio_client_accumulates_incremental_user_transcription_deltas(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    for event in (
+        SimpleNamespace(type="input_audio_buffer.speech_started", item_id="item_1"),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="item_1",
+            delta="user",
+        ),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="item_1",
+            delta=" partial",
+        ),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="item_1",
+            transcript="user partial",
+        ),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    assert renderer.user_transcript_by_item == {}
+    assert "USER: user partial" in capsys.readouterr().out
+
+
+def test_audio_client_tracks_overlapping_user_transcriptions_by_item(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    for event in (
+        SimpleNamespace(type="input_audio_buffer.speech_started", item_id="item_1"),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="item_1",
+            delta="hel",
+        ),
+        SimpleNamespace(type="input_audio_buffer.speech_started", item_id="item_2"),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="item_2",
+            delta="wor",
+        ),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="item_1",
+            delta="lo",
+        ),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="item_1",
+            transcript="hello",
+        ),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="item_2",
+            delta="ld",
+        ),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    assert renderer.user_transcript_by_item == {"item_2": "world"}
+    output = capsys.readouterr().out
+    assert "USER: hello" in output
+    assert "USER: world" in output
+
+
+def test_audio_client_retains_unterminated_transcripts_until_completion(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    for index in range(130):
+        handle_server_event(
+            SimpleNamespace(
+                type="conversation.item.input_audio_transcription.delta",
+                item_id=f"item_{index}",
+                delta=str(index),
+            ),
+            playback=playback,
+            renderer=renderer,
+            print_json=False,
+        )
+
+    assert len(renderer.user_transcript_by_item) == 130
+    assert renderer.user_transcript_by_item["item_0"] == "0"
+    assert renderer.user_transcript_by_item["item_1"] == "1"
+    assert renderer.user_transcript_by_item["item_129"] == "129"
+
+    handle_server_event(
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="item_0",
+            delta=" more",
+        ),
+        playback=playback,
+        renderer=renderer,
+        print_json=False,
+    )
+    assert renderer.user_transcript_by_item["item_0"] == "0 more"
+
+    handle_server_event(
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="item_0",
+            transcript="",
+        ),
+        playback=playback,
+        renderer=renderer,
+        print_json=False,
+    )
+    assert "item_0" not in renderer.user_transcript_by_item
+    capsys.readouterr()
 
 
 def test_audio_client_response_done_preserves_other_response_transcripts(capsys):

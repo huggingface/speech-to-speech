@@ -253,7 +253,7 @@ if (view._activeUserBubble !== null) {
   throw new Error("late stop restored the active voice bubble");
 }
 
-// A genuine reopened turn may reuse the item id and must clear the tombstone.
+// A speculative continuation reusing an incomplete item clears the tombstone.
 view.onUserTurnStarted({ itemId: "item_voice" });
 if (spawned !== 1 || view._activeUserBubble !== bubble) {
   throw new Error("reopened turn did not create a fresh listening bubble");
