@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@openai/agents": "0.14.3",
-    "hono": "4.13.1",
+    "hono": "4.13.0",
     "zod": "4.4.3"
   },
   "devDependencies": {
