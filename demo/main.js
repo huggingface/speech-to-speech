@@ -32,6 +32,7 @@ const STORAGE_KEYS = {
   // (in LB mode the browser never learns the LB address — it POSTs /api/session).
   directUrl: "s2s.ws.directUrl",
   voice: "s2s.ws.voice",
+  model: "s2s.ws.model",
   instructions: "s2s.ws.instructions",
   tools: "s2s.ws.tools",
   searchKey: "s2s.ws.searchKey",
@@ -112,6 +113,9 @@ function loadSettings() {
   return {
     directUrl: localStorage.getItem(STORAGE_KEYS.directUrl) || "",
     voice: localStorage.getItem(STORAGE_KEYS.voice) || DEFAULT_VOICE,
+    // "" means "whatever the server was started with" — the picker only
+    // fills this in once the backend reports models it can switch to.
+    model: localStorage.getItem(STORAGE_KEYS.model) || "",
     instructions: localStorage.getItem(STORAGE_KEYS.instructions) || DEFAULT_INSTRUCTIONS,
     noiseGate: loadGateThreshold(),
     // Default WebSocket: the proven path stays the first-run experience.
@@ -138,6 +142,7 @@ function loadGateThreshold() {
 function saveSettings(s) {
   localStorage.setItem(STORAGE_KEYS.directUrl, s.directUrl);
   localStorage.setItem(STORAGE_KEYS.voice, s.voice);
+  localStorage.setItem(STORAGE_KEYS.model, s.model || "");
   localStorage.setItem(STORAGE_KEYS.instructions, s.instructions);
   localStorage.setItem(STORAGE_KEYS.noiseGate, String(s.noiseGate));
   localStorage.setItem(STORAGE_KEYS.transport, s.transport);
@@ -265,6 +270,9 @@ const transportHint = $("#transport-hint");
 const gateField = $("#gate-field");
 /** @type {HTMLSelectElement} */
 const inputVoice = $("#voice");
+/** @type {HTMLSelectElement} */
+const inputModel = $("#model");
+const modelField = $("#model-field");
 /** @type {HTMLSelectElement} */
 const inputAudioInput = $("#audio-input");
 /** @type {HTMLSelectElement} */
@@ -458,6 +466,7 @@ function setCaption(text, kind = "") {
 function openSettings() {
   syncConnectionUi();
   inputVoice.value = settings.voice;
+  if (!modelField.hidden && settings.model) inputModel.value = settings.model;
   inputInstructions.value = settings.instructions;
   syncGateUi();
   updateRestartAvailability();
@@ -918,6 +927,87 @@ async function fetchConfig() {
   void account.refresh();
   syncToolsUi();
   syncConnectionUi();
+  void fetchVoices();
+  void fetchModels();
+}
+
+/**
+ * Populate the Model picker from `/api/models` (the backend's locally cached
+ * LLM checkpoints). Hidden unless the backend reports more than one: a remote
+ * LLM has nothing local to switch between, and a single cached model is not a
+ * choice.
+ */
+async function fetchModels() {
+  /** @type {{ models?: string[], current?: string|null }} */
+  let json;
+  try {
+    const res = await fetch("api/models");
+    if (!res.ok) return;
+    json = await res.json();
+  } catch {
+    return; // Older backend or static hosting: leave the field hidden.
+  }
+  const models = Array.isArray(json.models) ? json.models.filter((m) => typeof m === "string") : [];
+  if (models.length < 2) return;
+
+  inputModel.replaceChildren(...models.map((name) => {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    return opt;
+  }));
+  // A stored pick from a machine with a different cache must not silently
+  // select nothing; fall back to whatever the backend currently has loaded.
+  if (!models.includes(settings.model)) {
+    settings.model = (json.current && models.includes(json.current)) ? json.current : models[0];
+    saveSettings(settings);
+  }
+  inputModel.value = settings.model;
+  modelField.hidden = false;
+  if (DEBUG) console.debug(`[ui] models: n=${models.length} -> ${settings.model}`);
+}
+
+/**
+ * Replace the built-in voice list with the names the running TTS backend
+ * actually accepts (`/api/voices`, proxied to the backend's `/v1/voices`).
+ *
+ * The markup ships Qwen3-TTS speaker names, but the backend can be running
+ * Kokoro (`bm_fable`, `af_heart`, ...) or another TTS entirely, and a name it
+ * does not know is ignored server-side — the picker then silently does
+ * nothing. Any failure leaves the built-in options alone.
+ */
+async function fetchVoices() {
+  /** @type {{ backend?: string|null, voices?: string[], current?: string|null }} */
+  let json;
+  try {
+    const res = await fetch("api/voices");
+    if (!res.ok) return;
+    json = await res.json();
+  } catch {
+    return; // Endpoint missing (older backend / static hosting): keep defaults.
+  }
+  const voices = Array.isArray(json.voices) ? json.voices.filter((v) => typeof v === "string") : [];
+  // An empty list means "not selectable" (voice cloning, or a backend with no
+  // fixed table). Keep the built-in options rather than emptying the picker.
+  if (!voices.length) return;
+
+  inputVoice.replaceChildren(...voices.map((name) => {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    return opt;
+  }));
+
+  // The saved voice may belong to a different backend (or a previous run of
+  // this one). Fall back to whatever the backend says it is using, then to the
+  // first offered name, and persist it so the next session starts valid.
+  if (!voices.includes(settings.voice)) {
+    const fallback = (json.current && voices.includes(json.current)) ? json.current : voices[0];
+    settings.voice = fallback;
+    saveSettings(settings);
+  }
+  inputVoice.value = settings.voice;
+  if (DEBUG) console.debug(`[ui] voices: backend=${json.backend} n=${voices.length} -> ${settings.voice}`);
 }
 
 /**
@@ -989,6 +1079,9 @@ function readSettingsFromForm() {
   return {
     directUrl: allowDirect && !pinnedUrl ? inputLbUrl.value.trim() : settings.directUrl,
     voice: inputVoice.value || DEFAULT_VOICE,
+    // Only honoured while the picker is visible, so a saved pick survives
+    // a visit to a deploy whose backend can't switch models.
+    model: modelField.hidden ? settings.model : (inputModel.value || settings.model),
     instructions: inputInstructions.value.trim() || DEFAULT_INSTRUCTIONS,
     noiseGate: readGateThreshold(),
     transport: /** @type {"ws" | "webrtc"} */ (
@@ -1089,7 +1182,11 @@ settingsForm.addEventListener("submit", (event) => {
   // output can switch live when the browser supports AudioContext.setSinkId;
   // mic device changes need a Restart (new getUserMedia stream).
   if (client && LIVE_STATES.has(currentState)) {
-    client.updateSession({ voice: settings.voice, instructions: settings.instructions });
+    client.updateSession({
+      voice: settings.voice,
+      instructions: settings.instructions,
+      model: settings.model,
+    });
     if (typeof client.setAudioOutputDevice === "function") {
       void client.setAudioOutputDevice(settings.audioOutputId);
     }
@@ -1409,6 +1506,7 @@ async function doStart(audioContext = null) {
 
   const common = {
     voice: settings.voice,
+    model: settings.model,
     instructions: settings.instructions,
     startupGreeting,
     acquireMic: acquireMicStream,

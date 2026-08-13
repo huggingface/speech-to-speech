@@ -1009,6 +1009,9 @@ export class S2sWsRealtimeClient extends EventTarget {
         output: { voice: this.options.voice },
       },
     };
+    // Only sent when the user picked one; otherwise the server keeps whatever
+    // model it was started with.
+    if (this.options.model) session.model = this.options.model;
     // Tools are declared here; the backend already accepts them in
     // session.update and emits response.function_call_arguments.done when the
     // model decides to call one. Only include the keys when we actually have
@@ -1027,6 +1030,7 @@ export class S2sWsRealtimeClient extends EventTarget {
     const session = { type: "realtime" };
     if (patch.instructions) session.instructions = patch.instructions;
     if (patch.voice) session.audio = { output: { voice: patch.voice } };
+    if (patch.model) session.model = patch.model;
     if (Object.keys(session).length > 1) {
       this._send({ type: "session.update", session });
     }
