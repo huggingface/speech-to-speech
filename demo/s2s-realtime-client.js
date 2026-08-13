@@ -112,6 +112,10 @@ export class S2sRealtimeClient extends EventTarget {
     this._audibleResponses = new Set();
     this._asstTranscriptByResp = new Map();
     this._asstFullByResp = new Map();
+    // Input transcription deltas are append-only and may overlap across turns.
+    // Keep each unresolved prefix until its authoritative completion arrives.
+    this._userTranscriptByItem = new Map();
+    this._currentUserItemId = "";
     this._userAudioRecorder = new SentAudioRecorder({ sampleRate: AUDIO_SAMPLE_RATE });
     this._debug = (() => {
       try { return localStorage.getItem("s2s.debug") === "1"; } catch { return false; }
@@ -388,13 +392,14 @@ export class S2sRealtimeClient extends EventTarget {
     switch (type) {
       case "input_audio_buffer.speech_started": {
         this._clearPlayback();
+        const itemId = typeof event.item_id === "string" ? event.item_id : "";
+        this._currentUserItemId = itemId;
         if (this.options.transport === "websocket") {
           this._userAudioRecorder.speechStarted({
-            itemId: typeof event.item_id === "string" ? event.item_id : "",
+            itemId,
             audioStartMs: Number(event.audio_start_ms),
           });
         }
-        const itemId = typeof event.item_id === "string" ? event.item_id : "";
         this.dispatchEvent(new CustomEvent("user-turn-started", { detail: { itemId } }));
         this._setStatus("user-speaking");
         break;
@@ -421,22 +426,38 @@ export class S2sRealtimeClient extends EventTarget {
         if (event.part?.type === "audio" || event.part?.type === "output_audio") this._markAudible();
         break;
       case "conversation.item.input_audio_transcription.delta": {
-        const text = typeof event.delta === "string" ? event.delta : "";
-        if (text) this.dispatchEvent(new CustomEvent("transcript", { detail: {
-          role: "user", text, partial: true,
-          itemId: typeof event.item_id === "string" ? event.item_id : "",
-        } }));
+        const delta = typeof event.delta === "string" ? event.delta : "";
+        if (delta) {
+          const itemId = typeof event.item_id === "string" ? event.item_id : "";
+          const text = (this._userTranscriptByItem.get(itemId) || "") + delta;
+          this._userTranscriptByItem.set(itemId, text);
+          this.dispatchEvent(new CustomEvent("transcript", { detail: {
+            role: "user", text, partial: true, itemId,
+          } }));
+        }
         break;
       }
       case "conversation.item.input_audio_transcription.completed": {
         const text = typeof event.transcript === "string" ? event.transcript : "";
-        if (text) this.dispatchEvent(new CustomEvent("transcript", { detail: {
-          role: "user", text, partial: false,
-          itemId: typeof event.item_id === "string" ? event.item_id : "",
+        const itemId = typeof event.item_id === "string" ? event.item_id : "";
+        const hadPartial = Boolean(this._userTranscriptByItem.get(itemId));
+        this._userTranscriptByItem.delete(itemId);
+        const isCurrentUserItem = this._currentUserItemId
+          ? Boolean(itemId) && itemId === this._currentUserItemId
+          : true;
+        if (text || hadPartial) this.dispatchEvent(new CustomEvent("transcript", { detail: {
+          role: "user", text, partial: false, itemId,
         } }));
-        else if (this._status === "processing" && !this._activeResponseId && !this._responseRequested) {
+        if (
+          !text
+          && isCurrentUserItem
+          && this._status === "processing"
+          && !this._activeResponseId
+          && !this._responseRequested
+        ) {
           this._setStatus("connected");
         }
+        if (itemId && itemId === this._currentUserItemId) this._currentUserItemId = "";
         break;
       }
       case "response.audio_transcript.delta":
@@ -696,6 +717,8 @@ export class S2sRealtimeClient extends EventTarget {
     this._closed = true;
     this._closing = true;
     this._userAudioRecorder.reset();
+    this._userTranscriptByItem.clear();
+    this._currentUserItemId = "";
     if (this._queueWake) {
       clearTimeout(this._queueTimer);
       this._queueWake();

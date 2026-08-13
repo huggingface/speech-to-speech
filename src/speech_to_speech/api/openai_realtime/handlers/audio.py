@@ -14,6 +14,7 @@ from openai.types.realtime import (
 )
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
+from speech_to_speech.api.openai_realtime.input_state import InputItemState
 from speech_to_speech.api.openai_realtime.utils import resample
 from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
 
@@ -31,7 +32,14 @@ CHUNK_SIZE_BYTES = CHUNK_SAMPLES * BYTES_PER_SAMPLE
 class AudioHandler(RealtimeBaseHandler):
     """Owns inbound audio decoding/chunking and outbound audio encoding."""
 
-    def _start_input_item(self, conn_id: str, *, preserve_active_response: bool = False) -> str:
+    def _start_input_item(
+        self,
+        conn_id: str,
+        *,
+        turn_id: str | None = None,
+        turn_revision: int | None = None,
+        preserve_active_response: bool = False,
+    ) -> str:
         response = self._service.response
         st = self._state(conn_id)
         if not preserve_active_response:
@@ -42,8 +50,57 @@ class AudioHandler(RealtimeBaseHandler):
             item_id = response._start_item(conn_id)
             st.current_item_id = response_item_id
             st.content_index = response_content_index
-        st.input_content_index = 0
+        st.current_input_item_id = item_id
+        st.input_items[item_id] = InputItemState()
+        if turn_id is not None:
+            st.input_item_by_turn_revision[(turn_id, turn_revision)] = item_id
         return item_id
+
+    def _reuse_input_item(
+        self,
+        conn_id: str,
+        item_id: str,
+        *,
+        turn_id: str,
+        turn_revision: int | None,
+        preserve_active_response: bool,
+    ) -> str:
+        """Move an incomplete input item to the latest speculative revision."""
+        st = self._state(conn_id)
+        if not preserve_active_response:
+            st.current_item_id = item_id
+            st.content_index = 0
+        st.current_input_item_id = item_id
+        st.input_item_by_turn_revision = {
+            turn: tracked_item_id
+            for turn, tracked_item_id in st.input_item_by_turn_revision.items()
+            if tracked_item_id != item_id
+        }
+        st.input_item_by_turn_revision[(turn_id, turn_revision)] = item_id
+        return item_id
+
+    def release_input_item_state(
+        self,
+        conn_id: str,
+        turn_id: str | None,
+        turn_revision: int | None,
+    ) -> None:
+        """Drop routing state for a direct-audio item without publishing a transcription terminal."""
+        item_id = self._input_item_id(conn_id, turn_id, turn_revision)
+        if item_id is None:
+            return
+        self._release_input_item_state_by_id(conn_id, item_id)
+
+    def _release_input_item_state_by_id(self, conn_id: str, item_id: str) -> None:
+        st = self._state(conn_id)
+        st.input_item_by_turn_revision = {
+            turn: tracked_item_id
+            for turn, tracked_item_id in st.input_item_by_turn_revision.items()
+            if tracked_item_id != item_id
+        }
+        st.input_items.pop(item_id, None)
+        if st.current_input_item_id == item_id:
+            st.current_input_item_id = None
 
     def handle_audio_append(self, conn_id: str, event: InputAudioBufferAppendEvent) -> list[bytes]:
         """Decode base64 audio, resample to pipeline rate, and split into 512-sample PCM16 chunks for the VAD."""
@@ -119,25 +176,29 @@ class AudioHandler(RealtimeBaseHandler):
             st.completed_tool_response_keys.clear()
         is_reopen = bool(event.reopened and event.turn_id is not None and event.turn_id == st.speculative_turn_id)
         preserve_active_response = st.in_response
-        if is_reopen:
-            input_item_id = st.speculative_input_item_id
-            if input_item_id is None:
-                input_item_id = self._start_input_item(
-                    conn_id,
-                    preserve_active_response=preserve_active_response,
-                )
-                st.speculative_input_item_id = input_item_id
-            elif not preserve_active_response:
-                st.current_item_id = input_item_id
-                st.content_index = 0
-            st.input_audio_duration_s = 0.0
-            st.input_content_index = 0
+        previous_input_item_id = (
+            st.input_item_by_turn_revision.get((event.turn_id, st.speculative_turn_revision))
+            if is_reopen and event.turn_id is not None
+            else None
+        )
+        previous_input_item = st.input_items.get(previous_input_item_id) if previous_input_item_id is not None else None
+        if previous_input_item_id is not None and previous_input_item is not None:
+            assert event.turn_id is not None
+            input_item_id = self._reuse_input_item(
+                conn_id,
+                previous_input_item_id,
+                turn_id=event.turn_id,
+                turn_revision=event.turn_revision,
+                preserve_active_response=preserve_active_response,
+            )
         else:
             input_item_id = self._start_input_item(
                 conn_id,
+                turn_id=event.turn_id,
+                turn_revision=event.turn_revision,
                 preserve_active_response=preserve_active_response,
             )
-            st.speculative_input_item_id = input_item_id
+        if not is_reopen:
             st.response_usage.turns += 1
         st.speculative_turn_id = event.turn_id
         st.speculative_turn_revision = event.turn_revision
@@ -154,14 +215,26 @@ class AudioHandler(RealtimeBaseHandler):
 
     def on_speech_stopped(self, conn_id: str, event: SpeechStoppedEvent) -> list[ServerEvent]:
         """Handle VAD speech_stopped: record duration and emit stopped event."""
+        st = self._state(conn_id)
+        item_id = self._input_item_id(conn_id, event.turn_id, event.turn_revision)
+        if item_id is None:
+            logger.debug(
+                "Ignoring speech stop for unknown turn=%s rev=%s",
+                event.turn_id,
+                event.turn_revision,
+            )
+            return []
         if event.duration_s:
-            self._state(conn_id).input_audio_duration_s = event.duration_s
+            st.input_audio_duration_s = event.duration_s
+            input_item = st.input_items.get(item_id)
+            if input_item is not None:
+                input_item.audio_duration_s = event.duration_s
         return [
             InputAudioBufferSpeechStoppedEvent(
                 type="input_audio_buffer.speech_stopped",
                 event_id=self._next_event_id(),
                 audio_end_ms=event.audio_end_ms,
-                item_id=self._input_item_id(conn_id),
+                item_id=item_id,
             )
         ]
 

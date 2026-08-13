@@ -1,4 +1,11 @@
+from speech_to_speech.pipeline import PartialTranscriptionEvent
 from speech_to_speech.pipeline.messages import ResponsePrefetchTransaction
+
+
+def test_partial_transcription_event_retains_delta_constructor():
+    event = PartialTranscriptionEvent(delta="hello")
+
+    assert event.delta == "hello"
 
 
 def test_prefetch_transaction_commits_cleanup_once_across_completion_order():

@@ -2,7 +2,7 @@ import logging
 from collections.abc import Mapping
 from queue import Queue
 from threading import Event as ThreadingEvent
-from typing import Any, Callable, Literal, Optional, TypeVar, Union
+from typing import Any, Callable, Literal, Optional, TypeVar, Union, cast
 
 from openai.types.realtime import (
     ConversationItem,
@@ -37,6 +37,9 @@ from openai.types.realtime import (
     SessionUpdatedEvent,
     SessionUpdateEvent,
 )
+from openai.types.realtime.conversation_item_input_audio_transcription_completed_event import (
+    UsageTranscriptTextUsageDuration,
+)
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -46,6 +49,7 @@ from speech_to_speech.api.openai_realtime.handlers import (
     ResponseHandler,
     SessionHandler,
 )
+from speech_to_speech.api.openai_realtime.input_state import InputItemState
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.pipeline.events import (
@@ -189,7 +193,11 @@ class ConnState(BaseModel):
     response_error_type: Optional[str] = None
     current_item_id: Optional[str] = None
     content_index: int = 0
-    input_content_index: int = 0
+    current_input_item_id: Optional[str] = None
+    # Input transcription can overlap across turns. Route pipeline events back
+    # to their originating protocol item and keep append-only state per item.
+    input_item_by_turn_revision: dict[tuple[str, int | None], str] = Field(default_factory=dict)
+    input_items: dict[str, InputItemState] = Field(default_factory=dict)
     input_audio_duration_s: float = 0.0
     last_item_id: Optional[str] = None
     current_response_params: RealtimeResponseCreateParams | None = None
@@ -222,7 +230,6 @@ class ConnState(BaseModel):
     speculative_user_turn_revision: Optional[int] = None
     speculative_user_speech_stopped_at_s: Optional[float] = None
     speculative_user_item_id: Optional[str] = None
-    speculative_input_item_id: Optional[str] = None
     speculative_audio_duration_s: float = 0.0
     # Client conversation.item.create items that arrived while a response was
     # generating. Applying them mid-generation races the LLM handler's chat
@@ -603,6 +610,10 @@ class RealtimeService:
     def _on_transcription_completed(self, conn_id: str, event: TranscriptionCompletedEvent) -> list[ServerEvent]:
         """Handle a final STT transcription: emit protocol event, append to chat, trigger LM."""
         st = self._state(conn_id)
+        completed_events = self.conversation.on_transcription_completed(conn_id, event)
+        if not completed_events:
+            return []
+        input_duration_s = cast(UsageTranscriptTextUsageDuration, completed_events[0].usage).seconds
         self.response.discard_tool_followup_prefetch(conn_id)
         st.generation_done_tool_calls.clear()
         st.completed_tool_response_keys.clear()
@@ -612,9 +623,8 @@ class RealtimeService:
         else:
             st.speculative_audio_duration_s = 0.0
 
-        events = self.conversation.on_transcription_completed(conn_id, event)
         if event.turn_id is not None:
-            st.speculative_audio_duration_s = st.input_audio_duration_s
+            st.speculative_audio_duration_s = input_duration_s
 
         cfg = st.runtime_config
         transcript = event.transcript
@@ -650,11 +660,12 @@ class RealtimeService:
             st.mark_response_pending(request.response_key)
             queue.put(request)
 
-        return events
+        return [*completed_events]
 
     def _on_audio_input_completed(self, conn_id: str, event: AudioInputCompletedEvent) -> list[ServerEvent]:
         """Record final input audio and queue its realtime LM request."""
         st = self._state(conn_id)
+        self.audio.release_input_item_state(conn_id, event.turn_id, event.turn_revision)
         self.response.discard_tool_followup_prefetch(conn_id)
         st.generation_done_tool_calls.clear()
         st.completed_tool_response_keys.clear()

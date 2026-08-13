@@ -239,7 +239,8 @@ class PlaybackBuffer:
 
 class _FriendlyEventRenderer:
     def __init__(self) -> None:
-        self.partial_user_text = ""
+        # Input transcription events can arrive out of order across items.
+        self.user_transcript_by_item: dict[str | None, str] = {}
         self.live_user_width = 0
         self.saw_user_speech = False
         self.live_assistant_stream: _AssistantTranscriptStream | None = None
@@ -335,22 +336,25 @@ def handle_server_event(
     elif event.type == "input_audio_buffer.speech_started":
         renderer.finish_live_assistant_text()
         playback.clear()
-        renderer.partial_user_text = ""
         if renderer.saw_user_speech:
             print("", flush=True)
         renderer.saw_user_speech = True
     elif event.type == "input_audio_buffer.speech_stopped":
         return
     elif event.type == "conversation.item.input_audio_transcription.delta":
-        # This server emits the latest partial hypothesis, not a token suffix.
         renderer.finish_live_assistant_text()
-        renderer.partial_user_text = event.delta.strip()
-        if renderer.partial_user_text:
-            renderer.render_live_user_text(renderer.partial_user_text)
+        item_id = getattr(event, "item_id", None)
+        transcript = renderer.user_transcript_by_item.get(item_id, "") + (event.delta or "")
+        renderer.user_transcript_by_item[item_id] = transcript
+        display_text = transcript.strip()
+        if display_text:
+            renderer.render_live_user_text(display_text)
     elif event.type == "conversation.item.input_audio_transcription.completed":
         renderer.finish_live_assistant_text()
-        renderer.partial_user_text = ""
-        renderer.render_live_user_text(event.transcript.strip(), final=True)
+        item_id = getattr(event, "item_id", None)
+        transcript = event.transcript or ""
+        renderer.render_live_user_text(transcript.strip(), final=True)
+        renderer.user_transcript_by_item.pop(item_id, None)
     elif event.type == "response.created":
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()
