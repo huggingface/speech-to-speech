@@ -144,6 +144,7 @@ export class S2sRtcRealtimeClient extends EventTarget {
      * item id. Events from different speech turns may arrive out of order;
      * completed entries are removed after the authoritative final event. */
     this._userTranscriptByItem = new Map();
+    this._currentUserItemId = "";
     this._muted = false;
     // ── Response lock ────────────────────────────────────────────────────
     // Same scheme as the WS client: the backend allows ONE response in
@@ -478,6 +479,7 @@ export class S2sRtcRealtimeClient extends EventTarget {
 
       case "input_audio_buffer.speech_started": {
         const itemId = typeof event.item_id === "string" ? event.item_id : "";
+        this._currentUserItemId = itemId;
         // Barge-in: unlike WS there is no client playback buffer to clear —
         // the server flushes its track buffer — so this is UI state only.
         this._aiSpeaking = false;
@@ -597,7 +599,8 @@ export class S2sRtcRealtimeClient extends EventTarget {
         const itemId = typeof event.item_id === "string" ? event.item_id : "";
         const hadPartial = Boolean(this._userTranscriptByItem.get(itemId));
         this._userTranscriptByItem.delete(itemId);
-        if (this._waitingForResponseAfterCollision) {
+        const isCurrentUserItem = Boolean(itemId) && itemId === this._currentUserItemId;
+        if (this._waitingForResponseAfterCollision && isCurrentUserItem) {
           // A pending response interrupted by new speech has no response.done;
           // the final transcript is the first safe retry point.
           this._waitingForResponseAfterCollision = false;
@@ -615,11 +618,17 @@ export class S2sRtcRealtimeClient extends EventTarget {
             }),
           );
         }
-        if (!transcript && this._status === "processing" && !this._responsePending()) {
+        if (
+          !transcript
+          && isCurrentUserItem
+          && this._status === "processing"
+          && !this._responsePending()
+        ) {
           // Empty STT results intentionally do not create a response, so there
           // will be no response.done event to return the UI to listening.
           this._setStatus("connected");
         }
+        if (isCurrentUserItem) this._currentUserItemId = "";
         break;
       }
 

@@ -2,8 +2,7 @@ from pydantic import BaseModel
 
 
 class InputItemState(BaseModel):
-    """Lifecycle state for one client-visible input transcription item."""
+    """Active state for one client-visible input transcription item."""
 
-    transcript_prefix: str | None = ""
+    transcript_prefix: str = ""
     audio_duration_s: float = 0.0
-    completed: bool = False

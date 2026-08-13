@@ -133,6 +133,41 @@ await assertPendingStatus();
     ),
     pytest.param(
         """
+client._status = "connected";
+await deliver({ type: "input_audio_buffer.speech_started", item_id: "item_old" });
+await deliver({ type: "input_audio_buffer.speech_stopped", item_id: "item_old" });
+await deliver({ type: "input_audio_buffer.speech_started", item_id: "item_current" });
+await deliver({ type: "input_audio_buffer.speech_stopped", item_id: "item_current" });
+client._waitingForResponseAfterCollision = true;
+
+await deliver({
+  type: "conversation.item.input_audio_transcription.completed",
+  item_id: "item_old",
+  transcript: "",
+});
+if (client.status !== "processing") {
+  throw new Error(`late empty final overwrote current status: ${client.status}`);
+}
+if (!client._waitingForResponseAfterCollision) {
+  throw new Error("late completion released the current response collision");
+}
+
+await deliver({
+  type: "conversation.item.input_audio_transcription.completed",
+  item_id: "item_current",
+  transcript: "",
+});
+if (client.status !== "connected") {
+  throw new Error(`current empty final did not restore status: ${client.status}`);
+}
+if (client._waitingForResponseAfterCollision) {
+  throw new Error("current completion did not release the response collision");
+}
+""",
+        id="late-empty-final-keeps-current-status",
+    ),
+    pytest.param(
+        """
 await deliver({
   type: "conversation.item.input_audio_transcription.delta",
   item_id: "item_1",

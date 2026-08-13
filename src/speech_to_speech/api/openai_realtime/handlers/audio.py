@@ -27,7 +27,6 @@ PIPELINE_SAMPLE_RATE = 16000
 CHUNK_SAMPLES = 512
 BYTES_PER_SAMPLE = 2
 CHUNK_SIZE_BYTES = CHUNK_SAMPLES * BYTES_PER_SAMPLE
-MAX_BUFFERED_INPUT_ITEMS = 128
 
 
 class AudioHandler(RealtimeBaseHandler):
@@ -55,7 +54,6 @@ class AudioHandler(RealtimeBaseHandler):
         st.input_items[item_id] = InputItemState()
         if turn_id is not None:
             st.input_item_by_turn_revision[(turn_id, turn_revision)] = item_id
-        self.bound_input_item_buffers(conn_id)
         return item_id
 
     def _reuse_input_item(
@@ -103,13 +101,6 @@ class AudioHandler(RealtimeBaseHandler):
         st.input_items.pop(item_id, None)
         if st.current_input_item_id == item_id:
             st.current_input_item_id = None
-
-    def bound_input_item_buffers(self, conn_id: str) -> None:
-        """Discard old transcript prefixes while retaining terminal state."""
-        st = self._state(conn_id)
-        buffered_items = [item for item in st.input_items.values() if item.transcript_prefix is not None]
-        for item in buffered_items[:-MAX_BUFFERED_INPUT_ITEMS]:
-            item.transcript_prefix = None
 
     def handle_audio_append(self, conn_id: str, event: InputAudioBufferAppendEvent) -> list[bytes]:
         """Decode base64 audio, resample to pipeline rate, and split into 512-sample PCM16 chunks for the VAD."""
@@ -191,7 +182,7 @@ class AudioHandler(RealtimeBaseHandler):
             else None
         )
         previous_input_item = st.input_items.get(previous_input_item_id) if previous_input_item_id is not None else None
-        if previous_input_item_id is not None and previous_input_item is not None and not previous_input_item.completed:
+        if previous_input_item_id is not None and previous_input_item is not None:
             assert event.turn_id is not None
             input_item_id = self._reuse_input_item(
                 conn_id,
