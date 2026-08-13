@@ -67,6 +67,7 @@ flowchart LR
 | `input_audio_buffer.append` | Stream base64 PCM audio. Decoded, resampled to 16 kHz, and chunked for the VAD. |
 | `session.update` | Deep-merge session config (instructions, tools, voice, turn detection, audio format). |
 | `conversation.item.create` | Inject `input_text` or `function_call_output` into the LLM context without triggering generation. |
+| `conversation.item.truncate` | Accepted for stock WebSocket SDK interruption. Playback is client-owned, while an explicit `response.cancel` or automatic server-VAD cancellation already discards provisional generation, so this is an acknowledgement-free no-op. |
 | `response.create` | Trigger LLM generation. Supports per-response `instructions` and `tool_choice` overrides. |
 | `response.cancel` | Cancel the in-progress or queued response and re-enable listening. |
 
@@ -89,6 +90,34 @@ flowchart LR
 | `response.output_audio_transcript.done` | Full assistant transcript, emitted once when the output item closes. On cancellation, it contains the accumulated partial transcript. |
 | `response.function_call_arguments.done` | Tool call with `call_id`, `name`, and JSON `arguments`. |
 | `response.done` | Response finished (`completed`, `cancelled` with reason `turn_detected` or `client_cancelled`). |
+
+### Official Agents SDK compatibility
+
+CI pins `@openai/agents` 0.14.3 and runs independent integration jobs against
+the SDK's stock `OpenAIRealtimeWebSocket` and `OpenAIRealtimeWebRTC`
+transports. Both use a normal `RealtimeSession` with only its endpoint URL
+changed.
+
+| Tested behavior | Stock WebSocket | Stock WebRTC |
+|---|:---:|:---:|
+| `session.update` with instructions, voice, tools, server VAD, and PCM 24 kHz config | ✅ | ✅ |
+| Microphone input | `input_audio_buffer.append` | RTP audio track |
+| Assistant audio | `response.output_audio.delta` | RTP audio track |
+| Input and output transcription events | ✅ | ✅ |
+| Explicit cancellation | `response.cancel` + accepted `conversation.item.truncate` | `response.cancel` + `output_audio_buffer.clear` |
+| Server-VAD barge-in | `speech_started` cancels with `turn_detected`; adapter clears local PCM playback | `speech_started` cancels with `turn_detected`; server clears pending RTP audio |
+| Function call execution, output submission, and follow-up response | ✅ | ✅ |
+
+This matrix describes the tested core GA surface, not full API equivalence.
+Unlisted events, hosted features, and every future SDK behavior are not implied
+to be supported. The browser demo uses the same stock transports through a
+narrow adapter; its lower-level transport hooks only feed visualization,
+WebSocket PCM playback/replay, and existing UI events. One pinned-SDK gap is
+handled there as well: `@openai/agents` 0.14.3 omits `tools` when the updated
+list is empty, so the adapter uses the stock transport's `sendEvent` hook for
+an explicit `session.update` with `tools: []`. HF queueing, authentication,
+metering, camera capture, and device selection remain outside the Realtime
+protocol layer. No custom SDK transport is used.
 
 ### Transcript event compatibility
 

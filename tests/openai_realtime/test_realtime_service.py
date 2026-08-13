@@ -17,6 +17,7 @@ from openai.types.realtime import (
     ConversationItemCreateEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
+    ConversationItemTruncateEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferSpeechStartedEvent,
     InputAudioBufferSpeechStoppedEvent,
@@ -203,6 +204,17 @@ class TestParseClientEvent:
         raw = {"type": "response.cancel"}
         evt = service.parse_client_event(raw)
         assert isinstance(evt, ResponseCancelEvent)
+
+    def test_parse_valid_conversation_item_truncate(self, service):
+        """The stock Agents SDK sends this after cancelling audible WS output."""
+        raw = {
+            "type": "conversation.item.truncate",
+            "item_id": "item_assistant",
+            "content_index": 0,
+            "audio_end_ms": 120,
+        }
+        evt = service.parse_client_event(raw)
+        assert isinstance(evt, ConversationItemTruncateEvent)
 
     def test_parse_unknown_event_type(self, service):
         assert service.parse_client_event({"type": "bogus.event"}) is None

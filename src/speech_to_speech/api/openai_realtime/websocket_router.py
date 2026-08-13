@@ -11,6 +11,7 @@ import numpy as np
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from openai.types.realtime import (
     ConversationItemCreateEvent,
+    ConversationItemTruncateEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferCommitEvent,
     OutputAudioBufferClearEvent,
@@ -457,6 +458,14 @@ async def _dispatch_client_event(
         if events:
             await send_correlated(events)
 
+    elif isinstance(event, ConversationItemTruncateEvent):
+        # The stock Agents SDK sends this after an audible WebSocket
+        # interruption. An explicit response.cancel or automatic server-VAD
+        # cancellation has already discarded provisional generation, and
+        # client-side playback owns the unheard tail, so there is no additional
+        # server state to mutate.
+        logger.debug("Accepted conversation.item.truncate for %s", event.item_id)
+
     elif isinstance(event, ResponseCreateEvent):
         result = service.handle_response_create(session_id, event)
         if result:
@@ -528,7 +537,10 @@ def create_app(
 
     @app.websocket("/v1/realtime")
     async def realtime_endpoint(ws: WebSocket) -> None:
-        await ws.accept()
+        offered_subprotocols = {
+            protocol.strip() for protocol in ws.headers.get("sec-websocket-protocol", "").split(",")
+        }
+        await ws.accept(subprotocol="realtime" if "realtime" in offered_subprotocols else None)
 
         transport = WebSocketTransport(ws)
         unit = _claim_unit(transport)
