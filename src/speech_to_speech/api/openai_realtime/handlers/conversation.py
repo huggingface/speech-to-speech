@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
+from unicodedata import category
 
 from openai.types.realtime import (
     ConversationItem,
@@ -28,6 +29,37 @@ if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import ServerEvent
 
 logger = logging.getLogger(__name__)
+
+
+def _transcript_words(transcript: str) -> list[tuple[str, str]]:
+    """Return display and comparison forms for whitespace-delimited words."""
+    words: list[tuple[str, str]] = []
+    for token in transcript.split():
+        start = 0
+        end = len(token)
+        while start < end and category(token[start]).startswith("P"):
+            start += 1
+        while end > start and category(token[end - 1]).startswith("P"):
+            end -= 1
+        display = token[start:end]
+        if display:
+            words.append((display, display.casefold()))
+    return words
+
+
+def _stable_transcript_words(previous: str, current: str) -> list[tuple[str, str]]:
+    """Find words confirmed by two hypotheses, excluding their unstable tail."""
+    previous_words = _transcript_words(previous)
+    current_words = _transcript_words(current)
+    common_count = 0
+    for previous_word, current_word in zip(previous_words, current_words):
+        if previous_word[1] != current_word[1]:
+            break
+        common_count += 1
+
+    # The last matching word was at the speculative edge of the previous
+    # hypothesis. Hold it back until another update adds context after it.
+    return current_words[: max(0, common_count - 1)]
 
 
 class ConversationHandler(RealtimeBaseHandler):
@@ -203,7 +235,7 @@ class ConversationHandler(RealtimeBaseHandler):
     # ── Pipeline event handlers ────────────────────
 
     def on_partial_transcription(self, conn_id: str, event: PartialTranscriptionEvent) -> list[ServerEvent]:
-        """Translate a cumulative STT hypothesis into an append-only Realtime delta."""
+        """Stabilize a cumulative STT hypothesis into an append-only Realtime delta."""
         st = self._state(conn_id)
         item_id = self._input_item_id(conn_id, event.turn_id, event.turn_revision)
         if item_id is None:
@@ -217,24 +249,37 @@ class ConversationHandler(RealtimeBaseHandler):
         if input_item is None:
             logger.debug("Ignoring partial transcription for released item=%s", item_id)
             return []
-        hypothesis = event.delta
-        emitted = input_item.transcript_prefix
-        if not hypothesis or hypothesis == emitted:
+        hypothesis = event.delta.strip()
+        if not hypothesis or hypothesis == input_item.latest_transcript:
             return []
-        if not hypothesis.startswith(emitted):
-            # Batch STT over a growing audio window can revise earlier words.
-            # Realtime has no retraction event, so preserve the append-only wire
-            # stream and let the completed event replace it with the final text.
+
+        previous = input_item.latest_transcript
+        input_item.latest_transcript = hypothesis
+        if not previous:
+            return []
+
+        stable_words = _stable_transcript_words(previous, hypothesis)
+        emitted_words = _transcript_words(input_item.transcript_prefix)
+        emitted_comparison = [word[1] for word in emitted_words]
+        stable_comparison = [word[1] for word in stable_words]
+        if stable_comparison[: len(emitted_comparison)] != emitted_comparison:
+            # A word that already reached the wire was later revised. Realtime
+            # has no retraction event, so wait for a future hypothesis that
+            # extends the committed prefix or for the authoritative completion.
             logger.debug(
-                "Withholding revised partial transcription for item=%s (emitted=%r, hypothesis=%r)",
+                "Withholding revised stable transcription for item=%s (emitted=%r, hypothesis=%r)",
                 item_id,
-                emitted[-40:],
+                input_item.transcript_prefix[-40:],
                 hypothesis[-40:],
             )
             return []
 
-        delta = hypothesis[len(emitted) :]
-        input_item.transcript_prefix = hypothesis
+        new_words = stable_words[len(emitted_words) :]
+        if not new_words:
+            return []
+
+        delta = (" " if emitted_words else "") + " ".join(word[0] for word in new_words)
+        input_item.transcript_prefix += delta
         return [
             ConversationItemInputAudioTranscriptionDeltaEvent(
                 type="conversation.item.input_audio_transcription.delta",

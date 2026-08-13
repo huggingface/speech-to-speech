@@ -3339,41 +3339,107 @@ class TestDispatchPipelineEvent:
 
     # -- partial_transcription --
 
-    def test_partial_transcription_emits_incremental_deltas_for_one_content_part(self, service, conn_id):
+    def test_partial_transcription_emits_stable_incremental_deltas_for_one_content_part(self, service, conn_id):
         service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
-        e1 = service.dispatch_pipeline_event(
+        first = service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(delta="hel"),
+            PartialTranscriptionEvent(delta="hello brave"),
         )
-        e2 = service.dispatch_pipeline_event(
+        second = service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(delta="hello"),
+            PartialTranscriptionEvent(delta="hello brave new"),
         )
-        assert isinstance(e1[0], ConversationItemInputAudioTranscriptionDeltaEvent)
-        assert e1[0].content_index == 0
-        assert e1[0].delta == "hel"
-        assert isinstance(e2[0], ConversationItemInputAudioTranscriptionDeltaEvent)
-        assert e2[0].content_index == 0
-        assert e2[0].delta == "lo"
-
-    def test_duplicate_or_revised_partial_transcription_is_withheld(self, service, conn_id):
-        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
-        service.dispatch_pipeline_event(
+        third = service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(delta="hello"),
+            PartialTranscriptionEvent(delta="hello brave new world"),
         )
 
+        assert first == []
+        assert isinstance(second[0], ConversationItemInputAudioTranscriptionDeltaEvent)
+        assert second[0].content_index == 0
+        assert second[0].delta == "hello"
+        assert isinstance(third[0], ConversationItemInputAudioTranscriptionDeltaEvent)
+        assert third[0].content_index == 0
+        assert third[0].delta == " brave"
+
+    def test_duplicate_partial_does_not_confirm_speculative_words(self, service, conn_id):
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+        first = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello brave"),
+        )
         duplicate = service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(delta="hello"),
+            PartialTranscriptionEvent(delta="hello brave"),
+        )
+        extended = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello brave new"),
+        )
+
+        assert first == []
+        assert duplicate == []
+        assert extended[0].delta == "hello"
+
+    def test_punctuation_revision_does_not_block_later_stable_deltas(self, service, conn_id):
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+
+        first = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="Hey can you"),
+        )
+        second = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="Hey, can you hear"),
+        )
+        third = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="Hey, can you hear me?"),
+        )
+
+        assert first == []
+        assert second[0].delta == "Hey can"
+        assert third[0].delta == " you"
+
+    def test_early_word_revision_is_replaced_before_it_reaches_the_wire(self, service, conn_id):
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+
+        wrong = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="Nothing company."),
+        )
+        correction = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="Oh, nothing confused me."),
+        )
+        extended = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="Oh, nothing confused me. I was"),
+        )
+
+        assert wrong == []
+        assert correction == []
+        assert extended[0].delta == "Oh nothing confused"
+
+    def test_stabilizer_resumes_after_one_incompatible_hypothesis(self, service, conn_id):
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+        service.dispatch_pipeline_event(conn_id, PartialTranscriptionEvent(delta="The quick"))
+        committed = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="The quick brown"),
         )
         revised = service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(delta="hullo"),
+            PartialTranscriptionEvent(delta="The swift brown"),
+        )
+        recovered = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="The swift brown fox"),
         )
 
-        assert duplicate == []
+        assert committed[0].delta == "The"
         assert revised == []
+        assert recovered[0].delta == " swift"
 
     def test_new_input_item_resets_partial_transcription_delta(self, service, conn_id):
         first_started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1"))
@@ -3383,9 +3449,13 @@ class TestDispatchPipelineEvent:
         )
 
         second_started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_2"))
+        service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="new item", turn_id="turn_2"),
+        )
         second_partial = service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(delta="new", turn_id="turn_2"),
+            PartialTranscriptionEvent(delta="new item text", turn_id="turn_2"),
         )
 
         assert first_started[0].item_id != second_started[0].item_id
@@ -3410,14 +3480,19 @@ class TestDispatchPipelineEvent:
             conn_id,
             SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
         )
-        continued = service.dispatch_pipeline_event(
+        first_reopened_partial = service.dispatch_pipeline_event(
             conn_id,
             PartialTranscriptionEvent(delta="hello again", turn_id="turn_1", turn_revision=1),
         )
+        continued = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello again friend", turn_id="turn_1", turn_revision=1),
+        )
 
         assert reopened[0].item_id != first_started[0].item_id
+        assert first_reopened_partial == []
         assert continued[0].item_id == reopened[0].item_id
-        assert continued[0].delta == "hello again"
+        assert continued[0].delta == "hello"
         assert continued[0].content_index == 0
 
     def test_completed_input_item_does_not_emit_later_deltas(self, service, conn_id):
@@ -3476,7 +3551,7 @@ class TestDispatchPipelineEvent:
         )
         first_second_partial = service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(delta="wor", turn_id="turn_2"),
+            PartialTranscriptionEvent(delta="world today", turn_id="turn_2"),
         )
         late_first_completion = service.dispatch_pipeline_event(
             conn_id,
@@ -3484,7 +3559,11 @@ class TestDispatchPipelineEvent:
         )
         second_second_partial = service.dispatch_pipeline_event(
             conn_id,
-            PartialTranscriptionEvent(delta="world", turn_id="turn_2"),
+            PartialTranscriptionEvent(delta="world today again", turn_id="turn_2"),
+        )
+        third_second_partial = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="world today again please", turn_id="turn_2"),
         )
 
         first_item_id = first_started[0].item_id
@@ -3492,13 +3571,14 @@ class TestDispatchPipelineEvent:
         assert first_item_id != second_item_id
         assert late_first_completion[0].item_id == first_item_id
         assert late_first_completion[0].usage.seconds == 1.0
-        assert first_second_partial[0].item_id == second_item_id
-        assert first_second_partial[0].delta == "wor"
+        assert first_second_partial == []
         assert second_second_partial[0].item_id == second_item_id
-        assert second_second_partial[0].delta == "ld"
+        assert second_second_partial[0].delta == "world"
+        assert third_second_partial[0].item_id == second_item_id
+        assert third_second_partial[0].delta == " today"
         input_items = service._state(conn_id).input_items
         assert first_item_id not in input_items
-        assert input_items[second_item_id].transcript_prefix == "world"
+        assert input_items[second_item_id].transcript_prefix == "world today"
 
     def test_metadata_less_completion_keeps_the_current_input_item(self, service, conn_id):
         started = service.dispatch_pipeline_event(
@@ -3819,9 +3899,13 @@ class TestDispatchPipelineEvent:
         )
         # BaseSTTHandler drops revision 0 after the reopen, so no terminal event
         # for that revision is dispatched here.
-        second_partial = service.dispatch_pipeline_event(
+        first_reopened_partial = service.dispatch_pipeline_event(
             conn_id,
             PartialTranscriptionEvent(delta="hello again", turn_id="turn_1", turn_revision=1),
+        )
+        second_partial = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello again friend", turn_id="turn_1", turn_revision=1),
         )
         service.dispatch_pipeline_event(
             conn_id,
@@ -3834,8 +3918,9 @@ class TestDispatchPipelineEvent:
 
         item_id = first_started[0].item_id
         assert second_started[0].item_id == item_id
+        assert first_reopened_partial == []
         assert second_partial[0].item_id == item_id
-        assert second_partial[0].delta == " again"
+        assert second_partial[0].delta == "hello"
         assert completed[0].item_id == item_id
         state = service._state(conn_id)
         assert item_id not in state.input_items
