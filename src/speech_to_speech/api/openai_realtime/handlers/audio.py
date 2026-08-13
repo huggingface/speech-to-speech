@@ -14,6 +14,7 @@ from openai.types.realtime import (
 )
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
+from speech_to_speech.api.openai_realtime.input_state import InputItemState
 from speech_to_speech.api.openai_realtime.utils import resample
 from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
 
@@ -51,9 +52,7 @@ class AudioHandler(RealtimeBaseHandler):
             st.current_item_id = response_item_id
             st.content_index = response_content_index
         st.current_input_item_id = item_id
-        st.input_transcription_by_item[item_id] = ""
-        st.input_audio_duration_by_item[item_id] = 0.0
-        st.completed_input_item_ids.pop(item_id, None)
+        st.input_items[item_id] = InputItemState()
         if turn_id is not None:
             st.input_item_by_turn_revision[(turn_id, turn_revision)] = item_id
         self.bound_input_item_buffers(conn_id)
@@ -101,17 +100,16 @@ class AudioHandler(RealtimeBaseHandler):
             for turn, tracked_item_id in st.input_item_by_turn_revision.items()
             if tracked_item_id != item_id
         }
-        st.input_transcription_by_item.pop(item_id, None)
-        st.input_audio_duration_by_item.pop(item_id, None)
+        st.input_items.pop(item_id, None)
         if st.current_input_item_id == item_id:
             st.current_input_item_id = None
 
     def bound_input_item_buffers(self, conn_id: str) -> None:
         """Discard old transcript prefixes while retaining terminal state."""
         st = self._state(conn_id)
-        while len(st.input_transcription_by_item) > MAX_BUFFERED_INPUT_ITEMS:
-            oldest_item_id = next(iter(st.input_transcription_by_item))
-            st.input_transcription_by_item.pop(oldest_item_id)
+        buffered_items = [item for item in st.input_items.values() if item.transcript_prefix is not None]
+        for item in buffered_items[:-MAX_BUFFERED_INPUT_ITEMS]:
+            item.transcript_prefix = None
 
     def handle_audio_append(self, conn_id: str, event: InputAudioBufferAppendEvent) -> list[bytes]:
         """Decode base64 audio, resample to pipeline rate, and split into 512-sample PCM16 chunks for the VAD."""
@@ -192,7 +190,8 @@ class AudioHandler(RealtimeBaseHandler):
             if is_reopen and event.turn_id is not None
             else None
         )
-        if previous_input_item_id is not None and previous_input_item_id not in st.completed_input_item_ids:
+        previous_input_item = st.input_items.get(previous_input_item_id) if previous_input_item_id is not None else None
+        if previous_input_item_id is not None and previous_input_item is not None and not previous_input_item.completed:
             assert event.turn_id is not None
             input_item_id = self._reuse_input_item(
                 conn_id,
@@ -236,7 +235,9 @@ class AudioHandler(RealtimeBaseHandler):
             return []
         if event.duration_s:
             st.input_audio_duration_s = event.duration_s
-            st.input_audio_duration_by_item[item_id] = event.duration_s
+            input_item = st.input_items.get(item_id)
+            if input_item is not None:
+                input_item.audio_duration_s = event.duration_s
         return [
             InputAudioBufferSpeechStoppedEvent(
                 type="input_audio_buffer.speech_stopped",

@@ -3454,7 +3454,7 @@ class TestDispatchPipelineEvent:
 
         assert events == []
         assert service._state(conn_id).current_item_id == assistant_item_id
-        assert assistant_item_id not in service._state(conn_id).input_transcription_by_item
+        assert assistant_item_id not in service._state(conn_id).input_items
 
     def test_late_completion_and_overlapping_partial_keep_originating_item(self, service, conn_id):
         first_started = service.dispatch_pipeline_event(
@@ -3496,7 +3496,85 @@ class TestDispatchPipelineEvent:
         assert first_second_partial[0].delta == "wor"
         assert second_second_partial[0].item_id == second_item_id
         assert second_second_partial[0].delta == "ld"
-        assert service._state(conn_id).input_transcription_by_item == {second_item_id: "world"}
+        input_items = service._state(conn_id).input_items
+        assert input_items[first_item_id].completed is True
+        assert input_items[second_item_id].transcript_prefix == "world"
+
+    def test_metadata_less_completion_does_not_finalize_an_overlapping_item(
+        self,
+        service,
+        conn_id,
+        text_prompt_queue,
+    ):
+        first_started = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hel", turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=1.0, turn_id="turn_1", turn_revision=0),
+        )
+        second_started = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_2", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="wor", turn_id="turn_2", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStoppedEvent(duration_s=2.0, turn_id="turn_2", turn_revision=0),
+        )
+
+        completed = service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="ambiguous final"),
+        )
+
+        first_item_id = first_started[0].item_id
+        second_item_id = second_started[0].item_id
+        standalone_item_id = completed[0].item_id
+        state = service._state(conn_id)
+        assert standalone_item_id not in {first_item_id, second_item_id}
+        assert completed[0].usage.seconds == 0.0
+        assert state.input_items[first_item_id].completed is False
+        assert state.input_items[first_item_id].transcript_prefix == "hel"
+        assert state.input_items[first_item_id].audio_duration_s == 1.0
+        assert state.input_items[second_item_id].completed is False
+        assert state.input_items[second_item_id].transcript_prefix == "wor"
+        assert state.input_items[second_item_id].audio_duration_s == 2.0
+        assert state.input_items[standalone_item_id].completed is True
+        assert state.current_input_item_id == second_item_id
+        request = text_prompt_queue.get_nowait()
+        assert request.turn_id is None
+        assert request.turn_revision is None
+
+    def test_metadata_less_completion_does_not_finalize_a_routed_current_item(self, service, conn_id):
+        started = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="current", turn_id="turn_1", turn_revision=0),
+        )
+
+        completed = service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="metadata-less"),
+        )
+
+        current_item_id = started[0].item_id
+        state = service._state(conn_id)
+        assert completed[0].item_id != current_item_id
+        assert state.input_items[current_item_id].completed is False
+        assert state.input_items[current_item_id].transcript_prefix == "current"
+        assert state.current_input_item_id == current_item_id
 
     def test_completed_input_item_state_is_bounded(self, service, conn_id):
         for index in range(130):
@@ -3515,10 +3593,9 @@ class TestDispatchPipelineEvent:
             )
 
         state = service._state(conn_id)
-        assert len(state.completed_input_item_ids) == 128
+        assert len(state.input_items) == 128
+        assert all(item.completed for item in state.input_items.values())
         assert len(state.input_item_by_turn_revision) == 128
-        assert state.input_transcription_by_item == {}
-        assert state.input_audio_duration_by_item == {}
 
     def test_unterminated_input_buffers_are_bounded_without_losing_late_completion(
         self,
@@ -3550,12 +3627,13 @@ class TestDispatchPipelineEvent:
 
         state = service._state(conn_id)
         assert len(state.input_item_by_turn_revision) == 130
-        assert len(state.input_transcription_by_item) == 128
-        assert len(state.input_audio_duration_by_item) == 130
-        assert state.completed_input_item_ids == {}
-        assert started_item_ids[0] not in state.input_transcription_by_item
-        assert started_item_ids[1] not in state.input_transcription_by_item
-        assert started_item_ids[-1] in state.input_transcription_by_item
+        assert len(state.input_items) == 130
+        assert sum(item.transcript_prefix is not None for item in state.input_items.values()) == 128
+        assert not any(item.completed for item in state.input_items.values())
+        assert state.input_items[started_item_ids[0]].transcript_prefix is None
+        assert state.input_items[started_item_ids[0]].audio_duration_s == 1.0
+        assert state.input_items[started_item_ids[1]].transcript_prefix is None
+        assert state.input_items[started_item_ids[-1]].transcript_prefix == ""
         assert state.current_input_item_id == started_item_ids[-1]
 
         late_partial = service.dispatch_pipeline_event(
@@ -3563,7 +3641,7 @@ class TestDispatchPipelineEvent:
             PartialTranscriptionEvent(delta="hello", turn_id="turn_0", turn_revision=0),
         )
         assert late_partial == []
-        assert started_item_ids[0] not in state.input_transcription_by_item
+        assert state.input_items[started_item_ids[0]].transcript_prefix is None
 
         late_completion = service.dispatch_pipeline_event(
             conn_id,
@@ -3659,10 +3737,9 @@ class TestDispatchPipelineEvent:
         assert state.response_pending is True
         assert state.response_usage.audio_duration_s == 2.5
         assert state.current_input_item_id is None
-        assert state.input_transcription_by_item == {}
-        assert state.input_audio_duration_by_item == {}
+        assert state.input_items == {}
         assert state.input_item_by_turn_revision == {}
-        assert started[0].item_id not in state.completed_input_item_ids
+        assert started[0].item_id not in state.input_items
         request = text_prompt_queue.get_nowait()
         assert isinstance(request, GenerateResponseRequest)
         assert request.runtime_config is runtime_config
@@ -3896,10 +3973,10 @@ class TestDispatchPipelineEvent:
         assert second_partial[0].delta == " again"
         assert completed[0].item_id == item_id
         state = service._state(conn_id)
-        assert item_id in state.completed_input_item_ids
+        assert state.input_items[item_id].completed is True
         assert state.current_input_item_id is None
-        assert state.input_transcription_by_item == {}
-        assert state.input_audio_duration_by_item == {}
+        assert state.input_items[item_id].transcript_prefix is None
+        assert state.input_items[item_id].audio_duration_s == 0.0
         assert state.input_item_by_turn_revision == {("turn_1", 1): item_id}
         assert state.response_usage.audio_duration_s == 2.0
         user_items = [item for item in runtime_config.chat.buffer if getattr(item, "role", None) == "user"]
@@ -3930,7 +4007,7 @@ class TestDispatchPipelineEvent:
         assert runtime_config.chat.buffer == []
         assert text_prompt_queue.empty()
         assert service._state(conn_id).input_item_by_turn_revision == {}
-        assert service._state(conn_id).input_transcription_by_item == {}
+        assert service._state(conn_id).input_items == {}
         service.unregister(conn_id)
 
     def test_stale_assistant_text_dropped_after_unanswered_reopen(self, runtime_config, should_listen):

@@ -213,17 +213,21 @@ class ConversationHandler(RealtimeBaseHandler):
                 event.turn_revision,
             )
             return []
-        if item_id in st.completed_input_item_ids:
+        input_item = st.input_items.get(item_id)
+        if input_item is None:
+            logger.debug("Ignoring partial transcription for released item=%s", item_id)
+            return []
+        if input_item.completed:
             logger.debug("Ignoring partial transcription after completion for item=%s", item_id)
             return []
-        if item_id not in st.input_transcription_by_item:
+        if input_item.transcript_prefix is None:
             # The bounded buffer no longer contains the emitted prefix. Keep
             # the wire stream append-only by waiting for the authoritative
             # completion instead of replaying a cumulative hypothesis.
             logger.debug("Ignoring partial transcription after buffer eviction for item=%s", item_id)
             return []
         hypothesis = event.delta
-        emitted = st.input_transcription_by_item[item_id]
+        emitted = input_item.transcript_prefix
         if not hypothesis or hypothesis == emitted:
             return []
         if not hypothesis.startswith(emitted):
@@ -239,7 +243,7 @@ class ConversationHandler(RealtimeBaseHandler):
             return []
 
         delta = hypothesis[len(emitted) :]
-        st.input_transcription_by_item[item_id] = hypothesis
+        input_item.transcript_prefix = hypothesis
         self._service.audio.bound_input_item_buffers(conn_id)
         return [
             ConversationItemInputAudioTranscriptionDeltaEvent(
@@ -254,28 +258,27 @@ class ConversationHandler(RealtimeBaseHandler):
     def terminalize_input_item(
         self,
         conn_id: str,
-        turn_id: str | None,
-        turn_revision: int | None,
+        item_id: str,
     ) -> tuple[str, float] | None:
         """Release one input item's active state and retain a bounded tombstone."""
         st = self._state(conn_id)
-        item_id = self._input_item_id(conn_id, turn_id, turn_revision)
-        if item_id is None:
-            logger.debug(
-                "Ignoring input terminal for unknown turn=%s rev=%s",
-                turn_id,
-                turn_revision,
-            )
+        input_item = st.input_items.get(item_id)
+        if input_item is None:
+            logger.debug("Ignoring input terminal for released item=%s", item_id)
             return None
-        if item_id in st.completed_input_item_ids:
+        if input_item.completed:
             logger.debug("Ignoring duplicate input terminal for item=%s", item_id)
             return None
-        duration_s = st.input_audio_duration_by_item.pop(item_id, 0.0)
-        st.input_transcription_by_item.pop(item_id, None)
-        st.completed_input_item_ids[item_id] = None
-        while len(st.completed_input_item_ids) > 128:
-            expired_item_id = next(iter(st.completed_input_item_ids))
-            st.completed_input_item_ids.pop(expired_item_id)
+        duration_s = input_item.audio_duration_s
+        input_item.transcript_prefix = None
+        input_item.audio_duration_s = 0.0
+        input_item.completed = True
+        # Keep the shared item map ordered by terminal time so bounded
+        # completed records expire in lifecycle order, not creation order.
+        st.input_items[item_id] = st.input_items.pop(item_id)
+        completed_item_ids = [tracked_item_id for tracked_item_id, item in st.input_items.items() if item.completed]
+        for expired_item_id in completed_item_ids[:-128]:
+            st.input_items.pop(expired_item_id)
             st.input_item_by_turn_revision = {
                 turn: tracked_item_id
                 for turn, tracked_item_id in st.input_item_by_turn_revision.items()
@@ -285,6 +288,23 @@ class ConversationHandler(RealtimeBaseHandler):
             st.current_input_item_id = None
         return item_id, duration_s
 
+    def _completion_input_item_id(
+        self,
+        conn_id: str,
+        turn_id: str | None,
+        turn_revision: int | None,
+    ) -> str | None:
+        """Resolve a final only when its item identity is unambiguous."""
+        st = self._state(conn_id)
+        if turn_id is not None:
+            return st.input_item_by_turn_revision.get((turn_id, turn_revision))
+        current_item_id = st.current_input_item_id
+        unresolved_item_ids = [item_id for item_id, item in st.input_items.items() if not item.completed]
+        current_item_has_turn_route = current_item_id in st.input_item_by_turn_revision.values()
+        if current_item_id is not None and unresolved_item_ids == [current_item_id] and not current_item_has_turn_route:
+            return current_item_id
+        return None
+
     def on_transcription_completed(
         self,
         conn_id: str,
@@ -292,17 +312,21 @@ class ConversationHandler(RealtimeBaseHandler):
     ) -> list[ConversationItemInputAudioTranscriptionCompletedEvent]:
         """Terminalize one transcript item and emit its authoritative final event."""
         st = self._state(conn_id)
-        if self._input_item_id(conn_id, event.turn_id, event.turn_revision) is None:
+        item_id = self._completion_input_item_id(conn_id, event.turn_id, event.turn_revision)
+        if item_id is None:
             # Some pipelines do not publish speech lifecycle events. Give their
             # authoritative terminal a registered input item instead of
-            # borrowing a concurrently active assistant item.
-            self._service.audio._start_input_item(
+            # borrowing a concurrently active or ambiguous input item.
+            previous_input_item_id = st.current_input_item_id
+            item_id = self._service.audio._start_input_item(
                 conn_id,
                 turn_id=event.turn_id,
                 turn_revision=event.turn_revision,
-                preserve_active_response=st.in_response,
+                preserve_active_response=st.in_response or previous_input_item_id is not None,
             )
-        terminal = self.terminalize_input_item(conn_id, event.turn_id, event.turn_revision)
+            if previous_input_item_id is not None:
+                st.current_input_item_id = previous_input_item_id
+        terminal = self.terminalize_input_item(conn_id, item_id)
         if terminal is None:
             return []
         item_id, duration_s = terminal

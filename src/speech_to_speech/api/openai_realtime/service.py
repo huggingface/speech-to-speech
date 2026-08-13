@@ -48,6 +48,7 @@ from speech_to_speech.api.openai_realtime.handlers import (
     ResponseHandler,
     SessionHandler,
 )
+from speech_to_speech.api.openai_realtime.input_state import InputItemState
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.pipeline.events import (
@@ -193,9 +194,7 @@ class ConnState(BaseModel):
     # Input transcription can overlap across turns. Route pipeline events back
     # to their originating protocol item and keep append-only state per item.
     input_item_by_turn_revision: dict[tuple[str, int | None], str] = Field(default_factory=dict)
-    input_transcription_by_item: dict[str, str] = Field(default_factory=dict)
-    input_audio_duration_by_item: dict[str, float] = Field(default_factory=dict)
-    completed_input_item_ids: dict[str, None] = Field(default_factory=dict)
+    input_items: dict[str, InputItemState] = Field(default_factory=dict)
     input_audio_duration_s: float = 0.0
     last_item_id: Optional[str] = None
     current_response_params: RealtimeResponseCreateParams | None = None
