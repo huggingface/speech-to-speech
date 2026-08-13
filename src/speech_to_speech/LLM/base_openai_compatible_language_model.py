@@ -637,6 +637,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 new_text = remove_unspeechable(event.text)
                 state.clean_text += new_text
                 printable_text += new_text
+                trailing_whitespace = printable_text[len(printable_text.rstrip()) :]
                 sentences = sent_tokenize(printable_text)
                 if len(sentences) > 1:
                     for s in sentences[:-1]:
@@ -650,7 +651,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                             sentence_batch = []
                     if cancelled:
                         break
-                    printable_text = sentences[-1]
+                    printable_text = sentences[-1] + trailing_whitespace
 
         if not cancelled:
             if printable_text.strip():

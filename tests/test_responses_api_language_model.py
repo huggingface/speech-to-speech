@@ -616,6 +616,32 @@ def test_process_preserves_streamed_text_after_function_call_order():
     assert isinstance(outputs[3], EndOfResponse)
 
 
+def test_audio_streaming_preserves_provider_whitespace_across_chunks():
+    handler = _make_handler(stream=True)
+    handler.stream_batch_sentences = 3
+
+    handler.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            create=lambda **kwargs: _make_stream(
+                [
+                    _make_text_delta_event("Mock brain is working. I heard you say: What is "),
+                    _make_text_delta_event("the weather today?"),
+                    _make_output_item_done_event(
+                        content="Mock brain is working. I heard you say: What is the weather today?"
+                    ),
+                ]
+            )
+        )
+    )
+
+    outputs = [o.text for o in handler.process(_make_request("Ask about weather")) if isinstance(o, LLMResponseChunk)]
+    text = "".join(outputs)
+
+    assert outputs == ["Mock brain is working. I heard you say: What is the weather today?"]
+    assert "working.I" not in text
+    assert "isthe" not in text
+
+
 def test_process_preserves_nonstreaming_text_tool_text_order():
     handler = _make_handler(stream=False)
 
