@@ -190,12 +190,12 @@ def _validate_realtime_websocket_support() -> None:
 def _validate_darwin_dependency_pins() -> None:
     expected_versions = {
         "miniaudio": "1.61",
-        "mlx": "0.31.1",
-        "mlx-audio": "0.4.2",
-        "mlx-lm": "0.31.1",
-        "mlx-metal": "0.31.1",
+        "mlx": "0.32.0",
+        "mlx-audio": "0.4.7",
+        "mlx-lm": "0.31.3",
+        "mlx-metal": "0.32.0",
         "sounddevice": "0.5.3",
-        "transformers": "5.6.2",
+        "transformers": "5.14.1",
     }
     mismatches = []
     for package_name, expected_version in expected_versions.items():
@@ -216,6 +216,7 @@ def main() -> None:
     required_modules = [
         "fastapi",
         "huggingface_hub",
+        "librosa",
         "lingua",
         "onnxruntime",
         "openai",
