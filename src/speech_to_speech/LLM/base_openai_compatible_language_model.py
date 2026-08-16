@@ -242,14 +242,14 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         Providers differ in how reasoning is turned off: vLLM/Qwen honour
         ``chat_template_kwargs.enable_thinking=false``, while others (e.g. GLM via
         the HF router) ignore that and require ``reasoning_effort='none'``. A
-        non-empty ``reasoning_effort`` therefore takes precedence; otherwise we fall
-        back to the chat-template flag. None of this applies to the official
-        OpenAI server, which rejects unknown extra_body keys.
+        non-empty ``reasoning_effort`` therefore takes precedence, including for
+        official OpenAI requests; otherwise we fall back to the provider-specific
+        chat-template flag, which the official OpenAI server does not accept.
         """
-        if base_url is None or cls._is_official_openai(base_url):
-            return None
         if reasoning_effort:
             return {"reasoning_effort": reasoning_effort}
+        if base_url is None or cls._is_official_openai(base_url):
+            return None
         if disable_thinking:
             return {"chat_template_kwargs": {"enable_thinking": False}}
         return None
