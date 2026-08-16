@@ -243,13 +243,17 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         ``chat_template_kwargs.enable_thinking=false``, while others (e.g. GLM via
         the HF router) ignore that and require ``reasoning_effort='none'``. A
         non-empty ``reasoning_effort`` therefore takes precedence; otherwise we fall
-        back to the chat-template flag. None of this applies to the official
-        OpenAI server, which rejects unknown extra_body keys.
+        back to the chat-template flag. An explicit effort is honored even for the
+        official OpenAI server, where ``reasoning_effort`` is a documented
+        top-level Chat Completions parameter (e.g. ``none`` is required to combine
+        function tools with reasoning models); the provider-specific
+        chat-template flag never reaches it, as the server rejects unknown
+        extra_body keys.
         """
-        if base_url is None or cls._is_official_openai(base_url):
-            return None
         if reasoning_effort:
             return {"reasoning_effort": reasoning_effort}
+        if base_url is None or cls._is_official_openai(base_url):
+            return None
         if disable_thinking:
             return {"chat_template_kwargs": {"enable_thinking": False}}
         return None
