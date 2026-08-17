@@ -36,6 +36,7 @@ def test_progressive_paraformer_transcription_is_partial(monkeypatch):
     assert result[0].text == "今天天气不错"
     assert result[0].turn_id == "turn_1"
     assert result[0].turn_revision == 2
+    assert not hasattr(result[0], "language_code")
 
 
 def test_final_paraformer_transcription_is_final(monkeypatch):
@@ -57,6 +58,7 @@ def test_final_paraformer_transcription_is_final(monkeypatch):
     assert len(result) == 1
     assert isinstance(result[0], Transcription)
     assert result[0].text == "今天天气不错"
+    assert result[0].language_code == "zh"
     assert result[0].turn_id == "turn_1"
     assert result[0].turn_revision == 2
     assert result[0].speech_stopped_at_s == 123.0
