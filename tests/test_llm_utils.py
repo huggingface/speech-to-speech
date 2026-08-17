@@ -124,6 +124,14 @@ def test_remove_markdown_strips_bold_and_italic() -> None:
     assert remove_markdown("__bold__ and _italic_ text") == "bold and italic text"
 
 
+def test_remove_markdown_strips_emphasis_adjacent_to_word_characters() -> None:
+    assert remove_markdown("这是**重点**内容。") == "这是重点内容。"
+    assert remove_markdown("これは**重要**です。") == "これは重要です。"
+    assert remove_markdown("foo**bar**baz") == "foobarbaz"
+    assert remove_markdown("这是*重点*内容。") == "这是重点内容。"
+    assert remove_markdown("foo*bar*baz") == "foobarbaz"
+
+
 def test_remove_markdown_keeps_snake_case_identifiers() -> None:
     assert remove_markdown("function_call_output") == "function_call_output"
 
@@ -160,6 +168,15 @@ def test_remove_markdown_strips_nested_bold_and_code() -> None:
 
 def test_remove_markdown_strips_inline_code() -> None:
     assert remove_markdown("`inline`") == "inline"
+
+
+def test_remove_markdown_preserves_markdown_like_characters_inside_code() -> None:
+    assert remove_markdown("Use `*args` and `**kwargs`.") == "Use *args and **kwargs."
+    assert remove_markdown("Match `*.py` files.") == "Match *.py files."
+    assert (
+        remove_markdown("```python\n*args = values\n# keep_this\n**literal**\n```")
+        == "*args = values\n# keep_this\n**literal**\n"
+    )
 
 
 def test_remove_markdown_strips_fenced_code_block_and_language_tag() -> None:

@@ -23,6 +23,14 @@ SPEECHABLE_PATTERN = re.compile(
 MARKDOWN_HEADING_PATTERN = re.compile(r"^[ \t]{0,3}#{1,6}(?:[ \t]+|$)", flags=re.MULTILINE)
 MARKDOWN_BULLET_PATTERN = re.compile(r"^[ \t]{0,3}[-*+][ \t]+", flags=re.MULTILINE)
 
+# Protect complete code bodies while prose-only Markdown passes run. Fenced
+# blocks are handled first so their backticks are not mistaken for inline code.
+MARKDOWN_FENCED_CODE_PATTERN = re.compile(
+    r"^[ \t]{0,3}`{3,}[^\r\n]*\r?\n(?P<body>.*?)(?:^[ \t]{0,3}`{3,}[ \t]*$)",
+    flags=re.MULTILINE | re.DOTALL,
+)
+MARKDOWN_INLINE_CODE_PATTERN = re.compile(r"(?P<ticks>`{1,})(?P<body>[^\n]*?)(?P=ticks)")
+
 # A word after an opening fence is a language tag only when the fence line ends.
 # Requiring the newline preserves same-line code spans such as ```code```.
 MARKDOWN_FENCE_OPEN_PATTERN = re.compile(
@@ -31,8 +39,11 @@ MARKDOWN_FENCE_OPEN_PATTERN = re.compile(
 )
 MARKDOWN_FENCE_CLOSE_PATTERN = re.compile(r"^[ \t]{0,3}`{3,}[ \t]*$", flags=re.MULTILINE)
 
-# Markdown emphasis uses boundary delimiters. Keeping runs surrounded by word
-# characters preserves compact arithmetic and identifiers such as `2*3`.
+# Matched star pairs may directly adjoin CJK or other word characters. The
+# fallback delimiter pass still requires boundaries, preserving unmatched
+# compact operators such as `2*3` and `5**2`.
+MARKDOWN_DOUBLE_STAR_PAIR_PATTERN = re.compile(r"(?<!\*)\*\*(?!\*)(?P<body>[^\s*](?:[^\n]*?[^\s*])?)\*\*(?!\*)")
+MARKDOWN_SINGLE_STAR_PAIR_PATTERN = re.compile(r"(?<!\*)\*(?!\*)(?P<body>[^\s*](?:[^\n]*?[^\s*])?)\*(?!\*)")
 MARKDOWN_STAR_DELIMITER_PATTERN = re.compile(r"(?<![\w*])\*{1,3}(?=\S)|(?<=\S)\*{1,3}(?![\w*])")
 MARKDOWN_UNDERSCORE_DELIMITER_PATTERN = re.compile(r"(?<!\w)_{1,2}(?=\S)|(?<=\S)_{1,2}(?!\w)")
 MARKDOWN_BACKTICK_DELIMITER_PATTERN = re.compile(r"(?<=\S)`{1,3}|`{1,3}(?=\S)")
@@ -44,13 +55,26 @@ def remove_markdown(text: str) -> str:
     Must run on complete text, not per-token deltas: a delimiter run can arrive
     split across two streaming chunks.
     """
+    protected_code: list[str] = []
+
+    def protect_code(match: re.Match[str]) -> str:
+        token = f"\x00markdown-code-{len(protected_code)}\x00"
+        protected_code.append(match.group("body"))
+        return token
+
+    text = MARKDOWN_FENCED_CODE_PATTERN.sub(protect_code, text)
+    text = MARKDOWN_INLINE_CODE_PATTERN.sub(protect_code, text)
     text = MARKDOWN_HEADING_PATTERN.sub("", text)
     text = MARKDOWN_BULLET_PATTERN.sub("", text)
     text = MARKDOWN_FENCE_OPEN_PATTERN.sub("", text)
     text = MARKDOWN_FENCE_CLOSE_PATTERN.sub("", text)
+    text = MARKDOWN_DOUBLE_STAR_PAIR_PATTERN.sub(r"\g<body>", text)
+    text = MARKDOWN_SINGLE_STAR_PAIR_PATTERN.sub(r"\g<body>", text)
     text = MARKDOWN_STAR_DELIMITER_PATTERN.sub("", text)
     text = MARKDOWN_UNDERSCORE_DELIMITER_PATTERN.sub("", text)
     text = MARKDOWN_BACKTICK_DELIMITER_PATTERN.sub("", text)
+    for index, code_body in enumerate(protected_code):
+        text = text.replace(f"\x00markdown-code-{index}\x00", code_body)
     return text
 
 
