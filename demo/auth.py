@@ -235,7 +235,7 @@ def resolve_tier(user, token=None) -> str:
     return tier
 
 
-def user_view(request) -> dict:
+def user_view(request, tier=None) -> dict:
     """Public profile for /api/me."""
     info = current_oauth(request)
     user = _field(info, "user_info")
@@ -250,7 +250,7 @@ def user_view(request) -> dict:
         "loggedIn": True,
         "username": _field(user, "preferred_username") or _field(user, "name") or "you",
         "avatar": _field(user, "picture"),
-        "tier": resolve_tier(user, token),
+        "tier": tier if tier is not None else resolve_tier(user, token),
     }
     if AUTH_DEBUG:
         out["orgs"] = sorted(_org_names(user, token))

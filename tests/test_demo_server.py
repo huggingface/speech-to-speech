@@ -101,10 +101,11 @@ def test_failed_whoami_falls_back_without_blocking_retry(monkeypatch):
     assert len(calls) == 2
 
 
-async def test_me_uses_effective_tier_when_whoami_retry_succeeds(monkeypatch):
+async def test_me_reuses_whoami_resolution_and_retries_next_request(monkeypatch):
     monkeypatch.setattr(demo_server, "LIMITER_ENABLED", True)
     monkeypatch.setattr(demo_server, "AUTH_ENABLED", True)
     monkeypatch.setattr(demo_auth, "_whoami_cache", {})
+    monkeypatch.setattr(demo_server.limiter, "remaining", lambda keys, tier: 600)
     monkeypatch.setattr(
         demo_auth,
         "current_oauth",
@@ -127,20 +128,19 @@ async def test_me_uses_effective_tier_when_whoami_retry_succeeds(monkeypatch):
 
     monkeypatch.setattr(httpx, "get", get)
 
-    response = await demo_server.me(object())
+    first = json.loads((await demo_server.me(object())).body)
 
-    assert json.loads(response.body) == {
-        "enabled": True,
-        "auth": True,
-        "loggedIn": True,
-        "username": "alice",
-        "avatar": None,
-        "tier": "pro",
-        "remainingSec": None,
-        "limitSec": None,
-        "loginUrl": demo_auth.OAUTH_LOGIN_PATH,
-        "logoutUrl": demo_auth.OAUTH_LOGOUT_PATH,
-    }
+    assert first["tier"] == "free"
+    assert first["remainingSec"] == 600
+    assert first["limitSec"] == 600
+    assert demo_auth._whoami_cache == {}
+    assert len(calls) == 1
+
+    second = json.loads((await demo_server.me(object())).body)
+
+    assert second["tier"] == "pro"
+    assert second["remainingSec"] is None
+    assert second["limitSec"] is None
     assert len(calls) == 2
 
 

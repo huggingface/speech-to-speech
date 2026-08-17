@@ -214,15 +214,14 @@ async def me(request: Request):
     sets the anonymous tracking cookie when first seen."""
     if not LIMITER_ENABLED:
         return {"enabled": False}
-    view = auth.user_view(request)
     tier, keys, set_cookie = auth.resolve_identity(request)
+    view = auth.user_view(request, tier=tier)
     unlimited = limiter.budget_for(tier) is None
     rem = None if unlimited else await asyncio.to_thread(limiter.remaining, keys, tier)
     out = {
         "enabled": True,
         "auth": AUTH_ENABLED,
         **view,
-        "tier": tier,
         "remainingSec": rem,
         "limitSec": limiter.budget_for(tier),
         "loginUrl": auth.OAUTH_LOGIN_PATH if AUTH_ENABLED else None,
