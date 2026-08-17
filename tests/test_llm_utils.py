@@ -126,12 +126,6 @@ def test_remove_markdown_strips_bold_and_italic() -> None:
     assert remove_markdown("__bold__ and _italic_ text") == "bold and italic text"
 
 
-def test_remove_markdown_strips_emphasis_adjacent_to_word_characters() -> None:
-    assert remove_markdown("这是**重点**内容。") == "这是重点内容。"
-    assert remove_markdown("これは**重要**です。") == "これは重要です。"
-    assert remove_markdown("这是*重点*内容。") == "这是重点内容。"
-
-
 def test_remove_markdown_keeps_snake_case_identifiers() -> None:
     assert remove_markdown("function_call_output") == "function_call_output"
 
@@ -160,6 +154,10 @@ def test_remove_markdown_does_not_pair_independent_compact_operators() -> None:
     assert remove_markdown("x*y and a*b") == "x*y and a*b"
     assert remove_markdown("x*y*z") == "x*y*z"
     assert remove_markdown("x**y**z") == "x**y**z"
+    assert remove_markdown("力*質量*時間") == "力*質量*時間"
+    assert remove_markdown("скорость*время*путь") == "скорость*время*путь"
+    assert remove_markdown("α*β*γ") == "α*β*γ"
+    assert remove_markdown("a*β*c") == "a*β*c"
 
 
 def test_remove_markdown_preserves_unmatched_delimiters_and_operators() -> None:

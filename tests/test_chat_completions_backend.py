@@ -418,22 +418,6 @@ def test_streaming_strips_markdown_delimiters_split_across_deltas():
     assert "Second sentence." in text
 
 
-def test_streaming_strips_adjacent_cjk_emphasis_split_across_deltas():
-    h = _make_handler(stream=True)
-    h.client.chat.completions.create = lambda **k: _FakeStream(
-        [
-            _chunk(content="这是**重"),
-            _chunk(content="点**内容。"),
-            _chunk(usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1)),
-        ]
-    )
-
-    text, tools, _usage, _chat, _end = _drive(h)
-
-    assert text == "这是重点内容。"
-    assert tools == []
-
-
 def test_streaming_preserves_fenced_code_body_until_closing_fence():
     h = _make_handler(stream=True)
     h.client.chat.completions.create = lambda **k: _FakeStream(

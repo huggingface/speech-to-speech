@@ -36,16 +36,12 @@ MARKDOWN_FENCE_LINE_PATTERN = re.compile(
     flags=re.MULTILINE,
 )
 
-# Emphasis is removed only when the same delimiter run opens and closes it.
-# The boundary form covers ordinary Markdown prose. Intraword stars are kept
-# for ASCII identifiers/operators, with a narrow exception for CJK and other
-# non-ASCII scripts where adjoining emphasis is common.
+# Emphasis is removed only when the same delimiter run opens and closes it at
+# conservative word boundaries. Intraword stars are preserved as operators.
 MARKDOWN_BOUNDARY_EMPHASIS_PATTERN = re.compile(
     r"(?<![\w*_])(?P<delimiter>\*{1,3}|_{1,2})(?![*_])"
     r"(?P<body>\S(?:[^\n]*?\S)?)(?P=delimiter)(?![\w*_])"
 )
-MARKDOWN_INTRAWORD_DOUBLE_STAR_PATTERN = re.compile(r"(?<=[^\W\d_])\*\*(?P<body>[^\W\d_]+)\*\*(?=[^\W\d_])")
-MARKDOWN_INTRAWORD_SINGLE_STAR_PATTERN = re.compile(r"(?<=[^\W\d_])\*(?P<body>[^\W\d_]+)\*(?=[^\W\d_])")
 
 
 def _protect_markdown_code(text: str, *, keep_delimiters: bool) -> tuple[str, list[str]]:
@@ -125,17 +121,6 @@ def remove_markdown(text: str) -> str:
     text = MARKDOWN_HEADING_PATTERN.sub("", text)
     text = MARKDOWN_BULLET_PATTERN.sub("", text)
     text = MARKDOWN_BOUNDARY_EMPHASIS_PATTERN.sub(r"\g<body>", text)
-
-    def strip_non_ascii_intraword_emphasis(match: re.Match[str]) -> str:
-        before = match.string[match.start() - 1]
-        after = match.string[match.end()]
-        body = match.group("body")
-        if not (before.isascii() and body.isascii() and after.isascii()):
-            return body
-        return match.group(0)
-
-    text = MARKDOWN_INTRAWORD_DOUBLE_STAR_PATTERN.sub(strip_non_ascii_intraword_emphasis, text)
-    text = MARKDOWN_INTRAWORD_SINGLE_STAR_PATTERN.sub(strip_non_ascii_intraword_emphasis, text)
     return _restore_markdown_code(text, protected_code)
 
 
