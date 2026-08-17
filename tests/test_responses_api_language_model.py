@@ -585,6 +585,34 @@ def test_process_flushes_tool_lead_in_before_function_call_with_sentence_batchin
     assert isinstance(outputs[2], EndOfResponse)
 
 
+def test_markdown_cleanup_does_not_modify_responses_api_tool_arguments():
+    handler = _make_handler()
+    arguments = {"query": "**bold** _italic_ x*y", "tag": "#topic"}
+    streamed_events = [
+        _make_text_delta_event("**Let me check.**"),
+        _make_function_call_done_event(name="search_docs", arguments=json.dumps(arguments)),
+    ]
+    handler.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            create=lambda **kwargs: _make_stream(streamed_events),
+        )
+    )
+
+    request = _make_request("Find it")
+    request.runtime_config.session.tools = [
+        {"type": "function", "name": "search_docs", "parameters": {"type": "object"}}
+    ]
+    outputs = list(handler.process(request))
+    chunks = [output for output in outputs if isinstance(output, LLMResponseChunk)]
+    spoken_chunks = [chunk.text for chunk in chunks if chunk.text]
+    tool_chunks = [chunk for chunk in chunks if chunk.tools]
+
+    assert spoken_chunks == ["Let me check."]
+    assert len(tool_chunks) == 1
+    assert [tool.name for tool in tool_chunks[0].tools] == ["search_docs"]
+    assert json.loads(tool_chunks[0].tools[0].arguments) == arguments
+
+
 def test_process_preserves_streamed_text_after_function_call_order():
     handler = _make_handler()
     handler.stream_batch_sentences = 3

@@ -1,3 +1,4 @@
+import json
 from threading import Event
 from types import MethodType, SimpleNamespace
 
@@ -227,6 +228,40 @@ def test_local_tool_parser_preserves_interleaved_text_and_tool_calls(monkeypatch
     ]
     assert [tool.name for tool in tools] == ["dance", "camera"]
     assert remaining.strip() == "Last."
+
+
+def test_local_markdown_cleanup_does_not_modify_tool_block(monkeypatch):
+    monkeypatch.setattr(
+        "speech_to_speech.LLM.language_model.sent_tokenize",
+        lambda value: [value.strip()] if value.strip() else [],
+    )
+    handler = object.__new__(LanguageModelHandler)
+    argument = "**bold** _italic_ x*y #topic"
+    ctx = StreamContext(
+        function_tools=[
+            FunctionTool(
+                type="function",
+                name="search_docs",
+                description="Search for text.",
+                parameters={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            )
+        ],
+        block_regex=build_block_regex(),
+        enter_code=ENTER_CODE,
+        end_code=END_CODE,
+    )
+    text = f"**Checking.** {ENTER_CODE}search_docs(query={argument!r}){END_CODE}"
+
+    chunks, tools, remaining = handler._process_printable_text(text, None, [], ctx)
+
+    assert [chunk.text for chunk in chunks] == ["Checking.", ""]
+    assert [tool.name for tool in chunks[1].tools] == ["search_docs"]
+    assert json.loads(tools[0].arguments) == {"query": argument}
+    assert remaining == ""
 
 
 def test_local_text_only_with_tools_preserves_markdown_verbatim():

@@ -423,21 +423,22 @@ def test_streaming_tool_call_accumulates_arguments():
     # Arguments arrive split across deltas, as real servers stream them.
     h.client.chat.completions.create = lambda **k: _FakeStream(
         [
-            _chunk(tool_calls=[_tc_delta(0, id="srv_1", name="move_head", arguments='{"direction"')]),
-            _chunk(tool_calls=[_tc_delta(0, arguments=': "left"}')]),
+            _chunk(tool_calls=[_tc_delta(0, id="srv_1", name="search_docs", arguments='{"query": "**bo')]),
+            _chunk(tool_calls=[_tc_delta(0, arguments='ld** _italic_ x*y"}')]),
             _chunk(usage=SimpleNamespace(prompt_tokens=20, completion_tokens=8)),
         ]
     )
     text, tools, usage, chat, _end = _drive(
         h,
-        tools=[{"type": "function", "name": "move_head", "parameters": {"type": "object"}}],
+        tools=[{"type": "function", "name": "search_docs", "parameters": {"type": "object"}}],
         tool_choice="required",
     )
     assert len(tools) == 1
     tc = tools[0]
     assert isinstance(tc, ResponseFunctionToolCall)
-    assert tc.name == "move_head"
-    assert json.loads(tc.arguments) == {"direction": "left"}  # reassembled from two deltas
+    assert tc.name == "search_docs"
+    # Markdown cleanup only applies to spoken text, never structured tool arguments.
+    assert json.loads(tc.arguments) == {"query": "**bold** _italic_ x*y"}
     assert usage == (20, 8)
     # the function_call was stored in history with a freshly minted call_id
     assert chat._pending_tool_calls, "tool call should be recorded in chat history"
@@ -633,11 +634,13 @@ def test_non_streaming_tool_call():
         choices=[
             SimpleNamespace(
                 message=SimpleNamespace(
-                    content="",
+                    content="**Checking.**",
                     tool_calls=[
                         SimpleNamespace(
                             id="srv_9",
-                            function=SimpleNamespace(name="move_head", arguments='{"direction": "right"}'),
+                            function=SimpleNamespace(
+                                name="search_docs", arguments='{"query": "**bold** _italic_ x*y"}'
+                            ),
                         )
                     ],
                 )
@@ -647,11 +650,12 @@ def test_non_streaming_tool_call():
     )
     text, tools, usage, chat, _end = _drive(
         h,
-        tools=[{"type": "function", "name": "move_head", "parameters": {"type": "object"}}],
+        tools=[{"type": "function", "name": "search_docs", "parameters": {"type": "object"}}],
         tool_choice="required",
     )
-    assert len(tools) == 1 and tools[0].name == "move_head"
-    assert json.loads(tools[0].arguments) == {"direction": "right"}
+    assert text == "Checking."
+    assert len(tools) == 1 and tools[0].name == "search_docs"
+    assert json.loads(tools[0].arguments) == {"query": "**bold** _italic_ x*y"}
     assert usage == (7, 3)
 
 
