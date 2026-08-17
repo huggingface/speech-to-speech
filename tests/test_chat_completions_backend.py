@@ -100,7 +100,7 @@ class _FakeClient:
         return self
 
 
-def _make_handler(stream=True):
+def _make_handler(stream=True, *, base_url="http://fake/v1", reasoning_effort=None):
     """Build a handler whose warmup hits the fake client (no network)."""
     orig_openai = base_mod.OpenAI
     base_mod.OpenAI = _FakeClient
@@ -111,10 +111,11 @@ def _make_handler(stream=True):
             queue.Queue(),
             setup_kwargs=dict(
                 model_name="test-model",
-                base_url="http://fake/v1",
+                base_url=base_url,
                 api_key="k",
                 stream=stream,
                 disable_thinking=True,
+                reasoning_effort=reasoning_effort,
                 compact_history=False,
             ),
         )
@@ -201,8 +202,9 @@ def test_build_extra_body_variants():
     f = ChatCompletionsApiModelHandler._build_extra_body
     assert f("http://x/v1", True, None) == {"chat_template_kwargs": {"enable_thinking": False}}
     assert f("http://x/v1", True, "none") == {"reasoning_effort": "none"}  # explicit effort wins
-    assert f("https://api.openai.com/v1", True, "none") is None  # official OpenAI: no extra_body
-    assert f("https://api.openai.com/v1/", True, "none") is None  # trailing slash still official
+    assert f("https://api.openai.com/v1", True, "none") == {"reasoning_effort": "none"}
+    assert f("https://api.openai.com/v1/", True, "none") == {"reasoning_effort": "none"}
+    assert f(None, True, "none") == {"reasoning_effort": "none"}
     assert f("http://x/v1", True, "") == {"chat_template_kwargs": {"enable_thinking": False}}  # empty effort ignored
     assert f("http://x/v1", False, None) is None
     assert f(None, True, None) is None
@@ -696,6 +698,22 @@ def test_tools_converted_to_chat_format_on_request():
     assert captured["tool_choice"] == "auto"
     assert captured["stream"] is True
     assert captured["stream_options"] == {"include_usage": True}
+
+
+@pytest.mark.parametrize("base_url", [None, "https://api.openai.com/v1"])
+def test_official_openai_request_includes_configured_reasoning_effort_with_tools(base_url):
+    h = _make_handler(stream=True, base_url=base_url, reasoning_effort="none")
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _FakeStream([_chunk(content="ok.")])
+
+    h.client.chat.completions.create = fake_create
+    _drive(h, tools=[{"type": "function", "name": "f", "parameters": {"type": "object"}}])
+
+    assert captured["extra_body"] == {"reasoning_effort": "none"}
+    assert captured["tools"] == [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}]
 
 
 # ── Text-only (output_modalities=["text"]) ────────────────────────────────────
