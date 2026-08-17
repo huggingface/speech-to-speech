@@ -28,6 +28,7 @@ def _make_handler(monkeypatch, *, segments, language: str | None):
     FasterWhisperSTTHandler = _import_handler(monkeypatch)
     handler = object.__new__(FasterWhisperSTTHandler)
     handler.gen_kwargs = {}
+    handler.start_language = language
     handler.model = MagicMock()
     handler.model.transcribe.return_value = (segments, SimpleNamespace(language=language))
     return handler

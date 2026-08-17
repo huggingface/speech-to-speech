@@ -1,4 +1,8 @@
 import importlib
+import sys
+import types
+from contextlib import ExitStack
+from unittest import mock
 
 import pytest
 
@@ -39,6 +43,7 @@ _STT_HANDLER_MODULES = [
     "speech_to_speech.STT.whisper_stt_handler",
     "speech_to_speech.STT.mlx_audio_whisper_handler",
     "speech_to_speech.STT.lightning_whisper_mlx_handler",
+    "speech_to_speech.STT.faster_whisper_handler",
 ]
 
 # These have no optional top-level dependency, so a skip here means something is wrong
@@ -47,15 +52,33 @@ _ALWAYS_IMPORTABLE = {
     "speech_to_speech.STT.parakeet_tdt_handler",
     "speech_to_speech.STT.whisper_stt_handler",
     "speech_to_speech.STT.mlx_audio_whisper_handler",
+    # Importable via the stub above, so a skip here would mean the stub stopped working.
+    "speech_to_speech.STT.faster_whisper_handler",
+}
+
+
+# Optional third-party modules stubbed purely so a handler's SUPPORTED_LANGUAGES stays
+# checkable on CI. The list is a plain literal, so no real dependency is needed to read it,
+# and without this the faster-whisper check would silently skip everywhere.
+_STUBBABLE_DEPENDENCIES = {
+    "speech_to_speech.STT.faster_whisper_handler": ("faster_whisper", "WhisperModel"),
 }
 
 
 def _supported_languages(module_name):
-    try:
-        module = importlib.import_module(module_name)
-    except ImportError:
-        return None
-    return list(module.SUPPORTED_LANGUAGES)
+    stub = _STUBBABLE_DEPENDENCIES.get(module_name)
+    with ExitStack() as stack:
+        if stub is not None and stub[0] not in sys.modules:
+            package, attribute = stub
+            module = types.ModuleType(package)
+            setattr(module, attribute, object)
+            stack.enter_context(mock.patch.dict(sys.modules, {package: module}))
+            stack.callback(sys.modules.pop, module_name, None)
+        try:
+            handler_module = importlib.import_module(module_name)
+        except ImportError:
+            return None
+        return list(handler_module.SUPPORTED_LANGUAGES)
 
 
 @pytest.mark.parametrize("module_name", _STT_HANDLER_MODULES)
@@ -87,7 +110,17 @@ def test_language_names_are_lowercase_and_non_empty():
     """The name is interpolated mid-sentence, so it must read as lowercase prose."""
     for code, name in WHISPER_LANGUAGE_TO_LLM_LANGUAGE.items():
         assert name and name == name.lower(), f"{code} -> {name!r}"
-        assert name.isalpha(), f"{code} -> {name!r}"
+        # Multi-word names such as "haitian creole" are fine; punctuation is not.
+        assert name.replace(" ", "").isalpha(), f"{code} -> {name!r}"
+        assert name == name.strip(), f"{code} -> {name!r}"
+
+
+def test_whisper_language_coverage_is_complete():
+    """Whisper reports 100 languages; a missing name silently drops the prompt."""
+    assert len(WHISPER_LANGUAGE_TO_LLM_LANGUAGE) == 100
+    # Spot-check languages that only Whisper-family backends can report.
+    for code in ("ar", "tr", "he", "th", "yue", "haw"):
+        assert code in WHISPER_LANGUAGE_TO_LLM_LANGUAGE
 
 
 # --- resolve_auto_language ----------------------------------------------------------------
