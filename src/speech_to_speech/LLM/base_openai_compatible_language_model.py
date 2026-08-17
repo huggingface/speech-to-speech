@@ -40,7 +40,12 @@ from speech_to_speech.LLM.chat import (
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
 from speech_to_speech.LLM.text_prompt import build_text_system_prompt
-from speech_to_speech.LLM.utils import remove_markdown, remove_unspeechable, resolve_auto_language
+from speech_to_speech.LLM.utils import (
+    remove_markdown,
+    remove_unspeechable,
+    resolve_auto_language,
+    sent_tokenize_preserving_markdown_code,
+)
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
@@ -638,7 +643,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 state.clean_text += new_text
                 printable_text += new_text
                 trailing_whitespace = printable_text[len(printable_text.rstrip()) :]
-                sentences = sent_tokenize(printable_text)
+                sentences = sent_tokenize_preserving_markdown_code(printable_text, sent_tokenize)
                 if len(sentences) > 1:
                     for s in sentences[:-1]:
                         sentence_batch.append(remove_markdown(s))

@@ -154,6 +154,14 @@ def test_remove_markdown_does_not_eat_multiplication() -> None:
     assert remove_markdown("5**2 = 25") == "5**2 = 25"
 
 
+def test_remove_markdown_does_not_pair_independent_compact_operators() -> None:
+    assert remove_markdown("2*3 + 4*5") == "2*3 + 4*5"
+    assert remove_markdown("5**2 + 3**4") == "5**2 + 3**4"
+    assert remove_markdown("x*y and a*b") == "x*y and a*b"
+    assert remove_markdown("x*y*z") == "x*y*z"
+    assert remove_markdown("x**y**z") == "x**y**z"
+
+
 def test_remove_markdown_strips_delimiter_glued_to_punctuation() -> None:
     """A closing '**' butted against punctuation, not a space, still leaked
     before: `(?!\\s)` only checked for a following space, not for a following

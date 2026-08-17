@@ -1,6 +1,7 @@
 import base64
 import io
 import re
+from collections.abc import Callable
 from typing import Optional
 
 import requests  # type: ignore[import-untyped]
@@ -30,6 +31,10 @@ MARKDOWN_FENCED_CODE_PATTERN = re.compile(
     flags=re.MULTILINE | re.DOTALL,
 )
 MARKDOWN_INLINE_CODE_PATTERN = re.compile(r"(?P<ticks>`{1,})(?P<body>[^\n]*?)(?P=ticks)")
+MARKDOWN_FENCE_LINE_PATTERN = re.compile(
+    r"^[ \t]{0,3}(?P<ticks>`{3,})(?P<rest>[^\r\n]*)$",
+    flags=re.MULTILINE,
+)
 
 # A word after an opening fence is a language tag only when the fence line ends.
 # Requiring the newline preserves same-line code spans such as ```code```.
@@ -42,11 +47,56 @@ MARKDOWN_FENCE_CLOSE_PATTERN = re.compile(r"^[ \t]{0,3}`{3,}[ \t]*$", flags=re.M
 # Matched star pairs may directly adjoin CJK or other word characters. The
 # fallback delimiter pass still requires boundaries, preserving unmatched
 # compact operators such as `2*3` and `5**2`.
-MARKDOWN_DOUBLE_STAR_PAIR_PATTERN = re.compile(r"(?<!\*)\*\*(?!\*)(?P<body>[^\s*](?:[^\n]*?[^\s*])?)\*\*(?!\*)")
-MARKDOWN_SINGLE_STAR_PAIR_PATTERN = re.compile(r"(?<!\*)\*(?!\*)(?P<body>[^\s*](?:[^\n]*?[^\s*])?)\*(?!\*)")
+MARKDOWN_DOUBLE_STAR_PAIR_PATTERN = re.compile(r"(?<!\*)\*\*(?!\*)(?P<body>[^\W\d_]+)\*\*(?!\*)")
+MARKDOWN_SINGLE_STAR_PAIR_PATTERN = re.compile(r"(?<!\*)\*(?!\*)(?P<body>[^\W\d_]+)\*(?!\*)")
 MARKDOWN_STAR_DELIMITER_PATTERN = re.compile(r"(?<![\w*])\*{1,3}(?=\S)|(?<=\S)\*{1,3}(?![\w*])")
 MARKDOWN_UNDERSCORE_DELIMITER_PATTERN = re.compile(r"(?<!\w)_{1,2}(?=\S)|(?<=\S)_{1,2}(?!\w)")
 MARKDOWN_BACKTICK_DELIMITER_PATTERN = re.compile(r"(?<=\S)`{1,3}|`{1,3}(?=\S)")
+
+
+def _protect_markdown_code(text: str, *, keep_delimiters: bool) -> tuple[str, list[str]]:
+    protected_code: list[str] = []
+
+    def protect_code(match: re.Match[str]) -> str:
+        token = f"\x00markdown-code-{len(protected_code)}\x00"
+        protected_code.append(match.group(0) if keep_delimiters else match.group("body"))
+        return token
+
+    text = MARKDOWN_FENCED_CODE_PATTERN.sub(protect_code, text)
+    text = MARKDOWN_INLINE_CODE_PATTERN.sub(protect_code, text)
+    return text, protected_code
+
+
+def _restore_markdown_code(text: str, protected_code: list[str]) -> str:
+    for index, code_body in enumerate(protected_code):
+        text = text.replace(f"\x00markdown-code-{index}\x00", code_body)
+    return text
+
+
+def _has_unclosed_markdown_fence(text: str) -> bool:
+    opening_ticks: int | None = None
+    for match in MARKDOWN_FENCE_LINE_PATTERN.finditer(text):
+        ticks = len(match.group("ticks"))
+        rest = match.group("rest")
+        if opening_ticks is None:
+            # Backticks later on the same line make this an inline code span,
+            # such as the issue's ```code``` example, rather than a fence.
+            if "`" not in rest:
+                opening_ticks = ticks
+        elif ticks >= opening_ticks and not rest.strip():
+            opening_ticks = None
+    return opening_ticks is not None
+
+
+def sent_tokenize_preserving_markdown_code(
+    text: str,
+    tokenizer: Callable[[str], list[str]],
+) -> list[str]:
+    """Tokenize prose without splitting or prematurely cleaning code blocks."""
+    if _has_unclosed_markdown_fence(text):
+        return [text]
+    protected_text, protected_code = _protect_markdown_code(text, keep_delimiters=True)
+    return [_restore_markdown_code(sentence, protected_code) for sentence in tokenizer(protected_text)]
 
 
 def remove_markdown(text: str) -> str:
@@ -55,27 +105,26 @@ def remove_markdown(text: str) -> str:
     Must run on complete text, not per-token deltas: a delimiter run can arrive
     split across two streaming chunks.
     """
-    protected_code: list[str] = []
-
-    def protect_code(match: re.Match[str]) -> str:
-        token = f"\x00markdown-code-{len(protected_code)}\x00"
-        protected_code.append(match.group("body"))
-        return token
-
-    text = MARKDOWN_FENCED_CODE_PATTERN.sub(protect_code, text)
-    text = MARKDOWN_INLINE_CODE_PATTERN.sub(protect_code, text)
+    text, protected_code = _protect_markdown_code(text, keep_delimiters=False)
     text = MARKDOWN_HEADING_PATTERN.sub("", text)
     text = MARKDOWN_BULLET_PATTERN.sub("", text)
     text = MARKDOWN_FENCE_OPEN_PATTERN.sub("", text)
     text = MARKDOWN_FENCE_CLOSE_PATTERN.sub("", text)
-    text = MARKDOWN_DOUBLE_STAR_PAIR_PATTERN.sub(r"\g<body>", text)
-    text = MARKDOWN_SINGLE_STAR_PAIR_PATTERN.sub(r"\g<body>", text)
+
+    def strip_adjacent_star_pair(match: re.Match[str]) -> str:
+        body = match.group("body")
+        before = re.search(r"[A-Za-z]+$", match.string[: match.start()])
+        after = re.match(r"[A-Za-z]+", match.string[match.end() :])
+        if before and after and len(before.group()) == len(body) == len(after.group()) == 1:
+            return match.group(0)
+        return body
+
+    text = MARKDOWN_DOUBLE_STAR_PAIR_PATTERN.sub(strip_adjacent_star_pair, text)
+    text = MARKDOWN_SINGLE_STAR_PAIR_PATTERN.sub(strip_adjacent_star_pair, text)
     text = MARKDOWN_STAR_DELIMITER_PATTERN.sub("", text)
     text = MARKDOWN_UNDERSCORE_DELIMITER_PATTERN.sub("", text)
     text = MARKDOWN_BACKTICK_DELIMITER_PATTERN.sub("", text)
-    for index, code_body in enumerate(protected_code):
-        text = text.replace(f"\x00markdown-code-{index}\x00", code_body)
-    return text
+    return _restore_markdown_code(text, protected_code)
 
 
 def remove_unspeechable(text: str) -> str:

@@ -47,7 +47,13 @@ from speech_to_speech.LLM.text_prompt import build_text_system_prompt
 from speech_to_speech.LLM.tool_call.function_call import extract_function_calls_from_text
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
-from speech_to_speech.LLM.utils import image_url_to_pil, remove_markdown, remove_unspeechable, resolve_auto_language
+from speech_to_speech.LLM.utils import (
+    image_url_to_pil,
+    remove_markdown,
+    remove_unspeechable,
+    resolve_auto_language,
+    sent_tokenize_preserving_markdown_code,
+)
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
@@ -340,7 +346,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if text_only and before:
                 chunks.append(text_chunk(before))
             elif before.strip():
-                for s in sent_tokenize(before):
+                for s in sent_tokenize_preserving_markdown_code(before, sent_tokenize):
                     ctx.sentence_batch.append(remove_markdown(s))
             if ctx.sentence_batch:
                 chunks.append(text_chunk(" ".join(ctx.sentence_batch)))
@@ -393,7 +399,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return chunks, tools, pending_marker
 
         if printable_text:
-            sentences = sent_tokenize(printable_text)
+            sentences = sent_tokenize_preserving_markdown_code(printable_text, sent_tokenize)
             if len(sentences) > 1:
                 for s in sentences[:-1]:
                     ctx.sentence_batch.append(remove_markdown(s))

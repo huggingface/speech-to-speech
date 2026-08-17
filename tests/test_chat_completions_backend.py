@@ -434,6 +434,28 @@ def test_streaming_strips_adjacent_cjk_emphasis_split_across_deltas():
     assert tools == []
 
 
+def test_streaming_preserves_fenced_code_body_until_closing_fence():
+    h = _make_handler(stream=True)
+    h.client.chat.completions.create = lambda **k: _FakeStream(
+        [
+            _chunk(content="```python\n"),
+            _chunk(content="def f(*args, **kwargs):\n"),
+            _chunk(content="    return 1.\n"),
+            _chunk(content="```\nDone."),
+            _chunk(usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1)),
+        ]
+    )
+
+    text, tools, _usage, _chat, _end = _drive(h)
+
+    assert "```" not in text
+    assert "python" not in text
+    assert "def f(*args, **kwargs):" in text
+    assert "return 1." in text
+    assert "Done." in text
+    assert tools == []
+
+
 def test_streaming_tool_call_accumulates_arguments():
     h = _make_handler(stream=True)
     # Arguments arrive split across deltas, as real servers stream them.
