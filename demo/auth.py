@@ -177,7 +177,6 @@ def _whoami_via_token(token: str) -> dict:
         return {}
     if token in _whoami_cache:
         return _whoami_cache[token]
-    profile = {}
     try:
         import httpx
 
@@ -188,18 +187,21 @@ def _whoami_via_token(token: str) -> dict:
         )
         resp.raise_for_status()
         data = resp.json()
-        if isinstance(data, dict):
-            profile = data
+        if not isinstance(data, dict):
+            raise ValueError("whoami-v2 returned a non-object response")
     except Exception as exc:  # pragma: no cover - network/permission dependent
         logger.info("whoami-v2 profile lookup failed: %r", exc)
-    _whoami_cache[token] = profile
-    return profile
+        return {}
+    _whoami_cache[token] = data
+    return data
 
 
-def _orgs_via_token(token: str) -> "set[str]":
+def _orgs_via_token(token: str, profile=None) -> "set[str]":
     """Org names from the cached authenticated Hub profile."""
+    if profile is None:
+        profile = _whoami_via_token(token)
     names: "set[str]" = set()
-    for org in _whoami_via_token(token).get("orgs", []) or []:
+    for org in profile.get("orgs", []) or []:
         for key in ("name", "fullname"):
             val = _field(org, key)
             if val:
@@ -207,13 +209,13 @@ def _orgs_via_token(token: str) -> "set[str]":
     return names
 
 
-def _org_names(user, token=None, allow=None) -> "set[str]":
+def _org_names(user, token=None, allow=None, profile=None) -> "set[str]":
     """The user's org usernames from the OAuth userinfo claim. If that doesn't
     already satisfy `allow`, fall back to the Hub `whoami-v2` API (the claim is
     often empty or partial), so membership is resolved either way."""
     names = _user_org_names(user)
     if token and (allow is None or not (allow & names)):
-        names = names | _orgs_via_token(token)
+        names = names | _orgs_via_token(token, profile)
     return names
 
 
@@ -222,10 +224,11 @@ def resolve_tier(user, token=None) -> str:
     member, unlimited), or 'free'. PRO wins over org if both apply."""
     if bool(_field(user, "is_pro", False)):
         return "pro"
-    if bool(_whoami_via_token(token).get("isPro", False)):
+    profile = _whoami_via_token(token)
+    if bool(profile.get("isPro", False)):
         return "pro"
     allow = _unlimited_orgs()
-    names = _org_names(user, token, allow)
+    names = _org_names(user, token, allow, profile)
     tier = "org" if (allow & names) else "free"
     if AUTH_DEBUG:
         logger.info("tier=%s orgs=%s allow=%s", tier, sorted(names), sorted(allow))

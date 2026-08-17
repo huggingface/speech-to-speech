@@ -78,15 +78,70 @@ def test_token_backed_non_pro_tiers_remain_unchanged(monkeypatch, whoami, expect
     assert demo_auth.resolve_tier({"is_pro": False}, "hf_user_token") == expected
 
 
-def test_failed_whoami_preserves_free_fallback(monkeypatch):
+def test_failed_whoami_falls_back_without_blocking_retry(monkeypatch):
     monkeypatch.setattr(demo_auth, "_whoami_cache", {})
+    calls = []
 
-    def fail_get(*args, **kwargs):
-        raise httpx.ConnectError("Hub unavailable")
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        if len(calls) == 1:
+            raise httpx.ConnectError("Hub unavailable")
+        return httpx.Response(
+            200,
+            json={"isPro": True, "orgs": []},
+            request=httpx.Request("GET", url),
+        )
 
-    monkeypatch.setattr(httpx, "get", fail_get)
+    monkeypatch.setattr(httpx, "get", get)
 
     assert demo_auth.resolve_tier({"is_pro": False}, "hf_user_token") == "free"
+    assert demo_auth._whoami_cache == {}
+    assert demo_auth.resolve_tier({"is_pro": False}, "hf_user_token") == "pro"
+    assert demo_auth.resolve_tier({"is_pro": False}, "hf_user_token") == "pro"
+    assert len(calls) == 2
+
+
+async def test_me_uses_effective_tier_when_whoami_retry_succeeds(monkeypatch):
+    monkeypatch.setattr(demo_server, "LIMITER_ENABLED", True)
+    monkeypatch.setattr(demo_server, "AUTH_ENABLED", True)
+    monkeypatch.setattr(demo_auth, "_whoami_cache", {})
+    monkeypatch.setattr(
+        demo_auth,
+        "current_oauth",
+        lambda request: {
+            "access_token": "hf_user_token",
+            "user_info": {"sub": "123", "preferred_username": "alice"},
+        },
+    )
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        if len(calls) == 1:
+            raise httpx.ConnectError("Hub unavailable")
+        return httpx.Response(
+            200,
+            json={"isPro": True, "orgs": []},
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(httpx, "get", get)
+
+    response = await demo_server.me(object())
+
+    assert json.loads(response.body) == {
+        "enabled": True,
+        "auth": True,
+        "loggedIn": True,
+        "username": "alice",
+        "avatar": None,
+        "tier": "pro",
+        "remainingSec": None,
+        "limitSec": None,
+        "loginUrl": demo_auth.OAUTH_LOGIN_PATH,
+        "logoutUrl": demo_auth.OAUTH_LOGOUT_PATH,
+    }
+    assert len(calls) == 2
 
 
 def test_tier_and_org_resolution_share_one_whoami_request(monkeypatch):

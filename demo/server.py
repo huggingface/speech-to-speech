@@ -222,6 +222,7 @@ async def me(request: Request):
         "enabled": True,
         "auth": AUTH_ENABLED,
         **view,
+        "tier": tier,
         "remainingSec": rem,
         "limitSec": limiter.budget_for(tier),
         "loginUrl": auth.OAUTH_LOGIN_PATH if AUTH_ENABLED else None,
