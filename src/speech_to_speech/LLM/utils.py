@@ -20,10 +20,47 @@ SPEECHABLE_PATTERN = re.compile(
     flags=re.UNICODE,
 )
 
+MARKDOWN_HEADING_PATTERN = re.compile(r"^[ \t]{0,3}#{1,6}(?:[ \t]+|$)", flags=re.MULTILINE)
+MARKDOWN_BULLET_PATTERN = re.compile(r"^[ \t]{0,3}[-*+][ \t]+", flags=re.MULTILINE)
+
+# A word after an opening fence is a language tag only when the fence line ends.
+# Requiring the newline preserves same-line code spans such as ```code```.
+MARKDOWN_FENCE_OPEN_PATTERN = re.compile(
+    r"^[ \t]{0,3}`{3,}[ \t]*[\w+#-]*[ \t]*\r?\n",
+    flags=re.MULTILINE,
+)
+MARKDOWN_FENCE_CLOSE_PATTERN = re.compile(r"^[ \t]{0,3}`{3,}[ \t]*$", flags=re.MULTILINE)
+
+# Markdown emphasis uses boundary delimiters. Keeping runs surrounded by word
+# characters preserves compact arithmetic and identifiers such as `2*3`.
+MARKDOWN_STAR_DELIMITER_PATTERN = re.compile(r"(?<![\w*])\*{1,3}(?=\S)|(?<=\S)\*{1,3}(?![\w*])")
+MARKDOWN_UNDERSCORE_DELIMITER_PATTERN = re.compile(r"(?<!\w)_{1,2}(?=\S)|(?<=\S)_{1,2}(?!\w)")
+MARKDOWN_BACKTICK_DELIMITER_PATTERN = re.compile(r"(?<=\S)`{1,3}|`{1,3}(?=\S)")
+
+
+def remove_markdown(text: str) -> str:
+    """Strip common Markdown delimiters while preserving the enclosed text.
+
+    Must run on complete text, not per-token deltas: a delimiter run can arrive
+    split across two streaming chunks.
+    """
+    text = MARKDOWN_HEADING_PATTERN.sub("", text)
+    text = MARKDOWN_BULLET_PATTERN.sub("", text)
+    text = MARKDOWN_FENCE_OPEN_PATTERN.sub("", text)
+    text = MARKDOWN_FENCE_CLOSE_PATTERN.sub("", text)
+    text = MARKDOWN_STAR_DELIMITER_PATTERN.sub("", text)
+    text = MARKDOWN_UNDERSCORE_DELIMITER_PATTERN.sub("", text)
+    text = MARKDOWN_BACKTICK_DELIMITER_PATTERN.sub("", text)
+    return text
+
 
 def remove_unspeechable(text: str) -> str:
     """Keep only speechable characters: letters, digits, punctuation, whitespace.
     support unicode characters (english, arabic, chinese, japanese, korean, etc.)
+
+    Safe to call per streaming delta. Markdown stripping is intentionally not
+    included here -- unlike character filtering, it needs complete text (see
+    remove_markdown), so callers apply it separately once a full sentence exists.
     """
     text = text.translate(SMART_PUNCT_TRANSLATION)
     return SPEECHABLE_PATTERN.sub("", text)

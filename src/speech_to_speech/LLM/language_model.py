@@ -47,7 +47,7 @@ from speech_to_speech.LLM.text_prompt import build_text_system_prompt
 from speech_to_speech.LLM.tool_call.function_call import extract_function_calls_from_text
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
-from speech_to_speech.LLM.utils import image_url_to_pil, remove_unspeechable, resolve_auto_language
+from speech_to_speech.LLM.utils import image_url_to_pil, remove_markdown, remove_unspeechable, resolve_auto_language
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
@@ -341,7 +341,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 chunks.append(text_chunk(before))
             elif before.strip():
                 for s in sent_tokenize(before):
-                    ctx.sentence_batch.append(s)
+                    ctx.sentence_batch.append(remove_markdown(s))
             if ctx.sentence_batch:
                 chunks.append(text_chunk(" ".join(ctx.sentence_batch)))
                 ctx.sentence_batch = []
@@ -396,7 +396,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             sentences = sent_tokenize(printable_text)
             if len(sentences) > 1:
                 for s in sentences[:-1]:
-                    ctx.sentence_batch.append(s)
+                    ctx.sentence_batch.append(remove_markdown(s))
                     if len(ctx.sentence_batch) >= self.stream_batch_sentences:
                         chunks.append(text_chunk(" ".join(ctx.sentence_batch)))
                         ctx.sentence_batch = []
@@ -534,7 +534,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         if ctx.sentence_batch and not ctx.interrupted:
             if ctx.printable_text.strip():
-                ctx.sentence_batch.append(ctx.printable_text.strip())
+                leftover = ctx.printable_text.strip()
+                ctx.sentence_batch.append(remove_markdown(leftover) if wants_audio else leftover)
                 ctx.printable_text = ""
             if not self._turn_output_allowed(ctx.turn_id, ctx.turn_revision):
                 ctx.cancelled = True
@@ -679,7 +680,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             trailing_text = ctx.printable_text.strip() if response_wants_audio(response) else ctx.printable_text
             if turn_output_allowed and trailing_text:
                 trailing_chunk = LLMResponseChunk(
-                    text=trailing_text,
+                    text=remove_markdown(trailing_text) if response_wants_audio(response) else trailing_text,
                     language_code=language_code,
                     runtime_config=runtime_config,
                     response=response,

@@ -229,14 +229,14 @@ def test_local_tool_parser_preserves_interleaved_text_and_tool_calls(monkeypatch
     assert remaining.strip() == "Last."
 
 
-def test_local_text_only_with_tools_preserves_plain_text_verbatim():
+def test_local_text_only_with_tools_preserves_markdown_verbatim():
     handler = object.__new__(LanguageModelHandler)
     handler.cancel_scope = None
     handler.speculative_turns = None
     handler.stop_event = Event()
     handler.stream_batch_sentences = 3
     ctx = _stream_context("lookup")
-    raw = "  First.\n\nSecond.  "
+    raw = "  **First.**\n\n_Second._  "
 
     chunks = list(
         handler._stream_tokens(
@@ -250,6 +250,27 @@ def test_local_text_only_with_tools_preserves_plain_text_verbatim():
 
     assert "".join(chunk.text for chunk in chunks) == raw
     assert ctx.printable_text == ""
+
+
+def test_local_audio_strips_markdown_after_reassembling_streamed_deltas():
+    handler = object.__new__(LanguageModelHandler)
+    handler.cancel_scope = None
+    handler.speculative_turns = None
+    handler.stop_event = Event()
+    handler.stream_batch_sentences = 1
+    ctx = StreamContext()
+
+    chunks = list(
+        handler._stream_tokens(
+            iter(["This is *ita", "lic* text. ", "Second sentence."]),
+            None,
+            None,
+            ctx,
+        )
+    )
+
+    assert [chunk.text for chunk in chunks] == ["This is italic text."]
+    assert ctx.printable_text.strip() == "Second sentence."
 
 
 def test_local_text_only_tool_marker_can_span_tokens_without_losing_whitespace():

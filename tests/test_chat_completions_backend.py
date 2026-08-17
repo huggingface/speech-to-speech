@@ -399,6 +399,25 @@ def test_streaming_text_and_usage():
     assert any(getattr(i, "role", None) == "assistant" for i in chat.buffer)
 
 
+def test_streaming_strips_markdown_delimiters_split_across_deltas():
+    """A '*' pair can arrive split across two token deltas (e.g. '*ita' / 'lic*').
+    remove_markdown must not run per-delta -- it has to see the reassembled
+    sentence, or the delimiters leak straight to TTS."""
+    h = _make_handler(stream=True)
+    h.client.chat.completions.create = lambda **k: _FakeStream(
+        [
+            _chunk(content="This is *ita"),
+            _chunk(content="lic* text. "),
+            _chunk(content="Second sentence."),
+            _chunk(usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1)),
+        ]
+    )
+    text, _tools, _usage, _chat, _end = _drive(h)
+    assert "*" not in text
+    assert "This is italic text." in text
+    assert "Second sentence." in text
+
+
 def test_streaming_tool_call_accumulates_arguments():
     h = _make_handler(stream=True)
     # Arguments arrive split across deltas, as real servers stream them.
