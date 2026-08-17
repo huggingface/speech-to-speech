@@ -36,22 +36,16 @@ MARKDOWN_FENCE_LINE_PATTERN = re.compile(
     flags=re.MULTILINE,
 )
 
-# A word after an opening fence is a language tag only when the fence line ends.
-# Requiring the newline preserves same-line code spans such as ```code```.
-MARKDOWN_FENCE_OPEN_PATTERN = re.compile(
-    r"^[ \t]{0,3}`{3,}[ \t]*[\w+#-]*[ \t]*\r?\n",
-    flags=re.MULTILINE,
+# Emphasis is removed only when the same delimiter run opens and closes it.
+# The boundary form covers ordinary Markdown prose. Intraword stars are kept
+# for ASCII identifiers/operators, with a narrow exception for CJK and other
+# non-ASCII scripts where adjoining emphasis is common.
+MARKDOWN_BOUNDARY_EMPHASIS_PATTERN = re.compile(
+    r"(?<![\w*_])(?P<delimiter>\*{1,3}|_{1,2})(?![*_])"
+    r"(?P<body>\S(?:[^\n]*?\S)?)(?P=delimiter)(?![\w*_])"
 )
-MARKDOWN_FENCE_CLOSE_PATTERN = re.compile(r"^[ \t]{0,3}`{3,}[ \t]*$", flags=re.MULTILINE)
-
-# Matched star pairs may directly adjoin CJK or other word characters. The
-# fallback delimiter pass still requires boundaries, preserving unmatched
-# compact operators such as `2*3` and `5**2`.
-MARKDOWN_DOUBLE_STAR_PAIR_PATTERN = re.compile(r"(?<!\*)\*\*(?!\*)(?P<body>[^\W\d_]+)\*\*(?!\*)")
-MARKDOWN_SINGLE_STAR_PAIR_PATTERN = re.compile(r"(?<!\*)\*(?!\*)(?P<body>[^\W\d_]+)\*(?!\*)")
-MARKDOWN_STAR_DELIMITER_PATTERN = re.compile(r"(?<![\w*])\*{1,3}(?=\S)|(?<=\S)\*{1,3}(?![\w*])")
-MARKDOWN_UNDERSCORE_DELIMITER_PATTERN = re.compile(r"(?<!\w)_{1,2}(?=\S)|(?<=\S)_{1,2}(?!\w)")
-MARKDOWN_BACKTICK_DELIMITER_PATTERN = re.compile(r"(?<=\S)`{1,3}|`{1,3}(?=\S)")
+MARKDOWN_INTRAWORD_DOUBLE_STAR_PATTERN = re.compile(r"(?<=[^\W\d_])\*\*(?P<body>[^\W\d_]+)\*\*(?=[^\W\d_])")
+MARKDOWN_INTRAWORD_SINGLE_STAR_PATTERN = re.compile(r"(?<=[^\W\d_])\*(?P<body>[^\W\d_]+)\*(?=[^\W\d_])")
 
 
 def _protect_markdown_code(text: str, *, keep_delimiters: bool) -> tuple[str, list[str]]:
@@ -70,6 +64,24 @@ def _protect_markdown_code(text: str, *, keep_delimiters: bool) -> tuple[str, li
 def _restore_markdown_code(text: str, protected_code: list[str]) -> str:
     for index, code_body in enumerate(protected_code):
         text = text.replace(f"\x00markdown-code-{index}\x00", code_body)
+    return text
+
+
+def _protect_matched_emphasis(text: str) -> tuple[str, list[str]]:
+    protected_emphasis: list[str] = []
+
+    def protect_emphasis(match: re.Match[str]) -> str:
+        token = f"\x00markdown-emphasis-{len(protected_emphasis)}\x00"
+        protected_emphasis.append(match.group(0))
+        return token
+
+    text = MARKDOWN_BOUNDARY_EMPHASIS_PATTERN.sub(protect_emphasis, text)
+    return text, protected_emphasis
+
+
+def _restore_matched_emphasis(text: str, protected_emphasis: list[str]) -> str:
+    for index, emphasis in enumerate(protected_emphasis):
+        text = text.replace(f"\x00markdown-emphasis-{index}\x00", emphasis)
     return text
 
 
@@ -92,11 +104,15 @@ def sent_tokenize_preserving_markdown_code(
     text: str,
     tokenizer: Callable[[str], list[str]],
 ) -> list[str]:
-    """Tokenize prose without splitting or prematurely cleaning code blocks."""
+    """Tokenize prose without splitting complete Markdown constructs."""
     if _has_unclosed_markdown_fence(text):
         return [text]
     protected_text, protected_code = _protect_markdown_code(text, keep_delimiters=True)
-    return [_restore_markdown_code(sentence, protected_code) for sentence in tokenizer(protected_text)]
+    protected_text, protected_emphasis = _protect_matched_emphasis(protected_text)
+    return [
+        _restore_markdown_code(_restore_matched_emphasis(sentence, protected_emphasis), protected_code)
+        for sentence in tokenizer(protected_text)
+    ]
 
 
 def remove_markdown(text: str) -> str:
@@ -108,22 +124,18 @@ def remove_markdown(text: str) -> str:
     text, protected_code = _protect_markdown_code(text, keep_delimiters=False)
     text = MARKDOWN_HEADING_PATTERN.sub("", text)
     text = MARKDOWN_BULLET_PATTERN.sub("", text)
-    text = MARKDOWN_FENCE_OPEN_PATTERN.sub("", text)
-    text = MARKDOWN_FENCE_CLOSE_PATTERN.sub("", text)
+    text = MARKDOWN_BOUNDARY_EMPHASIS_PATTERN.sub(r"\g<body>", text)
 
-    def strip_adjacent_star_pair(match: re.Match[str]) -> str:
+    def strip_non_ascii_intraword_emphasis(match: re.Match[str]) -> str:
+        before = match.string[match.start() - 1]
+        after = match.string[match.end()]
         body = match.group("body")
-        before = re.search(r"[A-Za-z]+$", match.string[: match.start()])
-        after = re.match(r"[A-Za-z]+", match.string[match.end() :])
-        if before and after and len(before.group()) == len(body) == len(after.group()) == 1:
-            return match.group(0)
-        return body
+        if not (before.isascii() and body.isascii() and after.isascii()):
+            return body
+        return match.group(0)
 
-    text = MARKDOWN_DOUBLE_STAR_PAIR_PATTERN.sub(strip_adjacent_star_pair, text)
-    text = MARKDOWN_SINGLE_STAR_PAIR_PATTERN.sub(strip_adjacent_star_pair, text)
-    text = MARKDOWN_STAR_DELIMITER_PATTERN.sub("", text)
-    text = MARKDOWN_UNDERSCORE_DELIMITER_PATTERN.sub("", text)
-    text = MARKDOWN_BACKTICK_DELIMITER_PATTERN.sub("", text)
+    text = MARKDOWN_INTRAWORD_DOUBLE_STAR_PATTERN.sub(strip_non_ascii_intraword_emphasis, text)
+    text = MARKDOWN_INTRAWORD_SINGLE_STAR_PATTERN.sub(strip_non_ascii_intraword_emphasis, text)
     return _restore_markdown_code(text, protected_code)
 
 

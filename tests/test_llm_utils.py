@@ -1,12 +1,14 @@
 import importlib
 
 import pytest
+from nltk import sent_tokenize
 
 from speech_to_speech.LLM.utils import (
     WHISPER_LANGUAGE_TO_LLM_LANGUAGE,
     remove_markdown,
     remove_unspeechable,
     resolve_auto_language,
+    sent_tokenize_preserving_markdown_code,
 )
 
 
@@ -127,9 +129,7 @@ def test_remove_markdown_strips_bold_and_italic() -> None:
 def test_remove_markdown_strips_emphasis_adjacent_to_word_characters() -> None:
     assert remove_markdown("这是**重点**内容。") == "这是重点内容。"
     assert remove_markdown("これは**重要**です。") == "これは重要です。"
-    assert remove_markdown("foo**bar**baz") == "foobarbaz"
     assert remove_markdown("这是*重点*内容。") == "这是重点内容。"
-    assert remove_markdown("foo*bar*baz") == "foobarbaz"
 
 
 def test_remove_markdown_keeps_snake_case_identifiers() -> None:
@@ -162,12 +162,15 @@ def test_remove_markdown_does_not_pair_independent_compact_operators() -> None:
     assert remove_markdown("x**y**z") == "x**y**z"
 
 
-def test_remove_markdown_strips_delimiter_glued_to_punctuation() -> None:
-    """A closing '**' butted against punctuation, not a space, still leaked
-    before: `(?!\\s)` only checked for a following space, not for a following
-    non-word character in general."""
-    assert remove_markdown("Do you mean snake case**?") == "Do you mean snake case?"
-    assert remove_markdown("a theme/topic**.") == "a theme/topic."
+def test_remove_markdown_preserves_unmatched_delimiters_and_operators() -> None:
+    assert remove_markdown("*args") == "*args"
+    assert remove_markdown("**kwargs") == "**kwargs"
+    assert remove_markdown("_private") == "_private"
+    assert remove_markdown("file*.txt") == "file*.txt"
+    assert remove_markdown("Price is $5* tax.") == "Price is $5* tax."
+    assert remove_markdown("force*mass*time") == "force*mass*time"
+    assert remove_markdown("`unclosed") == "`unclosed"
+    assert remove_markdown("Do you mean snake case**?") == "Do you mean snake case**?"
 
 
 def test_remove_markdown_strips_nested_bold_and_code() -> None:
@@ -200,3 +203,7 @@ def test_remove_markdown_is_streaming_safe_across_split_deltas() -> None:
     deltas = ["*ita", "lic* is a word."]
     accumulated = "".join(deltas)
     assert remove_markdown(accumulated) == "italic is a word."
+
+
+def test_sentence_tokenization_preserves_complete_emphasis_pairs() -> None:
+    assert sent_tokenize_preserving_markdown_code("**Let me check.**", sent_tokenize) == ["**Let me check.**"]
