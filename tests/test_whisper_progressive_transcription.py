@@ -94,7 +94,7 @@ def build_faster_whisper(monkeypatch):
 
     def transcribe(audio, **kw):
         segment = SimpleNamespace(start=0.0, end=1.0, text=TRANSCRIPTS[len(audio)])
-        return [segment], None
+        return [segment], SimpleNamespace(language="en")
 
     handler = object.__new__(FasterWhisperSTTHandler)
     handler.gen_kwargs = {}
