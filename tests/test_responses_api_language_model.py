@@ -923,6 +923,7 @@ def test_setup_preserves_environment_api_key_for_custom_base_url(monkeypatch):
 def test_setup_does_not_inject_dummy_key_for_remote_custom_url(monkeypatch):
     captured = {}
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
     class FakeOpenAI:
         def __init__(self, *, api_key, base_url):
@@ -938,6 +939,28 @@ def test_setup_does_not_inject_dummy_key_for_remote_custom_url(monkeypatch):
     assert captured == {
         "api_key": None,
         "base_url": "https://provider.example/v1",
+    }
+
+
+def test_setup_resolves_gemini_api_key_and_endpoint(monkeypatch):
+    captured = {}
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-secret-123")
+
+    class FakeOpenAI:
+        def __init__(self, *, api_key, base_url):
+            captured["api_key"] = api_key
+            captured["base_url"] = base_url
+
+    monkeypatch.setattr(base_openai_compatible_language_model, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(ResponsesApiModelHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(ResponsesApiModelHandler)
+    handler.setup(model_name="gemini-2.5-flash", base_url=None, api_key=None, compact_history=False)
+
+    assert captured == {
+        "api_key": "gemini-secret-123",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
     }
 
 

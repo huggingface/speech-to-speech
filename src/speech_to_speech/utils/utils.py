@@ -1,12 +1,53 @@
 from __future__ import annotations
 
+import os
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 if TYPE_CHECKING:
     from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+
+_DOTENV_LOADED = False
+
+
+def load_dotenv_if_present(env_path: str | Path | None = None, force: bool = False) -> None:
+    """Load key-value pairs from a .env file into os.environ if not already present."""
+    global _DOTENV_LOADED
+    if _DOTENV_LOADED and not force:
+        return
+    _DOTENV_LOADED = True
+
+    if env_path is not None:
+        target = Path(env_path)
+        candidates = [target] if target.exists() else []
+    else:
+        cwd = Path.cwd()
+        candidates = [cwd / ".env", Path(__file__).resolve().parents[3] / ".env"]
+
+    for candidate in candidates:
+        if candidate.is_file():
+            try:
+                with open(candidate, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        key, _, value = line.partition("=")
+                        key = key.strip()
+                        value = value.strip()
+                        if (value.startswith('"') and value.endswith('"')) or (
+                            value.startswith("'") and value.endswith("'")
+                        ):
+                            value = value[1:-1]
+                        if key and key not in os.environ:
+                            os.environ[key] = value
+                break
+            except Exception:
+                pass
 
 
 def response_wants_audio(response: RealtimeResponseCreateParams | None) -> bool:

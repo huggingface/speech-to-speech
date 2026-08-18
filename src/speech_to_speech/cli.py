@@ -10,6 +10,7 @@ from speech_to_speech.api.openai_realtime.audio_client import (
     load_realtime_tool_module,
     run_realtime_audio_client,
 )
+from speech_to_speech.utils.cuda_env import sanitize_cuda_environment
 
 Command = Literal["serve", "talk", "local"]
 
@@ -167,6 +168,10 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
 
 
 def main() -> None:
+    sanitize_cuda_environment()
+    from speech_to_speech.utils.utils import load_dotenv_if_present
+
+    load_dotenv_if_present()
     command, command_args = parse_command()
     if command == "talk":
         run_realtime_audio_client(parse_talk_arguments(command_args))

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import io
-import ipaddress
 import logging
 import os
 import wave
@@ -12,7 +11,6 @@ from queue import Empty, Full, Queue
 from threading import BoundedSemaphore, Lock, Thread, current_thread
 from threading import Event as ThreadingEvent
 from typing import Any, Literal, Optional
-from urllib.parse import urlparse
 
 import httpx
 import numpy as np
@@ -29,6 +27,20 @@ from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel, ConfigDict, Field
 
 from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.config.providers import (
+    DEFAULT_PROVIDER_BASE_URLS,
+    PROVIDER_ENV_KEYS,
+    detect_provider,
+    is_local_base_url,
+    is_official_openai,
+    resolve_credentials,
+)
+
+__all__ = [
+    "BaseOpenAICompatibleHandler",
+    "DEFAULT_PROVIDER_BASE_URLS",
+    "PROVIDER_ENV_KEYS",
+]
 from speech_to_speech.LLM.chat import (
     Chat,
     ChatItemError,
@@ -61,7 +73,6 @@ PREFETCH_PROVIDER_WORKER_LIMIT = 1
 PREFETCH_STREAM_QUEUE_MAXSIZE = 16
 PREFETCH_WORKER_ACQUIRE_TIMEOUT_S = 0.05
 PROVIDER_FAILURE_FALLBACK = "I'm having trouble responding right now. Please try again."
-
 
 # ── Normalised provider events ────────────────────────────────────────────────
 # Each backend's stream/response is mapped to this small vocabulary so the shared
@@ -133,6 +144,7 @@ class _GenState(BaseModel):
     output_emitted: bool = False
 
 
+
 class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
     """Shared lifecycle for OpenAI-compatible LLM backends (Responses & Chat
     Completions).
@@ -144,6 +156,22 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
     sentence batching, text-only vs audio handling, history write-back, token
     usage, out-of-band handling and error termination.
     """
+
+    @classmethod
+    def _detect_provider(cls, model_name: Optional[str], base_url: Optional[str]) -> Optional[str]:
+        """Detect provider name based on model name or base URL."""
+        spec = detect_provider(model_name, base_url)
+        return spec.name if spec else None
+
+    @classmethod
+    def resolve_provider_credentials(
+        cls,
+        model_name: Optional[str] = None,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Resolve base_url and api_key from CLI arguments, .env environment variables, and defaults."""
+        return resolve_credentials(model_name=model_name, base_url=base_url, api_key=api_key)
 
     # ── setup ─────────────────────────────────────────────────────────────────
 
@@ -172,6 +200,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
     ) -> None:
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
+        env_model = os.environ.get("MODEL_NAME") or os.environ.get("LLM_MODEL_NAME")
+        if env_model and (model_name == "gpt-5.4-mini" or model_name is None):
+            model_name = env_model
+        elif model_name is None:
+            model_name = "gpt-5.4-mini"
         self.model_name = model_name
         self.stream = stream
         self.stream_batch_sentences = max(1, stream_batch_sentences)
@@ -190,13 +223,13 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         )
 
         self.user_role = user_role
-        if (
-            api_key is None
-            and not os.environ.get("OPENAI_API_KEY")
-            and base_url is not None
-            and self._is_local_base_url(base_url)
-        ):
-            api_key = "none"
+
+        base_url, api_key = self.resolve_provider_credentials(
+            model_name=self.model_name,
+            base_url=base_url,
+            api_key=api_key,
+        )
+
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self._extra_body = self._build_extra_body(base_url, disable_thinking, reasoning_effort)
         self._prefetch_worker_slots = BoundedSemaphore(PREFETCH_PROVIDER_WORKER_LIMIT)
@@ -207,28 +240,13 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
     @staticmethod
     def _is_official_openai(base_url: Optional[str]) -> bool:
-        """Whether ``base_url`` points at the official OpenAI server.
-
-        Normalises a trailing slash so ``https://api.openai.com/v1/`` is also
-        recognised; the official server rejects the provider-specific extra_body
-        keys we send to vLLM / the HF router.
-        """
-        if base_url is None:
-            return False
-        return base_url.rstrip("/") == "https://api.openai.com/v1"
+        """Whether base_url points at the official OpenAI server."""
+        return is_official_openai(base_url)
 
     @staticmethod
     def _is_local_base_url(base_url: str) -> bool:
-        """Whether *base_url* points at localhost or a loopback IP address."""
-        host = urlparse(base_url).hostname
-        if host is None:
-            return False
-        if host.rstrip(".").lower() == "localhost":
-            return True
-        try:
-            return ipaddress.ip_address(host).is_loopback
-        except ValueError:
-            return False
+        """Whether base_url points at localhost or a loopback IP address."""
+        return is_local_base_url(base_url)
 
     @classmethod
     def _build_extra_body(
@@ -248,7 +266,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         """
         if reasoning_effort:
             return {"reasoning_effort": reasoning_effort}
-        if base_url is None or cls._is_official_openai(base_url):
+        if base_url is None or cls._is_official_openai(base_url) or (base_url and "googleapis.com" in base_url):
             return None
         if disable_thinking:
             return {"chat_template_kwargs": {"enable_thinking": False}}
