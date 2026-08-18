@@ -211,6 +211,8 @@ def test_parser_carries_only_selected_normalized_configs():
             "pocket",
             "--pocket_tts_voice",
             "alba",
+            "--pocket_tts_language",
+            "french_24l",
         ]
     )
 
@@ -224,6 +226,7 @@ def test_parser_carries_only_selected_normalized_configs():
     assert args.llm_backend.config["gen_kwargs"]["max_new_tokens"] == 64
     assert args.tts_backend.name == "pocket"
     assert args.tts_backend.config["voice"] == "alba"
+    assert args.tts_backend.config["language"] == "french_24l"
     assert not hasattr(args, "whisper_stt_handler_kwargs")
     assert not hasattr(args, "qwen3_tts_handler_kwargs")
 
