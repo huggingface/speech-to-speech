@@ -175,8 +175,12 @@ This installs the package in editable mode and makes the `speech-to-speech` CLI 
 | TTS | [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) | CPU / CUDA | `pocket` |
 | TTS | [ChatTTS](https://github.com/2noise/ChatTTS) | CUDA / CPU | `chattts` |
 | TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | built-in |
+| TTS | OpenAI-compatible `/v1/audio/speech` endpoint | local or remote HTTP server | built-in |
 
 Select implementations with `--stt`, `--llm_backend`, and `--tts`. The CLI constructs configuration only for the selected backends; known options for inactive backends remain accepted for compatibility but are ignored with a warning. JSON configuration may likewise include extra inactive-backend keys, which are ignored. Run `speech-to-speech serve -h` for the defaults, or pass selectors before `-h` to see another combination's backend-specific flags (for example, `speech-to-speech serve --stt mlx-audio-whisper -h`).
+
+For client-only TTS serving with vLLM-Omni or another compatible server, see
+[OpenAI-compatible TTS](./docs/openai-compatible-tts.md).
 
 ## Commands
 

@@ -237,6 +237,23 @@ def test_parse_arguments_accepts_qwen3_tts_backend_override():
     assert args.tts_backend.config["backend"] == "torch"
 
 
+def test_parse_arguments_accepts_openai_tts_backend():
+    args = parse_arguments(
+        [
+            "--tts",
+            "openai",
+            "--openai_tts_base_url",
+            "http://localhost:8091/v1",
+            "--openai_tts_voice",
+            "vivian",
+        ]
+    )
+
+    assert args.tts_backend.name == "openai"
+    assert args.tts_backend.config["base_url"] == "http://localhost:8091/v1"
+    assert args.tts_backend.config["voice"] == "vivian"
+
+
 def test_parse_arguments_accepts_qwen3_tts_ggml_options():
     original_argv = sys.argv[:]
     try:
