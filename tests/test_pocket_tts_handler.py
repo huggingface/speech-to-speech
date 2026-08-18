@@ -1,3 +1,4 @@
+import sys
 from threading import Event
 from types import SimpleNamespace
 
@@ -14,8 +15,6 @@ from speech_to_speech.TTS.pocket_tts_handler import PocketTTSHandler
     ],
 )
 def test_pocket_tts_setup_loads_language(monkeypatch, setup_kwargs, expected_language):
-    import pocket_tts
-
     loaded_languages = []
 
     fake_model = SimpleNamespace(
@@ -28,12 +27,11 @@ def test_pocket_tts_setup_loads_language(monkeypatch, setup_kwargs, expected_lan
         loaded_languages.append(language)
         return fake_model
 
-    monkeypatch.setattr(
-        pocket_tts.TTSModel,
-        "load_model",
-        fake_load_model,
+    fake_pocket_tts = SimpleNamespace(
+        TTSModel=SimpleNamespace(load_model=fake_load_model),
     )
 
+    monkeypatch.setitem(sys.modules, "pocket_tts", fake_pocket_tts)
     handler = object.__new__(PocketTTSHandler)
 
     handler.setup(
