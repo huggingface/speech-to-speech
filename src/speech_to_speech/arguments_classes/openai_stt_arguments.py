@@ -4,7 +4,7 @@ from typing import Optional
 
 @dataclass
 class OpenAICompatibleSTTHandlerArguments:
-    """Connection settings for an OpenAI-compatible STT server."""
+    """Connection and admission settings for an OpenAI-compatible STT server."""
 
     openai_stt_base_url: str = field(
         default="http://localhost:8000/v1",
@@ -32,4 +32,16 @@ class OpenAICompatibleSTTHandlerArguments:
     openai_stt_timeout: float = field(
         default=60.0,
         metadata={"help": "HTTP request timeout in seconds."},
+    )
+    openai_stt_max_concurrency: int = field(
+        default=1,
+        metadata={"help": "Aggregate in-flight request limit shared by pipelines using this endpoint."},
+    )
+    openai_stt_max_queue_size: int = field(
+        default=8,
+        metadata={"help": "Aggregate bounded admission queue size for this endpoint."},
+    )
+    openai_stt_progressive_min_interval: float = field(
+        default=0.75,
+        metadata={"help": "Minimum seconds between progressive dispatches for the same turn."},
     )

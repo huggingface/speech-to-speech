@@ -11,6 +11,13 @@ VAD audio -> POST /v1/audio/transcriptions
 Each request uploads an in-memory mono PCM16 WAV at 16 kHz and accepts either
 JSON with a string `text` field or a plain-text response.
 
+The STT endpoint has a process-wide admission controller. Pipelines using the
+same normalized endpoint and credentials share its concurrency and queue limits.
+Queued progressive windows are latest-only, finals take priority, and final or
+new-revision work explicitly cancels superseded queued or active operations.
+Closing an active HTTP transport is best-effort server cancellation; stale
+results are always discarded locally.
+
 ## vLLM with Qwen3-ASR
 
 Run a supported ASR model behind vLLM:
@@ -29,7 +36,9 @@ curl http://localhost:8000/v1/models
 speech-to-speech local \
   --stt openai \
   --openai_stt_base_url http://localhost:8000/v1 \
-  --openai_stt_model Qwen/Qwen3-ASR-1.7B
+  --openai_stt_model Qwen/Qwen3-ASR-1.7B \
+  --openai_stt_max_concurrency 1 \
+  --openai_stt_progressive_min_interval 0.75
 ```
 
 ## NVIDIA Speech NIM
@@ -55,6 +64,6 @@ The client accepts JSON and text responses. Use
 errors are sanitized before they are surfaced to realtime clients, and failed
 final requests do not create LLM work.
 
-This first endpoint adapter intentionally uses the existing serial STT handler
-lifecycle. Endpoint-wide concurrency limits, bounded queues, coalescing, and
-final-request priority can be added independently as an admission layer.
+Admission settings are process-wide for each normalized endpoint and credential
+pair. When pipelines configure different settings for the same pair, the first
+controller remains authoritative and a warning is logged.
