@@ -399,26 +399,68 @@ def test_streaming_text_and_usage():
     assert any(getattr(i, "role", None) == "assistant" for i in chat.buffer)
 
 
+def test_streaming_strips_markdown_delimiters_split_across_deltas():
+    """A '*' pair can arrive split across two token deltas (e.g. '*ita' / 'lic*').
+    remove_markdown must not run per-delta -- it has to see the reassembled
+    sentence, or the delimiters leak straight to TTS."""
+    h = _make_handler(stream=True)
+    h.client.chat.completions.create = lambda **k: _FakeStream(
+        [
+            _chunk(content="This is *ita"),
+            _chunk(content="lic* text. "),
+            _chunk(content="Second sentence."),
+            _chunk(usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1)),
+        ]
+    )
+    text, _tools, _usage, _chat, _end = _drive(h)
+    assert "*" not in text
+    assert "This is italic text." in text
+    assert "Second sentence." in text
+
+
+def test_streaming_preserves_fenced_code_body_until_closing_fence():
+    h = _make_handler(stream=True)
+    h.client.chat.completions.create = lambda **k: _FakeStream(
+        [
+            _chunk(content="```python\n"),
+            _chunk(content="def f(*args, **kwargs):\n"),
+            _chunk(content="    return 1.\n"),
+            _chunk(content="```\nDone."),
+            _chunk(usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1)),
+        ]
+    )
+
+    text, tools, _usage, _chat, _end = _drive(h)
+
+    assert "```" not in text
+    assert "python" not in text
+    assert "def f(*args, **kwargs):" in text
+    assert "return 1." in text
+    assert "Done." in text
+    assert tools == []
+
+
 def test_streaming_tool_call_accumulates_arguments():
     h = _make_handler(stream=True)
     # Arguments arrive split across deltas, as real servers stream them.
     h.client.chat.completions.create = lambda **k: _FakeStream(
         [
-            _chunk(tool_calls=[_tc_delta(0, id="srv_1", name="move_head", arguments='{"direction"')]),
-            _chunk(tool_calls=[_tc_delta(0, arguments=': "left"}')]),
+            _chunk(tool_calls=[_tc_delta(0, id="srv_1", name="search_docs", arguments='{"query": "**bo')]),
+            _chunk(tool_calls=[_tc_delta(0, arguments='ld** _italic_ x*y"}')]),
             _chunk(usage=SimpleNamespace(prompt_tokens=20, completion_tokens=8)),
         ]
     )
     text, tools, usage, chat, _end = _drive(
         h,
-        tools=[{"type": "function", "name": "move_head", "parameters": {"type": "object"}}],
+        tools=[{"type": "function", "name": "search_docs", "parameters": {"type": "object"}}],
         tool_choice="required",
     )
     assert len(tools) == 1
     tc = tools[0]
     assert isinstance(tc, ResponseFunctionToolCall)
-    assert tc.name == "move_head"
-    assert json.loads(tc.arguments) == {"direction": "left"}  # reassembled from two deltas
+    assert tc.name == "search_docs"
+    # Markdown cleanup only applies to spoken text, never structured tool arguments.
+    assert json.loads(tc.arguments) == {"query": "**bold** _italic_ x*y"}
     assert usage == (20, 8)
     # the function_call was stored in history with a freshly minted call_id
     assert chat._pending_tool_calls, "tool call should be recorded in chat history"
@@ -614,11 +656,13 @@ def test_non_streaming_tool_call():
         choices=[
             SimpleNamespace(
                 message=SimpleNamespace(
-                    content="",
+                    content="**Checking.**",
                     tool_calls=[
                         SimpleNamespace(
                             id="srv_9",
-                            function=SimpleNamespace(name="move_head", arguments='{"direction": "right"}'),
+                            function=SimpleNamespace(
+                                name="search_docs", arguments='{"query": "**bold** _italic_ x*y"}'
+                            ),
                         )
                     ],
                 )
@@ -628,11 +672,12 @@ def test_non_streaming_tool_call():
     )
     text, tools, usage, chat, _end = _drive(
         h,
-        tools=[{"type": "function", "name": "move_head", "parameters": {"type": "object"}}],
+        tools=[{"type": "function", "name": "search_docs", "parameters": {"type": "object"}}],
         tool_choice="required",
     )
-    assert len(tools) == 1 and tools[0].name == "move_head"
-    assert json.loads(tools[0].arguments) == {"direction": "right"}
+    assert text == "Checking."
+    assert len(tools) == 1 and tools[0].name == "search_docs"
+    assert json.loads(tools[0].arguments) == {"query": "**bold** _italic_ x*y"}
     assert usage == (7, 3)
 
 

@@ -5,11 +5,14 @@ from contextlib import ExitStack
 from unittest import mock
 
 import pytest
+from nltk import sent_tokenize
 
 from speech_to_speech.LLM.utils import (
     WHISPER_LANGUAGE_TO_LLM_LANGUAGE,
+    remove_markdown,
     remove_unspeechable,
     resolve_auto_language,
+    sent_tokenize_preserving_markdown_code,
 )
 
 
@@ -149,3 +152,89 @@ def test_resolve_auto_language_passes_through_empty_codes(code):
 def test_resolve_auto_language_returns_no_name_for_unknown_code():
     """Unknown codes still round-trip the code, they just cannot be named."""
     assert resolve_auto_language("xx-auto") == ("xx", None)
+
+
+def test_remove_markdown_strips_bold_and_italic() -> None:
+    assert remove_markdown("**bold** and *italic* text") == "bold and italic text"
+    assert remove_markdown("__bold__ and _italic_ text") == "bold and italic text"
+
+
+def test_remove_markdown_keeps_snake_case_identifiers() -> None:
+    assert remove_markdown("function_call_output") == "function_call_output"
+
+
+def test_remove_markdown_strips_bullets_without_eating_following_lines() -> None:
+    assert remove_markdown("* first\n* second\n* third") == "first\nsecond\nthird"
+    assert remove_markdown("- one\n- two") == "one\ntwo"
+
+
+def test_remove_markdown_strips_headings() -> None:
+    assert remove_markdown("# Title\nsome text") == "Title\nsome text"
+    assert remove_markdown("### Subheading") == "Subheading"
+    assert remove_markdown("#include <stdio.h>") == "#include <stdio.h>"
+
+
+def test_remove_markdown_does_not_eat_multiplication() -> None:
+    assert remove_markdown("2 * 3 * 4") == "2 * 3 * 4"
+    assert remove_markdown("2*3 = 6") == "2*3 = 6"
+    assert remove_markdown("x*y") == "x*y"
+    assert remove_markdown("5**2 = 25") == "5**2 = 25"
+
+
+def test_remove_markdown_does_not_pair_independent_compact_operators() -> None:
+    assert remove_markdown("2*3 + 4*5") == "2*3 + 4*5"
+    assert remove_markdown("5**2 + 3**4") == "5**2 + 3**4"
+    assert remove_markdown("x*y and a*b") == "x*y and a*b"
+    assert remove_markdown("x*y*z") == "x*y*z"
+    assert remove_markdown("x**y**z") == "x**y**z"
+    assert remove_markdown("力*質量*時間") == "力*質量*時間"
+    assert remove_markdown("скорость*время*путь") == "скорость*время*путь"
+    assert remove_markdown("α*β*γ") == "α*β*γ"
+    assert remove_markdown("a*β*c") == "a*β*c"
+
+
+def test_remove_markdown_preserves_unmatched_delimiters_and_operators() -> None:
+    assert remove_markdown("*args") == "*args"
+    assert remove_markdown("**kwargs") == "**kwargs"
+    assert remove_markdown("_private") == "_private"
+    assert remove_markdown("file*.txt") == "file*.txt"
+    assert remove_markdown("Price is $5* tax.") == "Price is $5* tax."
+    assert remove_markdown("force*mass*time") == "force*mass*time"
+    assert remove_markdown("`unclosed") == "`unclosed"
+    assert remove_markdown("Do you mean snake case**?") == "Do you mean snake case**?"
+
+
+def test_remove_markdown_strips_nested_bold_and_code() -> None:
+    assert remove_markdown("**bold with `code`**") == "bold with code"
+
+
+def test_remove_markdown_strips_inline_code() -> None:
+    assert remove_markdown("`inline`") == "inline"
+
+
+def test_remove_markdown_preserves_markdown_like_characters_inside_code() -> None:
+    assert remove_markdown("Use `*args` and `**kwargs`.") == "Use *args and **kwargs."
+    assert remove_markdown("Match `*.py` files.") == "Match *.py files."
+    assert (
+        remove_markdown("```python\n*args = values\n# keep_this\n**literal**\n```")
+        == "*args = values\n# keep_this\n**literal**\n"
+    )
+
+
+def test_remove_markdown_strips_fenced_code_block_and_language_tag() -> None:
+    assert remove_markdown("```python\nname = 'Alice'\n```") == "name = 'Alice'\n"
+    assert remove_markdown("```\ncode\n```") == "code\n"
+    assert remove_markdown("```code```") == "code"
+
+
+def test_remove_markdown_is_streaming_safe_across_split_deltas() -> None:
+    """remove_markdown must be applied to complete text, not per-delta: a
+    delimiter pair split across two deltas (*ita / lic*) has nothing to match
+    on its own, so callers accumulate first and strip once, as tested here."""
+    deltas = ["*ita", "lic* is a word."]
+    accumulated = "".join(deltas)
+    assert remove_markdown(accumulated) == "italic is a word."
+
+
+def test_sentence_tokenization_preserves_complete_emphasis_pairs() -> None:
+    assert sent_tokenize_preserving_markdown_code("**Let me check.**", sent_tokenize) == ["**Let me check.**"]
