@@ -10,7 +10,7 @@ import pytest
 
 import speech_to_speech.TTS.qwen3_tts_handler as qwen3_tts_module
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 
@@ -526,6 +526,30 @@ def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     end_outputs = list(handler.process(EndOfResponse()))
 
     assert end_outputs == [AUDIO_RESPONSE_DONE]
+
+
+def test_stale_keyed_terminal_becomes_cleanup_after_lm_tts_handoff():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.speculative_turns = tracker
+    terminal = EndOfResponse(
+        response_key="response_1",
+        turn_id="turn_1",
+        turn_revision=0,
+        cancel_generation=7,
+    )
+    tracker.observe("turn_1", 1)
+
+    outputs = list(handler.process(terminal))
+    queued = handler.output_for_queue(outputs[0], terminal)
+
+    assert outputs == [AUDIO_RESPONSE_DONE]
+    assert terminal.cleanup_only is True
+    assert isinstance(queued, AudioOutput)
+    assert queued.response_key == "response_1"
+    assert queued.cancel_generation == 7
+    assert queued.cleanup_only is True
 
 
 def test_process_waits_for_pending_reopen_and_drops_stale_tts_input():

@@ -272,7 +272,9 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 tts_input.turn_id,
                 tts_input.turn_revision,
             ):
-                return
+                if tts_input.response_key is None:
+                    return
+                tts_input.cleanup_only = True
             with self._operation_lock:
                 self._failed_responses.discard(self._response_key(tts_input))
             yield AUDIO_RESPONSE_DONE
@@ -372,6 +374,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                             turn_id=tts_input.turn_id,
                             turn_revision=tts_input.turn_revision,
                             cancel_generation=cancel_generation,
+                            response_key=tts_input.response_key,
                         )
                     )
         finally:

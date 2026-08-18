@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 import av
 import numpy as np
+from aioice.ice import ICE_FAILED
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import MediaStreamError, MediaStreamTrack
 
@@ -179,6 +180,7 @@ class WebRTCSession(SessionTransport):
         self._on_closed = on_closed
         self._dc = None
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
         self._track = PipelineAudioTrack()
         self._out_resampler = PcmResampler(WEBRTC_SAMPLE_RATE)
         self._in_resampler = PcmResampler(PIPELINE_SAMPLE_RATE)
@@ -267,23 +269,10 @@ class WebRTCSession(SessionTransport):
         return self._pc.localDescription.sdp
 
     async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        # close() itself often runs as a _spawn()ed task (dc close handler),
-        # so it is in _tasks — cancelling the current task here would abort
-        # this method before the release callback runs.
-        current = asyncio.current_task()
-        for task in self._tasks:
-            if task is not current:
-                task.cancel()
-        self._track.stop()
-        try:
-            await self._pc.close()
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"[WebRTC] Error closing peer connection: {e}")
-        self._on_closed()
-        logger.info("[WebRTC] Session closed")
+        if self._close_task is None:
+            self._closed = True
+            self._close_task = asyncio.create_task(self._run_close())
+        await asyncio.shield(self._close_task)
 
     # ── SessionTransport interface ────────────────
 
@@ -297,10 +286,19 @@ class WebRTCSession(SessionTransport):
             except Exception as e:  # noqa: BLE001
                 logger.error(f"[WebRTC] Data channel send error: {e}")
 
-    async def send_audio_chunk(self, service: RealtimeService, session_id: str, pcm: bytes) -> None:
+    async def send_audio_chunk(
+        self,
+        service: RealtimeService,
+        session_id: str,
+        pcm: bytes,
+        response_key: str | None = None,
+    ) -> None:
         # Bookkeeping events (response.created on the implicit VAD path) go
         # over the data channel; the audio itself goes on the media track.
-        _resp_id, _item_id, events = service.begin_audio_response(session_id)
+        _resp_id, _item_id, _output_index, events = service.begin_audio_output(
+            session_id,
+            response_key,
+        )
         if events:
             await self.send_events(events)
         self._track.write(self._out_resampler.resample_pcm(pcm, PIPELINE_SAMPLE_RATE))
@@ -313,6 +311,82 @@ class WebRTCSession(SessionTransport):
     def _spawn(self, coro: Awaitable[None]) -> None:
         task = asyncio.ensure_future(coro)
         self._tasks.append(task)
+
+    async def _run_close(self) -> None:
+        # close() often runs as a _spawn()ed task (dc close handler). The
+        # separate cleanup task lets us cancel session work without cancelling
+        # teardown, even when the close() caller itself is cancelled.
+        for task in self._tasks:
+            task.cancel()
+        self._track.stop()
+        try:
+            await self._close_peer_connection()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[WebRTC] Error closing peer connection: {e}")
+        self._on_closed()
+        logger.info("[WebRTC] Session closed")
+
+    async def _close_peer_connection(self) -> None:
+        try:
+            await self._cancel_ice_checks()
+        finally:
+            try:
+                await self._pc.close()
+            finally:
+                try:
+                    await self._close_ice_connections()
+                finally:
+                    await self._cancel_ice_checks()
+                    await self._await_ice_connect_tasks()
+
+    def _ice_transports(self) -> set:
+        ice_transports = {transceiver.receiver.transport.transport for transceiver in self._pc.getTransceivers()}
+        if self._pc.sctp is not None:
+            ice_transports.add(self._pc.sctp.transport.transport)
+        return ice_transports
+
+    async def _close_ice_connections(self) -> None:
+        connections = {
+            ice_transport._connection
+            for ice_transport in self._ice_transports()
+            if not ice_transport._connection._closed
+        }
+        if connections:
+            results = await asyncio.gather(
+                *(connection.close() for connection in connections),
+                return_exceptions=True,
+            )
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
+
+    async def _cancel_ice_checks(self) -> None:
+        """Cancel and await aioice connectivity checks owned by this peer."""
+        tasks = set()
+        for ice_transport in self._ice_transports():
+            await ice_transport.addRemoteCandidate(None)
+            connection = ice_transport._connection
+            if connection._check_list and not connection._check_list_done and connection._check_list_state.empty():
+                connection._check_list_state.put_nowait(ICE_FAILED)
+            for pair in connection._check_list:
+                if pair.task is None:
+                    if pair.state in (pair.State.FROZEN, pair.State.WAITING):
+                        pair.state = pair.State.FAILED
+                else:
+                    pair.task.cancel()
+                    tasks.add(pair.task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _await_ice_connect_tasks(self) -> None:
+        start_events = [
+            event
+            for ice_transport in self._ice_transports()
+            if (event := getattr(ice_transport, "_RTCIceTransport__start")) is not None
+        ]
+        if start_events:
+            await asyncio.gather(*(event.wait() for event in start_events))
+            await asyncio.sleep(0)
 
     async def _connect_watchdog(self) -> None:
         await asyncio.sleep(CONNECT_TIMEOUT_S)

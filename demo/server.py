@@ -51,7 +51,7 @@ import auth
 import httpx
 import limiter
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -136,6 +136,25 @@ LB_USER_AGENT = "speech-to-speech-demo"
 
 app = FastAPI(title="s2s-demo")
 
+
+@app.get("/vendor/openai-realtime-agents.umd.js", include_in_schema=False)
+def agents_sdk_bundle():
+    """Serve the exact npm-pinned browser bundle without committing build output."""
+    bundled = os.path.join(HERE, "vendor", "openai-realtime-agents.umd.js")
+    installed = os.path.join(
+        HERE,
+        "node_modules",
+        "@openai",
+        "agents-realtime",
+        "dist",
+        "bundle",
+        "openai-realtime-agents.umd.js",
+    )
+    path = bundled if os.path.isfile(bundled) else installed
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=503, detail="Run npm ci in demo/")
+    return FileResponse(path, media_type="text/javascript")
+
 # Wire HF OAuth before the app serves (no-op unless the OAuth env is present).
 # Sign-in only matters when we're metering (prod Space), so gate it on that.
 AUTH_ENABLED = LIMITER_ENABLED and auth.attach(app)
@@ -195,8 +214,8 @@ async def me(request: Request):
     sets the anonymous tracking cookie when first seen."""
     if not LIMITER_ENABLED:
         return {"enabled": False}
-    view = auth.user_view(request)
     tier, keys, set_cookie = auth.resolve_identity(request)
+    view = auth.user_view(request, tier=tier)
     unlimited = limiter.budget_for(tier) is None
     rem = None if unlimited else await asyncio.to_thread(limiter.remaining, keys, tier)
     out = {

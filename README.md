@@ -11,7 +11,7 @@
 
 </div>
 
-A low-latency, fully modular voice-agent pipeline: **VAD -> STT -> LLM -> TTS**, exposed through an **OpenAI Realtime-compatible WebSocket API**. Every component is swappable. The LLM slot speaks OpenAI-compatible protocols, so you can point it at a hosted provider, at [HF Inference Providers](https://huggingface.co/inference-providers), or at a vLLM or llama.cpp server on your own hardware for a fully local, fully open stack.
+A low-latency, fully modular voice-agent pipeline: **VAD -> STT -> LLM -> TTS**, exposed through the **core OpenAI Realtime GA event set over WebSocket and WebRTC**. Every component is swappable. The LLM slot speaks OpenAI-compatible protocols, so you can point it at a hosted provider, at [HF Inference Providers](https://huggingface.co/inference-providers), or at a vLLM or llama.cpp server on your own hardware for a fully local, fully open stack.
 
 This pipeline runs in production as the conversation backend for thousands of [Reachy Mini](https://huggingface.co/blog/reachy-mini) robots.
 
@@ -60,12 +60,13 @@ speech-to-speech serve \
     --responses_api_api_key ""
 ```
 
-Any OpenAI Realtime-compatible client can connect. See [Realtime API](#realtime-api) for the protocol and [LLM backends](#llm-backends) for provider and local-server options.
+Clients using the implemented core Realtime event set can connect. The official OpenAI Agents SDK is tested over both stock transports; see [Realtime API](#realtime-api) for the tested surface and [LLM backends](#llm-backends) for provider and local-server options.
 
 ## Index
 
 * [How it works](#how-it-works)
 * [Installation](#installation)
+* [Offline operation](#offline-operation)
 * [Supported components](#supported-components)
 * [Commands](#commands)
 * [Realtime API](#realtime-api)
@@ -177,7 +178,7 @@ This installs the package in editable mode and makes the `speech-to-speech` CLI 
 | TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | built-in |
 | TTS | OpenAI-compatible `/v1/audio/speech` endpoint | local or remote HTTP server | built-in |
 
-Select implementations with `--stt`, `--llm_backend`, and `--tts`. Run `speech-to-speech serve -h` for exact values and backend-specific flags.
+Select implementations with `--stt`, `--llm_backend`, and `--tts`. The CLI constructs configuration only for the selected backends; known options for inactive backends remain accepted for compatibility but are ignored with a warning. JSON configuration may likewise include extra inactive-backend keys, which are ignored. Run `speech-to-speech serve -h` for the defaults, or pass selectors before `-h` to see another combination's backend-specific flags (for example, `speech-to-speech serve --stt mlx-audio-whisper -h`).
 
 For client-only STT/TTS serving with vLLM, vLLM-Omni, or NVIDIA Speech NIM,
 including cancellation and endpoint-wide admission behavior, see
@@ -192,6 +193,8 @@ including cancellation and endpoint-wide admission behavior, see
 | `local` | Composes `serve` and `talk` in-process over loopback. | You want to run the server and talk to it from one command. |
 
 `serve` binds to `127.0.0.1` by default; pass `--host 0.0.0.0` explicitly for network exposure. `local` always binds to loopback and connects the same packaged client at `ws://127.0.0.1:<port>/v1/realtime`.
+
+The packaged client can opt in to local Python tools with `talk --tool-module <module>` or `local --tool-module <module>`. The module contract, programmatic API, and a Serper web-search example are documented in [Tool calling design](./src/speech_to_speech/api/openai_realtime/README.md#packaged-python-client-tools).
 
 ### Migrating from `--mode`
 
@@ -306,7 +309,7 @@ with client.realtime.connect(model="local") as conn:
         print(event.type)
 ```
 
-The server implements the core Realtime event set: `input_audio_buffer.append`, `session.update`, `conversation.item.create`, `response.create`, and `response.cancel` inbound; speech start/stop, streaming transcription, audio deltas, tool calls, and `response.done` outbound. The full event reference, architecture, and design details live in the [Realtime Engine README](./src/speech_to_speech/api/openai_realtime/README.md).
+The server implements the core Realtime event set: `input_audio_buffer.append`, `session.update`, `conversation.item.create`, `conversation.item.truncate`, `response.create`, and `response.cancel` inbound; speech start/stop, streaming transcription, audio deltas, tool calls, and `response.done` outbound. CI connects pinned `@openai/agents` `RealtimeSession` instances through the SDK's stock WebSocket and WebRTC transports. This is a tested core subset, not a claim of full OpenAI Realtime API equivalence. The event matrix, architecture, and design details live in the [Realtime Engine README](./src/speech_to_speech/api/openai_realtime/README.md).
 
 ### LLM Proxy
 
@@ -484,6 +487,31 @@ speech-to-speech serve \
 ```
 
 Use `speech-to-speech local` when you want to run the same server and talk through the machine hosting it. In-process local backends are available with `--llm_backend mlx-lm` on Apple Silicon or `--llm_backend transformers` on CUDA / CPU.
+
+## Offline Operation
+
+The pipeline can run without internet access after the dependencies and model assets for the selected components
+are installed locally. Before disconnecting, start the exact configuration once while online so it can cache the
+STT, LLM, TTS, Silero VAD, NLTK, and Smart Turn resources it needs.
+
+For the lowest-friction fully local LLM setup, run llama.cpp on the same machine as described in
+[Fully Local](#fully-local). Once llama.cpp and the pipeline assets are available locally, set
+`HF_HUB_OFFLINE=1` when starting speech-to-speech to prevent Hugging Face Hub requests:
+
+```bash
+HF_HUB_OFFLINE=1 speech-to-speech serve \
+    --model_name "ggml-org/gemma-4-E4B-it-GGUF" \
+    --responses_api_base_url "http://127.0.0.1:8080/v1" \
+    --responses_api_api_key ""
+```
+
+Without the local base URL override, the default `responses-api` LLM backend calls a remote service. Alternatively,
+use an in-process local backend such as `transformers` or `mlx-lm`. Every selected model must already be cached or
+supplied through a local path supported by its backend.
+
+Smart Turn uses a separate ONNX checkpoint. A cached checkpoint works with `HF_HUB_OFFLINE=1`; for an explicit,
+cache-independent setup, pass `--smart_turn_model_path /path/to/smart-turn-v3.2-cpu.onnx`. If the checkpoint is not
+available, pass `--no_smart_turn` to disable Smart Turn.
 
 ## Multi-Language Support
 

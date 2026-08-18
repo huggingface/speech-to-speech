@@ -28,6 +28,7 @@ aiortc = pytest.importorskip("aiortc")
 av = pytest.importorskip("av")
 
 import httpx  # noqa: E402  (ships with the openai dependency)
+from aioice.ice import Connection  # noqa: E402
 from aiortc import RTCPeerConnection, RTCSessionDescription  # noqa: E402
 from aiortc.mediastreams import AudioStreamTrack, MediaStreamError  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
@@ -41,10 +42,22 @@ from speech_to_speech.api.openai_realtime.webrtc_session import (  # noqa: E402
     WEBRTC_SAMPLE_RATE,
     PcmResampler,
     PipelineAudioTrack,
+    WebRTCSession,
 )
 from speech_to_speech.pipeline.cancel_scope import CancelScope  # noqa: E402
-from speech_to_speech.pipeline.events import SpeechStartedEvent  # noqa: E402
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE  # noqa: E402
+from speech_to_speech.pipeline.events import (  # noqa: E402
+    AssistantOutputEvent,
+    AssistantResponseDoneEvent,
+    ResponseFailedEvent,
+    SpeechStartedEvent,
+    TokenUsageEvent,
+)
+from speech_to_speech.pipeline.messages import (  # noqa: E402
+    AUDIO_RESPONSE_DONE,
+    AssistantTextPart,
+    AssistantToolCallPart,
+    AudioOutput,
+)
 
 from .test_openai_client import _ServerEnv  # noqa: E402
 
@@ -85,7 +98,13 @@ class _FakeTransport(SessionTransport):
     async def send_events(self, events):
         self.sent.extend(e.model_dump() for e in events)
 
-    async def send_audio_chunk(self, service, session_id, pcm):
+    async def send_audio_chunk(
+        self,
+        service,
+        session_id,
+        pcm,
+        response_key=None,
+    ):
         raise AssertionError("dispatch tests never send audio")
 
     def discard_pending_audio(self):
@@ -245,7 +264,20 @@ class TestWebRTCDispatch:
         conn_id = unit.service.register()
         transport = _FakeTransport()
 
+        text_event = AssistantOutputEvent(text="before audio", response_key="response_1")
+        tool_event = AssistantOutputEvent(
+            tools=[{"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"}],
+            response_key="response_1",
+        )
+        failed_event = ResponseFailedEvent(message="provider failed", response_key="response_1")
+        usage_event = TokenUsageEvent(input_tokens=3, output_tokens=2, response_key="response_1")
+        done_event = AssistantResponseDoneEvent(response_key="response_1")
+        unit.output_queue.put(text_event)
         unit.output_queue.put(b"\x01\x00" * 512)
+        unit.output_queue.put(tool_event)
+        unit.output_queue.put(failed_event)
+        unit.output_queue.put(usage_event)
+        unit.output_queue.put(done_event)
         unit.output_queue.put(AUDIO_RESPONSE_DONE)
 
         await router_module._dispatch_client_event(
@@ -258,8 +290,15 @@ class TestWebRTCDispatch:
 
         assert transport.sent == []  # no error
         assert transport.discards == 1
-        # Pending audio flushed, done-sentinel preserved so the response still closes.
-        assert unit.output_queue.get_nowait() == AUDIO_RESPONSE_DONE
+        # Only audio is flushed; ordered response state and the terminal survive.
+        assert [unit.output_queue.get_nowait() for _ in range(6)] == [
+            text_event,
+            tool_event,
+            failed_event,
+            usage_event,
+            done_event,
+            AUDIO_RESPONSE_DONE,
+        ]
         with pytest.raises(Empty):
             unit.output_queue.get_nowait()
 
@@ -378,7 +417,160 @@ class _DataChannelInbox:
 
 
 class TestWebRTCLoopback:
-    async def test_handshake_events_and_audio_roundtrip(self, server_env):
+    async def test_cancelled_close_keeps_teardown_running(self, monkeypatch):
+        server_pc = RTCPeerConnection()
+        teardown_started = asyncio.Event()
+        release_teardown = asyncio.Event()
+        closed_calls = []
+
+        async def _on_client_event(_raw):
+            pass
+
+        async def _on_open():
+            pass
+
+        session = WebRTCSession(
+            server_pc,
+            on_client_event=_on_client_event,
+            on_audio=lambda _pcm: None,
+            on_open=_on_open,
+            on_closed=lambda: closed_calls.append(None),
+        )
+        session.setup()
+        close_peer_connection = session._close_peer_connection
+
+        async def _pause_peer_close():
+            teardown_started.set()
+            await release_teardown.wait()
+            await close_peer_connection()
+
+        monkeypatch.setattr(session, "_close_peer_connection", _pause_peer_close)
+        first_close = asyncio.create_task(session.close())
+        second_close = None
+        try:
+            await asyncio.wait_for(teardown_started.wait(), timeout=1.0)
+            first_close.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first_close
+
+            second_close = asyncio.create_task(session.close())
+            await asyncio.sleep(0)
+            assert not second_close.done()
+
+            release_teardown.set()
+            await second_close
+            assert server_pc.connectionState == "closed"
+            assert len(closed_calls) == 1
+        finally:
+            release_teardown.set()
+            close_tasks = [task for task in (first_close, second_close) if task is not None]
+            await asyncio.gather(*close_tasks, return_exceptions=True)
+            await session.close()
+            await server_pc.close()
+
+    async def test_close_awaits_pending_ice_checks(self, monkeypatch):
+        client_pc = RTCPeerConnection()
+        server_pc = RTCPeerConnection()
+        first_close = None
+        second_close = None
+        release_sweep = asyncio.Event()
+        closed_calls = []
+        close_server_pc = server_pc.close
+
+        def _pending_ice_checks():
+            return {
+                task
+                for task in asyncio.all_tasks()
+                if getattr(task.get_coro(), "cr_code", None) is Connection.check_start.__code__
+            }
+
+        connect_code = getattr(RTCPeerConnection, "_RTCPeerConnection__connect").__code__
+
+        def _pending_server_connects():
+            tasks = set()
+            for task in asyncio.all_tasks():
+                coro = task.get_coro()
+                frame = getattr(coro, "cr_frame", None)
+                if (
+                    getattr(coro, "cr_code", None) is connect_code
+                    and frame is not None
+                    and frame.f_locals.get("self") is server_pc
+                ):
+                    tasks.add(task)
+            return tasks
+
+        async def _on_client_event(_raw):
+            pass
+
+        async def _on_open():
+            pass
+
+        session = WebRTCSession(
+            server_pc,
+            on_client_event=_on_client_event,
+            on_audio=lambda _pcm: None,
+            on_open=_on_open,
+            on_closed=lambda: closed_calls.append(None),
+        )
+        session.setup()
+        try:
+            client_pc.createDataChannel("oai-events")
+            client_pc.addTrack(AudioStreamTrack())
+            offer = await client_pc.createOffer()
+            await client_pc.setLocalDescription(offer)
+            offer_sdp = client_pc.localDescription.sdp
+            partial_offer_sdp = offer_sdp.replace("a=end-of-candidates\r\n", "")
+            assert partial_offer_sdp != offer_sdp
+            await session.negotiate(partial_offer_sdp)
+
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                if _pending_ice_checks():
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("aioice did not start a connectivity check")
+            assert _pending_server_connects()
+
+            sweep_started = asyncio.Event()
+            cancel_ice_checks = session._cancel_ice_checks
+            sweep_count = 0
+
+            async def _pause_first_sweep():
+                nonlocal sweep_count
+                sweep_count += 1
+                if sweep_count == 1:
+                    sweep_started.set()
+                    await release_sweep.wait()
+                await cancel_ice_checks()
+
+            async def _fail_peer_close():
+                raise RuntimeError("peer close failed")
+
+            monkeypatch.setattr(session, "_cancel_ice_checks", _pause_first_sweep)
+            monkeypatch.setattr(server_pc, "close", _fail_peer_close)
+            first_close = asyncio.create_task(session.close())
+            await asyncio.wait_for(sweep_started.wait(), timeout=1.0)
+            second_close = asyncio.create_task(session.close())
+            await asyncio.sleep(0)
+            assert not second_close.done()
+
+            release_sweep.set()
+            await asyncio.gather(first_close, second_close)
+            assert not _pending_ice_checks()
+            assert not _pending_server_connects()
+            assert len(closed_calls) == 1
+        finally:
+            release_sweep.set()
+            close_tasks = [task for task in (first_close, second_close) if task is not None]
+            if close_tasks:
+                await asyncio.gather(*close_tasks, return_exceptions=True)
+            monkeypatch.setattr(server_pc, "close", close_server_pc)
+            await session.close()
+            await server_pc.close()
+            await client_pc.close()
+
+    async def test_handshake_events_and_multi_output_audio_roundtrip(self, server_env):
         pc = RTCPeerConnection()
         try:
             dc = pc.createDataChannel("oai-events")
@@ -434,15 +626,67 @@ class TestWebRTCLoopback:
             chunk, _cfg = await asyncio.get_running_loop().run_in_executor(None, _wait_for_input_chunk)
             assert len(chunk) == CHUNK_SIZE_BYTES
 
-            # Outbound pipeline audio: PCM through output_queue reaches the
-            # client as RTP frames, and the done-sentinel closes the response
-            # over the data channel (response.created was sent implicitly).
-            server_env.output_queue.put(np.ones(4096, dtype=np.int16).tobytes())
-            server_env.output_queue.put(AUDIO_RESPONSE_DONE)
+            # Two assistant messages separated by a tool call keep distinct
+            # output identities over a real WebRTC media/data-channel pair.
+            response_key = "webrtc_response_1"
+            server_env.output_queue.put(
+                AssistantOutputEvent(
+                    response_key=response_key,
+                    parts=[AssistantTextPart(text="before")],
+                )
+            )
+            server_env.output_queue.put(
+                AudioOutput(
+                    audio=np.ones(2048, dtype=np.int16).tobytes(),
+                    response_key=response_key,
+                )
+            )
+            server_env.output_queue.put(
+                AssistantOutputEvent(
+                    response_key=response_key,
+                    parts=[
+                        AssistantToolCallPart(
+                            tool={
+                                "type": "function_call",
+                                "call_id": "call_1",
+                                "name": "tool",
+                                "arguments": "{}",
+                            }
+                        )
+                    ],
+                )
+            )
+            server_env.output_queue.put(
+                AssistantOutputEvent(
+                    response_key=response_key,
+                    parts=[AssistantTextPart(text="after")],
+                )
+            )
+            server_env.output_queue.put(
+                AudioOutput(
+                    audio=np.ones(2048, dtype=np.int16).tobytes(),
+                    response_key=response_key,
+                )
+            )
+            server_env.output_queue.put(AssistantResponseDoneEvent(response_key=response_key))
+            server_env.output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key))
 
             await inbox.wait_for("response.created", timeout=10.0)
             done = await inbox.wait_for("response.done", timeout=10.0)
             assert done["response"]["status"] == "completed"
+            transcript_deltas = [
+                event for event in inbox.events if event["type"] == "response.output_audio_transcript.delta"
+            ]
+            audio_done = [event for event in inbox.events if event["type"] == "response.output_audio.done"]
+            assert [event["output_index"] for event in transcript_deltas] == [0, 2]
+            assert [event["output_index"] for event in audio_done] == [0, 2]
+            assert [item["type"] for item in done["response"]["output"]] == [
+                "message",
+                "function_call",
+                "message",
+            ]
+            for event in audio_done:
+                assert done["response"]["output"][event["output_index"]]["id"] == event["item_id"]
 
             await asyncio.wait_for(track_ready.wait(), timeout=10.0)
             assert received_frames[0].sample_rate == WEBRTC_SAMPLE_RATE

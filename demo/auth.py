@@ -88,9 +88,9 @@ def _field(obj, name, default=None):
 # verifying org gating on the live Space without guessing.
 AUTH_DEBUG = bool(os.environ.get("AUTH_DEBUG"))
 
-# whoami-v2 org lookups are cached for the process lifetime, keyed by token, so
-# /api/me + /api/session don't each hit the Hub.
-_orgs_cache: "dict[str, set[str]]" = {}
+# whoami-v2 profiles are cached for the process lifetime, keyed by token, so
+# tier and org resolution across /api/me + /api/session share one Hub request.
+_whoami_cache: "dict[str, dict]" = {}
 
 
 def current_oauth(request):
@@ -171,14 +171,12 @@ def _user_org_names(user) -> "set[str]":
     return names
 
 
-def _orgs_via_token(token: str) -> "set[str]":
-    """Fallback org lookup via the Hub `whoami-v2` API, using the user's OAuth
-    access token. Covers the case where the userinfo claim omits `orgs`."""
+def _whoami_via_token(token: str) -> dict:
+    """The authenticated Hub `whoami-v2` profile, cached by OAuth token."""
     if not token:
-        return set()
-    if token in _orgs_cache:
-        return _orgs_cache[token]
-    names: "set[str]" = set()
+        return {}
+    if token in _whoami_cache:
+        return _whoami_cache[token]
     try:
         import httpx
 
@@ -188,24 +186,36 @@ def _orgs_via_token(token: str) -> "set[str]":
             timeout=5.0,
         )
         resp.raise_for_status()
-        for org in resp.json().get("orgs", []) or []:
-            for key in ("name", "fullname"):
-                val = org.get(key)
-                if val:
-                    names.add(str(val).lower())
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ValueError("whoami-v2 returned a non-object response")
     except Exception as exc:  # pragma: no cover - network/permission dependent
-        logger.info("whoami-v2 org lookup failed: %r", exc)
-    _orgs_cache[token] = names
+        logger.info("whoami-v2 profile lookup failed: %r", exc)
+        return {}
+    _whoami_cache[token] = data
+    return data
+
+
+def _orgs_via_token(token: str, profile=None) -> "set[str]":
+    """Org names from the cached authenticated Hub profile."""
+    if profile is None:
+        profile = _whoami_via_token(token)
+    names: "set[str]" = set()
+    for org in profile.get("orgs", []) or []:
+        for key in ("name", "fullname"):
+            val = _field(org, key)
+            if val:
+                names.add(str(val).lower())
     return names
 
 
-def _org_names(user, token=None, allow=None) -> "set[str]":
+def _org_names(user, token=None, allow=None, profile=None) -> "set[str]":
     """The user's org usernames from the OAuth userinfo claim. If that doesn't
     already satisfy `allow`, fall back to the Hub `whoami-v2` API (the claim is
     often empty or partial), so membership is resolved either way."""
     names = _user_org_names(user)
     if token and (allow is None or not (allow & names)):
-        names = names | _orgs_via_token(token)
+        names = names | _orgs_via_token(token, profile)
     return names
 
 
@@ -214,15 +224,18 @@ def resolve_tier(user, token=None) -> str:
     member, unlimited), or 'free'. PRO wins over org if both apply."""
     if bool(_field(user, "is_pro", False)):
         return "pro"
+    profile = _whoami_via_token(token)
+    if bool(profile.get("isPro", False)):
+        return "pro"
     allow = _unlimited_orgs()
-    names = _org_names(user, token, allow)
+    names = _org_names(user, token, allow, profile)
     tier = "org" if (allow & names) else "free"
     if AUTH_DEBUG:
         logger.info("tier=%s orgs=%s allow=%s", tier, sorted(names), sorted(allow))
     return tier
 
 
-def user_view(request) -> dict:
+def user_view(request, tier=None) -> dict:
     """Public profile for /api/me."""
     info = current_oauth(request)
     user = _field(info, "user_info")
@@ -237,7 +250,7 @@ def user_view(request) -> dict:
         "loggedIn": True,
         "username": _field(user, "preferred_username") or _field(user, "name") or "you",
         "avatar": _field(user, "picture"),
-        "tier": resolve_tier(user, token),
+        "tier": tier if tier is not None else resolve_tier(user, token),
     }
     if AUTH_DEBUG:
         out["orgs"] = sorted(_org_names(user, token))

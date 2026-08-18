@@ -25,16 +25,16 @@ def test_sent_audio_recorder_uses_backend_vad_boundaries():
         """
 const { SentAudioRecorder } = await import("./demo/ws/user-audio-recorder.js");
 const recorder = new SentAudioRecorder({
-  sampleRate: 16000,
+  sampleRate: 24000,
   preRollMs: 1000,
   maxBufferMs: 10000,
 });
 
 // 300 ms of recognizable PCM, delivered in the same 40 ms frames as the demo.
-const samples = new Int16Array(4800);
-for (let i = 0; i < samples.length; i++) samples[i] = i - 2400;
-for (let offset = 0; offset < samples.length; offset += 640) {
-  recorder.append(samples.slice(offset, Math.min(offset + 640, samples.length)).buffer);
+const samples = new Int16Array(7200);
+for (let i = 0; i < samples.length; i++) samples[i] = i - 3600;
+for (let offset = 0; offset < samples.length; offset += 960) {
+  recorder.append(samples.slice(offset, Math.min(offset + 960, samples.length)).buffer);
 }
 
 recorder.speechStarted({ itemId: "item_1", audioStartMs: 50 });
@@ -51,10 +51,10 @@ const ascii = (offset, length) =>
 if (ascii(0, 4) !== "RIFF" || ascii(8, 4) !== "WAVE") {
   throw new Error("invalid WAV header");
 }
-if (wav.getUint32(24, true) !== 16000) throw new Error("wrong sample rate");
-if (wav.getUint32(40, true) !== 6400) throw new Error("wrong PCM payload length");
-// 50 ms * 16 samples/ms = sample 800.
-if (wav.getInt16(44, true) !== samples[800]) {
+if (wav.getUint32(24, true) !== 24000) throw new Error("wrong sample rate");
+if (wav.getUint32(40, true) !== 9600) throw new Error("wrong PCM payload length");
+// 50 ms * 24 samples/ms = sample 1200.
+if (wav.getInt16(44, true) !== samples[1200]) {
   throw new Error(`wrong first sample: ${wav.getInt16(44, true)}`);
 }
 """
@@ -65,17 +65,17 @@ def test_reopened_item_replaces_recording_with_accumulated_audio():
     _run_node(
         """
 const { SentAudioRecorder } = await import("./demo/ws/user-audio-recorder.js");
-const recorder = new SentAudioRecorder({ sampleRate: 16000 });
+const recorder = new SentAudioRecorder({ sampleRate: 24000 });
 const frame = (value, samples) => {
   const pcm = new Int16Array(samples);
   pcm.fill(value);
   return pcm.buffer;
 };
 
-recorder.append(frame(100, 1600));
+recorder.append(frame(100, 2400));
 recorder.speechStarted({ itemId: "item_same", audioStartMs: 0 });
 const first = recorder.speechStopped({ itemId: "item_same", audioEndMs: 100 });
-recorder.append(frame(200, 1600));
+recorder.append(frame(200, 2400));
 recorder.speechStarted({ itemId: "item_same", audioStartMs: 100 });
 const reopened = recorder.speechStopped({ itemId: "item_same", audioEndMs: 200 });
 
@@ -85,7 +85,7 @@ if (first.durationMs !== 100 || reopened.durationMs !== 200) {
 }
 const wav = new DataView(await reopened.audio.arrayBuffer());
 if (wav.getInt16(44, true) !== 100) throw new Error("first segment missing");
-if (wav.getInt16(44 + 1600 * 2, true) !== 200) throw new Error("reopened segment missing");
+if (wav.getInt16(44 + 2400 * 2, true) !== 200) throw new Error("reopened segment missing");
 """
     )
 
@@ -94,24 +94,28 @@ def test_websocket_client_emits_audio_only_user_turn():
     _run_node(
         """
 globalThis.localStorage = { getItem() { return null; } };
-globalThis.WebSocket = { OPEN: 1 };
 globalThis.CustomEvent = class CustomEvent extends Event {
   constructor(type, init = {}) {
     super(type);
     this.detail = init.detail;
   }
 };
-const { S2sWsRealtimeClient } = await import("./demo/ws/s2s-ws-client.js");
-const client = new S2sWsRealtimeClient({
+const { S2sRealtimeClient } = await import("./demo/s2s-realtime-client.js");
+const client = new S2sRealtimeClient({
+  transport: "websocket",
   voice: "Aiden",
   instructions: "Be helpful.",
   directUrl: "ws://unused",
 });
-client._ws = { readyState: 1, send() {} };
-client._sessionConfigured = true;
+client._session = { sendAudio() {} };
+client._status = "connected";
 
 let recording = null;
+let playbackClears = 0;
 const turnEvents = [];
+client._playbackNode = { port: { postMessage(message) {
+  if (message?.kind === "clear") playbackClears += 1;
+} } };
 client.addEventListener("user-audio", (event) => { recording = event.detail; });
 client.addEventListener("user-turn-started", (event) => {
   turnEvents.push(["started", event.detail.itemId]);
@@ -119,23 +123,24 @@ client.addEventListener("user-turn-started", (event) => {
 client.addEventListener("user-turn-stopped", (event) => {
   turnEvents.push(["stopped", event.detail.itemId]);
 });
-const frame = new Int16Array(640);
+const frame = new Int16Array(960);
 frame.fill(123);
 for (let i = 0; i < 5; i++) client._onMicChunk(frame.buffer);
-await client._onWsMessage(JSON.stringify({
+client._onTransportEvent({
   type: "input_audio_buffer.speech_started",
   item_id: "item_audio_only",
   audio_start_ms: 40,
-}));
+});
 for (let i = 0; i < 3; i++) client._onMicChunk(frame.buffer);
-await client._onWsMessage(JSON.stringify({
+client._onTransportEvent({
   type: "input_audio_buffer.speech_stopped",
   item_id: "item_audio_only",
   audio_end_ms: 280,
-}));
+});
 
 if (!recording) throw new Error("user-audio event was not emitted");
 if (recording.itemId !== "item_audio_only") throw new Error("wrong item association");
+if (playbackClears !== 1) throw new Error("barge-in did not clear WebSocket playback");
 if (Math.abs(recording.durationMs - 240) > 0.001) {
   throw new Error(`unexpected emitted duration: ${recording.durationMs}`);
 }
@@ -253,7 +258,7 @@ if (view._activeUserBubble !== null) {
   throw new Error("late stop restored the active voice bubble");
 }
 
-// A genuine reopened turn may reuse the item id and must clear the tombstone.
+// A speculative continuation reusing an incomplete item clears the tombstone.
 view.onUserTurnStarted({ itemId: "item_voice" });
 if (spawned !== 1 || view._activeUserBubble !== bubble) {
   throw new Error("reopened turn did not create a fresh listening bubble");

@@ -16,6 +16,146 @@ demo_auth = importlib.import_module("auth")
 demo_server = importlib.import_module("server")
 
 
+def _mock_whoami(monkeypatch, payload):
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        return httpx.Response(200, json=payload, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", get)
+    monkeypatch.setattr(demo_auth, "_whoami_cache", {})
+    return calls
+
+
+def test_resolve_tier_prefers_oauth_pro_without_hub_lookup(monkeypatch):
+    def unexpected_get(*args, **kwargs):
+        pytest.fail("OAuth PRO users must not require a whoami-v2 lookup")
+
+    monkeypatch.setattr(httpx, "get", unexpected_get)
+
+    assert demo_auth.resolve_tier({"is_pro": True}, "hf_user_token") == "pro"
+
+
+@pytest.mark.parametrize("oauth_is_pro", [None, False])
+def test_user_view_uses_token_backed_pro_status(monkeypatch, oauth_is_pro):
+    calls = _mock_whoami(
+        monkeypatch,
+        {"name": "alice", "isPro": True, "orgs": [], "private": "server-only"},
+    )
+    monkeypatch.setattr(
+        demo_auth,
+        "current_oauth",
+        lambda request: {
+            "access_token": "hf_user_token",
+            "user_info": {
+                "sub": "123",
+                "preferred_username": "alice",
+                "is_pro": oauth_is_pro,
+            },
+        },
+    )
+
+    assert demo_auth.user_view(object()) == {
+        "loggedIn": True,
+        "username": "alice",
+        "avatar": None,
+        "tier": "pro",
+    }
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("whoami", "expected"),
+    [
+        ({"isPro": False, "orgs": []}, "free"),
+        ({"isPro": False, "orgs": [{"name": "smolagents"}]}, "org"),
+    ],
+)
+def test_token_backed_non_pro_tiers_remain_unchanged(monkeypatch, whoami, expected):
+    _mock_whoami(monkeypatch, whoami)
+
+    assert demo_auth.resolve_tier({"is_pro": False}, "hf_user_token") == expected
+
+
+def test_failed_whoami_falls_back_without_blocking_retry(monkeypatch):
+    monkeypatch.setattr(demo_auth, "_whoami_cache", {})
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        if len(calls) == 1:
+            raise httpx.ConnectError("Hub unavailable")
+        return httpx.Response(
+            200,
+            json={"isPro": True, "orgs": []},
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(httpx, "get", get)
+
+    assert demo_auth.resolve_tier({"is_pro": False}, "hf_user_token") == "free"
+    assert demo_auth._whoami_cache == {}
+    assert demo_auth.resolve_tier({"is_pro": False}, "hf_user_token") == "pro"
+    assert demo_auth.resolve_tier({"is_pro": False}, "hf_user_token") == "pro"
+    assert len(calls) == 2
+
+
+async def test_me_reuses_whoami_resolution_and_retries_next_request(monkeypatch):
+    monkeypatch.setattr(demo_server, "LIMITER_ENABLED", True)
+    monkeypatch.setattr(demo_server, "AUTH_ENABLED", True)
+    monkeypatch.setattr(demo_auth, "_whoami_cache", {})
+    monkeypatch.setattr(demo_server.limiter, "remaining", lambda keys, tier: 600)
+    monkeypatch.setattr(
+        demo_auth,
+        "current_oauth",
+        lambda request: {
+            "access_token": "hf_user_token",
+            "user_info": {"sub": "123", "preferred_username": "alice"},
+        },
+    )
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        if len(calls) == 1:
+            raise httpx.ConnectError("Hub unavailable")
+        return httpx.Response(
+            200,
+            json={"isPro": True, "orgs": []},
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(httpx, "get", get)
+
+    first = json.loads((await demo_server.me(object())).body)
+
+    assert first["tier"] == "free"
+    assert first["remainingSec"] == 600
+    assert first["limitSec"] == 600
+    assert demo_auth._whoami_cache == {}
+    assert len(calls) == 1
+
+    second = json.loads((await demo_server.me(object())).body)
+
+    assert second["tier"] == "pro"
+    assert second["remainingSec"] is None
+    assert second["limitSec"] is None
+    assert len(calls) == 2
+
+
+def test_tier_and_org_resolution_share_one_whoami_request(monkeypatch):
+    calls = _mock_whoami(
+        monkeypatch,
+        {"isPro": False, "orgs": [{"name": "smolagents"}]},
+    )
+    user = {"is_pro": False}
+
+    assert demo_auth.resolve_tier(user, "hf_user_token") == "org"
+    assert demo_auth._org_names(user, "hf_user_token") == {"smolagents"}
+    assert len(calls) == 1
+
+
 def test_current_access_token_normalizes_oauth_token(monkeypatch):
     monkeypatch.setattr(
         demo_auth,
@@ -167,8 +307,9 @@ globalThis.fetch = async () => ({
     return { reason: "token_invalid", loginUrl: "/oauth/huggingface/login" };
   },
 });
-const { S2sWsRealtimeClient } = await import("./demo/ws/s2s-ws-client.js");
-const client = new S2sWsRealtimeClient({
+const { S2sRealtimeClient } = await import("./demo/s2s-realtime-client.js");
+const client = new S2sRealtimeClient({
+  transport: "websocket",
   voice: "Aiden",
   instructions: "Be helpful.",
   sessionUrl: "api/session",

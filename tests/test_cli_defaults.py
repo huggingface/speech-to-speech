@@ -1,33 +1,24 @@
 import sys
 from dataclasses import fields
+from types import SimpleNamespace
 
 import pytest
 
 from speech_to_speech.arguments_classes.chat_completions_language_model_arguments import (
     ChatCompletionsLanguageModelHandlerArguments,
 )
-from speech_to_speech.arguments_classes.chat_tts_arguments import ChatTTSHandlerArguments
-from speech_to_speech.arguments_classes.facebookmms_tts_arguments import FacebookMMSTTSHandlerArguments
-from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import FasterWhisperSTTHandlerArguments
-from speech_to_speech.arguments_classes.kokoro_tts_arguments import KokoroTTSHandlerArguments
 from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
 from speech_to_speech.arguments_classes.local_audio_arguments import LocalAudioArguments
-from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import MLXAudioWhisperSTTHandlerArguments
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
-from speech_to_speech.arguments_classes.openai_stt_arguments import OpenAICompatibleSTTHandlerArguments
-from speech_to_speech.arguments_classes.openai_tts_arguments import OpenAICompatibleTTSHandlerArguments
-from speech_to_speech.arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
-from speech_to_speech.arguments_classes.parakeet_tdt_arguments import ParakeetTDTSTTHandlerArguments
-from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
 from speech_to_speech.arguments_classes.realtime_server_arguments import RealtimeServerArguments
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
     ResponsesApiLanguageModelHandlerArguments,
 )
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
-from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
+from speech_to_speech.backend_registry import BackendSelection
 from speech_to_speech.cli import main, parse_command, parse_talk_arguments
-from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments, prepare_module_args
+from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments, prepare_all_args, prepare_module_args
 
 
 def test_release_defaults_match_responses_api_parakeet_qwen3_profile():
@@ -83,19 +74,17 @@ def test_mac_optimal_settings_flag_does_not_select_a_command():
     assert args.module_kwargs.stt == "parakeet-tdt"
     assert args.module_kwargs.llm_backend == "mlx-lm"
     assert args.module_kwargs.tts == "qwen3"
-    assert args.language_model_handler_kwargs.llm_device == "mps"
-    assert args.qwen3_tts_handler_kwargs.qwen3_tts_device == "mps"
-    assert args.language_model_handler_kwargs.model_name == "mlx-community/Qwen3-4B-Instruct-2507-bf16"
+    assert args.llm_backend.config["device"] == "mps"
+    assert args.tts_backend.config["device"] == "mps"
+    assert args.llm_backend.config["model_name"] == "mlx-community/Qwen3-4B-Instruct-2507-bf16"
 
 
 def test_mac_optimal_settings_routes_explicit_model_to_mlx_backend():
     args = parse_arguments(["--mac-optimal-settings", "--model_name", "custom/mlx-model"])
 
-    prepare_module_args(args.module_kwargs, args.language_model_handler_kwargs)
-
     assert args.module_kwargs.llm_backend == "mlx-lm"
-    assert type(args.language_model_handler_kwargs) is LanguageModelHandlerArguments
-    assert args.language_model_handler_kwargs.model_name == "custom/mlx-model"
+    assert args.llm_backend.spec.config_type is LanguageModelHandlerArguments
+    assert args.llm_backend.config["model_name"] == "custom/mlx-model"
 
 
 def test_mac_optimal_settings_preserves_explicit_component_overrides():
@@ -115,28 +104,22 @@ def test_mac_optimal_settings_preserves_explicit_component_overrides():
         ]
     )
 
-    prepare_module_args(
-        args.module_kwargs,
-        args.language_model_handler_kwargs,
-        args.qwen3_tts_handler_kwargs,
-    )
+    prepare_all_args(args)
 
     assert args.module_kwargs.device == "cpu"
     assert args.module_kwargs.stt == "whisper"
     assert args.module_kwargs.llm_backend == "transformers"
     assert args.module_kwargs.tts == "kokoro"
-    assert args.language_model_handler_kwargs.llm_device == "cpu"
-    assert args.language_model_handler_kwargs.model_name == "custom/transformers-model"
-    assert args.qwen3_tts_handler_kwargs.qwen3_tts_device == "cpu"
+    assert args.llm_backend.config["device"] == "cpu"
+    assert args.llm_backend.config["model_name"] == "custom/transformers-model"
+    assert args.tts_backend.config["device"] == "cpu"
 
 
 def test_mac_optimal_settings_preserves_explicit_component_device():
     args = parse_arguments(["--mac-optimal-settings", "--qwen3_tts_device", "cpu"])
 
-    prepare_module_args(args.module_kwargs, args.qwen3_tts_handler_kwargs)
-
     assert args.module_kwargs.device is None
-    assert args.qwen3_tts_handler_kwargs.qwen3_tts_device == "cpu"
+    assert args.tts_backend.config["device"] == "cpu"
 
 
 @pytest.mark.parametrize("flag", ["--local_mac_optimal_settings", "--mac_optimal_settings"])
@@ -152,20 +135,9 @@ EXPECTED_FIELD_TYPES = {
     "realtime_server_kwargs": RealtimeServerArguments,
     "local_audio_kwargs": LocalAudioArguments,
     "vad_handler_kwargs": VADHandlerArguments,
-    "whisper_stt_handler_kwargs": WhisperSTTHandlerArguments,
-    "paraformer_stt_handler_kwargs": ParaformerSTTHandlerArguments,
-    "faster_whisper_stt_handler_kwargs": FasterWhisperSTTHandlerArguments,
-    "mlx_audio_whisper_stt_handler_kwargs": MLXAudioWhisperSTTHandlerArguments,
-    "parakeet_tdt_stt_handler_kwargs": ParakeetTDTSTTHandlerArguments,
-    "openai_stt_handler_kwargs": OpenAICompatibleSTTHandlerArguments,
-    "language_model_handler_kwargs": LanguageModelHandlerArguments,
-    "responses_api_language_model_handler_kwargs": ResponsesApiLanguageModelHandlerArguments,
-    "chat_tts_handler_kwargs": ChatTTSHandlerArguments,
-    "facebook_mms_tts_handler_kwargs": FacebookMMSTTSHandlerArguments,
-    "pocket_tts_handler_kwargs": PocketTTSHandlerArguments,
-    "kokoro_tts_handler_kwargs": KokoroTTSHandlerArguments,
-    "qwen3_tts_handler_kwargs": Qwen3TTSHandlerArguments,
-    "openai_tts_handler_kwargs": OpenAICompatibleTTSHandlerArguments,
+    "stt_backend": BackendSelection,
+    "llm_backend": BackendSelection,
+    "tts_backend": BackendSelection,
 }
 
 
@@ -191,9 +163,9 @@ def test_parse_arguments_default_backend_returns_openai_api():
 
     assert isinstance(args, ParsedArguments)
     assert isinstance(args.module_kwargs, ModuleArguments)
-    assert isinstance(args.responses_api_language_model_handler_kwargs, ResponsesApiLanguageModelHandlerArguments)
-    assert isinstance(args.language_model_handler_kwargs, LanguageModelHandlerArguments)
-    assert args.responses_api_language_model_handler_kwargs.model_name == "gpt-5.4-mini"
+    assert args.llm_backend.name == "responses-api"
+    assert args.llm_backend.spec.config_type is ResponsesApiLanguageModelHandlerArguments
+    assert args.llm_backend.config["model_name"] == "gpt-5.4-mini"
     assert args.module_kwargs.llm_backend == "responses-api"
     assert args.vad_handler_kwargs.smart_turn is True
     assert args.vad_handler_kwargs.smart_turn_model_path is None
@@ -262,14 +234,12 @@ def test_parse_arguments_accepts_qwen3_tts_backend_override():
     finally:
         sys.argv = original_argv
 
-    assert args.qwen3_tts_handler_kwargs.qwen3_tts_backend == "torch"
+    assert args.tts_backend.config["backend"] == "torch"
 
 
 def test_parse_arguments_accepts_openai_audio_backends():
-    original_argv = sys.argv[:]
-    try:
-        sys.argv = [
-            "speech-to-speech",
+    args = parse_arguments(
+        [
             "--stt",
             "openai",
             "--tts",
@@ -283,14 +253,12 @@ def test_parse_arguments_accepts_openai_audio_backends():
             "--openai_tts_voice",
             "vivian",
         ]
-        args = parse_arguments()
-    finally:
-        sys.argv = original_argv
+    )
 
-    assert args.module_kwargs.stt == "openai"
-    assert args.module_kwargs.tts == "openai"
-    assert args.openai_stt_handler_kwargs.openai_stt_model == "Qwen/Qwen3-ASR-1.7B"
-    assert args.openai_tts_handler_kwargs.openai_tts_voice == "vivian"
+    assert args.stt_backend.name == "openai"
+    assert args.stt_backend.config["model"] == "Qwen/Qwen3-ASR-1.7B"
+    assert args.tts_backend.name == "openai"
+    assert args.tts_backend.config["voice"] == "vivian"
 
 
 def test_parse_arguments_accepts_qwen3_tts_ggml_options():
@@ -315,13 +283,13 @@ def test_parse_arguments_accepts_qwen3_tts_ggml_options():
     finally:
         sys.argv = original_argv
 
-    qwen3_args = args.qwen3_tts_handler_kwargs
-    assert qwen3_args.qwen3_tts_ggml_quantization == "Q4_K_M"
-    assert qwen3_args.qwen3_tts_gguf_talker_path == "/models/talker.gguf"
-    assert qwen3_args.qwen3_tts_gguf_codec_path == "/models/codec.gguf"
-    assert qwen3_args.qwen3_tts_ref_cache_dir == "/voices/cache"
-    assert qwen3_args.qwen3_tts_ref_spk == "/voices/ref.spk"
-    assert qwen3_args.qwen3_tts_ref_rvq == "/voices/ref.rvq"
+    qwen3_config = args.tts_backend.config
+    assert qwen3_config["ggml_quantization"] == "Q4_K_M"
+    assert qwen3_config["gguf_talker_path"] == "/models/talker.gguf"
+    assert qwen3_config["gguf_codec_path"] == "/models/codec.gguf"
+    assert qwen3_config["ref_cache_dir"] == "/voices/cache"
+    assert qwen3_config["ref_spk"] == "/voices/ref.spk"
+    assert qwen3_config["ref_rvq"] == "/voices/ref.rvq"
 
 
 @pytest.mark.parametrize("command", ["serve", "talk", "local"])
@@ -392,6 +360,24 @@ def test_talk_leaves_api_key_unset_for_sdk_environment_authentication():
     assert parse_talk_arguments(["--api-key", "explicit-secret"]).api_key == "explicit-secret"
 
 
+def test_talk_loads_opt_in_tool_module(monkeypatch):
+    async def executor(_name, _arguments):
+        return None
+
+    tool = {"type": "function", "name": "lookup", "parameters": {"type": "object"}}
+    monkeypatch.setitem(
+        sys.modules,
+        "test_cli_voice_tools",
+        SimpleNamespace(TOOLS=[tool], execute_tool=executor, CREATE_RESPONSE=False),
+    )
+
+    config = parse_talk_arguments(["--tool-module", "test_cli_voice_tools"])
+
+    assert config.tools == [tool]
+    assert config.tool_executor is executor
+    assert config.tool_response_create is False
+
+
 @pytest.mark.parametrize("flag", ["--host", "--port", "--base-url", "--websocket-base-url", "--stt"])
 def test_talk_rejects_server_and_overlapping_connection_flags(flag):
     with pytest.raises(SystemExit):
@@ -420,6 +406,16 @@ def test_local_accepts_audio_flags_but_rejects_host():
         parse_arguments(["--host", "0.0.0.0"], command="local")
 
 
+@pytest.mark.parametrize(
+    "flag",
+    ["--tool-module", "--local_audio_tool_module", "--local-audio-tool-module"],
+)
+def test_local_accepts_opt_in_tool_module(flag):
+    args = parse_arguments([flag, "my_voice_tools"], command="local")
+
+    assert args.local_audio_kwargs.local_audio_tool_module == "my_voice_tools"
+
+
 def test_parse_arguments_transformers_backend():
     original_argv = sys.argv[:]
     try:
@@ -429,11 +425,10 @@ def test_parse_arguments_transformers_backend():
         sys.argv = original_argv
 
     assert isinstance(args, ParsedArguments)
-    assert isinstance(args.language_model_handler_kwargs, LanguageModelHandlerArguments)
-    assert isinstance(args.responses_api_language_model_handler_kwargs, ResponsesApiLanguageModelHandlerArguments)
-    assert args.language_model_handler_kwargs.model_name == "Qwen/Qwen3-4B-Instruct-2507"
-    # unused slot gets a default instance
-    assert args.responses_api_language_model_handler_kwargs.model_name == "gpt-5.4-mini"
+    assert args.llm_backend.name == "transformers"
+    assert args.llm_backend.spec.config_type is LanguageModelHandlerArguments
+    assert args.llm_backend.config["model_name"] == "Qwen/Qwen3-4B-Instruct-2507"
+    assert not hasattr(args, "responses_api_language_model_handler_kwargs")
 
 
 def test_prepare_module_args_rejects_responses_api_for_stt_none():
@@ -454,9 +449,9 @@ def test_prepare_module_args_rejects_responses_api_for_stt_none():
 
     with pytest.raises(
         ValueError,
-        match="--stt none requires --llm_backend chat-completions",
+        match="--stt none requires an audio-input LLM backend.*chat-completions",
     ):
-        prepare_module_args(args.module_kwargs)
+        prepare_module_args(args.module_kwargs, args.llm_backend)
 
 
 def test_parse_arguments_stt_none_supports_chat_completions_audio_path():
@@ -479,17 +474,14 @@ def test_parse_arguments_stt_none_supports_chat_completions_audio_path():
     finally:
         sys.argv = original_argv
 
-    prepare_module_args(args.module_kwargs)
+    prepare_module_args(args.module_kwargs, args.llm_backend)
 
     assert args.module_kwargs.stt == "none"
     assert args.module_kwargs.llm_backend == "chat-completions"
-    assert isinstance(
-        args.responses_api_language_model_handler_kwargs,
-        ChatCompletionsLanguageModelHandlerArguments,
-    )
-    assert args.responses_api_language_model_handler_kwargs.model_name == "gpt-audio-1.5"
-    assert args.responses_api_language_model_handler_kwargs.responses_api_audio_content_type == "audio_url"
-    assert args.responses_api_language_model_handler_kwargs.responses_api_audio_history_turns == 2
+    assert args.llm_backend.spec.config_type is ChatCompletionsLanguageModelHandlerArguments
+    assert args.llm_backend.config["model_name"] == "gpt-audio-1.5"
+    assert args.llm_backend.config["audio_content_type"] == "audio_url"
+    assert args.llm_backend.config["audio_history_turns"] == 2
 
 
 def test_parse_arguments_all_fields_populated():

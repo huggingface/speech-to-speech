@@ -14,7 +14,10 @@ import queue
 import threading
 from types import SimpleNamespace
 
+import httpx
 import numpy as np
+import pytest
+from openai import APIConnectionError, InternalServerError, RateLimitError
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemFunctionCall,
     RealtimeConversationItemFunctionCallOutput,
@@ -34,12 +37,18 @@ from speech_to_speech.LLM.chat_completions_language_model import (
     _to_chat_tool_choice,
     _to_chat_tools,
 )
+from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
+from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.events import AssistantOutputEvent, ResponseFailedEvent
 from speech_to_speech.pipeline.messages import (
     EndOfResponse,
     GenerateResponseRequest,
     LLMResponseChunk,
+    ResponsePrefetchTransaction,
     TokenUsage,
+    TTSInput,
 )
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
 
@@ -91,7 +100,7 @@ class _FakeClient:
         return self
 
 
-def _make_handler(stream=True):
+def _make_handler(stream=True, *, base_url="http://fake/v1", reasoning_effort=None):
     """Build a handler whose warmup hits the fake client (no network)."""
     orig_openai = base_mod.OpenAI
     base_mod.OpenAI = _FakeClient
@@ -102,10 +111,11 @@ def _make_handler(stream=True):
             queue.Queue(),
             setup_kwargs=dict(
                 model_name="test-model",
-                base_url="http://fake/v1",
+                base_url=base_url,
                 api_key="k",
                 stream=stream,
                 disable_thinking=True,
+                reasoning_effort=reasoning_effort,
                 compact_history=False,
             ),
         )
@@ -192,8 +202,9 @@ def test_build_extra_body_variants():
     f = ChatCompletionsApiModelHandler._build_extra_body
     assert f("http://x/v1", True, None) == {"chat_template_kwargs": {"enable_thinking": False}}
     assert f("http://x/v1", True, "none") == {"reasoning_effort": "none"}  # explicit effort wins
-    assert f("https://api.openai.com/v1", True, "none") is None  # official OpenAI: no extra_body
-    assert f("https://api.openai.com/v1/", True, "none") is None  # trailing slash still official
+    assert f("https://api.openai.com/v1", True, "none") == {"reasoning_effort": "none"}
+    assert f("https://api.openai.com/v1/", True, "none") == {"reasoning_effort": "none"}
+    assert f(None, True, "none") == {"reasoning_effort": "none"}
     assert f("http://x/v1", True, "") == {"chat_template_kwargs": {"enable_thinking": False}}  # empty effort ignored
     assert f("http://x/v1", False, None) is None
     assert f(None, True, None) is None
@@ -388,29 +399,180 @@ def test_streaming_text_and_usage():
     assert any(getattr(i, "role", None) == "assistant" for i in chat.buffer)
 
 
+def test_streaming_strips_markdown_delimiters_split_across_deltas():
+    """A '*' pair can arrive split across two token deltas (e.g. '*ita' / 'lic*').
+    remove_markdown must not run per-delta -- it has to see the reassembled
+    sentence, or the delimiters leak straight to TTS."""
+    h = _make_handler(stream=True)
+    h.client.chat.completions.create = lambda **k: _FakeStream(
+        [
+            _chunk(content="This is *ita"),
+            _chunk(content="lic* text. "),
+            _chunk(content="Second sentence."),
+            _chunk(usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1)),
+        ]
+    )
+    text, _tools, _usage, _chat, _end = _drive(h)
+    assert "*" not in text
+    assert "This is italic text." in text
+    assert "Second sentence." in text
+
+
+def test_streaming_preserves_fenced_code_body_until_closing_fence():
+    h = _make_handler(stream=True)
+    h.client.chat.completions.create = lambda **k: _FakeStream(
+        [
+            _chunk(content="```python\n"),
+            _chunk(content="def f(*args, **kwargs):\n"),
+            _chunk(content="    return 1.\n"),
+            _chunk(content="```\nDone."),
+            _chunk(usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1)),
+        ]
+    )
+
+    text, tools, _usage, _chat, _end = _drive(h)
+
+    assert "```" not in text
+    assert "python" not in text
+    assert "def f(*args, **kwargs):" in text
+    assert "return 1." in text
+    assert "Done." in text
+    assert tools == []
+
+
 def test_streaming_tool_call_accumulates_arguments():
     h = _make_handler(stream=True)
     # Arguments arrive split across deltas, as real servers stream them.
     h.client.chat.completions.create = lambda **k: _FakeStream(
         [
-            _chunk(tool_calls=[_tc_delta(0, id="srv_1", name="move_head", arguments='{"direction"')]),
-            _chunk(tool_calls=[_tc_delta(0, arguments=': "left"}')]),
+            _chunk(tool_calls=[_tc_delta(0, id="srv_1", name="search_docs", arguments='{"query": "**bo')]),
+            _chunk(tool_calls=[_tc_delta(0, arguments='ld** _italic_ x*y"}')]),
             _chunk(usage=SimpleNamespace(prompt_tokens=20, completion_tokens=8)),
         ]
     )
     text, tools, usage, chat, _end = _drive(
         h,
-        tools=[{"type": "function", "name": "move_head", "parameters": {"type": "object"}}],
+        tools=[{"type": "function", "name": "search_docs", "parameters": {"type": "object"}}],
         tool_choice="required",
     )
     assert len(tools) == 1
     tc = tools[0]
     assert isinstance(tc, ResponseFunctionToolCall)
-    assert tc.name == "move_head"
-    assert json.loads(tc.arguments) == {"direction": "left"}  # reassembled from two deltas
+    assert tc.name == "search_docs"
+    # Markdown cleanup only applies to spoken text, never structured tool arguments.
+    assert json.loads(tc.arguments) == {"query": "**bold** _italic_ x*y"}
     assert usage == (20, 8)
     # the function_call was stored in history with a freshly minted call_id
     assert chat._pending_tool_calls, "tool call should be recorded in chat history"
+
+
+def test_streaming_preserves_text_tool_text_order():
+    h = _make_handler(stream=True)
+    h.client.chat.completions.create = lambda **kwargs: _FakeStream(
+        [
+            _chunk(content="Before."),
+            _chunk(tool_calls=[_tc_delta(0, id="srv_1", name="lookup", arguments='{"q":')]),
+            _chunk(content="After.", tool_calls=[_tc_delta(0, arguments='"x"}')]),
+        ]
+    )
+    chat = Chat(10)
+    chat.add_item(make_user_message("go"))
+    session = RealtimeSessionCreateRequest(type="realtime", instructions="Use tools.")
+    session.tools = [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}]
+    request = GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat, session=session))
+
+    outputs = list(h.process(request))
+
+    output_parts = [part.type for output in outputs if isinstance(output, LLMResponseChunk) for part in output.parts]
+    assert output_parts == ["text", "tool_call", "text"]
+    call = next(item for item in chat.buffer if isinstance(item, RealtimeConversationItemFunctionCall))
+    assert json.loads(call.arguments) == {"q": "x"}
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id=call.call_id,
+            output="done",
+        )
+    )
+    assert [item.type for item in chat.buffer] == [
+        "message",
+        "message",
+        "function_call",
+        "message",
+        "function_call_output",
+    ]
+    assert [message["role"] for message in h._serialize(chat)] == [
+        "user",
+        "assistant",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+
+
+def test_prefetch_defers_irreversible_chat_cleanup_until_claim():
+    handler = _make_handler(stream=False)
+    chat = Chat(1)
+    old_message = chat.add_item(make_user_message("old turn"))
+    image_message = chat.add_item(
+        RealtimeConversationItemUserMessage(
+            type="message",
+            role="user",
+            content=[UserContent(type="input_image", image_url="data:image/jpeg;base64,abc")],
+        )
+    )
+    session = RealtimeSessionCreateRequest(type="realtime", instructions="Describe the image.")
+    transaction = ResponsePrefetchTransaction()
+    request = GenerateResponseRequest(
+        runtime_config=RuntimeConfig(chat=chat, session=session),
+        prefetch_transaction=transaction,
+    )
+
+    list(handler.process(request))
+
+    assert any(item.id == old_message.id for item in chat.buffer)
+    live_image = next(item for item in chat.buffer if item.id == image_message.id)
+    assert live_image.content[0].type == "input_image"
+
+    transaction.claim()
+
+    assert not any(item.id == old_message.id for item in chat.buffer)
+    live_image = next(item for item in chat.buffer if item.id == image_message.id)
+    assert live_image.content == []
+
+
+def test_prefetch_cleanup_failure_restores_consumed_image_and_history(monkeypatch):
+    handler = _make_handler(stream=False)
+    chat = Chat(1)
+    old_message = chat.add_item(make_user_message("old turn"))
+    image_message = chat.add_item(
+        RealtimeConversationItemUserMessage(
+            type="message",
+            role="user",
+            content=[UserContent(type="input_image", image_url="data:image/jpeg;base64,abc")],
+        )
+    )
+    session = RealtimeSessionCreateRequest(type="realtime", instructions="Describe the image.")
+    transaction = ResponsePrefetchTransaction()
+    request = GenerateResponseRequest(
+        runtime_config=RuntimeConfig(chat=chat, session=session),
+        prefetch_transaction=transaction,
+    )
+    list(handler.process(request))
+
+    def fail_after_image_strip(compactor=None):
+        live_image = next(item for item in chat.buffer if item.id == image_message.id)
+        assert live_image.content == []
+        raise RuntimeError("trim failed")
+
+    monkeypatch.setattr(chat, "trim_if_needed", fail_after_image_strip)
+
+    with pytest.raises(RuntimeError, match="trim failed"):
+        transaction.claim()
+
+    assert any(item.id == old_message.id for item in chat.buffer)
+    live_image = next(item for item in chat.buffer if item.id == image_message.id)
+    assert live_image.content[0].type == "input_image"
 
 
 def test_tool_call_recorded_before_chunk_is_emitted():
@@ -449,6 +611,43 @@ def test_tool_call_recorded_before_chunk_is_emitted():
             )
     assert emitted_call_id is not None, "a tool call should have been emitted"
     assert chat._has_call_id_in_buffer(emitted_call_id), "call+output should be paired in the buffer"
+    assert req.response_key in chat._provisional_generations
+    chat.finalize_provisional_generation(req.response_key)
+    assert chat._provisional_generations == {}
+
+
+def test_cancelled_text_tool_turn_rolls_back_ordered_call():
+    h = _make_handler(stream=True)
+    scope = CancelScope()
+    h.cancel_scope = scope
+    h.client.chat.completions.create = lambda **kwargs: _FakeStream(
+        [_chunk(tool_calls=[_tc_delta(0, id="srv_1", name="camera_snapshot", arguments="{}")])]
+    )
+    chat = Chat(10)
+    user = chat.add_item(make_user_message("take a photo"))
+    session = RealtimeSessionCreateRequest(type="realtime", instructions="Use tools.")
+    session.tools = [{"type": "function", "name": "camera_snapshot", "parameters": {"type": "object"}}]
+    request = GenerateResponseRequest(
+        runtime_config=RuntimeConfig(chat=chat, session=session),
+        turn_id="t",
+        turn_revision=0,
+    )
+    generation = h.process(request)
+
+    while True:
+        output = next(generation)
+        if isinstance(output, LLMResponseChunk) and output.tools:
+            break
+    assert chat.has_pending_tool_calls()
+    assert request.response_key in chat._provisional_generations
+
+    scope.cancel()
+    remaining = list(generation)
+
+    assert any(isinstance(output, EndOfResponse) for output in remaining)
+    assert chat.buffer == [user]
+    assert not chat.has_pending_tool_calls()
+    assert chat._provisional_generations == {}
 
 
 def test_non_streaming_tool_call():
@@ -457,11 +656,13 @@ def test_non_streaming_tool_call():
         choices=[
             SimpleNamespace(
                 message=SimpleNamespace(
-                    content="",
+                    content="**Checking.**",
                     tool_calls=[
                         SimpleNamespace(
                             id="srv_9",
-                            function=SimpleNamespace(name="move_head", arguments='{"direction": "right"}'),
+                            function=SimpleNamespace(
+                                name="search_docs", arguments='{"query": "**bold** _italic_ x*y"}'
+                            ),
                         )
                     ],
                 )
@@ -471,11 +672,12 @@ def test_non_streaming_tool_call():
     )
     text, tools, usage, chat, _end = _drive(
         h,
-        tools=[{"type": "function", "name": "move_head", "parameters": {"type": "object"}}],
+        tools=[{"type": "function", "name": "search_docs", "parameters": {"type": "object"}}],
         tool_choice="required",
     )
-    assert len(tools) == 1 and tools[0].name == "move_head"
-    assert json.loads(tools[0].arguments) == {"direction": "right"}
+    assert text == "Checking."
+    assert len(tools) == 1 and tools[0].name == "search_docs"
+    assert json.loads(tools[0].arguments) == {"query": "**bold** _italic_ x*y"}
     assert usage == (7, 3)
 
 
@@ -541,6 +743,22 @@ def test_tools_converted_to_chat_format_on_request():
     assert captured["tool_choice"] == "auto"
     assert captured["stream"] is True
     assert captured["stream_options"] == {"include_usage": True}
+
+
+@pytest.mark.parametrize("base_url", [None, "https://api.openai.com/v1"])
+def test_official_openai_request_includes_configured_reasoning_effort_with_tools(base_url):
+    h = _make_handler(stream=True, base_url=base_url, reasoning_effort="none")
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _FakeStream([_chunk(content="ok.")])
+
+    h.client.chat.completions.create = fake_create
+    _drive(h, tools=[{"type": "function", "name": "f", "parameters": {"type": "object"}}])
+
+    assert captured["extra_body"] == {"reasoning_effort": "none"}
+    assert captured["tools"] == [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}]
 
 
 # ── Text-only (output_modalities=["text"]) ────────────────────────────────────
@@ -659,6 +877,94 @@ def test_generation_error_emits_failed_end_of_response():
     text, tools, usage, chat, end = _drive(h)
     assert end is not None and end.error is not None
     assert "kaboom" in end.error
+    assert text == base_mod.PROVIDER_FAILURE_FALLBACK
+
+
+def _api_error_response(status_code):
+    request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
+    return httpx.Response(status_code, request=request)
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        (APIConnectionError(request=httpx.Request("POST", "https://provider.example")), "Connection error"),
+        (RateLimitError("rate limited", response=_api_error_response(429), body=None), "rate limited"),
+        (InternalServerError("server failed", response=_api_error_response(500), body=None), "server failed"),
+    ],
+)
+def test_provider_failure_before_output_speaks_fallback_then_fails_without_history(error, message):
+    h = _make_handler(stream=True)
+
+    def fail(**kwargs):
+        raise error
+
+    h.client.chat.completions.create = fail
+    chat = Chat(10)
+    chat.add_item(make_user_message("Hallo"))
+    runtime_config = RuntimeConfig(
+        chat=chat,
+        session=RealtimeSessionCreateRequest(type="realtime", instructions="Du bist ein Roboter."),
+    )
+    request = GenerateResponseRequest(
+        runtime_config=runtime_config,
+        language_code="de",
+        turn_id="t",
+        turn_revision=0,
+    )
+
+    outputs = list(h.process(request))
+
+    assert [type(output) for output in outputs] == [LLMResponseChunk, EndOfResponse]
+    assert outputs[0].text == base_mod.PROVIDER_FAILURE_FALLBACK
+    assert outputs[0].language_code is None
+    assert outputs[1].error is not None and message in outputs[1].error
+    assert [getattr(item, "role", None) for item in chat.buffer] == ["user"]
+
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup()
+    pipeline_outputs = [processed for output in outputs for processed in processor.process(output)]
+    assert [type(output) for output in pipeline_outputs] == [
+        AssistantOutputEvent,
+        TTSInput,
+        ResponseFailedEvent,
+        EndOfResponse,
+    ]
+
+
+def test_cancelled_provider_failure_does_not_emit_fallback():
+    scope = CancelScope()
+    h = _make_handler(stream=True)
+    h.cancel_scope = scope
+
+    def fail(**kwargs):
+        scope.cancel()
+        raise RuntimeError("cancelled request failed")
+
+    h.client.chat.completions.create = fail
+    text, tools, usage, chat, end = _drive(h)
+
+    assert text == ""
+    assert end is not None and "cancelled request failed" in end.error
+    assert not any(getattr(item, "role", None) == "assistant" for item in chat.buffer)
+
+
+def test_stale_provider_failure_does_not_emit_fallback():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("t", 0)
+    h = _make_handler(stream=True)
+    h.speculative_turns = tracker
+
+    def fail(**kwargs):
+        tracker.observe("t", 1)
+        raise RuntimeError("stale request failed")
+
+    h.client.chat.completions.create = fail
+    text, tools, usage, chat, end = _drive(h)
+
+    assert text == ""
+    assert end is not None and "stale request failed" in end.error
+    assert not any(getattr(item, "role", None) == "assistant" for item in chat.buffer)
 
 
 # ── Out-of-band (conversation="none") responses ───────────────────────────────

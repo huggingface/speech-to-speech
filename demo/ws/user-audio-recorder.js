@@ -8,7 +8,7 @@
  * to the backend. Nothing leaves the page beyond the existing realtime stream.
  */
 
-export const USER_AUDIO_SAMPLE_RATE = 16000;
+export const USER_AUDIO_SAMPLE_RATE = 24000;
 const BYTES_PER_SAMPLE = 2;
 const DEFAULT_PREROLL_MS = 5000;
 const DEFAULT_MAX_BUFFER_MS = 120000;

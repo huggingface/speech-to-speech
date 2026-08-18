@@ -120,7 +120,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             self.smart_turn_max_wait_ms if smart_turn else 0,
         )
         self.model, _ = torch.hub.load(
-            "snakers4/silero-vad",
+            "snakers4/silero-vad:master",
             "silero_vad",
             trust_repo=True,
             skip_validation=True,

@@ -8,34 +8,22 @@
  * audio. The orb visually reflects the live state (idle, connecting,
  * listening, user-speaking, processing, ai-speaking).
  *
- * The two client classes expose the same events and methods, so everything
- * below except the constructor pick is transport-agnostic. WebRTC is offered
- * only in env-pinned direct mode (the /api/calls proxy forwards exclusively
- * to SPEECH_TO_SPEECH_URL); LB mode and user-typed URLs stay on WebSocket.
+ * One adapter drives the official Agents SDK RealtimeSession over either stock
+ * transport. WebRTC is offered only in env-pinned direct mode (the /api/calls
+ * proxy forwards exclusively to SPEECH_TO_SPEECH_URL); LB mode and user-typed
+ * URLs stay on WebSocket.
  *
  * @typedef {"idle" | "connecting" | "queued" | "your-turn" | "listening" | "user-speaking" | "processing" | "ai-speaking" | "error"} AppState
- * @typedef {S2sWsRealtimeClient | S2sRtcRealtimeClient} RealtimeClient
+ * @typedef {S2sRealtimeClient} RealtimeClient
  */
 
-import { S2sWsRealtimeClient } from "./ws/s2s-ws-client.js";
-import { S2sRtcRealtimeClient } from "./rtc/s2s-rtc-client.js";
+import { S2sRealtimeClient } from "./s2s-realtime-client.js";
 import { $, truncateError, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js";
 import { Account } from "./ui/account.js";
 
 const DEFAULT_VOICE = "Aiden";
-const DEFAULT_INSTRUCTIONS =
-  "You are a friendly voice assistant. " +
-  "Keep replies short, warm, and spoken. Avoid long monologues.";
-
-// Appended to the user's instructions whenever at least one tool is enabled.
-// Stops the model from announcing capabilities ("Yes, I can search") and then
-// idling for the next turn — it should act immediately in the same response.
-const TOOL_USE_HINT =
-  " When the user's request calls for one of your tools, do not describe your " +
-  "capabilities or say you can do it and wait for another turn. Instead, say " +
-  'a brief acknowledgement like "Let me search for that..." and call the tool ' +
-  "right away in the same response.";
+const DEFAULT_INSTRUCTIONS = "You are a friendly voice assistant.";
 
 const STORAGE_KEYS = {
   // Direct s2s server URL, used only when the deploy has no LOAD_BALANCER_URL
@@ -65,7 +53,7 @@ const GATE_OFF_DB = -66; // slider minimum = off / bottom of the meter axis
 const GATE_MAX_DB = -3; // slider maximum = most aggressive / top of the meter axis
 const GATE_DEFAULT_DB = -50; // first-run default: a gentle gate, enabled
 
-/** @param {number} thresholdDb @returns {import("./ws/s2s-ws-client.js").NoiseGate} */
+/** @param {number} thresholdDb @returns {import("./s2s-realtime-client.js").NoiseGate} */
 function gateParams(thresholdDb) {
   return { enabled: thresholdDb > GATE_OFF_DB, thresholdDb };
 }
@@ -73,7 +61,7 @@ function gateParams(thresholdDb) {
 // ── Tools ─────────────────────────────────────────────────────────────────
 // Function tools we declare to the backend. The model decides when to call
 // one; the executor below runs it and returns the result (see runTool).
-/** @type {Record<string, import("./ws/s2s-ws-client.js").ToolDef>} */
+/** @type {Record<string, import("./s2s-realtime-client.js").ToolDef>} */
 const TOOL_DEFS = {
   web_search: {
     type: "function",
@@ -360,19 +348,10 @@ function activeToolDefs() {
   return defs;
 }
 
-/** Instructions plus the hidden tool-use hint when any tool is active. */
-function effectiveInstructions() {
-  const base = settings.instructions;
-  return activeToolDefs().length ? base + TOOL_USE_HINT : base;
-}
-
 /** Push the active tool set to a live session so toggles apply mid-call. */
 function pushToolsToSession() {
   if (!client || !LIVE_STATES.has(currentState)) return;
   client.setTools(activeToolDefs());
-  // The hidden tool-use hint depends on whether any tool is active, so refresh
-  // instructions alongside the tool set.
-  client.updateSession({ instructions: effectiveInstructions() });
 }
 
 // ── Chat view ───────────────────────────────────────────────────────────────
@@ -830,14 +809,13 @@ function flashPreview() {
 }
 
 // ── Tool executor ─────────────────────────────────────────────────────────
-// Runs the function the model called, returns the result, and asks for a
-// response so the model speaks it. Errors come back as the tool output too, so
-// the model can recover gracefully instead of the turn stalling.
+// Runs the function the model called and returns the result. RealtimeSession
+// owns function output ordering and the follow-up response. Errors come back as
+// tool output too, so the model can recover gracefully instead of stalling.
 
 /**
- * Run the function the model called, return its result to the backend, and ask
- * for a follow-up response. We also hand the result back to the caller so it
- * can be shown in the conversation once the tool has actually run.
+ * Run the function the model called. The Agents SDK preserves call order and
+ * submits the returned value to the session.
  * @param {string} name @param {string} argsJson @param {string} callId
  * @returns {Promise<{ output: string, image?: string }>}
  */
@@ -855,37 +833,23 @@ async function runTool(name, argsJson, callId) {
     if (name === "web_search") {
       const query = typeof args.query === "string" ? args.query : "";
       result.output = await execWebSearch(query);
-      // Return the result and let the bare response.create (below) trigger the
-      // spoken answer.
-      client.sendToolOutput(callId, result.output);
     } else if (name === "camera_snapshot") {
       const dataUrl = captureSnapshot();
       if (dataUrl) {
         if (DEBUG) console.debug(`[tool] camera_snapshot captured frame (${dataUrl.length} chars), sending image + output`);
         result = { output: "Snapshot captured from the webcam and attached as an image.", image: dataUrl };
-        // Return the tool output; the frame itself rides along with the
-        // response.create below (sent right before it), so the model sees the
-        // snapshot in the very response it's about to speak.
-        client.sendToolOutput(callId, result.output);
         flashPreview();
       } else {
         console.warn("[tool] camera_snapshot: no frame — camera off or not ready");
         result.output = "The camera is not available right now.";
-        client.sendToolOutput(callId, result.output);
       }
     } else {
       result.output = `Unknown tool: ${name}`;
-      client.sendToolOutput(callId, result.output);
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     result.output = `Tool failed: ${msg}`;
-    client.sendToolOutput(callId, result.output);
   }
-  if (DEBUG) console.debug(`[tool] requesting model response after ${name}`);
-  // Camera: the captured frame rides with the response.create (sent just before
-  // it) so it's in context for the reply. Other tools: a bare create.
-  client.requestResponse(result.image ? { image: result.image } : undefined);
   return result;
 }
 
@@ -1122,7 +1086,7 @@ settingsForm.addEventListener("submit", (event) => {
   // output can switch live when the browser supports AudioContext.setSinkId;
   // mic device changes need a Restart (new getUserMedia stream).
   if (client && LIVE_STATES.has(currentState)) {
-    client.updateSession({ voice: settings.voice, instructions: effectiveInstructions() });
+    client.updateSession({ voice: settings.voice, instructions: settings.instructions });
     if (typeof client.setAudioOutputDevice === "function") {
       void client.setAudioOutputDevice(settings.audioOutputId);
     }
@@ -1442,20 +1406,28 @@ async function doStart(audioContext = null) {
 
   const common = {
     voice: settings.voice,
-    instructions: effectiveInstructions(),
+    instructions: settings.instructions,
     startupGreeting,
     acquireMic: acquireMicStream,
     tools: activeToolDefs(),
     audioOutputId: settings.audioOutputId || "",
+    executeTool: async ({ name, arguments: args, callId }) => {
+      chat.onToolCall(name);
+      const result = await runTool(name, args, callId);
+      if (client === c) chat.onToolResult(name, args, result.output, result.image);
+      return result;
+    },
     ...(audioContext ? { audioContext } : {}),
   };
   const c = target === null
-    ? new S2sRtcRealtimeClient({
+    ? new S2sRealtimeClient({
+        transport: "webrtc",
         callsUrl: "api/calls",
         iceServers,
         ...common,
       })
-    : new S2sWsRealtimeClient({
+    : new S2sRealtimeClient({
+        transport: "websocket",
         ...target,
         noiseGate: gateParams(settings.noiseGate),
         ...common,
@@ -1470,7 +1442,7 @@ async function doStart(audioContext = null) {
   });
 
   c.addEventListener("ready-to-join", (e) => {
-    const { info, expiresSec } = /** @type {CustomEvent<{ info: import("./ws/s2s-ws-client.js").WsSessionInfo; expiresSec: number }>} */ (e).detail;
+    const { info, expiresSec } = /** @type {CustomEvent<{ info: import("./s2s-realtime-client.js").SessionInfo; expiresSec: number }>} */ (e).detail;
     // A slot is held for us. We're out of the queue now, so drop the ticket ref.
     // Track the granted session id already so that leaving (or letting the timer
     // lapse) refunds the budget the server reserved at claim, even before we dial.
@@ -1508,16 +1480,6 @@ async function doStart(audioContext = null) {
     const detail = /** @type {CustomEvent<{ responseId: string; status: string; audible?: boolean; transcript?: string }>} */ (e).detail;
     chat.onResponseFinished(detail);
   });
-
-  c.addEventListener("toolcall", (e) => {
-    const { name, arguments: args, callId } = /** @type {CustomEvent<{ name: string; arguments: string; callId: string }>} */ (e).detail;
-    chat.onToolCall(name);
-    // Execute the tool, then push it to the conversation once the result is in,
-    // so the toggle shows both the call input and its output together.
-    void runTool(name, args, callId).then(({ output, image }) => {
-      chat.onToolResult(name, args, output, image);
-    });
-  });
   c.addEventListener("error", (e) => {
     const detail = /** @type {CustomEvent<{ error: unknown }>} */ (e).detail;
     void onFatalError(detail.error);
@@ -1530,7 +1492,7 @@ async function doStart(audioContext = null) {
     console.warn("[main] server error (non-fatal):", msg);
   });
   c.addEventListener("session", (e) => {
-    const info = /** @type {CustomEvent<{ info: import("./ws/s2s-ws-client.js").WsSessionInfo }>} */ (e).detail.info;
+    const info = /** @type {CustomEvent<{ info: import("./s2s-realtime-client.js").SessionInfo }>} */ (e).detail.info;
     console.log("[ws] session created:", info.sessionId);
     // A slot was granted — we're out of the queue; drop the ticket reference so
     // teardown doesn't try to leave a line we already left.

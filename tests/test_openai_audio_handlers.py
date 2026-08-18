@@ -14,6 +14,7 @@ from speech_to_speech.pipeline.control import SESSION_END
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.messages import (
     AUDIO_RESPONSE_DONE,
+    AudioOutput,
     EndOfResponse,
     PartialTranscription,
     TranscriptionFailure,
@@ -423,6 +424,7 @@ def test_openai_tts_http_failure_before_audio_does_not_commit(monkeypatch):
                 text="Hello",
                 turn_id="turn-1",
                 turn_revision=0,
+                response_key="response-1",
             )
         )
     )
@@ -435,6 +437,30 @@ def test_openai_tts_http_failure_before_audio_does_not_commit(monkeypatch):
     assert failure.message == "speech server returned HTTP 500"
     assert failure.turn_id == "turn-1"
     assert failure.turn_revision == 0
+    assert failure.response_key == "response-1"
+
+
+def test_openai_tts_stale_keyed_terminal_becomes_cleanup(monkeypatch):
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn-1", 0)
+    handler = _openai_tts_handler(monkeypatch, speculative_turns=tracker)
+    terminal = EndOfResponse(
+        response_key="response-1",
+        turn_id="turn-1",
+        turn_revision=0,
+        cancel_generation=7,
+    )
+    tracker.observe("turn-1", 1)
+
+    outputs = list(handler.process(terminal))
+    queued = handler.output_for_queue(outputs[0], terminal)
+
+    assert outputs == [AUDIO_RESPONSE_DONE]
+    assert terminal.cleanup_only is True
+    assert isinstance(queued, AudioOutput)
+    assert queued.response_key == "response-1"
+    assert queued.cancel_generation == 7
+    assert queued.cleanup_only is True
 
 
 def test_openai_tts_failure_after_audio_emits_response_failure(monkeypatch):

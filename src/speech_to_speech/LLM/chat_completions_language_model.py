@@ -203,7 +203,27 @@ def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Itera
     """Normalize a streaming Chat Completions response."""
     tool_accum: dict[int, dict[str, str]] = {}
     usage: Usage | None = None
-    raw_text = ""
+    text_segment = ""
+
+    def flush_tools() -> Iterator[ProviderEvent]:
+        nonlocal text_segment
+        if text_segment:
+            yield AssistantMessage(content=[AssistantContent(type="output_text", text=text_segment)])
+            text_segment = ""
+        yield from _tool_calls_from_accum(tool_accum)
+        tool_accum.clear()
+
+    def accumulate_tools(tool_calls: Any) -> None:
+        for tool_call in tool_calls or []:
+            entry = tool_accum.setdefault(tool_call.index, {"name": "", "args": "", "id": ""})
+            if tool_call.id:
+                entry["id"] = tool_call.id
+            if tool_call.function is not None:
+                if tool_call.function.name:
+                    entry["name"] = tool_call.function.name
+                if tool_call.function.arguments:
+                    entry["args"] += tool_call.function.arguments
+
     for chunk in api_response:
         if chunk.usage is not None:
             usage = Usage(
@@ -213,24 +233,22 @@ def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Itera
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
-        if delta.tool_calls:
-            for tool_call in delta.tool_calls:
-                entry = tool_accum.setdefault(tool_call.index, {"name": "", "args": "", "id": ""})
-                if tool_call.id:
-                    entry["id"] = tool_call.id
-                if tool_call.function is not None:
-                    if tool_call.function.name:
-                        entry["name"] = tool_call.function.name
-                    if tool_call.function.arguments:
-                        entry["args"] += tool_call.function.arguments
         text_piece = delta.content or getattr(delta, "refusal", None)
+        continuing_tool = bool(tool_accum)
+        if continuing_tool:
+            accumulate_tools(delta.tool_calls)
         if text_piece:
-            raw_text += text_piece
+            if continuing_tool:
+                yield from flush_tools()
+            text_segment += text_piece
             yield TextDelta(text=text_piece)
+        if not continuing_tool:
+            accumulate_tools(delta.tool_calls)
 
-    if raw_text.strip():
-        yield AssistantMessage(content=[AssistantContent(type="output_text", text=raw_text)])
-    yield from _tool_calls_from_accum(tool_accum)
+    if tool_accum:
+        yield from flush_tools()
+    if text_segment:
+        yield AssistantMessage(content=[AssistantContent(type="output_text", text=text_segment)])
     if usage is not None:
         yield usage
 
