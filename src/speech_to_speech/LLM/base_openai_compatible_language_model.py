@@ -32,6 +32,7 @@ from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import (
     Chat,
     ChatItemError,
+    ProviderFunctionCall,
     SupportedItem,
     build_active_chat,
     make_system_message,
@@ -88,9 +89,11 @@ class AssistantMessage(BaseModel):
 
 
 class ToolCall(BaseModel):
-    """A complete function tool call (``call_id`` / ``id`` already regenerated)."""
+    """A complete function tool call with private provider replay metadata."""
 
     item: ResponseFunctionToolCall
+    provider_call_id: str | None = Field(default=None, exclude=True, repr=False)
+    provider_extra_content: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
 
 
 class Usage(BaseModel):
@@ -528,7 +531,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             prefetch_transaction=turn.prefetch_transaction,
         )
 
-    def _record_tool_call(self, state: _GenState, turn: _Turn, item: ResponseFunctionToolCall) -> Iterator[LLMOut]:
+    def _record_tool_call(self, state: _GenState, turn: _Turn, event: ToolCall) -> Iterator[LLMOut]:
         """Emit a tool call, persisting it (and any assistant text seen so far)
         to history *before* it is forwarded to the client.
 
@@ -542,14 +545,17 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         Out-of-band turns never touch the default conversation, and a stale turn
         records nothing (it is not forwarded to the client either)."""
+        item = event.item
         state.tools.append(item)
-        fc_item = RealtimeConversationItemFunctionCall(
+        fc_item = ProviderFunctionCall(
             type="function_call",
             name=item.name,
             arguments=item.arguments,
             call_id=item.call_id,
             id=item.id,
             status=item.status,
+            provider_call_id=event.provider_call_id,
+            provider_extra_content=event.provider_extra_content,
         )
         if self._turn_is_cancelled(turn) or not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
             logger.info("LLM generation cancelled (stale speculative turn)")
@@ -624,7 +630,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         break
                     yield from _flush(sentence_batch)
                     sentence_batch = []
-                yield from self._record_tool_call(state, turn, event.item)
+                yield from self._record_tool_call(state, turn, event)
             elif isinstance(event, TextDelta):
                 if not turn.wants_audio:
                     # Text-only: forward verbatim. Keep every character (no
@@ -696,7 +702,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     RealtimeConversationItemAssistantMessage(type="message", role="assistant", content=event.content)
                 )
             elif isinstance(event, ToolCall):
-                yield from self._record_tool_call(state, turn, event.item)
+                yield from self._record_tool_call(state, turn, event)
             elif isinstance(event, TextDelta):
                 # Text-only keeps every character verbatim; audio strips markdown
                 # and TTS-unfriendly symbols. Not per-delta here: each TextDelta

@@ -17,6 +17,7 @@ from speech_to_speech.arguments_classes.facebookmms_tts_arguments import Faceboo
 from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import (
     FasterWhisperSTTHandlerArguments,
 )
+from speech_to_speech.arguments_classes.gemini_tts_arguments import GeminiTTSHandlerArguments
 from speech_to_speech.arguments_classes.kokoro_tts_arguments import KokoroTTSHandlerArguments
 from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
@@ -472,6 +473,19 @@ TTS_BACKENDS = build_backend_registry(
                 context_kwargs=True,
             ),
             config_prefix="qwen3_tts",
+        ),
+        BackendSpec(
+            "gemini",
+            "tts",
+            GeminiTTSHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.TTS.gemini_tts_handler",
+                "GeminiTTSHandler",
+                setup_should_listen=True,
+                context_kwargs=True,
+            ),
+            config_prefix="gemini_tts",
+            required_extra="gemini",
         ),
     ],
 )

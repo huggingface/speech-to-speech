@@ -1348,11 +1348,12 @@ def test_audio_nonstreaming_tool_call_uses_chat_protocol_and_survives_next_turn(
         "user",
     ]
     tool_call_message = second_messages[2]
+    assert tool_call_message["tool_calls"][0]["id"] == "server_call"
     assert tool_call_message["tool_calls"][0]["function"]["name"] == "lookup"
     assert tool_call_message["tool_calls"][0]["function"]["arguments"] == '{"q": "weather"}'
     assert second_messages[3] == {
         "role": "tool",
-        "tool_call_id": emitted_tool.call_id,
+        "tool_call_id": "server_call",
         "content": '{"temperature": 22}',
     }
     assert second_messages[4]["content"][0]["type"] == "input_audio"

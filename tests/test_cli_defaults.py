@@ -7,6 +7,10 @@ import pytest
 from speech_to_speech.arguments_classes.chat_completions_language_model_arguments import (
     ChatCompletionsLanguageModelHandlerArguments,
 )
+from speech_to_speech.arguments_classes.gemini_tts_arguments import (
+    DEFAULT_GEMINI_TTS_PROMPT,
+    GeminiTTSHandlerArguments,
+)
 from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
 from speech_to_speech.arguments_classes.local_audio_arguments import LocalAudioArguments
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
@@ -120,6 +124,38 @@ def test_mac_optimal_settings_preserves_explicit_component_device():
 
     assert args.module_kwargs.device is None
     assert args.tts_backend.config["device"] == "cpu"
+
+
+def test_parse_arguments_accepts_gemini_tts_defaults_and_overrides():
+    defaults = GeminiTTSHandlerArguments()
+    assert defaults.gemini_tts_model_name == "gemini-3.1-flash-tts-preview"
+    assert defaults.gemini_tts_voice == "Kore"
+    assert defaults.gemini_tts_api_key is None
+    assert defaults.gemini_tts_prompt == DEFAULT_GEMINI_TTS_PROMPT
+    assert defaults.gemini_tts_timeout_s == 20.0
+    assert defaults.gemini_tts_blocksize == 512
+
+    args = parse_arguments(
+        [
+            "--tts",
+            "gemini",
+            "--gemini_tts_model_name",
+            "custom-tts",
+            "--gemini_tts_voice",
+            "Puck",
+            "--gemini_tts_timeout_s",
+            "9",
+            "--gemini_tts_blocksize",
+            "256",
+        ]
+    )
+
+    assert args.tts_backend.name == "gemini"
+    assert args.tts_backend.config["model_name"] == "custom-tts"
+    assert args.tts_backend.config["voice"] == "Puck"
+    assert args.tts_backend.config["api_key"] is None
+    assert args.tts_backend.config["timeout_s"] == 9.0
+    assert args.tts_backend.config["blocksize"] == 256
 
 
 @pytest.mark.parametrize("flag", ["--local_mac_optimal_settings", "--mac_optimal_settings"])

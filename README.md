@@ -136,6 +136,7 @@ Optional components are installed with pip extras:
 pip install "speech-to-speech[kokoro]"          # Kokoro-82M TTS on non-macOS
 pip install "speech-to-speech[pocket]"          # Pocket TTS
 pip install "speech-to-speech[chattts]"         # ChatTTS
+pip install "speech-to-speech[gemini]"          # Gemini streaming TTS
 pip install "speech-to-speech[faster-whisper]"  # Faster Whisper STT
 pip install "speech-to-speech[whisper-mlx]"     # Lightning Whisper MLX STT on macOS
 pip install "speech-to-speech[paraformer]"      # Paraformer STT through FunASR
@@ -175,6 +176,7 @@ This installs the package in editable mode and makes the `speech-to-speech` CLI 
 | TTS | [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) | CPU / CUDA | `pocket` |
 | TTS | [ChatTTS](https://github.com/2noise/ChatTTS) | CUDA / CPU | `chattts` |
 | TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | built-in |
+| TTS | [Gemini TTS](https://ai.google.dev/gemini-api/docs/speech-generation) | hosted | `gemini` |
 
 Select implementations with `--stt`, `--llm_backend`, and `--tts`. The CLI constructs configuration only for the selected backends; known options for inactive backends remain accepted for compatibility but are ignored with a warning. JSON configuration may likewise include extra inactive-backend keys, which are ignored. Run `speech-to-speech serve -h` for the defaults, or pass selectors before `-h` to see another combination's backend-specific flags (for example, `speech-to-speech serve --stt mlx-audio-whisper -h`).
 
@@ -246,7 +248,7 @@ This setting:
 
 The preset supplies these as defaults only: explicit `--device`, component-device flags such as `--qwen3_tts_device`, and `--stt`, `--llm_backend`, `--model_name`, and `--tts` all win. Use it with `serve` instead of `local` when you want to expose the server without starting the microphone/speaker client.
 
-`--tts pocket` and `--tts kokoro` are also valid on macOS.
+`--tts pocket`, `--tts kokoro`, and `--tts gemini` are also valid on macOS.
 
 To compare the MLX quantization variants locally:
 
@@ -520,6 +522,7 @@ Language coverage depends on the STT and TTS backends you pick, not on the pipel
 | TTS | Kokoro | Multiple language/voice mappings, depending on backend availability |
 | TTS | ChatTTS | English and Chinese |
 | TTS | MMS TTS | Broad multilingual coverage through MMS checkpoints |
+| TTS | Gemini TTS | Automatically detects supported input languages, including Polish |
 
 Make sure the STT, LLM, and TTS you pair all cover your target language(s). Two usage patterns:
 
@@ -561,6 +564,25 @@ speech-to-speech serve \
 ```
 
 Available voice presets: `alba`, `marius`, `javert`, `jean`, `fantine`, `cosette`, `eponine`, `azelma`. Custom voice files and Hugging Face paths also work.
+
+## Gemini TTS
+
+Gemini TTS streams 24 kHz mono PCM through the Gemini Interactions API. The handler resamples it continuously to the
+pipeline's 16 kHz output and does not switch to another provider after an error. Install the `gemini` extra and set
+`GEMINI_API_KEY`:
+
+```bash
+export GEMINI_API_KEY="..."
+
+speech-to-speech serve \
+    --tts gemini \
+    --gemini_tts_model_name gemini-3.1-flash-tts-preview \
+    --gemini_tts_voice Kore
+```
+
+The default prompt asks Gemini to read the supplied text exactly in natural Polish. Gemini detects the text language;
+there is no locale flag. Run `speech-to-speech serve --tts gemini -h` for timeout, block-size, prompt, and API-key
+options.
 
 ## CLI Reference
 

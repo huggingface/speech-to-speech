@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from collections.abc import Iterator
+from copy import deepcopy
 from typing import Any, cast
 
 from openai import Stream
@@ -141,7 +142,7 @@ def _chat_messages(
     audio_content_type: str = "input_audio",
 ) -> list[dict[str, Any]]:
     """Serialise chat history, including media and tool messages, for Chat Completions."""
-    messages = chat.to_transformers_chat()
+    messages = chat.to_chat_completions_chat()
     for message in messages:
         for tool_call in message.get("tool_calls") or []:
             fn = tool_call.get("function")
@@ -181,7 +182,24 @@ def _request_chat_completions(
     )
 
 
-def _tool_calls_from_accum(tool_accum: dict[int, dict[str, str]]) -> Iterator[ToolCall]:
+def _tool_extra_content(tool_call: Any) -> dict[str, Any] | None:
+    raw = getattr(tool_call, "extra_content", None)
+    if raw is None:
+        model_extra = getattr(tool_call, "model_extra", None)
+        if isinstance(model_extra, dict):
+            raw = model_extra.get("extra_content")
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return deepcopy(raw)
+    model_dump = getattr(raw, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump(exclude_none=False)
+        return deepcopy(dumped) if isinstance(dumped, dict) else None
+    return None
+
+
+def _tool_calls_from_accum(tool_accum: dict[int, dict[str, Any]]) -> Iterator[ToolCall]:
     """Turn accumulated Chat Completions tool deltas into normalized tool-call events."""
     for index in sorted(tool_accum):
         entry = tool_accum[index]
@@ -195,13 +213,15 @@ def _tool_calls_from_accum(tool_accum: dict[int, dict[str, str]]) -> Iterator[To
                 call_id=_generate_id("call"),
                 id=_generate_id("fc"),
                 status="completed",
-            )
+            ),
+            provider_call_id=entry["id"] or None,
+            provider_extra_content=entry["extra_content"],
         )
 
 
 def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Iterator[ProviderEvent]:
     """Normalize a streaming Chat Completions response."""
-    tool_accum: dict[int, dict[str, str]] = {}
+    tool_accum: dict[int, dict[str, Any]] = {}
     usage: Usage | None = None
     text_segment = ""
 
@@ -215,7 +235,10 @@ def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Itera
 
     def accumulate_tools(tool_calls: Any) -> None:
         for tool_call in tool_calls or []:
-            entry = tool_accum.setdefault(tool_call.index, {"name": "", "args": "", "id": ""})
+            entry = tool_accum.setdefault(
+                tool_call.index,
+                {"name": "", "args": "", "id": "", "extra_content": None},
+            )
             if tool_call.id:
                 entry["id"] = tool_call.id
             if tool_call.function is not None:
@@ -223,6 +246,9 @@ def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Itera
                     entry["name"] = tool_call.function.name
                 if tool_call.function.arguments:
                     entry["args"] += tool_call.function.arguments
+            extra_content = _tool_extra_content(tool_call)
+            if extra_content is not None:
+                entry["extra_content"] = extra_content
 
     for chunk in api_response:
         if chunk.usage is not None:
@@ -265,12 +291,13 @@ def _iter_chat_response_events(api_response: Any) -> Iterator[ProviderEvent]:
     if raw_content:
         yield AssistantMessage(content=[AssistantContent(type="output_text", text=raw_content)])
         yield TextDelta(text=raw_content)
-    tool_accum: dict[int, dict[str, str]] = {}
+    tool_accum: dict[int, dict[str, Any]] = {}
     for tool_call in message.tool_calls or []:
         tool_accum[len(tool_accum)] = {
             "name": tool_call.function.name or "",
             "args": tool_call.function.arguments or "",
             "id": tool_call.id or "",
+            "extra_content": _tool_extra_content(tool_call),
         }
     yield from _tool_calls_from_accum(tool_accum)
 
@@ -362,7 +389,7 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         yield from _iter_chat_response_events(api_response)
 
     @staticmethod
-    def _tool_calls_from_accum(tool_accum: dict[int, dict[str, str]]) -> Iterator[ToolCall]:
+    def _tool_calls_from_accum(tool_accum: dict[int, dict[str, Any]]) -> Iterator[ToolCall]:
         yield from _tool_calls_from_accum(tool_accum)
 
     def on_session_end(self) -> None:

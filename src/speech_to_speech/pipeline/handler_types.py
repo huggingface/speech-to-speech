@@ -26,6 +26,7 @@ from speech_to_speech.pipeline.messages import (
 )
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.pipeline.events import ResponseFailedEvent
 
 # ── VAD stage ─────────────────────────────────────────────────────────
 VADIn: TypeAlias = bytes | tuple[bytes, RuntimeConfig]
@@ -41,4 +42,4 @@ LLMOut: TypeAlias = LLMResponseChunk | TokenUsage | EndOfResponse
 
 # ── TTS stage ─────────────────────────────────────────────────────────
 TTSIn: TypeAlias = TTSInput | EndOfResponse
-TTSOut: TypeAlias = bytes | np.ndarray | AudioOutput
+TTSOut: TypeAlias = bytes | np.ndarray | AudioOutput | ResponseFailedEvent

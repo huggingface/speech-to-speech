@@ -50,6 +50,13 @@ class ChatItemError(Exception):
     """Raised when a conversation item fails validation in :meth:`Chat.add_item`."""
 
 
+class ProviderFunctionCall(RealtimeConversationItemFunctionCall):
+    """Function call with provider-only metadata retained for replay."""
+
+    provider_call_id: str | None = None
+    provider_extra_content: dict[str, Any] | None = None
+
+
 class CompactionResult(BaseModel):
     """Output of a :data:`CompactFn` summarization run."""
 
@@ -692,6 +699,109 @@ class Chat:
                         )
                     )
             return [m.model_dump() for m in messages]
+
+    def to_chat_completions_chat(self) -> list[dict[str, Any]]:
+        """Serialize history for Chat Completions without losing provider tool metadata."""
+
+        with self._lock:
+            messages: list[dict[str, Any]] = []
+            if self.init_chat_message:
+                text = " ".join(part.text for part in self.init_chat_message.content if part.text)
+                messages.append({"role": "system", "content": text})
+
+            outputs_by_call_id: dict[str, list[RealtimeConversationItemFunctionCallOutput]] = {}
+            for item in self.buffer:
+                if isinstance(item, RealtimeConversationItemFunctionCallOutput):
+                    outputs_by_call_id.setdefault(item.call_id, []).append(item)
+
+            consumed_output_call_ids: set[str] = set()
+            index = 0
+            while index < len(self.buffer):
+                item = self.buffer[index]
+                if isinstance(item, RealtimeConversationItemUserMessage):
+                    has_media = any(part.type in {"input_image", "input_audio"} for part in item.content)
+                    if has_media:
+                        content: str | list[dict[str, Any]] = [
+                            part.model_dump(exclude_none=True) for part in item.content
+                        ]
+                    else:
+                        content = " ".join(
+                            part.text for part in item.content if part.type == "input_text" and part.text
+                        )
+                    messages.append({"role": "user", "content": content})
+                    index += 1
+                    continue
+
+                if isinstance(item, RealtimeConversationItemAssistantMessage):
+                    text = " ".join(part.text for part in item.content if part.text)
+                    messages.append({"role": "assistant", "content": text})
+                    index += 1
+                    continue
+
+                if isinstance(item, RealtimeConversationItemFunctionCall):
+                    group: list[RealtimeConversationItemFunctionCall] = []
+                    stop_after_group = False
+                    while index < len(self.buffer):
+                        candidate = self.buffer[index]
+                        if not isinstance(candidate, RealtimeConversationItemFunctionCall):
+                            break
+                        if candidate.call_id in self._pending_tool_calls:
+                            if candidate.call_id in self._ordered_pending_call_ids:
+                                stop_after_group = True
+                                break
+                            index += 1
+                            continue
+                        group.append(candidate)
+                        index += 1
+
+                    if group:
+                        tool_calls: list[dict[str, Any]] = []
+                        for function_call in group:
+                            assert function_call.call_id is not None
+                            provider_call_id = function_call.call_id
+                            extra_content: dict[str, Any] | None = None
+                            if isinstance(function_call, ProviderFunctionCall):
+                                provider_call_id = function_call.provider_call_id or function_call.call_id
+                                extra_content = function_call.provider_extra_content
+                            serialized_call: dict[str, Any] = {
+                                "type": "function",
+                                "id": provider_call_id,
+                                "function": {
+                                    "name": function_call.name,
+                                    "arguments": function_call.arguments,
+                                },
+                            }
+                            if extra_content is not None:
+                                serialized_call["extra_content"] = deepcopy(extra_content)
+                            tool_calls.append(serialized_call)
+                        messages.append({"role": "assistant", "tool_calls": tool_calls})
+
+                        for function_call in group:
+                            assert function_call.call_id is not None
+                            provider_call_id = function_call.call_id
+                            if isinstance(function_call, ProviderFunctionCall):
+                                provider_call_id = function_call.provider_call_id or function_call.call_id
+                            for output in outputs_by_call_id.get(function_call.call_id, []):
+                                messages.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": provider_call_id,
+                                        "content": output.output,
+                                    }
+                                )
+                            consumed_output_call_ids.add(function_call.call_id)
+                    if stop_after_group:
+                        break
+                    continue
+
+                if isinstance(item, RealtimeConversationItemFunctionCallOutput):
+                    if item.call_id not in consumed_output_call_ids:
+                        logger.warning("Skipping orphaned function_call_output for call_id=%s", item.call_id)
+                    index += 1
+                    continue
+
+                index += 1
+            return messages
 
     def copy(self, *, deep: bool = False) -> Chat:
         """Return a snapshot safe for concurrent read access."""

@@ -31,7 +31,7 @@ from openai.types.responses import ResponseFunctionToolCall
 import speech_to_speech.LLM.base_openai_compatible_language_model as base_mod
 import speech_to_speech.LLM.chat_completions_language_model as ccm
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.LLM.chat import Chat, make_user_audio_message, make_user_message
+from speech_to_speech.LLM.chat import Chat, ProviderFunctionCall, make_user_audio_message, make_user_message
 from speech_to_speech.LLM.chat_completions_language_model import (
     ChatCompletionsApiModelHandler,
     _to_chat_tool_choice,
@@ -137,8 +137,13 @@ def _chunk(content=None, tool_calls=None, usage=None):
     return SimpleNamespace(choices=choices, usage=usage)
 
 
-def _tc_delta(index, id=None, name=None, arguments=None):
-    return SimpleNamespace(index=index, id=id, function=SimpleNamespace(name=name, arguments=arguments))
+def _tc_delta(index, id=None, name=None, arguments=None, extra_content=None):
+    return SimpleNamespace(
+        index=index,
+        id=id,
+        function=SimpleNamespace(name=name, arguments=arguments),
+        extra_content=extra_content,
+    )
 
 
 def _drive(
@@ -464,6 +469,155 @@ def test_streaming_tool_call_accumulates_arguments():
     assert usage == (20, 8)
     # the function_call was stored in history with a freshly minted call_id
     assert chat._pending_tool_calls, "tool call should be recorded in chat history"
+
+
+def test_gemini_tool_metadata_is_private_and_replayed_with_result():
+    signature = {"google": {"thought_signature": "opaque-signature"}}
+    h = _make_handler(stream=True, base_url="https://generativelanguage.googleapis.com/v1beta/openai/")
+    h.client.chat.completions.create = lambda **kwargs: _FakeStream(
+        [
+            _chunk(
+                tool_calls=[
+                    _tc_delta(
+                        0,
+                        id="gemini-provider-1",
+                        name="lookup",
+                        arguments='{"query":"x"}',
+                        extra_content=signature,
+                    )
+                ]
+            )
+        ]
+    )
+
+    _text, tools, _usage, chat, _end = _drive(
+        h,
+        tools=[{"type": "function", "name": "lookup", "parameters": {"type": "object"}}],
+    )
+
+    assert len(tools) == 1
+    local_tool = tools[0]
+    assert local_tool.call_id.startswith("call_")
+    assert local_tool.call_id != "gemini-provider-1"
+    assert "thought_signature" not in local_tool.model_dump_json()
+    stored = next(item for item in chat.buffer if isinstance(item, ProviderFunctionCall))
+    assert stored.provider_call_id == "gemini-provider-1"
+    assert stored.provider_extra_content == signature
+
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id=local_tool.call_id,
+            output='{"answer":"ok"}',
+        )
+    )
+    messages = h._serialize(chat)
+    assistant = next(message for message in messages if message.get("tool_calls"))
+    tool_message = next(message for message in messages if message.get("role") == "tool")
+    assert assistant["tool_calls"][0]["id"] == "gemini-provider-1"
+    assert assistant["tool_calls"][0]["extra_content"] == signature
+    assert tool_message["tool_call_id"] == "gemini-provider-1"
+
+
+def test_parallel_gemini_tool_calls_are_grouped_before_all_results():
+    h = _make_handler(stream=True, base_url="https://generativelanguage.googleapis.com/v1beta/openai/")
+    h.client.chat.completions.create = lambda **kwargs: _FakeStream(
+        [
+            _chunk(
+                tool_calls=[
+                    _tc_delta(
+                        0,
+                        id="gemini-a",
+                        name="first",
+                        arguments="{}",
+                        extra_content={"google": {"thought_signature": "sig-a"}},
+                    ),
+                    _tc_delta(
+                        1,
+                        id="gemini-b",
+                        name="second",
+                        arguments="{}",
+                        extra_content={"google": {"thought_signature": "sig-b"}},
+                    ),
+                ]
+            )
+        ]
+    )
+    _text, tools, _usage, chat, _end = _drive(
+        h,
+        tools=[
+            {"type": "function", "name": "first", "parameters": {"type": "object"}},
+            {"type": "function", "name": "second", "parameters": {"type": "object"}},
+        ],
+    )
+    for tool in tools:
+        chat.add_item(
+            RealtimeConversationItemFunctionCallOutput(
+                type="function_call_output",
+                call_id=tool.call_id,
+                output=f"result-{tool.name}",
+            )
+        )
+
+    messages = h._serialize(chat)
+    assistant_indexes = [index for index, message in enumerate(messages) if message.get("tool_calls")]
+    assert len(assistant_indexes) == 1
+    assistant_index = assistant_indexes[0]
+    assistant = messages[assistant_index]
+    assert [call["id"] for call in assistant["tool_calls"]] == ["gemini-a", "gemini-b"]
+    assert [message["role"] for message in messages[assistant_index : assistant_index + 3]] == [
+        "assistant",
+        "tool",
+        "tool",
+    ]
+    assert [message["tool_call_id"] for message in messages[assistant_index + 1 : assistant_index + 3]] == [
+        "gemini-a",
+        "gemini-b",
+    ]
+
+
+def test_sequential_provider_calls_remain_separate_groups():
+    chat = Chat(10)
+    chat.add_item(make_user_message("go"))
+    first = ProviderFunctionCall(
+        type="function_call",
+        id="fc_local_1",
+        call_id="call_local_1",
+        name="first",
+        arguments="{}",
+        provider_call_id="provider-1",
+        provider_extra_content={"google": {"thought_signature": "sig-1"}},
+    )
+    chat.add_ordered_function_call(first)
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id="call_local_1",
+            output="one",
+        )
+    )
+    second = ProviderFunctionCall(
+        type="function_call",
+        id="fc_local_2",
+        call_id="call_local_2",
+        name="second",
+        arguments="{}",
+        provider_call_id="provider-2",
+        provider_extra_content={"google": {"thought_signature": "sig-2"}},
+    )
+    chat.add_ordered_function_call(second)
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id="call_local_2",
+            output="two",
+        )
+    )
+
+    messages = ChatCompletionsApiModelHandler._chat_messages(chat)
+    assert [message.get("role") for message in messages] == ["user", "assistant", "tool", "assistant", "tool"]
+    assert messages[1]["tool_calls"][0]["id"] == "provider-1"
+    assert messages[3]["tool_calls"][0]["id"] == "provider-2"
 
 
 def test_streaming_preserves_text_tool_text_order():

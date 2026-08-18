@@ -65,6 +65,8 @@ def test_builtin_registry_lookup_and_cli_choices_share_one_catalog():
     assert STT_BACKENDS["parakeet-tdt"].kind == "stt"
     assert LLM_BACKENDS["responses-api"].kind == "llm"
     assert TTS_BACKENDS["qwen3"].kind == "tts"
+    assert TTS_BACKENDS["gemini"].kind == "tts"
+    assert TTS_BACKENDS["gemini"].required_extra == "gemini"
     assert LLM_BACKENDS["responses-api"].capabilities.supports_llm_proxy
     assert LLM_BACKENDS["chat-completions"].capabilities.supports_llm_proxy
     assert LLM_BACKENDS["chat-completions"].capabilities.supports_audio_input
