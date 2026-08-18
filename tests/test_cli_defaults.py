@@ -237,6 +237,23 @@ def test_parse_arguments_accepts_qwen3_tts_backend_override():
     assert args.tts_backend.config["backend"] == "torch"
 
 
+def test_parse_arguments_accepts_openai_stt_backend():
+    args = parse_arguments(
+        [
+            "--stt",
+            "openai",
+            "--openai_stt_base_url",
+            "http://localhost:8000/v1",
+            "--openai_stt_model",
+            "Qwen/Qwen3-ASR-1.7B",
+        ]
+    )
+
+    assert args.stt_backend.name == "openai"
+    assert args.stt_backend.config["base_url"] == "http://localhost:8000/v1"
+    assert args.stt_backend.config["model"] == "Qwen/Qwen3-ASR-1.7B"
+
+
 def test_parse_arguments_accepts_qwen3_tts_ggml_options():
     original_argv = sys.argv[:]
     try:

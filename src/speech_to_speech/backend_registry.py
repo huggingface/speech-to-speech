@@ -22,6 +22,7 @@ from speech_to_speech.arguments_classes.language_model_arguments import Language
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
     MLXAudioWhisperSTTHandlerArguments,
 )
+from speech_to_speech.arguments_classes.openai_stt_arguments import OpenAICompatibleSTTHandlerArguments
 from speech_to_speech.arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
 from speech_to_speech.arguments_classes.parakeet_tdt_arguments import (
     ParakeetTDTSTTHandlerArguments,
@@ -358,6 +359,17 @@ STT_BACKENDS = build_backend_registry(
             ),
             config_prefix="paraformer_stt",
             required_extra="paraformer",
+        ),
+        BackendSpec(
+            "openai",
+            "stt",
+            OpenAICompatibleSTTHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.STT.openai_compatible_handler",
+                "OpenAICompatibleSTTHandler",
+                attach_speculative_turns=True,
+            ),
+            config_prefix="openai_stt",
         ),
     ],
 )

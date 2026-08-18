@@ -62,6 +62,7 @@ from speech_to_speech.pipeline.events import (
     SpeechStoppedEvent,
     TokenUsageEvent,
     TranscriptionCompletedEvent,
+    TranscriptionFailedEvent,
 )
 from speech_to_speech.pipeline.messages import (
     AssistantTextPart,
@@ -2587,6 +2588,27 @@ class TestResponseDoneOutputItems:
 
 class TestDispatchPipelineEvent:
     # -- speech_started --
+
+    def test_transcription_failure_emits_error_without_llm_work(
+        self,
+        service,
+        conn_id,
+        text_prompt_queue,
+    ):
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionFailedEvent(
+                message="transcription request timed out",
+                turn_id="turn_1",
+                turn_revision=0,
+            ),
+        )
+
+        assert len(events) == 1
+        assert isinstance(events[0], RealtimeErrorEvent)
+        assert events[0].error.type == "transcription_failed"
+        assert events[0].error.message == "transcription request timed out"
+        assert text_prompt_queue.empty()
 
     def test_speech_started_emits_event(self, service, conn_id):
         events = service.dispatch_pipeline_event(
