@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
@@ -267,6 +268,47 @@ def _create_parakeet(context: HandlerContext, config: Mapping[str, Any]) -> Any:
     return handler
 
 
+def _create_openai_stt(context: HandlerContext, config: Mapping[str, Any]) -> Any:
+    from speech_to_speech.STT.endpoint_admission import (
+        EndpointAdmissionRegistry,
+        EndpointAdmissionSettings,
+    )
+
+    handler_class = _load_handler(
+        "speech_to_speech.STT.openai_compatible_handler",
+        "OpenAICompatibleSTTHandler",
+    )
+    setup_kwargs = dict(config)
+    configured_api_key = setup_kwargs.get("api_key")
+    base_url = setup_kwargs["base_url"].rstrip("/")
+    resolved_api_key = configured_api_key
+    if resolved_api_key is None and base_url == "https://api.openai.com/v1":
+        resolved_api_key = os.getenv("OPENAI_API_KEY")
+    lease = EndpointAdmissionRegistry.acquire(
+        base_url=setup_kwargs["base_url"],
+        api_key=resolved_api_key,
+        settings=EndpointAdmissionSettings(
+            max_concurrency=setup_kwargs["max_concurrency"],
+            max_queue_size=setup_kwargs["max_queue_size"],
+            progressive_min_interval_s=setup_kwargs["progressive_min_interval"],
+        ),
+    )
+    setup_kwargs.update(
+        admission_lease=lease,
+        speculative_turns=context.speculative_turns,
+    )
+    try:
+        return handler_class(
+            context.stop_event,
+            queue_in=context.queue_in,
+            queue_out=context.queue_out,
+            setup_kwargs=setup_kwargs,
+        )
+    except Exception:
+        lease.release()
+        raise
+
+
 def _create_openai_tts(context: HandlerContext, config: Mapping[str, Any]) -> Any:
     handler_class = _load_handler(
         "speech_to_speech.TTS.openai_compatible_handler",
@@ -397,11 +439,7 @@ STT_BACKENDS = build_backend_registry(
             "openai",
             "stt",
             OpenAICompatibleSTTHandlerArguments,
-            _simple_handler_factory(
-                "speech_to_speech.STT.openai_compatible_handler",
-                "OpenAICompatibleSTTHandler",
-                attach_speculative_turns=True,
-            ),
+            _create_openai_stt,
             config_prefix="openai_stt",
         ),
     ],

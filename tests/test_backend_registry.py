@@ -236,7 +236,10 @@ def test_openai_stt_backend_constructs_through_registry(monkeypatch):
     args = parse_arguments(["--stt", "openai"])
     stt = create_backend_handler(args.stt_backend, _context())
 
-    assert isinstance(stt, OpenAICompatibleSTTHandler)
+    try:
+        assert isinstance(stt, OpenAICompatibleSTTHandler)
+    finally:
+        stt.cleanup()
 
 
 def test_new_stt_backend_gets_transcription_notifier_by_default(monkeypatch):

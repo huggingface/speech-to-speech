@@ -13,6 +13,13 @@ JSON with a string `text` field or a plain-text response. With live
 transcription enabled, progressive updates upload the accumulated utterance
 again, increasing request volume and provider usage.
 
+The STT endpoint has a process-wide admission controller. Pipelines using the
+same normalized endpoint and credentials share its concurrency and queue limits.
+Queued progressive windows are latest-only, finals take priority, and final or
+new-revision work explicitly cancels superseded queued or active operations.
+Closing an active HTTP transport is best-effort server cancellation; stale
+results are always discarded locally.
+
 ## vLLM with Qwen3-ASR
 
 Run a supported ASR model behind vLLM. Install vLLM in its own environment on
@@ -32,7 +39,9 @@ curl http://localhost:8000/v1/models
 speech-to-speech local \
   --stt openai \
   --openai_stt_base_url http://localhost:8000/v1 \
-  --openai_stt_model Qwen/Qwen3-ASR-1.7B
+  --openai_stt_model Qwen/Qwen3-ASR-1.7B \
+  --openai_stt_max_concurrency 1 \
+  --openai_stt_progressive_min_interval 0.75
 ```
 
 ## OpenAI-hosted transcription
@@ -72,11 +81,14 @@ The client accepts JSON and text responses. Use
 errors are sanitized before they are surfaced to realtime clients, and failed
 final requests do not create LLM work.
 
+Admission settings are process-wide for each normalized endpoint and credential
+pair. When pipelines configure different settings for the same pair, the first
+controller remains authoritative and a warning is logged.
+
 During setup, the handler transcribes one second of synthetic silence through
 the configured endpoint. Endpoint, authentication, model, or response-format
 failures therefore prevent the realtime server from accepting sessions.
 
-Progressive requests are best-effort. Each pipeline keeps at most one
-progressive request in flight and drops newer progressive updates while it is
-running. A final request is submitted independently, so it does not wait for an
-in-flight progressive request; late progressive results are discarded.
+Progressive requests are best-effort. Queued progressive windows are coalesced
+to the latest one, finals take priority, and superseded work is cancelled. Late
+results from cancelled or stale requests are discarded.

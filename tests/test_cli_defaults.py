@@ -273,12 +273,18 @@ def test_parse_arguments_accepts_openai_stt_backend():
             "http://localhost:8000/v1",
             "--openai_stt_model",
             "Qwen/Qwen3-ASR-1.7B",
+            "--openai_stt_max_concurrency",
+            "2",
+            "--openai_stt_max_queue_size",
+            "5",
         ]
     )
 
     assert args.stt_backend.name == "openai"
     assert args.stt_backend.config["base_url"] == "http://localhost:8000/v1"
     assert args.stt_backend.config["model"] == "Qwen/Qwen3-ASR-1.7B"
+    assert args.stt_backend.config["max_concurrency"] == 2
+    assert args.stt_backend.config["max_queue_size"] == 5
 
 
 def test_parse_arguments_accepts_qwen3_tts_ggml_options():
