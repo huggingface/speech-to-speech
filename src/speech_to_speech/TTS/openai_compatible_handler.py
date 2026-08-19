@@ -479,6 +479,8 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         converted = resampler.push(np.empty(0, dtype=np.int16), final=True)
         sample_remainder = np.concatenate((sample_remainder, converted))
         if byte_remainder:
+            # Preserve valid audio: a trailing byte cannot form a PCM16 sample, so
+            # discard it with a warning instead of failing the whole response.
             logger.warning("Speech endpoint returned an incomplete PCM16 sample")
         while sample_remainder.size >= self.blocksize:
             yield sample_remainder[: self.blocksize].copy()

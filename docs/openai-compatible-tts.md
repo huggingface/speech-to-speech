@@ -64,3 +64,9 @@ The client accepts:
 The `stream_format=audio` field is part of the standard request shape;
 `stream=true` is a vLLM-Omni extension. Disable `--openai_tts_stream` for
 servers that reject that extension.
+
+Cancellation is best-effort: barge-in and session teardown close the client's
+active HTTP response and prevent further audio publication locally. The
+standard `/v1/audio/speech` interface has no portable server-side cancellation
+operation, so a disconnected client does not guarantee that endpoint
+computation stops immediately.

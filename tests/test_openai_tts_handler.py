@@ -49,6 +49,8 @@ class _FakeSpeechOperation:
             samples = np.arange(2400, dtype="<i2")
             encoded = samples.tobytes()
         for index, offset in enumerate(range(0, len(encoded), 301)):
+            if self.cancelled:
+                raise SpeechRequestCancelled
             if type(self).failure_after_chunks == index:
                 raise tts_module.SpeechRequestError("speech stream failed")
             if cancel_check():
@@ -439,6 +441,42 @@ def test_openai_tts_cancellation_stops_publication_and_closes_operation(monkeypa
     assert isinstance(first, np.ndarray)
     assert list(generation) == []
     assert _FakeSpeechOperation.instances[0].cancelled is True
+
+
+def test_openai_tts_session_teardown_stops_publication_and_closes_operation(monkeypatch):
+    handler = _openai_tts_handler(monkeypatch)
+    generation = handler.process(TTSInput(text="Hello"))
+    first = next(generation)
+    operation = _FakeSpeechOperation.instances[0]
+
+    handler.on_session_end()
+
+    assert isinstance(first, np.ndarray)
+    assert list(generation) == []
+    assert operation.cancelled is True
+    assert handler._active_operation is None
+    assert handler.queue_out.empty()
+
+
+def test_http_speech_cancellation_after_completion_is_harmless(monkeypatch):
+    transport = tts_module.httpx.MockTransport(
+        lambda request: tts_module.httpx.Response(200, content=b"\x00\x00", request=request)
+    )
+    client = tts_module.httpx.Client(transport=transport)
+    monkeypatch.setattr(tts_module.httpx, "Client", lambda **kwargs: client)
+    operation = HttpSpeechOperation(
+        endpoint_url="http://localhost:8000/v1/audio/speech",
+        api_key=None,
+        payload={"input": "hello"},
+        timeout_s=2,
+    )
+
+    assert list(operation.iter_bytes(lambda: False)) == [b"\x00\x00"]
+    assert client.is_closed
+    operation.cancel()
+    operation.cancel()
+
+    assert client.is_closed
 
 
 def test_http_speech_cancellation_during_client_construction_prevents_dispatch(monkeypatch):
