@@ -31,6 +31,7 @@ from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandl
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
     ResponsesApiLanguageModelHandlerArguments,
 )
+from speech_to_speech.arguments_classes.supertonic_tts_arguments import SupertonicTTSHandlerArguments
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -472,6 +473,19 @@ TTS_BACKENDS = build_backend_registry(
                 context_kwargs=True,
             ),
             config_prefix="qwen3_tts",
+        ),
+        BackendSpec(
+            "supertonic",
+            "tts",
+            SupertonicTTSHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.TTS.supertonic_tts_handler",
+                "SupertonicTTSHandler",
+                setup_should_listen=True,
+                context_kwargs=True,
+            ),
+            config_prefix="supertonic_tts",
+            required_extra="supertonic",
         ),
     ],
 )
