@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import socket
 from queue import Queue
-from threading import Event, Thread
+from threading import Event, Thread, current_thread
 from time import perf_counter
 
 import numpy as np
@@ -484,6 +484,8 @@ def test_http_speech_cancellation_after_completion_is_harmless(monkeypatch):
 def test_http_speech_cancellation_during_client_construction_prevents_dispatch(monkeypatch):
     construction_started = Event()
     resume_construction = Event()
+    cancelled = Event()
+    worker_observed_cancellation = Event()
     stream_calls = 0
 
     class BlockingClient:
@@ -510,22 +512,32 @@ def test_http_speech_cancellation_during_client_construction_prevents_dispatch(m
     )
     errors: list[BaseException] = []
 
+    def cancel_check() -> bool:
+        if not cancelled.is_set():
+            return False
+        if current_thread().name == "tts-http-reader":
+            worker_observed_cancellation.set()
+        else:
+            assert worker_observed_cancellation.wait(1)
+        return True
+
     def consume() -> None:
         try:
-            list(operation.iter_bytes(lambda: False))
+            list(operation.iter_bytes(cancel_check))
         except BaseException as exc:
             errors.append(exc)
 
     thread = Thread(target=consume)
     thread.start()
     assert construction_started.wait(1)
-    operation.cancel()
+    cancelled.set()
     resume_construction.set()
     thread.join(timeout=1)
 
     assert not thread.is_alive()
     assert len(errors) == 1
     assert isinstance(errors[0], SpeechRequestCancelled)
+    assert worker_observed_cancellation.is_set()
     assert stream_calls == 0
 
 

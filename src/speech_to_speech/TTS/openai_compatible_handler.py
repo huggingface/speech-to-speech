@@ -81,7 +81,7 @@ class HttpSpeechOperation:
 
         worker = Thread(
             target=self._read_stream,
-            args=(headers, results),
+            args=(headers, results, cancel_check),
             name="tts-http-reader",
             daemon=True,
         )
@@ -111,14 +111,20 @@ class HttpSpeechOperation:
             if not completed:
                 self.cancel()
 
-    def _read_stream(self, headers: dict[str, str], results: Queue[tuple[bool, object]]) -> None:
+    def _read_stream(
+        self,
+        headers: dict[str, str],
+        results: Queue[tuple[bool, object]],
+        cancel_check: Callable[[], bool],
+    ) -> None:
         client: httpx.Client | None = None
         response: httpx.Response | None = None
         result: tuple[bool, object] = (True, _SPEECH_STREAM_DONE)
         try:
             client = httpx.Client(timeout=self.timeout_s)
             with self._transport_lock:
-                if self._cancelled.is_set():
+                if self._cancelled.is_set() or cancel_check():
+                    self._cancelled.set()
                     cancelled_before_dispatch = True
                 else:
                     self._client = client
