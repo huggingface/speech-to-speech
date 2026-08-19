@@ -66,6 +66,7 @@ def test_builtin_registry_lookup_and_cli_choices_share_one_catalog():
     assert LLM_BACKENDS["responses-api"].kind == "llm"
     assert TTS_BACKENDS["qwen3"].kind == "tts"
     assert TTS_BACKENDS["openai"].kind == "tts"
+    assert TTS_BACKENDS["supertonic"].required_extra == "supertonic"
     assert LLM_BACKENDS["responses-api"].capabilities.supports_llm_proxy
     assert LLM_BACKENDS["chat-completions"].capabilities.supports_llm_proxy
     assert LLM_BACKENDS["chat-completions"].capabilities.supports_audio_input
@@ -81,6 +82,32 @@ def test_registry_rejects_duplicate_names_and_wrong_kinds():
         build_backend_registry("stt", [spec, spec])
     with pytest.raises(ValueError, match="expected 'llm'"):
         build_backend_registry("llm", [spec])
+
+
+def test_supertonic_cli_config_is_normalized_for_the_handler():
+    args = parse_arguments(
+        [
+            "--tts",
+            "supertonic",
+            "--supertonic_tts_voice",
+            "F3",
+            "--supertonic_tts_lang",
+            "fr",
+            "--supertonic_tts_speed",
+            "1.2",
+            "--supertonic_tts_blocksize",
+            "256",
+        ]
+    )
+
+    assert args.tts_backend.name == "supertonic"
+    assert args.tts_backend.config == {
+        "voice": "F3",
+        "lang": "fr",
+        "speed": 1.2,
+        "blocksize": 256,
+        "gen_kwargs": {},
+    }
 
 
 def test_audio_input_validation_uses_registry_capability_not_backend_name():
@@ -221,6 +248,8 @@ def test_parser_carries_only_selected_normalized_configs():
             "pocket",
             "--pocket_tts_voice",
             "alba",
+            "--pocket_tts_language",
+            "french_24l",
         ]
     )
 
@@ -234,6 +263,7 @@ def test_parser_carries_only_selected_normalized_configs():
     assert args.llm_backend.config["gen_kwargs"]["max_new_tokens"] == 64
     assert args.tts_backend.name == "pocket"
     assert args.tts_backend.config["voice"] == "alba"
+    assert args.tts_backend.config["language"] == "french_24l"
     assert not hasattr(args, "whisper_stt_handler_kwargs")
     assert not hasattr(args, "qwen3_tts_handler_kwargs")
 

@@ -10,6 +10,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 - `kokoro` → `kokoro_handler.py`
 - `qwen3` → `qwen3_tts_handler.py`
 - `openai` → `openai_compatible_handler.py`
+- `supertonic` → `supertonic_tts_handler.py`
 
 Deprecated TTS implementations, including MeloTTS, live in [`../../../archive/TTS`](../../../archive/TTS) and are no longer wired into `s2s_pipeline.py`.
 
@@ -198,6 +199,30 @@ The default settings target Qwen3-TTS on vLLM-Omni.
 
 See [`docs/openai-compatible-tts.md`](../../../docs/openai-compatible-tts.md)
 for server commands and all relevant flags.
+
+### 7) Supertonic (`--tts supertonic`)
+
+Primary args prefix: `--supertonic_tts_*`
+
+```bash
+speech-to-speech serve \
+  --tts supertonic \
+  --supertonic_tts_voice M1 \
+  --supertonic_tts_speed 1.0
+```
+
+Behavior:
+- Supports real-time text-to-speech using Supertone's ONNX runtime models
+- Downloads the models locally to `~/.cache/supertonic3/`
+- Supports 10 built-in voice models: `M1`-`M5` and `F1`-`F5`
+- Uses per-utterance language codes when supported and falls back to `--supertonic_tts_lang` otherwise
+- Outputs natively at 44.1kHz but gets downsampled in the pipeline to 16kHz for uniform playback
+
+Install the optional dependency with:
+
+```bash
+pip install "speech-to-speech[supertonic]"
+```
 
 ## Setup
 

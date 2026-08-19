@@ -85,7 +85,10 @@ paraformer = [
     "onnxruntime<1.24; python_version < '3.11'",
 ]
 pocket = [
-    "pocket-tts>=0.1.0",
+    "pocket-tts>=2.0.0",
+]
+supertonic = [
+    "supertonic>=1.3.1",
 ]
 webrtc = [
     "aiortc>=1.9.0",
