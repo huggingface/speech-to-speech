@@ -7,7 +7,8 @@ import numpy as np
 import pytest
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.messages import TTSInput
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS import supertonic_tts_handler as supertonic_module
 from speech_to_speech.TTS.supertonic_tts_handler import SupertonicTTSHandler
 
@@ -108,6 +109,30 @@ def test_process_drops_audio_when_cancelled_during_synthesis() -> None:
     handler = make_handler(synthesize, cancel_scope=cancel_scope)
 
     assert list(handler.process(TTSInput(text="Hello", language_code="en"))) == []
+
+
+def test_stale_keyed_terminal_becomes_cleanup_after_lm_tts_handoff() -> None:
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    handler = SupertonicTTSHandler.__new__(SupertonicTTSHandler)
+    handler.speculative_turns = tracker
+    terminal = EndOfResponse(
+        response_key="response_1",
+        turn_id="turn_1",
+        turn_revision=0,
+        cancel_generation=7,
+    )
+    tracker.observe("turn_1", 1)
+
+    outputs = list(handler.process(terminal))
+    queued = handler.output_for_queue(outputs[0], terminal)
+
+    assert outputs == [AUDIO_RESPONSE_DONE]
+    assert terminal.cleanup_only is True
+    assert isinstance(queued, AudioOutput)
+    assert queued.response_key == "response_1"
+    assert queued.cancel_generation == 7
+    assert queued.cleanup_only is True
 
 
 def test_process_checks_cancellation_before_padded_tail(monkeypatch: pytest.MonkeyPatch) -> None:

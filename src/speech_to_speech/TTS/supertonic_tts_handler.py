@@ -142,7 +142,9 @@ class SupertonicTTSHandler(BaseHandler[TTSIn, TTSOut]):
             if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
                 tts_input.turn_id, tts_input.turn_revision
             ):
-                return
+                if tts_input.response_key is None:
+                    return
+                tts_input.cleanup_only = True
             yield AUDIO_RESPONSE_DONE
             return
 
