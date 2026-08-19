@@ -48,7 +48,7 @@ class VADHandlerArguments:
     audio_enhancement: bool = field(
         default=False,
         metadata={
-            "help": "improves sound quality by applying techniques like noise reduction, equalization, and echo cancellation. Default is False."
+            "help": "improves sound quality by applying techniques like noise reduction and equalization. Default is False."
         },
     )
     enable_realtime_transcription: bool = field(
