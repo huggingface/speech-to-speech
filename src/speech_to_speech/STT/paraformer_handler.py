@@ -32,6 +32,7 @@ class ParaformerSTTHandler(BaseSTTHandler):
         logger.info("Loading Paraformer STT model: %s", model_name)
         if len(model_name.split("/")) > 1:
             model_name = model_name.split("/")[-1]
+        self.language = model_name.split("-")[1] if "-" in model_name else "zh"
         self.device = device
         try:
             from funasr import AutoModel
@@ -70,6 +71,7 @@ class ParaformerSTTHandler(BaseSTTHandler):
         else:
             yield Transcription(
                 text=pred_text,
+                language_code=self.language,
                 turn_id=vad_audio.turn_id,
                 turn_revision=vad_audio.turn_revision,
                 speech_stopped_at_s=vad_audio.created_at_s,
