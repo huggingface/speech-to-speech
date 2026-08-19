@@ -16,20 +16,6 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-def language_from_model_name(model_name: str) -> str:
-    """FunASR checkpoints are named ``paraformer-{lang}[-streaming]``.
-
-    ``funasr/paraformer-en`` and ``paraformer-zh-streaming`` both resolve to the
-    language segment after the ``paraformer-`` prefix. Unknown names fall back
-    to Chinese, matching the handler default.
-    """
-    name = model_name.rsplit("/", 1)[-1]
-    parts = name.split("-")
-    if len(parts) >= 2 and parts[1]:
-        return parts[1]
-    return "zh"
-
-
 class ParaformerSTTHandler(BaseSTTHandler):
     """
     Handles the Speech To Text generation using a Paraformer model.
@@ -44,9 +30,9 @@ class ParaformerSTTHandler(BaseSTTHandler):
         gen_kwargs: dict[str, Any] = {},
     ) -> None:
         logger.info("Loading Paraformer STT model: %s", model_name)
-        self.language = language_from_model_name(model_name)
         if len(model_name.split("/")) > 1:
             model_name = model_name.split("/")[-1]
+        self.language = model_name.split("-")[1] if "-" in model_name else "zh"
         self.device = device
         try:
             from funasr import AutoModel

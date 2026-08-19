@@ -1,9 +1,12 @@
+import sys
+from unittest.mock import MagicMock
+
 import numpy as np
 import pytest
 
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, VADAudio
 from speech_to_speech.STT import paraformer_handler
-from speech_to_speech.STT.paraformer_handler import ParaformerSTTHandler, language_from_model_name
+from speech_to_speech.STT.paraformer_handler import ParaformerSTTHandler
 
 
 class _FakeParaformerModel:
@@ -24,13 +27,22 @@ def _handler(*, language: str = "zh"):
         ("paraformer-zh", "zh"),
         ("paraformer-en", "en"),
         ("funasr/paraformer-en", "en"),
-        ("funasr/paraformer-zh", "zh"),
         ("paraformer-zh-streaming", "zh"),
         ("paraformer", "zh"),
     ],
 )
-def test_language_from_model_name(model_name, expected):
-    assert language_from_model_name(model_name) == expected
+def test_setup_extracts_language_from_model_name(monkeypatch, model_name, expected):
+    fake_model = MagicMock()
+    fake_model.generate.return_value = [{"text": "warmup"}]
+    fake_funasr = MagicMock()
+    fake_funasr.AutoModel = MagicMock(return_value=fake_model)
+    monkeypatch.setitem(sys.modules, "funasr", fake_funasr)
+    monkeypatch.setattr(paraformer_handler.torch.mps, "empty_cache", lambda: None)
+
+    handler = object.__new__(ParaformerSTTHandler)
+    handler.setup(model_name=model_name, device="cpu")
+
+    assert handler.language == expected
 
 
 def test_progressive_paraformer_transcription_is_partial(monkeypatch):
