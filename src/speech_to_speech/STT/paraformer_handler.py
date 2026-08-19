@@ -57,7 +57,9 @@ class ParaformerSTTHandler(BaseSTTHandler):
         logger.debug("infering paraformer...")
 
         pred_text = self.model.generate(vad_audio.audio)[0]["text"].strip().replace(" ", "")
-        torch.mps.empty_cache()
+        # Same idea as ChatTTSHandler: MPS cache clear only on Apple Silicon.
+        if self.device == "mps":
+            torch.mps.empty_cache()
 
         logger.debug("finished paraformer inference")
         console.print(f"[yellow]USER: {pred_text}")
