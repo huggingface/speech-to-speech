@@ -85,7 +85,9 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
 
         pred_text = transcription_dict["text"].strip()
         language_code = transcription_dict["language"]
-        torch.mps.empty_cache()
+        # Same idea as ChatTTSHandler: MPS cache clear only on Apple Silicon.
+        if getattr(self, "device", None) == "mps":
+            torch.mps.empty_cache()
 
         logger.debug("finished whisper inference")
         console.print(f"[yellow]USER: {pred_text}")

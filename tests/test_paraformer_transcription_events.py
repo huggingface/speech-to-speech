@@ -14,10 +14,11 @@ class _FakeParaformerModel:
         return [{"text": " 今 天 天 气 不 错 "}]
 
 
-def _handler(*, language: str = "zh"):
+def _handler(*, language: str = "zh", device: str = "cpu"):
     handler = object.__new__(ParaformerSTTHandler)
     handler.model = _FakeParaformerModel()
     handler.language = language
+    handler.device = device
     return handler
 
 
@@ -107,3 +108,24 @@ def test_final_paraformer_transcription_uses_english_checkpoint_language(monkeyp
     )
 
     assert result[0].language_code == "en"
+
+
+def test_paraformer_skips_mps_cache_clear_on_cpu(monkeypatch):
+    monkeypatch.setattr(paraformer_handler.console, "print", lambda *args, **kwargs: None)
+
+    def fail_if_called():
+        raise AssertionError("torch.mps.empty_cache should not run on cpu")
+
+    monkeypatch.setattr(paraformer_handler.torch.mps, "empty_cache", fail_if_called)
+
+    result = list(
+        _handler(device="cpu").process(
+            VADAudio(
+                audio=np.zeros(16000, dtype=np.float32),
+                mode="final",
+            )
+        )
+    )
+
+    assert len(result) == 1
+    assert isinstance(result[0], Transcription)
