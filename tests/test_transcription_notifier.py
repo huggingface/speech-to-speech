@@ -62,7 +62,7 @@ def test_empty_final_transcription_reenables_listening_without_runtime_config():
     assert should_listen.is_set()
 
 
-def test_transcription_failure_emits_error_without_llm_work_and_reenables_listening():
+def test_transcription_failure_defers_listening_change_to_realtime_owner():
     text_output_queue = Queue()
     should_listen = Event()
     notifier = _notifier(text_output_queue=text_output_queue, should_listen=should_listen)
@@ -78,7 +78,7 @@ def test_transcription_failure_emits_error_without_llm_work_and_reenables_listen
     )
 
     assert result == []
-    assert should_listen.is_set()
+    assert not should_listen.is_set()
     event = text_output_queue.get_nowait()
     assert isinstance(event, TranscriptionFailedEvent)
     assert event.message == "transcription request timed out"

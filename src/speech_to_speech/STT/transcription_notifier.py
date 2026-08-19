@@ -60,8 +60,6 @@ class TranscriptionNotifier(BaseHandler[STTOut, LLMIn]):
                         turn_revision=transcription.turn_revision,
                     )
                 )
-            if self.should_listen is not None:
-                self.should_listen.set()
             return
 
         if isinstance(transcription, Transcription):

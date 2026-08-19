@@ -48,7 +48,9 @@ speech-to-speech local \
 ## Authentication and compatibility
 
 Set `--openai_stt_api_key` when the endpoint requires bearer authentication.
-When it is omitted, the handler uses `OPENAI_API_KEY` if present.
+When the base URL is `https://api.openai.com/v1` and this flag is omitted, the
+handler uses `OPENAI_API_KEY` if present. Other endpoints never receive that
+environment credential implicitly.
 
 The client accepts JSON and text responses. Use
 `--openai_stt_response_format text` for a plain-text server. Transport and HTTP

@@ -10,6 +10,7 @@ from openai.types.realtime import (
     ConversationItemCreateEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
+    ConversationItemInputAudioTranscriptionFailedEvent,
     ConversationItemTruncateEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferCommitEvent,
@@ -113,6 +114,7 @@ ServerEvent = Union[
     ConversationItemCreatedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
+    ConversationItemInputAudioTranscriptionFailedEvent,
     ResponseCreatedEvent,
     ResponseDoneEvent,
     ResponseAudioDeltaEvent,
@@ -667,8 +669,13 @@ class RealtimeService:
 
     def _on_transcription_failed(self, conn_id: str, event: TranscriptionFailedEvent) -> list[ServerEvent]:
         """Surface a final STT failure without creating conversation or LLM work."""
-        self._state(conn_id)
-        return [self.make_error(event.message, "transcription_failed")]
+        st = self._state(conn_id)
+        current_input_item_id = st.current_input_item_id
+        failed_events = self.conversation.on_transcription_failed(conn_id, event)
+        owns_current_input = failed_events and failed_events[0].item_id == current_input_item_id
+        if owns_current_input and self.should_listen is not None:
+            self.should_listen.set()
+        return [*failed_events]
 
     def _on_audio_input_completed(self, conn_id: str, event: AudioInputCompletedEvent) -> list[ServerEvent]:
         """Record final input audio and queue its realtime LM request."""
