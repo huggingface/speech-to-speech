@@ -4,7 +4,6 @@ import io
 import logging
 import os
 from collections.abc import Callable
-from queue import Queue
 from threading import Event, Lock, Thread
 from time import perf_counter
 from typing import Any, Iterator
@@ -15,11 +14,9 @@ import numpy as np
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.control import SESSION_END, is_control_message
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, EndOfResponse, TTSInput
-from speech_to_speech.pipeline.queue_types import TextEventItem
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 logger = logging.getLogger(__name__)
@@ -66,11 +63,11 @@ class HttpSpeechOperation:
         self._transport_lock = Lock()
         self._client: httpx.Client | None = None
         self._response: httpx.Response | None = None
+        self._deadline_exceeded = Event()
 
     def iter_bytes(self, cancel_check: Callable[[], bool]) -> Iterator[bytes]:
-        if cancel_check():
-            self._cancelled.set()
-            raise SpeechRequestCancelled
+        deadline_at_s = perf_counter() + self.timeout_s
+        self._raise_if_stopped(cancel_check)
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -89,31 +86,27 @@ class HttpSpeechOperation:
         monitor_stop = Event()
         monitor = Thread(
             target=self._monitor_cancellation,
-            args=(cancel_check, monitor_stop),
+            args=(cancel_check, monitor_stop, deadline_at_s),
             name="tts-http-cancel",
             daemon=True,
         )
         monitor.start()
 
         try:
-            if self._cancelled.is_set() or cancel_check():
-                self.cancel()
-                raise SpeechRequestCancelled
+            self._raise_if_stopped(cancel_check)
             with client.stream("POST", self.endpoint_url, headers=headers, json=self.payload) as response:
                 with self._transport_lock:
                     self._response = response
-                if self._cancelled.is_set():
-                    raise SpeechRequestCancelled
+                self._raise_if_stopped(cancel_check)
                 try:
                     response.raise_for_status()
                 except httpx.HTTPStatusError as exc:
                     raise SpeechRequestError(f"speech server returned HTTP {exc.response.status_code}") from exc
                 for chunk in response.iter_bytes():
-                    if self._cancelled.is_set() or cancel_check():
-                        self.cancel()
-                        raise SpeechRequestCancelled
+                    self._raise_if_stopped(cancel_check)
                     if chunk:
                         yield chunk
+                self._raise_if_stopped(cancel_check)
         except SpeechRequestCancelled:
             raise
         except SpeechRequestError:
@@ -121,9 +114,17 @@ class HttpSpeechOperation:
         except httpx.TimeoutException as exc:
             raise SpeechRequestError("speech request timed out") from exc
         except httpx.HTTPError as exc:
+            if self._deadline_exceeded.is_set():
+                raise SpeechRequestError("speech request timed out") from exc
             if self._cancelled.is_set():
                 raise SpeechRequestCancelled from exc
             raise SpeechRequestError(f"speech transport failed: {type(exc).__name__}") from exc
+        except Exception as exc:
+            if self._deadline_exceeded.is_set():
+                raise SpeechRequestError("speech request timed out") from exc
+            if self._cancelled.is_set():
+                raise SpeechRequestCancelled from exc
+            raise
         finally:
             monitor_stop.set()
             monitor.join(timeout=0.2)
@@ -148,8 +149,27 @@ class HttpSpeechOperation:
             except Exception:
                 logger.debug("Error closing speech client", exc_info=True)
 
-    def _monitor_cancellation(self, cancel_check: Callable[[], bool], stop: Event) -> None:
-        while not stop.wait(0.025):
+    def _raise_if_stopped(self, cancel_check: Callable[[], bool]) -> None:
+        if self._deadline_exceeded.is_set():
+            raise SpeechRequestError("speech request timed out")
+        if self._cancelled.is_set() or cancel_check():
+            self.cancel()
+            raise SpeechRequestCancelled
+
+    def _monitor_cancellation(
+        self,
+        cancel_check: Callable[[], bool],
+        stop: Event,
+        deadline_at_s: float,
+    ) -> None:
+        while True:
+            remaining_s = deadline_at_s - perf_counter()
+            if remaining_s <= 0:
+                self._deadline_exceeded.set()
+                self.cancel()
+                return
+            if stop.wait(min(0.025, remaining_s)):
+                return
             if cancel_check():
                 self.cancel()
                 return
@@ -229,7 +249,6 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         blocksize: int = 512,
         cancel_scope: CancelScope | None = None,
         speculative_turns: SpeculativeTurnTracker | None = None,
-        text_output_queue: Queue[TextEventItem] | None = None,
         gen_kwargs: dict[str, Any] | None = None,
     ) -> None:
         if response_format not in {"pcm", "wav"}:
@@ -260,11 +279,10 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.blocksize = blocksize
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
-        self.text_output_queue = text_output_queue
         self.gen_kwargs = gen_kwargs or {}
         self._operation_lock = Lock()
         self._active_operation: HttpSpeechOperation | None = None
-        self._failed_responses: set[tuple[int | None, str | None, int | None]] = set()
+        self._failed_responses: set[tuple[int | None, str | None, str | None, int | None]] = set()
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         if isinstance(tts_input, EndOfResponse):
@@ -276,7 +294,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     return
                 tts_input.cleanup_only = True
             with self._operation_lock:
-                self._failed_responses.discard(self._response_key(tts_input))
+                self._failed_responses.discard(self._response_identity(tts_input))
             yield AUDIO_RESPONSE_DONE
             return
 
@@ -292,9 +310,9 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         cancel_generation = tts_input.cancel_generation
         if cancel_generation is None and self.cancel_scope is not None:
             cancel_generation = self.cancel_scope.generation
-        response_key = self._response_key(tts_input, cancel_generation)
+        response_identity = self._response_identity(tts_input, cancel_generation)
         with self._operation_lock:
-            if response_key in self._failed_responses:
+            if response_identity in self._failed_responses:
                 logger.debug(
                     "Dropping remote TTS input after response failure turn=%s rev=%s",
                     tts_input.turn_id,
@@ -302,11 +320,11 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 )
                 return
 
-        text, input_language = self._coalesce_pending_tts_input(tts_input)
+        text = tts_input.text.strip()
         if not text:
             return
         voice = self._resolve_voice(tts_input.runtime_config, tts_input.response)
-        language = self._resolve_language(input_language)
+        language = self._resolve_language(tts_input.language_code)
         payload = self._request_payload(text=text, voice=voice, language=language)
         operation = HttpSpeechOperation(
             endpoint_url=self.endpoint_url,
@@ -359,6 +377,8 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                         self._log_first_audio_latency(tts_input, started_at_s)
                         first_audio = False
                     yield chunk
+            if first_audio and not cancel_check():
+                raise SpeechRequestError("speech endpoint returned no audio")
         except SpeechRequestCancelled:
             logger.info("OpenAI-compatible TTS request cancelled")
         except Exception as exc:
@@ -366,17 +386,16 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             logger.error("OpenAI-compatible TTS failed: %s", message, exc_info=True)
             if not cancel_check():
                 with self._operation_lock:
-                    self._failed_responses.add(response_key)
-                if self.text_output_queue is not None:
-                    self.text_output_queue.put(
-                        ResponseFailedEvent(
-                            message=message,
-                            turn_id=tts_input.turn_id,
-                            turn_revision=tts_input.turn_revision,
-                            cancel_generation=cancel_generation,
-                            response_key=tts_input.response_key,
-                        )
+                    self._failed_responses.add(response_identity)
+                self.queue_out.put(
+                    ResponseFailedEvent(
+                        message=message,
+                        turn_id=tts_input.turn_id,
+                        turn_revision=tts_input.turn_revision,
+                        cancel_generation=cancel_generation,
+                        response_key=tts_input.response_key,
                     )
+                )
         finally:
             with self._operation_lock:
                 if self._active_operation is operation:
@@ -392,13 +411,13 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         )
 
     @staticmethod
-    def _response_key(
+    def _response_identity(
         message: TTSInput | EndOfResponse,
         cancel_generation: int | None = None,
-    ) -> tuple[int | None, str | None, int | None]:
+    ) -> tuple[int | None, str | None, str | None, int | None]:
         if cancel_generation is None:
             cancel_generation = message.cancel_generation
-        return (cancel_generation, message.turn_id, message.turn_revision)
+        return (cancel_generation, message.response_key, message.turn_id, message.turn_revision)
 
     def _request_payload(self, *, text: str, voice: str, language: str | None) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -419,32 +438,6 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         if self.instructions:
             payload["instructions"] = self.instructions
         return payload
-
-    def _coalesce_pending_tts_input(self, current: TTSInput) -> tuple[str, str | None]:
-        parts = [current.text.strip()] if current.text.strip() else []
-        language = current.language_code
-        if not hasattr(self.queue_in, "mutex") or not hasattr(self.queue_in, "queue"):
-            return " ".join(parts), language
-
-        with self.queue_in.mutex:
-            while self.queue_in.queue:
-                next_item = self.queue_in.queue[0]
-                if (
-                    is_control_message(next_item, SESSION_END.kind)
-                    or (isinstance(next_item, bytes) and next_item == PIPELINE_END)
-                    or isinstance(next_item, EndOfResponse)
-                    or not isinstance(next_item, TTSInput)
-                ):
-                    break
-                if current.turn_id != next_item.turn_id or current.turn_revision != next_item.turn_revision:
-                    break
-                if language and next_item.language_code and language != next_item.language_code:
-                    break
-                self.queue_in.queue.popleft()
-                if next_item.text.strip():
-                    parts.append(next_item.text.strip())
-                language = language or next_item.language_code
-        return " ".join(parts).strip(), language
 
     def _resolve_language(self, input_language: str | None) -> str | None:
         if self.language is None:

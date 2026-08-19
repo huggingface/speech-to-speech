@@ -61,6 +61,6 @@ The client accepts:
 - a complete WAV response with `--openai_tts_stream false` and
   `--openai_tts_response_format wav`.
 
-The raw streaming fields `stream=true` and `stream_format=audio` are vLLM-Omni
-extensions. Disable `--openai_tts_stream` for servers that implement only the
-standard request shape.
+The `stream_format=audio` field is part of the standard request shape;
+`stream=true` is a vLLM-Omni extension. Disable `--openai_tts_stream` for
+servers that reject that extension.

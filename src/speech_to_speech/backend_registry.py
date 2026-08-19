@@ -277,7 +277,6 @@ def _create_openai_tts(context: HandlerContext, config: Mapping[str, Any]) -> An
             **config,
             "cancel_scope": context.cancel_scope,
             "speculative_turns": context.speculative_turns,
-            "text_output_queue": context.text_output_queue,
         },
     )
 
