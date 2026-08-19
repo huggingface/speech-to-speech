@@ -228,6 +228,30 @@ def test_parser_carries_only_selected_normalized_configs():
     assert not hasattr(args, "qwen3_tts_handler_kwargs")
 
 
+def test_sense_voice_backend_normalizes_selected_cli_config():
+    args = parse_arguments(
+        [
+            "--stt",
+            "sense-voice",
+            "--sense_voice_stt_model_name",
+            "custom/SenseVoiceSmall",
+            "--sense_voice_stt_device",
+            "cpu",
+            "--sense_voice_stt_language",
+            "zh",
+        ]
+    )
+
+    assert args.stt_backend.name == "sense-voice"
+    assert args.stt_backend.config == {
+        "model_name": "custom/SenseVoiceSmall",
+        "device": "cpu",
+        "language": "zh",
+        "gen_kwargs": {},
+    }
+    assert args.stt_backend.spec.required_extra == "sensevoice"
+
+
 def test_facebook_mms_options_are_normalized_for_handler_setup(monkeypatch):
     from speech_to_speech.TTS.facebookmms_handler import FacebookMMSTTSHandler
 
