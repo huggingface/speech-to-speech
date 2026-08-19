@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import os
@@ -67,8 +68,8 @@ class HttpSpeechOperation:
         self.timeout_s = timeout_s
         self._cancelled = Event()
         self._transport_lock = Lock()
-        self._client: httpx.Client | None = None
-        self._response: httpx.Response | None = None
+        self._worker_loop: asyncio.AbstractEventLoop | None = None
+        self._worker_task: asyncio.Task[None] | None = None
         self._deadline_exceeded = Event()
 
     def iter_bytes(self, cancel_check: Callable[[], bool]) -> Iterator[bytes]:
@@ -110,6 +111,7 @@ class HttpSpeechOperation:
         finally:
             if not completed:
                 self.cancel()
+            worker.join()
 
     def _read_stream(
         self,
@@ -117,55 +119,61 @@ class HttpSpeechOperation:
         results: Queue[tuple[bool, object]],
         cancel_check: Callable[[], bool],
     ) -> None:
-        client: httpx.Client | None = None
-        response: httpx.Response | None = None
         result: tuple[bool, object] = (True, _SPEECH_STREAM_DONE)
+        loop = asyncio.new_event_loop()
+        task = loop.create_task(self._read_stream_async(headers, results, cancel_check))
+        with self._transport_lock:
+            self._worker_loop = loop
+            self._worker_task = task
+            cancelled_before_start = self._cancelled.is_set()
+        if cancelled_before_start:
+            task.cancel()
         try:
-            client = httpx.Client(timeout=self.timeout_s)
+            loop.run_until_complete(task)
+        except asyncio.CancelledError:
+            result = (False, SpeechRequestCancelled())
+        except Exception as exc:
+            result = (False, self._normalize_error(exc))
+        finally:
             with self._transport_lock:
-                if self._cancelled.is_set() or cancel_check():
-                    self._cancelled.set()
-                    cancelled_before_dispatch = True
-                else:
-                    self._client = client
-                    cancelled_before_dispatch = False
-            if cancelled_before_dispatch:
-                return
+                if self._worker_task is task:
+                    self._worker_task = None
+                if self._worker_loop is loop:
+                    self._worker_loop = None
+            loop.close()
 
-            with client.stream("POST", self.endpoint_url, headers=headers, json=self.payload) as response:
-                with self._transport_lock:
-                    if self._cancelled.is_set():
-                        cancelled_before_read = True
-                    else:
-                        self._response = response
-                        cancelled_before_read = False
-                if cancelled_before_read:
-                    return
+        self._publish(results, result)
+
+    async def _read_stream_async(
+        self,
+        headers: dict[str, str],
+        results: Queue[tuple[bool, object]],
+        cancel_check: Callable[[], bool],
+    ) -> None:
+        client = httpx.AsyncClient(timeout=self.timeout_s)
+        try:
+            if self._cancelled.is_set() or cancel_check():
+                self._cancelled.set()
+                raise SpeechRequestCancelled
+
+            async with client.stream("POST", self.endpoint_url, headers=headers, json=self.payload) as response:
                 try:
                     response.raise_for_status()
                 except httpx.HTTPStatusError as exc:
                     raise SpeechRequestError(f"speech server returned HTTP {exc.response.status_code}") from exc
                 self._validate_content_type(response)
-                for chunk in response.iter_bytes():
+                async for chunk in response.aiter_bytes():
                     if self._cancelled.is_set():
                         return
                     if chunk and not self._publish(results, (True, chunk)):
                         return
-        except Exception as exc:
-            result = (False, self._normalize_error(exc))
         finally:
-            with self._transport_lock:
-                if self._response is response:
-                    self._response = None
-                if self._client is client:
-                    self._client = None
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:
-                    logger.debug("Error closing speech client", exc_info=True)
-
-        self._publish(results, result)
+            close_task = asyncio.create_task(client.aclose())
+            try:
+                await asyncio.shield(close_task)
+            except asyncio.CancelledError:
+                await close_task
+                raise
 
     def _publish(self, results: Queue[tuple[bool, object]], result: tuple[bool, object]) -> bool:
         while not self._cancelled.is_set():
@@ -203,20 +211,19 @@ class HttpSpeechOperation:
         return exc
 
     def cancel(self) -> None:
-        self._cancelled.set()
         with self._transport_lock:
-            response = self._response
-            client = self._client
-        if response is not None:
+            if self._cancelled.is_set():
+                return
+            self._cancelled.set()
+            loop = self._worker_loop
+            task = self._worker_task
+        if loop is not None and task is not None:
             try:
-                response.close()
-            except Exception:
-                logger.debug("Error closing speech response", exc_info=True)
-        if client is not None:
-            try:
-                client.close()
-            except Exception:
-                logger.debug("Error closing speech client", exc_info=True)
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                # The worker may have completed and closed its loop between the
+                # lock snapshot and this cancellation request.
+                pass
 
     def _raise_if_stopped(self, cancel_check: Callable[[], bool]) -> None:
         if self._deadline_exceeded.is_set():

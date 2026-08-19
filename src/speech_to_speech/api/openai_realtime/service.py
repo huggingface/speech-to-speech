@@ -533,6 +533,19 @@ class RealtimeService:
         if isinstance(event, TokenUsageEvent):
             return self._on_token_usage(conn_id, event)
 
+        if isinstance(event, (AssistantOutputEvent, AssistantToolCallReadyEvent)):
+            # A TTS failure can overtake assistant content that the LLM already
+            # queued for the same response. Do not publish text or tools after
+            # that response has been marked failed.
+            st = self._state(conn_id)
+            event_response_key = event.response_key
+            failed_response_owns_event = st.response_failed and (
+                event_response_key is None or event_response_key == st.current_response_key
+            )
+            if failed_response_owns_event:
+                logger.info("Ignoring %s after response failure", event.type)
+                return []
+
         is_stale = self._is_stale_turn_event(event, wait_for_pending_reopen=wait_for_pending_reopen)
         if is_stale is None:
             return None

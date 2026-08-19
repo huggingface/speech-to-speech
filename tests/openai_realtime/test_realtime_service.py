@@ -4065,6 +4065,52 @@ class TestDispatchPipelineEvent:
         assert response_done.response.output[0].status == "incomplete"
         assert response_done.response.status_details.error.type == "response_failed"
 
+    def test_response_failure_suppresses_late_assistant_content(self, service, conn_id):
+        response_key = "response-1"
+        service.response._ensure_response(conn_id, response_key)
+        service.dispatch_pipeline_event(
+            conn_id,
+            ResponseFailedEvent(message="speech provider failed", response_key=response_key),
+        )
+
+        assert (
+            service.dispatch_pipeline_event(
+                conn_id,
+                AssistantOutputEvent(text="never synthesized", response_key=response_key),
+            )
+            == []
+        )
+        assert (
+            service.dispatch_pipeline_event(
+                conn_id,
+                AssistantToolCallReadyEvent(
+                    part=AssistantToolCallPart(
+                        tool={
+                            "type": "function_call",
+                            "call_id": "call-late",
+                            "name": "lookup",
+                            "arguments": "{}",
+                        }
+                    ),
+                    output_sequence=1,
+                    response_key=response_key,
+                ),
+            )
+            == []
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            TokenUsageEvent(input_tokens=3, output_tokens=2, response_key=response_key),
+        )
+
+        state = service._state(conn_id)
+        assert state.pending_text_outputs == []
+        assert state.pending_function_calls == {}
+        assert state.response_usage.input_tokens == 3
+        assert state.response_usage.output_tokens == 2
+        done = service.finish_response(conn_id, response_key=response_key)
+        assert done[-1].response.status == "failed"
+
     def test_response_failed_while_pending_emits_error_and_failed_done(self, service, conn_id):
         service.dispatch_pipeline_event(
             conn_id,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import socket
 from queue import Queue
@@ -464,8 +465,8 @@ def test_http_speech_cancellation_after_completion_is_harmless(monkeypatch):
     transport = tts_module.httpx.MockTransport(
         lambda request: tts_module.httpx.Response(200, content=b"\x00\x00", request=request)
     )
-    client = tts_module.httpx.Client(transport=transport)
-    monkeypatch.setattr(tts_module.httpx, "Client", lambda **kwargs: client)
+    client = tts_module.httpx.AsyncClient(transport=transport)
+    monkeypatch.setattr(tts_module.httpx, "AsyncClient", lambda **kwargs: client)
     operation = HttpSpeechOperation(
         endpoint_url="http://localhost:8000/v1/audio/speech",
         api_key=None,
@@ -500,10 +501,10 @@ def test_http_speech_cancellation_during_client_construction_prevents_dispatch(m
             stream_calls += 1
             raise AssertionError("cancelled operation must not enter client.stream()")
 
-        def close(self) -> None:
+        async def aclose(self) -> None:
             pass
 
-    monkeypatch.setattr(tts_module.httpx, "Client", BlockingClient)
+    monkeypatch.setattr(tts_module.httpx, "AsyncClient", BlockingClient)
     operation = HttpSpeechOperation(
         endpoint_url="http://localhost:8000/v1/audio/speech",
         api_key=None,
@@ -545,22 +546,23 @@ def test_http_speech_timeout_is_a_total_deadline(monkeypatch):
     closed = Event()
 
     class TricklingResponse:
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, *args) -> None:
+        async def __aexit__(self, *args) -> None:
             del args
-            self.close()
+            await self.aclose()
 
-        def close(self) -> None:
+        async def aclose(self) -> None:
             closed.set()
 
         def raise_for_status(self) -> None:
             pass
 
-        def iter_bytes(self):
+        async def aiter_bytes(self):
             while not closed.wait(0.01):
                 yield b"\x00\x00"
+                await asyncio.sleep(0)
 
     response = TricklingResponse()
 
@@ -572,10 +574,10 @@ def test_http_speech_timeout_is_a_total_deadline(monkeypatch):
             del args, kwargs
             return response
 
-        def close(self) -> None:
-            response.close()
+        async def aclose(self) -> None:
+            await response.aclose()
 
-    monkeypatch.setattr(tts_module.httpx, "Client", TricklingClient)
+    monkeypatch.setattr(tts_module.httpx, "AsyncClient", TricklingClient)
     operation = HttpSpeechOperation(
         endpoint_url="http://localhost:8000/v1/audio/speech",
         api_key=None,
@@ -604,8 +606,8 @@ def test_openai_tts_rejects_non_audio_success_responses(monkeypatch, content_typ
             request=request,
         )
     )
-    client = tts_module.httpx.Client(transport=transport)
-    monkeypatch.setattr(tts_module.httpx, "Client", lambda **kwargs: client)
+    client = tts_module.httpx.AsyncClient(transport=transport)
+    monkeypatch.setattr(tts_module.httpx, "AsyncClient", lambda **kwargs: client)
     handler = OpenAICompatibleTTSHandler(
         Event(),
         queue_in=Queue(),
@@ -620,6 +622,65 @@ def test_openai_tts_rejects_non_audio_success_responses(monkeypatch, content_typ
     assert isinstance(failure, ResponseFailedEvent)
     assert failure.message == "speech endpoint returned a non-audio response"
     assert failure.response_key == "response-1"
+
+
+def test_http_speech_cancellation_closes_transport_before_response_headers():
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    host, port = listener.getsockname()
+    request_received = Event()
+    connection_closed = Event()
+    cancelled = Event()
+
+    def serve_stalled_response() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            request = b""
+            while b"\r\n\r\n" not in request:
+                data = connection.recv(4096)
+                if not data:
+                    return
+                request += data
+            request_received.set()
+            while connection.recv(4096):
+                pass
+            connection_closed.set()
+
+    server_thread = Thread(target=serve_stalled_response, daemon=True)
+    server_thread.start()
+    operation = HttpSpeechOperation(
+        endpoint_url=f"http://{host}:{port}/v1/audio/speech",
+        api_key=None,
+        payload={"input": "hello"},
+        timeout_s=30,
+    )
+    errors: list[BaseException] = []
+
+    def consume() -> None:
+        try:
+            list(operation.iter_bytes(cancelled.is_set))
+        except BaseException as exc:
+            errors.append(exc)
+
+    consumer = Thread(target=consume)
+    consumer.start()
+
+    try:
+        assert request_received.wait(1)
+        cancelled.set()
+        consumer.join(timeout=1)
+
+        assert not consumer.is_alive()
+        assert len(errors) == 1
+        assert isinstance(errors[0], SpeechRequestCancelled)
+        assert connection_closed.wait(1)
+        assert operation._worker_task is None
+        assert operation._worker_loop is None
+    finally:
+        listener.close()
+        server_thread.join(timeout=1)
 
 
 def test_openai_tts_cancellation_unblocks_a_stalled_socket_and_session_end():
