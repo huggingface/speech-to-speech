@@ -4,6 +4,7 @@ import io
 import logging
 import os
 from collections.abc import Callable
+from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from time import perf_counter
 from typing import Any, Iterator, cast
@@ -44,6 +45,11 @@ class SpeechRequestError(RuntimeError):
     """Sanitized HTTP/protocol failure safe to log or surface."""
 
 
+_SPEECH_STREAM_DONE = object()
+_SPEECH_STREAM_QUEUE_MAXSIZE = 2
+_SPEECH_STREAM_POLL_INTERVAL_S = 0.025
+
+
 class HttpSpeechOperation:
     """Exactly one speech request and its streaming transport lifecycle."""
 
@@ -68,70 +74,127 @@ class HttpSpeechOperation:
     def iter_bytes(self, cancel_check: Callable[[], bool]) -> Iterator[bytes]:
         deadline_at_s = perf_counter() + self.timeout_s
         self._raise_if_stopped(cancel_check)
+        results: Queue[tuple[bool, object]] = Queue(maxsize=_SPEECH_STREAM_QUEUE_MAXSIZE)
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        client = httpx.Client(timeout=self.timeout_s)
-        with self._transport_lock:
-            cancelled_before_dispatch = self._cancelled.is_set() or cancel_check()
-            if cancelled_before_dispatch:
-                self._cancelled.set()
-            else:
-                self._client = client
-        if cancelled_before_dispatch:
-            client.close()
-            raise SpeechRequestCancelled
-
-        monitor_stop = Event()
-        monitor = Thread(
-            target=self._monitor_cancellation,
-            args=(cancel_check, monitor_stop, deadline_at_s),
-            name="tts-http-cancel",
+        worker = Thread(
+            target=self._read_stream,
+            args=(headers, results),
+            name="tts-http-reader",
             daemon=True,
         )
-        monitor.start()
+        worker.start()
 
+        completed = False
         try:
-            self._raise_if_stopped(cancel_check)
+            while True:
+                self._raise_if_stopped(cancel_check)
+                remaining_s = deadline_at_s - perf_counter()
+                if remaining_s <= 0:
+                    self._deadline_exceeded.set()
+                    self.cancel()
+                    raise SpeechRequestError("speech request timed out")
+                try:
+                    succeeded, value = results.get(timeout=min(_SPEECH_STREAM_POLL_INTERVAL_S, remaining_s))
+                except Empty:
+                    continue
+                self._raise_if_stopped(cancel_check)
+                if not succeeded:
+                    raise cast(BaseException, value)
+                if value is _SPEECH_STREAM_DONE:
+                    completed = True
+                    return
+                yield cast(bytes, value)
+        finally:
+            if not completed:
+                self.cancel()
+
+    def _read_stream(self, headers: dict[str, str], results: Queue[tuple[bool, object]]) -> None:
+        client: httpx.Client | None = None
+        response: httpx.Response | None = None
+        result: tuple[bool, object] = (True, _SPEECH_STREAM_DONE)
+        try:
+            client = httpx.Client(timeout=self.timeout_s)
+            with self._transport_lock:
+                if self._cancelled.is_set():
+                    cancelled_before_dispatch = True
+                else:
+                    self._client = client
+                    cancelled_before_dispatch = False
+            if cancelled_before_dispatch:
+                return
+
             with client.stream("POST", self.endpoint_url, headers=headers, json=self.payload) as response:
                 with self._transport_lock:
-                    self._response = response
-                self._raise_if_stopped(cancel_check)
+                    if self._cancelled.is_set():
+                        cancelled_before_read = True
+                    else:
+                        self._response = response
+                        cancelled_before_read = False
+                if cancelled_before_read:
+                    return
                 try:
                     response.raise_for_status()
                 except httpx.HTTPStatusError as exc:
                     raise SpeechRequestError(f"speech server returned HTTP {exc.response.status_code}") from exc
+                self._validate_content_type(response)
                 for chunk in response.iter_bytes():
-                    self._raise_if_stopped(cancel_check)
-                    if chunk:
-                        yield chunk
-                self._raise_if_stopped(cancel_check)
-        except SpeechRequestCancelled:
-            raise
-        except SpeechRequestError:
-            raise
-        except httpx.TimeoutException as exc:
-            raise SpeechRequestError("speech request timed out") from exc
-        except httpx.HTTPError as exc:
-            if self._deadline_exceeded.is_set():
-                raise SpeechRequestError("speech request timed out") from exc
-            if self._cancelled.is_set():
-                raise SpeechRequestCancelled from exc
-            raise SpeechRequestError(f"speech transport failed: {type(exc).__name__}") from exc
+                    if self._cancelled.is_set():
+                        return
+                    if chunk and not self._publish(results, (True, chunk)):
+                        return
         except Exception as exc:
-            if self._deadline_exceeded.is_set():
-                raise SpeechRequestError("speech request timed out") from exc
-            if self._cancelled.is_set():
-                raise SpeechRequestCancelled from exc
-            raise
+            result = (False, self._normalize_error(exc))
         finally:
-            monitor_stop.set()
-            monitor.join(timeout=0.2)
             with self._transport_lock:
-                self._response = None
-                self._client = None
-            client.close()
+                if self._response is response:
+                    self._response = None
+                if self._client is client:
+                    self._client = None
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    logger.debug("Error closing speech client", exc_info=True)
+
+        self._publish(results, result)
+
+    def _publish(self, results: Queue[tuple[bool, object]], result: tuple[bool, object]) -> bool:
+        while not self._cancelled.is_set():
+            try:
+                results.put(result, timeout=_SPEECH_STREAM_POLL_INTERVAL_S)
+            except Full:
+                continue
+            return True
+        return False
+
+    @staticmethod
+    def _validate_content_type(response: httpx.Response) -> None:
+        headers = getattr(response, "headers", None)
+        if headers is None:
+            return
+        media_type = headers.get("content-type", "").partition(";")[0].strip().lower()
+        if media_type.startswith("text/") or media_type == "application/json" or media_type.endswith("+json"):
+            raise SpeechRequestError("speech endpoint returned a non-audio response")
+
+    def _normalize_error(self, exc: Exception) -> BaseException:
+        if isinstance(exc, (SpeechRequestCancelled, SpeechRequestError)):
+            return exc
+        if isinstance(exc, httpx.TimeoutException):
+            return SpeechRequestError("speech request timed out")
+        if isinstance(exc, httpx.HTTPError):
+            if self._deadline_exceeded.is_set():
+                return SpeechRequestError("speech request timed out")
+            if self._cancelled.is_set():
+                return SpeechRequestCancelled()
+            return SpeechRequestError(f"speech transport failed: {type(exc).__name__}")
+        if self._deadline_exceeded.is_set():
+            return SpeechRequestError("speech request timed out")
+        if self._cancelled.is_set():
+            return SpeechRequestCancelled()
+        return exc
 
     def cancel(self) -> None:
         self._cancelled.set()
@@ -155,24 +218,6 @@ class HttpSpeechOperation:
         if self._cancelled.is_set() or cancel_check():
             self.cancel()
             raise SpeechRequestCancelled
-
-    def _monitor_cancellation(
-        self,
-        cancel_check: Callable[[], bool],
-        stop: Event,
-        deadline_at_s: float,
-    ) -> None:
-        while True:
-            remaining_s = deadline_at_s - perf_counter()
-            if remaining_s <= 0:
-                self._deadline_exceeded.set()
-                self.cancel()
-                return
-            if stop.wait(min(0.025, remaining_s)):
-                return
-            if cancel_check():
-                self.cancel()
-                return
 
 
 class _StreamingLinearResampler:

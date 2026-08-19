@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import socket
 from queue import Queue
 from threading import Event, Thread
 from time import perf_counter
@@ -10,6 +11,7 @@ import pytest
 from scipy.io import wavfile
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.control import SESSION_END
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.messages import (
     AUDIO_RESPONSE_DONE,
@@ -575,3 +577,97 @@ def test_http_speech_timeout_is_a_total_deadline(monkeypatch):
 
     assert closed.is_set()
     assert perf_counter() - started_at_s < 0.5
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    ["application/json; charset=utf-8", "application/problem+json", "text/plain"],
+)
+def test_openai_tts_rejects_non_audio_success_responses(monkeypatch, content_type):
+    transport = tts_module.httpx.MockTransport(
+        lambda request: tts_module.httpx.Response(
+            200,
+            headers={"Content-Type": content_type},
+            content=b'{"error":"upstream failure"}',
+            request=request,
+        )
+    )
+    client = tts_module.httpx.Client(transport=transport)
+    monkeypatch.setattr(tts_module.httpx, "Client", lambda **kwargs: client)
+    handler = OpenAICompatibleTTSHandler(
+        Event(),
+        queue_in=Queue(),
+        queue_out=Queue(),
+        setup_args=(Event(),),
+        setup_kwargs={"sample_rate": 24000, "blocksize": 512},
+    )
+
+    assert list(handler.process(TTSInput(text="Hello", response_key="response-1"))) == []
+
+    failure = handler.queue_out.get_nowait()
+    assert isinstance(failure, ResponseFailedEvent)
+    assert failure.message == "speech endpoint returned a non-audio response"
+    assert failure.response_key == "response-1"
+
+
+def test_openai_tts_cancellation_unblocks_a_stalled_socket_and_session_end():
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    host, port = listener.getsockname()
+    headers_sent = Event()
+    release_server = Event()
+
+    def serve_stalled_response() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            request = b""
+            while b"\r\n\r\n" not in request:
+                data = connection.recv(4096)
+                if not data:
+                    return
+                request += data
+            connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\nTransfer-Encoding: chunked\r\n\r\n")
+            headers_sent.set()
+            release_server.wait(5)
+
+    server_thread = Thread(target=serve_stalled_response, daemon=True)
+    server_thread.start()
+    cancel_scope = CancelScope()
+    handler = OpenAICompatibleTTSHandler(
+        Event(),
+        queue_in=Queue(),
+        queue_out=Queue(),
+        setup_args=(Event(),),
+        setup_kwargs={
+            "base_url": f"http://{host}:{port}/v1",
+            "sample_rate": 24000,
+            "blocksize": 512,
+            "timeout": 30,
+            "cancel_scope": cancel_scope,
+        },
+    )
+    handler.queue_in.put(
+        TTSInput(
+            text="Hello",
+            cancel_generation=cancel_scope.generation,
+        )
+    )
+    handler_thread = Thread(target=handler.run, daemon=True)
+    handler_thread.start()
+
+    try:
+        assert headers_sent.wait(1)
+        cancel_scope.cancel()
+        handler.queue_in.put(SESSION_END)
+        handler.queue_in.put(PIPELINE_END)
+
+        assert handler.queue_out.get(timeout=1) == SESSION_END
+        handler_thread.join(timeout=1)
+        assert not handler_thread.is_alive()
+        assert handler.queue_out.get_nowait() == PIPELINE_END
+    finally:
+        release_server.set()
+        listener.close()
+        server_thread.join(timeout=1)
