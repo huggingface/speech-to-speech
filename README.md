@@ -167,6 +167,7 @@ This installs the package in editable mode and makes the `speech-to-speech` CLI 
 | STT | [Lightning Whisper MLX](https://github.com/mustafaaljadery/lightning-whisper-mlx) | Apple Silicon | `whisper-mlx` |
 | STT | [MLX Audio Whisper](https://github.com/huggingface/mlx-audio) | Apple Silicon | built-in on macOS |
 | STT | [Paraformer](https://github.com/modelscope/FunASR) | CUDA / CPU | `paraformer` |
+| STT | OpenAI-compatible `/v1/audio/transcriptions` endpoint | local or remote HTTP server | built-in |
 | LLM | OpenAI-compatible API (`responses-api`, `chat-completions`) | hosted providers or self-hosted servers | built-in |
 | LLM | [Transformers](https://huggingface.co/models?pipeline_tag=text-generation&sort=trending) | CUDA / CPU | built-in |
 | LLM | [mlx-lm](https://github.com/ml-explore/mlx-lm) | Apple Silicon | built-in on macOS |
@@ -177,6 +178,9 @@ This installs the package in editable mode and makes the `speech-to-speech` CLI 
 | TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | built-in |
 
 Select implementations with `--stt`, `--llm_backend`, and `--tts`. The CLI constructs configuration only for the selected backends; known options for inactive backends remain accepted for compatibility but are ignored with a warning. JSON configuration may likewise include extra inactive-backend keys, which are ignored. Run `speech-to-speech serve -h` for the defaults, or pass selectors before `-h` to see another combination's backend-specific flags (for example, `speech-to-speech serve --stt mlx-audio-whisper -h`).
+
+For client-only speech recognition with vLLM, NVIDIA Speech NIM, or another
+compatible server, see [OpenAI-compatible STT](./docs/openai-compatible-stt.md).
 
 ## Commands
 

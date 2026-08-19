@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
@@ -22,6 +23,7 @@ from speech_to_speech.arguments_classes.language_model_arguments import Language
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
     MLXAudioWhisperSTTHandlerArguments,
 )
+from speech_to_speech.arguments_classes.openai_stt_arguments import OpenAICompatibleSTTHandlerArguments
 from speech_to_speech.arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
 from speech_to_speech.arguments_classes.parakeet_tdt_arguments import (
     ParakeetTDTSTTHandlerArguments,
@@ -263,6 +265,44 @@ def _create_parakeet(context: HandlerContext, config: Mapping[str, Any]) -> Any:
     return handler
 
 
+def _create_openai_stt(context: HandlerContext, config: Mapping[str, Any]) -> Any:
+    from speech_to_speech.STT.endpoint_admission import (
+        EndpointAdmissionRegistry,
+        EndpointAdmissionSettings,
+    )
+
+    handler_class = _load_handler(
+        "speech_to_speech.STT.openai_compatible_handler",
+        "OpenAICompatibleSTTHandler",
+    )
+    setup_kwargs = dict(config)
+    configured_api_key = setup_kwargs.get("api_key")
+    resolved_api_key = configured_api_key if configured_api_key is not None else os.getenv("OPENAI_API_KEY")
+    lease = EndpointAdmissionRegistry.acquire(
+        base_url=setup_kwargs["base_url"],
+        api_key=resolved_api_key,
+        settings=EndpointAdmissionSettings(
+            max_concurrency=setup_kwargs["max_concurrency"],
+            max_queue_size=setup_kwargs["max_queue_size"],
+            progressive_min_interval_s=setup_kwargs["progressive_min_interval"],
+        ),
+    )
+    setup_kwargs.update(
+        admission_lease=lease,
+        speculative_turns=context.speculative_turns,
+    )
+    try:
+        return handler_class(
+            context.stop_event,
+            queue_in=context.queue_in,
+            queue_out=context.queue_out,
+            setup_kwargs=setup_kwargs,
+        )
+    except Exception:
+        lease.release()
+        raise
+
+
 def _create_local_llm(backend: Literal["transformers", "mlx-lm"]) -> HandlerFactory:
     def create(context: HandlerContext, config: Mapping[str, Any]) -> Any:
         setup_kwargs = dict(config)
@@ -359,6 +399,13 @@ STT_BACKENDS = build_backend_registry(
             ),
             config_prefix="paraformer_stt",
             required_extra="paraformer",
+        ),
+        BackendSpec(
+            "openai",
+            "stt",
+            OpenAICompatibleSTTHandlerArguments,
+            _create_openai_stt,
+            config_prefix="openai_stt",
         ),
     ],
 )
