@@ -6,7 +6,7 @@ import os
 from collections.abc import Callable
 from threading import Event, Lock, Thread
 from time import perf_counter
-from typing import Any, Iterator
+from typing import Any, Iterator, cast
 
 import httpx
 import numpy as np
@@ -388,12 +388,15 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 with self._operation_lock:
                     self._failed_responses.add(response_identity)
                 self.queue_out.put(
-                    ResponseFailedEvent(
-                        message=message,
-                        turn_id=tts_input.turn_id,
-                        turn_revision=tts_input.turn_revision,
-                        cancel_generation=cancel_generation,
-                        response_key=tts_input.response_key,
+                    cast(
+                        TTSOut,
+                        ResponseFailedEvent(
+                            message=message,
+                            turn_id=tts_input.turn_id,
+                            turn_revision=tts_input.turn_revision,
+                            cancel_generation=cancel_generation,
+                            response_key=tts_input.response_key,
+                        ),
                     )
                 )
         finally:
