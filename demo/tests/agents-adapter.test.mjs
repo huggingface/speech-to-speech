@@ -50,3 +50,62 @@ test("the pinned SDK changes the live voice and explicitly clears all tools", as
     session: { type: "realtime", tools: [], tool_choice: "none" },
   });
 });
+
+test("a current transcription failure clears its item and resumes listening", () => {
+  globalThis.localStorage = { getItem() { return null; } };
+  globalThis.OpenAIAgentsRealtime = realtime;
+
+  const client = new S2sRealtimeClient({
+    transport: "websocket",
+    directUrl: "ws://unused",
+  });
+  client._status = "processing";
+  client._currentUserItemId = "item-current";
+  client._userTranscriptByItem.set("item-current", "partial words");
+  const statuses = [];
+  const errors = [];
+  client.addEventListener("status", (event) => statuses.push(event.detail.status));
+  client.addEventListener("server-error", (event) => errors.push(event.detail.error.message));
+
+  client._onTransportEvent({
+    type: "conversation.item.input_audio_transcription.failed",
+    item_id: "item-current",
+    content_index: 0,
+    error: { message: "transcription request timed out" },
+  });
+
+  assert.equal(client.status, "connected");
+  assert.equal(client._currentUserItemId, "");
+  assert.equal(client._userTranscriptByItem.has("item-current"), false);
+  assert.deepEqual(statuses, ["connected"]);
+  assert.deepEqual(errors, ["transcription request timed out"]);
+});
+
+test("an older transcription failure does not reset the current item", () => {
+  globalThis.localStorage = { getItem() { return null; } };
+  globalThis.OpenAIAgentsRealtime = realtime;
+
+  const client = new S2sRealtimeClient({
+    transport: "websocket",
+    directUrl: "ws://unused",
+  });
+  client._status = "processing";
+  client._currentUserItemId = "item-current";
+  client._userTranscriptByItem.set("item-old", "old partial");
+  client._userTranscriptByItem.set("item-current", "current partial");
+  const errors = [];
+  client.addEventListener("server-error", (event) => errors.push(event.detail.error.message));
+
+  client._onTransportEvent({
+    type: "conversation.item.input_audio_transcription.failed",
+    item_id: "item-old",
+    content_index: 0,
+    error: { message: "old transcription failed" },
+  });
+
+  assert.equal(client.status, "processing");
+  assert.equal(client._currentUserItemId, "item-current");
+  assert.equal(client._userTranscriptByItem.has("item-old"), false);
+  assert.equal(client._userTranscriptByItem.get("item-current"), "current partial");
+  assert.deepEqual(errors, ["old transcription failed"]);
+});
