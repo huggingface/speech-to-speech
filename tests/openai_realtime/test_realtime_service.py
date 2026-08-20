@@ -2102,6 +2102,36 @@ class TestHandleResponseCreate:
         assert isinstance(result, ResponseCreatedEvent)
         assert result.response.conversation_id == service._state(conn_id).conversation_id
 
+    def test_response_custom_voice_id_is_reported_in_created_and_done_events(self, service, conn_id):
+        created = service.handle_response_create(
+            conn_id,
+            ResponseCreateEvent(
+                type="response.create",
+                response={"audio": {"output": {"voice": {"id": "voice_response"}}}},
+            ),
+        )
+
+        assert isinstance(created, ResponseCreatedEvent)
+        assert created.response.audio.output.voice == "voice_response"
+        done = next(event for event in service.finish_response(conn_id) if isinstance(event, ResponseDoneEvent))
+        assert done.response.audio.output.voice == "voice_response"
+
+    def test_session_custom_voice_id_is_reported_in_created_and_done_events(self, service, conn_id):
+        service.handle_session_update(
+            conn_id,
+            SessionUpdateEvent(
+                type="session.update",
+                session={"type": "realtime", "audio": {"output": {"voice": {"id": "voice_session"}}}},
+            ),
+        )
+
+        created = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
+
+        assert isinstance(created, ResponseCreatedEvent)
+        assert created.response.audio.output.voice == "voice_session"
+        done = next(event for event in service.finish_response(conn_id) if isinstance(event, ResponseDoneEvent))
+        assert done.response.audio.output.voice == "voice_session"
+
 
 # ===================================================================
 # Response cancel

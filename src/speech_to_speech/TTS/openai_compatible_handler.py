@@ -302,7 +302,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         response_format: str = "pcm",
         sample_rate: int = 24000,
         speed: float = 1.0,
-        stream: bool = True,
+        stream: bool = False,
         timeout: float = 300.0,
         blocksize: int = 512,
         cancel_scope: CancelScope | None = None,
@@ -312,13 +312,13 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         if response_format not in {"pcm", "wav"}:
             raise ValueError("OpenAI-compatible TTS currently supports response_format 'pcm' or 'wav'")
         if stream and response_format != "pcm":
-            raise ValueError("Streaming OpenAI-compatible TTS requires response_format='pcm'")
+            raise ValueError("The vLLM streaming extension requires response_format='pcm'")
         if timeout <= 0:
             raise ValueError("OpenAI-compatible TTS timeout must be > 0")
         if blocksize < 1:
             raise ValueError("OpenAI-compatible TTS blocksize must be >= 1")
         if stream and speed != 1.0:
-            raise ValueError("Streaming OpenAI-compatible TTS requires speed=1.0")
+            raise ValueError("The vLLM streaming extension requires speed=1.0")
 
         self.should_listen = should_listen
         self.base_url = base_url.rstrip("/")
@@ -480,7 +480,13 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             cancel_generation = message.cancel_generation
         return (cancel_generation, message.response_key, message.turn_id, message.turn_revision)
 
-    def _request_payload(self, *, text: str, voice: str, language: str | None) -> dict[str, Any]:
+    def _request_payload(
+        self,
+        *,
+        text: str,
+        voice: str | dict[str, str],
+        language: str | None,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
             "input": text,
@@ -488,8 +494,10 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             "response_format": self.response_format,
             **self.gen_kwargs,
         }
+        if self.response_format == "pcm":
+            payload["stream_format"] = "audio"
         if self.stream:
-            payload.update({"stream": True, "stream_format": "audio"})
+            payload["stream"] = True
         elif self.speed != 1.0:
             payload["speed"] = self.speed
         if language:
@@ -507,15 +515,28 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             return input_language or "Auto"
         return self.language
 
-    def _resolve_voice(self, runtime_config: RuntimeConfig | None, response: Any) -> str:
+    def _resolve_voice(
+        self,
+        runtime_config: RuntimeConfig | None,
+        response: Any,
+    ) -> str | dict[str, str]:
         if response and response.audio and response.audio.output and response.audio.output.voice:
-            return str(response.audio.output.voice)
+            return self._serialize_voice(response.audio.output.voice)
         if runtime_config is not None:
             audio = runtime_config.session.audio
             output = audio.output if audio is not None else None
             if output is not None and output.voice:
-                return str(output.voice)
+                return self._serialize_voice(output.voice)
         return self.voice
+
+    @staticmethod
+    def _serialize_voice(voice: Any) -> str | dict[str, str]:
+        if isinstance(voice, str):
+            return voice
+        voice_id = voice.get("id") if isinstance(voice, dict) else getattr(voice, "id", None)
+        if isinstance(voice_id, str) and voice_id:
+            return {"id": voice_id}
+        raise ValueError("Realtime voice overrides must be a voice name or custom voice ID")
 
     def _decode_pcm_stream(self, encoded_chunks: Iterator[bytes]) -> Iterator[np.ndarray]:
         resampler = _StreamingLinearResampler(self.sample_rate, PIPELINE_SAMPLE_RATE)

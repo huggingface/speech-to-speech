@@ -50,6 +50,25 @@ speech-to-speech local \
 Qwen3-TTS produces 24 kHz audio. The client incrementally converts its raw
 PCM16 response to the pipeline's mono, signed-int16, 16 kHz, 512-sample chunks.
 
+## OpenAI and standard-compatible servers
+
+Standard OpenAI-compatible endpoints do not need the vLLM streaming extension.
+For example, with `OPENAI_API_KEY` set:
+
+```bash
+speech-to-speech local \
+  --tts openai \
+  --openai_tts_base_url https://api.openai.com/v1 \
+  --openai_tts_model gpt-4o-mini-tts \
+  --openai_tts_voice alloy \
+  --openai_tts_response_format pcm \
+  --openai_tts_sample_rate 24000
+```
+
+The default request uses the standard `stream_format=audio` field and consumes
+the HTTP response body incrementally. It does not send the non-standard
+`stream` field.
+
 ## Authentication and compatibility
 
 Set `--openai_tts_api_key` when the endpoint requires bearer authentication.
@@ -61,9 +80,9 @@ The client accepts:
 - a complete WAV response with `--openai_tts_stream false` and
   `--openai_tts_response_format wav`.
 
-The `stream_format=audio` field is part of the standard request shape;
-`stream=true` is a vLLM-Omni extension. Disable `--openai_tts_stream` for
-servers that reject that extension.
+The `stream_format=audio` field is part of the standard request shape.
+`stream=true` is a vLLM-Omni extension and is disabled by default; enable it
+explicitly with `--openai_tts_stream true` when the server supports it.
 
 Cancellation is best-effort: barge-in and session teardown close the client's
 active HTTP response and prevent further audio publication locally. The

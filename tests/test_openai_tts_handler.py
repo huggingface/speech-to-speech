@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import socket
 from queue import Queue
 from threading import Event, Thread, current_thread
@@ -9,8 +10,11 @@ from time import perf_counter
 
 import numpy as np
 import pytest
+from openai.types.realtime import RealtimeSessionCreateRequest
+from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from scipy.io import wavfile
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END
 from speech_to_speech.pipeline.events import ResponseFailedEvent
@@ -121,8 +125,101 @@ def test_openai_tts_streams_resampled_fixed_size_pcm(monkeypatch):
     assert payload["input"] == "Hello"
     assert payload["voice"] == "aiden"
     assert payload["language"] == "English"
+    assert "stream" not in payload
+    assert payload["stream_format"] == "audio"
+
+
+def test_openai_tts_vllm_stream_extension_is_opt_in(monkeypatch):
+    handler = _openai_tts_handler(monkeypatch)
+    handler.stream = True
+
+    assert list(handler.process(TTSInput(text="Hello")))
+
+    payload = _FakeSpeechOperation.instances[0].payload
     assert payload["stream"] is True
     assert payload["stream_format"] == "audio"
+
+
+def test_openai_tts_preserves_session_custom_voice_id(monkeypatch):
+    handler = _openai_tts_handler(monkeypatch)
+    runtime_config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(
+            type="realtime",
+            audio={"output": {"voice": {"id": "voice_session"}}},
+        )
+    )
+
+    assert list(handler.process(TTSInput(text="Hello", runtime_config=runtime_config)))
+
+    assert _FakeSpeechOperation.instances[0].payload["voice"] == {"id": "voice_session"}
+
+
+def test_openai_tts_preserves_per_response_custom_voice_id(monkeypatch):
+    handler = _openai_tts_handler(monkeypatch)
+    response = RealtimeResponseCreateParams(
+        audio={"output": {"voice": {"id": "voice_response"}}},
+    )
+
+    assert list(handler.process(TTSInput(text="Hello", response=response)))
+
+    assert _FakeSpeechOperation.instances[0].payload["voice"] == {"id": "voice_response"}
+
+
+def test_openai_tts_standard_request_yields_audio_before_response_eof(monkeypatch):
+    release_response = Event()
+    response_finished = Event()
+    received_payload: dict[str, object] = {}
+    encoded = np.arange(2400, dtype="<i2").tobytes()
+
+    class GatedAudioStream(tts_module.httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield encoded
+            while not release_response.is_set():
+                await asyncio.sleep(0.01)
+            response_finished.set()
+
+        async def aclose(self) -> None:
+            pass
+
+    def respond(request):
+        received_payload.update(json.loads(request.content))
+        return tts_module.httpx.Response(
+            200,
+            headers={"Content-Type": "audio/pcm"},
+            stream=GatedAudioStream(),
+            request=request,
+        )
+
+    transport = tts_module.httpx.MockTransport(respond)
+    client = tts_module.httpx.AsyncClient(transport=transport)
+    monkeypatch.setattr(tts_module.httpx, "AsyncClient", lambda **kwargs: client)
+    handler = OpenAICompatibleTTSHandler(
+        Event(),
+        queue_in=Queue(),
+        queue_out=Queue(),
+        setup_args=(Event(),),
+        setup_kwargs={"sample_rate": 24000, "blocksize": 512},
+    )
+
+    generation = handler.process(TTSInput(text="Hello"))
+    try:
+        first_audio = next(generation)
+        finished_before_first_audio = response_finished.is_set()
+    finally:
+        release_response.set()
+    remaining_audio = list(generation)
+
+    assert isinstance(first_audio, np.ndarray)
+    assert remaining_audio
+    assert finished_before_first_audio is False
+    assert response_finished.is_set()
+    assert received_payload == {
+        "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        "input": "Hello",
+        "voice": "aiden",
+        "response_format": "pcm",
+        "stream_format": "audio",
+    }
 
 
 def test_openai_tts_http_failure_before_audio_does_not_commit(monkeypatch):

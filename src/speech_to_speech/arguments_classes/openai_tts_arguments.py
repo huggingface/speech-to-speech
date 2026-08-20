@@ -49,8 +49,8 @@ class OpenAICompatibleTTSHandlerArguments:
         metadata={"help": "Speech speed for compatible non-streaming endpoints."},
     )
     openai_tts_stream: bool = field(
-        default=True,
-        metadata={"help": "Request vLLM-Omni raw audio streaming extensions."},
+        default=False,
+        metadata={"help": "Opt in to the vLLM-Omni stream=true extension."},
     )
     openai_tts_timeout: float = field(
         default=300.0,
