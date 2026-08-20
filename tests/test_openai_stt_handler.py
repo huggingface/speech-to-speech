@@ -14,6 +14,7 @@ from openai.types.realtime import ConversationItemInputAudioTranscriptionDeltaEv
 from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.pipeline.events import SpeechStartedEvent
 from speech_to_speech.pipeline.messages import (
+    PIPELINE_END,
     PartialTranscription,
     Transcription,
     TranscriptionFailure,
@@ -173,6 +174,21 @@ def _audio(mode: str = "final", *, revision: int = 0) -> VADAudio:
     )
 
 
+def _run_progressive(handler: OpenAICompatibleSTTHandler) -> list[PartialTranscription]:
+    assert list(handler.process(_audio("progressive"))) == []
+    thread = handler._progressive_thread
+    assert thread is not None
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+
+    outputs = []
+    while not handler.queue_out.empty():
+        output = handler.queue_out.get_nowait()
+        assert isinstance(output, PartialTranscription)
+        outputs.append(output)
+    return outputs
+
+
 def test_openai_stt_warmup_uses_configured_operation_before_readiness(monkeypatch):
     handler = _handler(
         monkeypatch,
@@ -236,8 +252,8 @@ def test_remote_progressive_hypotheses_remain_cumulative(monkeypatch):
         HttpTranscriptionResult(text="hello world"),
     ]
 
-    first = list(handler.process(_audio("progressive")))
-    second = list(handler.process(_audio("progressive")))
+    first = _run_progressive(handler)
+    second = _run_progressive(handler)
 
     assert first == [PartialTranscription(text="hello", turn_id="turn-1", turn_revision=0)]
     assert second == [PartialTranscription(text="hello world", turn_id="turn-1", turn_revision=0)]
@@ -250,10 +266,10 @@ def test_remote_progressive_hypothesis_corrections_reach_the_router(monkeypatch)
         HttpTranscriptionResult(text="hello their"),
     ]
 
-    assert list(handler.process(_audio("progressive"))) == [
+    assert _run_progressive(handler) == [
         PartialTranscription(text="hello there", turn_id="turn-1", turn_revision=0)
     ]
-    assert list(handler.process(_audio("progressive"))) == [
+    assert _run_progressive(handler) == [
         PartialTranscription(text="hello their", turn_id="turn-1", turn_revision=0)
     ]
 
@@ -278,7 +294,7 @@ def test_remote_progressive_hypotheses_emit_realtime_deltas(monkeypatch):
 
     wire_events = []
     for _ in range(4):
-        for partial in handler.process(_audio("progressive")):
+        for partial in _run_progressive(handler):
             assert list(notifier.process(partial)) == []
             wire_events.extend(service.dispatch_pipeline_event(conn_id, text_output_queue.get_nowait()))
 
@@ -303,7 +319,118 @@ def test_progressive_transport_failure_is_discarded(monkeypatch):
     handler = _handler(monkeypatch)
     _FakeOperation.error = TranscriptionRequestError("transcription request timed out")
 
+    assert _run_progressive(handler) == []
+
+
+def test_final_request_does_not_wait_for_in_flight_progressive(monkeypatch):
+    handler = _handler(monkeypatch)
+    progressive_started = Event()
+    release_progressive = Event()
+    final_started = Event()
+
+    class _BlockingProgressiveOperation:
+        def run(self):
+            progressive_started.set()
+            assert release_progressive.wait(timeout=2)
+            return HttpTranscriptionResult(text="partial")
+
+    class _FinalOperation:
+        def run(self):
+            final_started.set()
+            return HttpTranscriptionResult(text="final", language="en")
+
+    operations = iter([_BlockingProgressiveOperation(), _FinalOperation()])
+    monkeypatch.setattr(handler, "_make_operation", lambda _audio: next(operations))
+    handler_thread = Thread(target=handler.run, daemon=True)
+    handler_thread.start()
+
+    try:
+        handler.queue_in.put(_audio("progressive"))
+        assert progressive_started.wait(timeout=1)
+        handler.queue_in.put(_audio())
+
+        assert final_started.wait(timeout=1)
+        output = handler.queue_out.get(timeout=1)
+        assert isinstance(output, Transcription)
+        assert output.text == "final"
+        assert output.language_code == "en"
+        assert output.turn_id == "turn-1"
+        assert output.turn_revision == 0
+        assert not release_progressive.is_set()
+
+        release_progressive.set()
+        thread = handler._progressive_thread
+        assert thread is not None
+        thread.join(timeout=1)
+        assert not thread.is_alive()
+        assert handler.queue_out.empty()
+    finally:
+        release_progressive.set()
+        handler.stop_event.set()
+        handler.queue_in.put(PIPELINE_END)
+        handler_thread.join(timeout=1)
+    assert not handler_thread.is_alive()
+
+
+def test_additional_progressive_requests_are_dropped_while_one_is_in_flight(monkeypatch):
+    handler = _handler(monkeypatch)
+    progressive_started = Event()
+    release_progressive = Event()
+    operation_count = 0
+
+    class _BlockingProgressiveOperation:
+        def run(self):
+            progressive_started.set()
+            assert release_progressive.wait(timeout=2)
+            return HttpTranscriptionResult(text="partial")
+
+    def make_operation(_audio):
+        nonlocal operation_count
+        operation_count += 1
+        return _BlockingProgressiveOperation()
+
+    monkeypatch.setattr(handler, "_make_operation", make_operation)
+
     assert list(handler.process(_audio("progressive"))) == []
+    assert progressive_started.wait(timeout=1)
+    assert list(handler.process(_audio("progressive"))) == []
+    assert operation_count == 1
+
+    release_progressive.set()
+    thread = handler._progressive_thread
+    assert thread is not None
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert handler.queue_out.get_nowait() == PartialTranscription(
+        text="partial",
+        turn_id="turn-1",
+        turn_revision=0,
+    )
+
+
+def test_session_end_suppresses_in_flight_progressive_result(monkeypatch):
+    handler = _handler(monkeypatch)
+    progressive_started = Event()
+    release_progressive = Event()
+
+    class _BlockingProgressiveOperation:
+        def run(self):
+            progressive_started.set()
+            assert release_progressive.wait(timeout=2)
+            return HttpTranscriptionResult(text="old session")
+
+    monkeypatch.setattr(handler, "_make_operation", lambda _audio: _BlockingProgressiveOperation())
+
+    assert list(handler.process(_audio("progressive"))) == []
+    assert progressive_started.wait(timeout=1)
+    handler.on_session_end()
+    release_progressive.set()
+
+    thread = handler._progressive_thread
+    assert thread is not None
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert handler.queue_out.empty()
 
 
 def test_stale_revision_is_dropped_after_request(monkeypatch):
