@@ -179,8 +179,9 @@ This installs the package in editable mode and makes the `speech-to-speech` CLI 
 
 Select implementations with `--stt`, `--llm_backend`, and `--tts`. The CLI constructs configuration only for the selected backends; known options for inactive backends remain accepted for compatibility but are ignored with a warning. JSON configuration may likewise include extra inactive-backend keys, which are ignored. Run `speech-to-speech serve -h` for the defaults, or pass selectors before `-h` to see another combination's backend-specific flags (for example, `speech-to-speech serve --stt mlx-audio-whisper -h`).
 
-For client-only speech recognition with vLLM, NVIDIA Speech NIM, or another
-compatible server, see [OpenAI-compatible STT](./docs/openai-compatible-stt.md).
+For client-only speech recognition with vLLM, OpenAI's hosted Transcription API,
+or another compatible server, see
+[OpenAI-compatible STT](./docs/openai-compatible-stt.md).
 
 ## Commands
 

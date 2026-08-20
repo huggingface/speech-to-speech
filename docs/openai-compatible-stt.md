@@ -9,11 +9,14 @@ VAD audio -> POST /v1/audio/transcriptions
 ```
 
 Each request uploads an in-memory mono PCM16 WAV at 16 kHz and accepts either
-JSON with a string `text` field or a plain-text response.
+JSON with a string `text` field or a plain-text response. With live
+transcription enabled, progressive updates upload the accumulated utterance
+again, increasing request volume and provider usage.
 
 ## vLLM with Qwen3-ASR
 
-Run a supported ASR model behind vLLM:
+Run a supported ASR model behind vLLM. Install vLLM in its own environment on
+the machine serving STT; it does not need to be inside this repository.
 
 ```bash
 pip install "vllm[audio]"
@@ -32,18 +35,24 @@ speech-to-speech local \
   --openai_stt_model Qwen/Qwen3-ASR-1.7B
 ```
 
-## NVIDIA Speech NIM
+## OpenAI-hosted transcription
 
-NVIDIA Speech ASR NIM exposes the same multipart endpoint. Select the NIM model
-at deployment time, then let the request select its language when appropriate:
+The same backend can call OpenAI's hosted
+[Transcription API](https://developers.openai.com/api/docs/guides/speech-to-text).
+Export an API key and select a transcription model:
 
 ```bash
+export OPENAI_API_KEY=...
+
 speech-to-speech local \
   --stt openai \
-  --openai_stt_base_url http://localhost:9000/v1 \
-  --openai_stt_model "" \
-  --openai_stt_language en-US
+  --openai_stt_base_url https://api.openai.com/v1 \
+  --openai_stt_model gpt-transcribe \
+  --openai_stt_response_format json
 ```
+
+The LLM and TTS backends remain independently configurable; using OpenAI for
+STT does not require using it for the rest of the pipeline.
 
 ## Authentication and compatibility
 
@@ -61,6 +70,7 @@ During setup, the handler transcribes one second of synthetic silence through
 the configured endpoint. Endpoint, authentication, model, or response-format
 failures therefore prevent the realtime server from accepting sessions.
 
-This first endpoint adapter intentionally uses the existing serial STT handler
-lifecycle. Endpoint-wide concurrency limits, bounded queues, coalescing, and
-final-request priority can be added independently as an admission layer.
+Progressive requests are best-effort. Each pipeline keeps at most one
+progressive request in flight and drops newer progressive updates while it is
+running. A final request is submitted independently, so it does not wait for an
+in-flight progressive request; late progressive results are discarded.
