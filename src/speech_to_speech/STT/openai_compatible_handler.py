@@ -215,7 +215,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             )
 
         logger.info(
-            "OpenAI-compatible STT completed turn=%s rev=%s mode=%s in %.3fs",
+            "OpenAI-compatible STT request completed turn=%s rev=%s mode=%s in %.3fs",
             vad_audio.turn_id,
             vad_audio.turn_revision,
             vad_audio.mode,
