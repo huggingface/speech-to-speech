@@ -61,6 +61,12 @@ When the base URL is `https://api.openai.com/v1` and this flag is omitted, the
 handler uses `OPENAI_API_KEY` if present. Other endpoints never receive that
 environment credential implicitly.
 
+The request and response shapes follow OpenAI's Audio API. In particular,
+`gpt-transcribe` sends language hints with the official plural `languages[]`
+field and reads the first detected language code from the plural `languages`
+response. Older models and compatible servers continue to use the singular
+`language` field.
+
 The client accepts JSON and text responses. Use
 `--openai_stt_response_format text` for a plain-text server. Transport and HTTP
 errors are sanitized before they are surfaced to realtime clients, and failed

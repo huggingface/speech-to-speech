@@ -104,6 +104,50 @@ def test_http_transcription_operation_can_select_model_by_language():
     assert b"en-US" in _TranscriptionServer.received_body
 
 
+def test_http_transcription_operation_uses_gpt_transcribe_language_contract():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _TranscriptionServer)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        operation = HttpTranscriptionOperation(
+            endpoint_url=f"http://127.0.0.1:{server.server_port}/v1/audio/transcriptions",
+            api_key=None,
+            model="gpt-transcribe",
+            wav_bytes=b"RIFF-test-wave",
+            language="fr",
+            response_format="json",
+            timeout_s=2,
+        )
+        operation.run()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+    assert b'form-data; name="languages[]"' in _TranscriptionServer.received_body
+    assert b'form-data; name="language"' not in _TranscriptionServer.received_body
+    assert b"fr" in _TranscriptionServer.received_body
+
+
+def test_http_transcription_operation_parses_gpt_transcribe_languages():
+    operation = HttpTranscriptionOperation(
+        endpoint_url="http://127.0.0.1:1/v1/audio/transcriptions",
+        api_key=None,
+        model="gpt-transcribe",
+        wav_bytes=b"RIFF-test-wave",
+        language=None,
+        response_format="json",
+        timeout_s=2,
+    )
+
+    result = operation._parse_response(
+        json.dumps({"text": "bonjour", "languages": [{"code": "fr"}]}).encode(),
+        "application/json",
+    )
+
+    assert result == HttpTranscriptionResult(text="bonjour", language="fr")
+
+
 def test_http_transcription_operation_parses_plain_text():
     operation = HttpTranscriptionOperation(
         endpoint_url="http://127.0.0.1:1/v1/audio/transcriptions",

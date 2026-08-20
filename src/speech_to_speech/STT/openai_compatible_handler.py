@@ -64,7 +64,10 @@ class HttpTranscriptionOperation:
         if self.model:
             data["model"] = self.model
         if self.language:
-            data["language"] = self.language
+            if self.model == "gpt-transcribe":
+                data["languages[]"] = self.language
+            else:
+                data["language"] = self.language
 
         try:
             response = httpx.post(
@@ -94,10 +97,18 @@ class HttpTranscriptionOperation:
         text = payload.get("text") if isinstance(payload, dict) else None
         if not isinstance(text, str):
             raise TranscriptionRequestError("transcription response is missing a string 'text' field")
-        language = payload.get("language")
+        language = None
+        languages = payload.get("languages")
+        if isinstance(languages, list):
+            for detected_language in languages:
+                if isinstance(detected_language, dict) and isinstance(detected_language.get("code"), str):
+                    language = detected_language["code"]
+                    break
+        if language is None and isinstance(payload.get("language"), str):
+            language = payload["language"]
         return HttpTranscriptionResult(
             text=text,
-            language=language if isinstance(language, str) else self.language,
+            language=language or self.language,
         )
 
 
