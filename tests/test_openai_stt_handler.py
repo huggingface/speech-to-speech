@@ -266,12 +266,8 @@ def test_remote_progressive_hypothesis_corrections_reach_the_router(monkeypatch)
         HttpTranscriptionResult(text="hello their"),
     ]
 
-    assert _run_progressive(handler) == [
-        PartialTranscription(text="hello there", turn_id="turn-1", turn_revision=0)
-    ]
-    assert _run_progressive(handler) == [
-        PartialTranscription(text="hello their", turn_id="turn-1", turn_revision=0)
-    ]
+    assert _run_progressive(handler) == [PartialTranscription(text="hello there", turn_id="turn-1", turn_revision=0)]
+    assert _run_progressive(handler) == [PartialTranscription(text="hello their", turn_id="turn-1", turn_revision=0)]
 
 
 def test_remote_progressive_hypotheses_emit_realtime_deltas(monkeypatch):

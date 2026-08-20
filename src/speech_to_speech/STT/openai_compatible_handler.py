@@ -227,8 +227,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         with self._progressive_lock:
             if self._progressive_thread is not None and self._progressive_thread.is_alive():
                 logger.debug(
-                    "Skipping OpenAI-compatible progressive STT while a request is in flight "
-                    "turn=%s rev=%s",
+                    "Skipping OpenAI-compatible progressive STT while a request is in flight turn=%s rev=%s",
                     vad_audio.turn_id,
                     vad_audio.turn_revision,
                 )
