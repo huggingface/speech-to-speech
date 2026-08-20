@@ -143,9 +143,10 @@ def test_test_backend_only_needs_config_factory_and_registry_entry():
     assert calls[0][1] is selection.config
 
 
-def test_openai_stt_backend_constructs_through_registry():
+def test_openai_stt_backend_constructs_through_registry(monkeypatch):
     from speech_to_speech.STT.openai_compatible_handler import OpenAICompatibleSTTHandler
 
+    monkeypatch.setattr(OpenAICompatibleSTTHandler, "warmup", lambda self: None)
     args = parse_arguments(["--stt", "openai"])
     stt = create_backend_handler(args.stt_backend, _context())
 

@@ -135,6 +135,18 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         self.speculative_turns = speculative_turns
         self.final_revision_settle_s = final_revision_settle_s
         self.gen_kwargs = gen_kwargs or {}
+        self.warmup()
+
+    def warmup(self) -> None:
+        """Validate the configured transcription endpoint before accepting sessions."""
+        logger.info("Warming up %s", self.__class__.__name__)
+        started_at_s = perf_counter()
+        self._make_operation(np.zeros(PIPELINE_SAMPLE_RATE, dtype=np.float32)).run()
+        logger.info(
+            "%s warmed up in %.3fs",
+            self.__class__.__name__,
+            perf_counter() - started_at_s,
+        )
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         if not self._is_request_relevant(vad_audio):

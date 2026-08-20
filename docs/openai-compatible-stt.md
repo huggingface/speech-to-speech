@@ -57,6 +57,10 @@ The client accepts JSON and text responses. Use
 errors are sanitized before they are surfaced to realtime clients, and failed
 final requests do not create LLM work.
 
+During setup, the handler transcribes one second of synthetic silence through
+the configured endpoint. Endpoint, authentication, model, or response-format
+failures therefore prevent the realtime server from accepting sessions.
+
 This first endpoint adapter intentionally uses the existing serial STT handler
 lifecycle. Endpoint-wide concurrency limits, bounded queues, coalescing, and
 final-request priority can be added independently as an admission layer.

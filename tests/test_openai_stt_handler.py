@@ -8,6 +8,7 @@ from queue import Queue
 from threading import Event, Thread
 
 import numpy as np
+import pytest
 from openai.types.realtime import ConversationItemInputAudioTranscriptionDeltaEvent
 
 from speech_to_speech.api.openai_realtime.service import RealtimeService
@@ -21,6 +22,7 @@ from speech_to_speech.pipeline.messages import (
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.STT import openai_compatible_handler as stt_module
 from speech_to_speech.STT.openai_compatible_handler import (
+    PIPELINE_SAMPLE_RATE,
     HttpTranscriptionOperation,
     HttpTranscriptionResult,
     OpenAICompatibleSTTHandler,
@@ -148,16 +150,18 @@ def _handler(
     tracker: SpeculativeTurnTracker | None = None,
     **setup_overrides,
 ) -> OpenAICompatibleSTTHandler:
-    _FakeOperation.results = []
+    _FakeOperation.results = [HttpTranscriptionResult(text="")]
     _FakeOperation.error = None
     _FakeOperation.instances = []
     monkeypatch.setattr(stt_module, "HttpTranscriptionOperation", _FakeOperation)
-    return OpenAICompatibleSTTHandler(
+    handler = OpenAICompatibleSTTHandler(
         Event(),
         queue_in=Queue(),
         queue_out=Queue(),
         setup_kwargs={"speculative_turns": tracker, **setup_overrides},
     )
+    _FakeOperation.results = []
+    return handler
 
 
 def _audio(mode: str = "final", *, revision: int = 0) -> VADAudio:
@@ -167,6 +171,48 @@ def _audio(mode: str = "final", *, revision: int = 0) -> VADAudio:
         turn_id="turn-1",
         turn_revision=revision,
     )
+
+
+def test_openai_stt_warmup_uses_configured_operation_before_readiness(monkeypatch):
+    handler = _handler(
+        monkeypatch,
+        base_url="https://transcription.example/v1/",
+        api_key="endpoint-secret",
+        model="test-model",
+        language="en",
+        response_format="json",
+        timeout=2,
+    )
+
+    assert len(_FakeOperation.instances) == 1
+    operation = _FakeOperation.instances[0].kwargs
+    assert operation["endpoint_url"] == "https://transcription.example/v1/audio/transcriptions"
+    assert operation["api_key"] == "endpoint-secret"
+    assert operation["model"] == "test-model"
+    assert operation["language"] == "en"
+    assert operation["response_format"] == "json"
+    assert operation["timeout_s"] == 2
+    with wave.open(io.BytesIO(operation["wav_bytes"]), "rb") as wav:
+        assert wav.getnchannels() == 1
+        assert wav.getsampwidth() == 2
+        assert wav.getframerate() == PIPELINE_SAMPLE_RATE
+        assert wav.getnframes() == PIPELINE_SAMPLE_RATE
+    assert handler.queue_out.empty()
+
+
+def test_openai_stt_warmup_failure_prevents_handler_construction(monkeypatch):
+    _FakeOperation.results = []
+    _FakeOperation.error = TranscriptionRequestError("transcription server returned HTTP 404")
+    _FakeOperation.instances = []
+    monkeypatch.setattr(stt_module, "HttpTranscriptionOperation", _FakeOperation)
+
+    with pytest.raises(TranscriptionRequestError, match="transcription server returned HTTP 404"):
+        OpenAICompatibleSTTHandler(
+            Event(),
+            queue_in=Queue(),
+            queue_out=Queue(),
+            setup_kwargs={"model": "missing-model"},
+        )
 
 
 def test_openai_stt_returns_final_transcription(monkeypatch):
@@ -179,8 +225,8 @@ def test_openai_stt_returns_final_transcription(monkeypatch):
     assert isinstance(outputs[0], Transcription)
     assert outputs[0].text == "hello"
     assert outputs[0].language_code == "en"
-    assert _FakeOperation.instances[0].kwargs["endpoint_url"].endswith("/v1/audio/transcriptions")
-    assert _FakeOperation.instances[0].kwargs["wav_bytes"].startswith(b"RIFF")
+    assert _FakeOperation.instances[-1].kwargs["endpoint_url"].endswith("/v1/audio/transcriptions")
+    assert _FakeOperation.instances[-1].kwargs["wav_bytes"].startswith(b"RIFF")
 
 
 def test_remote_progressive_hypotheses_remain_cumulative(monkeypatch):
