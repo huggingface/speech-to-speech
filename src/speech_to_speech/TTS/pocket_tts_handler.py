@@ -13,6 +13,7 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -128,7 +129,7 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
         console.print(f"[green]ASSISTANT: {text}")
 
         # Generate audio stream
-        logger.debug("Generating audio: chars=%d", len(text))
+        logger.debug("Generating audio: %s", transcript_for_log(text))
 
         pipeline_start = perf_counter()
         first_chunk = True

@@ -32,6 +32,7 @@ from speech_to_speech.pipeline.events import (
     TranscriptionCompletedEvent,
     TranscriptionFailedEvent,
 )
+from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 
 if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import ServerEvent
@@ -275,10 +276,10 @@ class ConversationHandler(RealtimeBaseHandler):
             # has no retraction event, so wait for a future hypothesis that
             # extends the committed prefix or for the authoritative completion.
             logger.debug(
-                "Withholding revised stable transcription for item=%s (emitted_chars=%d, hypothesis_chars=%d)",
+                "Withholding revised stable transcription for item=%s (emitted=%s, hypothesis=%s)",
                 item_id,
-                len(input_item.transcript_prefix),
-                len(hypothesis),
+                transcript_for_log(input_item.transcript_prefix),
+                transcript_for_log(hypothesis),
             )
             return []
 

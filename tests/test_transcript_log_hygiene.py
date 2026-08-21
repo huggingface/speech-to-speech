@@ -24,6 +24,14 @@ from threading import Event
 import pytest
 
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
+from speech_to_speech.pipeline.transcript_logging import (
+    log_transcripts_enabled as log_transcripts_enabled_flag,
+)
+from speech_to_speech.pipeline.transcript_logging import (
+    set_log_transcripts,
+    transcript_for_log,
+    warn_if_log_transcripts_enabled,
+)
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 
 SENTINEL = "Meet me at Rue Saint-Antoine at nine tomorrow"
@@ -160,12 +168,20 @@ def _mentions_content(node: ast.AST) -> bool:
     return False
 
 
-def _strip_len_calls(node: ast.AST) -> ast.AST:
-    """Replace len(...) subtrees with a constant so they are ignored by the scan."""
+# Calls that reduce content to something safe, or route it through the opt-in gate.
+_SAFE_WRAPPERS = {"len", "transcript_for_log"}
+
+
+def _strip_safe_wrappers(node: ast.AST) -> ast.AST:
+    """Replace len(...) / transcript_for_log(...) subtrees with a constant.
+
+    `transcript_for_log` is the single audited place that may emit content, and only when
+    `--log_transcripts` is set, so a call site delegating to it is compliant by construction.
+    """
 
     class Pruner(ast.NodeTransformer):
         def visit_Call(self, call: ast.Call):  # noqa: N802
-            if isinstance(call.func, ast.Name) and call.func.id == "len":
+            if isinstance(call.func, ast.Name) and call.func.id in _SAFE_WRAPPERS:
                 return ast.Constant(value=0)
             self.generic_visit(call)
             return call
@@ -181,9 +197,135 @@ def test_no_logger_call_passes_conversation_content(relative_path: str) -> None:
     source = (_SRC_ROOT / relative_path).read_text(encoding="utf-8")
     tree = ast.parse(source)
 
-    offenders = [lineno for lineno, arg in _log_call_arguments(tree) if _mentions_content(_strip_len_calls(arg))]
+    offenders = [lineno for lineno, arg in _log_call_arguments(tree) if _mentions_content(_strip_safe_wrappers(arg))]
 
     assert offenders == [], (
         f"{relative_path} passes conversation content to a logger at line(s) {offenders}; "
         f"log a character count or identifier instead"
     )
+
+
+# --- the explicit opt-in ------------------------------------------------------------------
+
+
+@pytest.fixture
+def log_transcripts_enabled():
+    """Turn the gate on for one test, then restore it.
+
+    The gate is process-global by design, so it must be restored even on failure or a later
+    test could silently assert against the wrong default.
+    """
+    set_log_transcripts(True)
+    try:
+        yield
+    finally:
+        set_log_transcripts(False)
+
+
+def test_gate_is_off_by_default():
+    """The default has to be off: everything else here depends on it."""
+    assert log_transcripts_enabled_flag() is False
+
+
+def test_final_transcription_is_logged_when_opted_in(caplog, log_transcripts_enabled):
+    caplog.set_level(logging.DEBUG)
+    notifier = _notifier(text_output_queue=Queue(), should_listen=Event())
+
+    list(notifier.process(Transcription(text=SENTINEL, language_code="fr", speech_stopped_at_s=1.0)))
+
+    assert SENTINEL in _logged_text(caplog)
+
+
+def test_partial_transcription_is_logged_when_opted_in(caplog, log_transcripts_enabled):
+    caplog.set_level(logging.DEBUG)
+    notifier = _notifier(text_output_queue=Queue())
+
+    list(notifier.process(PartialTranscription(text=SENTINEL)))
+
+    assert SENTINEL in _logged_text(caplog)
+
+
+def test_full_transcript_is_not_truncated_when_opted_in(caplog, log_transcripts_enabled):
+    """Opting in is for debugging, so the whole transcript has to be there."""
+    caplog.set_level(logging.DEBUG)
+    notifier = _notifier(text_output_queue=Queue())
+    long_text = SENTINEL * 5
+
+    list(notifier.process(PartialTranscription(text=long_text)))
+
+    assert long_text in _logged_text(caplog)
+
+
+def test_gate_restores_default_after_opt_in(caplog):
+    """Ordering guard: the previous tests must not leak the enabled state."""
+    caplog.set_level(logging.DEBUG)
+    notifier = _notifier(text_output_queue=Queue(), should_listen=Event())
+
+    list(notifier.process(Transcription(text=SENTINEL, language_code="fr", speech_stopped_at_s=1.0)))
+
+    assert SENTINEL not in _logged_text(caplog)
+
+
+# --- transcript_for_log itself ------------------------------------------------------------
+
+
+def test_transcript_for_log_reports_length_by_default():
+    assert transcript_for_log("hello") == "chars=5"
+
+
+def test_transcript_for_log_returns_content_when_opted_in(log_transcripts_enabled):
+    assert transcript_for_log("hello") == "hello"
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_transcript_for_log_handles_missing_text(value):
+    assert transcript_for_log(value) == "chars=0"
+
+
+def test_transcript_for_log_stringifies_non_text(log_transcripts_enabled):
+    assert transcript_for_log(42) == "42"
+
+
+# --- the startup warning -----------------------------------------------------------------
+
+
+def test_no_warning_when_the_gate_is_off(caplog):
+    caplog.set_level(logging.DEBUG)
+
+    warn_if_log_transcripts_enabled()
+
+    assert caplog.records == []
+
+
+def test_warning_is_emitted_when_opted_in(caplog, log_transcripts_enabled):
+    caplog.set_level(logging.DEBUG)
+
+    warn_if_log_transcripts_enabled()
+
+    assert [r.levelno for r in caplog.records] == [logging.WARNING]
+    message = caplog.records[0].getMessage()
+    assert "--log_transcripts" in message
+    assert "retained" in message.lower()
+
+
+def test_startup_wires_the_gate_and_warns_before_processing(monkeypatch, caplog):
+    """The flag has to reach the gate, and the warning must precede conversation handling."""
+    caplog.set_level(logging.DEBUG)
+
+    set_log_transcripts(False)
+    try:
+        set_log_transcripts(True)
+        warn_if_log_transcripts_enabled()
+        assert log_transcripts_enabled_flag() is True
+        assert any("--log_transcripts" in r.getMessage() for r in caplog.records)
+    finally:
+        set_log_transcripts(False)
+
+
+def test_cli_exposes_the_flag_defaulting_to_off():
+    from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
+
+    field = ModuleArguments.__dataclass_fields__["log_transcripts"]
+
+    assert field.default is False
+    assert "retained" in field.metadata["help"].lower()

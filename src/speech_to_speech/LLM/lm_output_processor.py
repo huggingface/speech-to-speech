@@ -33,6 +33,7 @@ from speech_to_speech.pipeline.messages import (
     TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 from speech_to_speech.utils.utils import response_wants_audio
 
 logger = logging.getLogger(__name__)
@@ -207,7 +208,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 or not response_wants_audio(lm_output.response)
             ):
                 continue
-            logger.debug("Forwarding to TTS: chars=%d", len(part.text))
+            logger.debug("Forwarding to TTS: %s", transcript_for_log(part.text))
             yield TTSInput(
                 text=part.text,
                 language_code=lm_output.language_code,

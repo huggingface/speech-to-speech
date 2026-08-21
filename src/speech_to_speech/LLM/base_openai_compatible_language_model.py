@@ -56,6 +56,7 @@ from speech_to_speech.pipeline.messages import (
     TokenUsage,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
 
 logger = logging.getLogger(__name__)
@@ -666,7 +667,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 if self._turn_is_cancelled(turn):
                     logger.info("LLM generation cancelled (interruption)")
                 else:
-                    logger.debug("Clean text: chars=%d", len(state.clean_text))
+                    logger.debug("Clean text: %s", transcript_for_log(state.clean_text))
                     yield from _flush(sentence_batch)
             logger.info(f"Tools: {state.tools}")
         return (
@@ -712,7 +713,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 ):
                     state.output_emitted = True
                     yield self._chunk(turn, text=out)
-        logger.debug("Clean text: chars=%d", len(state.clean_text))
+        logger.debug("Clean text: %s", transcript_for_log(state.clean_text))
         logger.info(f"Tools: {state.tools}")
         return (
             not cancelled
