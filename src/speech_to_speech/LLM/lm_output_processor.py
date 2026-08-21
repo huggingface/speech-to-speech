@@ -207,7 +207,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 or not response_wants_audio(lm_output.response)
             ):
                 continue
-            logger.debug("Forwarding to TTS: '%s'", part.text)
+            logger.debug("Forwarding to TTS: chars=%d", len(part.text))
             yield TTSInput(
                 text=part.text,
                 language_code=lm_output.language_code,

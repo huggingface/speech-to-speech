@@ -666,7 +666,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 if self._turn_is_cancelled(turn):
                     logger.info("LLM generation cancelled (interruption)")
                 else:
-                    logger.debug(f"Clean text: {state.clean_text}")
+                    logger.debug("Clean text: chars=%d", len(state.clean_text))
                     yield from _flush(sentence_batch)
             logger.info(f"Tools: {state.tools}")
         return (
@@ -712,7 +712,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 ):
                     state.output_emitted = True
                     yield self._chunk(turn, text=out)
-        logger.debug(f"Clean text: {state.clean_text}")
+        logger.debug("Clean text: chars=%d", len(state.clean_text))
         logger.info(f"Tools: {state.tools}")
         return (
             not cancelled

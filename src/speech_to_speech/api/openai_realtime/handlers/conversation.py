@@ -275,10 +275,10 @@ class ConversationHandler(RealtimeBaseHandler):
             # has no retraction event, so wait for a future hypothesis that
             # extends the committed prefix or for the authoritative completion.
             logger.debug(
-                "Withholding revised stable transcription for item=%s (emitted=%r, hypothesis=%r)",
+                "Withholding revised stable transcription for item=%s (emitted_chars=%d, hypothesis_chars=%d)",
                 item_id,
-                input_item.transcript_prefix[-40:],
-                hypothesis[-40:],
+                len(input_item.transcript_prefix),
+                len(hypothesis),
             )
             return []
 

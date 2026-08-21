@@ -726,7 +726,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     history_committed = True
                 else:
                     trailing_chunk = None
-            logger.debug("Clean text: %s", ctx.generated_text)
+            logger.debug("Clean text: chars=%d", len(ctx.generated_text))
             logger.info(f"Tools: {ctx.tools}")
 
             if trailing_chunk is not None:
