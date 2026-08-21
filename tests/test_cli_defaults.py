@@ -44,6 +44,7 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_profile():
     assert responses_api_args.model_name == "gpt-5.6-terra"
     assert responses_api_args.chat_size == 30
     assert responses_api_args.responses_api_stream is True
+    assert responses_api_args.responses_api_reasoning_effort == "none"
     assert responses_api_args.responses_api_audio_content_type == "input_audio"
     assert responses_api_args.responses_api_audio_history_turns == 1
     assert qwen3_args.qwen3_tts_model_name == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
@@ -166,6 +167,7 @@ def test_parse_arguments_default_backend_returns_openai_api():
     assert args.llm_backend.name == "responses-api"
     assert args.llm_backend.spec.config_type is ResponsesApiLanguageModelHandlerArguments
     assert args.llm_backend.config["model_name"] == "gpt-5.6-terra"
+    assert args.llm_backend.config["reasoning_effort"] == "none"
     assert args.module_kwargs.llm_backend == "responses-api"
     assert args.vad_handler_kwargs.smart_turn is True
     assert args.vad_handler_kwargs.smart_turn_model_path is None

@@ -188,6 +188,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             raise ValueError("audio_content_type must be either 'input_audio' or 'audio_url'.")
         self.audio_content_type = audio_content_type
         self.audio_history_turns = max(0, audio_history_turns)
+        self.reasoning_effort = reasoning_effort
         self.request_timeout_s = float(request_timeout_s)
         self.request_timeout = httpx.Timeout(
             self.request_timeout_s,

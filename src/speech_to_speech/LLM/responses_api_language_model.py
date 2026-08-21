@@ -43,6 +43,25 @@ logger = logging.getLogger(__name__)
 class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
     """LLM handler that talks to an OpenAI ``/v1/responses`` server."""
 
+    @classmethod
+    def _build_extra_body(
+        cls,
+        base_url: str | None,
+        disable_thinking: bool,
+        reasoning_effort: str | None,
+    ) -> dict[str, Any] | None:
+        """Keep Responses reasoning out of the Chat-Completions-shaped extra body."""
+        return super()._build_extra_body(
+            base_url,
+            disable_thinking=disable_thinking and reasoning_effort is None,
+            reasoning_effort=None,
+        )
+
+    def _reasoning_kwargs(self) -> dict[str, Any]:
+        if self.reasoning_effort is None:
+            return {}
+        return {"reasoning": {"effort": self.reasoning_effort}}
+
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
         start = time.time()
@@ -57,6 +76,7 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
                 {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]},
             ],
             timeout=self.request_timeout,
+            **self._reasoning_kwargs(),
         )
         end = time.time()
         logger.info(f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s")
@@ -66,6 +86,7 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         client = self.client
         model_name = self.model_name
         timeout = self.request_timeout
+        reasoning_kwargs = self._reasoning_kwargs()
 
         def generate(system: str, user: str) -> str:
             response = client.responses.create(
@@ -83,6 +104,7 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
                     },
                 ],
                 timeout=timeout,
+                **reasoning_kwargs,
             )
             return response.output_text
 
@@ -130,7 +152,7 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         return active_chat.to_responses_api_chat()
 
     def _build_optional_kwargs(self, req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:
-        optional_kwargs: dict[str, Any] = {}
+        optional_kwargs = self._reasoning_kwargs()
         if req_tools is not None:
             optional_kwargs["tools"] = req_tools
         if req_tool_choice is not None:

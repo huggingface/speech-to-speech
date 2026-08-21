@@ -229,7 +229,7 @@ speech-to-speech serve \
     --enable_live_transcription
 ```
 
-The default model is `gpt-5.6-terra` through the OpenAI Responses API. Override it with `--model_name`, and set `--responses_api_base_url` for another OpenAI-compatible provider or server.
+The default model is `gpt-5.6-terra` through the OpenAI Responses API with reasoning effort `none`, preserving the previous default model's latency-oriented reasoning behavior. Override the model with `--model_name`, the effort with `--responses_api_reasoning_effort`, and set `--responses_api_base_url` for another OpenAI-compatible provider or server.
 
 ### Local Mac
 
