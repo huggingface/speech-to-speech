@@ -63,6 +63,7 @@ def test_builtin_registry_lookup_and_cli_choices_share_one_catalog():
     assert tuple(LLM_BACKENDS) == module_fields["llm_backend"].metadata["choices"]
     assert tuple(TTS_BACKENDS) == module_fields["tts"].metadata["choices"]
     assert STT_BACKENDS["parakeet-tdt"].kind == "stt"
+    assert STT_BACKENDS["openai"].kind == "stt"
     assert LLM_BACKENDS["responses-api"].kind == "llm"
     assert TTS_BACKENDS["qwen3"].kind == "tts"
     assert TTS_BACKENDS["openai"].kind == "tts"
@@ -177,6 +178,16 @@ def test_openai_tts_backend_constructs_through_registry():
     tts = create_backend_handler(args.tts_backend, _context())
 
     assert isinstance(tts, OpenAICompatibleTTSHandler)
+
+
+def test_openai_stt_backend_constructs_through_registry(monkeypatch):
+    from speech_to_speech.STT.openai_compatible_handler import OpenAICompatibleSTTHandler
+
+    monkeypatch.setattr(OpenAICompatibleSTTHandler, "warmup", lambda self: None)
+    args = parse_arguments(["--stt", "openai"])
+    stt = create_backend_handler(args.stt_backend, _context())
+
+    assert isinstance(stt, OpenAICompatibleSTTHandler)
 
 
 def test_new_stt_backend_gets_transcription_notifier_by_default(monkeypatch):

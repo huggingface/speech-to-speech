@@ -170,6 +170,7 @@ This installs the package in editable mode and makes the `speech-to-speech` CLI 
 | STT | [Lightning Whisper MLX](https://github.com/mustafaaljadery/lightning-whisper-mlx) | Apple Silicon | `whisper-mlx` |
 | STT | [MLX Audio Whisper](https://github.com/huggingface/mlx-audio) | Apple Silicon | built-in on macOS |
 | STT | [Paraformer](https://github.com/modelscope/FunASR) | CUDA / CPU | `paraformer` |
+| STT | OpenAI-compatible `/v1/audio/transcriptions` endpoint | local or remote HTTP server | built-in |
 | LLM | OpenAI-compatible API (`responses-api`, `chat-completions`) | hosted providers or self-hosted servers | built-in |
 | LLM | [Transformers](https://huggingface.co/models?pipeline_tag=text-generation&sort=trending) | CUDA / CPU | built-in |
 | LLM | [mlx-lm](https://github.com/ml-explore/mlx-lm) | Apple Silicon | built-in on macOS |
@@ -184,6 +185,10 @@ Select implementations with `--stt`, `--llm_backend`, and `--tts`. The CLI const
 
 For client-only TTS serving with vLLM-Omni or another compatible server, see
 [OpenAI-compatible TTS](./docs/openai-compatible-tts.md).
+
+For client-only speech recognition with vLLM, OpenAI's hosted Transcription API,
+or another compatible server, see
+[OpenAI-compatible STT](./docs/openai-compatible-stt.md).
 
 ## Commands
 
