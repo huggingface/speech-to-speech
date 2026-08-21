@@ -68,6 +68,7 @@ from speech_to_speech.pipeline.messages import (
     TokenUsage,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
 
 try:
@@ -726,7 +727,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     history_committed = True
                 else:
                     trailing_chunk = None
-            logger.debug("Clean text: %s", ctx.generated_text)
+            logger.debug("Clean text: %s", transcript_for_log(ctx.generated_text))
             logger.info(f"Tools: {ctx.tools}")
 
             if trailing_chunk is not None:
