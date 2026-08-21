@@ -154,7 +154,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
     def setup(
         self,
-        model_name: str = "gpt-5.4-mini",
+        model_name: str = "gpt-5.6-terra",
         device: str = "cuda",
         gen_kwargs: dict[str, Any] = {},
         base_url: Optional[str] = None,

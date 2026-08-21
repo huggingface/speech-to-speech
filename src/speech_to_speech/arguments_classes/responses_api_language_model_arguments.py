@@ -7,9 +7,9 @@ from speech_to_speech.arguments_classes.language_model_base_arguments import Lan
 @dataclass
 class ResponsesApiLanguageModelHandlerArguments(LanguageModelBaseArguments):
     model_name: str = field(
-        default="gpt-5.4-mini",
+        default="gpt-5.6-terra",
         metadata={
-            "help": "The model to use with the OpenAI-compatible API. Default is 'gpt-5.4-mini', "
+            "help": "The model to use with the OpenAI-compatible API. Default is 'gpt-5.6-terra', "
             "which is not audio-capable; --stt none requires an explicitly selected audio-input model."
         },
     )
