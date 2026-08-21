@@ -2104,6 +2104,36 @@ class TestHandleResponseCreate:
         assert isinstance(result, ResponseCreatedEvent)
         assert result.response.conversation_id == service._state(conn_id).conversation_id
 
+    def test_response_custom_voice_id_is_reported_in_created_and_done_events(self, service, conn_id):
+        created = service.handle_response_create(
+            conn_id,
+            ResponseCreateEvent(
+                type="response.create",
+                response={"audio": {"output": {"voice": {"id": "voice_response"}}}},
+            ),
+        )
+
+        assert isinstance(created, ResponseCreatedEvent)
+        assert created.response.audio.output.voice == "voice_response"
+        done = next(event for event in service.finish_response(conn_id) if isinstance(event, ResponseDoneEvent))
+        assert done.response.audio.output.voice == "voice_response"
+
+    def test_session_custom_voice_id_is_reported_in_created_and_done_events(self, service, conn_id):
+        service.handle_session_update(
+            conn_id,
+            SessionUpdateEvent(
+                type="session.update",
+                session={"type": "realtime", "audio": {"output": {"voice": {"id": "voice_session"}}}},
+            ),
+        )
+
+        created = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
+
+        assert isinstance(created, ResponseCreatedEvent)
+        assert created.response.audio.output.voice == "voice_session"
+        done = next(event for event in service.finish_response(conn_id) if isinstance(event, ResponseDoneEvent))
+        assert done.response.audio.output.voice == "voice_session"
+
 
 # ===================================================================
 # Response cancel
@@ -4194,6 +4224,52 @@ class TestDispatchPipelineEvent:
         assert response_done.response.status == "failed"
         assert response_done.response.output[0].status == "incomplete"
         assert response_done.response.status_details.error.type == "response_failed"
+
+    def test_response_failure_suppresses_late_assistant_content(self, service, conn_id):
+        response_key = "response-1"
+        service.response._ensure_response(conn_id, response_key)
+        service.dispatch_pipeline_event(
+            conn_id,
+            ResponseFailedEvent(message="speech provider failed", response_key=response_key),
+        )
+
+        assert (
+            service.dispatch_pipeline_event(
+                conn_id,
+                AssistantOutputEvent(text="never synthesized", response_key=response_key),
+            )
+            == []
+        )
+        assert (
+            service.dispatch_pipeline_event(
+                conn_id,
+                AssistantToolCallReadyEvent(
+                    part=AssistantToolCallPart(
+                        tool={
+                            "type": "function_call",
+                            "call_id": "call-late",
+                            "name": "lookup",
+                            "arguments": "{}",
+                        }
+                    ),
+                    output_sequence=1,
+                    response_key=response_key,
+                ),
+            )
+            == []
+        )
+        service.dispatch_pipeline_event(
+            conn_id,
+            TokenUsageEvent(input_tokens=3, output_tokens=2, response_key=response_key),
+        )
+
+        state = service._state(conn_id)
+        assert state.pending_text_outputs == []
+        assert state.pending_function_calls == {}
+        assert state.response_usage.input_tokens == 3
+        assert state.response_usage.output_tokens == 2
+        done = service.finish_response(conn_id, response_key=response_key)
+        assert done[-1].response.status == "failed"
 
     def test_response_failed_while_pending_emits_error_and_failed_done(self, service, conn_id):
         service.dispatch_pipeline_event(
