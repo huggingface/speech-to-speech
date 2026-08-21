@@ -227,13 +227,13 @@ speech-to-speech serve \
     --qwen3_tts_backend ggml \
     --qwen3_tts_non_streaming_mode True \
     --qwen3_tts_mlx_quantization 6bit \
-    --model_name gpt-5.4-mini \
+    --model_name gpt-5.6-terra \
     --chat_size 30 \
     --responses_api_stream \
     --enable_live_transcription
 ```
 
-The default model is `gpt-5.4-mini` through the OpenAI Responses API. Override it with `--model_name`, and set `--responses_api_base_url` for another OpenAI-compatible provider or server.
+The default model is `gpt-5.6-terra` through the OpenAI Responses API with reasoning effort `none`, preserving the previous default model's latency-oriented reasoning behavior. Override the model with `--model_name`, the effort with `--responses_api_reasoning_effort`, and set `--responses_api_base_url` for another OpenAI-compatible provider or server.
 
 ### Local Mac
 
@@ -360,10 +360,10 @@ supported with `--llm_backend responses-api`: a model may accept audio through
 [`gpt-audio-1.5`](https://developers.openai.com/api/docs/models/gpt-audio-1.5).
 
 You must explicitly set `--model_name` to a model that accepts audio: the
-default `gpt-5.4-mini` accepts text and image input, but not audio. Check the
+default `gpt-5.6-terra` accepts text and image input, but not audio. Check the
 provider's model documentation and endpoint support before enabling this mode.
 For OpenAI, see the
-[GPT-5.4 mini model card](https://developers.openai.com/api/docs/models/gpt-5.4-mini)
+[GPT-5.6 Terra model card](https://developers.openai.com/api/docs/models/gpt-5.6-terra)
 and [audio-input guide](https://developers.openai.com/api/docs/guides/audio#add-audio-to-your-existing-application).
 
 ```bash

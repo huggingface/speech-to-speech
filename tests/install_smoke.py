@@ -121,8 +121,9 @@ def _validate_package_defaults() -> None:
     assert module_args.log_level == "info"
     assert module_args.enable_live_transcription is True
     assert module_args.live_transcription_update_interval == 0.5
-    assert responses_api_args.model_name == "gpt-5.4-mini"
+    assert responses_api_args.model_name == "gpt-5.6-terra"
     assert responses_api_args.responses_api_stream is True
+    assert responses_api_args.responses_api_reasoning_effort == "none"
     assert qwen3_args.qwen3_tts_model_name == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     assert qwen3_args.qwen3_tts_speaker == "Aiden"
     assert qwen3_args.qwen3_tts_language == "auto"
