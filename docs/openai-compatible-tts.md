@@ -74,6 +74,10 @@ the HTTP response body incrementally. It does not send the non-standard
 Set `--openai_tts_api_key` when the endpoint requires bearer authentication.
 When it is omitted, the handler uses `OPENAI_API_KEY` if present.
 
+The backend performs a short synthesis request during startup. Invalid endpoint,
+authentication, model, voice, request, and audio-response configuration therefore
+fail before the Realtime server accepts sessions.
+
 The client accepts:
 
 - raw signed PCM16 with a configured `--openai_tts_sample_rate`; or

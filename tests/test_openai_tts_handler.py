@@ -95,7 +95,7 @@ def _openai_tts_handler(
 ) -> OpenAICompatibleTTSHandler:
     _reset_fake_speech_operation()
     monkeypatch.setattr(tts_module, "HttpSpeechOperation", _FakeSpeechOperation)
-    return OpenAICompatibleTTSHandler(
+    handler = OpenAICompatibleTTSHandler(
         Event(),
         queue_in=Queue(),
         queue_out=Queue(),
@@ -107,6 +107,59 @@ def _openai_tts_handler(
             "speculative_turns": speculative_turns,
         },
     )
+    _reset_fake_speech_operation()
+    return handler
+
+
+def test_openai_tts_warmup_uses_configured_request(monkeypatch):
+    _reset_fake_speech_operation()
+    monkeypatch.setattr(tts_module, "HttpSpeechOperation", _FakeSpeechOperation)
+
+    OpenAICompatibleTTSHandler(
+        Event(),
+        queue_in=Queue(),
+        queue_out=Queue(),
+        setup_args=(Event(),),
+        setup_kwargs={
+            "base_url": "http://speech.example/v1",
+            "api_key": "test-key",
+            "model": "test-model",
+            "voice": "test-voice",
+            "language": "Auto",
+            "sample_rate": 24000,
+            "stream": True,
+            "timeout": 12,
+            "blocksize": 512,
+        },
+    )
+
+    assert len(_FakeSpeechOperation.instances) == 1
+    operation = _FakeSpeechOperation.instances[0]
+    assert operation.payload == {
+        "model": "test-model",
+        "input": "Warmup",
+        "voice": "test-voice",
+        "response_format": "pcm",
+        "stream_format": "audio",
+        "stream": True,
+        "language": "Auto",
+    }
+    assert operation.cancelled is False
+
+
+def test_openai_tts_warmup_http_failure_aborts_construction(monkeypatch):
+    transport = tts_module.httpx.MockTransport(lambda request: tts_module.httpx.Response(404, request=request))
+    client = tts_module.httpx.AsyncClient(transport=transport)
+    monkeypatch.setattr(tts_module.httpx, "AsyncClient", lambda **kwargs: client)
+
+    with pytest.raises(tts_module.SpeechRequestError, match="speech server returned HTTP 404"):
+        OpenAICompatibleTTSHandler(
+            Event(),
+            queue_in=Queue(),
+            queue_out=Queue(),
+            setup_args=(Event(),),
+            setup_kwargs={"sample_rate": 24000, "blocksize": 512},
+        )
 
 
 def test_openai_tts_streams_resampled_fixed_size_pcm(monkeypatch):
@@ -193,6 +246,7 @@ def test_openai_tts_standard_request_yields_audio_before_response_eof(monkeypatc
     transport = tts_module.httpx.MockTransport(respond)
     client = tts_module.httpx.AsyncClient(transport=transport)
     monkeypatch.setattr(tts_module.httpx, "AsyncClient", lambda **kwargs: client)
+    monkeypatch.setattr(OpenAICompatibleTTSHandler, "warmup", lambda self: None)
     handler = OpenAICompatibleTTSHandler(
         Event(),
         queue_in=Queue(),
@@ -705,6 +759,7 @@ def test_openai_tts_rejects_non_audio_success_responses(monkeypatch, content_typ
     )
     client = tts_module.httpx.AsyncClient(transport=transport)
     monkeypatch.setattr(tts_module.httpx, "AsyncClient", lambda **kwargs: client)
+    monkeypatch.setattr(OpenAICompatibleTTSHandler, "warmup", lambda self: None)
     handler = OpenAICompatibleTTSHandler(
         Event(),
         queue_in=Queue(),
@@ -780,7 +835,7 @@ def test_http_speech_cancellation_closes_transport_before_response_headers():
         server_thread.join(timeout=1)
 
 
-def test_openai_tts_cancellation_unblocks_a_stalled_socket_and_session_end():
+def test_openai_tts_cancellation_unblocks_a_stalled_socket_and_session_end(monkeypatch):
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", 0))
@@ -805,6 +860,7 @@ def test_openai_tts_cancellation_unblocks_a_stalled_socket_and_session_end():
     server_thread = Thread(target=serve_stalled_response, daemon=True)
     server_thread.start()
     cancel_scope = CancelScope()
+    monkeypatch.setattr(OpenAICompatibleTTSHandler, "warmup", lambda self: None)
     handler = OpenAICompatibleTTSHandler(
         Event(),
         queue_in=Queue(),
