@@ -190,6 +190,9 @@ class ConnState(BaseModel):
     closed_response_keys: dict[str, None] = Field(default_factory=dict)
     audio_buffer_has_data: bool = False
     audio_remainder: bytes = b""
+    # Trailing byte of a PCM16 sample split across two appends, held at the
+    # client's sample rate until its other half arrives (see ``append_pcm``).
+    pcm_byte_remainder: bytes = b""
     current_response_id: Optional[str] = None
     current_response_key: Optional[str] = None
     response_failed: bool = False

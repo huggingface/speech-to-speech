@@ -129,9 +129,21 @@ class AudioHandler(RealtimeBaseHandler):
         one place regardless of how audio arrives.
         """
         st = self._state(conn_id)
-        pcm_bytes = resample(pcm_bytes, src_rate, PIPELINE_SAMPLE_RATE)
 
-        pcm_bytes = st.audio_remainder + pcm_bytes
+        # PCM16 is two bytes per sample, but nothing guarantees an append lands
+        # on a sample boundary: a client is free to split a sample across two
+        # ``input_audio_buffer.append`` events, and ``base64.b64decode`` happily
+        # returns an odd number of bytes. Carry the stray byte over to the next
+        # append so ``resample``'s ``np.frombuffer(..., np.int16)`` never sees an
+        # odd-length buffer — it raises ``ValueError`` there, outside
+        # ``handle_audio_append``'s try/except, which tears down the session.
+        raw = st.pcm_byte_remainder + pcm_bytes
+        if len(raw) % 2:
+            st.pcm_byte_remainder, raw = raw[-1:], raw[:-1]
+        else:
+            st.pcm_byte_remainder = b""
+
+        pcm_bytes = st.audio_remainder + resample(raw, src_rate, PIPELINE_SAMPLE_RATE)
 
         chunks = []
         for i in range(0, len(pcm_bytes), CHUNK_SIZE_BYTES):
