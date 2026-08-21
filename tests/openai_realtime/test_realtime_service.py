@@ -17,6 +17,7 @@ from openai.types.realtime import (
     ConversationItemCreateEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
+    ConversationItemInputAudioTranscriptionFailedEvent,
     ConversationItemTruncateEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferSpeechStartedEvent,
@@ -62,6 +63,7 @@ from speech_to_speech.pipeline.events import (
     SpeechStoppedEvent,
     TokenUsageEvent,
     TranscriptionCompletedEvent,
+    TranscriptionFailedEvent,
 )
 from speech_to_speech.pipeline.messages import (
     AssistantTextPart,
@@ -2587,6 +2589,134 @@ class TestResponseDoneOutputItems:
 
 class TestDispatchPipelineEvent:
     # -- speech_started --
+
+    def test_transcription_failure_emits_error_without_llm_work(
+        self,
+        service,
+        conn_id,
+        text_prompt_queue,
+        should_listen,
+    ):
+        should_listen.clear()
+        started = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+        )
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionFailedEvent(
+                message="transcription request timed out",
+                turn_id="turn_1",
+                turn_revision=0,
+            ),
+        )
+
+        assert len(events) == 1
+        assert isinstance(events[0], ConversationItemInputAudioTranscriptionFailedEvent)
+        assert events[0].item_id == started[0].item_id
+        assert events[0].content_index == 0
+        assert events[0].error.type == "transcription_error"
+        assert events[0].error.code == "transcription_failed"
+        assert events[0].error.message == "transcription request timed out"
+        assert should_listen.is_set()
+        assert text_prompt_queue.empty()
+        state = service._state(conn_id)
+        assert state.current_input_item_id is None
+        assert state.input_items == {}
+        assert state.input_item_by_turn_revision == {}
+        assert state.response_pending is False
+
+    def test_stale_transcription_failure_does_not_reenable_listening(self, runtime_config):
+        text_prompt_queue = Queue()
+        should_listen = Event()
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(
+            text_prompt_queue=text_prompt_queue,
+            should_listen=should_listen,
+            speculative_turns=tracker,
+        )
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+        )
+        tracker.observe("turn_1", 1)
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionFailedEvent(
+                message="transcription request timed out",
+                turn_id="turn_1",
+                turn_revision=0,
+            ),
+        )
+
+        assert events == []
+        assert not should_listen.is_set()
+        assert text_prompt_queue.empty()
+        service.unregister(conn_id)
+
+    def test_late_failure_does_not_reenable_listening_for_overlapping_item(
+        self,
+        service,
+        conn_id,
+        should_listen,
+    ):
+        first_started = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+        )
+        second_started = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_2", turn_revision=0),
+        )
+        should_listen.clear()
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionFailedEvent(
+                message="transcription request timed out",
+                turn_id="turn_1",
+                turn_revision=0,
+            ),
+        )
+
+        assert events[0].item_id == first_started[0].item_id
+        assert not should_listen.is_set()
+        state = service._state(conn_id)
+        assert state.current_input_item_id == second_started[0].item_id
+        assert first_started[0].item_id not in state.input_items
+
+    def test_duplicate_late_failure_does_not_terminalize_newer_item(
+        self,
+        service,
+        conn_id,
+        should_listen,
+    ):
+        service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+        )
+        failure = TranscriptionFailedEvent(
+            message="transcription request timed out",
+            turn_id="turn_1",
+            turn_revision=0,
+        )
+        service.dispatch_pipeline_event(conn_id, failure)
+        newer_started = service.dispatch_pipeline_event(
+            conn_id,
+            SpeechStartedEvent(turn_id="turn_2", turn_revision=0),
+        )
+        should_listen.clear()
+
+        events = service.dispatch_pipeline_event(conn_id, failure)
+
+        assert events == []
+        assert not should_listen.is_set()
+        state = service._state(conn_id)
+        assert state.current_input_item_id == newer_started[0].item_id
+        assert newer_started[0].item_id in state.input_items
 
     def test_speech_started_emits_event(self, service, conn_id):
         events = service.dispatch_pipeline_event(

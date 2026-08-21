@@ -10,6 +10,7 @@ from openai.types.realtime import (
     ConversationItemCreateEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
+    ConversationItemInputAudioTranscriptionFailedEvent,
     ConversationItemTruncateEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferCommitEvent,
@@ -65,6 +66,7 @@ from speech_to_speech.pipeline.events import (
     SpeechStoppedEvent,
     TokenUsageEvent,
     TranscriptionCompletedEvent,
+    TranscriptionFailedEvent,
 )
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
 from speech_to_speech.pipeline.queue_types import TextPromptItem
@@ -112,6 +114,7 @@ ServerEvent = Union[
     ConversationItemCreatedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
+    ConversationItemInputAudioTranscriptionFailedEvent,
     ResponseCreatedEvent,
     ResponseDoneEvent,
     ResponseAudioDeltaEvent,
@@ -314,6 +317,7 @@ class RealtimeService:
             SpeechStoppedEvent: self.audio.on_speech_stopped,
             PartialTranscriptionEvent: self.conversation.on_partial_transcription,
             TranscriptionCompletedEvent: self._on_transcription_completed,
+            TranscriptionFailedEvent: self._on_transcription_failed,
             AudioInputCompletedEvent: self._on_audio_input_completed,
             ResponseGenerationDoneEvent: self.response.on_response_generation_done,
             AssistantToolCallReadyEvent: self.response.on_assistant_tool_call_ready,
@@ -568,6 +572,7 @@ class RealtimeService:
             (
                 PartialTranscriptionEvent,
                 TranscriptionCompletedEvent,
+                TranscriptionFailedEvent,
                 AudioInputCompletedEvent,
                 AssistantOutputEvent,
                 AssistantResponseDoneEvent,
@@ -661,6 +666,16 @@ class RealtimeService:
             queue.put(request)
 
         return [*completed_events]
+
+    def _on_transcription_failed(self, conn_id: str, event: TranscriptionFailedEvent) -> list[ServerEvent]:
+        """Surface a final STT failure without creating conversation or LLM work."""
+        st = self._state(conn_id)
+        current_input_item_id = st.current_input_item_id
+        failed_events = self.conversation.on_transcription_failed(conn_id, event)
+        owns_current_input = failed_events and failed_events[0].item_id == current_input_item_id
+        if owns_current_input and self.should_listen is not None:
+            self.should_listen.set()
+        return [*failed_events]
 
     def _on_audio_input_completed(self, conn_id: str, event: AudioInputCompletedEvent) -> list[ServerEvent]:
         """Record final input audio and queue its realtime LM request."""

@@ -44,6 +44,7 @@ from speech_to_speech.pipeline.events import (
     SpeechStoppedEvent,
     TokenUsageEvent,
     TranscriptionCompletedEvent,
+    TranscriptionFailedEvent,
 )
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
@@ -97,6 +98,7 @@ def _keep_user_text_event(item: Any) -> bool:
             SpeechStoppedEvent,
             PartialTranscriptionEvent,
             TranscriptionCompletedEvent,
+            TranscriptionFailedEvent,
             AudioInputCompletedEvent,
         ),
     )

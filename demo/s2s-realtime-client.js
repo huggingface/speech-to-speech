@@ -460,6 +460,25 @@ export class S2sRealtimeClient extends EventTarget {
         if (itemId && itemId === this._currentUserItemId) this._currentUserItemId = "";
         break;
       }
+      case "conversation.item.input_audio_transcription.failed": {
+        const itemId = typeof event.item_id === "string" ? event.item_id : "";
+        const isCurrentUserItem = this._currentUserItemId
+          ? Boolean(itemId) && itemId === this._currentUserItemId
+          : true;
+        this._userTranscriptByItem.delete(itemId);
+        if (itemId && itemId === this._currentUserItemId) this._currentUserItemId = "";
+        if (
+          isCurrentUserItem
+          && this._status === "processing"
+          && !this._activeResponseId
+          && !this._responseRequested
+        ) {
+          this._setStatus("connected");
+        }
+        const message = event.error?.message ?? "Input audio transcription failed";
+        this.dispatchEvent(new CustomEvent("server-error", { detail: { error: new Error(message) } }));
+        break;
+      }
       case "response.audio_transcript.delta":
       case "response.output_audio_transcript.delta": {
         const responseId = typeof event.response_id === "string" ? event.response_id : "";
