@@ -84,7 +84,23 @@ def signature_from_schema(schema: object | None) -> inspect.Signature:
     required = set(schema.get("required", []))
     params = []
 
-    for name, spec in props.items():
+    # JSON Schema does not require properties to list required fields first.
+    # Python signatures do: parameters without defaults must precede parameters
+    # with defaults. Keep the schema's order within both groups while moving
+    # required fields without schema defaults ahead of optional/defaulted ones.
+    property_items = list(props.items())
+    required_without_default = [
+        (name, spec)
+        for name, spec in property_items
+        if name in required and not (isinstance(spec, dict) and "default" in spec)
+    ]
+    defaulted_or_optional = [
+        (name, spec)
+        for name, spec in property_items
+        if not (name in required and not (isinstance(spec, dict) and "default" in spec))
+    ]
+
+    for name, spec in [*required_without_default, *defaulted_or_optional]:
         annotation = _annotation_from_spec(spec)
 
         has_schema_default = "default" in spec if isinstance(spec, dict) else False
