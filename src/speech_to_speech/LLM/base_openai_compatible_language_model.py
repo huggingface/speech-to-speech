@@ -121,6 +121,9 @@ class _Turn(BaseModel):
     wants_audio: bool
     response_key: str
     prefetch_transaction: ResponsePrefetchTransaction | None = None
+    # End of the conversation when this turn started; keeps its output ahead of
+    # user messages appended while the model was still running.
+    history_anchor_id: str | None = None
 
 
 class _GenState(BaseModel):
@@ -563,6 +566,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             recorded_items = chat.add_provisional_generation_items(
                 turn.response_key,
                 [*state.pending, fc_item],
+                after_item_id=turn.history_anchor_id,
             )
             state.pending.clear()
             if recorded_items is None:
@@ -848,6 +852,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                             committed_item_ids=(
                                 {transactional_user_message_id} if transactional_user_message_id is not None else None
                             ),
+                            after_item_id=turn.history_anchor_id,
                         )
                         if recorded_items is None:
                             can_commit = False
@@ -930,6 +935,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return
 
         original_chat = runtime_config.chat
+        history_anchor_id: str | None = None
         if not is_out_of_band(response) and original_chat.has_pending_tool_calls():
             yield EndOfResponse(
                 turn_id=turn_id,
@@ -996,6 +1002,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 return
             assert provisional_message.id is not None
             transactional_user_message_id = provisional_message.id
+            # This turn writes its own user message, so anchor its output after
+            # that message: speech arriving later must not overtake it.
+            history_anchor_id = transactional_user_message_id
 
             def commit_audio_history() -> None:
                 original_chat.compact_audio_history(self.audio_history_turns)
@@ -1016,6 +1025,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             wants_audio=wants_audio,
             response_key=request.response_key,
             prefetch_transaction=request.prefetch_transaction,
+            history_anchor_id=history_anchor_id,
         )
         yield from self._generate(
             active_chat,
@@ -1052,6 +1062,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return
 
         original_chat = runtime_config.chat
+        history_anchor_id = original_chat.history_anchor_id()
         if not is_out_of_band(response) and original_chat.has_pending_tool_calls():
             yield EndOfResponse(
                 turn_id=turn_id,
@@ -1110,6 +1121,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             wants_audio=wants_audio,
             response_key=request.response_key,
             prefetch_transaction=request.prefetch_transaction,
+            history_anchor_id=history_anchor_id,
         )
         yield from self._generate(active_chat, original_chat, turn, optional_kwargs)
 

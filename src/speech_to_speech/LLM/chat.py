@@ -45,6 +45,11 @@ logger = logging.getLogger(__name__)
 
 AUDIO_INPUT_HISTORY_PLACEHOLDER = "[User audio input]"
 
+# Anchor returned by :meth:`Chat.history_anchor_id` for an empty conversation,
+# so a generation that starts from empty history is still written before user
+# messages that arrive while it runs.
+HISTORY_START_ANCHOR = "__history_start__"
+
 
 class ChatItemError(Exception):
     """Raised when a conversation item fails validation in :meth:`Chat.add_item`."""
@@ -213,7 +218,58 @@ class Chat:
         with self._lock:
             self.init_chat_message = message
 
-    def _add_item_locked(self, item: SupportedItem, *, ordered_function_call: bool = False) -> SupportedItem:
+    def history_anchor_id(self) -> str | None:
+        """Anchor identifying the current end of the conversation.
+
+        A generation captures this before it starts so its output can later be
+        written back at its own turn position instead of after user messages
+        that arrived while it was still running. ``None`` means the tail cannot
+        be anchored, in which case callers fall back to appending.
+        """
+
+        with self._lock:
+            if not self.buffer:
+                return HISTORY_START_ANCHOR
+            return self.buffer[-1].id
+
+    def _turn_insertion_index_locked(self, after_item_id: str | None) -> int | None:
+        """Buffer index just past the turn anchored at *after_item_id*.
+
+        ``None`` means "append at the end": either the caller passed no anchor,
+        or the anchor is gone (evicted, compacted, or rolled back) and its turn
+        position can no longer be recovered.
+        """
+
+        if after_item_id is None:
+            return None
+        if after_item_id == HISTORY_START_ANCHOR:
+            cursor = 0
+        else:
+            anchor = next((index for index, item in enumerate(self.buffer) if item.id == after_item_id), None)
+            if anchor is None:
+                return None
+            cursor = anchor + 1
+        # Items already written for this same turn stay before the next user
+        # message, which by definition opens a later turn.
+        while cursor < len(self.buffer) and not isinstance(self.buffer[cursor], RealtimeConversationItemUserMessage):
+            cursor += 1
+        return cursor
+
+    def _place_locked(self, item: SupportedItem, insert_at: int | None) -> None:
+        """Append *item*, or splice it back into its own turn at *insert_at*."""
+
+        if insert_at is None:
+            self.buffer.append(item)
+        else:
+            self.buffer.insert(insert_at, item)
+
+    def _add_item_locked(
+        self,
+        item: SupportedItem,
+        *,
+        ordered_function_call: bool = False,
+        insert_at: int | None = None,
+    ) -> SupportedItem:
         """Body of :meth:`add_item`; caller holds ``_lock``."""
 
         if isinstance(item, RealtimeConversationItemSystemMessage):
@@ -234,7 +290,7 @@ class Chat:
                 raise ChatItemError(
                     "Message has no supported content. Supported modalities: input_text, input_image, input_audio."
                 )
-            self.buffer.append(item)
+            self._place_locked(item, insert_at)
             self._user_turn_count += 1
             logger.debug("Added user message to chat (%d parts)", len(item.content))
 
@@ -243,14 +299,14 @@ class Chat:
             item.content = [part for part in item.content if part.type == "output_text" and part.text]
             if not item.content:
                 return item
-            self.buffer.append(item)
+            self._place_locked(item, insert_at)
             logger.debug("Added assistant message to chat (%d parts)", len(item.content))
 
         elif isinstance(item, RealtimeConversationItemFunctionCall):
             item.id = _ensure_id(item.id, "fc")
             item.call_id = _ensure_id(item.call_id, "call")
             if ordered_function_call:
-                self.buffer.append(item)
+                self._place_locked(item, insert_at)
                 self._ordered_pending_call_ids.add(item.call_id)
             self._pending_tool_calls[item.call_id] = item
             logger.debug("Added function_call to chat (call_id=%s)", item.call_id)
@@ -274,8 +330,12 @@ class Chat:
 
         return item
 
-    def add_item(self, item: SupportedItem) -> SupportedItem:
+    def add_item(self, item: SupportedItem, *, after_item_id: str | None = None) -> SupportedItem:
         """Validate and route a conversation item into the chat buffer.
+
+        ``after_item_id`` is a :meth:`history_anchor_id` anchor: the item is
+        spliced back into that turn instead of being appended after user
+        messages that arrived in the meantime.
 
         Does not enforce the soft size limit — call :meth:`trim_if_needed`
         explicitly after each successful generation to evict or compact old
@@ -286,14 +346,18 @@ class Chat:
         Raises :class:`ChatItemError` if the item fails validation.
         """
         with self._lock:
-            return self._add_item_locked(item)
+            return self._add_item_locked(item, insert_at=self._turn_insertion_index_locked(after_item_id))
 
     def add_ordered_function_call(
-        self, item: RealtimeConversationItemFunctionCall
+        self, item: RealtimeConversationItemFunctionCall, *, after_item_id: str | None = None
     ) -> RealtimeConversationItemFunctionCall:
         """Stage a local-model call at its emitted position until its output arrives."""
         with self._lock:
-            recorded = self._add_item_locked(item, ordered_function_call=True)
+            recorded = self._add_item_locked(
+                item,
+                ordered_function_call=True,
+                insert_at=self._turn_insertion_index_locked(after_item_id),
+            )
             assert isinstance(recorded, RealtimeConversationItemFunctionCall)
             return recorded
 
@@ -382,6 +446,7 @@ class Chat:
         items: Sequence[SupportedItem],
         *,
         committed_item_ids: set[str] | None = None,
+        after_item_id: str | None = None,
     ) -> list[SupportedItem] | None:
         """Atomically write and track items exposed by an active response.
 
@@ -401,6 +466,7 @@ class Chat:
             recorded_items: list[SupportedItem] = []
             item_ids: set[str] = set()
             call_ids: set[str] = set()
+            anchor_id = after_item_id
             try:
                 for item in items:
                     if not isinstance(
@@ -412,10 +478,17 @@ class Chat:
                         ),
                     ):
                         raise ChatItemError(f"Unsupported provisional item type: {getattr(item, 'type', None)}")
+                    buffered_before = len(self.buffer)
                     recorded = self._add_item_locked(
                         item,
                         ordered_function_call=isinstance(item, RealtimeConversationItemFunctionCall),
+                        insert_at=self._turn_insertion_index_locked(anchor_id),
                     )
+                    # Keep the batch in emission order: the next item anchors on
+                    # the one just written, re-resolved so an eviction triggered
+                    # by this write cannot leave a stale index behind.
+                    if len(self.buffer) > buffered_before and recorded.id is not None:
+                        anchor_id = recorded.id
                     if isinstance(recorded, RealtimeConversationItemAssistantMessage) and not recorded.content:
                         continue
                     recorded_items.append(recorded)
@@ -516,6 +589,32 @@ class Chat:
                         replacement_added = True
                 item.content = compacted
 
+    def _drop_unpaired_ordered_turns_locked(self, items: Sequence[SupportedItem]) -> list[SupportedItem]:
+        """Drop each unpaired ordered call and the rest of the turn it opened.
+
+        A local model can emit text after a tool call in the same response, and
+        that text is meaningless to a provider until the call has an output. So
+        everything from such a call up to the next user message is omitted --
+        but later turns, which a non-interrupting speaker may have appended
+        while the call was still unpaired, stay in the snapshot.
+
+        Runs on the output of :meth:`_with_adjacent_tool_outputs` so a result
+        that arrived after the unpaired call has already been moved next to the
+        call it completes, instead of being skipped with the unpaired turn.
+        """
+        kept: list[SupportedItem] = []
+        skipping = False
+        for item in items:
+            if isinstance(item, RealtimeConversationItemUserMessage):
+                skipping = False
+            elif isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id in (
+                self._ordered_pending_call_ids
+            ):
+                skipping = True
+            if not skipping:
+                kept.append(item)
+        return kept
+
     @staticmethod
     def _with_adjacent_tool_outputs(items: Sequence[SupportedItem]) -> list[SupportedItem]:
         """Return a backend-safe snapshot without rewriting canonical chronology."""
@@ -549,7 +648,7 @@ class Chat:
 
     def _to_responses_api_chat_locked(self, items: list[SupportedItem]) -> ResponseInputParam:
         """Body of :meth:`to_responses_api_chat`. Caller must hold ``_lock``."""
-        buffer_items = self._with_adjacent_tool_outputs(items)
+        buffer_items = self._drop_unpaired_ordered_turns_locked(self._with_adjacent_tool_outputs(items))
         result: list[ResponseInputItemParam] = []
         if self.init_chat_message:
             result.append(
@@ -599,8 +698,6 @@ class Chat:
                     )
             elif isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
                 if item.call_id in self._pending_tool_calls:
-                    if item.call_id in self._ordered_pending_call_ids:
-                        break
                     continue
                 assert item.call_id is not None and item.call_id != ""
                 function_call = ResponseFunctionToolCallParam(
@@ -640,7 +737,7 @@ class Chat:
             if self.init_chat_message:
                 text = " ".join(p.text for p in self.init_chat_message.content if p.text)
                 messages.append(TransformersSystemMessage(content=text))
-            for item in self._with_adjacent_tool_outputs(self.buffer):
+            for item in self._drop_unpaired_ordered_turns_locked(self._with_adjacent_tool_outputs(self.buffer)):
                 if isinstance(item, RealtimeConversationItemUserMessage):
                     has_media = any(p.type in {"input_image", "input_audio"} for p in item.content)
                     if has_media:
@@ -655,8 +752,6 @@ class Chat:
                     messages.append(TransformersAssistantMessage(content=text))
                 elif isinstance(item, RealtimeConversationItemFunctionCall):
                     if item.call_id in self._pending_tool_calls:
-                        if item.call_id in self._ordered_pending_call_ids:
-                            break
                         continue
                     assert item.call_id is not None and item.call_id != ""
                     args: Any = item.arguments

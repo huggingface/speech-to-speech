@@ -1681,3 +1681,30 @@ def test_out_of_band_invalid_input_emits_failed_end_of_response():
     assert isinstance(outputs[0], EndOfResponse)
     assert outputs[0].error is not None
     assert outputs[0].cancel_generation == scope.generation
+
+
+def test_response_history_precedes_speech_that_arrived_during_generation():
+    """Non-interrupting speech must not overtake the response it did not interrupt."""
+    handler = _make_handler(stream=False)
+    request = _make_request("A", chat_size=5)
+    chat = request.runtime_config.chat
+
+    def create(**kwargs):
+        chat.add_item(make_user_message("B"))
+        return _make_response(
+            [
+                ResponseOutputMessage(
+                    id="msg_a",
+                    type="message",
+                    role="assistant",
+                    status="completed",
+                    content=[ResponseOutputText(type="output_text", text="answer A", annotations=[])],
+                )
+            ]
+        )
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+
+    list(handler.process(request))
+
+    assert [part.text for item in chat.buffer for part in item.content if part.text] == ["A", "answer A", "B"]
