@@ -19,6 +19,7 @@ import numpy as np
 from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.LLM.utils import resolve_auto_language
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
@@ -261,7 +262,9 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         runtime_config = tts_input.runtime_config
         response = tts_input.response
-        language_code = tts_input.language_code
+        # STT reports "de-auto" in auto-detect mode, but the language maps below are keyed
+        # on bare codes, so the suffix has to go before any lookup.
+        language_code, _ = resolve_auto_language(tts_input.language_code)
         text = tts_input.text
 
         voice: Optional[str] = None

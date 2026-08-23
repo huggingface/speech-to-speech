@@ -11,6 +11,7 @@ from rich.console import Console
 from transformers import AutoTokenizer, VitsModel
 
 from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.LLM.utils import resolve_auto_language
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
@@ -162,7 +163,9 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
             speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
-        language_code = tts_input.language_code
+        # STT reports "de-auto" in auto-detect mode; WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE is
+        # keyed on bare codes, so the suffix has to go before the lookup and the comparisons.
+        language_code, _ = resolve_auto_language(tts_input.language_code)
         text = tts_input.text
 
         console.print(f"[green]ASSISTANT: {text}")
