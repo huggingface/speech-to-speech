@@ -399,6 +399,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return chunks, tools, pending_marker
 
         if printable_text:
+            trailing_whitespace = printable_text[len(printable_text.rstrip()) :]
             sentences = sent_tokenize_preserving_markdown_code(printable_text, sent_tokenize)
             if len(sentences) > 1:
                 for s in sentences[:-1]:
@@ -406,7 +407,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     if len(ctx.sentence_batch) >= self.stream_batch_sentences:
                         chunks.append(text_chunk(" ".join(ctx.sentence_batch)))
                         ctx.sentence_batch = []
-                printable_text = sentences[-1]
+                printable_text = sentences[-1] + trailing_whitespace
 
         return chunks, tools, printable_text
 
