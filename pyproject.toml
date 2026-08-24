@@ -80,7 +80,7 @@ mlx-lm = [
     "mlx-vlm==0.4.1; platform_system == 'Darwin'",
 ]
 omnivoice = [
-    "omnivoice>=0.2.1",
+    "omnivoice>=0.2.1; platform_system == 'Darwin'",
 ]
 paraformer = [
     "funasr>=1.1.6",
