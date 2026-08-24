@@ -18,6 +18,7 @@ from speech_to_speech.arguments_classes.responses_api_language_model_arguments i
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 from speech_to_speech.backend_registry import BackendSelection
 from speech_to_speech.cli import main, parse_command, parse_talk_arguments
+from speech_to_speech.pipeline.transcript_logging import log_transcripts_enabled, set_log_transcripts
 from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments, prepare_all_args, prepare_module_args
 
 
@@ -353,6 +354,35 @@ def test_talk_accepts_one_full_url_connection_option():
 def test_talk_leaves_api_key_unset_for_sdk_environment_authentication():
     assert parse_talk_arguments([]).api_key is None
     assert parse_talk_arguments(["--api-key", "explicit-secret"]).api_key == "explicit-secret"
+
+
+@pytest.mark.parametrize("flag", ["--log-transcripts", "--log_transcripts"])
+def test_talk_accepts_transcript_logging_opt_in(flag):
+    assert parse_talk_arguments([]).log_transcripts is False
+    assert parse_talk_arguments([flag]).log_transcripts is True
+
+
+def test_main_wires_talk_transcript_logging_before_client_start(monkeypatch):
+    events = []
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "talk", "--log-transcripts"])
+
+    def warning():
+        assert log_transcripts_enabled() is True
+        events.append("warning")
+
+    def run_client(config):
+        assert log_transcripts_enabled() is True
+        events.append(("client", config.log_transcripts))
+
+    monkeypatch.setattr("speech_to_speech.cli.warn_if_log_transcripts_enabled", warning)
+    monkeypatch.setattr("speech_to_speech.cli.run_realtime_audio_client", run_client)
+
+    try:
+        main()
+    finally:
+        set_log_transcripts(False)
+
+    assert events == ["warning", ("client", True)]
 
 
 def test_talk_loads_opt_in_tool_module(monkeypatch):

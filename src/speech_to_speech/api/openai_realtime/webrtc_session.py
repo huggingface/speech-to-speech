@@ -30,6 +30,7 @@ from aiortc.mediastreams import MediaStreamError, MediaStreamTrack
 
 from speech_to_speech.api.openai_realtime.service import PIPELINE_SAMPLE_RATE
 from speech_to_speech.api.openai_realtime.transports import SessionTransport
+from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 
 if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import RealtimeService, ServerEvent
@@ -403,15 +404,15 @@ class WebRTCSession(SessionTransport):
             try:
                 raw = json.loads(msg)
             except json.JSONDecodeError:
-                logger.error(f"[WebRTC] Invalid JSON on data channel: {msg!r}")
+                logger.error("[WebRTC] Invalid JSON on data channel: %s", transcript_for_log(msg))
                 continue
             if not isinstance(raw, dict):
-                logger.error(f"[WebRTC] Non-object event on data channel: {msg!r}")
+                logger.error("[WebRTC] Non-object event on data channel: %s", transcript_for_log(msg))
                 continue
             try:
                 await self._on_client_event(raw)
-            except Exception:  # noqa: BLE001
-                logger.exception("[WebRTC] Error handling client event")
+            except Exception as exc:  # noqa: BLE001
+                log_exception(logger, "[WebRTC] Error handling client event", exc)
 
     async def _consume_inbound_audio(self, track) -> None:
         while not self._closed:

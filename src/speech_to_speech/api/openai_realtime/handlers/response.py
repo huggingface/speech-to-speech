@@ -40,6 +40,7 @@ from speech_to_speech.pipeline.messages import (
     GenerateResponseRequest,
     ResponsePrefetchTransaction,
 )
+from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
 
 if TYPE_CHECKING:
@@ -247,11 +248,11 @@ class ResponseHandler(RealtimeBaseHandler):
         if request.prefetch_transaction is not None:
             try:
                 claim_succeeded = request.prefetch_transaction.claim()
-            except Exception:
+            except Exception as exc:
                 # Deferred image/history cleanup runs at the standard create
                 # boundary. A failure must not escape the transport or leave
                 # the hidden response occupying the session indefinitely.
-                logger.exception("Failed to commit tool follow-up prefetch history")
+                log_exception(logger, "Failed to commit tool follow-up prefetch history", exc)
                 self.discard_tool_followup_prefetch(
                     conn_id,
                     origin_response_key=st.tool_followup_prefetch_origin_response_key,
