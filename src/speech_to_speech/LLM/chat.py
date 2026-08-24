@@ -943,8 +943,12 @@ class Chat:
                 return
             try:
                 result = compactor(snapshot)
-            except Exception:
-                logger.exception("Chat compaction failed; chat unchanged")
+            except Exception as exc:
+                # Import lazily: importing pipeline modules while RuntimeConfig imports Chat
+                # creates a RuntimeConfig -> Chat -> pipeline.messages cycle at startup.
+                from speech_to_speech.pipeline.transcript_logging import log_exception
+
+                log_exception(logger, "Chat compaction failed; chat unchanged", exc)
                 return
             if not isinstance(result, CompactionResult):
                 logger.error("Compactor must return a CompactionResult, got %r", type(result).__name__)

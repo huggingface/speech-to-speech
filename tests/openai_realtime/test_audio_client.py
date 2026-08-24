@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import signal
 import sys
 from threading import Event
@@ -819,12 +820,13 @@ async def test_audio_client_returns_error_when_executor_result_is_not_awaitable(
     await coordinator.close()
 
 
-async def test_audio_client_returns_unknown_malformed_and_handler_failures_and_forces_recovery(capsys):
+async def test_audio_client_returns_unknown_malformed_and_handler_failures_and_forces_recovery(capsys, caplog):
+    caplog.set_level(logging.DEBUG)
     calls = []
 
     async def executor(name, arguments):
         calls.append((name, arguments))
-        raise RuntimeError("lookup failed")
+        raise RuntimeError("executor-secret-8675309")
 
     conn = RecordingConnection()
     coordinator = _ToolCallCoordinator(
@@ -854,7 +856,8 @@ async def test_audio_client_returns_unknown_malformed_and_handler_failures_and_f
     errors = capsys.readouterr().out
     assert "unknown tool" in errors
     assert "not valid JSON" in errors
-    assert "lookup failed" in errors
+    assert "executor-secret-8675309" in errors
+    assert "executor-secret-8675309" not in "\n".join(record.getMessage() for record in caplog.records)
     await coordinator.close()
 
 

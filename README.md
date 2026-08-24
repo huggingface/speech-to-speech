@@ -75,6 +75,7 @@ Clients using the implemented core Realtime event set can connect. The official 
 * [Realtime API](#realtime-api)
 * [LLM backends](#llm-backends)
 * [Multi-language support](#multi-language-support)
+* [OmniVoice](#omnivoice)
 * [Pocket TTS](#pocket-tts)
 * [CLI reference](#cli-reference)
 * [Contributing](#contributing)
@@ -139,6 +140,7 @@ Optional components are installed with pip extras:
 pip install "speech-to-speech[kokoro]"          # Kokoro-82M TTS on non-macOS
 pip install "speech-to-speech[pocket]"          # Pocket TTS
 pip install "speech-to-speech[chattts]"         # ChatTTS
+pip install "speech-to-speech[omnivoice]"       # OmniVoice TTS (Apple Silicon; see dependency note below)
 pip install "speech-to-speech[faster-whisper]"  # Faster Whisper STT
 pip install "speech-to-speech[whisper-mlx]"     # Lightning Whisper MLX STT on macOS
 pip install "speech-to-speech[paraformer]"      # Paraformer STT through FunASR
@@ -178,6 +180,7 @@ This installs the package in editable mode and makes the `speech-to-speech` CLI 
 | TTS | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | CUDA / CPU, Apple Silicon | `kokoro` on non-macOS; built-in on macOS |
 | TTS | [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) | CPU / CUDA | `pocket` |
 | TTS | [ChatTTS](https://github.com/2noise/ChatTTS) | CUDA / CPU | `chattts` |
+| TTS | [OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) | Apple Silicon / MPS; upstream also supports CUDA and Intel XPU | `omnivoice` |
 | TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | built-in |
 | TTS | OpenAI-compatible `/v1/audio/speech` endpoint | local or remote HTTP server | built-in |
 
@@ -258,7 +261,7 @@ This setting:
 
 The preset supplies these as defaults only: explicit `--device`, component-device flags such as `--qwen3_tts_device`, and `--stt`, `--llm_backend`, `--model_name`, and `--tts` all win. Use it with `serve` instead of `local` when you want to expose the server without starting the microphone/speaker client.
 
-`--tts pocket` and `--tts kokoro` are also valid on macOS.
+`--tts pocket`, `--tts kokoro`, and `--tts omnivoice` are also valid on macOS.
 
 To compare the MLX quantization variants locally:
 
@@ -560,6 +563,26 @@ speech-to-speech serve \
 ```
 
 Both commands also work with `--mac-optimal-settings`; explicit `--stt` flags override the defaults it sets.
+
+## OmniVoice
+
+OmniVoice provides voice cloning, voice design, and automatic voice selection across 600+ languages. Install its opt-in dependencies and provide a reference clip plus its transcript for voice cloning:
+
+```bash
+pip install "speech-to-speech[omnivoice]"
+speech-to-speech serve \
+    --tts omnivoice \
+    --omnivoice_device mps \
+    --omnivoice_ref_audio /path/to/reference.wav \
+    --omnivoice_ref_text "Transcript of the reference clip."
+```
+
+The handler converts OmniVoice's completed 24 kHz float output into the pipeline's 16 kHz `int16` blocks. OmniVoice does not currently expose incremental audio through `generate()`, so the first block is available only after the full utterance has been synthesized. See the [TTS component guide](./src/speech_to_speech/TTS/README.md#6-omnivoice---tts-omnivoice) for saved prompts, voice design, devices, latency, and all backend flags.
+
+The `omnivoice` extra currently resolves with this project's pinned dependencies on macOS. On Linux and Windows, OmniVoice requires Transformers 5 while the built-in Qwen3 dependency still requires Transformers 4; the combined extra is therefore not currently installable there. CUDA and Intel XPU remain upstream OmniVoice capabilities pending resolution of that dependency conflict.
+
+> [!WARNING]
+> OmniVoice's code is Apache-2.0, but its pretrained weights are CC-BY-NC and are not licensed for commercial use. Use voice cloning only with authorization and consent; do not use it for impersonation, fraud, scams, or other illegal or unethical activity.
 
 ## Pocket TTS
 

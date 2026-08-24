@@ -8,6 +8,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 - `facebookMMS` → `facebookmms_handler.py`
 - `pocket` → `pocket_tts_handler.py`
 - `kokoro` → `kokoro_handler.py`
+- `omnivoice` → `omnivoice_handler.py`
 - `qwen3` → `qwen3_tts_handler.py`
 - `openai` → `openai_compatible_handler.py`
 - `supertonic` → `supertonic_tts_handler.py`
@@ -200,7 +201,50 @@ The default settings target Qwen3-TTS on vLLM-Omni.
 See [`docs/openai-compatible-tts.md`](../../../docs/openai-compatible-tts.md)
 for server commands and all relevant flags.
 
-### 7) Supertonic (`--tts supertonic`)
+### 7) OmniVoice (`--tts omnivoice`)
+
+Primary args prefix: `--omnivoice_*`
+
+Install the optional dependency and select a device supported by your PyTorch installation:
+
+```bash
+pip install "speech-to-speech[omnivoice]"
+speech-to-speech serve \
+  --tts omnivoice \
+  --omnivoice_model_name k2-fsa/OmniVoice \
+  --omnivoice_device mps \
+  --omnivoice_dtype float16 \
+  --omnivoice_ref_audio /voices/reference.wav \
+  --omnivoice_ref_text "Transcript of the reference clip."
+```
+
+The reference is encoded once during handler setup and the resulting voice-clone prompt is reused for every text chunk. To reuse an upstream `VoiceClonePrompt.save(...)` file without re-encoding the reference, replace the two reference flags with:
+
+```bash
+--omnivoice_voice_clone_prompt /voices/saved-prompt.pt
+```
+
+Voice design omits the cloning flags and supplies an instruction:
+
+```bash
+speech-to-speech serve \
+  --tts omnivoice \
+  --omnivoice_device mps \
+  --omnivoice_instruct "female, low pitch, British accent"
+```
+
+For auto voice, omit `--omnivoice_ref_audio`, `--omnivoice_voice_clone_prompt`, and `--omnivoice_instruct`. `--omnivoice_language` pins a language name or code; when it is unset, the handler forwards the language code carried by each pipeline utterance. `--omnivoice_num_steps` controls diffusion steps (32 by default), and `--omnivoice_speed` controls speaking rate.
+
+Supported upstream device values include CUDA (`cuda` or `cuda:0`), Apple Silicon (`mps`), and Intel GPU (`xpu`). Choose `float16`, `bfloat16`, or `float32` with `--omnivoice_dtype` according to device support.
+
+The `speech-to-speech[omnivoice]` dependency set currently resolves on macOS, where this project already pins Transformers 5. On Linux and Windows, the default `faster-qwen3-tts` dependency requires Transformers `<5` while OmniVoice 0.2.1 requires Transformers `>=5.3`; the combined extra is therefore not currently installable on those platforms. CUDA and Intel XPU are upstream OmniVoice capabilities but require that packaging conflict to be resolved before they can be supported by this extra. Intel XPU also requires the matching Intel PyTorch build.
+
+OmniVoice returns complete 24 kHz float arrays. This handler downsamples them to 16 kHz, clips to `int16`, and then emits fixed-size blocks. It is playback chunking rather than model streaming: upstream `generate()` is blocking, so time to first audio includes synthesis of the entire utterance, and an interruption during generation discards the result after the blocking call returns. Upstream reports real-time factors as low as 0.025 in its accelerated benchmarks, but actual latency depends on the device, dtype, diffusion-step count, and text length.
+
+> [!WARNING]
+> The [OmniVoice code](https://github.com/k2-fsa/OmniVoice) is Apache-2.0, but the [`k2-fsa/OmniVoice` pretrained weights](https://huggingface.co/k2-fsa/OmniVoice) are CC-BY-NC because of training-data constraints and are not licensed for commercial use. Voice cloning requires authorization and consent. Unauthorized cloning, impersonation, fraud, scams, and other illegal or unethical use are prohibited by the upstream model's safety notice.
+
+### 8) Supertonic (`--tts supertonic`)
 
 Primary args prefix: `--supertonic_tts_*`
 
@@ -241,4 +285,4 @@ speech-to-speech local \
   --mac-optimal-settings
 ```
 
-`--tts pocket` and `--tts kokoro` are also valid options on macOS.
+`--tts pocket`, `--tts kokoro`, and `--tts omnivoice` are also valid options on macOS.

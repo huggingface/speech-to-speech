@@ -10,6 +10,10 @@ from speech_to_speech.api.openai_realtime.audio_client import (
     load_realtime_tool_module,
     run_realtime_audio_client,
 )
+from speech_to_speech.pipeline.transcript_logging import (
+    set_log_transcripts,
+    warn_if_log_transcripts_enabled,
+)
 
 Command = Literal["serve", "talk", "local"]
 
@@ -135,6 +139,14 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         default=defaults.block_mic_during_playback,
     )
     parser.add_argument(
+        "--log-transcripts",
+        "--log_transcripts",
+        dest="log_transcripts",
+        action="store_true",
+        default=defaults.log_transcripts,
+        help="Write full Realtime transcript and tool error details to application logs.",
+    )
+    parser.add_argument(
         "--connection-retry-timeout",
         type=float,
         default=defaults.connection_retry_timeout_s,
@@ -159,6 +171,7 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         voice=namespace.voice,
         print_json=namespace.print_json,
         block_mic_during_playback=namespace.block_mic_during_playback,
+        log_transcripts=namespace.log_transcripts,
         connection_retry_timeout_s=namespace.connection_retry_timeout,
         tools=tools,
         tool_executor=tool_executor,
@@ -169,7 +182,10 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
 def main() -> None:
     command, command_args = parse_command()
     if command == "talk":
-        run_realtime_audio_client(parse_talk_arguments(command_args))
+        config = parse_talk_arguments(command_args)
+        set_log_transcripts(config.log_transcripts)
+        warn_if_log_transcripts_enabled()
+        run_realtime_audio_client(config)
         return
 
     from speech_to_speech.s2s_pipeline import run_pipeline_command

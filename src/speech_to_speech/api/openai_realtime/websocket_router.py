@@ -48,6 +48,7 @@ from speech_to_speech.pipeline.events import (
 )
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
+from speech_to_speech.pipeline.transcript_logging import log_exception
 
 # aiortc (the 'webrtc' extra) is optional. Import it here, at module load,
 # rather than lazily in the calls endpoint: the av/cryptography C extensions
@@ -586,8 +587,8 @@ def create_app(
 
         except WebSocketDisconnect:
             logger.info(f"Client {session_id} disconnected from pipeline {unit.index}")
-        except Exception as e:
-            logger.error(f"Client {session_id} on pipeline {unit.index} error: {type(e).__name__}: {e}", exc_info=True)
+        except Exception as exc:
+            log_exception(logger, f"Client {session_id} on pipeline {unit.index} error", exc)
         finally:
             # Hold the session reference: the send loop's snapshot will still resolve
             # to this object until we clear unit.session, so any handler output that

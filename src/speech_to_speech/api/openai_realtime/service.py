@@ -71,6 +71,7 @@ from speech_to_speech.pipeline.events import (
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
 from speech_to_speech.pipeline.queue_types import TextPromptItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
@@ -387,8 +388,8 @@ class RealtimeService:
             return None
         try:
             return model_cls.model_validate(raw)  # type: ignore[return-value]
-        except ValidationError as e:
-            logger.error(f"Invalid {event_type} payload: {e}")
+        except ValidationError as exc:
+            log_exception(logger, f"Invalid {event_type} payload", exc)
             return None
 
     # ── Client event handlers ────────────────────
@@ -782,7 +783,7 @@ class RealtimeService:
         response; stale generations are discarded by the router. Unkeyed late
         failures remain gated on active/pending state for compatibility.
         """
-        logger.info("Response failed: %s", event.message)
+        logger.info("Response failed: %s", transcript_for_log(event.message))
         st = self._state(conn_id)
         if event.response_key is None and not (st.in_response or st.response_pending):
             return []

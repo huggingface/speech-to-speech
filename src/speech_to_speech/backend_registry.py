@@ -22,6 +22,7 @@ from speech_to_speech.arguments_classes.language_model_arguments import Language
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
     MLXAudioWhisperSTTHandlerArguments,
 )
+from speech_to_speech.arguments_classes.omnivoice_tts_arguments import OmniVoiceTTSHandlerArguments
 from speech_to_speech.arguments_classes.openai_stt_arguments import OpenAICompatibleSTTHandlerArguments
 from speech_to_speech.arguments_classes.openai_tts_arguments import OpenAICompatibleTTSHandlerArguments
 from speech_to_speech.arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
@@ -466,6 +467,19 @@ TTS_BACKENDS = build_backend_registry(
                 context_kwargs=True,
             ),
             normalize_config=_normalize_facebook_mms_config,
+        ),
+        BackendSpec(
+            "omnivoice",
+            "tts",
+            OmniVoiceTTSHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.TTS.omnivoice_handler",
+                "OmniVoiceTTSHandler",
+                setup_should_listen=True,
+                context_kwargs=True,
+            ),
+            config_prefix="omnivoice",
+            required_extra="omnivoice",
         ),
         BackendSpec(
             "pocket",

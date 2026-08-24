@@ -50,6 +50,17 @@ class ModuleArguments:
         default="info",
         metadata={"help": "Provide logging level. Example --log_level debug, default=info."},
     )
+    log_transcripts: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Write full user and assistant transcript text to the application log, for "
+                "debugging STT, LLM, TTS and Realtime flows. Off by default: logs are often "
+                "retained by service managers, containers and hosted log aggregators, so "
+                "conversation content would outlive the conversation there. Default is False."
+            )
+        },
+    )
     enable_live_transcription: bool = field(
         default=True,
         metadata={
