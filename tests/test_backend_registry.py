@@ -75,6 +75,54 @@ def test_builtin_registry_lookup_and_cli_choices_share_one_catalog():
     assert not STT_BACKENDS["whisper"].capabilities.bypasses_transcription_notifier
 
 
+def test_omnivoice_tts_backend_is_registered_as_optional():
+    spec = TTS_BACKENDS["omnivoice"]
+
+    assert spec.kind == "tts"
+    assert spec.required_extra == "omnivoice"
+
+
+def test_omnivoice_cli_config_is_normalized_for_the_handler():
+    args = parse_arguments(
+        [
+            "--tts",
+            "omnivoice",
+            "--omnivoice_model_name",
+            "local/omnivoice",
+            "--omnivoice_device",
+            "xpu",
+            "--omnivoice_dtype",
+            "bfloat16",
+            "--omnivoice_ref_audio",
+            "voice.wav",
+            "--omnivoice_ref_text",
+            "Reference transcript.",
+            "--omnivoice_num_steps",
+            "16",
+            "--omnivoice_speed",
+            "1.25",
+            "--omnivoice_blocksize",
+            "256",
+        ]
+    )
+
+    assert args.tts_backend.name == "omnivoice"
+    assert args.tts_backend.config == {
+        "model_name": "local/omnivoice",
+        "device": "xpu",
+        "dtype": "bfloat16",
+        "ref_audio": "voice.wav",
+        "ref_text": "Reference transcript.",
+        "voice_clone_prompt": None,
+        "instruct": None,
+        "language": None,
+        "num_steps": 16,
+        "speed": 1.25,
+        "blocksize": 256,
+        "gen_kwargs": {},
+    }
+
+
 def test_registry_rejects_duplicate_names_and_wrong_kinds():
     spec = BackendSpec("fake", "stt", FakeArguments, _factory)
 
@@ -470,6 +518,7 @@ def test_factories_keep_backend_modules_lazy():
         "speech_to_speech.STT.whisper_stt_handler",
         "speech_to_speech.LLM.language_model",
         "speech_to_speech.TTS.chatTTS_handler",
+        "speech_to_speech.TTS.omnivoice_handler",
     ]
     for module_name in module_names:
         sys.modules.pop(module_name, None)
