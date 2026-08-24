@@ -68,7 +68,7 @@ from speech_to_speech.pipeline.messages import (
     TokenUsage,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.pipeline.transcript_logging import transcript_for_log
+from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
 
 try:
@@ -603,7 +603,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             try:
                 active_chat = build_active_chat(original_chat, response)
             except ChatItemError as exc:
-                logger.info("Out-of-band response rejected: %s", exc)
+                log_exception(logger, "Out-of-band response rejected", exc, level=logging.INFO)
                 yield EndOfResponse(
                     turn_id=ctx.turn_id,
                     turn_revision=ctx.turn_revision,
@@ -728,7 +728,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 else:
                     trailing_chunk = None
             logger.debug("Clean text: %s", transcript_for_log(ctx.generated_text))
-            logger.info(f"Tools: {ctx.tools}")
+            logger.info("Tools: %s", transcript_for_log(ctx.tools))
 
             if trailing_chunk is not None:
                 yield trailing_chunk
@@ -747,7 +747,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             # Any generation failure must still terminate the response. Without this
             # the exception would escape process() and no EndOfResponse would be
             # emitted, leaving st.in_response stuck and locking every later response.
-            logger.exception("LLM generation failed; ending the current response")
+            log_exception(logger, "LLM generation failed; ending the current response", exc)
             rollback_history()
             if request.prefetch_transaction is not None:
                 # The terminal is queued before this generator resumes into its

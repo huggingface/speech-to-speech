@@ -62,3 +62,24 @@ def transcript_for_log(text: object) -> str:
     if _log_transcripts:
         return value
     return f"chars={len(value)}"
+
+
+def log_exception(
+    target: logging.Logger,
+    message: str,
+    exc: BaseException,
+    *,
+    level: int = logging.ERROR,
+) -> None:
+    """Log an exception without exposing its message or traceback by default."""
+    if _log_transcripts:
+        target.log(
+            level,
+            "%s (%s): %s",
+            message,
+            type(exc).__name__,
+            exc,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        return
+    target.log(level, "%s (%s)", message, type(exc).__name__)

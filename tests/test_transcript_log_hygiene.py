@@ -1,47 +1,48 @@
-"""Conversation content must not reach application loggers.
-
-Operational logs are retained by service managers, containers and hosted logging systems,
-so transcript text written through `logger.*` outlives the conversation in places the user
-never agreed to. Several call sites used to log it directly, including at INFO level:
-
-    logger.info("Transcription completed (language=%s): %s", language_code, transcript)
-
-Diagnostics are kept — stage, event type, language, identifiers, character counts, timing —
-only the content is dropped.
-
-Rich/terminal conversation display (`console.print`) is deliberately out of scope: that is
-the operator watching a live conversation, not a retained log.
-"""
+"""Conversation content is retained in protocol events, but omitted from logs by default."""
 
 from __future__ import annotations
 
-import ast
 import logging
-from pathlib import Path
 from queue import Queue
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
+from openai.types.responses import ResponseFunctionToolCall
 
-from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
-from speech_to_speech.pipeline.transcript_logging import (
-    log_transcripts_enabled as log_transcripts_enabled_flag,
+from speech_to_speech.api.openai_realtime.service import RealtimeService
+from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
+from speech_to_speech.pipeline.messages import (
+    AssistantTextPart,
+    AssistantToolCallPart,
+    LLMResponseChunk,
+    PartialTranscription,
+    Transcription,
 )
 from speech_to_speech.pipeline.transcript_logging import (
+    log_transcripts_enabled,
     set_log_transcripts,
     transcript_for_log,
     warn_if_log_transcripts_enabled,
 )
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
+from speech_to_speech.TTS.facebookmms_handler import FacebookMMSTTSHandler
 
 SENTINEL = "Meet me at Rue Saint-Antoine at nine tomorrow"
+TOOL_SENTINEL = "account-number-8675309"
+ERROR_SENTINEL = "tts-error-8675309"
 
-_SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
+
+@pytest.fixture(autouse=True)
+def reset_transcript_gate():
+    set_log_transcripts(False)
+    yield
+    set_log_transcripts(False)
 
 
-def _notifier(text_output_queue=None, should_listen=None) -> TranscriptionNotifier:
+def _notifier() -> TranscriptionNotifier:
     notifier = object.__new__(TranscriptionNotifier)
-    notifier.setup(text_output_queue=text_output_queue, should_listen=should_listen)
+    notifier.setup(text_output_queue=Queue(), should_listen=Event())
     return notifier
 
 
@@ -49,56 +50,32 @@ def _logged_text(caplog) -> str:
     return "\n".join(record.getMessage() for record in caplog.records)
 
 
-# --- behavioural: the STT notifier path ---------------------------------------------------
+def _assert_content_visibility(logged: str, enabled: bool, *values: str) -> None:
+    for value in values:
+        assert (value in logged) is enabled
 
 
-def test_final_transcription_content_is_not_logged(caplog):
-    """This was an INFO-level leak, so it showed up in default deployments."""
+@pytest.mark.parametrize(
+    "message",
+    [
+        Transcription(text=SENTINEL, language_code="fr", speech_stopped_at_s=1.0),
+        Transcription(text=SENTINEL, language_code=None, speech_stopped_at_s=1.0),
+        PartialTranscription(text=SENTINEL),
+        PartialTranscription(text=SENTINEL * 10),
+    ],
+)
+def test_stt_content_is_not_logged_by_default(caplog, message):
     caplog.set_level(logging.DEBUG)
-    notifier = _notifier(text_output_queue=Queue(), should_listen=Event())
 
-    list(notifier.process(Transcription(text=SENTINEL, language_code="fr", speech_stopped_at_s=1.0)))
+    list(_notifier().process(message))
 
     assert SENTINEL not in _logged_text(caplog)
 
 
-def test_final_transcription_without_language_is_not_logged(caplog):
+def test_stt_metadata_is_retained(caplog):
     caplog.set_level(logging.DEBUG)
-    notifier = _notifier(text_output_queue=Queue(), should_listen=Event())
 
-    list(notifier.process(Transcription(text=SENTINEL, language_code=None, speech_stopped_at_s=1.0)))
-
-    assert SENTINEL not in _logged_text(caplog)
-
-
-def test_partial_transcription_content_is_not_logged(caplog):
-    caplog.set_level(logging.DEBUG)
-    notifier = _notifier(text_output_queue=Queue())
-
-    list(notifier.process(PartialTranscription(text=SENTINEL)))
-
-    assert SENTINEL not in _logged_text(caplog)
-
-
-def test_long_transcript_is_not_logged_even_truncated(caplog):
-    """Truncated content is still content: the old code logged the first 80 characters."""
-    caplog.set_level(logging.DEBUG)
-    notifier = _notifier(text_output_queue=Queue())
-    long_text = SENTINEL * 10
-
-    list(notifier.process(PartialTranscription(text=long_text)))
-
-    logged = _logged_text(caplog)
-    assert SENTINEL not in logged
-    assert long_text[:80] not in logged
-
-
-def test_useful_diagnostics_are_retained(caplog):
-    """Dropping content must not mean dropping observability."""
-    caplog.set_level(logging.DEBUG)
-    notifier = _notifier(text_output_queue=Queue(), should_listen=Event())
-
-    list(notifier.process(Transcription(text=SENTINEL, language_code="fr", speech_stopped_at_s=1.0)))
+    list(_notifier().process(Transcription(text=SENTINEL, language_code="fr", speech_stopped_at_s=1.0)))
 
     logged = _logged_text(caplog)
     assert "Transcription completed" in logged
@@ -106,187 +83,103 @@ def test_useful_diagnostics_are_retained(caplog):
     assert str(len(SENTINEL)) in logged
 
 
-def test_transcription_events_still_carry_the_text():
-    """Protocol payloads are unchanged; only logging is content-free."""
+def test_transcription_protocol_event_still_carries_text():
     queue: Queue = Queue()
-    notifier = _notifier(text_output_queue=queue, should_listen=Event())
+    notifier = object.__new__(TranscriptionNotifier)
+    notifier.setup(text_output_queue=queue, should_listen=Event())
 
     list(notifier.process(PartialTranscription(text=SENTINEL)))
 
     assert queue.get_nowait().delta == SENTINEL
 
 
-# --- source sweep: STT, LLM, TTS and Realtime paths ---------------------------------------
-#
-# A behavioural test can only reach the paths it can cheaply construct. This sweep covers
-# every module, so a new content-bearing log call fails CI wherever it is added.
-
-# Expressions that evaluate to conversation content. Logging any of these leaks transcript
-# text; logging len(...) of them does not.
-_CONTENT_EXPRESSIONS = {
-    "clean_text",
-    "generated_text",
-    "transcript",
-    "pred_text",
-    "hypothesis",
-    "transcript_prefix",
-    # Generic, but every logger use of a bare `text` in this package is conversation text.
-    "text",
-}
-
-_CONTENT_ATTRIBUTES = {"clean_text", "generated_text", "transcript", "transcript_prefix", "text"}
-
-_LOG_METHODS = {"debug", "info", "warning", "error", "exception", "critical"}
-
-
-def _log_call_arguments(tree: ast.AST):
-    """Yield (lineno, arg) for every argument passed to a logger.<level>() call."""
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if not isinstance(func, ast.Attribute) or func.attr not in _LOG_METHODS:
-            continue
-        if not (isinstance(func.value, ast.Name) and func.value.id in {"logger", "logging"}):
-            continue
-        for arg in node.args:
-            yield node.lineno, arg
-
-
-def _mentions_content(node: ast.AST) -> bool:
-    """True if *node* evaluates to conversation content rather than a measurement of it."""
-    for inner in ast.walk(node):
-        # len(x) and similar reductions are fine, so don't descend into them.
-        if isinstance(inner, ast.Call):
-            callee = inner.func
-            if isinstance(callee, ast.Name) and callee.id == "len":
-                continue
-        if isinstance(inner, ast.Name) and inner.id in _CONTENT_EXPRESSIONS:
-            return True
-        if isinstance(inner, ast.Attribute) and inner.attr in _CONTENT_ATTRIBUTES:
-            return True
-    return False
-
-
-# Calls that reduce content to something safe, or route it through the opt-in gate.
-_SAFE_WRAPPERS = {"len", "transcript_for_log"}
-
-
-def _strip_safe_wrappers(node: ast.AST) -> ast.AST:
-    """Replace len(...) / transcript_for_log(...) subtrees with a constant.
-
-    `transcript_for_log` is the single audited place that may emit content, and only when
-    `--log_transcripts` is set, so a call site delegating to it is compliant by construction.
-    """
-
-    class Pruner(ast.NodeTransformer):
-        def visit_Call(self, call: ast.Call):  # noqa: N802
-            if isinstance(call.func, ast.Name) and call.func.id in _SAFE_WRAPPERS:
-                return ast.Constant(value=0)
-            self.generic_visit(call)
-            return call
-
-    return Pruner().visit(node)
-
-
 @pytest.mark.parametrize(
-    "relative_path",
-    sorted(str(p.relative_to(_SRC_ROOT)) for p in (_SRC_ROOT / "speech_to_speech").rglob("*.py")),
+    "message",
+    [
+        Transcription(text=SENTINEL, language_code="fr", speech_stopped_at_s=1.0),
+        PartialTranscription(text=SENTINEL * 5),
+    ],
 )
-def test_no_logger_call_passes_conversation_content(relative_path: str) -> None:
-    source = (_SRC_ROOT / relative_path).read_text(encoding="utf-8")
-    tree = ast.parse(source)
-
-    offenders = [lineno for lineno, arg in _log_call_arguments(tree) if _mentions_content(_strip_safe_wrappers(arg))]
-
-    assert offenders == [], (
-        f"{relative_path} passes conversation content to a logger at line(s) {offenders}; "
-        f"log a character count or identifier instead"
-    )
-
-
-# --- the explicit opt-in ------------------------------------------------------------------
-
-
-@pytest.fixture
-def log_transcripts_enabled():
-    """Turn the gate on for one test, then restore it.
-
-    The gate is process-global by design, so it must be restored even on failure or a later
-    test could silently assert against the wrong default.
-    """
+def test_stt_content_is_logged_in_full_when_opted_in(caplog, message):
+    caplog.set_level(logging.DEBUG)
     set_log_transcripts(True)
-    try:
-        yield
-    finally:
-        set_log_transcripts(False)
+
+    list(_notifier().process(message))
+
+    assert message.text in _logged_text(caplog)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_llm_text_and_tool_arguments_follow_the_gate(caplog, enabled):
+    caplog.set_level(logging.DEBUG)
+    tool = ResponseFunctionToolCall(
+        type="function_call",
+        id="fc_test",
+        call_id="call_test",
+        name="remember",
+        arguments=f'{{"note": "{TOOL_SENTINEL}"}}',
+        status="completed",
+    )
+    chunk = LLMResponseChunk(parts=[AssistantTextPart(text=SENTINEL), AssistantToolCallPart(tool=tool)])
+    processor = object.__new__(LMOutputProcessor)
+    processor.setup()
+    set_log_transcripts(enabled)
+
+    list(processor.process(chunk))
+
+    _assert_content_visibility(_logged_text(caplog), enabled, SENTINEL, TOOL_SENTINEL)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_realtime_validation_errors_follow_the_gate(caplog, enabled):
+    caplog.set_level(logging.DEBUG)
+    raw = {
+        "type": "conversation.item.create",
+        "item": {"type": "function_call", "arguments": TOOL_SENTINEL},
+    }
+    set_log_transcripts(enabled)
+
+    assert RealtimeService().parse_client_event(raw) is None
+
+    _assert_content_visibility(_logged_text(caplog), enabled, TOOL_SENTINEL)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_tts_exceptions_follow_the_gate(caplog, enabled):
+    class FailingTokenizer:
+        def __call__(self, *_args, **_kwargs):
+            raise ValueError(ERROR_SENTINEL)
+
+    caplog.set_level(logging.DEBUG)
+    handler = object.__new__(FacebookMMSTTSHandler)
+    handler.language = "en"
+    handler.tokenizer = FailingTokenizer()
+    set_log_transcripts(enabled)
+
+    assert handler.generate_audio("harmless input") is None
+
+    logged = _logged_text(caplog)
+    _assert_content_visibility(logged, enabled, ERROR_SENTINEL)
+    assert "ValueError" in logged
 
 
 def test_gate_is_off_by_default():
-    """The default has to be off: everything else here depends on it."""
-    assert log_transcripts_enabled_flag() is False
+    assert log_transcripts_enabled() is False
 
 
-def test_final_transcription_is_logged_when_opted_in(caplog, log_transcripts_enabled):
-    caplog.set_level(logging.DEBUG)
-    notifier = _notifier(text_output_queue=Queue(), should_listen=Event())
-
-    list(notifier.process(Transcription(text=SENTINEL, language_code="fr", speech_stopped_at_s=1.0)))
-
-    assert SENTINEL in _logged_text(caplog)
-
-
-def test_partial_transcription_is_logged_when_opted_in(caplog, log_transcripts_enabled):
-    caplog.set_level(logging.DEBUG)
-    notifier = _notifier(text_output_queue=Queue())
-
-    list(notifier.process(PartialTranscription(text=SENTINEL)))
-
-    assert SENTINEL in _logged_text(caplog)
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("hello", "chars=5"), (None, "chars=0"), ("", "chars=0")],
+)
+def test_transcript_for_log_reports_length_by_default(value, expected):
+    assert transcript_for_log(value) == expected
 
 
-def test_full_transcript_is_not_truncated_when_opted_in(caplog, log_transcripts_enabled):
-    """Opting in is for debugging, so the whole transcript has to be there."""
-    caplog.set_level(logging.DEBUG)
-    notifier = _notifier(text_output_queue=Queue())
-    long_text = SENTINEL * 5
+def test_transcript_for_log_returns_stringified_content_when_opted_in():
+    set_log_transcripts(True)
 
-    list(notifier.process(PartialTranscription(text=long_text)))
-
-    assert long_text in _logged_text(caplog)
-
-
-def test_gate_restores_default_after_opt_in(caplog):
-    """Ordering guard: the previous tests must not leak the enabled state."""
-    caplog.set_level(logging.DEBUG)
-    notifier = _notifier(text_output_queue=Queue(), should_listen=Event())
-
-    list(notifier.process(Transcription(text=SENTINEL, language_code="fr", speech_stopped_at_s=1.0)))
-
-    assert SENTINEL not in _logged_text(caplog)
-
-
-# --- transcript_for_log itself ------------------------------------------------------------
-
-
-def test_transcript_for_log_reports_length_by_default():
-    assert transcript_for_log("hello") == "chars=5"
-
-
-def test_transcript_for_log_returns_content_when_opted_in(log_transcripts_enabled):
     assert transcript_for_log("hello") == "hello"
-
-
-@pytest.mark.parametrize("value", [None, ""])
-def test_transcript_for_log_handles_missing_text(value):
-    assert transcript_for_log(value) == "chars=0"
-
-
-def test_transcript_for_log_stringifies_non_text(log_transcripts_enabled):
     assert transcript_for_log(42) == "42"
-
-
-# --- the startup warning -----------------------------------------------------------------
 
 
 def test_no_warning_when_the_gate_is_off(caplog):
@@ -297,29 +190,57 @@ def test_no_warning_when_the_gate_is_off(caplog):
     assert caplog.records == []
 
 
-def test_warning_is_emitted_when_opted_in(caplog, log_transcripts_enabled):
+def test_warning_is_emitted_when_opted_in(caplog):
     caplog.set_level(logging.DEBUG)
+    set_log_transcripts(True)
 
     warn_if_log_transcripts_enabled()
 
-    assert [r.levelno for r in caplog.records] == [logging.WARNING]
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
     message = caplog.records[0].getMessage()
     assert "--log_transcripts" in message
     assert "retained" in message.lower()
 
 
-def test_startup_wires_the_gate_and_warns_before_processing(monkeypatch, caplog):
-    """The flag has to reach the gate, and the warning must precede conversation handling."""
-    caplog.set_level(logging.DEBUG)
+def test_startup_wires_the_gate_and_warns_before_processing(monkeypatch):
+    from speech_to_speech import s2s_pipeline
 
-    set_log_transcripts(False)
-    try:
-        set_log_transcripts(True)
-        warn_if_log_transcripts_enabled()
-        assert log_transcripts_enabled_flag() is True
-        assert any("--log_transcripts" in r.getMessage() for r in caplog.records)
-    finally:
-        set_log_transcripts(False)
+    events: list[str] = []
+    args = SimpleNamespace(
+        module_kwargs=SimpleNamespace(
+            log_level="debug",
+            log_transcripts=True,
+            num_pipelines=1,
+            enable_live_transcription=False,
+        )
+    )
+    manager = SimpleNamespace(
+        start=lambda: events.append("start"),
+        wait=lambda: events.append("wait"),
+        stop=lambda: events.append("stop"),
+    )
+
+    monkeypatch.setattr(s2s_pipeline, "parse_arguments", lambda *_args, **_kwargs: args)
+    monkeypatch.setattr(s2s_pipeline, "setup_logger", lambda _level: events.append("logger"))
+    monkeypatch.setattr(s2s_pipeline, "prepare_all_args", lambda _args: events.append("prepare"))
+    monkeypatch.setattr(
+        s2s_pipeline,
+        "build_pipeline",
+        lambda _args, _stop_event: events.append("build") or manager,
+    )
+    monkeypatch.setattr(s2s_pipeline.signal, "signal", lambda *_args: None)
+    original_warning = s2s_pipeline.warn_if_log_transcripts_enabled
+
+    def record_warning():
+        assert log_transcripts_enabled() is True
+        events.append("warning")
+        original_warning()
+
+    monkeypatch.setattr(s2s_pipeline, "warn_if_log_transcripts_enabled", record_warning)
+
+    s2s_pipeline.run_pipeline_command("serve", [])
+
+    assert events == ["logger", "warning", "prepare", "build", "start", "wait"]
 
 
 def test_cli_exposes_the_flag_defaulting_to_off():

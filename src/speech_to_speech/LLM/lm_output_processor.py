@@ -173,7 +173,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             logger.debug("Dropping stale LLM chunk for turn=%s rev=%s", lm_output.turn_id, lm_output.turn_revision)
             return
 
-        logger.debug("LM processor: parts=%s", lm_output.parts)
+        logger.debug("LM processor: parts=%s", transcript_for_log(lm_output.parts))
 
         response_key = self._start_response(lm_output.response_key)
 

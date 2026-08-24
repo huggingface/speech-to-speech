@@ -38,6 +38,7 @@ from speech_to_speech.pipeline.messages import (
     TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 
 logger = logging.getLogger(__name__)
@@ -861,8 +862,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                     self._log_first_audio_latency(tts_input)
                     first_audio = False
                 yield audio_chunk
-        except Exception as e:
-            logger.error(f"Error during Qwen3-TTS generation: {e}", exc_info=True)
+        except Exception as exc:
+            log_exception(logger, "Error during Qwen3-TTS generation", exc)
 
     def _log_first_audio_latency(self, tts_input: TTSInput) -> None:
         if tts_input.speech_stopped_at_s is None:

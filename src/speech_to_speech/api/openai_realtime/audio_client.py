@@ -27,6 +27,8 @@ from jsonschema import SchemaError, ValidationError
 from jsonschema.validators import validator_for
 from openai import AsyncOpenAI
 
+from speech_to_speech.pipeline.transcript_logging import log_exception
+
 logger = logging.getLogger(__name__)
 
 _AssistantTranscriptStream = tuple[str | None, str | None, int | None, int | None]
@@ -528,7 +530,7 @@ class _ToolCallCoordinator:
             raise
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
-            logger.debug("Local tool %s failed", display_name, exc_info=True)
+            log_exception(logger, f"Local tool {display_name} failed", exc, level=logging.DEBUG)
             print(f"TOOL ERROR: {display_name} call_id={call_id}: {message}", flush=True)
             output = json.dumps({"error": message})
             create_response = True
