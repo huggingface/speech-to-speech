@@ -12,6 +12,7 @@ from openai.types.responses import ResponseFunctionToolCall
 
 from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
+from speech_to_speech.pipeline.events import PartialTranscriptionEvent, SpeechStartedEvent
 from speech_to_speech.pipeline.messages import (
     AssistantTextPart,
     AssistantToolCallPart,
@@ -145,6 +146,27 @@ def test_realtime_validation_errors_follow_the_gate(caplog, enabled):
 
 
 @pytest.mark.parametrize("enabled", [False, True])
+def test_realtime_transcript_hypotheses_follow_the_gate(caplog, enabled):
+    caplog.set_level(logging.DEBUG)
+    service = RealtimeService()
+    conn_id = service.register()
+    set_log_transcripts(enabled)
+
+    service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+    service.dispatch_pipeline_event(conn_id, PartialTranscriptionEvent(delta=SENTINEL))
+    service.dispatch_pipeline_event(conn_id, PartialTranscriptionEvent(delta=f"{SENTINEL} please"))
+    service.dispatch_pipeline_event(conn_id, PartialTranscriptionEvent(delta=f"{SENTINEL} please now"))
+    revised = service.dispatch_pipeline_event(
+        conn_id,
+        PartialTranscriptionEvent(delta="Call me at Rue Saint-Antoine at nine tomorrow please now"),
+    )
+
+    assert revised == []
+    _assert_content_visibility(_logged_text(caplog), enabled, SENTINEL)
+    service.unregister(conn_id)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
 def test_tts_exceptions_follow_the_gate(caplog, enabled):
     class FailingTokenizer:
         def __call__(self, *_args, **_kwargs):
@@ -156,10 +178,10 @@ def test_tts_exceptions_follow_the_gate(caplog, enabled):
     handler.tokenizer = FailingTokenizer()
     set_log_transcripts(enabled)
 
-    assert handler.generate_audio("harmless input") is None
+    assert handler.generate_audio(SENTINEL) is None
 
     logged = _logged_text(caplog)
-    _assert_content_visibility(logged, enabled, ERROR_SENTINEL)
+    _assert_content_visibility(logged, enabled, SENTINEL, ERROR_SENTINEL)
     assert "ValueError" in logged
 
 

@@ -60,6 +60,7 @@ class RealtimeAudioClientConfig:
     voice: Optional[str] = None
     print_json: bool = False
     block_mic_during_playback: bool = False
+    log_transcripts: bool = False
     connection_retry_timeout_s: float = 30.0
     tools: list[dict[str, Any]] = field(default_factory=list)
     tool_executor: ToolExecutor | None = None
