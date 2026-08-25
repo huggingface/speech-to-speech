@@ -380,6 +380,12 @@ def test_talk_leaves_api_key_unset_for_sdk_environment_authentication():
     assert parse_talk_arguments(["--api-key", "explicit-secret"]).api_key == "explicit-secret"
 
 
+def test_talk_accepts_custom_playback_buffer():
+    config = parse_talk_arguments(["--playback-buffer-ms", "240"])
+
+    assert config.playback_buffer_ms == 240
+
+
 @pytest.mark.parametrize("flag", ["--log-transcripts", "--log_transcripts"])
 def test_talk_accepts_transcript_logging_opt_in(flag):
     assert parse_talk_arguments([]).log_transcripts is False
@@ -446,11 +452,15 @@ def test_serve_rejects_local_audio_flags():
 
 
 def test_local_accepts_audio_flags_but_rejects_host():
-    args = parse_arguments(["--port", "9876", "--local_audio_input_device", "2"], command="local")
+    args = parse_arguments(
+        ["--port", "9876", "--local_audio_input_device", "2", "--playback-buffer-ms", "240"],
+        command="local",
+    )
 
     assert args.realtime_server_kwargs.host == "127.0.0.1"
     assert args.realtime_server_kwargs.port == 9876
     assert args.local_audio_kwargs.local_audio_input_device == 2
+    assert args.local_audio_kwargs.local_audio_playback_buffer_ms == 240
     with pytest.raises(ValueError, match="--host"):
         parse_arguments(["--host", "0.0.0.0"], command="local")
 

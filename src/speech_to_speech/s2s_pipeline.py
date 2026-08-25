@@ -608,6 +608,7 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
             url=f"ws://127.0.0.1:{args.realtime_server_kwargs.port}/v1/realtime",
             api_key="local",
             chunk_size=local_audio.local_audio_chunk_size,
+            playback_buffer_ms=local_audio.local_audio_playback_buffer_ms,
             input_device=local_audio.local_audio_input_device,
             output_device=local_audio.local_audio_output_device,
             print_json=local_audio.local_audio_print_json,

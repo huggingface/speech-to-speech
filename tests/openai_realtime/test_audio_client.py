@@ -255,6 +255,12 @@ def test_playback_buffer_flushes_completed_audio_shorter_than_startup_buffer():
     assert playback.buffered_bytes == 0
 
 
+@pytest.mark.parametrize("buffer_ms", [-1, float("inf"), float("nan")])
+def test_audio_client_rejects_invalid_playback_buffer(buffer_ms):
+    with pytest.raises(ValueError, match="playback_buffer_ms"):
+        RealtimeAudioClientConfig(playback_buffer_ms=buffer_ms)
+
+
 def test_audio_client_clears_unplayed_audio_on_barge_in(capsys):
     playback = PlaybackBuffer(16000)
     renderer = _FriendlyEventRenderer()
@@ -1245,6 +1251,13 @@ def test_audio_client_does_not_duplicate_partial_transcript_on_cancel(capsys):
 
 async def test_audio_streams_are_cleaned_up_when_output_start_fails(monkeypatch):
     events = []
+    playback_args = []
+
+    original_playback_buffer = PlaybackBuffer
+
+    def recording_playback_buffer(recv_rate, startup_buffer_ms):
+        playback_args.append((recv_rate, startup_buffer_ms))
+        return original_playback_buffer(recv_rate, startup_buffer_ms)
 
     class FakeStream:
         def __init__(self, name, *, fail_start=False):
@@ -1269,14 +1282,16 @@ async def test_audio_streams_are_cleaned_up_when_output_start_fails(monkeypatch)
         RawOutputStream=lambda **_kwargs: output_stream,
     )
     monkeypatch.setitem(sys.modules, "sounddevice", fake_sounddevice)
+    monkeypatch.setattr(audio_client_module, "PlaybackBuffer", recording_playback_buffer)
 
     with pytest.raises(RuntimeError, match="output start failed"):
         await audio_client_module._run_audio_session(
             SimpleNamespace(),
-            RealtimeAudioClientConfig(),
+            RealtimeAudioClientConfig(playback_buffer_ms=240),
             Event(),
         )
 
+    assert playback_args == [(16000, 240)]
     assert events == [
         "input.start",
         "output.start",

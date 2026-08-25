@@ -43,6 +43,7 @@ def test_local_composes_loopback_client_with_same_server_builder(monkeypatch):
     args = _default_args()
     args.realtime_server_kwargs.host = "192.0.2.10"
     args.realtime_server_kwargs.port = 9876
+    args.local_audio_kwargs.local_audio_playback_buffer_ms = 240
     pipeline_handler = object()
     unit = SimpleNamespace(handlers=[pipeline_handler])
     monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", lambda **_kwargs: unit)
@@ -59,3 +60,4 @@ def test_local_composes_loopback_client_with_same_server_builder(monkeypatch):
     assert server.port == 9876
     assert client.config.url == f"ws://127.0.0.1:{server.port}/v1/realtime"
     assert client.config.api_key == "local"
+    assert client.config.playback_buffer_ms == 240

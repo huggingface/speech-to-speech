@@ -54,6 +54,7 @@ class RealtimeAudioClientConfig:
     api_key: Optional[str] = None
     send_rate: int = 16000
     recv_rate: int = 16000
+    playback_buffer_ms: float = _PLAYBACK_START_BUFFER_MS
     chunk_size: int = 1024
     input_device: Optional[int] = None
     output_device: Optional[int] = None
@@ -66,6 +67,10 @@ class RealtimeAudioClientConfig:
     tools: list[dict[str, Any]] = field(default_factory=list)
     tool_executor: ToolExecutor | None = None
     tool_response_create: bool = True
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.playback_buffer_ms < float("inf"):
+            raise ValueError("playback_buffer_ms must be a finite non-negative number")
 
 
 def load_realtime_tool_module(module_name: str) -> tuple[list[dict[str, Any]], ToolExecutor, bool]:
@@ -208,8 +213,8 @@ class PlaybackBuffer:
     def __init__(self, recv_rate: int, startup_buffer_ms: float = _PLAYBACK_START_BUFFER_MS) -> None:
         if recv_rate <= 0:
             raise ValueError("recv_rate must be positive")
-        if startup_buffer_ms < 0:
-            raise ValueError("startup_buffer_ms must not be negative")
+        if not 0 <= startup_buffer_ms < float("inf"):
+            raise ValueError("startup_buffer_ms must be a finite non-negative number")
         self.recv_rate = recv_rate
         self._startup_buffer_bytes = int(recv_rate * 2 * startup_buffer_ms / 1000)
         self._startup_buffer_bytes -= self._startup_buffer_bytes % 2
@@ -835,7 +840,7 @@ async def _run_audio_session(
     import sounddevice as sd
 
     mic_queue: Queue[bytes] = Queue(maxsize=128)
-    playback = PlaybackBuffer(config.recv_rate)
+    playback = PlaybackBuffer(config.recv_rate, startup_buffer_ms=config.playback_buffer_ms)
     renderer = _FriendlyEventRenderer()
     tool_calls = _ToolCallCoordinator(conn, config)
 
