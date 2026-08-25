@@ -386,6 +386,11 @@ def test_talk_accepts_custom_playback_buffer():
     assert config.playback_buffer_ms == 240
 
 
+def test_packaged_audio_clients_default_to_196_ms_playback_buffer():
+    assert parse_talk_arguments([]).playback_buffer_ms == 196
+    assert LocalAudioArguments().local_audio_playback_buffer_ms == 196
+
+
 @pytest.mark.parametrize("flag", ["--log-transcripts", "--log_transcripts"])
 def test_talk_accepts_transcript_logging_opt_in(flag):
     assert parse_talk_arguments([]).log_transcripts is False

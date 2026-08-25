@@ -24,9 +24,9 @@ class LocalAudioArguments:
         metadata={"help": "Microphone and speaker callback block size in samples. Default is 1024."},
     )
     local_audio_playback_buffer_ms: float = field(
-        default=128.0,
+        default=196.0,
         metadata={
-            "help": "Audio to buffer before local playback starts, in milliseconds. Default is 128.",
+            "help": "Audio to buffer before local playback starts, in milliseconds. Default is 196.",
             "aliases": ["--playback-buffer-ms"],
         },
     )

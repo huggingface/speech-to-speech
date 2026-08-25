@@ -69,6 +69,35 @@ The default request uses the standard `stream_format=audio` field and consumes
 the HTTP response body incrementally. It does not send the non-standard
 `stream` field.
 
+## Playback buffering
+
+The packaged Python audio client used by `speech-to-speech local` and
+`speech-to-speech talk` waits for 196 ms of audio before starting playback. If
+playback runs out of audio while a response is still arriving, it uses the same
+cushion before restarting. This small client-side delay absorbs uneven network
+or synthesis delivery so the speaker is less likely to underrun and stutter.
+
+The buffer is downstream of TTS and therefore applies to both PCM and WAV and
+to every backend, including hosted OpenAI and a local vLLM deployment. A local
+server may need less buffering because its chunks usually arrive more evenly.
+It does not alter the TTS request, synthesis, resampling, or server deployment.
+
+Override the default for either command with `--playback-buffer-ms`. Higher
+values improve tolerance for delivery jitter at the cost of a later start to
+each response; lower values reduce that startup delay but increase underrun
+risk. For example:
+
+```bash
+speech-to-speech local \
+  --playback-buffer-ms 256 \
+  --tts openai \
+  --openai_tts_base_url https://api.openai.com/v1
+```
+
+Responses shorter than the configured buffer are played as soon as the audio
+response completes. Browser, WebRTC, and third-party Realtime clients use their
+own playback behavior and are not affected by this option.
+
 ## Authentication and compatibility
 
 Set `--openai_tts_api_key` when the endpoint requires bearer authentication.
@@ -81,8 +110,11 @@ fail before the Realtime server accepts sessions.
 The client accepts:
 
 - raw signed PCM16 with a configured `--openai_tts_sample_rate`; or
-- a complete WAV response with `--openai_tts_stream false` and
+- a WAV response with `--openai_tts_stream false` and
   `--openai_tts_response_format wav`.
+
+Both formats are decoded, resampled, and forwarded incrementally as their HTTP
+response bodies arrive.
 
 The `stream_format=audio` field is part of the standard request shape.
 `stream=true` is a vLLM-Omni extension and is disabled by default; enable it

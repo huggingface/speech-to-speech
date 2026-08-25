@@ -203,6 +203,14 @@ or another compatible server, see
 
 `serve` binds to `127.0.0.1` by default; pass `--host 0.0.0.0` explicitly for network exposure. `local` always binds to loopback and connects the same packaged client at `ws://127.0.0.1:<port>/v1/realtime`.
 
+The packaged `local` and `talk` client buffers 196 ms of received audio before
+starting playback. This absorbs short delivery gaps from either local or remote
+backends. Use `--playback-buffer-ms <milliseconds>` to tune the tradeoff: a
+larger value resists stuttering but delays the start of each response, while a
+smaller value starts sooner but is more sensitive to jitter. This setting only
+controls the packaged Python client's speakers; browser and other Realtime
+clients manage their own playback buffers.
+
 The packaged client can opt in to local Python tools with `talk --tool-module <module>` or `local --tool-module <module>`. The module contract, programmatic API, and a Serper web-search example are documented in [Tool calling design](./src/speech_to_speech/api/openai_realtime/README.md#packaged-python-client-tools).
 
 ### Migrating from `--mode`
