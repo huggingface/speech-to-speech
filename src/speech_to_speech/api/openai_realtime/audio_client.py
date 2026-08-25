@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 _AssistantTranscriptStream = tuple[str | None, str | None, int | None, int | None]
 ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[Any]]
 _TOOL_CREATE_ID_METADATA_KEY = "s2s_local_tool_create_id"
-_PLAYBACK_START_BUFFER_MS = 96.0
+_PLAYBACK_START_BUFFER_MS = 128.0
 
 
 @dataclass(frozen=True)
