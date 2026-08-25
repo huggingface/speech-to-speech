@@ -4,6 +4,7 @@ import asyncio
 import io
 import logging
 import os
+import wave
 from collections.abc import Callable
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
@@ -12,6 +13,7 @@ from typing import Any, Iterator, cast
 
 import httpx
 import numpy as np
+from scipy.signal import firwin, lfilter
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
@@ -233,61 +235,123 @@ class HttpSpeechOperation:
             raise SpeechRequestCancelled
 
 
-class _StreamingLinearResampler:
-    """Small stateful PCM resampler that preserves continuity across HTTP chunks."""
+class _StreamingFIRResampler:
+    """Stateful anti-aliased resampler with stable output across input chunks."""
 
     def __init__(self, source_rate: int, target_rate: int) -> None:
         if source_rate <= 0 or target_rate <= 0:
             raise ValueError("sample rates must be positive")
         self.source_rate = source_rate
         self.target_rate = target_rate
-        self._buffer = np.empty(0, dtype=np.float32)
-        self._buffer_start = 0
-        self._next_output_index = 0
+        gcd = int(np.gcd(source_rate, target_rate))
+        self._up = target_rate // gcd
+        self._down = source_rate // gcd
+        self._input_samples = 0
+        self._upsampled_samples = 0
+        self._output_samples = 0
+        self._finalized = False
+
+        if self._up == self._down:
+            self._taps = np.ones(1, dtype=np.float64)
+            self._filter_state = np.empty(0, dtype=np.float64)
+            self._delay = 0
+            return
+
+        max_rate = max(self._up, self._down)
+        half_length = 10 * max_rate
+        self._taps = (
+            firwin(
+                2 * half_length + 1,
+                cutoff=1.0 / max_rate,
+                window=("kaiser", 5.0),
+            )
+            * self._up
+        )
+        self._filter_state = np.zeros(self._taps.size - 1, dtype=np.float64)
+        self._delay = (self._taps.size - 1) // 2
 
     def push(self, samples: np.ndarray, *, final: bool = False) -> np.ndarray:
-        incoming = np.asarray(samples, dtype=np.float32).reshape(-1)
+        if self._finalized:
+            raise RuntimeError("resampler has already been finalized")
+
+        incoming = np.asarray(samples, dtype=np.float64).reshape(-1)
+        self._input_samples += incoming.size
+        if self._up == self._down:
+            if final:
+                self._finalized = True
+            return self._to_int16(incoming)
+
+        output_parts: list[np.ndarray] = []
         if incoming.size:
-            self._buffer = np.concatenate((self._buffer, incoming))
-        if self._buffer.size == 0:
-            return np.empty(0, dtype=np.int16)
-        if self.source_rate == self.target_rate:
-            same_rate_output = self._buffer
-            self._buffer = np.empty(0, dtype=np.float32)
-            self._buffer_start = 0
-            return np.clip(np.round(same_rate_output), -32768, 32767).astype(np.int16)
+            upsampled = np.zeros(incoming.size * self._up, dtype=np.float64)
+            upsampled[:: self._up] = incoming
+            output_parts.append(self._filter_and_decimate(upsampled))
 
-        last_source_index = self._buffer_start + self._buffer.size - 1
-        resampled_output: list[float] = []
-        while True:
-            numerator = self._next_output_index * self.source_rate
-            left = numerator // self.target_rate
-            remainder = numerator % self.target_rate
-            right = left + (1 if remainder else 0)
-            if right > last_source_index:
-                if not final or left > last_source_index:
-                    break
-                right = left
-                remainder = 0
-            left_offset = int(left - self._buffer_start)
-            right_offset = int(right - self._buffer_start)
-            fraction = remainder / self.target_rate
-            value = self._buffer[left_offset] * (1.0 - fraction) + self._buffer[right_offset] * fraction
-            resampled_output.append(float(value))
-            self._next_output_index += 1
+        if final:
+            self._finalized = True
+            # Flush the FIR tail so the centered final samples are not truncated.
+            output_parts.append(self._filter_and_decimate(np.zeros(self._taps.size - 1, dtype=np.float64)))
 
-        next_source = (self._next_output_index * self.source_rate) // self.target_rate
-        keep_from = max(self._buffer_start, int(next_source) - 1)
-        drop = min(self._buffer.size, keep_from - self._buffer_start)
-        if drop > 0:
-            self._buffer = self._buffer[drop:]
-            self._buffer_start += drop
+        output = np.concatenate(output_parts) if output_parts else np.empty(0, dtype=np.float64)
+        target_total = (self._input_samples * self.target_rate + self.source_rate - 1) // self.source_rate
+        remaining = max(0, target_total - self._output_samples)
+        if output.size > remaining:
+            output = output[:remaining]
+        self._output_samples += output.size
+        return self._to_int16(output)
 
-        return np.clip(np.round(resampled_output), -32768, 32767).astype(np.int16)
+    def _filter_and_decimate(self, upsampled: np.ndarray) -> np.ndarray:
+        filtered, self._filter_state = lfilter(
+            self._taps,
+            np.ones(1, dtype=np.float64),
+            upsampled,
+            zi=self._filter_state,
+        )
+        global_start = self._upsampled_samples
+        self._upsampled_samples += upsampled.size
+        minimum_index = max(global_start, self._delay)
+        phase = (minimum_index - self._delay) % self._down
+        first_index = minimum_index if phase == 0 else minimum_index + self._down - phase
+        local_start = first_index - global_start
+        if local_start >= filtered.size:
+            return np.empty(0, dtype=np.float64)
+        return filtered[local_start :: self._down]
+
+    @staticmethod
+    def _to_int16(samples: np.ndarray) -> np.ndarray:
+        return np.clip(np.round(samples), -32768, 32767).astype(np.int16)
+
+
+class _StreamingByteReader(io.RawIOBase):
+    """Expose an iterator of HTTP bytes as the file API used by ``wave``."""
+
+    def __init__(self, chunks: Iterator[bytes]) -> None:
+        super().__init__()
+        self._chunks = iter(chunks)
+        self._buffer = bytearray()
+        self._eof = False
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            for chunk in self._chunks:
+                self._buffer.extend(chunk)
+            self._eof = True
+            size = len(self._buffer)
+        while len(self._buffer) < size and not self._eof:
+            try:
+                self._buffer.extend(next(self._chunks))
+            except StopIteration:
+                self._eof = True
+        result = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return result
+
+    def readable(self) -> bool:
+        return True
 
 
 class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
-    """Client handler for POST /v1/audio/speech with cancellable PCM streaming."""
+    """Client handler for POST /v1/audio/speech with cancellable audio streaming."""
 
     def setup(
         self,
@@ -353,11 +417,12 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             language=self._resolve_language(None),
         )
 
-        if self.response_format == "pcm":
-            decoded_chunks = self._decode_pcm_stream(operation.iter_bytes(self.stop_event.is_set))
-        else:
-            encoded = b"".join(operation.iter_bytes(self.stop_event.is_set))
-            decoded_chunks = self._decode_wav(encoded)
+        source_chunks = operation.iter_bytes(self.stop_event.is_set)
+        decoded_chunks = (
+            self._decode_pcm_stream(source_chunks)
+            if self.response_format == "pcm"
+            else self._decode_wav_stream(source_chunks)
+        )
 
         received_audio = False
         for chunk in decoded_chunks:
@@ -432,32 +497,23 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         first_audio = True
         started_at_s = perf_counter()
         try:
-            if self.response_format == "pcm":
-                source_chunks = operation.iter_bytes(cancel_check)
-                for chunk in self._decode_pcm_stream(source_chunks):
-                    if cancel_check():
+            source_chunks = operation.iter_bytes(cancel_check)
+            decoded_chunks = (
+                self._decode_pcm_stream(source_chunks)
+                if self.response_format == "pcm"
+                else self._decode_wav_stream(source_chunks)
+            )
+            for chunk in decoded_chunks:
+                if cancel_check():
+                    operation.cancel()
+                    return
+                if first_audio:
+                    if not self._commit_first_audio(tts_input):
                         operation.cancel()
                         return
-                    if first_audio:
-                        if not self._commit_first_audio(tts_input):
-                            operation.cancel()
-                            return
-                        self._log_first_audio_latency(tts_input, started_at_s)
-                        first_audio = False
-                    yield chunk
-            else:
-                encoded = b"".join(operation.iter_bytes(cancel_check))
-                for chunk in self._decode_wav(encoded):
-                    if cancel_check():
-                        operation.cancel()
-                        return
-                    if first_audio:
-                        if not self._commit_first_audio(tts_input):
-                            operation.cancel()
-                            return
-                        self._log_first_audio_latency(tts_input, started_at_s)
-                        first_audio = False
-                    yield chunk
+                    self._log_first_audio_latency(tts_input, started_at_s)
+                    first_audio = False
+                yield chunk
             if first_audio and not cancel_check():
                 raise SpeechRequestError("speech endpoint returned no audio")
         except SpeechRequestCancelled:
@@ -576,58 +632,96 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         raise ValueError("Realtime voice overrides must be a voice name or custom voice ID")
 
     def _decode_pcm_stream(self, encoded_chunks: Iterator[bytes]) -> Iterator[np.ndarray]:
-        resampler = _StreamingLinearResampler(self.sample_rate, PIPELINE_SAMPLE_RATE)
         byte_remainder = b""
+
+        def sample_chunks() -> Iterator[np.ndarray]:
+            nonlocal byte_remainder
+            for encoded in encoded_chunks:
+                encoded = byte_remainder + encoded
+                usable = len(encoded) - (len(encoded) % 2)
+                byte_remainder = encoded[usable:]
+                if usable:
+                    yield np.frombuffer(encoded[:usable], dtype="<i2")
+            if byte_remainder:
+                # Preserve valid audio: a trailing byte cannot form a PCM16 sample, so
+                # discard it with a warning instead of failing the whole response.
+                logger.warning("Speech endpoint returned an incomplete PCM16 sample")
+
+        yield from self._resample_to_blocks(sample_chunks(), self.sample_rate)
+
+    def _decode_wav_stream(self, encoded_chunks: Iterator[bytes]) -> Iterator[np.ndarray]:
+        stream = _StreamingByteReader(encoded_chunks)
+        try:
+            wav_reader = wave.open(cast(Any, stream), "rb")
+        except (EOFError, wave.Error) as exc:
+            raise SpeechRequestError("speech endpoint returned an invalid WAV stream") from exc
+
+        try:
+            channels = wav_reader.getnchannels()
+            sample_width = wav_reader.getsampwidth()
+            sample_rate = wav_reader.getframerate()
+            if wav_reader.getcomptype() != "NONE" or channels < 1 or sample_width not in {1, 2, 3, 4}:
+                raise SpeechRequestError("speech endpoint returned an unsupported WAV format")
+            source_frames_per_read = max(
+                1024,
+                (self.blocksize * sample_rate + PIPELINE_SAMPLE_RATE - 1) // PIPELINE_SAMPLE_RATE + 64,
+            )
+
+            def sample_chunks() -> Iterator[np.ndarray]:
+                byte_remainder = b""
+                frame_size = channels * sample_width
+                while encoded := wav_reader.readframes(source_frames_per_read):
+                    encoded = byte_remainder + encoded
+                    usable = len(encoded) - (len(encoded) % frame_size)
+                    byte_remainder = encoded[usable:]
+                    if usable:
+                        yield self._decode_wav_frames(encoded[:usable], channels, sample_width)
+                if byte_remainder:
+                    logger.warning("Speech endpoint returned an incomplete WAV audio frame")
+
+            yield from self._resample_to_blocks(sample_chunks(), sample_rate)
+        except wave.Error as exc:
+            raise SpeechRequestError("speech endpoint returned an invalid WAV stream") from exc
+        finally:
+            wav_reader.close()
+
+    @staticmethod
+    def _decode_wav_frames(encoded: bytes, channels: int, sample_width: int) -> np.ndarray:
+        if sample_width == 1:
+            waveform = (np.frombuffer(encoded, dtype=np.uint8).astype(np.float64) - 128.0) * 256.0
+        elif sample_width == 2:
+            waveform = np.frombuffer(encoded, dtype="<i2").astype(np.float64)
+        elif sample_width == 3:
+            octets = np.frombuffer(encoded, dtype=np.uint8).reshape(-1, 3).astype(np.int32)
+            values = octets[:, 0] | (octets[:, 1] << 8) | (octets[:, 2] << 16)
+            values = np.where(values & 0x800000, values - 0x1000000, values)
+            waveform = values.astype(np.float64) / 256.0
+        else:
+            waveform = np.frombuffer(encoded, dtype="<i4").astype(np.float64) / 65536.0
+        frames = waveform.reshape(-1, channels)
+        return frames.mean(axis=1) if channels > 1 else frames[:, 0]
+
+    def _resample_to_blocks(
+        self,
+        sample_chunks: Iterator[np.ndarray],
+        source_rate: int,
+    ) -> Iterator[np.ndarray]:
+        resampler = _StreamingFIRResampler(source_rate, PIPELINE_SAMPLE_RATE)
         sample_remainder = np.empty(0, dtype=np.int16)
-        for encoded in encoded_chunks:
-            encoded = byte_remainder + encoded
-            usable = len(encoded) - (len(encoded) % 2)
-            byte_remainder = encoded[usable:]
-            if usable == 0:
-                continue
-            samples = np.frombuffer(encoded[:usable], dtype="<i2")
+        for samples in sample_chunks:
             converted = resampler.push(samples)
             sample_remainder = np.concatenate((sample_remainder, converted))
             while sample_remainder.size >= self.blocksize:
                 yield sample_remainder[: self.blocksize].copy()
                 sample_remainder = sample_remainder[self.blocksize :]
 
-        converted = resampler.push(np.empty(0, dtype=np.int16), final=True)
+        converted = resampler.push(np.empty(0, dtype=np.float64), final=True)
         sample_remainder = np.concatenate((sample_remainder, converted))
-        if byte_remainder:
-            # Preserve valid audio: a trailing byte cannot form a PCM16 sample, so
-            # discard it with a warning instead of failing the whole response.
-            logger.warning("Speech endpoint returned an incomplete PCM16 sample")
         while sample_remainder.size >= self.blocksize:
             yield sample_remainder[: self.blocksize].copy()
             sample_remainder = sample_remainder[self.blocksize :]
         if sample_remainder.size:
             yield np.pad(sample_remainder, (0, self.blocksize - sample_remainder.size))
-
-    def _decode_wav(self, encoded: bytes) -> Iterator[np.ndarray]:
-        from scipy.io import wavfile
-        from scipy.signal import resample_poly
-
-        sample_rate, samples = wavfile.read(io.BytesIO(encoded))
-        waveform = np.asarray(samples)
-        if waveform.ndim == 2:
-            waveform = waveform.mean(axis=1)
-        if np.issubdtype(waveform.dtype, np.floating):
-            waveform = np.clip(waveform, -1.0, 1.0) * 32767.0
-        waveform = waveform.astype(np.float32)
-        if sample_rate != PIPELINE_SAMPLE_RATE:
-            gcd = int(np.gcd(sample_rate, PIPELINE_SAMPLE_RATE))
-            waveform = resample_poly(
-                waveform,
-                up=PIPELINE_SAMPLE_RATE // gcd,
-                down=sample_rate // gcd,
-            )
-        pcm = np.clip(np.round(waveform), -32768, 32767).astype(np.int16)
-        for offset in range(0, pcm.size, self.blocksize):
-            chunk = pcm[offset : offset + self.blocksize]
-            if chunk.size < self.blocksize:
-                chunk = np.pad(chunk, (0, self.blocksize - chunk.size))
-            yield chunk
 
     def _log_first_audio_latency(self, tts_input: TTSInput, request_started_at_s: float) -> None:
         logger.info("OpenAI-compatible TTS time to first audio: %.3fs", perf_counter() - request_started_at_s)

@@ -182,6 +182,33 @@ def test_openai_tts_streams_resampled_fixed_size_pcm(monkeypatch):
     assert payload["stream_format"] == "audio"
 
 
+def test_openai_tts_streaming_resampler_is_chunk_invariant_and_anti_aliased():
+    sample_rate = 24000
+    duration_s = 0.2
+    timeline = np.arange(int(sample_rate * duration_s)) / sample_rate
+    passband = np.round(16000 * np.sin(2 * np.pi * 1000 * timeline)).astype(np.int16)
+    stopband = np.round(16000 * np.sin(2 * np.pi * 10000 * timeline)).astype(np.int16)
+
+    def resample(samples, chunk_sizes):
+        resampler = tts_module._StreamingFIRResampler(sample_rate, 16000)
+        output = []
+        offset = 0
+        for chunk_size in chunk_sizes:
+            output.append(resampler.push(samples[offset : offset + chunk_size]))
+            offset += chunk_size
+        output.append(resampler.push(samples[offset:]))
+        output.append(resampler.push(np.empty(0, dtype=np.int16), final=True))
+        return np.concatenate(output)
+
+    passband_streamed = resample(passband, [1, 301, 17, 1024, 3])
+    passband_single = resample(passband, [])
+    stopband_streamed = resample(stopband, [299, 2, 777, 31])
+
+    np.testing.assert_array_equal(passband_streamed, passband_single)
+    assert np.sqrt(np.mean(passband_streamed.astype(np.float64) ** 2)) > 10000
+    assert np.sqrt(np.mean(stopband_streamed.astype(np.float64) ** 2)) < 500
+
+
 def test_openai_tts_vllm_stream_extension_is_opt_in(monkeypatch):
     handler = _openai_tts_handler(monkeypatch)
     handler.stream = True
@@ -496,7 +523,7 @@ def test_openai_tts_empty_success_response_emits_failure(monkeypatch):
     assert failure.response_key == "response-1"
 
 
-def test_openai_tts_decodes_non_streaming_wav(monkeypatch):
+def test_openai_tts_decodes_wav_stream(monkeypatch):
     handler = _openai_tts_handler(monkeypatch)
     handler.response_format = "wav"
     handler.stream = False
@@ -512,6 +539,77 @@ def test_openai_tts_decodes_non_streaming_wav(monkeypatch):
     payload = _FakeSpeechOperation.instances[0].payload
     assert payload["response_format"] == "wav"
     assert "stream" not in payload
+
+
+def test_openai_tts_wav_yields_audio_before_response_eof(monkeypatch):
+    release_response = Event()
+    response_finished = Event()
+    encoded = io.BytesIO()
+    wavfile.write(encoded, 24000, np.arange(4800, dtype=np.int16))
+    wav_bytes = bytearray(encoded.getvalue())
+    wav_bytes[4:8] = b"\xff\xff\xff\xff"
+    wav_bytes[40:44] = b"\xff\xff\xff\xff"
+    first_part_size = 44 + 2400 * 2
+
+    class GatedWavStream(tts_module.httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield bytes(wav_bytes[:first_part_size])
+            while not release_response.is_set():
+                await asyncio.sleep(0.01)
+            yield bytes(wav_bytes[first_part_size:])
+            response_finished.set()
+
+        async def aclose(self) -> None:
+            pass
+
+    def respond(request):
+        return tts_module.httpx.Response(
+            200,
+            headers={"Content-Type": "audio/wav"},
+            stream=GatedWavStream(),
+            request=request,
+        )
+
+    client = tts_module.httpx.AsyncClient(transport=tts_module.httpx.MockTransport(respond))
+    monkeypatch.setattr(tts_module.httpx, "AsyncClient", lambda **kwargs: client)
+    monkeypatch.setattr(OpenAICompatibleTTSHandler, "warmup", lambda self: None)
+    handler = OpenAICompatibleTTSHandler(
+        Event(),
+        queue_in=Queue(),
+        queue_out=Queue(),
+        setup_args=(Event(),),
+        setup_kwargs={"response_format": "wav", "blocksize": 512},
+    )
+
+    generation = handler.process(TTSInput(text="Hello"))
+    try:
+        first_audio = next(generation)
+        finished_before_first_audio = response_finished.is_set()
+    finally:
+        release_response.set()
+    remaining_audio = list(generation)
+
+    assert isinstance(first_audio, np.ndarray)
+    assert remaining_audio
+    assert finished_before_first_audio is False
+    assert response_finished.is_set()
+
+
+def test_openai_tts_decodes_streaming_wav_with_unknown_data_length(monkeypatch):
+    handler = _openai_tts_handler(monkeypatch)
+    handler.response_format = "wav"
+    encoded = io.BytesIO()
+    wavfile.write(encoded, 24000, np.arange(2400, dtype=np.int16))
+    wav_bytes = bytearray(encoded.getvalue())
+    wav_bytes[4:8] = b"\xff\xff\xff\xff"
+    wav_bytes[40:44] = b"\xff\xff\xff\xff"
+    _FakeSpeechOperation.response_bytes = bytes(wav_bytes)
+
+    chunks = list(handler.process(TTSInput(text="Hello")))
+
+    assert chunks
+    assert all(chunk.dtype == np.int16 and chunk.shape == (512,) for chunk in chunks)
+    assert sum(chunk.size for chunk in chunks) == 2048
 
 
 def test_openai_tts_cancellation_before_audio_does_not_commit(monkeypatch):
