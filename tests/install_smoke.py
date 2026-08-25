@@ -184,6 +184,15 @@ def _validate_default_handler_imports() -> None:
         importlib.import_module(module_name)
 
 
+def _validate_runtime_dependency_imports() -> None:
+    if sys.platform != "darwin":
+        importlib.import_module("faster_qwen3_tts")
+    if os.environ.get("SPEECH_TO_SPEECH_SMOKE_EXTRA") == "omnivoice":
+        omnivoice = importlib.import_module("omnivoice")
+        assert omnivoice.OmniVoice is not None
+        assert omnivoice.VoiceClonePrompt is not None
+
+
 def _validate_realtime_websocket_support() -> None:
     importlib.import_module("uvicorn.protocols.websockets.websockets_impl")
 
@@ -234,6 +243,8 @@ def main() -> None:
         required_modules.extend(["miniaudio", "mlx", "mlx_audio", "mlx_lm", "misaki", "soundfile", "spacy"])
     else:
         required_modules.extend(["faster_qwen3_tts", "nano_parakeet"])
+    if os.environ.get("SPEECH_TO_SPEECH_SMOKE_EXTRA") == "omnivoice":
+        required_modules.append("omnivoice")
 
     _require_modules(required_modules)
     if sys.platform == "darwin":
@@ -243,6 +254,7 @@ def main() -> None:
     _validate_empty_qwen_ref_audio_arg()
     _validate_realtime_engine_imports()
     _validate_default_handler_imports()
+    _validate_runtime_dependency_imports()
     _validate_realtime_websocket_support()
     print("speech-to-speech installed package smoke test passed")
 
