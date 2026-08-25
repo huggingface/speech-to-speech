@@ -100,8 +100,8 @@ Behavior:
 - Defaults to the CustomVoice model with speaker `Aiden`, so no reference audio is required. Voice-clone/base models can still use `--qwen3_tts_ref_audio`.
 
 Install notes for Linux GGML:
-- The default PyPI `qwentts-cpp-python` wheel targets CUDA 12.8.
-- If that wheel does not match your CUDA runtime, install one of the Hugging Face wheelhouse builds before installing `speech-to-speech`.
+- The default PyPI `qwentts-cpp-python` wheel targets CUDA 12.8 and `manylinux_2_39` (for example, Ubuntu 24.04).
+- If that wheel does not match your CUDA runtime or glibc, install one of the Hugging Face wheelhouse builds before installing `speech-to-speech`.
 
 ```bash
 pip install "qwentts-cpp-python==0.3.1+cu130" \
@@ -194,14 +194,14 @@ This will run separate benchmark entries for `qwen3[bf16]`, `qwen3[4bit]`, `qwen
 
 Primary args prefix: `--omnivoice_*`
 
-Install the optional dependency and select a device supported by your PyTorch installation:
+Install the optional dependency and select a device supported by your PyTorch installation. This example uses CUDA on Linux or Windows; use `mps` on Apple Silicon or `xpu` with an Intel XPU-enabled PyTorch installation:
 
 ```bash
 pip install "speech-to-speech[omnivoice]"
 speech-to-speech serve \
   --tts omnivoice \
   --omnivoice_model_name k2-fsa/OmniVoice \
-  --omnivoice_device mps \
+  --omnivoice_device cuda \
   --omnivoice_dtype float16 \
   --omnivoice_ref_audio /voices/reference.wav \
   --omnivoice_ref_text "Transcript of the reference clip."
@@ -226,7 +226,7 @@ For auto voice, omit `--omnivoice_ref_audio`, `--omnivoice_voice_clone_prompt`, 
 
 Supported upstream device values include CUDA (`cuda` or `cuda:0`), Apple Silicon (`mps`), and Intel GPU (`xpu`). Choose `float16`, `bfloat16`, or `float32` with `--omnivoice_dtype` according to device support.
 
-The `speech-to-speech[omnivoice]` dependency set currently resolves on macOS, where this project already pins Transformers 5. On Linux and Windows, the default `faster-qwen3-tts` dependency requires Transformers `<5` while OmniVoice 0.2.1 requires Transformers `>=5.3`; the combined extra is therefore not currently installable on those platforms. CUDA and Intel XPU are upstream OmniVoice capabilities but require that packaging conflict to be resolved before they can be supported by this extra. Intel XPU also requires the matching Intel PyTorch build.
+The `speech-to-speech[omnivoice]` dependency set is supported on Linux, Windows, and macOS. On non-macOS platforms, `faster-qwen3-tts>=0.4.0` and OmniVoice share Transformers 5, so the extra can be installed alongside the built-in Qwen3 backend. Linux uses Qwen3's GGML extra by default; install a matching `qwentts-cpp-python` wheel as described above when the default CUDA 12.8 / `manylinux_2_39` wheel does not match the host. Intel XPU requires the matching Intel PyTorch build.
 
 OmniVoice returns complete 24 kHz float arrays. This handler downsamples them to 16 kHz, clips to `int16`, and then emits fixed-size blocks. It is playback chunking rather than model streaming: upstream `generate()` is blocking, so time to first audio includes synthesis of the entire utterance, and an interruption during generation discards the result after the blocking call returns. Upstream reports real-time factors as low as 0.025 in its accelerated benchmarks, but actual latency depends on the device, dtype, diffusion-step count, and text length.
 
