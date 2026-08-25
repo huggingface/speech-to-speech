@@ -308,6 +308,29 @@ def test_local_audio_strips_markdown_after_reassembling_streamed_deltas():
     assert ctx.printable_text.strip() == "Second sentence."
 
 
+def test_local_audio_streaming_preserves_whitespace_across_chunks():
+    handler = object.__new__(LanguageModelHandler)
+    handler.cancel_scope = None
+    handler.speculative_turns = None
+    handler.stop_event = Event()
+    handler.stream_batch_sentences = 1
+    ctx = StreamContext()
+
+    chunks = list(
+        handler._stream_tokens(
+            iter(["It is sunny. What is ", "the weather like?"]),
+            None,
+            None,
+            ctx,
+        )
+    )
+
+    text = "".join(chunk.text for chunk in chunks) + ctx.printable_text
+    assert [chunk.text for chunk in chunks] == ["It is sunny."]
+    assert "isthe" not in text
+    assert ctx.printable_text == "What is the weather like?"
+
+
 def test_local_text_only_tool_marker_can_span_tokens_without_losing_whitespace():
     handler = object.__new__(LanguageModelHandler)
     ctx = _stream_context("dance")
