@@ -482,6 +482,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         text = tts_input.text.strip()
         if not text:
             return
+
         def cancel_check() -> bool:
             cancelled = self.stop_event.is_set() or (
                 cancel_generation is not None
