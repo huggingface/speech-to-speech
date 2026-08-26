@@ -24,6 +24,7 @@ from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
 )
 from speech_to_speech.arguments_classes.omnivoice_tts_arguments import OmniVoiceTTSHandlerArguments
 from speech_to_speech.arguments_classes.openai_stt_arguments import OpenAICompatibleSTTHandlerArguments
+from speech_to_speech.arguments_classes.openai_tts_arguments import OpenAICompatibleTTSHandlerArguments
 from speech_to_speech.arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
 from speech_to_speech.arguments_classes.parakeet_tdt_arguments import (
     ParakeetTDTSTTHandlerArguments,
@@ -265,6 +266,24 @@ def _create_parakeet(context: HandlerContext, config: Mapping[str, Any]) -> Any:
     return handler
 
 
+def _create_openai_tts(context: HandlerContext, config: Mapping[str, Any]) -> Any:
+    handler_class = _load_handler(
+        "speech_to_speech.TTS.openai_compatible_handler",
+        "OpenAICompatibleTTSHandler",
+    )
+    return handler_class(
+        context.stop_event,
+        queue_in=context.queue_in,
+        queue_out=context.queue_out,
+        setup_args=(context.should_listen,),
+        setup_kwargs={
+            **config,
+            "cancel_scope": context.cancel_scope,
+            "speculative_turns": context.speculative_turns,
+        },
+    )
+
+
 def _create_local_llm(backend: Literal["transformers", "mlx-lm"]) -> HandlerFactory:
     def create(context: HandlerContext, config: Mapping[str, Any]) -> Any:
         setup_kwargs = dict(config)
@@ -499,6 +518,13 @@ TTS_BACKENDS = build_backend_registry(
                 context_kwargs=True,
             ),
             config_prefix="qwen3_tts",
+        ),
+        BackendSpec(
+            "openai",
+            "tts",
+            OpenAICompatibleTTSHandlerArguments,
+            _create_openai_tts,
+            config_prefix="openai_tts",
         ),
         BackendSpec(
             "supertonic",

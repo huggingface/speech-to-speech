@@ -119,6 +119,12 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
     )
     parser.add_argument("--send-rate", type=int, default=defaults.send_rate)
     parser.add_argument("--recv-rate", type=int, default=defaults.recv_rate)
+    parser.add_argument(
+        "--playback-buffer-ms",
+        type=float,
+        default=defaults.playback_buffer_ms,
+        help="Audio to buffer before playback starts, in milliseconds.",
+    )
     parser.add_argument("--chunk-size", type=int, default=defaults.chunk_size)
     parser.add_argument("--input-device", type=int, default=defaults.input_device)
     parser.add_argument("--output-device", type=int, default=defaults.output_device)
@@ -164,6 +170,7 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         api_key=namespace.api_key,
         send_rate=namespace.send_rate,
         recv_rate=namespace.recv_rate,
+        playback_buffer_ms=namespace.playback_buffer_ms,
         chunk_size=namespace.chunk_size,
         input_device=namespace.input_device,
         output_device=namespace.output_device,

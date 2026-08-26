@@ -182,8 +182,12 @@ This installs the package in editable mode and makes the `speech-to-speech` CLI 
 | TTS | [ChatTTS](https://github.com/2noise/ChatTTS) | CUDA / CPU | `chattts` |
 | TTS | [OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) | CUDA / Intel XPU / Apple Silicon | `omnivoice` |
 | TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | built-in |
+| TTS | OpenAI-compatible `/v1/audio/speech` endpoint | local or remote HTTP server | built-in |
 
 Select implementations with `--stt`, `--llm_backend`, and `--tts`. The CLI constructs configuration only for the selected backends; known options for inactive backends remain accepted for compatibility but are ignored with a warning. JSON configuration may likewise include extra inactive-backend keys, which are ignored. Run `speech-to-speech serve -h` for the defaults, or pass selectors before `-h` to see another combination's backend-specific flags (for example, `speech-to-speech serve --stt mlx-audio-whisper -h`).
+
+For client-only TTS serving with vLLM-Omni or another compatible server, see
+[OpenAI-compatible TTS](./docs/openai-compatible-tts.md).
 
 For client-only speech recognition with vLLM, OpenAI's hosted Transcription API,
 or another compatible server, see
@@ -198,6 +202,14 @@ or another compatible server, see
 | `local` | Composes `serve` and `talk` in-process over loopback. | You want to run the server and talk to it from one command. |
 
 `serve` binds to `127.0.0.1` by default; pass `--host 0.0.0.0` explicitly for network exposure. `local` always binds to loopback and connects the same packaged client at `ws://127.0.0.1:<port>/v1/realtime`.
+
+The packaged `local` and `talk` client buffers 196 ms of received audio before
+starting playback. This absorbs short delivery gaps from either local or remote
+backends. Use `--playback-buffer-ms <milliseconds>` to tune the tradeoff: a
+larger value resists stuttering but delays the start of each response, while a
+smaller value starts sooner but is more sensitive to jitter. This setting only
+controls the packaged Python client's speakers; browser and other Realtime
+clients manage their own playback buffers.
 
 The packaged client can opt in to local Python tools with `talk --tool-module <module>` or `local --tool-module <module>`. The module contract, programmatic API, and a Serper web-search example are documented in [Tool calling design](./src/speech_to_speech/api/openai_realtime/README.md#packaged-python-client-tools).
 

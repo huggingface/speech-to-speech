@@ -10,6 +10,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 - `kokoro` → `kokoro_handler.py`
 - `omnivoice` → `omnivoice_handler.py`
 - `qwen3` → `qwen3_tts_handler.py`
+- `openai` → `openai_compatible_handler.py`
 - `supertonic` → `supertonic_tts_handler.py`
 
 Deprecated TTS implementations, including MeloTTS, live in [`../../../archive/TTS`](../../../archive/TTS) and are no longer wired into `s2s_pipeline.py`.
@@ -190,7 +191,17 @@ To benchmark the Apple Silicon MLX variants side by side:
 
 This will run separate benchmark entries for `qwen3[bf16]`, `qwen3[4bit]`, `qwen3[6bit]`, and `qwen3[8bit]`.
 
-### 6) OmniVoice (`--tts omnivoice`)
+### 6) OpenAI-compatible endpoint (`--tts openai`)
+
+The handler sends text to `POST /v1/audio/speech`. It supports streaming raw
+PCM16 and complete WAV responses, resamples them to the pipeline's 16 kHz
+format, and closes the active transport when response generation is cancelled.
+The default settings target Qwen3-TTS on vLLM-Omni.
+
+See [`docs/openai-compatible-tts.md`](../../../docs/openai-compatible-tts.md)
+for server commands and all relevant flags.
+
+### 7) OmniVoice (`--tts omnivoice`)
 
 Primary args prefix: `--omnivoice_*`
 
@@ -233,7 +244,7 @@ OmniVoice returns complete 24 kHz float arrays. This handler downsamples them to
 > [!WARNING]
 > The [OmniVoice code](https://github.com/k2-fsa/OmniVoice) is Apache-2.0, but the [`k2-fsa/OmniVoice` pretrained weights](https://huggingface.co/k2-fsa/OmniVoice) are CC-BY-NC because of training-data constraints and are not licensed for commercial use. Voice cloning requires authorization and consent. Unauthorized cloning, impersonation, fraud, scams, and other illegal or unethical use are prohibited by the upstream model's safety notice.
 
-### 7) Supertonic (`--tts supertonic`)
+### 8) Supertonic (`--tts supertonic`)
 
 Primary args prefix: `--supertonic_tts_*`
 

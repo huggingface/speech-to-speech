@@ -66,6 +66,7 @@ def test_builtin_registry_lookup_and_cli_choices_share_one_catalog():
     assert STT_BACKENDS["openai"].kind == "stt"
     assert LLM_BACKENDS["responses-api"].kind == "llm"
     assert TTS_BACKENDS["qwen3"].kind == "tts"
+    assert TTS_BACKENDS["openai"].kind == "tts"
     assert TTS_BACKENDS["supertonic"].required_extra == "supertonic"
     assert LLM_BACKENDS["responses-api"].capabilities.supports_llm_proxy
     assert LLM_BACKENDS["chat-completions"].capabilities.supports_llm_proxy
@@ -216,6 +217,16 @@ def test_test_backend_only_needs_config_factory_and_registry_entry():
     assert selection.config == {"option": "selected", "gen_kwargs": {}}
     assert parsed_config.fake_option == "selected"
     assert calls[0][1] is selection.config
+
+
+def test_openai_tts_backend_constructs_through_registry(monkeypatch):
+    from speech_to_speech.TTS.openai_compatible_handler import OpenAICompatibleTTSHandler
+
+    monkeypatch.setattr(OpenAICompatibleTTSHandler, "warmup", lambda self: None)
+    args = parse_arguments(["--tts", "openai"])
+    tts = create_backend_handler(args.tts_backend, _context())
+
+    assert isinstance(tts, OpenAICompatibleTTSHandler)
 
 
 def test_openai_stt_backend_constructs_through_registry(monkeypatch):

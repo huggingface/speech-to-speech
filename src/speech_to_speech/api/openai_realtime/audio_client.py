@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 _AssistantTranscriptStream = tuple[str | None, str | None, int | None, int | None]
 ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[Any]]
 _TOOL_CREATE_ID_METADATA_KEY = "s2s_local_tool_create_id"
+_PLAYBACK_START_BUFFER_MS = 196.0
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ class RealtimeAudioClientConfig:
     api_key: Optional[str] = None
     send_rate: int = 16000
     recv_rate: int = 16000
+    playback_buffer_ms: float = _PLAYBACK_START_BUFFER_MS
     chunk_size: int = 1024
     input_device: Optional[int] = None
     output_device: Optional[int] = None
@@ -65,6 +67,10 @@ class RealtimeAudioClientConfig:
     tools: list[dict[str, Any]] = field(default_factory=list)
     tool_executor: ToolExecutor | None = None
     tool_response_create: bool = True
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.playback_buffer_ms < float("inf"):
+            raise ValueError("playback_buffer_ms must be a finite non-negative number")
 
 
 def load_realtime_tool_module(module_name: str) -> tuple[list[dict[str, Any]], ToolExecutor, bool]:
@@ -204,21 +210,42 @@ def build_session_update(config: RealtimeAudioClientConfig) -> dict[str, Any]:
 class PlaybackBuffer:
     """Thread-safe audio state shared by the Realtime loop and sounddevice callbacks."""
 
-    def __init__(self, recv_rate: int) -> None:
+    def __init__(self, recv_rate: int, startup_buffer_ms: float = _PLAYBACK_START_BUFFER_MS) -> None:
+        if recv_rate <= 0:
+            raise ValueError("recv_rate must be positive")
+        if not 0 <= startup_buffer_ms < float("inf"):
+            raise ValueError("startup_buffer_ms must be a finite non-negative number")
         self.recv_rate = recv_rate
+        self._startup_buffer_bytes = int(recv_rate * 2 * startup_buffer_ms / 1000)
+        self._startup_buffer_bytes -= self._startup_buffer_bytes % 2
         self._audio = bytearray()
         self._lock = Lock()
         self._active_until = 0.0
+        self._playing = False
+        self._input_complete = False
 
     def clear(self) -> None:
         with self._lock:
             self._active_until = 0.0
             self._audio.clear()
+            self._playing = False
+            self._input_complete = False
 
     def append(self, audio: bytes) -> None:
+        if not audio:
+            return
         with self._lock:
+            if self._input_complete and not self._audio:
+                self._playing = False
+            self._input_complete = False
             self._audio.extend(audio)
             self._active_until = time.monotonic() + max(0.15, len(audio) / (2 * self.recv_rate))
+
+    def finish(self) -> None:
+        """Allow a completed short response to play before reaching the startup target."""
+
+        with self._lock:
+            self._input_complete = True
 
     def is_active(self) -> bool:
         with self._lock:
@@ -227,12 +254,21 @@ class PlaybackBuffer:
     def write(self, outdata: Any) -> None:
         needed = len(outdata)
         with self._lock:
+            if not self._playing:
+                ready = len(self._audio) >= self._startup_buffer_bytes
+                if not ready and not (self._input_complete and self._audio):
+                    outdata[:] = b"\x00" * needed
+                    return
+                self._playing = True
             available = min(needed, len(self._audio))
             if available:
                 outdata[:available] = self._audio[:available]
                 del self._audio[:available]
             if available < needed:
                 outdata[available:] = b"\x00" * (needed - available)
+                self._playing = False
+            if not self._audio and self._input_complete:
+                self._playing = False
 
     @property
     def buffered_bytes(self) -> int:
@@ -367,6 +403,7 @@ def handle_server_event(
     elif event.type == "response.output_audio.delta":
         playback.append(base64.b64decode(event.delta))
     elif event.type == "response.output_audio.done":
+        playback.finish()
         renderer.finish_live_assistant_text()
         print("ASSISTANT: <audio done>", flush=True)
     elif event.type == "response.output_audio_transcript.delta":
@@ -383,6 +420,8 @@ def handle_server_event(
         renderer.finish_assistant_response(getattr(event.response, "id", None))
         if event.response.status == "cancelled":
             playback.clear()
+        else:
+            playback.finish()
         print(f"ASSISTANT: <response {event.response.status}>", flush=True)
     elif event.type == "output_audio_buffer.cleared":
         playback.clear()
@@ -801,7 +840,7 @@ async def _run_audio_session(
     import sounddevice as sd
 
     mic_queue: Queue[bytes] = Queue(maxsize=128)
-    playback = PlaybackBuffer(config.recv_rate)
+    playback = PlaybackBuffer(config.recv_rate, startup_buffer_ms=config.playback_buffer_ms)
     renderer = _FriendlyEventRenderer()
     tool_calls = _ToolCallCoordinator(conn, config)
 
