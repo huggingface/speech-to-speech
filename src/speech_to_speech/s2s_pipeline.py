@@ -75,6 +75,7 @@ logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.WARNING)  # quiet down numba logs
 
 MLX_DEFAULT_LM_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-bf16"
+OPENAI_TTS_PLAYBACK_BUFFER_MS = 196.0
 
 
 def _mac_preset_defaults(llm_backend: str) -> dict[str, Any]:
@@ -596,6 +597,9 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
     )
 
     local_audio = args.local_audio_kwargs
+    playback_buffer_ms = local_audio.local_audio_playback_buffer_ms
+    if playback_buffer_ms is None:
+        playback_buffer_ms = OPENAI_TTS_PLAYBACK_BUFFER_MS if args.tts_backend.name == "openai" else 0.0
     tools: list[dict[str, Any]] = []
     tool_executor = None
     tool_response_create = True
@@ -608,7 +612,7 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
             url=f"ws://127.0.0.1:{args.realtime_server_kwargs.port}/v1/realtime",
             api_key="local",
             chunk_size=local_audio.local_audio_chunk_size,
-            playback_buffer_ms=local_audio.local_audio_playback_buffer_ms,
+            playback_buffer_ms=playback_buffer_ms,
             input_device=local_audio.local_audio_input_device,
             output_device=local_audio.local_audio_output_device,
             print_json=local_audio.local_audio_print_json,

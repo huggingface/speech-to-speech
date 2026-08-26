@@ -73,21 +73,33 @@ the HTTP response body incrementally. It does not send the non-standard
 
 ## Playback buffering
 
-The packaged Python audio client used by `speech-to-speech local` and
-`speech-to-speech talk` waits for 196 ms of audio before starting playback. If
-playback runs out of audio while a response is still arriving, it uses the same
-cushion before restarting. This small client-side delay absorbs uneven network
-or synthesis delivery so the speaker is less likely to underrun and stutter.
+Sometimes the first audio chunks arrive unevenly: an initial burst can be
+followed by a short gap before delivery settles into a steady stream. Starting
+playback immediately can then empty the speaker queue and cause a brief stutter.
+A startup buffer holds a small amount of audio before playback begins so it can
+absorb that early jitter. If playback later catches up with the incoming stream,
+the client uses the same buffer before restarting.
 
-The buffer is downstream of TTS and therefore applies to both PCM and WAV and
-to every backend, including hosted OpenAI and a local vLLM deployment. A local
-server may need less buffering because its chunks usually arrive more evenly.
-It does not alter the TTS request, synthesis, resampling, or server deployment.
+The buffer is generally 0 ms, so other local TTS backends and
+`speech-to-speech talk` start playback as soon as audio arrives. This keeps
+latency to a minimum when chunks are delivered evenly. The `talk` client cannot
+choose a backend-specific default because it connects to a Realtime endpoint
+without knowing which TTS backend produced the audio.
 
-Override the default for either command with `--playback-buffer-ms`. Higher
-values improve tolerance for delivery jitter at the cost of a later start to
-each response; lower values reduce that startup delay but increase underrun
-risk. For example:
+For `speech-to-speech local --tts openai`, the default changes to 196 ms. The
+OpenAI-compatible backend receives synthesized audio over a separate HTTP
+connection to the `/audio/speech` endpoint, where the first chunks can have more
+substantial delivery jitter than in-process TTS. The extra cushion trades a
+small startup delay for smoother playback.
+
+The buffer is downstream of TTS and does not alter the TTS request, synthesis,
+resampling, or server deployment.
+
+Override the default for either command with `--playback-buffer-ms`. An
+explicit `0` disables buffering even for `local --tts openai`. Higher values
+improve tolerance for delivery jitter at the cost of a later start to each
+response; lower values reduce that startup delay but increase underrun risk.
+For example:
 
 ```bash
 speech-to-speech local \

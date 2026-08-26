@@ -61,3 +61,22 @@ def test_local_composes_loopback_client_with_same_server_builder(monkeypatch):
     assert client.config.url == f"ws://127.0.0.1:{server.port}/v1/realtime"
     assert client.config.api_key == "local"
     assert client.config.playback_buffer_ms == 240
+
+
+def test_local_resolves_backend_specific_playback_buffer_defaults(monkeypatch):
+    unit = SimpleNamespace(handlers=[object()])
+    monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", lambda **_kwargs: unit)
+
+    cases = [
+        (["--tts", "qwen3"], 0),
+        (["--tts", "openai"], 196),
+        (["--tts", "openai", "--playback-buffer-ms", "0"], 0),
+        (["--tts", "openai", "--playback-buffer-ms", "240"], 240),
+    ]
+    for argv, expected_buffer_ms in cases:
+        args = parse_arguments(argv, command="local")
+        manager = build_local_pipeline(args, Event())
+        client = manager.handlers[-1]
+
+        assert isinstance(client, RealtimeAudioClient)
+        assert client.config.playback_buffer_ms == expected_buffer_ms
