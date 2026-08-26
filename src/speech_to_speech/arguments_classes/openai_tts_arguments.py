@@ -24,9 +24,7 @@ class OpenAICompatibleTTSHandlerArguments:
     )
     openai_tts_language: Optional[str] = field(
         default=None,
-        metadata={
-            "help": "Optional vLLM-Omni language extension. Use 'Auto' to forward the STT language when available."
-        },
+        metadata={"help": "Optional fixed language value forwarded unchanged with every speech request."},
     )
     openai_tts_task_type: Optional[str] = field(
         default=None,

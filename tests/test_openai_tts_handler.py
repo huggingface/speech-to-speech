@@ -125,7 +125,7 @@ def test_openai_tts_warmup_uses_configured_request(monkeypatch):
             "api_key": "test-key",
             "model": "test-model",
             "voice": "test-voice",
-            "language": "Auto",
+            "language": "English",
             "sample_rate": 24000,
             "stream": True,
             "timeout": 12,
@@ -142,7 +142,7 @@ def test_openai_tts_warmup_uses_configured_request(monkeypatch):
         "response_format": "pcm",
         "stream_format": "audio",
         "stream": True,
-        "language": "Auto",
+        "language": "English",
     }
     assert operation.cancelled is False
 
@@ -166,9 +166,9 @@ def test_openai_tts_streams_resampled_fixed_size_pcm(monkeypatch):
     handler = _openai_tts_handler(monkeypatch, cancel_scope=CancelScope())
     handler.model = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     handler.voice = "aiden"
-    handler.language = "Auto"
+    handler.language = "English"
 
-    chunks = list(handler.process(TTSInput(text="Hello", language_code="en")))
+    chunks = list(handler.process(TTSInput(text="Hello", language_code="de")))
 
     assert chunks
     assert all(isinstance(chunk, np.ndarray) for chunk in chunks)
@@ -180,6 +180,15 @@ def test_openai_tts_streams_resampled_fixed_size_pcm(monkeypatch):
     assert payload["language"] == "English"
     assert "stream" not in payload
     assert payload["stream_format"] == "audio"
+
+
+def test_openai_tts_does_not_infer_language_from_pipeline(monkeypatch):
+    handler = _openai_tts_handler(monkeypatch)
+
+    assert list(handler.process(TTSInput(text="Hello", language_code="en")))
+
+    payload = _FakeSpeechOperation.instances[0].payload
+    assert "language" not in payload
 
 
 def test_openai_tts_streaming_resampler_is_chunk_invariant_and_anti_aliased():

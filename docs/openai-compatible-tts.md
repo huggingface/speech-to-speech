@@ -42,13 +42,15 @@ speech-to-speech local \
   --openai_tts_base_url http://localhost:8091/v1 \
   --openai_tts_model Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
   --openai_tts_voice aiden \
-  --openai_tts_language Auto \
   --openai_tts_sample_rate 24000 \
   --openai_tts_stream true
 ```
 
 Qwen3-TTS produces 24 kHz audio. The client incrementally converts its raw
 PCM16 response to the pipeline's mono, signed-int16, 16 kHz, 512-sample chunks.
+If a server requires an explicit language, pass its expected value, such as
+`--openai_tts_language English` for Qwen3-TTS. The value is forwarded unchanged
+with every speech request; the TTS handler does not infer it from the pipeline.
 
 ## OpenAI and standard-compatible servers
 

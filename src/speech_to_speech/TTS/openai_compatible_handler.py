@@ -26,18 +26,6 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 logger = logging.getLogger(__name__)
 
 PIPELINE_SAMPLE_RATE = 16000
-LANGUAGE_NAMES = {
-    "zh": "Chinese",
-    "en": "English",
-    "ja": "Japanese",
-    "ko": "Korean",
-    "de": "German",
-    "fr": "French",
-    "ru": "Russian",
-    "pt": "Portuguese",
-    "es": "Spanish",
-    "it": "Italian",
-}
 
 
 class SpeechRequestCancelled(RuntimeError):
@@ -414,7 +402,6 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         operation = self._make_operation(
             text="Warmup",
             voice=self.voice,
-            language=self._resolve_language(None),
         )
 
         source_chunks = operation.iter_bytes(self.stop_event.is_set)
@@ -476,8 +463,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         if not text:
             return
         voice = self._resolve_voice(tts_input.runtime_config, tts_input.response)
-        language = self._resolve_language(tts_input.language_code)
-        operation = self._make_operation(text=text, voice=voice, language=language)
+        operation = self._make_operation(text=text, voice=voice)
         with self._operation_lock:
             self._active_operation = operation
 
@@ -564,12 +550,11 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         *,
         text: str,
         voice: str | dict[str, str],
-        language: str | None,
     ) -> HttpSpeechOperation:
         return HttpSpeechOperation(
             endpoint_url=self.endpoint_url,
             api_key=self.api_key,
-            payload=self._request_payload(text=text, voice=voice, language=language),
+            payload=self._request_payload(text=text, voice=voice),
             timeout_s=self.timeout,
         )
 
@@ -578,7 +563,6 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         *,
         text: str,
         voice: str | dict[str, str],
-        language: str | None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -593,20 +577,13 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             payload["stream"] = True
         elif self.speed != 1.0:
             payload["speed"] = self.speed
-        if language:
-            payload["language"] = LANGUAGE_NAMES.get(language.lower(), language)
+        if self.language:
+            payload["language"] = self.language
         if self.task_type:
             payload["task_type"] = self.task_type
         if self.instructions:
             payload["instructions"] = self.instructions
         return payload
-
-    def _resolve_language(self, input_language: str | None) -> str | None:
-        if self.language is None:
-            return None
-        if self.language.strip().lower() == "auto":
-            return input_language or "Auto"
-        return self.language
 
     def _resolve_voice(
         self,
