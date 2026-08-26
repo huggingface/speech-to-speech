@@ -255,6 +255,17 @@ def test_playback_buffer_flushes_completed_audio_shorter_than_startup_buffer():
     assert playback.buffered_bytes == 0
 
 
+def test_playback_buffer_starts_immediately_by_default():
+    playback = PlaybackBuffer(1000)
+    playback.append(b"\x04" * 100)
+    callback = bytearray(100)
+
+    playback.write(callback)
+
+    assert callback == b"\x04" * 100
+    assert playback.buffered_bytes == 0
+
+
 @pytest.mark.parametrize("buffer_ms", [-1, float("inf"), float("nan")])
 def test_audio_client_rejects_invalid_playback_buffer(buffer_ms):
     with pytest.raises(ValueError, match="playback_buffer_ms"):

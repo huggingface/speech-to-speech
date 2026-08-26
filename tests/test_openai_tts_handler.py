@@ -254,6 +254,20 @@ def test_openai_tts_preserves_per_response_custom_voice_id(monkeypatch):
     assert _FakeSpeechOperation.instances[0].payload["voice"] == {"id": "voice_response"}
 
 
+def test_openai_tts_invalid_custom_voice_emits_failure(monkeypatch):
+    handler = _openai_tts_handler(monkeypatch)
+    response = RealtimeResponseCreateParams(
+        audio={"output": {"voice": {"id": ""}}},
+    )
+
+    assert list(handler.process(TTSInput(text="Hello", response=response, response_key="response-1"))) == []
+    assert _FakeSpeechOperation.instances == []
+    failure = handler.queue_out.get_nowait()
+    assert isinstance(failure, ResponseFailedEvent)
+    assert failure.message == "speech request failed"
+    assert failure.response_key == "response-1"
+
+
 def test_openai_tts_standard_request_yields_audio_before_response_eof(monkeypatch):
     release_response = Event()
     response_finished = Event()
@@ -880,6 +894,96 @@ def test_openai_tts_rejects_non_audio_success_responses(monkeypatch, content_typ
     failure = handler.queue_out.get_nowait()
     assert isinstance(failure, ResponseFailedEvent)
     assert failure.message == "speech endpoint returned a non-audio response"
+    assert failure.response_key == "response-1"
+
+
+@pytest.mark.parametrize(
+    ("response_format", "content_type"),
+    [
+        ("pcm", "audio/pcm; rate=24000"),
+        ("pcm", "audio/L16"),
+        ("wav", "audio/wav"),
+        ("wav", "application/x-wav"),
+        ("pcm", None),
+        ("wav", "application/octet-stream"),
+    ],
+)
+def test_http_speech_accepts_matching_or_ambiguous_content_types(response_format, content_type):
+    headers = {} if content_type is None else {"Content-Type": content_type}
+    operation = HttpSpeechOperation(
+        endpoint_url="http://localhost:8000/v1/audio/speech",
+        api_key=None,
+        payload={"input": "hello", "response_format": response_format},
+        timeout_s=1,
+    )
+
+    operation._validate_content_type(tts_module.httpx.Response(200, headers=headers))
+
+
+@pytest.mark.parametrize(
+    ("response_format", "content_type", "actual_format"),
+    [
+        ("pcm", "audio/mpeg", "mp3"),
+        ("pcm", "audio/wav", "wav"),
+        ("wav", "audio/pcm", "pcm"),
+        ("wav", "audio/flac", "flac"),
+    ],
+)
+def test_http_speech_rejects_known_audio_format_mismatches(response_format, content_type, actual_format):
+    operation = HttpSpeechOperation(
+        endpoint_url="http://localhost:8000/v1/audio/speech",
+        api_key=None,
+        payload={"input": "hello", "response_format": response_format},
+        timeout_s=1,
+    )
+
+    with pytest.raises(
+        tts_module.SpeechRequestError,
+        match=f"speech endpoint returned {actual_format} audio for requested {response_format} format",
+    ):
+        operation._validate_content_type(tts_module.httpx.Response(200, headers={"Content-Type": content_type}))
+
+
+def test_http_speech_validates_against_decoder_format_when_payload_is_overridden():
+    operation = HttpSpeechOperation(
+        endpoint_url="http://localhost:8000/v1/audio/speech",
+        api_key=None,
+        payload={"input": "hello", "response_format": "mp3"},
+        timeout_s=1,
+        response_format="pcm",
+    )
+
+    with pytest.raises(
+        tts_module.SpeechRequestError,
+        match="speech endpoint returned mp3 audio for requested pcm format",
+    ):
+        operation._validate_content_type(tts_module.httpx.Response(200, headers={"Content-Type": "audio/mpeg"}))
+
+
+def test_openai_tts_audio_format_mismatch_emits_failure_without_audio(monkeypatch):
+    transport = tts_module.httpx.MockTransport(
+        lambda request: tts_module.httpx.Response(
+            200,
+            headers={"Content-Type": "audio/mpeg"},
+            content=b"ID3 invalid for raw PCM",
+            request=request,
+        )
+    )
+    client = tts_module.httpx.AsyncClient(transport=transport)
+    monkeypatch.setattr(tts_module.httpx, "AsyncClient", lambda **kwargs: client)
+    monkeypatch.setattr(OpenAICompatibleTTSHandler, "warmup", lambda self: None)
+    handler = OpenAICompatibleTTSHandler(
+        Event(),
+        queue_in=Queue(),
+        queue_out=Queue(),
+        setup_args=(Event(),),
+        setup_kwargs={"sample_rate": 24000, "blocksize": 512},
+    )
+
+    assert list(handler.process(TTSInput(text="Hello", response_key="response-1"))) == []
+    failure = handler.queue_out.get_nowait()
+    assert isinstance(failure, ResponseFailedEvent)
+    assert failure.message == "speech endpoint returned mp3 audio for requested pcm format"
     assert failure.response_key == "response-1"
 
 

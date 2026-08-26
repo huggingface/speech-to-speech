@@ -39,6 +39,14 @@ class SpeechRequestError(RuntimeError):
 _SPEECH_STREAM_DONE = object()
 _SPEECH_STREAM_QUEUE_MAXSIZE = 2
 _SPEECH_STREAM_POLL_INTERVAL_S = 0.025
+_AUDIO_MEDIA_TYPES_BY_FORMAT = {
+    "pcm": frozenset({"audio/pcm", "audio/l16", "audio/x-pcm"}),
+    "wav": frozenset({"application/x-wav", "audio/vnd.wave", "audio/wav", "audio/wave", "audio/x-wav"}),
+    "mp3": frozenset({"audio/mp3", "audio/mpeg"}),
+    "opus": frozenset({"audio/ogg", "audio/opus"}),
+    "aac": frozenset({"audio/aac"}),
+    "flac": frozenset({"audio/flac", "audio/x-flac"}),
+}
 
 
 class HttpSpeechOperation:
@@ -51,11 +59,13 @@ class HttpSpeechOperation:
         api_key: str | None,
         payload: dict[str, Any],
         timeout_s: float,
+        response_format: str | None = None,
     ) -> None:
         self.endpoint_url = endpoint_url
         self.api_key = api_key
         self.payload = payload
         self.timeout_s = timeout_s
+        self.response_format = response_format if response_format is not None else payload.get("response_format")
         self._cancelled = Event()
         self._transport_lock = Lock()
         self._worker_loop: asyncio.AbstractEventLoop | None = None
@@ -174,14 +184,24 @@ class HttpSpeechOperation:
             return True
         return False
 
-    @staticmethod
-    def _validate_content_type(response: httpx.Response) -> None:
+    def _validate_content_type(self, response: httpx.Response) -> None:
         headers = getattr(response, "headers", None)
         if headers is None:
             return
         media_type = headers.get("content-type", "").partition(";")[0].strip().lower()
         if media_type.startswith("text/") or media_type == "application/json" or media_type.endswith("+json"):
             raise SpeechRequestError("speech endpoint returned a non-audio response")
+        response_format = self.response_format
+        if response_format not in {"pcm", "wav"}:
+            return
+        for actual_format, media_types in _AUDIO_MEDIA_TYPES_BY_FORMAT.items():
+            if media_type not in media_types:
+                continue
+            if actual_format != response_format:
+                raise SpeechRequestError(
+                    f"speech endpoint returned {actual_format} audio for requested {response_format} format"
+                )
+            return
 
     def _normalize_error(self, exc: Exception) -> BaseException:
         if isinstance(exc, (SpeechRequestCancelled, SpeechRequestError)):
@@ -462,11 +482,6 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         text = tts_input.text.strip()
         if not text:
             return
-        voice = self._resolve_voice(tts_input.runtime_config, tts_input.response)
-        operation = self._make_operation(text=text, voice=voice)
-        with self._operation_lock:
-            self._active_operation = operation
-
         def cancel_check() -> bool:
             cancelled = self.stop_event.is_set() or (
                 cancel_generation is not None
@@ -482,7 +497,12 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         first_audio = True
         started_at_s = perf_counter()
+        operation: HttpSpeechOperation | None = None
         try:
+            voice = self._resolve_voice(tts_input.runtime_config, tts_input.response)
+            operation = self._make_operation(text=text, voice=voice)
+            with self._operation_lock:
+                self._active_operation = operation
             source_chunks = operation.iter_bytes(cancel_check)
             decoded_chunks = (
                 self._decode_pcm_stream(source_chunks)
@@ -523,9 +543,10 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     )
                 )
         finally:
-            with self._operation_lock:
-                if self._active_operation is operation:
-                    self._active_operation = None
+            if operation is not None:
+                with self._operation_lock:
+                    if self._active_operation is operation:
+                        self._active_operation = None
 
     def _commit_first_audio(self, tts_input: TTSInput) -> bool:
         tracker = self.speculative_turns
@@ -556,6 +577,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             api_key=self.api_key,
             payload=self._request_payload(text=text, voice=voice),
             timeout_s=self.timeout,
+            response_format=self.response_format,
         )
 
     def _request_payload(
