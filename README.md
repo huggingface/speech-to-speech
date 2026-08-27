@@ -258,7 +258,7 @@ Optionally with a specific LLM:
 ```bash
 speech-to-speech local \
     --mac-optimal-settings \
-    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-4bit
 ```
 
 This setting:
@@ -557,7 +557,7 @@ speech-to-speech serve \
     --stt parakeet-tdt \
     --language auto \
     --llm_backend mlx-lm \
-    --model_name "mlx-community/Qwen3-4B-Instruct-2507-bf16"
+    --model_name "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 ```
 
 A single non-English language, Chinese in this example:
@@ -568,7 +568,7 @@ speech-to-speech serve \
     --stt_model_name large-v3 \
     --language zh \
     --llm_backend mlx-lm \
-    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-4bit
 ```
 
 Both commands also work with `--mac-optimal-settings`; explicit `--stt` flags override the defaults it sets.

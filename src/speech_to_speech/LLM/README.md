@@ -42,7 +42,7 @@ Common options:
 ```bash
 speech-to-speech serve \
   --llm_backend mlx-lm \
-  --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16 \
+  --model_name mlx-community/Qwen3-4B-Instruct-2507-4bit \
   --llm_device mps \
   --llm_gen_max_new_tokens 128
 ```
@@ -97,10 +97,10 @@ speech-to-speech serve \
 ```bash
 speech-to-speech local \
   --mac-optimal-settings \
-  --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+  --model_name mlx-community/Qwen3-4B-Instruct-2507-4bit
 ```
 
-`--mac-optimal-settings` sets `--llm_backend mlx-lm` and defaults the model to `mlx-community/Qwen3-4B-Instruct-2507-bf16` if not overridden. The command independently selects whether to run only the server or compose it with the audio client.
+`--mac-optimal-settings` sets `--llm_backend mlx-lm` and defaults the model to `mlx-community/Qwen3-4B-Instruct-2507-4bit` if not overridden. The command independently selects whether to run only the server or compose it with the audio client.
 
 ### Realtime (OpenAI-compatible) setup
 
@@ -110,7 +110,7 @@ Run the server, then connect with the packaged audio client:
 # 1. Start the pipeline server
 speech-to-speech serve \
   --llm_backend mlx-lm \
-  --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16 \
+  --model_name mlx-community/Qwen3-4B-Instruct-2507-4bit \
   --host 0.0.0.0 \
   --port 8765
 

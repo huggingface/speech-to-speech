@@ -78,7 +78,7 @@ def test_mac_optimal_settings_flag_does_not_select_a_command():
     assert args.module_kwargs.tts == "qwen3"
     assert args.llm_backend.config["device"] == "mps"
     assert args.tts_backend.config["device"] == "mps"
-    assert args.llm_backend.config["model_name"] == "mlx-community/Qwen3-4B-Instruct-2507-bf16"
+    assert args.llm_backend.config["model_name"] == "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 
 
 def test_mac_optimal_settings_routes_explicit_model_to_mlx_backend():
