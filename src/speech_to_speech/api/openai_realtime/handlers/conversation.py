@@ -10,9 +10,13 @@ from openai.types.realtime import (
     ConversationItemCreateEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
+    ConversationItemInputAudioTranscriptionFailedEvent,
 )
 from openai.types.realtime.conversation_item_input_audio_transcription_completed_event import (
     UsageTranscriptTextUsageDuration,
+)
+from openai.types.realtime.conversation_item_input_audio_transcription_failed_event import (
+    Error as InputAudioTranscriptionError,
 )
 from openai.types.realtime.realtime_conversation_item_function_call_output import (
     RealtimeConversationItemFunctionCallOutput,
@@ -23,7 +27,12 @@ from openai.types.realtime.realtime_conversation_item_user_message import (
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
 from speech_to_speech.LLM.chat import ChatItemError, add_supported_item
-from speech_to_speech.pipeline.events import PartialTranscriptionEvent, TranscriptionCompletedEvent
+from speech_to_speech.pipeline.events import (
+    PartialTranscriptionEvent,
+    TranscriptionCompletedEvent,
+    TranscriptionFailedEvent,
+)
+from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 
 if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import ServerEvent
@@ -267,10 +276,10 @@ class ConversationHandler(RealtimeBaseHandler):
             # has no retraction event, so wait for a future hypothesis that
             # extends the committed prefix or for the authoritative completion.
             logger.debug(
-                "Withholding revised stable transcription for item=%s (emitted=%r, hypothesis=%r)",
+                "Withholding revised stable transcription for item=%s (emitted=%s, hypothesis=%s)",
                 item_id,
-                input_item.transcript_prefix[-40:],
-                hypothesis[-40:],
+                transcript_for_log(input_item.transcript_prefix),
+                transcript_for_log(hypothesis),
             )
             return []
 
@@ -355,6 +364,41 @@ class ConversationHandler(RealtimeBaseHandler):
                 usage=UsageTranscriptTextUsageDuration(
                     seconds=duration_s,
                     type="duration",
+                ),
+            )
+        ]
+
+    def on_transcription_failed(
+        self,
+        conn_id: str,
+        event: TranscriptionFailedEvent,
+    ) -> list[ConversationItemInputAudioTranscriptionFailedEvent]:
+        """Terminalize one transcript item and emit its item-scoped failure."""
+        st = self._state(conn_id)
+        if event.turn_id is not None:
+            item_id = st.input_item_by_turn_revision.get((event.turn_id, event.turn_revision))
+        else:
+            item_id = st.current_input_item_id
+        if item_id is None:
+            logger.debug(
+                "Ignoring transcription failure for unknown turn=%s rev=%s",
+                event.turn_id,
+                event.turn_revision,
+            )
+            return []
+        if self.terminalize_input_item(conn_id, item_id) is None:
+            return []
+        return [
+            ConversationItemInputAudioTranscriptionFailedEvent(
+                type="conversation.item.input_audio_transcription.failed",
+                event_id=self._next_event_id(),
+                content_index=0,
+                item_id=item_id,
+                error=InputAudioTranscriptionError(
+                    type="transcription_error",
+                    code="transcription_failed",
+                    message=event.message,
+                    param=None,
                 ),
             )
         ]

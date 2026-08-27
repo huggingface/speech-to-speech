@@ -56,6 +56,7 @@ from speech_to_speech.pipeline.messages import (
     TokenUsage,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
 
 logger = logging.getLogger(__name__)
@@ -154,7 +155,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
     def setup(
         self,
-        model_name: str = "gpt-5.4-mini",
+        model_name: str = "gpt-5.6-terra",
         device: str = "cuda",
         gen_kwargs: dict[str, Any] = {},
         base_url: Optional[str] = None,
@@ -188,6 +189,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             raise ValueError("audio_content_type must be either 'input_audio' or 'audio_url'.")
         self.audio_content_type = audio_content_type
         self.audio_history_turns = max(0, audio_history_turns)
+        self.reasoning_effort = reasoning_effort
         self.request_timeout_s = float(request_timeout_s)
         self.request_timeout = httpx.Timeout(
             self.request_timeout_s,
@@ -665,9 +667,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 if self._turn_is_cancelled(turn):
                     logger.info("LLM generation cancelled (interruption)")
                 else:
-                    logger.debug(f"Clean text: {state.clean_text}")
+                    logger.debug("Clean text: %s", transcript_for_log(state.clean_text))
                     yield from _flush(sentence_batch)
-            logger.info(f"Tools: {state.tools}")
+            logger.info("Tools: %s", transcript_for_log(state.tools))
         return (
             not cancelled
             and not self._turn_is_cancelled(turn)
@@ -711,8 +713,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 ):
                     state.output_emitted = True
                     yield self._chunk(turn, text=out)
-        logger.debug(f"Clean text: {state.clean_text}")
-        logger.info(f"Tools: {state.tools}")
+        logger.debug("Clean text: %s", transcript_for_log(state.clean_text))
+        logger.info("Tools: %s", transcript_for_log(state.tools))
         return (
             not cancelled
             and not self._turn_is_cancelled(turn)
@@ -802,7 +804,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 # the error and fall through to the EndOfResponse below. Without this the
                 # exception would escape process() and no EndOfResponse would be emitted,
                 # leaving st.in_response stuck and locking every subsequent response.
-                logger.exception("LLM generation failed; ending the current response")
+                log_exception(logger, "LLM generation failed; ending the current response", exc)
                 if error_message is None:
                     error_message = f"Language model generation failed: {exc}"
 
@@ -872,7 +874,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                                 cleanup_history()
                     history_committed = can_commit
                 except Exception as exc:
-                    logger.exception("LLM history commit failed; rolling back the current response")
+                    log_exception(logger, "LLM history commit failed; rolling back the current response", exc)
                     error_message = f"Language model history commit failed: {exc}"
 
             rollback_transaction()
@@ -942,7 +944,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             try:
                 active_chat = build_active_chat(original_chat, response)
             except ChatItemError as exc:
-                logger.info("Out-of-band response rejected: %s", exc)
+                log_exception(logger, "Out-of-band response rejected", exc, level=logging.INFO)
                 yield EndOfResponse(
                     turn_id=turn_id,
                     turn_revision=turn_revision,
@@ -1064,7 +1066,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             try:
                 active_chat = build_active_chat(original_chat, response)
             except ChatItemError as exc:
-                logger.info("Out-of-band response rejected: %s", exc)
+                log_exception(logger, "Out-of-band response rejected", exc, level=logging.INFO)
                 yield EndOfResponse(
                     turn_id=turn_id,
                     turn_revision=turn_revision,

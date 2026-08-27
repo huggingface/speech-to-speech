@@ -15,6 +15,7 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +115,7 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
             return None
 
         try:
-            logger.debug(f"Tokenizing text: {text}")
+            logger.debug("Tokenizing text: %s", transcript_for_log(text))
             logger.debug(f"Current language: {self.language}")
             logger.debug(f"Tokenizer: {self.tokenizer}")
 
@@ -123,7 +124,7 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
             attention_mask = inputs.attention_mask.to(self.device)
 
             logger.debug(f"Input IDs shape: {input_ids.shape}, dtype: {input_ids.dtype}")
-            logger.debug(f"Input IDs: {input_ids}")
+            logger.debug("Input IDs: %s", transcript_for_log(input_ids))
 
             if input_ids.numel() == 0:
                 logger.error("Input IDs tensor is empty")
@@ -134,9 +135,8 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
             logger.debug(f"Output waveform shape: {output.waveform.shape}")
             return output.waveform
-        except Exception as e:
-            logger.error(f"Error in generate_audio: {str(e)}")
-            logger.exception("Full traceback:")
+        except Exception as exc:
+            log_exception(logger, "Error in generate_audio", exc)
             return None
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
@@ -166,7 +166,7 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
         text = tts_input.text
 
         console.print(f"[green]ASSISTANT: {text}")
-        logger.debug(f"Processing text: {text}")
+        logger.debug("Processing text: %s", transcript_for_log(text))
         logger.debug(f"Language code: {language_code}")
 
         restore_initial_model = (

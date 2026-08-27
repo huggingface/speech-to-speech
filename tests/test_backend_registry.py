@@ -63,8 +63,10 @@ def test_builtin_registry_lookup_and_cli_choices_share_one_catalog():
     assert tuple(LLM_BACKENDS) == module_fields["llm_backend"].metadata["choices"]
     assert tuple(TTS_BACKENDS) == module_fields["tts"].metadata["choices"]
     assert STT_BACKENDS["parakeet-tdt"].kind == "stt"
+    assert STT_BACKENDS["openai"].kind == "stt"
     assert LLM_BACKENDS["responses-api"].kind == "llm"
     assert TTS_BACKENDS["qwen3"].kind == "tts"
+    assert TTS_BACKENDS["openai"].kind == "tts"
     assert TTS_BACKENDS["supertonic"].required_extra == "supertonic"
     assert LLM_BACKENDS["responses-api"].capabilities.supports_llm_proxy
     assert LLM_BACKENDS["chat-completions"].capabilities.supports_llm_proxy
@@ -72,6 +74,54 @@ def test_builtin_registry_lookup_and_cli_choices_share_one_catalog():
     assert not LLM_BACKENDS["transformers"].capabilities.supports_audio_input
     assert STT_BACKENDS["none"].capabilities.bypasses_transcription_notifier
     assert not STT_BACKENDS["whisper"].capabilities.bypasses_transcription_notifier
+
+
+def test_omnivoice_tts_backend_is_registered_as_optional():
+    spec = TTS_BACKENDS["omnivoice"]
+
+    assert spec.kind == "tts"
+    assert spec.required_extra == "omnivoice"
+
+
+def test_omnivoice_cli_config_is_normalized_for_the_handler():
+    args = parse_arguments(
+        [
+            "--tts",
+            "omnivoice",
+            "--omnivoice_model_name",
+            "local/omnivoice",
+            "--omnivoice_device",
+            "xpu",
+            "--omnivoice_dtype",
+            "bfloat16",
+            "--omnivoice_ref_audio",
+            "voice.wav",
+            "--omnivoice_ref_text",
+            "Reference transcript.",
+            "--omnivoice_num_steps",
+            "16",
+            "--omnivoice_speed",
+            "1.25",
+            "--omnivoice_blocksize",
+            "256",
+        ]
+    )
+
+    assert args.tts_backend.name == "omnivoice"
+    assert args.tts_backend.config == {
+        "model_name": "local/omnivoice",
+        "device": "xpu",
+        "dtype": "bfloat16",
+        "ref_audio": "voice.wav",
+        "ref_text": "Reference transcript.",
+        "voice_clone_prompt": None,
+        "instruct": None,
+        "language": None,
+        "num_steps": 16,
+        "speed": 1.25,
+        "blocksize": 256,
+        "gen_kwargs": {},
+    }
 
 
 def test_registry_rejects_duplicate_names_and_wrong_kinds():
@@ -167,6 +217,26 @@ def test_test_backend_only_needs_config_factory_and_registry_entry():
     assert selection.config == {"option": "selected", "gen_kwargs": {}}
     assert parsed_config.fake_option == "selected"
     assert calls[0][1] is selection.config
+
+
+def test_openai_tts_backend_constructs_through_registry(monkeypatch):
+    from speech_to_speech.TTS.openai_compatible_handler import OpenAICompatibleTTSHandler
+
+    monkeypatch.setattr(OpenAICompatibleTTSHandler, "warmup", lambda self: None)
+    args = parse_arguments(["--tts", "openai"])
+    tts = create_backend_handler(args.tts_backend, _context())
+
+    assert isinstance(tts, OpenAICompatibleTTSHandler)
+
+
+def test_openai_stt_backend_constructs_through_registry(monkeypatch):
+    from speech_to_speech.STT.openai_compatible_handler import OpenAICompatibleSTTHandler
+
+    monkeypatch.setattr(OpenAICompatibleSTTHandler, "warmup", lambda self: None)
+    args = parse_arguments(["--stt", "openai"])
+    stt = create_backend_handler(args.stt_backend, _context())
+
+    assert isinstance(stt, OpenAICompatibleSTTHandler)
 
 
 def test_new_stt_backend_gets_transcription_notifier_by_default(monkeypatch):
@@ -459,6 +529,7 @@ def test_factories_keep_backend_modules_lazy():
         "speech_to_speech.STT.whisper_stt_handler",
         "speech_to_speech.LLM.language_model",
         "speech_to_speech.TTS.chatTTS_handler",
+        "speech_to_speech.TTS.omnivoice_handler",
     ]
     for module_name in module_names:
         sys.modules.pop(module_name, None)

@@ -18,6 +18,7 @@ from speech_to_speech.arguments_classes.responses_api_language_model_arguments i
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 from speech_to_speech.backend_registry import BackendSelection
 from speech_to_speech.cli import main, parse_command, parse_talk_arguments
+from speech_to_speech.pipeline.transcript_logging import log_transcripts_enabled, set_log_transcripts
 from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments, prepare_all_args, prepare_module_args
 
 
@@ -41,9 +42,10 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_profile():
     assert vad_args.min_speech_continuation_ms == 192
     assert vad_args.realtime_processing_pause == 0.5
     assert vad_args.smart_turn is True
-    assert responses_api_args.model_name == "gpt-5.4-mini"
+    assert responses_api_args.model_name == "gpt-5.6-terra"
     assert responses_api_args.chat_size == 30
     assert responses_api_args.responses_api_stream is True
+    assert responses_api_args.responses_api_reasoning_effort == "none"
     assert responses_api_args.responses_api_audio_content_type == "input_audio"
     assert responses_api_args.responses_api_audio_history_turns == 1
     assert qwen3_args.qwen3_tts_model_name == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
@@ -165,7 +167,8 @@ def test_parse_arguments_default_backend_returns_openai_api():
     assert isinstance(args.module_kwargs, ModuleArguments)
     assert args.llm_backend.name == "responses-api"
     assert args.llm_backend.spec.config_type is ResponsesApiLanguageModelHandlerArguments
-    assert args.llm_backend.config["model_name"] == "gpt-5.4-mini"
+    assert args.llm_backend.config["model_name"] == "gpt-5.6-terra"
+    assert args.llm_backend.config["reasoning_effort"] == "none"
     assert args.module_kwargs.llm_backend == "responses-api"
     assert args.vad_handler_kwargs.smart_turn is True
     assert args.vad_handler_kwargs.smart_turn_model_path is None
@@ -235,6 +238,47 @@ def test_parse_arguments_accepts_qwen3_tts_backend_override():
         sys.argv = original_argv
 
     assert args.tts_backend.config["backend"] == "torch"
+
+
+def test_parse_arguments_accepts_openai_tts_backend():
+    args = parse_arguments(
+        [
+            "--tts",
+            "openai",
+            "--openai_tts_base_url",
+            "http://localhost:8091/v1",
+            "--openai_tts_voice",
+            "vivian",
+        ]
+    )
+
+    assert args.tts_backend.name == "openai"
+    assert args.tts_backend.config["base_url"] == "http://localhost:8091/v1"
+    assert args.tts_backend.config["voice"] == "vivian"
+    assert args.tts_backend.config["stream"] is False
+
+
+def test_parse_arguments_accepts_vllm_tts_stream_extension():
+    args = parse_arguments(["--tts", "openai", "--openai_tts_stream", "true"])
+
+    assert args.tts_backend.config["stream"] is True
+
+
+def test_parse_arguments_accepts_openai_stt_backend():
+    args = parse_arguments(
+        [
+            "--stt",
+            "openai",
+            "--openai_stt_base_url",
+            "http://localhost:8000/v1",
+            "--openai_stt_model",
+            "Qwen/Qwen3-ASR-1.7B",
+        ]
+    )
+
+    assert args.stt_backend.name == "openai"
+    assert args.stt_backend.config["base_url"] == "http://localhost:8000/v1"
+    assert args.stt_backend.config["model"] == "Qwen/Qwen3-ASR-1.7B"
 
 
 def test_parse_arguments_accepts_qwen3_tts_ggml_options():
@@ -336,6 +380,46 @@ def test_talk_leaves_api_key_unset_for_sdk_environment_authentication():
     assert parse_talk_arguments(["--api-key", "explicit-secret"]).api_key == "explicit-secret"
 
 
+def test_talk_accepts_custom_playback_buffer():
+    config = parse_talk_arguments(["--playback-buffer-ms", "240"])
+
+    assert config.playback_buffer_ms == 240
+
+
+def test_packaged_audio_clients_have_no_general_playback_buffer_default():
+    assert parse_talk_arguments([]).playback_buffer_ms == 0
+    assert LocalAudioArguments().local_audio_playback_buffer_ms is None
+
+
+@pytest.mark.parametrize("flag", ["--log-transcripts", "--log_transcripts"])
+def test_talk_accepts_transcript_logging_opt_in(flag):
+    assert parse_talk_arguments([]).log_transcripts is False
+    assert parse_talk_arguments([flag]).log_transcripts is True
+
+
+def test_main_wires_talk_transcript_logging_before_client_start(monkeypatch):
+    events = []
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "talk", "--log-transcripts"])
+
+    def warning():
+        assert log_transcripts_enabled() is True
+        events.append("warning")
+
+    def run_client(config):
+        assert log_transcripts_enabled() is True
+        events.append(("client", config.log_transcripts))
+
+    monkeypatch.setattr("speech_to_speech.cli.warn_if_log_transcripts_enabled", warning)
+    monkeypatch.setattr("speech_to_speech.cli.run_realtime_audio_client", run_client)
+
+    try:
+        main()
+    finally:
+        set_log_transcripts(False)
+
+    assert events == ["warning", ("client", True)]
+
+
 def test_talk_loads_opt_in_tool_module(monkeypatch):
     async def executor(_name, _arguments):
         return None
@@ -373,11 +457,15 @@ def test_serve_rejects_local_audio_flags():
 
 
 def test_local_accepts_audio_flags_but_rejects_host():
-    args = parse_arguments(["--port", "9876", "--local_audio_input_device", "2"], command="local")
+    args = parse_arguments(
+        ["--port", "9876", "--local_audio_input_device", "2", "--playback-buffer-ms", "240"],
+        command="local",
+    )
 
     assert args.realtime_server_kwargs.host == "127.0.0.1"
     assert args.realtime_server_kwargs.port == 9876
     assert args.local_audio_kwargs.local_audio_input_device == 2
+    assert args.local_audio_kwargs.local_audio_playback_buffer_ms == 240
     with pytest.raises(ValueError, match="--host"):
         parse_arguments(["--host", "0.0.0.0"], command="local")
 

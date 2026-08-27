@@ -32,6 +32,7 @@ from speech_to_speech.pipeline.events import (
     ResponseGenerationDoneEvent,
     SpeechStartedEvent,
     TokenUsageEvent,
+    TranscriptionFailedEvent,
 )
 from speech_to_speech.pipeline.messages import (
     AUDIO_RESPONSE_DONE,
@@ -1294,6 +1295,21 @@ class TestDrainRelease:
         router_module._flush_queue(q, preserve=router_module._keep_user_text_event)
 
         assert q.get_nowait() is audio_event
+        assert q.empty()
+
+    def test_barge_in_flush_preserves_transcription_failure(self):
+        q: Queue = Queue()
+        failure_event = TranscriptionFailedEvent(
+            message="transcription request timed out",
+            turn_id="turn-1",
+            turn_revision=0,
+        )
+        q.put(AssistantOutputEvent(text="stale"))
+        q.put(failure_event)
+
+        router_module._flush_queue(q, preserve=router_module._keep_user_text_event)
+
+        assert q.get_nowait() is failure_event
         assert q.empty()
 
     def test_barge_in_flush_preserves_session_end(self):

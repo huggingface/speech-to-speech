@@ -23,6 +23,16 @@ class LocalAudioArguments:
         default=1024,
         metadata={"help": "Microphone and speaker callback block size in samples. Default is 1024."},
     )
+    local_audio_playback_buffer_ms: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Audio to buffer before local playback starts, in milliseconds. "
+                "Defaults to 196 for OpenAI-compatible TTS and 0 otherwise."
+            ),
+            "aliases": ["--playback-buffer-ms"],
+        },
+    )
     local_audio_block_mic_during_playback: bool = field(
         default=False,
         metadata={

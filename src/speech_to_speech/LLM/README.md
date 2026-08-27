@@ -63,7 +63,7 @@ Common options:
 ```bash
 speech-to-speech serve \
   --llm_backend responses-api \
-  --model_name gpt-5.4-mini \
+  --model_name gpt-5.6-terra \
   --responses_api_api_key YOUR_API_KEY \
   --responses_api_base_url https://api.example.com/v1 \
   --responses_api_stream true
@@ -132,6 +132,6 @@ speech-to-speech serve \
 ```bash
 speech-to-speech serve \
   --llm_backend responses-api \
-  --model_name gpt-5.4-mini \
+  --model_name gpt-5.6-terra \
   --responses_api_api_key YOUR_API_KEY
 ```

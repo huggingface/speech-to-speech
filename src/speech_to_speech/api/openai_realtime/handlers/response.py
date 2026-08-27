@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Literal
 
 from openai.types.realtime import (
     ConversationItem,
@@ -40,6 +40,7 @@ from speech_to_speech.pipeline.messages import (
     GenerateResponseRequest,
     ResponsePrefetchTransaction,
 )
+from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
 
 if TYPE_CHECKING:
@@ -247,11 +248,11 @@ class ResponseHandler(RealtimeBaseHandler):
         if request.prefetch_transaction is not None:
             try:
                 claim_succeeded = request.prefetch_transaction.claim()
-            except Exception:
+            except Exception as exc:
                 # Deferred image/history cleanup runs at the standard create
                 # boundary. A failure must not escape the transport or leave
                 # the hidden response occupying the session indefinitely.
-                logger.exception("Failed to commit tool follow-up prefetch history")
+                log_exception(logger, "Failed to commit tool follow-up prefetch history", exc)
                 self.discard_tool_followup_prefetch(
                     conn_id,
                     origin_response_key=st.tool_followup_prefetch_origin_response_key,
@@ -432,13 +433,13 @@ class ResponseHandler(RealtimeBaseHandler):
         rp = st.current_response_params
         metadata = rp.metadata if rp and rp.metadata else None
 
-        voice: Optional[str] = None
+        voice: str | None = None
         if rp and rp.audio and rp.audio.output and rp.audio.output.voice:
-            voice = str(rp.audio.output.voice)
+            voice = self._response_voice_id(rp.audio.output.voice)
         if not voice:
             audio_cfg = st.runtime_config.session.audio
             audio_output = audio_cfg.output if audio_cfg is not None else None
-            voice = str(audio_output.voice) if audio_output is not None and audio_output.voice else None
+            voice = self._response_voice_id(audio_output.voice) if audio_output is not None else None
 
         # Out-of-band responses are not threaded into any conversation: report a null id.
         conversation_id = None if is_out_of_band(rp) else st.conversation_id
@@ -448,7 +449,7 @@ class ResponseHandler(RealtimeBaseHandler):
             object="realtime.response",
             status=status,
             status_details=status_details,
-            audio=Audio(output=AudioOutput(voice=str(voice) if voice else None)),  # type: ignore[arg-type]
+            audio=Audio(output=AudioOutput(voice=voice)),  # type: ignore[arg-type]
             conversation_id=conversation_id,
             metadata=metadata,
             output=self._build_output_items(conn_id, status),
@@ -458,6 +459,14 @@ class ResponseHandler(RealtimeBaseHandler):
                 total_tokens=st.response_usage.input_tokens + st.response_usage.output_tokens,
             ),
         )
+
+    @staticmethod
+    def _response_voice_id(voice: object | None) -> str | None:
+        """Return the protocol string for a built-in or custom voice."""
+        if isinstance(voice, str):
+            return voice
+        voice_id = getattr(voice, "id", None)
+        return voice_id if isinstance(voice_id, str) else None
 
     # Annotated with ConversationItem (the SDK's own 9-type item union) rather
     # than the two types actually produced: list is invariant, so a narrower

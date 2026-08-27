@@ -21,6 +21,7 @@ from openai.types.responses.response_function_tool_call import ResponseFunctionT
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.pipeline.transcript_logging import log_exception
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,16 @@ class Transcription(PipelineMessage):
     tag: Literal["transcription"] = "transcription"
     text: str
     language_code: Optional[str] = None
+    turn_id: str | None = None
+    turn_revision: int | None = None
+    speech_stopped_at_s: float | None = None
+
+
+class TranscriptionFailure(PipelineMessage):
+    """A final STT operation failed without producing LLM input."""
+
+    tag: Literal["transcription_failure"] = "transcription_failure"
+    message: str
     turn_id: str | None = None
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
@@ -248,10 +259,10 @@ class ResponsePrefetchTransaction:
     def _run_abort(abort: Callable[[], None]) -> None:
         try:
             abort()
-        except Exception:
+        except Exception as exc:
             # Cancellation must still reach response rollback and tombstoning
             # when a provider or backend raises while releasing its stream.
-            logger.exception("Failed to abort discarded response prefetch")
+            log_exception(logger, "Failed to abort discarded response prefetch", exc)
 
     @property
     def discarded(self) -> bool:

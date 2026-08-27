@@ -14,6 +14,7 @@ from speech_to_speech.pipeline.control import PipelineControlMessage, is_control
 from speech_to_speech.pipeline.events import PipelineEvent, TokenUsageEvent
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import PIPELINE_END, AudioOutput, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.transcript_logging import log_exception
 
 logger = logging.getLogger(__name__)
 
@@ -116,11 +117,8 @@ class BaseHandler(Generic[InT, OutT]):
                 logger.debug(f"{self.__class__.__name__}: session end received")
                 try:
                     self.on_session_end()
-                except Exception as e:
-                    logger.error(
-                        f"{self.__class__.__name__}: Error in on_session_end(): {type(e).__name__}: {e}",
-                        exc_info=True,
-                    )
+                except Exception as exc:
+                    log_exception(logger, f"{self.__class__.__name__}: Error in on_session_end()", exc)
                 self.queue_out.put(item)
                 continue
 
@@ -159,8 +157,8 @@ class BaseHandler(Generic[InT, OutT]):
                     )
                     self.queue_out.put(queued_output)
                     start_time = perf_counter()
-            except Exception as e:
-                logger.error(f"{self.__class__.__name__}: Error in process(): {type(e).__name__}: {e}", exc_info=True)
+            except Exception as exc:
+                log_exception(logger, f"{self.__class__.__name__}: Error in process()", exc)
 
         self.cleanup()
         self.queue_out.put(PIPELINE_END)

@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: "latest"
       - run: uv sync --group dev
@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: "latest"
       - run: uv sync --group dev
@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: "latest"
       - run: uv sync --group dev
@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: "latest"
       - uses: actions/setup-node@v7
@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: "latest"
       - uses: actions/setup-node@v7
@@ -84,7 +84,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: "latest"
       - name: Build distributions
@@ -95,6 +95,30 @@ jobs:
         with:
           name: dist
           path: dist/*
+
+  omnivoice-resolver:
+    name: OmniVoice resolver (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux
+            platform: x86_64-manylinux_2_39
+          - label: windows
+            platform: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "latest"
+      - name: Resolve speech-to-speech[omnivoice]
+        run: >-
+          uv pip compile pyproject.toml
+          --extra omnivoice
+          --python-version 3.11
+          --python-platform ${{ matrix.platform }}
+          --output-file ${{ runner.temp }}/omnivoice-${{ matrix.label }}.txt
 
   install-smoke:
     name: Install smoke (${{ matrix.label }})
@@ -107,8 +131,12 @@ jobs:
         include:
           - label: linux
             os: ubuntu-latest
+            extra: "[omnivoice]"
+            smoke_extra: omnivoice
           - label: macos-arm64
             os: macos-14
+            extra: ""
+            smoke_extra: ""
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
@@ -124,10 +152,13 @@ jobs:
           python -m venv .venv-smoke
           source .venv-smoke/bin/activate
           python -m pip install --upgrade pip
-          python -m pip install dist/speech_to_speech-*.whl
+          wheel=$(find dist -name 'speech_to_speech-*.whl' -print -quit)
+          python -m pip install "${wheel}${{ matrix.extra }}"
           python -m pip check
       - name: Run installed CLI smoke test
         shell: bash
+        env:
+          SPEECH_TO_SPEECH_SMOKE_EXTRA: ${{ matrix.smoke_extra }}
         run: |
           source .venv-smoke/bin/activate
           unset OPENAI_API_KEY

@@ -121,8 +121,9 @@ def _validate_package_defaults() -> None:
     assert module_args.log_level == "info"
     assert module_args.enable_live_transcription is True
     assert module_args.live_transcription_update_interval == 0.5
-    assert responses_api_args.model_name == "gpt-5.4-mini"
+    assert responses_api_args.model_name == "gpt-5.6-terra"
     assert responses_api_args.responses_api_stream is True
+    assert responses_api_args.responses_api_reasoning_effort == "none"
     assert qwen3_args.qwen3_tts_model_name == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     assert qwen3_args.qwen3_tts_speaker == "Aiden"
     assert qwen3_args.qwen3_tts_language == "auto"
@@ -183,6 +184,15 @@ def _validate_default_handler_imports() -> None:
         importlib.import_module(module_name)
 
 
+def _validate_runtime_dependency_imports() -> None:
+    if sys.platform != "darwin":
+        importlib.import_module("faster_qwen3_tts")
+    if os.environ.get("SPEECH_TO_SPEECH_SMOKE_EXTRA") == "omnivoice":
+        omnivoice = importlib.import_module("omnivoice")
+        assert omnivoice.OmniVoice is not None
+        assert omnivoice.VoiceClonePrompt is not None
+
+
 def _validate_realtime_websocket_support() -> None:
     importlib.import_module("uvicorn.protocols.websockets.websockets_impl")
 
@@ -233,6 +243,8 @@ def main() -> None:
         required_modules.extend(["miniaudio", "mlx", "mlx_audio", "mlx_lm", "misaki", "soundfile", "spacy"])
     else:
         required_modules.extend(["faster_qwen3_tts", "nano_parakeet"])
+    if os.environ.get("SPEECH_TO_SPEECH_SMOKE_EXTRA") == "omnivoice":
+        required_modules.append("omnivoice")
 
     _require_modules(required_modules)
     if sys.platform == "darwin":
@@ -242,6 +254,7 @@ def main() -> None:
     _validate_empty_qwen_ref_audio_arg()
     _validate_realtime_engine_imports()
     _validate_default_handler_imports()
+    _validate_runtime_dependency_imports()
     _validate_realtime_websocket_support()
     print("speech-to-speech installed package smoke test passed")
 
