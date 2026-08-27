@@ -96,9 +96,7 @@ def test_swedish_gets_a_language_instruction():
 
     contents = _sent_system_messages(handler, "sv-auto")
 
-    assert any(
-        isinstance(c, str) and f"{LANGUAGE_INSTRUCTION_PREFIX}swedish." in c for c in contents
-    )
+    assert any(isinstance(c, str) and f"{LANGUAGE_INSTRUCTION_PREFIX}swedish." in c for c in contents)
 
 
 @pytest.mark.parametrize("code", sorted(PARAKEET_LANGUAGES))
@@ -108,9 +106,7 @@ def test_every_parakeet_language_produces_an_instruction(code):
 
     contents = _sent_system_messages(handler, f"{code}-auto")
 
-    instructions = [
-        c for c in contents if isinstance(c, str) and LANGUAGE_INSTRUCTION_PREFIX in c
-    ]
+    instructions = [c for c in contents if isinstance(c, str) and LANGUAGE_INSTRUCTION_PREFIX in c]
     assert len(instructions) == 1, f"no language instruction emitted for {code!r}"
 
 
