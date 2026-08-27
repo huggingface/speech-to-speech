@@ -1,12 +1,11 @@
 """End-to-end coverage for the ``--enable_lang_prompt`` language instruction.
 
-The instruction is gated on a language *name*, not on the language code:
+When enabled, the resolved language name is passed into the system-prompt
+builders (``build_voice_system_prompt`` / ``build_text_system_prompt``) for the
+current turn. It never adds a second consecutive user message, which would break
+strict chat templates (e.g. Ministral).
 
-    language_code, lang_name = resolve_auto_language(language_code)
-    if lang_name and self.enable_lang_prompt:
-        active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
-
-so any code missing from ``WHISPER_LANGUAGE_TO_LLM_LANGUAGE`` silently produces no
+Any code missing from ``WHISPER_LANGUAGE_TO_LLM_LANGUAGE`` silently produces no
 instruction at all. Parakeet TDT is the default STT and reports 25 languages, so this
 asserts the instruction actually reaches the outgoing request for the ones it detects --
 not merely that the mapping dict has keys.
@@ -29,6 +28,8 @@ from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.LLM.chat_completions_language_model import ChatCompletionsApiModelHandler
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
 from speech_to_speech.STT.parakeet_tdt_handler import SUPPORTED_LANGUAGES as PARAKEET_LANGUAGES
+
+LANGUAGE_INSTRUCTION_PREFIX = "Please reply to my message in "
 
 
 class _FakeCompletions:
@@ -74,8 +75,8 @@ def _make_handler(*, enable_lang_prompt):
         base_mod.OpenAI = orig_openai
 
 
-def _sent_messages(handler, language_code, *, enable_lang_prompt=True):
-    """Drive one request and return the messages the backend actually sent."""
+def _sent_system_messages(handler, language_code, *, enable_lang_prompt=True):
+    """Drive one request and return system message contents the backend sent."""
     chat = Chat(10)
     chat.add_item(make_user_message("Hej, hur mar du?"))
     session = RealtimeSessionCreateRequest(type="realtime", instructions="You are a robot.")
@@ -86,16 +87,18 @@ def _sent_messages(handler, language_code, *, enable_lang_prompt=True):
 
     calls = handler.client.chat.completions.calls
     assert calls, "the backend never issued a request"
-    return [m.get("content") for m in calls[-1]["messages"] if m.get("role") == "user"]
+    return [m.get("content") for m in calls[-1]["messages"] if m.get("role") == "system"]
 
 
 def test_swedish_gets_a_language_instruction():
     """Swedish is one of the 17 Parakeet languages that previously got nothing."""
     handler = _make_handler(enable_lang_prompt=True)
 
-    contents = _sent_messages(handler, "sv-auto")
+    contents = _sent_system_messages(handler, "sv-auto")
 
-    assert "Please reply to my message in swedish." in contents
+    assert any(
+        isinstance(c, str) and f"{LANGUAGE_INSTRUCTION_PREFIX}swedish." in c for c in contents
+    )
 
 
 @pytest.mark.parametrize("code", sorted(PARAKEET_LANGUAGES))
@@ -103,9 +106,11 @@ def test_every_parakeet_language_produces_an_instruction(code):
     """No language the default STT can report may silently skip the instruction."""
     handler = _make_handler(enable_lang_prompt=True)
 
-    contents = _sent_messages(handler, f"{code}-auto")
+    contents = _sent_system_messages(handler, f"{code}-auto")
 
-    instructions = [c for c in contents if isinstance(c, str) and c.startswith("Please reply to my message in ")]
+    instructions = [
+        c for c in contents if isinstance(c, str) and LANGUAGE_INSTRUCTION_PREFIX in c
+    ]
     assert len(instructions) == 1, f"no language instruction emitted for {code!r}"
 
 
@@ -113,15 +118,15 @@ def test_no_instruction_when_the_flag_is_disabled():
     """The flag still gates the instruction; this is the default configuration."""
     handler = _make_handler(enable_lang_prompt=False)
 
-    contents = _sent_messages(handler, "sv-auto")
+    contents = _sent_system_messages(handler, "sv-auto")
 
-    assert not [c for c in contents if isinstance(c, str) and c.startswith("Please reply to my message in ")]
+    assert not [c for c in contents if isinstance(c, str) and LANGUAGE_INSTRUCTION_PREFIX in c]
 
 
 def test_unknown_language_code_still_emits_no_instruction():
     """An unnameable code must not produce 'reply in None.' -- absent is correct here."""
     handler = _make_handler(enable_lang_prompt=True)
 
-    contents = _sent_messages(handler, "xx-auto")
+    contents = _sent_system_messages(handler, "xx-auto")
 
-    assert not [c for c in contents if isinstance(c, str) and c.startswith("Please reply to my message in ")]
+    assert not [c for c in contents if isinstance(c, str) and LANGUAGE_INSTRUCTION_PREFIX in c]

@@ -62,6 +62,13 @@ def test_voice_prompt_is_short_and_keeps_persona_in_session_prompt():
     assert "Match the user's intent" not in prompt
 
 
+def test_voice_prompt_can_include_language_hint():
+    prompt = build_voice_system_prompt("Be concise.", language_name="french")
+
+    assert "Please reply to my message in french." in prompt
+    assert "Be concise." in prompt
+
+
 def test_voice_prompt_makes_speech_the_default_and_handles_noisy_stt():
     prompt = build_voice_system_prompt("Be concise.")
 

@@ -49,6 +49,7 @@ from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
 from speech_to_speech.LLM.utils import (
     image_url_to_pil,
+    language_name_for_prompt,
     remove_markdown,
     remove_unspeechable,
     resolve_auto_language,
@@ -277,8 +278,10 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         tool_choice: Optional[str],
         ctx: StreamContext | None = None,
         wants_audio: bool = True,
+        *,
+        language_name: str | None = None,
     ) -> None:
-        if not instructions:
+        if not instructions and not language_name:
             return
 
         raw_tools = raw_tools or []
@@ -289,12 +292,16 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         if function_tools and tool_choice != "none":
             tool_section = build_tool_system_prompt(function_tools, text_only=not wants_audio)
-            full_instructions = build_system_prompt(instructions, tool_section=tool_section)
+            full_instructions = build_system_prompt(
+                instructions or "",
+                tool_section=tool_section,
+                language_name=language_name,
+            )
             block_regex = build_block_regex()
             enter_code = ENTER_CODE
             end_code = END_CODE
         else:
-            full_instructions = build_system_prompt(instructions)
+            full_instructions = build_system_prompt(instructions or "", language_name=language_name)
             block_regex = None
             enter_code = None
             end_code = None
@@ -616,6 +623,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         else:
             active_chat = original_chat.copy()
         language_code = request.language_code
+        language_code, _ = resolve_auto_language(language_code)
+        lang_name = language_name_for_prompt(language_code, enable=self.enable_lang_prompt)
         instructions = (
             response.instructions
             if response is not None and response.instructions is not None
@@ -630,10 +639,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             str(tool_choice) if tool_choice else None,
             ctx,
             response_wants_audio(response),
+            language_name=lang_name,
         )
-        language_code, lang_name = resolve_auto_language(language_code)
-        if lang_name and self.enable_lang_prompt:
-            active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
 
         # Images the model sees this turn; only these are stripped on write-back,
         # so an image a fast client injects mid-generation for the next turn
