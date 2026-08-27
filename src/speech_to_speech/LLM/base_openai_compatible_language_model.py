@@ -36,7 +36,6 @@ from speech_to_speech.LLM.chat import (
     build_active_chat,
     make_system_message,
     make_user_audio_message,
-    make_user_message,
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
 from speech_to_speech.LLM.text_prompt import build_text_system_prompt
