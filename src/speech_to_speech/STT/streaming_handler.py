@@ -524,6 +524,7 @@ class _StreamingSession:
                         close_connection()
             reset_utterance()
             audio_error = None
+            failed_turn_ids.clear()
 
         def send(event: dict[str, Any]) -> None:
             if connection is None:
@@ -705,9 +706,13 @@ class _StreamingSession:
                     discard_utterance()
 
             if isinstance(command, _StartTurn):
-                if failed_turn_ids and command.turn_id not in failed_turn_ids:
-                    failed_turn_ids.clear()
-                    audio_error = None
+                if failed_turn_ids:
+                    if None in failed_turn_ids and command.turn_id is not None:
+                        failed_turn_ids.clear()
+                        failed_turn_ids.add(command.turn_id)
+                    elif command.turn_id not in failed_turn_ids:
+                        failed_turn_ids.clear()
+                        audio_error = None
                 turn_id = command.turn_id
                 turn_revision = command.turn_revision
                 if command.turn_id in failed_turn_ids:

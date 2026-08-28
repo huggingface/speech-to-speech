@@ -682,6 +682,54 @@ def test_connection_failure_is_not_replayed_and_only_fails_affected_turn(handler
 
 
 @pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
+def test_connection_failure_before_turn_assignment_fails_the_first_concrete_turn(handler_type, dialect) -> None:
+    disconnect_once = True
+
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        nonlocal disconnect_once
+        if _ack_session_update(event, socket, dialect):
+            return
+        if event["type"] == "input_audio_buffer.append" and disconnect_once:
+            disconnect_once = False
+            socket.incoming.put(ConnectionError("connection lost"))
+        elif _is_final_commit(event, dialect):
+            socket.incoming.put(json.dumps(_completion_event(dialect, "recovered", item_id="item_recovered")))
+
+    factory = _SocketFactory(dialect, on_send)
+    handler = _handler(handler_type, factory)
+    lost_chunk = b"\x01\x00" * 512
+    skipped_chunk = b"\x02\x00" * 512
+
+    handler.append_audio(lost_chunk)
+    handler.start_turn("turn_1", 0)
+    handler.append_audio(skipped_chunk)
+    failed = list(handler.process(_vad_final()))
+
+    assert len(failed) == 1
+    assert isinstance(failed[0], TranscriptionFailure)
+    assert len(factory.instances) == 1
+    transmitted = [base64.b64decode(event["audio"]) for event in _append_events(factory.instances[0])]
+    assert transmitted == [lost_chunk]
+
+    handler.start_turn("turn_2", 0)
+    handler.append_audio(b"\x03\x00" * 512)
+    recovered = list(
+        handler.process(
+            VADAudio(
+                audio=np.zeros(160, dtype=np.float32),
+                mode="final",
+                turn_id="turn_2",
+                turn_revision=0,
+            )
+        )
+    )
+
+    assert [output.text for output in recovered] == ["recovered"]
+    assert len(factory.instances) == 2
+    handler.cleanup()
+
+
+@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
 def test_connection_failure_discards_reopened_revisions_of_the_same_turn(handler_type, dialect) -> None:
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
