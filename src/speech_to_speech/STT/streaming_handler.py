@@ -50,6 +50,7 @@ class _ProtocolEvent:
     language: str | None = None
     message: str = ""
     item_id: str | None = None
+    content_index: int | None = None
 
 
 class StreamingSTTProtocol(Protocol):
@@ -118,12 +119,32 @@ class OpenAIRealtimeProtocol:
 
     def parse_event(self, event: dict[str, Any]) -> _ProtocolEvent:
         event_type = event.get("type")
-        item_id = event.get("item_id") if isinstance(event.get("item_id"), str) else None
+        raw_item_id = event.get("item_id")
+        item_id = raw_item_id if isinstance(raw_item_id, str) and raw_item_id else None
         if event_type == "input_audio_buffer.committed":
+            if item_id is None:
+                return _ProtocolEvent("ignore")
             return _ProtocolEvent("committed", item_id=item_id)
+        content_index = event.get("content_index")
+        if event_type in {
+            "conversation.item.input_audio_transcription.delta",
+            "conversation.item.input_audio_transcription.completed",
+            "conversation.item.input_audio_transcription.failed",
+        } and (
+            item_id is None
+            or isinstance(content_index, bool)
+            or not isinstance(content_index, int)
+            or content_index < 0
+        ):
+            return _ProtocolEvent("ignore")
         if event_type == "conversation.item.input_audio_transcription.delta":
             delta = event.get("delta")
-            return _ProtocolEvent("delta", text=delta if isinstance(delta, str) else "", item_id=item_id)
+            return _ProtocolEvent(
+                "delta",
+                text=delta if isinstance(delta, str) else "",
+                item_id=item_id,
+                content_index=content_index,
+            )
         if event_type == "conversation.item.input_audio_transcription.completed":
             transcript = event.get("transcript")
             language = _first_language_code(event.get("languages"))
@@ -134,57 +155,15 @@ class OpenAIRealtimeProtocol:
                 text=transcript if isinstance(transcript, str) else "",
                 language=language,
                 item_id=item_id,
+                content_index=content_index,
             )
         if event_type == "conversation.item.input_audio_transcription.failed":
             return _ProtocolEvent(
                 "failed",
                 message=_remote_error_message(event),
                 item_id=item_id,
+                content_index=content_index,
             )
-        if event_type == "error":
-            return _ProtocolEvent("error", message=_remote_error_message(event))
-        return _ProtocolEvent("ignore")
-
-
-@dataclass(frozen=True)
-class VLLMRealtimeProtocol:
-    """vLLM's distinct, experimental Realtime transcription wire dialect."""
-
-    model: str
-    language: str | None
-    audio_sample_rate: int
-
-    name = "vllm-realtime"
-    requires_session_updated = False
-
-    def session_update(self) -> dict[str, Any]:
-        return {"type": "session.update", "model": self.model}
-
-    def start_utterance(self) -> dict[str, Any] | None:
-        return {"type": "input_audio_buffer.commit", "final": False}
-
-    def append_audio(self, audio: bytes) -> dict[str, Any]:
-        return {
-            "type": "input_audio_buffer.append",
-            "audio": base64.b64encode(audio).decode("ascii"),
-        }
-
-    def finish_utterance(self) -> dict[str, Any]:
-        return {"type": "input_audio_buffer.commit", "final": True}
-
-    def discard_utterance(self) -> dict[str, Any] | None:
-        # vLLM currently has no per-buffer clear event. Closing the socket is
-        # the only way to guarantee rejected PCM cannot reach the next turn.
-        return None
-
-    def parse_event(self, event: dict[str, Any]) -> _ProtocolEvent:
-        event_type = event.get("type")
-        if event_type == "transcription.delta":
-            delta = event.get("delta")
-            return _ProtocolEvent("delta", text=delta if isinstance(delta, str) else "")
-        if event_type == "transcription.done":
-            text = event.get("text")
-            return _ProtocolEvent("completed", text=text if isinstance(text, str) else "")
         if event_type == "error":
             return _ProtocolEvent("error", message=_remote_error_message(event))
         return _ProtocolEvent("ignore")
@@ -458,21 +437,42 @@ class _StreamingSession:
         utterance_has_audio = False
         remote_hypothesis = ""
         audio_error: str | None = None
+        audio_error_requires_close = False
         active_commit: _Commit | None = None
         active_item_id: str | None = None
+        active_content_index: int | None = None
         retired_item_ids: set[str] = set()
         committed_prefixes: dict[str, str] = {}
         failed_turn_ids: set[str | None] = set()
+        failed_turn_message: str | None = None
+        pending_unassigned_audio: deque[_AppendAudio] = deque()
         deferred_commands: deque[_StartTurn | _AppendAudio | _Commit] = deque()
 
         def reset_utterance() -> None:
-            nonlocal utterance_started, utterance_has_audio, remote_hypothesis, turn_id, turn_revision, active_item_id
+            nonlocal utterance_started, utterance_has_audio, remote_hypothesis, turn_id, turn_revision
+            nonlocal active_item_id, active_content_index
             utterance_started = False
             utterance_has_audio = False
             remote_hypothesis = ""
             turn_id = None
             turn_revision = None
             active_item_id = None
+            active_content_index = None
+
+        def poison_turn(failed_turn_id: str | None, message: str) -> None:
+            nonlocal failed_turn_message
+            failed_turn_ids.clear()
+            failed_turn_ids.add(failed_turn_id)
+            failed_turn_message = message
+
+        def clear_failed_turn() -> None:
+            nonlocal failed_turn_message
+            failed_turn_ids.clear()
+            failed_turn_message = None
+
+        def retire_active_item() -> None:
+            if active_item_id is not None:
+                retired_item_ids.add(active_item_id)
 
         def close_connection() -> None:
             nonlocal connection
@@ -490,24 +490,25 @@ class _StreamingSession:
             commit.done.set()
 
         def fail_connection(exc: BaseException) -> None:
-            nonlocal active_commit, audio_error
+            nonlocal active_commit, audio_error, audio_error_requires_close
             logger.warning("%s STT connection failed: %s", self.protocol.name, type(exc).__name__)
             close_connection()
             message = "streaming transcription connection failed"
             if active_commit is not None:
-                failed_turn_ids.clear()
-                failed_turn_ids.add(active_commit.turn_id)
+                poison_turn(active_commit.turn_id, message)
                 fail_commit(active_commit, message)
                 active_commit = None
                 reset_utterance()
                 audio_error = None
-            elif utterance_has_audio:
-                failed_turn_ids.clear()
-                failed_turn_ids.add(turn_id)
+                audio_error_requires_close = False
+            elif utterance_started or utterance_has_audio:
+                poison_turn(turn_id, message)
                 audio_error = message
+                audio_error_requires_close = True
 
         def discard_utterance() -> None:
-            nonlocal audio_error
+            nonlocal audio_error, audio_error_requires_close
+            pending_unassigned_audio.clear()
             if connection is not None and (utterance_started or utterance_has_audio):
                 discard_event = self.protocol.discard_utterance()
                 if discard_event is None:
@@ -522,9 +523,11 @@ class _StreamingSession:
                             type(exc).__name__,
                         )
                         close_connection()
+            retire_active_item()
             reset_utterance()
             audio_error = None
-            failed_turn_ids.clear()
+            audio_error_requires_close = False
+            clear_failed_turn()
 
         def send(event: dict[str, Any]) -> None:
             if connection is None:
@@ -592,11 +595,13 @@ class _StreamingSession:
                 self.queue_out.put(output)
 
         def handle_protocol_event(event: _ProtocolEvent) -> None:
-            nonlocal active_commit, active_item_id, remote_hypothesis, audio_error
+            nonlocal active_commit, active_item_id, active_content_index, remote_hypothesis
+            nonlocal audio_error, audio_error_requires_close
             if event.kind == "ignore":
                 return
-            if event.item_id is not None:
-                if active_commit is None or event.item_id in retired_item_ids:
+
+            if event.kind == "committed":
+                if active_commit is None or event.item_id is None or event.item_id in retired_item_ids:
                     logger.debug(
                         "Ignoring retired or unowned %s STT event for item=%s", self.protocol.name, event.item_id
                     )
@@ -606,8 +611,39 @@ class _StreamingSession:
                 elif event.item_id != active_item_id:
                     logger.debug("Ignoring unowned %s STT event for item=%s", self.protocol.name, event.item_id)
                     return
-            if event.kind == "committed":
                 return
+
+            if event.item_id is not None:
+                if (
+                    event.item_id in retired_item_ids
+                    or (active_commit is None and not utterance_has_audio)
+                    or (event.kind == "completed" and active_commit is None)
+                ):
+                    logger.debug(
+                        "Ignoring retired or unowned %s STT event for item=%s", self.protocol.name, event.item_id
+                    )
+                    return
+                if active_item_id is None:
+                    active_item_id = event.item_id
+                    active_content_index = event.content_index
+                elif event.item_id != active_item_id:
+                    logger.debug(
+                        "Ignoring unowned %s STT event for item=%s content=%s",
+                        self.protocol.name,
+                        event.item_id,
+                        event.content_index,
+                    )
+                    return
+                elif active_content_index is None:
+                    active_content_index = event.content_index
+                elif event.content_index != active_content_index:
+                    logger.debug(
+                        "Ignoring unowned %s STT event for item=%s content=%s",
+                        self.protocol.name,
+                        event.item_id,
+                        event.content_index,
+                    )
+                    return
             if event.kind == "delta":
                 if not event.text:
                     return
@@ -616,37 +652,45 @@ class _StreamingSession:
                 return
             if event.kind == "error":
                 logger.warning("%s STT remote error: %s", self.protocol.name, event.message)
+                has_unfinished_turn = active_commit is not None or utterance_started or utterance_has_audio
+                failed_turn_id = active_commit.turn_id if active_commit is not None else turn_id
                 close_connection()
                 message = "remote streaming transcription failed"
+                if has_unfinished_turn:
+                    poison_turn(failed_turn_id, message)
                 if active_commit is not None:
                     fail_commit(active_commit, message)
                     active_commit = None
                     reset_utterance()
                     audio_error = None
-                else:
+                    audio_error_requires_close = False
+                elif has_unfinished_turn:
                     audio_error = message
+                    audio_error_requires_close = True
                 return
             if event.kind == "failed":
-                if active_commit is None:
-                    logger.debug("Ignoring unowned %s STT item failure", self.protocol.name)
-                    return
                 logger.warning(
                     "%s STT transcription failed for item=%s",
                     self.protocol.name,
                     event.item_id or "unknown",
                 )
-                if active_item_id is not None:
-                    retired_item_ids.add(active_item_id)
-                fail_commit(active_commit, "remote streaming transcription failed")
-                active_commit = None
+                message = "remote streaming transcription failed"
+                failed_turn_id = active_commit.turn_id if active_commit is not None else turn_id
+                poison_turn(failed_turn_id, message)
+                retire_active_item()
+                if active_commit is not None:
+                    fail_commit(active_commit, message)
+                    active_commit = None
+                    audio_error = None
+                else:
+                    audio_error = message
+                audio_error_requires_close = False
                 reset_utterance()
-                audio_error = None
                 return
             if active_commit is None:
                 logger.debug("Ignoring duplicate or unowned %s STT completion", self.protocol.name)
                 return
-            if active_item_id is not None:
-                retired_item_ids.add(active_item_id)
+            retire_active_item()
             combined = combined_hypothesis(event.text)
             if active_commit.turn_id is not None:
                 committed_prefixes[active_commit.turn_id] = combined
@@ -656,6 +700,7 @@ class _StreamingSession:
             active_commit = None
             reset_utterance()
             audio_error = None
+            audio_error_requires_close = False
 
         while True:
             command: _Command | None = None
@@ -679,8 +724,10 @@ class _StreamingSession:
                     active_commit.done.set()
                     active_commit = None
                 audio_error = None
+                audio_error_requires_close = False
                 committed_prefixes.clear()
-                failed_turn_ids.clear()
+                clear_failed_turn()
+                pending_unassigned_audio.clear()
                 deferred_commands.clear()
                 reset_utterance()
                 close_connection()
@@ -711,18 +758,27 @@ class _StreamingSession:
                         failed_turn_ids.clear()
                         failed_turn_ids.add(command.turn_id)
                     elif command.turn_id not in failed_turn_ids:
-                        failed_turn_ids.clear()
+                        clear_failed_turn()
                         audio_error = None
+                        audio_error_requires_close = False
                 turn_id = command.turn_id
                 turn_revision = command.turn_revision
                 if command.turn_id in failed_turn_ids:
-                    audio_error = "streaming transcription connection failed"
+                    audio_error = failed_turn_message or "streaming transcription failed"
+                    pending_unassigned_audio.clear()
+                else:
+                    while pending_unassigned_audio:
+                        deferred_commands.appendleft(pending_unassigned_audio.pop())
                 emit_partial()
 
             elif isinstance(command, _AppendAudio):
-                if audio_error is None:
+                if failed_turn_ids and turn_id is None:
+                    pending_unassigned_audio.append(command)
+                elif audio_error is None:
                     if not ensure_connection():
                         audio_error = "streaming transcription connection failed"
+                        audio_error_requires_close = True
+                        poison_turn(turn_id, audio_error)
                     else:
                         try:
                             if not utterance_started:
@@ -740,10 +796,13 @@ class _StreamingSession:
                 turn_id = command.turn_id
                 turn_revision = command.turn_revision
                 if audio_error is not None:
+                    should_close = audio_error_requires_close
                     fail_commit(command, audio_error)
                     audio_error = None
+                    audio_error_requires_close = False
                     reset_utterance()
-                    close_connection()
+                    if should_close:
+                        close_connection()
                 elif not utterance_has_audio or connection is None:
                     fail_commit(command, "streaming transcription received no audio")
                     reset_utterance()
@@ -800,9 +859,8 @@ class _StreamingSession:
 class StatefulStreamingSTTHandler(BaseSTTHandler):
     """STT handler that pairs incremental PCM ingress with local VAD commits."""
 
-    protocol_type: type[OpenAIRealtimeProtocol] | type[VLLMRealtimeProtocol]
+    protocol_type: type[OpenAIRealtimeProtocol]
     include_model_query = False
-    experimental = False
 
     def setup(
         self,
@@ -823,8 +881,6 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
             raise ValueError("Streaming STT audio_sample_rate must be > 0")
         if connect_timeout <= 0 or final_timeout <= 0:
             raise ValueError("Streaming STT timeouts must be > 0")
-        if self.protocol_type is VLLMRealtimeProtocol and audio_sample_rate != PIPELINE_SAMPLE_RATE:
-            raise ValueError("vLLM Realtime STT requires 16 kHz PCM")
 
         self.speculative_turns = speculative_turns
         self.final_revision_settle_s = 0.0
@@ -861,8 +917,6 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
             speculative_turns=speculative_turns,
             pipeline_index=pipeline_index,
         )
-        if self.experimental:
-            logger.warning("%s is experimental; keep --stt openai as the compatibility fallback", protocol.name)
 
     def append_audio(self, audio: bytes) -> None:
         with self._audio_lock:
@@ -946,8 +1000,3 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
 class OpenAIRealtimeSTTHandler(StatefulStreamingSTTHandler):
     protocol_type = OpenAIRealtimeProtocol
     include_model_query = True
-
-
-class VLLMRealtimeSTTHandler(StatefulStreamingSTTHandler):
-    protocol_type = VLLMRealtimeProtocol
-    experimental = True

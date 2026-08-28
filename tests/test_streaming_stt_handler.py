@@ -20,26 +20,18 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.STT.streaming_handler import (
     OpenAIRealtimeProtocol,
     OpenAIRealtimeSTTHandler,
-    VLLMRealtimeProtocol,
-    VLLMRealtimeSTTHandler,
     _StreamingPCMResampler,
 )
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 
-DIALECT_CASES = [
-    (OpenAIRealtimeSTTHandler, "openai"),
-    (VLLMRealtimeSTTHandler, "vllm"),
-]
-
 
 class _FakeSocket:
-    def __init__(self, on_send: Callable[[dict[str, Any], "_FakeSocket"], None], *, dialect: str) -> None:
+    def __init__(self, on_send: Callable[[dict[str, Any], "_FakeSocket"], None]) -> None:
         self.on_send = on_send
         self.sent: list[dict[str, Any]] = []
         self.incoming: Queue[str | Exception] = Queue()
         self.closed = False
         self.incoming.put(json.dumps({"type": "session.created", "session": {"id": "sess_fake"}}))
-        self.dialect = dialect
 
     def send(self, raw: str) -> None:
         if self.closed:
@@ -61,17 +53,21 @@ class _FakeSocket:
 class _SocketFactory:
     def __init__(
         self,
-        dialect: str,
         on_send: Callable[[dict[str, Any], _FakeSocket], None],
+        *,
+        fail_connects: int = 0,
     ) -> None:
-        self.dialect = dialect
         self.on_send = on_send
+        self.fail_connects = fail_connects
         self.instances: list[_FakeSocket] = []
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     def __call__(self, url: str, **kwargs: Any) -> _FakeSocket:
         self.calls.append((url, kwargs))
-        socket = _FakeSocket(self.on_send, dialect=self.dialect)
+        if self.fail_connects:
+            self.fail_connects -= 1
+            raise ConnectionError("connection setup failed")
+        socket = _FakeSocket(self.on_send)
         self.instances.append(socket)
         return socket
 
@@ -99,14 +95,13 @@ def _vad_final(*, revision: int = 0) -> VADAudio:
 
 
 def _handler(
-    handler_type: type[OpenAIRealtimeSTTHandler] | type[VLLMRealtimeSTTHandler],
     socket_factory: _SocketFactory,
     *,
     tracker: SpeculativeTurnTracker | None = None,
     audio_sample_rate: int = 16000,
     queue_out: Queue[Any] | None = None,
 ):
-    return handler_type(
+    return OpenAIRealtimeSTTHandler(
         Event(),
         queue_in=Queue(),
         queue_out=queue_out if queue_out is not None else Queue(),
@@ -126,71 +121,68 @@ def _append_events(socket: _FakeSocket) -> list[dict[str, Any]]:
     return [event for event in socket.sent if event["type"] == "input_audio_buffer.append"]
 
 
-def _ack_session_update(event: dict[str, Any], socket: _FakeSocket, dialect: str) -> bool:
+def _ack_session_update(event: dict[str, Any], socket: _FakeSocket) -> bool:
     if event["type"] != "session.update":
         return False
-    if dialect == "openai":
-        socket.incoming.put(json.dumps({"type": "session.updated"}))
+    socket.incoming.put(json.dumps({"type": "session.updated"}))
     return True
 
 
-def _is_final_commit(event: dict[str, Any], dialect: str) -> bool:
-    return event["type"] == "input_audio_buffer.commit" and (dialect == "openai" or event.get("final") is True)
+def _is_final_commit(event: dict[str, Any]) -> bool:
+    return event["type"] == "input_audio_buffer.commit"
 
 
-def _completion_event(dialect: str, text: str, *, item_id: str = "item_current") -> dict[str, Any]:
-    if dialect == "openai":
-        return {
-            "type": "conversation.item.input_audio_transcription.completed",
-            "item_id": item_id,
-            "transcript": text,
-        }
-    return {"type": "transcription.done", "text": text}
+def _completion_event(text: str, *, item_id: str = "item_current", content_index: int = 0) -> dict[str, Any]:
+    return {
+        "type": "conversation.item.input_audio_transcription.completed",
+        "item_id": item_id,
+        "content_index": content_index,
+        "transcript": text,
+    }
 
 
 def test_openai_realtime_streams_each_chunk_once_then_explicitly_commits(caplog) -> None:
     caplog.set_level("INFO")
+    append_count = 0
 
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        nonlocal append_count
         if event["type"] == "session.update":
             socket.incoming.put(json.dumps({"type": "session.updated"}))
+        elif event["type"] == "input_audio_buffer.append":
+            append_count += 1
+            socket.incoming.put(
+                json.dumps(
+                    {
+                        "type": "conversation.item.input_audio_transcription.delta",
+                        "item_id": "item_1",
+                        "content_index": 0,
+                        "delta": "hello " if append_count == 1 else "world",
+                    }
+                )
+            )
         elif event["type"] == "input_audio_buffer.commit":
-            socket.incoming.put(
-                json.dumps(
-                    {
-                        "type": "conversation.item.input_audio_transcription.delta",
-                        "item_id": "item_1",
-                        "delta": "hello ",
-                    }
-                )
-            )
-            socket.incoming.put(
-                json.dumps(
-                    {
-                        "type": "conversation.item.input_audio_transcription.delta",
-                        "item_id": "item_1",
-                        "delta": "world",
-                    }
-                )
-            )
             socket.incoming.put(
                 json.dumps(
                     {
                         "type": "conversation.item.input_audio_transcription.completed",
                         "item_id": "item_1",
+                        "content_index": 0,
                         "transcript": "hello world",
                     }
                 )
             )
 
-    factory = _SocketFactory("openai", on_send)
-    handler = _handler(OpenAIRealtimeSTTHandler, factory)
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory)
     first = b"\x01\x00" * 512
     second = b"\x02\x00" * 512
 
     handler.start_turn("turn_1", 0)
     handler.append_audio(first)
+    first_partial = handler.queue_out.get(timeout=1)
     handler.append_audio(second)
+    second_partial = handler.queue_out.get(timeout=1)
     outputs = list(handler.process(_vad_final()))
 
     assert outputs == [
@@ -210,8 +202,7 @@ def test_openai_realtime_streams_each_chunk_once_then_explicitly_commits(caplog)
     ]
     assert [base64.b64decode(event["audio"]) for event in _append_events(socket)] == [first, second]
     assert factory.calls[0][0] == "ws://transcription.example/v1/realtime?model=test-model"
-    partials = [handler.queue_out.get(timeout=1), handler.queue_out.get(timeout=1)]
-    assert partials == [
+    assert [first_partial, second_partial] == [
         PartialTranscription(text="hello", turn_id="turn_1", turn_revision=0),
         PartialTranscription(text="hello world", turn_id="turn_1", turn_revision=0),
     ]
@@ -220,14 +211,7 @@ def test_openai_realtime_streams_each_chunk_once_then_explicitly_commits(caplog)
     handler.cleanup()
 
 
-@pytest.mark.parametrize(
-    ("handler_type", "dialect"),
-    [
-        (OpenAIRealtimeSTTHandler, "openai"),
-        (VLLMRealtimeSTTHandler, "vllm"),
-    ],
-)
-def test_streaming_backends_interoperate_with_fake_websocket_server(handler_type, dialect) -> None:
+def test_openai_realtime_interoperates_with_fake_websocket_server() -> None:
     received: Queue[dict[str, Any]] = Queue()
 
     def server_handler(socket) -> None:
@@ -235,44 +219,33 @@ def test_streaming_backends_interoperate_with_fake_websocket_server(handler_type
         for raw in socket:
             event = json.loads(raw)
             received.put(event)
-            if event["type"] == "session.update" and dialect == "openai":
+            if event["type"] == "session.update":
                 socket.send(json.dumps({"type": "session.updated"}))
-            elif event["type"] == "input_audio_buffer.append" and dialect == "vllm":
-                socket.send(json.dumps({"type": "transcription.delta", "delta": "live"}))
-            elif event["type"] == "input_audio_buffer.commit" and (dialect == "openai" or event.get("final") is True):
-                if dialect == "openai":
-                    socket.send(
-                        json.dumps(
-                            {
-                                "type": "conversation.item.input_audio_transcription.delta",
-                                "item_id": "item_1",
-                                "delta": "live",
-                            }
-                        )
+            elif event["type"] == "input_audio_buffer.commit":
+                socket.send(
+                    json.dumps(
+                        {
+                            "type": "conversation.item.input_audio_transcription.delta",
+                            "item_id": "item_1",
+                            "content_index": 0,
+                            "delta": "live",
+                        }
                     )
-                completed = (
-                    {
-                        "type": "conversation.item.input_audio_transcription.completed",
-                        "item_id": "item_1",
-                        "transcript": "live final",
-                    }
-                    if dialect == "openai"
-                    else {"type": "transcription.done", "text": "live final"}
                 )
-                socket.send(json.dumps(completed))
+                socket.send(json.dumps(_completion_event("live final", item_id="item_1")))
 
     server = serve(server_handler, "127.0.0.1", 0)
     server_thread = Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
     port = server.socket.getsockname()[1]
-    handler = handler_type(
+    handler = OpenAIRealtimeSTTHandler(
         Event(),
         queue_in=Queue(),
         queue_out=Queue(),
         setup_kwargs={
             "base_url": f"ws://127.0.0.1:{port}/v1",
             "model": "test-model",
-            "audio_sample_rate": 24000 if dialect == "openai" else 16000,
+            "audio_sample_rate": 24000,
             "connect_timeout": 1.0,
             "final_timeout": 1.0,
         },
@@ -287,14 +260,14 @@ def test_streaming_backends_interoperate_with_fake_websocket_server(handler_type
 
         assert outputs[0].text == "live final"
         assert handler.queue_out.get(timeout=1).text == "live"
-        events = [received.get(timeout=1) for _ in range(4 if dialect == "vllm" else 3)]
+        events = [received.get(timeout=1) for _ in range(3)]
         assert sum(event["type"] == "input_audio_buffer.append" for event in events) == 1
         transmitted_samples = sum(
             len(base64.b64decode(event["audio"])) // 2
             for event in events
             if event["type"] == "input_audio_buffer.append"
         )
-        assert transmitted_samples == (768 if dialect == "openai" else 512)
+        assert transmitted_samples == 768
     finally:
         handler.cleanup()
         server.shutdown()
@@ -313,43 +286,76 @@ def test_openai_realtime_session_disables_remote_turn_detection() -> None:
     assert audio_input["turn_detection"] is None
 
 
-def test_vllm_realtime_uses_start_then_final_commit_lifecycle() -> None:
+@pytest.mark.parametrize(
+    "event",
+    [
+        {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "content_index": 0,
+            "delta": "missing item",
+        },
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "",
+            "content_index": 0,
+            "transcript": "empty item",
+        },
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "item_1",
+            "transcript": "missing content index",
+        },
+        {
+            "type": "conversation.item.input_audio_transcription.failed",
+            "item_id": "item_1",
+            "content_index": True,
+        },
+        {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "item_1",
+            "content_index": -1,
+            "delta": "negative content index",
+        },
+    ],
+)
+def test_openai_realtime_ignores_transcription_events_without_valid_identity(event) -> None:
+    protocol = OpenAIRealtimeProtocol(model="gpt-live-transcribe", language=None, audio_sample_rate=24000)
+
+    assert protocol.parse_event(event).kind == "ignore"
+
+
+def test_openai_realtime_matches_deltas_and_completion_by_item_and_content_index() -> None:
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        if _ack_session_update(event, socket):
+            return
         if event["type"] == "input_audio_buffer.append":
-            socket.incoming.put(json.dumps({"type": "transcription.delta", "delta": "hello"}))
-        elif event == {"type": "input_audio_buffer.commit", "final": True}:
-            socket.incoming.put(json.dumps({"type": "transcription.done", "text": "hello"}))
+            for item_id, content_index, delta in [
+                ("item_1", 0, "kept"),
+                ("item_1", 1, " wrong content"),
+                ("item_other", 0, " wrong item"),
+            ]:
+                socket.incoming.put(
+                    json.dumps(
+                        {
+                            "type": "conversation.item.input_audio_transcription.delta",
+                            "item_id": item_id,
+                            "content_index": content_index,
+                            "delta": delta,
+                        }
+                    )
+                )
+        elif _is_final_commit(event):
+            socket.incoming.put(json.dumps(_completion_event("kept", item_id="item_1")))
 
-    factory = _SocketFactory("vllm", on_send)
-    handler = _handler(VLLMRealtimeSTTHandler, factory)
-    chunk = b"\x03\x00" * 512
-
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory)
     handler.start_turn("turn_1", 0)
-    handler.append_audio(chunk)
-    outputs = list(handler.process(_vad_final()))
+    handler.append_audio(b"\x01\x00" * 512)
 
-    socket = factory.instances[0]
-    assert socket.sent == [
-        {"type": "session.update", "model": "test-model"},
-        {"type": "input_audio_buffer.commit", "final": False},
-        {"type": "input_audio_buffer.append", "audio": base64.b64encode(chunk).decode("ascii")},
-        {"type": "input_audio_buffer.commit", "final": True},
-    ]
-    assert outputs[0].text == "hello"
-    assert handler.queue_out.get(timeout=1) == PartialTranscription(
-        text="hello",
-        turn_id="turn_1",
-        turn_revision=0,
-    )
+    assert [output.text for output in handler.process(_vad_final())] == ["kept"]
+    assert handler.queue_out.get(timeout=1).text == "kept"
+    assert handler.queue_out.empty()
     handler.cleanup()
-
-
-def test_vllm_protocol_is_separate_from_openai_wire_shape() -> None:
-    protocol = VLLMRealtimeProtocol(model="Qwen/Qwen3-ASR-1.7B", language=None, audio_sample_rate=16000)
-
-    assert protocol.session_update() == {"type": "session.update", "model": "Qwen/Qwen3-ASR-1.7B"}
-    assert protocol.start_utterance() == {"type": "input_audio_buffer.commit", "final": False}
-    assert protocol.finish_utterance() == {"type": "input_audio_buffer.commit", "final": True}
 
 
 def test_streaming_resampler_is_continuous_across_input_chunks() -> None:
@@ -371,19 +377,18 @@ def test_streaming_resampler_is_continuous_across_input_chunks() -> None:
     assert np.sqrt(np.mean(difference.astype(np.float64) ** 2)) < 1
 
 
-@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
-def test_vad_commit_boundary_cannot_be_overtaken_by_next_turn_audio(handler_type, dialect) -> None:
+def test_vad_commit_boundary_cannot_be_overtaken_by_next_turn_audio() -> None:
     completions = iter(["old", "new"])
 
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
-        if _ack_session_update(event, socket, dialect):
+        if _ack_session_update(event, socket):
             return
-        if _is_final_commit(event, dialect):
+        if _is_final_commit(event):
             text = next(completions)
-            socket.incoming.put(json.dumps(_completion_event(dialect, text, item_id=f"item_{text}")))
+            socket.incoming.put(json.dumps(_completion_event(text, item_id=f"item_{text}")))
 
-    factory = _SocketFactory(dialect, on_send)
-    handler = _handler(handler_type, factory)
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory)
     old_chunk = b"\x01\x00" * 512
     new_chunk = b"\x02\x00" * 512
 
@@ -409,32 +414,31 @@ def test_vad_commit_boundary_cannot_be_overtaken_by_next_turn_audio(handler_type
     assert [output.text for output in old + new] == ["old", "new"]
     socket = factory.instances[0]
     append_indexes = [index for index, event in enumerate(socket.sent) if event["type"] == "input_audio_buffer.append"]
-    final_commit_indexes = [index for index, event in enumerate(socket.sent) if _is_final_commit(event, dialect)]
+    final_commit_indexes = [index for index, event in enumerate(socket.sent) if _is_final_commit(event)]
     assert append_indexes[0] < final_commit_indexes[0] < append_indexes[1] < final_commit_indexes[1]
     assert [base64.b64decode(event["audio"]) for event in _append_events(socket)] == [old_chunk, new_chunk]
     handler.cleanup()
 
 
-@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
-def test_commit_to_final_metric_starts_at_the_vad_boundary(handler_type, dialect, caplog) -> None:
+def test_commit_to_final_metric_starts_at_the_vad_boundary(caplog) -> None:
     caplog.set_level("INFO")
     first_commit_seen = Event()
     commit_count = 0
 
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
         nonlocal commit_count
-        if _ack_session_update(event, socket, dialect):
+        if _ack_session_update(event, socket):
             return
-        if not _is_final_commit(event, dialect):
+        if not _is_final_commit(event):
             return
         commit_count += 1
         if commit_count == 1:
             first_commit_seen.set()
         else:
-            socket.incoming.put(json.dumps(_completion_event(dialect, "new", item_id="item_new")))
+            socket.incoming.put(json.dumps(_completion_event("new", item_id="item_new")))
 
-    factory = _SocketFactory(dialect, on_send)
-    handler = _handler(handler_type, factory)
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory)
     handler.start_turn("turn_1", 0)
     handler.append_audio(b"\x01\x00" * 512)
     handler.commit_boundary("turn_1", 0)
@@ -447,7 +451,7 @@ def test_commit_to_final_metric_starts_at_the_vad_boundary(handler_type, dialect
     handler.append_audio(b"\x02\x00" * 512)
     handler.commit_boundary("turn_2", 0)
     Event().wait(0.12)
-    factory.instances[0].incoming.put(json.dumps(_completion_event(dialect, "old", item_id="item_old")))
+    factory.instances[0].incoming.put(json.dumps(_completion_event("old", item_id="item_old")))
     first_thread.join(timeout=1)
 
     assert [output.text for output in first_result] == ["old"]
@@ -472,26 +476,25 @@ def test_commit_to_final_metric_starts_at_the_vad_boundary(handler_type, dialect
     handler.cleanup()
 
 
-@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
-def test_late_reopen_starts_new_remote_utterance_and_combines_final_text(handler_type, dialect) -> None:
+def test_late_reopen_starts_new_remote_utterance_and_combines_final_text() -> None:
     completions = iter(["hello", "world"])
 
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
-        if _ack_session_update(event, socket, dialect):
+        if _ack_session_update(event, socket):
             return
-        if _is_final_commit(event, dialect):
+        if _is_final_commit(event):
             text = next(completions)
-            socket.incoming.put(json.dumps(_completion_event(dialect, text, item_id=f"item_{text}")))
+            socket.incoming.put(json.dumps(_completion_event(text, item_id=f"item_{text}")))
 
-    factory = _SocketFactory(dialect, on_send)
-    handler = _handler(handler_type, factory)
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory)
 
     handler.start_turn("turn_1", 0)
     handler.append_audio(b"\x01\x00" * 512)
     assert list(handler.process(_vad_final()))[0].text == "hello"
 
-    handler.start_turn("turn_1", 1)
     handler.append_audio(b"\x02\x00" * 512)
+    handler.start_turn("turn_1", 1)
     reopened = list(handler.process(_vad_final(revision=1)))
 
     assert reopened[0].text == "hello world"
@@ -517,6 +520,7 @@ def test_openai_realtime_ignores_late_completion_for_an_older_remote_item() -> N
                         {
                             "type": "conversation.item.input_audio_transcription.completed",
                             "item_id": "item_1",
+                            "content_index": 0,
                             "transcript": "late old result",
                         }
                     )
@@ -526,13 +530,14 @@ def test_openai_realtime_ignores_late_completion_for_an_older_remote_item() -> N
                     {
                         "type": "conversation.item.input_audio_transcription.completed",
                         "item_id": item_id,
+                        "content_index": 0,
                         "transcript": f"result {commit_count}",
                     }
                 )
             )
 
-    factory = _SocketFactory("openai", on_send)
-    handler = _handler(OpenAIRealtimeSTTHandler, factory)
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory)
     handler.start_turn("turn_1", 0)
     handler.append_audio(b"\x01\x00" * 512)
     assert list(handler.process(_vad_final()))[0].text == "result 1"
@@ -559,26 +564,27 @@ def test_openai_realtime_ignores_late_delta_from_a_completed_remote_item() -> No
 
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
         nonlocal commit_count
-        if _ack_session_update(event, socket, "openai"):
+        if _ack_session_update(event, socket):
             return
-        if not _is_final_commit(event, "openai"):
+        if not _is_final_commit(event):
             return
         commit_count += 1
         item_id = f"item_{commit_count}"
-        socket.incoming.put(json.dumps(_completion_event("openai", f"result {commit_count}", item_id=item_id)))
+        socket.incoming.put(json.dumps(_completion_event(f"result {commit_count}", item_id=item_id)))
         if commit_count == 1:
             socket.incoming.put(
                 json.dumps(
                     {
                         "type": "conversation.item.input_audio_transcription.delta",
                         "item_id": item_id,
+                        "content_index": 0,
                         "delta": "late old text",
                     }
                 )
             )
 
-    factory = _SocketFactory("openai", on_send)
-    handler = _handler(OpenAIRealtimeSTTHandler, factory)
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory)
     handler.start_turn("turn_1", 0)
     handler.append_audio(b"\x01\x00" * 512)
     assert [output.text for output in handler.process(_vad_final())] == ["result 1"]
@@ -611,6 +617,7 @@ def test_empty_final_is_authoritative_over_an_earlier_partial() -> None:
                     {
                         "type": "conversation.item.input_audio_transcription.delta",
                         "item_id": "item_1",
+                        "content_index": 0,
                         "delta": "tentative",
                     }
                 )
@@ -620,13 +627,14 @@ def test_empty_final_is_authoritative_over_an_earlier_partial() -> None:
                     {
                         "type": "conversation.item.input_audio_transcription.completed",
                         "item_id": "item_1",
+                        "content_index": 0,
                         "transcript": "",
                     }
                 )
             )
 
-    factory = _SocketFactory("openai", on_send)
-    handler = _handler(OpenAIRealtimeSTTHandler, factory)
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory)
     handler.start_turn("turn_1", 0)
     handler.append_audio(b"\x01\x00" * 512)
 
@@ -635,22 +643,21 @@ def test_empty_final_is_authoritative_over_an_earlier_partial() -> None:
     handler.cleanup()
 
 
-@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
-def test_connection_failure_is_not_replayed_and_only_fails_affected_turn(handler_type, dialect) -> None:
+def test_connection_failure_is_not_replayed_and_only_fails_affected_turn() -> None:
     disconnect_once = True
 
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
         nonlocal disconnect_once
-        if _ack_session_update(event, socket, dialect):
+        if _ack_session_update(event, socket):
             return
         if event["type"] == "input_audio_buffer.append" and disconnect_once:
             disconnect_once = False
             socket.incoming.put(ConnectionError("connection lost"))
-        elif _is_final_commit(event, dialect):
-            socket.incoming.put(json.dumps(_completion_event(dialect, "recovered", item_id="item_recovered")))
+        elif _is_final_commit(event):
+            socket.incoming.put(json.dumps(_completion_event("recovered", item_id="item_recovered")))
 
-    factory = _SocketFactory(dialect, on_send)
-    handler = _handler(handler_type, factory)
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory)
     lost_chunk = b"\x01\x00" * 512
 
     handler.start_turn("turn_1", 0)
@@ -681,22 +688,21 @@ def test_connection_failure_is_not_replayed_and_only_fails_affected_turn(handler
     handler.cleanup()
 
 
-@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
-def test_connection_failure_before_turn_assignment_fails_the_first_concrete_turn(handler_type, dialect) -> None:
+def test_connection_failure_before_turn_assignment_fails_the_first_concrete_turn() -> None:
     disconnect_once = True
 
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
         nonlocal disconnect_once
-        if _ack_session_update(event, socket, dialect):
+        if _ack_session_update(event, socket):
             return
         if event["type"] == "input_audio_buffer.append" and disconnect_once:
             disconnect_once = False
             socket.incoming.put(ConnectionError("connection lost"))
-        elif _is_final_commit(event, dialect):
-            socket.incoming.put(json.dumps(_completion_event(dialect, "recovered", item_id="item_recovered")))
+        elif _is_final_commit(event):
+            socket.incoming.put(json.dumps(_completion_event("recovered", item_id="item_recovered")))
 
-    factory = _SocketFactory(dialect, on_send)
-    handler = _handler(handler_type, factory)
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory)
     lost_chunk = b"\x01\x00" * 512
     skipped_chunk = b"\x02\x00" * 512
 
@@ -711,8 +717,8 @@ def test_connection_failure_before_turn_assignment_fails_the_first_concrete_turn
     transmitted = [base64.b64decode(event["audio"]) for event in _append_events(factory.instances[0])]
     assert transmitted == [lost_chunk]
 
-    handler.start_turn("turn_2", 0)
     handler.append_audio(b"\x03\x00" * 512)
+    handler.start_turn("turn_2", 0)
     recovered = list(
         handler.process(
             VADAudio(
@@ -729,8 +735,48 @@ def test_connection_failure_before_turn_assignment_fails_the_first_concrete_turn
     handler.cleanup()
 
 
-@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
-def test_connection_failure_discards_reopened_revisions_of_the_same_turn(handler_type, dialect) -> None:
+def test_setup_failure_discards_reopened_revisions_of_the_same_turn() -> None:
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        if _ack_session_update(event, socket):
+            return
+        if _is_final_commit(event):
+            socket.incoming.put(json.dumps(_completion_event("recovered", item_id="item_recovered")))
+
+    factory = _SocketFactory(on_send, fail_connects=1)
+    handler = _handler(factory)
+
+    handler.start_turn("turn_1", 0)
+    handler.append_audio(b"\x01\x00" * 512)
+    first = list(handler.process(_vad_final()))
+
+    handler.append_audio(b"\x02\x00" * 512)
+    handler.start_turn("turn_1", 1)
+    reopened = list(handler.process(_vad_final(revision=1)))
+
+    assert len(first) == 1 and isinstance(first[0], TranscriptionFailure)
+    assert len(reopened) == 1 and isinstance(reopened[0], TranscriptionFailure)
+    assert len(factory.calls) == 1
+    assert factory.instances == []
+
+    handler.append_audio(b"\x03\x00" * 512)
+    handler.start_turn("turn_2", 0)
+    recovered = list(
+        handler.process(
+            VADAudio(
+                audio=np.zeros(160, dtype=np.float32),
+                mode="final",
+                turn_id="turn_2",
+                turn_revision=0,
+            )
+        )
+    )
+
+    assert [output.text for output in recovered] == ["recovered"]
+    assert len(factory.calls) == 2
+    handler.cleanup()
+
+
+def test_connection_failure_discards_reopened_revisions_of_the_same_turn() -> None:
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
     first_commit_seen = Event()
@@ -739,18 +785,18 @@ def test_connection_failure_discards_reopened_revisions_of_the_same_turn(handler
 
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
         nonlocal commit_count
-        if _ack_session_update(event, socket, dialect):
+        if _ack_session_update(event, socket):
             return
-        if not _is_final_commit(event, dialect):
+        if not _is_final_commit(event):
             return
         commit_count += 1
         if commit_count == 1:
             first_commit_seen.set()
         else:
-            socket.incoming.put(json.dumps(_completion_event(dialect, "recovered", item_id="item_recovered")))
+            socket.incoming.put(json.dumps(_completion_event("recovered", item_id="item_recovered")))
 
-    factory = _SocketFactory(dialect, on_send)
-    handler = _handler(handler_type, factory, tracker=tracker)
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory, tracker=tracker)
     handler.start_turn("turn_1", 0)
     handler.append_audio(b"\x01\x00" * 512)
     first_result: list[Transcription | TranscriptionFailure] = []
@@ -797,18 +843,17 @@ def test_connection_failure_discards_reopened_revisions_of_the_same_turn(handler
     handler.cleanup()
 
 
-@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
-def test_cancel_and_session_reuse_fence_late_results(handler_type, dialect) -> None:
+def test_cancel_and_session_reuse_fence_late_results() -> None:
     commit_seen = Event()
 
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
-        if _ack_session_update(event, socket, dialect):
+        if _ack_session_update(event, socket):
             return
-        if _is_final_commit(event, dialect):
+        if _is_final_commit(event):
             commit_seen.set()
 
-    factory = _SocketFactory(dialect, on_send)
-    handler = _handler(handler_type, factory)
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory)
     handler.start_turn("turn_1", 0)
     handler.append_audio(b"\x01\x00" * 512)
 
@@ -822,7 +867,7 @@ def test_cancel_and_session_reuse_fence_late_results(handler_type, dialect) -> N
     assert commit_seen.wait(timeout=1)
     old_socket = factory.instances[0]
     handler.cancel_session()
-    old_socket.incoming.put(json.dumps(_completion_event(dialect, "stale", item_id="item_old")))
+    old_socket.incoming.put(json.dumps(_completion_event("stale", item_id="item_old")))
     thread.join(timeout=1)
 
     assert not thread.is_alive()
@@ -837,28 +882,24 @@ def test_cancel_and_session_reuse_fence_late_results(handler_type, dialect) -> N
     handler.cleanup()
 
 
-@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
-def test_partial_publication_finishes_before_session_end_can_cross_the_barrier(handler_type, dialect) -> None:
+def test_partial_publication_finishes_before_session_end_can_cross_the_barrier() -> None:
     queue_out = _BlockingPartialQueue()
 
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
-        if _ack_session_update(event, socket, dialect):
+        if _ack_session_update(event, socket):
             return
-        if not _is_final_commit(event, dialect):
+        if not _is_final_commit(event):
             return
-        delta = (
-            {
-                "type": "conversation.item.input_audio_transcription.delta",
-                "item_id": "item_old",
-                "delta": "stale",
-            }
-            if dialect == "openai"
-            else {"type": "transcription.delta", "delta": "stale"}
-        )
+        delta = {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "item_old",
+            "content_index": 0,
+            "delta": "stale",
+        }
         socket.incoming.put(json.dumps(delta))
 
-    factory = _SocketFactory(dialect, on_send)
-    handler = _handler(handler_type, factory, queue_out=queue_out)
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory, queue_out=queue_out)
     handler.start_turn("turn_1", 0)
     handler.append_audio(b"\x01\x00" * 512)
     final_result: list[Transcription | TranscriptionFailure] = []
@@ -893,18 +934,17 @@ def test_partial_publication_finishes_before_session_end_can_cross_the_barrier(h
     handler.cleanup()
 
 
-@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
-def test_session_end_reconnects_and_clears_prior_turn_prefixes(handler_type, dialect) -> None:
+def test_session_end_reconnects_and_clears_prior_turn_prefixes() -> None:
     completions = iter(["first", "second"])
 
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
-        if _ack_session_update(event, socket, dialect):
+        if _ack_session_update(event, socket):
             return
-        if _is_final_commit(event, dialect):
-            socket.incoming.put(json.dumps(_completion_event(dialect, next(completions))))
+        if _is_final_commit(event):
+            socket.incoming.put(json.dumps(_completion_event(next(completions))))
 
-    factory = _SocketFactory(dialect, on_send)
-    handler = _handler(handler_type, factory)
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory)
     handler.start_turn("turn_1", 0)
     handler.append_audio(b"\x01\x00" * 512)
     assert list(handler.process(_vad_final()))[0].text == "first"
@@ -920,8 +960,7 @@ def test_session_end_reconnects_and_clears_prior_turn_prefixes(handler_type, dia
     handler.cleanup()
 
 
-@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
-def test_reopen_audio_waits_for_the_active_revision_to_finish(handler_type, dialect) -> None:
+def test_reopen_audio_waits_for_the_active_revision_to_finish() -> None:
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
     first_commit_seen = Event()
@@ -931,22 +970,22 @@ def test_reopen_audio_waits_for_the_active_revision_to_finish(handler_type, dial
 
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
         nonlocal commit_count
-        if _ack_session_update(event, socket, dialect):
+        if _ack_session_update(event, socket):
             return
         if event["type"] == "input_audio_buffer.append":
             if base64.b64decode(event["audio"]) == second_chunk:
                 second_append_seen.set()
             return
-        if not _is_final_commit(event, dialect):
+        if not _is_final_commit(event):
             return
         commit_count += 1
         if commit_count == 1:
             first_commit_seen.set()
         else:
-            socket.incoming.put(json.dumps(_completion_event(dialect, "new", item_id="item_new")))
+            socket.incoming.put(json.dumps(_completion_event("new", item_id="item_new")))
 
-    factory = _SocketFactory(dialect, on_send)
-    handler = _handler(handler_type, factory, tracker=tracker)
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory, tracker=tracker)
     handler.start_turn("turn_1", 0)
     handler.append_audio(b"\x01\x00" * 512)
     first_result: list[Transcription | TranscriptionFailure] = []
@@ -960,7 +999,7 @@ def test_reopen_audio_waits_for_the_active_revision_to_finish(handler_type, dial
     handler.append_audio(second_chunk)
     assert not second_append_seen.wait(timeout=0.1)
 
-    factory.instances[0].incoming.put(json.dumps(_completion_event(dialect, "old", item_id="item_old")))
+    factory.instances[0].incoming.put(json.dumps(_completion_event("old", item_id="item_old")))
     first_thread.join(timeout=1)
 
     assert not first_thread.is_alive()
@@ -978,9 +1017,9 @@ def test_openai_item_scoped_failure_returns_prompt_sanitized_failure_and_keeps_c
 
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
         nonlocal commit_count
-        if _ack_session_update(event, socket, "openai"):
+        if _ack_session_update(event, socket):
             return
-        if not _is_final_commit(event, "openai"):
+        if not _is_final_commit(event):
             return
         commit_count += 1
         if commit_count == 1:
@@ -989,15 +1028,16 @@ def test_openai_item_scoped_failure_returns_prompt_sanitized_failure_and_keeps_c
                     {
                         "type": "conversation.item.input_audio_transcription.failed",
                         "item_id": "item_failed",
+                        "content_index": 0,
                         "error": {"message": "provider detail that must not reach the client"},
                     }
                 )
             )
         else:
-            socket.incoming.put(json.dumps(_completion_event("openai", "recovered")))
+            socket.incoming.put(json.dumps(_completion_event("recovered")))
 
-    factory = _SocketFactory("openai", on_send)
-    handler = _handler(OpenAIRealtimeSTTHandler, factory)
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory)
     handler.start_turn("turn_1", 0)
     handler.append_audio(b"\x01\x00" * 512)
 
@@ -1026,22 +1066,77 @@ def test_openai_item_scoped_failure_returns_prompt_sanitized_failure_and_keeps_c
     handler.cleanup()
 
 
-@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
-def test_discarded_audio_cannot_contaminate_the_next_turn(handler_type, dialect) -> None:
+def test_openai_precommit_item_failure_discards_same_turn_revisions() -> None:
+    append_count = 0
+
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        nonlocal append_count
+        if _ack_session_update(event, socket):
+            return
+        if event["type"] == "input_audio_buffer.append":
+            append_count += 1
+            if append_count == 1:
+                socket.incoming.put(
+                    json.dumps(
+                        {
+                            "type": "conversation.item.input_audio_transcription.failed",
+                            "item_id": "item_failed",
+                            "content_index": 0,
+                            "error": {"message": "provider detail"},
+                        }
+                    )
+                )
+        elif _is_final_commit(event):
+            socket.incoming.put(json.dumps(_completion_event("recovered", item_id="item_recovered")))
+
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory)
+    handler.start_turn("turn_1", 0)
+    handler.append_audio(b"\x01\x00" * 512)
+
+    first = list(handler.process(_vad_final()))
+    handler.append_audio(b"\x02\x00" * 512)
+    handler.start_turn("turn_1", 1)
+    reopened = list(handler.process(_vad_final(revision=1)))
+
+    assert len(first) == 1 and isinstance(first[0], TranscriptionFailure)
+    assert len(reopened) == 1 and isinstance(reopened[0], TranscriptionFailure)
+    assert append_count == 1
+
+    handler.append_audio(b"\x03\x00" * 512)
+    handler.start_turn("turn_2", 0)
+    recovered = list(
+        handler.process(
+            VADAudio(
+                audio=np.zeros(160, dtype=np.float32),
+                mode="final",
+                turn_id="turn_2",
+                turn_revision=0,
+            )
+        )
+    )
+
+    assert [output.text for output in recovered] == ["recovered"]
+    assert append_count == 2
+    assert len(factory.instances) == 1
+    handler.cleanup()
+
+
+def test_discarded_audio_cannot_contaminate_the_next_turn() -> None:
     first_append_seen = Event()
     rejected_chunk = b"\x01\x00" * 512
     accepted_chunk = b"\x02\x00" * 512
 
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
-        if _ack_session_update(event, socket, dialect):
+        if _ack_session_update(event, socket):
             return
         if event["type"] == "input_audio_buffer.append" and base64.b64decode(event["audio"]) == rejected_chunk:
             first_append_seen.set()
-        elif _is_final_commit(event, dialect):
-            socket.incoming.put(json.dumps(_completion_event(dialect, "accepted")))
+        elif _is_final_commit(event):
+            socket.incoming.put(json.dumps(_completion_event("accepted")))
 
-    factory = _SocketFactory(dialect, on_send)
-    handler = _handler(handler_type, factory)
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory)
     handler.append_audio(rejected_chunk)
     assert first_append_seen.wait(timeout=1)
 
@@ -1051,20 +1146,15 @@ def test_discarded_audio_cannot_contaminate_the_next_turn(handler_type, dialect)
     outputs = list(handler.process(_vad_final()))
 
     assert [output.text for output in outputs] == ["accepted"]
-    if dialect == "openai":
-        events = factory.instances[0].sent
-        clear_index = events.index({"type": "input_audio_buffer.clear"})
-        accepted_index = next(
-            index
-            for index, event in enumerate(events)
-            if event["type"] == "input_audio_buffer.append" and base64.b64decode(event["audio"]) == accepted_chunk
-        )
-        assert clear_index < accepted_index
-        assert len(factory.instances) == 1
-    else:
-        assert len(factory.instances) == 2
-        assert factory.instances[0].closed
-        assert [base64.b64decode(event["audio"]) for event in _append_events(factory.instances[1])] == [accepted_chunk]
+    events = factory.instances[0].sent
+    clear_index = events.index({"type": "input_audio_buffer.clear"})
+    accepted_index = next(
+        index
+        for index, event in enumerate(events)
+        if event["type"] == "input_audio_buffer.append" and base64.b64decode(event["audio"]) == accepted_chunk
+    )
+    assert clear_index < accepted_index
+    assert len(factory.instances) == 1
     handler.cleanup()
 
 
@@ -1086,6 +1176,7 @@ def test_stale_completed_revision_yields_exactly_one_llm_request_for_latest_revi
                     {
                         "type": "conversation.item.input_audio_transcription.completed",
                         "item_id": f"item_{commit_count}",
+                        "content_index": 0,
                         "transcript": "old" if commit_count == 1 else "latest",
                     }
                 )
@@ -1096,13 +1187,14 @@ def test_stale_completed_revision_yields_exactly_one_llm_request_for_latest_revi
                         {
                             "type": "conversation.item.input_audio_transcription.completed",
                             "item_id": "item_1",
+                            "content_index": 0,
                             "transcript": "duplicate",
                         }
                     )
                 )
 
-    factory = _SocketFactory("openai", on_send)
-    handler = _handler(OpenAIRealtimeSTTHandler, factory, tracker=tracker)
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory, tracker=tracker)
     handler.start_turn("turn_1", 0)
     handler.append_audio(b"\x01\x00" * 512)
 
@@ -1132,24 +1224,4 @@ def test_stale_completed_revision_yields_exactly_one_llm_request_for_latest_revi
     assert (request.turn_id, request.turn_revision) == ("turn_1", 1)
     assert llm_requests.empty()
     service.unregister(connection_id)
-    handler.cleanup()
-
-
-@pytest.mark.parametrize("sample_count", [16000 * 4 + 8000, 16000 * 5, 16000 * 5 + 8000])
-def test_vllm_boundary_audio_is_sent_once_without_window_reupload(sample_count: int) -> None:
-    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
-        if event == {"type": "input_audio_buffer.commit", "final": True}:
-            socket.incoming.put(json.dumps({"type": "transcription.done", "text": "done"}))
-
-    factory = _SocketFactory("vllm", on_send)
-    handler = _handler(VLLMRealtimeSTTHandler, factory)
-    audio = np.arange(sample_count, dtype=np.int16).tobytes()
-    chunks = [audio[index : index + 1024] for index in range(0, len(audio), 1024)]
-    handler.start_turn("turn_1", 0)
-    for chunk in chunks:
-        handler.append_audio(chunk)
-
-    assert list(handler.process(_vad_final()))[0].text == "done"
-    transmitted = b"".join(base64.b64decode(event["audio"]) for event in _append_events(factory.instances[0]))
-    assert transmitted == audio
     handler.cleanup()
