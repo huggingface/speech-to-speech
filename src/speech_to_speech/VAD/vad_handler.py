@@ -164,6 +164,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._last_final_audio_ms: int | None = None
         self._pending_reopen_candidate: tuple[str, int, int] | None = None
         self._pending_short_segment: _PendingShortSegment | None = None
+        self.streaming_stt_sink: Any | None = None
 
     @property
     def _audio_ms(self) -> int:
@@ -356,6 +357,42 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
     def _current_turn_metadata(self) -> tuple[str | None, int | None]:
         return self._current_turn_id, self._current_turn_revision
 
+    def _notify_streaming_turn(self, turn_id: str | None, turn_revision: int | None) -> None:
+        sink = getattr(self, "streaming_stt_sink", None)
+        if sink is None:
+            return
+        try:
+            sink.start_turn(turn_id, turn_revision)
+        except Exception:
+            logger.exception("VAD: failed to mark the streaming STT turn")
+
+    def _stream_audio_chunk(self, audio_chunk: bytes) -> None:
+        sink = getattr(self, "streaming_stt_sink", None)
+        if sink is None:
+            return
+        try:
+            sink.append_audio(audio_chunk)
+        except Exception:
+            logger.exception("VAD: failed to enqueue a streaming STT audio chunk")
+
+    def _discard_streaming_utterance(self) -> None:
+        sink = getattr(self, "streaming_stt_sink", None)
+        if sink is None:
+            return
+        try:
+            sink.discard_utterance()
+        except Exception:
+            logger.exception("VAD: failed to discard a rejected streaming STT utterance")
+
+    def _commit_streaming_turn(self, turn_id: str | None, turn_revision: int | None) -> None:
+        sink = getattr(self, "streaming_stt_sink", None)
+        if sink is None:
+            return
+        try:
+            sink.commit_boundary(turn_id, turn_revision)
+        except Exception:
+            logger.exception("VAD: failed to commit the streaming STT turn boundary")
+
     def _combined_turn_audio(self, current_segment: np.ndarray) -> np.ndarray:
         if self._speculative_audio_prefix is None:
             return current_segment
@@ -441,6 +478,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         if pending is None:
             return
         self._pending_short_segment = None
+        self._discard_streaming_utterance()
         logger.info(
             "VAD: discarding held short segment=%.0fms active=%.0fms (%s, active_min=%sms)",
             self._segment_duration_ms(pending.audio),
@@ -549,6 +587,14 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         if not self.should_listen.is_set():
             return
 
+        # Clear an expired held fragment before forwarding the next chunk so
+        # provider state cannot mix a locally rejected segment into new speech.
+        self._discard_expired_pending_short_segment()
+
+        # Stateful STT receives the same accepted PCM chunk as local VAD. The
+        # sink enqueues transport work without blocking this VAD thread.
+        self._stream_audio_chunk(audio_chunk)
+
         # Normal listening mode
         self._log_chunks += 1
         audio_int16 = np.frombuffer(audio_chunk, dtype=np.int16)
@@ -573,6 +619,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             active_speech_min_ms = self._active_speech_min_ms(effective_start_ms)
             if effective_active_speech_duration_ms >= active_speech_min_ms:
                 turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start(effective_start_ms)
+                self._notify_streaming_turn(turn_id, turn_revision)
                 self._speech_started_emitted = True
                 self._log_speech_starts += 1
                 logger.info(
@@ -666,6 +713,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 if not self._speech_started_emitted:
                     self._cancel_pending_reopen()
                 self._speech_started_emitted = False
+                if self._pending_short_segment is None:
+                    self._discard_streaming_utterance()
                 self._discard_expired_pending_short_segment()
                 return
 
@@ -689,6 +738,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
             duration_exceeds_limit = duration_ms > self.max_speech_ms
             if active_speech_duration_ms < min_active_ms or duration_exceeds_limit:
+                held_for_merge = False
                 if (
                     self._short_segment_merge_window_ms() > 0
                     and raw_active_ms >= _SHORT_SEGMENT_MIN_FRAGMENT_MS
@@ -696,6 +746,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     and duration_ms <= self.max_speech_ms
                 ):
                     self._hold_short_segment(array, active_speech_duration_ms, start_ms, end_ms)
+                    held_for_merge = True
                 else:
                     logger.info(
                         "VAD: discarding segment=%.0fms active=%.0fms (active_min=%sms, segment_max=%sms)",
@@ -704,6 +755,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         min_active_ms,
                         self.max_speech_ms,
                     )
+                if not held_for_merge and self._pending_short_segment is None:
+                    self._discard_streaming_utterance()
                 if self._speech_started_emitted and self.text_output_queue:
                     turn_id, turn_revision = self._current_turn_metadata()
                     self.text_output_queue.put(
@@ -725,6 +778,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     )
                 if not self._speech_started_emitted:
                     turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start(start_ms)
+                    self._notify_streaming_turn(turn_id, turn_revision)
                     if self.text_output_queue:
                         self.text_output_queue.put(
                             SpeechStartedEvent(
@@ -772,6 +826,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     turn_revision,
                     reopen_grace_ms / 1000.0,
                 )
+                # Queue the provider boundary before yielding downstream. The
+                # next microphone chunk can then never overtake this commit.
+                self._commit_streaming_turn(turn_id, turn_revision)
                 yield VADAudio(
                     audio=output_array,
                     runtime_config=runtime_config,
@@ -821,6 +878,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         return enhanced.numpy().squeeze()
 
     def on_session_end(self):
+        streaming_stt_sink = getattr(self, "streaming_stt_sink", None)
+        if streaming_stt_sink is not None:
+            streaming_stt_sink.cancel_session()
         self.iterator.reset_states()
         self._pending_short_segment = None
         self.iterator.buffer = []

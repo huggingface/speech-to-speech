@@ -472,6 +472,52 @@ def test_vad_interruption_emits_after_active_speech_threshold():
     assert handler._speech_started_emitted is True
 
 
+class _RecordingStreamingSTT:
+    def __init__(self) -> None:
+        self.audio: list[bytes] = []
+        self.turns: list[tuple[str | None, int | None]] = []
+        self.commits: list[tuple[str | None, int | None]] = []
+        self.discard_count = 0
+        self.events: list[str] = []
+
+    def append_audio(self, chunk: bytes) -> None:
+        self.audio.append(chunk)
+        self.events.append("append")
+
+    def start_turn(self, turn_id: str | None, turn_revision: int | None) -> None:
+        self.turns.append((turn_id, turn_revision))
+        self.events.append("start")
+
+    def discard_utterance(self) -> None:
+        self.discard_count += 1
+        self.events.append("discard")
+
+    def commit_boundary(self, turn_id: str | None, turn_revision: int | None) -> None:
+        self.commits.append((turn_id, turn_revision))
+        self.events.append("commit")
+
+
+def test_vad_streams_each_accepted_chunk_and_marks_the_confirmed_turn():
+
+    chunks = [torch.zeros(512) for _ in range(20)]
+    iterator = _StaticVADIterator(
+        triggered=True,
+        vad_output=None,
+        buffer_chunks=chunks,
+        speech_chunks=chunks,
+        active_speech_samples=12 * 512,
+    )
+    handler = _vad_handler_for_iterator(iterator)
+    sink = _RecordingStreamingSTT()
+    handler.streaming_stt_sink = sink
+    chunk = _audio_bytes()
+
+    assert list(handler.process(chunk)) == []
+
+    assert sink.audio == [chunk]
+    assert sink.turns == [("turn_1", 0)]
+
+
 def test_vad_discards_final_segment_when_active_speech_is_short():
     final_chunks = [torch.zeros(512) for _ in range(31)]
     iterator = _StaticVADIterator(
@@ -480,11 +526,47 @@ def test_vad_discards_final_segment_when_active_speech_is_short():
         last_utterance_active_speech_samples=11 * 512,
     )
     handler = _vad_handler_for_iterator(iterator)
+    sink = _RecordingStreamingSTT()
+    handler.streaming_stt_sink = sink
 
     outputs = list(handler.process(_audio_bytes()))
 
     assert outputs == []
     assert handler.text_output_queue.empty()
+    assert sink.discard_count == 1
+
+
+def test_vad_queues_streaming_commit_before_emitting_an_accepted_final():
+    handler = _vad_handler_for_iterator(
+        _StaticVADIterator(
+            triggered=False,
+            vad_output=[torch.zeros(512) for _ in range(31)],
+            last_utterance_active_speech_samples=12 * 512,
+        )
+    )
+    sink = _RecordingStreamingSTT()
+    handler.streaming_stt_sink = sink
+
+    outputs = list(handler.process(_audio_bytes()))
+
+    assert len(outputs) == 1
+    assert sink.commits == [(outputs[0].turn_id, outputs[0].turn_revision)]
+    assert sink.events == ["append", "start", "commit"]
+
+
+def test_vad_discards_streamed_audio_after_a_phantom_trigger():
+    handler = _vad_handler_for_iterator(
+        _StaticVADIterator(
+            triggered=False,
+            vad_output=[],
+        )
+    )
+    sink = _RecordingStreamingSTT()
+    handler.streaming_stt_sink = sink
+
+    assert list(handler.process(_audio_bytes())) == []
+
+    assert sink.discard_count == 1
 
 
 def _drive_final_segment(handler: VADHandler, active_chunks: int = 12, segment_chunks: int = 31) -> list:
