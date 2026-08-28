@@ -209,10 +209,10 @@ class _Commit:
     turn_id: str | None
     turn_revision: int | None
     done: Event
+    boundary_queued_at_s: float
     result: str | None = None
     language: str | None = None
     error: str | None = None
-    commit_sent_at_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -386,6 +386,7 @@ class _StreamingSession:
             turn_id=turn_id,
             turn_revision=turn_revision,
             done=Event(),
+            boundary_queued_at_s=perf_counter(),
         )
         key = (generation, turn_id, turn_revision)
         with self._commit_lock:
@@ -411,6 +412,7 @@ class _StreamingSession:
                 turn_id=source.turn_id,
                 turn_revision=source.turn_revision,
                 done=Event(),
+                boundary_queued_at_s=perf_counter(),
             )
             self._commands.put(commit)
         deadline = monotonic() + timeout_s
@@ -458,6 +460,7 @@ class _StreamingSession:
         audio_error: str | None = None
         active_commit: _Commit | None = None
         active_item_id: str | None = None
+        retired_item_ids: set[str] = set()
         committed_prefixes: dict[str, str] = {}
         deferred_commands: deque[_StartTurn | _AppendAudio | _Commit] = deque()
 
@@ -478,6 +481,7 @@ class _StreamingSession:
                 except Exception:
                     logger.debug("Ignoring error while closing %s STT connection", self.protocol.name, exc_info=True)
             connection = None
+            retired_item_ids.clear()
             self._publish_connection(None)
 
         def fail_commit(commit: _Commit, message: str) -> None:
@@ -585,12 +589,18 @@ class _StreamingSession:
             nonlocal active_commit, active_item_id, remote_hypothesis, audio_error
             if event.kind == "ignore":
                 return
-            if event.kind == "committed":
-                if active_commit is not None:
+            if event.item_id is not None:
+                if active_commit is None or event.item_id in retired_item_ids:
+                    logger.debug(
+                        "Ignoring retired or unowned %s STT event for item=%s", self.protocol.name, event.item_id
+                    )
+                    return
+                if active_item_id is None:
                     active_item_id = event.item_id
-                return
-            if active_item_id is not None and event.item_id is not None and event.item_id != active_item_id:
-                logger.debug("Ignoring unowned %s STT event for item=%s", self.protocol.name, event.item_id)
+                elif event.item_id != active_item_id:
+                    logger.debug("Ignoring unowned %s STT event for item=%s", self.protocol.name, event.item_id)
+                    return
+            if event.kind == "committed":
                 return
             if event.kind == "delta":
                 if not event.text:
@@ -619,6 +629,8 @@ class _StreamingSession:
                     self.protocol.name,
                     event.item_id or "unknown",
                 )
+                if active_item_id is not None:
+                    retired_item_ids.add(active_item_id)
                 fail_commit(active_commit, "remote streaming transcription failed")
                 active_commit = None
                 reset_utterance()
@@ -627,6 +639,8 @@ class _StreamingSession:
             if active_commit is None:
                 logger.debug("Ignoring duplicate or unowned %s STT completion", self.protocol.name)
                 return
+            if active_item_id is not None:
+                retired_item_ids.add(active_item_id)
             combined = combined_hypothesis(event.text)
             if active_commit.turn_id is not None:
                 committed_prefixes[active_commit.turn_id] = combined
@@ -720,7 +734,6 @@ class _StreamingSession:
                 else:
                     try:
                         active_commit = command
-                        command.commit_sent_at_s = perf_counter()
                         send(self.protocol.finish_utterance())
                     except Exception as exc:
                         fail_connection(exc)
@@ -886,14 +899,13 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
                 speech_stopped_at_s=vad_audio.created_at_s,
             )
             return
-        if commit.commit_sent_at_s is not None:
-            logger.info(
-                "%s VAD commit to final transcript completed in %.3fs turn=%s rev=%s",
-                self.__class__.__name__,
-                perf_counter() - commit.commit_sent_at_s,
-                vad_audio.turn_id,
-                vad_audio.turn_revision,
-            )
+        logger.info(
+            "%s VAD commit to final transcript completed in %.3fs turn=%s rev=%s",
+            self.__class__.__name__,
+            perf_counter() - commit.boundary_queued_at_s,
+            vad_audio.turn_id,
+            vad_audio.turn_revision,
+        )
         if self.speculative_turns is not None and not self.speculative_turns.is_latest(
             vad_audio.turn_id,
             vad_audio.turn_revision,

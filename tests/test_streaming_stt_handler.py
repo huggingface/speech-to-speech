@@ -237,14 +237,19 @@ def test_streaming_backends_interoperate_with_fake_websocket_server(handler_type
             received.put(event)
             if event["type"] == "session.update" and dialect == "openai":
                 socket.send(json.dumps({"type": "session.updated"}))
-            elif event["type"] == "input_audio_buffer.append":
-                event_type = (
-                    "conversation.item.input_audio_transcription.delta"
-                    if dialect == "openai"
-                    else "transcription.delta"
-                )
-                socket.send(json.dumps({"type": event_type, "item_id": "item_1", "delta": "live"}))
+            elif event["type"] == "input_audio_buffer.append" and dialect == "vllm":
+                socket.send(json.dumps({"type": "transcription.delta", "delta": "live"}))
             elif event["type"] == "input_audio_buffer.commit" and (dialect == "openai" or event.get("final") is True):
+                if dialect == "openai":
+                    socket.send(
+                        json.dumps(
+                            {
+                                "type": "conversation.item.input_audio_transcription.delta",
+                                "item_id": "item_1",
+                                "delta": "live",
+                            }
+                        )
+                    )
                 completed = (
                     {
                         "type": "conversation.item.input_audio_transcription.completed",
@@ -411,6 +416,63 @@ def test_vad_commit_boundary_cannot_be_overtaken_by_next_turn_audio(handler_type
 
 
 @pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
+def test_commit_to_final_metric_starts_at_the_vad_boundary(handler_type, dialect, caplog) -> None:
+    caplog.set_level("INFO")
+    first_commit_seen = Event()
+    commit_count = 0
+
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        nonlocal commit_count
+        if _ack_session_update(event, socket, dialect):
+            return
+        if not _is_final_commit(event, dialect):
+            return
+        commit_count += 1
+        if commit_count == 1:
+            first_commit_seen.set()
+        else:
+            socket.incoming.put(json.dumps(_completion_event(dialect, "new", item_id="item_new")))
+
+    factory = _SocketFactory(dialect, on_send)
+    handler = _handler(handler_type, factory)
+    handler.start_turn("turn_1", 0)
+    handler.append_audio(b"\x01\x00" * 512)
+    handler.commit_boundary("turn_1", 0)
+    first_result: list[Transcription | TranscriptionFailure] = []
+    first_thread = Thread(target=lambda: first_result.extend(handler.process(_vad_final())))
+    first_thread.start()
+    assert first_commit_seen.wait(timeout=1)
+
+    handler.start_turn("turn_2", 0)
+    handler.append_audio(b"\x02\x00" * 512)
+    handler.commit_boundary("turn_2", 0)
+    Event().wait(0.12)
+    factory.instances[0].incoming.put(json.dumps(_completion_event(dialect, "old", item_id="item_old")))
+    first_thread.join(timeout=1)
+
+    assert [output.text for output in first_result] == ["old"]
+    second = list(
+        handler.process(
+            VADAudio(
+                audio=np.zeros(160, dtype=np.float32),
+                mode="final",
+                turn_id="turn_2",
+                turn_revision=0,
+            )
+        )
+    )
+    assert [output.text for output in second] == ["new"]
+    metric = next(
+        record.getMessage()
+        for record in caplog.records
+        if "VAD commit to final transcript" in record.getMessage() and "turn=turn_2" in record.getMessage()
+    )
+    elapsed_s = float(metric.split("completed in ", 1)[1].split("s ", 1)[0])
+    assert elapsed_s >= 0.1
+    handler.cleanup()
+
+
+@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
 def test_late_reopen_starts_new_remote_utterance_and_combines_final_text(handler_type, dialect) -> None:
     completions = iter(["hello", "world"])
 
@@ -489,6 +551,53 @@ def test_openai_realtime_ignores_late_completion_for_an_older_remote_item() -> N
     )
 
     assert second[0].text == "result 2"
+    handler.cleanup()
+
+
+def test_openai_realtime_ignores_late_delta_from_a_completed_remote_item() -> None:
+    commit_count = 0
+
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        nonlocal commit_count
+        if _ack_session_update(event, socket, "openai"):
+            return
+        if not _is_final_commit(event, "openai"):
+            return
+        commit_count += 1
+        item_id = f"item_{commit_count}"
+        socket.incoming.put(json.dumps(_completion_event("openai", f"result {commit_count}", item_id=item_id)))
+        if commit_count == 1:
+            socket.incoming.put(
+                json.dumps(
+                    {
+                        "type": "conversation.item.input_audio_transcription.delta",
+                        "item_id": item_id,
+                        "delta": "late old text",
+                    }
+                )
+            )
+
+    factory = _SocketFactory("openai", on_send)
+    handler = _handler(OpenAIRealtimeSTTHandler, factory)
+    handler.start_turn("turn_1", 0)
+    handler.append_audio(b"\x01\x00" * 512)
+    assert [output.text for output in handler.process(_vad_final())] == ["result 1"]
+
+    handler.start_turn("turn_2", 0)
+    handler.append_audio(b"\x02\x00" * 512)
+    second = list(
+        handler.process(
+            VADAudio(
+                audio=np.zeros(160, dtype=np.float32),
+                mode="final",
+                turn_id="turn_2",
+                turn_revision=0,
+            )
+        )
+    )
+
+    assert [output.text for output in second] == ["result 2"]
+    assert handler.queue_out.empty()
     handler.cleanup()
 
 
@@ -619,7 +728,7 @@ def test_partial_publication_finishes_before_session_end_can_cross_the_barrier(h
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
         if _ack_session_update(event, socket, dialect):
             return
-        if event["type"] != "input_audio_buffer.append":
+        if not _is_final_commit(event, dialect):
             return
         delta = (
             {
@@ -636,6 +745,9 @@ def test_partial_publication_finishes_before_session_end_can_cross_the_barrier(h
     handler = _handler(handler_type, factory, queue_out=queue_out)
     handler.start_turn("turn_1", 0)
     handler.append_audio(b"\x01\x00" * 512)
+    final_result: list[Transcription | TranscriptionFailure] = []
+    final_thread = Thread(target=lambda: final_result.extend(handler.process(_vad_final())))
+    final_thread.start()
     assert queue_out.partial_put_started.wait(timeout=1)
 
     cancel_done = Event()
@@ -654,7 +766,9 @@ def test_partial_publication_finishes_before_session_end_can_cross_the_barrier(h
 
     queue_out.release_partial.set()
     cancel_thread.join(timeout=1)
+    final_thread.join(timeout=1)
     assert cancel_done.is_set()
+    assert final_result == []
     queue_out.put(SESSION_END)
 
     assert isinstance(queue_out.get_nowait(), PartialTranscription)
