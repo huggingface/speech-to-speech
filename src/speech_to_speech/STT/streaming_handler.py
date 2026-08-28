@@ -462,6 +462,7 @@ class _StreamingSession:
         active_item_id: str | None = None
         retired_item_ids: set[str] = set()
         committed_prefixes: dict[str, str] = {}
+        failed_turn_ids: set[str | None] = set()
         deferred_commands: deque[_StartTurn | _AppendAudio | _Commit] = deque()
 
         def reset_utterance() -> None:
@@ -494,11 +495,15 @@ class _StreamingSession:
             close_connection()
             message = "streaming transcription connection failed"
             if active_commit is not None:
+                failed_turn_ids.clear()
+                failed_turn_ids.add(active_commit.turn_id)
                 fail_commit(active_commit, message)
                 active_commit = None
                 reset_utterance()
                 audio_error = None
             elif utterance_has_audio:
+                failed_turn_ids.clear()
+                failed_turn_ids.add(turn_id)
                 audio_error = message
 
         def discard_utterance() -> None:
@@ -674,6 +679,7 @@ class _StreamingSession:
                     active_commit = None
                 audio_error = None
                 committed_prefixes.clear()
+                failed_turn_ids.clear()
                 deferred_commands.clear()
                 reset_utterance()
                 close_connection()
@@ -699,8 +705,13 @@ class _StreamingSession:
                     discard_utterance()
 
             if isinstance(command, _StartTurn):
+                if failed_turn_ids and command.turn_id not in failed_turn_ids:
+                    failed_turn_ids.clear()
+                    audio_error = None
                 turn_id = command.turn_id
                 turn_revision = command.turn_revision
+                if command.turn_id in failed_turn_ids:
+                    audio_error = "streaming transcription connection failed"
                 emit_partial()
 
             elif isinstance(command, _AppendAudio):

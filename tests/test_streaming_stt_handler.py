@@ -682,6 +682,74 @@ def test_connection_failure_is_not_replayed_and_only_fails_affected_turn(handler
 
 
 @pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
+def test_connection_failure_discards_reopened_revisions_of_the_same_turn(handler_type, dialect) -> None:
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    first_commit_seen = Event()
+    commit_count = 0
+    reopened_chunk = b"\x02\x00" * 512
+
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        nonlocal commit_count
+        if _ack_session_update(event, socket, dialect):
+            return
+        if not _is_final_commit(event, dialect):
+            return
+        commit_count += 1
+        if commit_count == 1:
+            first_commit_seen.set()
+        else:
+            socket.incoming.put(json.dumps(_completion_event(dialect, "recovered", item_id="item_recovered")))
+
+    factory = _SocketFactory(dialect, on_send)
+    handler = _handler(handler_type, factory, tracker=tracker)
+    handler.start_turn("turn_1", 0)
+    handler.append_audio(b"\x01\x00" * 512)
+    first_result: list[Transcription | TranscriptionFailure] = []
+    first_thread = Thread(target=lambda: first_result.extend(handler.process(_vad_final())))
+    first_thread.start()
+    assert first_commit_seen.wait(timeout=1)
+
+    tracker.observe("turn_1", 1)
+    handler.start_turn("turn_1", 1)
+    handler.append_audio(reopened_chunk)
+    handler.commit_boundary("turn_1", 1)
+    factory.instances[0].incoming.put(ConnectionError("connection lost"))
+    first_thread.join(timeout=1)
+
+    assert not first_thread.is_alive()
+    assert len(first_result) == 1
+    assert isinstance(first_result[0], TranscriptionFailure)
+    reopened = list(handler.process(_vad_final(revision=1)))
+    assert len(reopened) == 1
+    assert isinstance(reopened[0], TranscriptionFailure)
+    assert all(
+        base64.b64decode(event["audio"]) != reopened_chunk
+        for socket in factory.instances
+        for event in _append_events(socket)
+    )
+    assert len(factory.instances) == 1
+
+    tracker.observe("turn_2", 0)
+    handler.start_turn("turn_2", 0)
+    handler.append_audio(b"\x03\x00" * 512)
+    recovered = list(
+        handler.process(
+            VADAudio(
+                audio=np.zeros(160, dtype=np.float32),
+                mode="final",
+                turn_id="turn_2",
+                turn_revision=0,
+            )
+        )
+    )
+
+    assert [output.text for output in recovered] == ["recovered"]
+    assert len(factory.instances) == 2
+    handler.cleanup()
+
+
+@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
 def test_cancel_and_session_reuse_fence_late_results(handler_type, dialect) -> None:
     commit_seen = Event()
 
