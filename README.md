@@ -4,10 +4,13 @@
 
 # Speech To Speech: Build voice agents with open-source models
 
+<p>
+  <a href="https://trendshift.io/repositories/20645"><img src="https://img.shields.io/badge/GitHub%20Trending-%231%20Repository%20of%20the%20Day-7B2CBF?logo=github&amp;logoColor=white&amp;style=for-the-badge" alt="GitHub Trending: #1 Repository of the Day"></a>
+</p>
+
 [![PyPI](https://img.shields.io/pypi/v/speech-to-speech)](https://pypi.org/project/speech-to-speech/)
 [![Python](https://img.shields.io/pypi/pyversions/speech-to-speech)](https://pypi.org/project/speech-to-speech/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE)
-[![GitHub Trending: #1 Repository of the Day](https://img.shields.io/badge/GitHub%20Trending-%231%20Repository%20of%20the%20Day-7B2CBF?logo=github&logoColor=white)](https://trendshift.io/repositories/20645)
 
 </div>
 
@@ -72,6 +75,7 @@ Clients using the implemented core Realtime event set can connect. The official 
 * [Realtime API](#realtime-api)
 * [LLM backends](#llm-backends)
 * [Multi-language support](#multi-language-support)
+* [OmniVoice](#omnivoice)
 * [Pocket TTS](#pocket-tts)
 * [CLI reference](#cli-reference)
 * [Contributing](#contributing)
@@ -108,7 +112,7 @@ macOS and non-macOS dependencies are resolved automatically via platform markers
 
 ### CUDA Note for Qwen3-TTS
 
-On Linux, the Qwen3-TTS GGML backend comes from `faster-qwen3-tts[ggml]`. Its default `qwentts-cpp-python` wheel on PyPI targets CUDA 12.8. If your machine does not have the CUDA 12 runtime that wheel expects, install the matching wheel from the Hugging Face wheelhouse before installing `speech-to-speech`:
+On Linux, the Qwen3-TTS GGML backend comes from `faster-qwen3-tts[ggml]`. Its default `qwentts-cpp-python` wheel on PyPI targets CUDA 12.8 and `manylinux_2_39` (for example, Ubuntu 24.04). If your CUDA runtime or glibc is older, install the matching wheel from the Hugging Face wheelhouse before installing `speech-to-speech`:
 
 ```bash
 # CUDA 13.x
@@ -136,6 +140,7 @@ Optional components are installed with pip extras:
 pip install "speech-to-speech[kokoro]"          # Kokoro-82M TTS on non-macOS
 pip install "speech-to-speech[pocket]"          # Pocket TTS
 pip install "speech-to-speech[chattts]"         # ChatTTS
+pip install "speech-to-speech[omnivoice]"       # OmniVoice TTS (CUDA, Intel XPU, or Apple Silicon)
 pip install "speech-to-speech[faster-whisper]"  # Faster Whisper STT
 pip install "speech-to-speech[whisper-mlx]"     # Lightning Whisper MLX STT on macOS
 pip install "speech-to-speech[paraformer]"      # Paraformer STT through FunASR
@@ -175,12 +180,18 @@ This installs the package in editable mode and makes the `speech-to-speech` CLI 
 | TTS | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | CUDA / CPU, Apple Silicon | `kokoro` on non-macOS; built-in on macOS |
 | TTS | [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) | CPU / CUDA | `pocket` |
 | TTS | [ChatTTS](https://github.com/2noise/ChatTTS) | CUDA / CPU | `chattts` |
+| TTS | [OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) | CUDA / Intel XPU / Apple Silicon | `omnivoice` |
 | TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | built-in |
+| TTS | OpenAI-compatible `/v1/audio/speech` endpoint | local or remote HTTP server | built-in |
 
 Select implementations with `--stt`, `--llm_backend`, and `--tts`. The CLI constructs configuration only for the selected backends; known options for inactive backends remain accepted for compatibility but are ignored with a warning. JSON configuration may likewise include extra inactive-backend keys, which are ignored. Run `speech-to-speech serve -h` for the defaults, or pass selectors before `-h` to see another combination's backend-specific flags (for example, `speech-to-speech serve --stt mlx-audio-whisper -h`).
 
-For client-only speech recognition with vLLM, NVIDIA Speech NIM, or another
-compatible server, see [OpenAI-compatible STT](./docs/openai-compatible-stt.md).
+For client-only TTS serving with vLLM-Omni or another compatible server, see
+[OpenAI-compatible TTS](./docs/openai-compatible-tts.md).
+
+For client-only speech recognition with vLLM, OpenAI's hosted Transcription API,
+or another compatible server, see
+[OpenAI-compatible STT](./docs/openai-compatible-stt.md).
 
 ## Commands
 
@@ -191,6 +202,15 @@ compatible server, see [OpenAI-compatible STT](./docs/openai-compatible-stt.md).
 | `local` | Composes `serve` and `talk` in-process over loopback. | You want to run the server and talk to it from one command. |
 
 `serve` binds to `127.0.0.1` by default; pass `--host 0.0.0.0` explicitly for network exposure. `local` always binds to loopback and connects the same packaged client at `ws://127.0.0.1:<port>/v1/realtime`.
+
+The packaged `local` client buffers 196 ms of received audio when using the
+OpenAI-compatible TTS backend, which absorbs short delivery gaps from HTTP
+speech inference. Other `local` backends and `talk` start playback immediately
+by default. Use `--playback-buffer-ms <milliseconds>` to override either
+default: a larger value resists stuttering but delays the start of each
+response, while a smaller value starts sooner but is more sensitive to jitter.
+This setting only controls the packaged Python client's speakers; browser and
+other Realtime clients manage their own playback buffers.
 
 The packaged client can opt in to local Python tools with `talk --tool-module <module>` or `local --tool-module <module>`. The module contract, programmatic API, and a Serper web-search example are documented in [Tool calling design](./src/speech_to_speech/api/openai_realtime/README.md#packaged-python-client-tools).
 
@@ -219,13 +239,13 @@ speech-to-speech serve \
     --qwen3_tts_backend ggml \
     --qwen3_tts_non_streaming_mode True \
     --qwen3_tts_mlx_quantization 6bit \
-    --model_name gpt-5.4-mini \
+    --model_name gpt-5.6-terra \
     --chat_size 30 \
     --responses_api_stream \
     --enable_live_transcription
 ```
 
-The default model is `gpt-5.4-mini` through the OpenAI Responses API. Override it with `--model_name`, and set `--responses_api_base_url` for another OpenAI-compatible provider or server.
+The default model is `gpt-5.6-terra` through the OpenAI Responses API with reasoning effort `none`, preserving the previous default model's latency-oriented reasoning behavior. Override the model with `--model_name`, the effort with `--responses_api_reasoning_effort`, and set `--responses_api_base_url` for another OpenAI-compatible provider or server.
 
 ### Local Mac
 
@@ -238,7 +258,7 @@ Optionally with a specific LLM:
 ```bash
 speech-to-speech local \
     --mac-optimal-settings \
-    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-4bit
 ```
 
 This setting:
@@ -250,7 +270,7 @@ This setting:
 
 The preset supplies these as defaults only: explicit `--device`, component-device flags such as `--qwen3_tts_device`, and `--stt`, `--llm_backend`, `--model_name`, and `--tts` all win. Use it with `serve` instead of `local` when you want to expose the server without starting the microphone/speaker client.
 
-`--tts pocket` and `--tts kokoro` are also valid on macOS.
+`--tts pocket`, `--tts kokoro`, and `--tts omnivoice` are also valid on macOS.
 
 To compare the MLX quantization variants locally:
 
@@ -352,10 +372,10 @@ supported with `--llm_backend responses-api`: a model may accept audio through
 [`gpt-audio-1.5`](https://developers.openai.com/api/docs/models/gpt-audio-1.5).
 
 You must explicitly set `--model_name` to a model that accepts audio: the
-default `gpt-5.4-mini` accepts text and image input, but not audio. Check the
+default `gpt-5.6-terra` accepts text and image input, but not audio. Check the
 provider's model documentation and endpoint support before enabling this mode.
 For OpenAI, see the
-[GPT-5.4 mini model card](https://developers.openai.com/api/docs/models/gpt-5.4-mini)
+[GPT-5.6 Terra model card](https://developers.openai.com/api/docs/models/gpt-5.6-terra)
 and [audio-input guide](https://developers.openai.com/api/docs/guides/audio#add-audio-to-your-existing-application).
 
 ```bash
@@ -537,7 +557,7 @@ speech-to-speech serve \
     --stt parakeet-tdt \
     --language auto \
     --llm_backend mlx-lm \
-    --model_name "mlx-community/Qwen3-4B-Instruct-2507-bf16"
+    --model_name "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 ```
 
 A single non-English language, Chinese in this example:
@@ -548,10 +568,30 @@ speech-to-speech serve \
     --stt_model_name large-v3 \
     --language zh \
     --llm_backend mlx-lm \
-    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-4bit
 ```
 
 Both commands also work with `--mac-optimal-settings`; explicit `--stt` flags override the defaults it sets.
+
+## OmniVoice
+
+OmniVoice provides voice cloning, voice design, and automatic voice selection across 600+ languages. Install its opt-in dependencies and provide a reference clip plus its transcript for voice cloning. This example uses CUDA on Linux or Windows; use `--omnivoice_device mps` on Apple Silicon or `--omnivoice_device xpu` with an Intel XPU-enabled PyTorch installation:
+
+```bash
+pip install "speech-to-speech[omnivoice]"
+speech-to-speech serve \
+    --tts omnivoice \
+    --omnivoice_device cuda \
+    --omnivoice_ref_audio /path/to/reference.wav \
+    --omnivoice_ref_text "Transcript of the reference clip."
+```
+
+The handler converts OmniVoice's completed 24 kHz float output into the pipeline's 16 kHz `int16` blocks. OmniVoice does not currently expose incremental audio through `generate()`, so the first block is available only after the full utterance has been synthesized. See the [TTS component guide](./src/speech_to_speech/TTS/README.md#6-omnivoice---tts-omnivoice) for saved prompts, voice design, devices, latency, and all backend flags.
+
+The `omnivoice` extra is supported on Linux, Windows, and macOS. On non-macOS platforms, both OmniVoice and the built-in Qwen3 backend share Transformers 5 through `faster-qwen3-tts>=0.4.0`, so installing this extra keeps the default Qwen3 path available. Linux uses Qwen3's GGML extra by default; see the [CUDA note](#cuda-note-for-qwen3-tts) if its CUDA 12.8 / `manylinux_2_39` native wheel does not match your host.
+
+> [!WARNING]
+> OmniVoice's code is Apache-2.0, but its pretrained weights are CC-BY-NC and are not licensed for commercial use. Use voice cloning only with authorization and consent; do not use it for impersonation, fraud, scams, or other illegal or unethical activity.
 
 ## Pocket TTS
 

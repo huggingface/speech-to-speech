@@ -17,6 +17,7 @@ import httpx
 import numpy as np
 
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
+from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import (
     PartialTranscription,
     Transcription,
@@ -38,6 +39,7 @@ from speech_to_speech.STT.endpoint_admission import (
 logger = logging.getLogger(__name__)
 
 PIPELINE_SAMPLE_RATE = 16000
+OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 # Compatibility name used by the serial adapter introduced in the preceding PR.
 TranscriptionRequestCancelled = TranscriptionCancelled
@@ -91,11 +93,17 @@ class HttpTranscriptionOperation:
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        data: dict[str, Any] = {"response_format": self.response_format, **self.extra_fields}
+        data: dict[str, Any] = {
+            "response_format": self.response_format,
+            **(self.extra_fields or {}),
+        }
         if self.model:
             data["model"] = self.model
         if self.language:
-            data["language"] = self.language
+            if self.model == "gpt-transcribe":
+                data["languages[]"] = self.language
+            else:
+                data["language"] = self.language
 
         client = httpx.Client(timeout=self.timeout_s)
         with self._transport_lock:
@@ -182,13 +190,21 @@ class HttpTranscriptionOperation:
             payload = json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise TranscriptionRequestError("transcription server returned an invalid JSON response") from exc
-        text = payload.get("text")
+        text = payload.get("text") if isinstance(payload, dict) else None
         if not isinstance(text, str):
             raise TranscriptionRequestError("transcription response is missing a string 'text' field")
-        language = payload.get("language")
+        language = None
+        languages = payload.get("languages")
+        if isinstance(languages, list):
+            for detected_language in languages:
+                if isinstance(detected_language, dict) and isinstance(detected_language.get("code"), str):
+                    language = detected_language["code"]
+                    break
+        if language is None and isinstance(payload.get("language"), str):
+            language = payload["language"]
         return HttpTranscriptionResult(
             text=text,
-            language=language if isinstance(language, str) else self.language,
+            language=language or self.language,
         )
 
 
@@ -233,7 +249,9 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         self.admission = admission_lease.controller
         self.base_url = base_url.rstrip("/")
         self.endpoint_url = f"{self.base_url}/audio/transcriptions"
-        self.api_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY")
+        self.api_key = api_key
+        if self.api_key is None and self.base_url == OPENAI_BASE_URL:
+            self.api_key = os.getenv("OPENAI_API_KEY")
         self.model = model
         self.language = language
         self.response_format = response_format
@@ -245,7 +263,11 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         self._owner_id = uuid4().hex
         self._session_generation = 0
         self._publication_lock = Lock()
-        self._progressive_hypotheses: dict[tuple[int, str, int], str] = {}
+        try:
+            self.warmup()
+        except Exception:
+            self.admission_lease.release()
+            raise
         self._completion_queue: Queue[_CompletedRequest | None] = Queue()
         self._delivery_thread = Thread(
             target=self._delivery_loop,
@@ -253,6 +275,17 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             daemon=True,
         )
         self._delivery_thread.start()
+
+    def warmup(self) -> None:
+        """Validate the configured transcription endpoint before accepting sessions."""
+        logger.info("Warming up %s", self.__class__.__name__)
+        started_at_s = perf_counter()
+        self._make_operation(uuid4().hex, np.zeros(PIPELINE_SAMPLE_RATE, dtype=np.float32)).run()
+        logger.info(
+            "%s warmed up in %.3fs",
+            self.__class__.__name__,
+            perf_counter() - started_at_s,
+        )
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         mode: TranscriptionMode = "progressive" if vad_audio.mode == "progressive" else "final"
@@ -299,7 +332,8 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             extra_fields=self.gen_kwargs,
         )
 
-    def _encode_wav(self, audio: np.ndarray) -> bytes:
+    @staticmethod
+    def _encode_wav(audio: np.ndarray) -> bytes:
         waveform = np.asarray(audio).squeeze()
         if waveform.ndim != 1:
             raise ValueError(f"STT audio must be mono, got shape {waveform.shape}")
@@ -318,6 +352,8 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         return output.getvalue()
 
     def _is_request_relevant(self, source: VADAudio, session_generation: int) -> bool:
+        if self.stop_event.is_set():
+            return False
         with self._publication_lock:
             if session_generation != self._session_generation:
                 return False
@@ -334,6 +370,8 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
                 continue
             if completed is None:
                 return
+            if self.pipeline_index is not None:
+                pipeline_log_ctx.set(self.pipeline_index)
 
             source = completed.source
             try:
@@ -418,7 +456,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
                 continue
             elapsed_s = perf_counter() - completed.started_at_s
             logger.info(
-                "OpenAI-compatible STT completed turn=%s rev=%s mode=%s in %.3fs",
+                "OpenAI-compatible STT request completed turn=%s rev=%s mode=%s in %.3fs",
                 source.turn_id,
                 source.turn_revision,
                 source.mode,
@@ -431,48 +469,17 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         with self._publication_lock:
             if completed.session_generation != self._session_generation:
                 return False
-            prepared_output = self._prepare_output_locked(completed, output)
-            if prepared_output is None or not self.should_emit_output(prepared_output):
+            if not self.should_emit_output(output):
                 return False
-            self.before_emit_output(prepared_output)
-            self.queue_out.put(prepared_output)
+            self.before_emit_output(output)
+            self.queue_out.put(output)
             return True
-
-    def _prepare_output_locked(self, completed: _CompletedRequest, output: STTOut) -> STTOut | None:
-        source = completed.source
-        if source.turn_id is None or source.turn_revision is None:
-            return output
-        key = (completed.session_generation, source.turn_id, source.turn_revision)
-        if isinstance(output, PartialTranscription):
-            # Stateless HTTP STT responses are complete snapshots, while the
-            # realtime protocol field is an append-only delta. Emit only a
-            # suffix extension; corrections cannot be represented safely and
-            # are therefore suppressed until the authoritative final result.
-            previous = self._progressive_hypotheses.get(key, "")
-            if output.text == previous:
-                return None
-            if previous and not output.text.startswith(previous):
-                logger.debug(
-                    "Suppressing rewritten progressive STT hypothesis turn=%s rev=%s",
-                    source.turn_id,
-                    source.turn_revision,
-                )
-                return None
-            self._progressive_hypotheses[key] = output.text
-            return PartialTranscription(
-                text=output.text[len(previous) :],
-                turn_id=output.turn_id,
-                turn_revision=output.turn_revision,
-            )
-        self._progressive_hypotheses.pop(key, None)
-        return output
 
     def on_session_end(self) -> None:
         with self._publication_lock:
             old_owner_id = self._owner_id
             self._owner_id = uuid4().hex
             self._session_generation += 1
-            self._progressive_hypotheses.clear()
         self.admission.cancel(CancelTranscription(owner_id=old_owner_id, reason="session_end"))
         super().on_session_end()
 

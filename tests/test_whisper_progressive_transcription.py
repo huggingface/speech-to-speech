@@ -108,10 +108,10 @@ def build_lightning_whisper_mlx(monkeypatch):
     from speech_to_speech.STT.lightning_whisper_mlx_handler import LightningWhisperSTTHandler
 
     monkeypatch.setattr(lightning_whisper_mlx_handler.console, "print", lambda *a, **k: None)
-    # torch.mps.empty_cache() is unguarded and is a no-op only where Metal exists.
     monkeypatch.setattr(lightning_whisper_mlx_handler.torch.mps, "empty_cache", lambda: None)
 
     handler = object.__new__(LightningWhisperSTTHandler)
+    handler.device = "mps"
     handler.start_language = "en"
     handler.last_language = "en"
     handler.model = SimpleNamespace(transcribe=lambda audio, **kw: {"text": TRANSCRIPTS[len(audio)], "language": "en"})

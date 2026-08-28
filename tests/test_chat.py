@@ -1543,3 +1543,130 @@ class TestBuildActiveChat:
 
         with pytest.raises(ChatItemError):
             build_active_chat(original, resp)
+
+
+# ===================================================================
+# Turn ordering under overlapping (non-interrupting) speech
+# ===================================================================
+
+
+def _texts(chat: Chat) -> list[str]:
+    return [part.text for item in chat.buffer for part in getattr(item, "content", []) if part.text]
+
+
+class TestTurnOrdering:
+    def test_generation_output_stays_ahead_of_speech_that_arrived_meanwhile(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("A"))
+        anchor = chat.history_anchor_id()
+        chat.add_item(_user("B"))
+
+        recorded = chat.add_provisional_generation_items("response-a", [_assistant("answer A")], after_item_id=anchor)
+
+        assert recorded is not None
+        assert _texts(chat) == ["A", "answer A", "B"]
+
+    def test_multi_item_generation_keeps_its_own_emission_order(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("A"))
+        anchor = chat.history_anchor_id()
+        chat.add_item(_user("B"))
+
+        chat.add_provisional_generation_items(
+            "response-a",
+            [_assistant("first"), _fc("call_a"), _assistant("second")],
+            after_item_id=anchor,
+        )
+
+        assert [item.type for item in chat.buffer] == [
+            "message",
+            "message",
+            "function_call",
+            "message",
+            "message",
+        ]
+        assert _texts(chat) == ["A", "first", "second", "B"]
+
+    def test_generation_started_on_empty_history_precedes_later_speech(self):
+        chat = Chat(size=5)
+        anchor = chat.history_anchor_id()
+        chat.add_item(_user("B"))
+
+        chat.add_item(_assistant("out of the blue"), after_item_id=anchor)
+
+        assert _texts(chat) == ["out of the blue", "B"]
+
+    def test_output_is_appended_when_its_anchor_turn_is_gone(self):
+        chat = Chat(size=5)
+        user_a = chat.add_item(_user("A"))
+        anchor = chat.history_anchor_id()
+        chat.add_item(_user("B"))
+        assert user_a.id is not None
+        assert chat.remove_user_message(user_a.id)
+
+        chat.add_item(_assistant("answer A"), after_item_id=anchor)
+
+        assert _texts(chat) == ["B", "answer A"]
+
+    def test_ordered_function_call_is_placed_in_its_own_turn(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("A"))
+        anchor = chat.history_anchor_id()
+        chat.add_item(_user("B"))
+
+        chat.add_ordered_function_call(_fc("call_a"), after_item_id=anchor)
+
+        assert [item.type for item in chat.buffer] == ["message", "function_call", "message"]
+
+    def test_unpaired_ordered_call_hides_its_own_turn_but_not_later_speech(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("A"))
+        anchor = chat.history_anchor_id()
+        chat.add_item(_user("B"))
+
+        chat.add_provisional_generation_items(
+            "response-a",
+            [_assistant("before the call"), _fc("call_a"), _assistant("after the call")],
+            after_item_id=anchor,
+        )
+
+        # The unpaired call and the text emitted after it are not serializable
+        # yet, but the newer user turn still has to reach the provider.
+        assert [(item["role"], item["content"][0]["text"]) for item in chat.to_responses_api_chat()] == [
+            ("user", "A"),
+            ("assistant", "before the call"),
+            ("user", "B"),
+        ]
+        assert [(item["role"], item["content"]) for item in chat.to_transformers_chat()] == [
+            ("user", "A"),
+            ("assistant", "before the call"),
+            ("user", "B"),
+        ]
+
+    def test_paired_call_is_serialized_once_its_output_arrives_after_later_speech(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("A"))
+        anchor = chat.history_anchor_id()
+        chat.add_item(_user("B"))
+        chat.add_provisional_generation_items("response-a", [_fc("call_a")], after_item_id=anchor)
+
+        chat.add_item(_fco("call_a", output="result"))
+
+        assert [item["type"] for item in chat.to_responses_api_chat()] == [
+            "message",
+            "function_call",
+            "function_call_output",
+            "message",
+        ]
+
+    def test_second_commit_of_a_turn_follows_the_items_it_already_wrote(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("A"))
+        anchor = chat.history_anchor_id()
+        chat.add_provisional_generation_items("response-a", [_assistant("first")], after_item_id=anchor)
+        chat.add_item(_user("B"))
+
+        # Same stale anchor: the trailing commit must land after "first", not before it.
+        chat.add_provisional_generation_items("response-a", [_assistant("second")], after_item_id=anchor)
+
+        assert _texts(chat) == ["A", "first", "second", "B"]

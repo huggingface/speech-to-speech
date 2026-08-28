@@ -12,7 +12,10 @@ class OpenAICompatibleSTTHandlerArguments:
     )
     openai_stt_api_key: Optional[str] = field(
         default=None,
-        metadata={"help": "Optional bearer token. If unset, OPENAI_API_KEY is used when available."},
+        metadata={
+            "help": "Optional bearer token. For https://api.openai.com/v1 only, "
+            "OPENAI_API_KEY is used when this flag is unset."
+        },
     )
     openai_stt_model: Optional[str] = field(
         default="nvidia/parakeet-tdt-0.6b-v3",

@@ -23,7 +23,9 @@ from speech_to_speech.arguments_classes.language_model_arguments import Language
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
     MLXAudioWhisperSTTHandlerArguments,
 )
+from speech_to_speech.arguments_classes.omnivoice_tts_arguments import OmniVoiceTTSHandlerArguments
 from speech_to_speech.arguments_classes.openai_stt_arguments import OpenAICompatibleSTTHandlerArguments
+from speech_to_speech.arguments_classes.openai_tts_arguments import OpenAICompatibleTTSHandlerArguments
 from speech_to_speech.arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
 from speech_to_speech.arguments_classes.parakeet_tdt_arguments import (
     ParakeetTDTSTTHandlerArguments,
@@ -33,6 +35,7 @@ from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandl
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
     ResponsesApiLanguageModelHandlerArguments,
 )
+from speech_to_speech.arguments_classes.supertonic_tts_arguments import SupertonicTTSHandlerArguments
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -276,7 +279,10 @@ def _create_openai_stt(context: HandlerContext, config: Mapping[str, Any]) -> An
     )
     setup_kwargs = dict(config)
     configured_api_key = setup_kwargs.get("api_key")
-    resolved_api_key = configured_api_key if configured_api_key is not None else os.getenv("OPENAI_API_KEY")
+    base_url = setup_kwargs["base_url"].rstrip("/")
+    resolved_api_key = configured_api_key
+    if resolved_api_key is None and base_url == "https://api.openai.com/v1":
+        resolved_api_key = os.getenv("OPENAI_API_KEY")
     lease = EndpointAdmissionRegistry.acquire(
         base_url=setup_kwargs["base_url"],
         api_key=resolved_api_key,
@@ -300,6 +306,24 @@ def _create_openai_stt(context: HandlerContext, config: Mapping[str, Any]) -> An
     except Exception:
         lease.release()
         raise
+
+
+def _create_openai_tts(context: HandlerContext, config: Mapping[str, Any]) -> Any:
+    handler_class = _load_handler(
+        "speech_to_speech.TTS.openai_compatible_handler",
+        "OpenAICompatibleTTSHandler",
+    )
+    return handler_class(
+        context.stop_event,
+        queue_in=context.queue_in,
+        queue_out=context.queue_out,
+        setup_args=(context.should_listen,),
+        setup_kwargs={
+            **config,
+            "cancel_scope": context.cancel_scope,
+            "speculative_turns": context.speculative_turns,
+        },
+    )
 
 
 def _create_local_llm(backend: Literal["transformers", "mlx-lm"]) -> HandlerFactory:
@@ -483,6 +507,19 @@ TTS_BACKENDS = build_backend_registry(
             normalize_config=_normalize_facebook_mms_config,
         ),
         BackendSpec(
+            "omnivoice",
+            "tts",
+            OmniVoiceTTSHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.TTS.omnivoice_handler",
+                "OmniVoiceTTSHandler",
+                setup_should_listen=True,
+                context_kwargs=True,
+            ),
+            config_prefix="omnivoice",
+            required_extra="omnivoice",
+        ),
+        BackendSpec(
             "pocket",
             "tts",
             PocketTTSHandlerArguments,
@@ -519,6 +556,26 @@ TTS_BACKENDS = build_backend_registry(
                 context_kwargs=True,
             ),
             config_prefix="qwen3_tts",
+        ),
+        BackendSpec(
+            "openai",
+            "tts",
+            OpenAICompatibleTTSHandlerArguments,
+            _create_openai_tts,
+            config_prefix="openai_tts",
+        ),
+        BackendSpec(
+            "supertonic",
+            "tts",
+            SupertonicTTSHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.TTS.supertonic_tts_handler",
+                "SupertonicTTSHandler",
+                setup_should_listen=True,
+                context_kwargs=True,
+            ),
+            config_prefix="supertonic_tts",
+            required_extra="supertonic",
         ),
     ],
 )

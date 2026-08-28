@@ -11,6 +11,12 @@ def test_text_prompt_keeps_persona_in_session_prompt():
     assert "You are a helpful assistant in a text conversation." in TEXT_SYSTEM_PROMPT
 
 
+def test_text_prompt_can_include_language_hint():
+    prompt = build_text_system_prompt("Be helpful.", language_name="swedish")
+
+    assert "Please reply to my message in swedish." in prompt
+
+
 def test_text_prompt_allows_markdown_and_drops_voice_rules():
     prompt = build_text_system_prompt("Be helpful.")
 

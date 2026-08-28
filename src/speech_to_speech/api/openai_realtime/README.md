@@ -222,8 +222,8 @@ async def execute_tool(name, arguments):
 Make the module importable, then opt in from either packaged CLI:
 
 ```bash
-speech-to-speech talk --tool-module my_voice_tools --url ws://127.0.0.1:8765/v1/realtime
-speech-to-speech local --tool-module my_voice_tools
+uv run python -m speech_to_speech.cli talk --tool-module my_voice_tools --url ws://127.0.0.1:8765/v1/realtime
+uv run python -m speech_to_speech.cli local --tool-module my_voice_tools
 ```
 
 For the included Google search example, get an API key from [serper.dev](https://serper.dev/) and export it:

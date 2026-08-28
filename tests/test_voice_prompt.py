@@ -62,6 +62,13 @@ def test_voice_prompt_is_short_and_keeps_persona_in_session_prompt():
     assert "Match the user's intent" not in prompt
 
 
+def test_voice_prompt_can_include_language_hint():
+    prompt = build_voice_system_prompt("Be concise.", language_name="french")
+
+    assert "Please reply to my message in french." in prompt
+    assert "Be concise." in prompt
+
+
 def test_voice_prompt_makes_speech_the_default_and_handles_noisy_stt():
     prompt = build_voice_system_prompt("Be concise.")
 
@@ -306,6 +313,29 @@ def test_local_audio_strips_markdown_after_reassembling_streamed_deltas():
 
     assert [chunk.text for chunk in chunks] == ["This is italic text."]
     assert ctx.printable_text.strip() == "Second sentence."
+
+
+def test_local_audio_streaming_preserves_whitespace_across_chunks():
+    handler = object.__new__(LanguageModelHandler)
+    handler.cancel_scope = None
+    handler.speculative_turns = None
+    handler.stop_event = Event()
+    handler.stream_batch_sentences = 1
+    ctx = StreamContext()
+
+    chunks = list(
+        handler._stream_tokens(
+            iter(["It is sunny. What is ", "the weather like?"]),
+            None,
+            None,
+            ctx,
+        )
+    )
+
+    text = "".join(chunk.text for chunk in chunks) + ctx.printable_text
+    assert [chunk.text for chunk in chunks] == ["It is sunny."]
+    assert "isthe" not in text
+    assert ctx.printable_text == "What is the weather like?"
 
 
 def test_local_text_only_tool_marker_can_span_tokens_without_losing_whitespace():

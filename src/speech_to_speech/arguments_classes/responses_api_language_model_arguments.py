@@ -7,9 +7,9 @@ from speech_to_speech.arguments_classes.language_model_base_arguments import Lan
 @dataclass
 class ResponsesApiLanguageModelHandlerArguments(LanguageModelBaseArguments):
     model_name: str = field(
-        default="gpt-5.4-mini",
+        default="gpt-5.6-terra",
         metadata={
-            "help": "The model to use with the OpenAI-compatible API. Default is 'gpt-5.4-mini', "
+            "help": "The model to use with the OpenAI-compatible API. Default is 'gpt-5.6-terra', "
             "which is not audio-capable; --stt none requires an explicitly selected audio-input model."
         },
     )
@@ -33,6 +33,14 @@ class ResponsesApiLanguageModelHandlerArguments(LanguageModelBaseArguments):
         metadata={
             "help": "Disable provider-side thinking/reasoning when supported by the OpenAI-compatible backend. "
             "For Together Qwen3.5 models this sends chat_template_kwargs.enable_thinking=false."
+        },
+    )
+    responses_api_reasoning_effort: Optional[str] = field(
+        default="none",
+        metadata={
+            "help": "Reasoning effort for the OpenAI-compatible API. The Responses backend sends "
+            "reasoning={'effort': <value>}; Chat Completions sends reasoning_effort. Default is 'none', "
+            "preserving the previous gpt-5.4-mini reasoning behavior."
         },
     )
     responses_api_audio_max_tokens: int = field(

@@ -36,11 +36,11 @@ from speech_to_speech.LLM.chat import (
     build_active_chat,
     make_system_message,
     make_user_audio_message,
-    make_user_message,
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
 from speech_to_speech.LLM.text_prompt import build_text_system_prompt
 from speech_to_speech.LLM.utils import (
+    language_name_for_prompt,
     remove_markdown,
     remove_unspeechable,
     resolve_auto_language,
@@ -56,6 +56,7 @@ from speech_to_speech.pipeline.messages import (
     TokenUsage,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,9 @@ class _Turn(BaseModel):
     wants_audio: bool
     response_key: str
     prefetch_transaction: ResponsePrefetchTransaction | None = None
+    # End of the conversation when this turn started; keeps its output ahead of
+    # user messages appended while the model was still running.
+    history_anchor_id: str | None = None
 
 
 class _GenState(BaseModel):
@@ -154,7 +158,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
     def setup(
         self,
-        model_name: str = "gpt-5.4-mini",
+        model_name: str = "gpt-5.6-terra",
         device: str = "cuda",
         gen_kwargs: dict[str, Any] = {},
         base_url: Optional[str] = None,
@@ -188,6 +192,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             raise ValueError("audio_content_type must be either 'input_audio' or 'audio_url'.")
         self.audio_content_type = audio_content_type
         self.audio_history_turns = max(0, audio_history_turns)
+        self.reasoning_effort = reasoning_effort
         self.request_timeout_s = float(request_timeout_s)
         self.request_timeout = httpx.Timeout(
             self.request_timeout_s,
@@ -498,11 +503,14 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         chat: Chat,
         instructions: Optional[str],
         wants_audio: bool = True,
+        *,
+        language_name: str | None = None,
     ) -> None:
-        if instructions:
-            builder = build_voice_system_prompt if wants_audio else build_text_system_prompt
-            full_instructions = builder(instructions)
-            chat.add_item(make_system_message(full_instructions))
+        if not instructions and not language_name:
+            return
+        builder = build_voice_system_prompt if wants_audio else build_text_system_prompt
+        full_instructions = builder(instructions or "", language_name=language_name)
+        chat.add_item(make_system_message(full_instructions))
 
     # ── output helpers ──────────────────────────────────────────────────────--
 
@@ -562,6 +570,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             recorded_items = chat.add_provisional_generation_items(
                 turn.response_key,
                 [*state.pending, fc_item],
+                after_item_id=turn.history_anchor_id,
             )
             state.pending.clear()
             if recorded_items is None:
@@ -665,9 +674,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 if self._turn_is_cancelled(turn):
                     logger.info("LLM generation cancelled (interruption)")
                 else:
-                    logger.debug(f"Clean text: {state.clean_text}")
+                    logger.debug("Clean text: %s", transcript_for_log(state.clean_text))
                     yield from _flush(sentence_batch)
-            logger.info(f"Tools: {state.tools}")
+            logger.info("Tools: %s", transcript_for_log(state.tools))
         return (
             not cancelled
             and not self._turn_is_cancelled(turn)
@@ -711,8 +720,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 ):
                     state.output_emitted = True
                     yield self._chunk(turn, text=out)
-        logger.debug(f"Clean text: {state.clean_text}")
-        logger.info(f"Tools: {state.tools}")
+        logger.debug("Clean text: %s", transcript_for_log(state.clean_text))
+        logger.info("Tools: %s", transcript_for_log(state.tools))
         return (
             not cancelled
             and not self._turn_is_cancelled(turn)
@@ -802,7 +811,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 # the error and fall through to the EndOfResponse below. Without this the
                 # exception would escape process() and no EndOfResponse would be emitted,
                 # leaving st.in_response stuck and locking every subsequent response.
-                logger.exception("LLM generation failed; ending the current response")
+                log_exception(logger, "LLM generation failed; ending the current response", exc)
                 if error_message is None:
                     error_message = f"Language model generation failed: {exc}"
 
@@ -847,6 +856,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                             committed_item_ids=(
                                 {transactional_user_message_id} if transactional_user_message_id is not None else None
                             ),
+                            after_item_id=turn.history_anchor_id,
                         )
                         if recorded_items is None:
                             can_commit = False
@@ -872,7 +882,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                                 cleanup_history()
                     history_committed = can_commit
                 except Exception as exc:
-                    logger.exception("LLM history commit failed; rolling back the current response")
+                    log_exception(logger, "LLM history commit failed; rolling back the current response", exc)
                     error_message = f"Language model history commit failed: {exc}"
 
             rollback_transaction()
@@ -929,6 +939,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return
 
         original_chat = runtime_config.chat
+        history_anchor_id: str | None = None
         if not is_out_of_band(response) and original_chat.has_pending_tool_calls():
             yield EndOfResponse(
                 turn_id=turn_id,
@@ -942,7 +953,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             try:
                 active_chat = build_active_chat(original_chat, response)
             except ChatItemError as exc:
-                logger.info("Out-of-band response rejected: %s", exc)
+                log_exception(logger, "Out-of-band response rejected", exc, level=logging.INFO)
                 yield EndOfResponse(
                     turn_id=turn_id,
                     turn_revision=turn_revision,
@@ -955,6 +966,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             active_chat = original_chat.copy()
 
         language_code = request.language_code
+        language_code, _ = resolve_auto_language(language_code)
+        lang_name = language_name_for_prompt(language_code, enable=self.enable_lang_prompt)
         instructions = (
             response.instructions
             if response is not None and response.instructions is not None
@@ -967,10 +980,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
         )
         wants_audio = response_wants_audio(response)
-        self._apply_config(active_chat, instructions, wants_audio)
-        language_code, lang_name = resolve_auto_language(language_code)
-        if lang_name and self.enable_lang_prompt:
-            active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
+        self._apply_config(active_chat, instructions, wants_audio, language_name=lang_name)
 
         audio_b64 = self._audio_to_wav_base64(request.audio, request.audio_sample_rate)
         audio_message = active_chat.add_item(make_user_audio_message(audio_b64))
@@ -995,6 +1005,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 return
             assert provisional_message.id is not None
             transactional_user_message_id = provisional_message.id
+            # This turn writes its own user message, so anchor its output after
+            # that message: speech arriving later must not overtake it.
+            history_anchor_id = transactional_user_message_id
 
             def commit_audio_history() -> None:
                 original_chat.compact_audio_history(self.audio_history_turns)
@@ -1015,6 +1028,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             wants_audio=wants_audio,
             response_key=request.response_key,
             prefetch_transaction=request.prefetch_transaction,
+            history_anchor_id=history_anchor_id,
         )
         yield from self._generate(
             active_chat,
@@ -1051,6 +1065,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return
 
         original_chat = runtime_config.chat
+        history_anchor_id = original_chat.history_anchor_id()
         if not is_out_of_band(response) and original_chat.has_pending_tool_calls():
             yield EndOfResponse(
                 turn_id=turn_id,
@@ -1064,7 +1079,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             try:
                 active_chat = build_active_chat(original_chat, response)
             except ChatItemError as exc:
-                logger.info("Out-of-band response rejected: %s", exc)
+                log_exception(logger, "Out-of-band response rejected", exc, level=logging.INFO)
                 yield EndOfResponse(
                     turn_id=turn_id,
                     turn_revision=turn_revision,
@@ -1076,6 +1091,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         else:
             active_chat = original_chat.copy()
         language_code = request.language_code
+        language_code, _ = resolve_auto_language(language_code)
+        lang_name = language_name_for_prompt(language_code, enable=self.enable_lang_prompt)
         instructions = (
             response.instructions
             if response is not None and response.instructions is not None
@@ -1088,10 +1105,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
         )
         wants_audio = response_wants_audio(response)
-        self._apply_config(active_chat, instructions, wants_audio)
-        language_code, lang_name = resolve_auto_language(language_code)
-        if lang_name and self.enable_lang_prompt:
-            active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
+        self._apply_config(active_chat, instructions, wants_audio, language_name=lang_name)
 
         optional_kwargs = self._build_optional_kwargs(req_tools, req_tool_choice)
 
@@ -1109,6 +1123,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             wants_audio=wants_audio,
             response_key=request.response_key,
             prefetch_transaction=request.prefetch_transaction,
+            history_anchor_id=history_anchor_id,
         )
         yield from self._generate(active_chat, original_chat, turn, optional_kwargs)
 

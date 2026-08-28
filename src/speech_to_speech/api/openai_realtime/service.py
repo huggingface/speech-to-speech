@@ -10,6 +10,7 @@ from openai.types.realtime import (
     ConversationItemCreateEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
+    ConversationItemInputAudioTranscriptionFailedEvent,
     ConversationItemTruncateEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferCommitEvent,
@@ -70,6 +71,7 @@ from speech_to_speech.pipeline.events import (
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
 from speech_to_speech.pipeline.queue_types import TextPromptItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
@@ -113,6 +115,7 @@ ServerEvent = Union[
     ConversationItemCreatedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
+    ConversationItemInputAudioTranscriptionFailedEvent,
     ResponseCreatedEvent,
     ResponseDoneEvent,
     ResponseAudioDeltaEvent,
@@ -385,8 +388,8 @@ class RealtimeService:
             return None
         try:
             return model_cls.model_validate(raw)  # type: ignore[return-value]
-        except ValidationError as e:
-            logger.error(f"Invalid {event_type} payload: {e}")
+        except ValidationError as exc:
+            log_exception(logger, f"Invalid {event_type} payload", exc)
             return None
 
     # ── Client event handlers ────────────────────
@@ -535,6 +538,19 @@ class RealtimeService:
         if isinstance(event, TokenUsageEvent):
             return self._on_token_usage(conn_id, event)
 
+        if isinstance(event, (AssistantOutputEvent, AssistantToolCallReadyEvent)):
+            # A TTS failure can overtake assistant content that the LLM already
+            # queued for the same response. Do not publish text or tools after
+            # that response has been marked failed.
+            st = self._state(conn_id)
+            event_response_key = event.response_key
+            failed_response_owns_event = st.response_failed and (
+                event_response_key is None or event_response_key == st.current_response_key
+            )
+            if failed_response_owns_event:
+                logger.info("Ignoring %s after response failure", event.type)
+                return []
+
         is_stale = self._is_stale_turn_event(event, wait_for_pending_reopen=wait_for_pending_reopen)
         if is_stale is None:
             return None
@@ -667,8 +683,13 @@ class RealtimeService:
 
     def _on_transcription_failed(self, conn_id: str, event: TranscriptionFailedEvent) -> list[ServerEvent]:
         """Surface a final STT failure without creating conversation or LLM work."""
-        self._state(conn_id)
-        return [self.make_error(event.message, "transcription_failed")]
+        st = self._state(conn_id)
+        current_input_item_id = st.current_input_item_id
+        failed_events = self.conversation.on_transcription_failed(conn_id, event)
+        owns_current_input = failed_events and failed_events[0].item_id == current_input_item_id
+        if owns_current_input and self.should_listen is not None:
+            self.should_listen.set()
+        return [*failed_events]
 
     def _on_audio_input_completed(self, conn_id: str, event: AudioInputCompletedEvent) -> list[ServerEvent]:
         """Record final input audio and queue its realtime LM request."""
@@ -762,7 +783,7 @@ class RealtimeService:
         response; stale generations are discarded by the router. Unkeyed late
         failures remain gated on active/pending state for compatibility.
         """
-        logger.info("Response failed: %s", event.message)
+        logger.info("Response failed: %s", transcript_for_log(event.message))
         st = self._state(conn_id)
         if event.response_key is None and not (st.in_response or st.response_pending):
             return []

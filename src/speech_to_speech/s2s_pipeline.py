@@ -47,6 +47,10 @@ from speech_to_speech.pipeline.queue_types import (
     VADOutItem,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.transcript_logging import (
+    set_log_transcripts,
+    warn_if_log_transcripts_enabled,
+)
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.utils.thread_manager import ThreadManager
 from speech_to_speech.VAD.vad_handler import VADHandler
@@ -70,7 +74,8 @@ console = Console()
 logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.WARNING)  # quiet down numba logs
 
-MLX_DEFAULT_LM_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-bf16"
+MLX_DEFAULT_LM_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+OPENAI_TTS_PLAYBACK_BUFFER_MS = 196.0
 
 
 def _mac_preset_defaults(llm_backend: str) -> dict[str, Any]:
@@ -309,9 +314,10 @@ def check_mac_settings(module_kwargs: ModuleArguments) -> None:
             logger.warning(
                 "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm_backend mlx-lm."
             )
-        if module_kwargs.tts not in ("pocket", "kokoro", "qwen3"):
+        if module_kwargs.tts not in ("pocket", "kokoro", "omnivoice", "qwen3"):
             logger.warning(
-                "For macOS users, it is recommended to use qwen3 for TTS (pocket and kokoro are also valid options)."
+                "For macOS users, it is recommended to use qwen3 for TTS "
+                "(pocket, kokoro, and omnivoice are also valid options)."
             )
 
 
@@ -591,6 +597,9 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
     )
 
     local_audio = args.local_audio_kwargs
+    playback_buffer_ms = local_audio.local_audio_playback_buffer_ms
+    if playback_buffer_ms is None:
+        playback_buffer_ms = OPENAI_TTS_PLAYBACK_BUFFER_MS if args.tts_backend.name == "openai" else 0.0
     tools: list[dict[str, Any]] = []
     tool_executor = None
     tool_response_create = True
@@ -603,6 +612,7 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
             url=f"ws://127.0.0.1:{args.realtime_server_kwargs.port}/v1/realtime",
             api_key="local",
             chunk_size=local_audio.local_audio_chunk_size,
+            playback_buffer_ms=playback_buffer_ms,
             input_device=local_audio.local_audio_input_device,
             output_device=local_audio.local_audio_output_device,
             print_json=local_audio.local_audio_print_json,
@@ -621,6 +631,10 @@ def run_pipeline_command(command: Literal["serve", "local"], argv: Sequence[str]
     args = parse_arguments(argv, command=command)
 
     setup_logger(args.module_kwargs.log_level)
+    # Set the transcript gate and warn before any conversation is processed, so an operator
+    # sees the notice ahead of the first turn rather than after content is already logged.
+    set_log_transcripts(args.module_kwargs.log_transcripts)
+    warn_if_log_transcripts_enabled()
 
     if args.module_kwargs.num_pipelines < 1:
         raise ValueError(f"--num_pipelines must be >= 1, got {args.module_kwargs.num_pipelines}")

@@ -18,6 +18,7 @@ from speech_to_speech.pipeline.messages import (
     TranscriptionFailure,
 )
 from speech_to_speech.pipeline.queue_types import TextEventItem
+from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ class TranscriptionNotifier(BaseHandler[STTOut, LLMIn]):
                         turn_revision=transcription.turn_revision,
                     )
                 )
-                logger.debug("Partial transcription: %s", str(transcription.text)[:80])
+                logger.debug("Partial transcription: %s", transcript_for_log(transcription.text))
             return
 
         if isinstance(transcription, TranscriptionFailure):
@@ -60,8 +61,6 @@ class TranscriptionNotifier(BaseHandler[STTOut, LLMIn]):
                         turn_revision=transcription.turn_revision,
                     )
                 )
-            if self.should_listen is not None:
-                self.should_listen.set()
             return
 
         if isinstance(transcription, Transcription):
@@ -100,8 +99,8 @@ class TranscriptionNotifier(BaseHandler[STTOut, LLMIn]):
             return
 
         if language_code:
-            logger.info("Transcription completed (language=%s): %s", language_code, transcript)
+            logger.info("Transcription completed (language=%s): %s", language_code, transcript_for_log(transcript))
         else:
-            logger.info("Transcription completed: %s", transcript)
+            logger.info("Transcription completed: %s", transcript_for_log(transcript))
 
         yield from ()

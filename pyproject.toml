@@ -46,12 +46,12 @@ dependencies = [
     "torchaudio==2.11.0; platform_system == 'Darwin'",
     "torchaudio>=2.4.0; platform_system != 'Darwin'",
     "transformers==5.14.1; platform_system == 'Darwin'",
-    "transformers>=4.57.0; platform_system != 'Darwin'",
+    "transformers>=5.15.1,<6; platform_system != 'Darwin'",
     "uvicorn>=0.30.0",
     "websockets>=12.0",
     "nano-parakeet>=0.2.0; platform_system != 'Darwin'",
-    "faster-qwen3-tts[ggml]>=0.3.2; platform_system != 'Darwin' and platform_system != 'Windows'",
-    "faster-qwen3-tts>=0.3.2; platform_system == 'Windows'",
+    "faster-qwen3-tts[ggml]>=0.4.0; platform_system != 'Darwin' and platform_system != 'Windows'",
+    "faster-qwen3-tts>=0.4.0; platform_system == 'Windows'",
     "librosa==0.11.0",
     "lingua-language-detector>=2.0.2",
     "miniaudio==1.61; platform_system == 'Darwin'",
@@ -79,13 +79,19 @@ mlx-lm = [
     "mlx-lm==0.31.3; platform_system == 'Darwin'",
     "mlx-vlm==0.4.1; platform_system == 'Darwin'",
 ]
+omnivoice = [
+    "omnivoice>=0.2.1",
+]
 paraformer = [
     "funasr>=1.1.6",
     "modelscope>=1.17.1",
     "onnxruntime<1.24; python_version < '3.11'",
 ]
 pocket = [
-    "pocket-tts>=0.1.0",
+    "pocket-tts>=2.0.0",
+]
+supertonic = [
+    "supertonic>=1.3.1",
 ]
 webrtc = [
     "aiortc>=1.9.0",
