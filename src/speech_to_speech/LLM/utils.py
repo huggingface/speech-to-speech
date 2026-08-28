@@ -251,6 +251,19 @@ WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
 }
 
 
+def format_language_instruction(lang_name: str) -> str:
+    """Build the opt-in language instruction for ``--enable_lang_prompt``."""
+    return f"Please reply to my message in {lang_name}."
+
+
+def language_name_for_prompt(language_code: Optional[str], *, enable: bool) -> Optional[str]:
+    """Resolve the language name injected into the system prompt when enabled."""
+    if not enable:
+        return None
+    _, lang_name = resolve_auto_language(language_code)
+    return lang_name
+
+
 def resolve_auto_language(language_code: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     """Strip the ``-auto`` suffix and resolve the human-readable language name.
 
