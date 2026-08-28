@@ -427,6 +427,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         response_key: str | None = None,
         recorded_item_ids: set[str] | None = None,
         recorded_call_ids: set[str] | None = None,
+        after_item_id: str | None = None,
     ) -> bool:
         """Persist exactly the ordered text/tool stream emitted to the client."""
         text_parts: list[str] = []
@@ -460,16 +461,16 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         flush_text()
 
         if response_key is not None:
-            recorded_items = chat.add_provisional_generation_items(response_key, items)
+            recorded_items = chat.add_provisional_generation_items(response_key, items, after_item_id=after_item_id)
             if recorded_items is None:
                 return False
         else:
             recorded_items = []
             for item in items:
                 if isinstance(item, RealtimeConversationItemFunctionCall):
-                    recorded_items.append(chat.add_ordered_function_call(item))
+                    recorded_items.append(chat.add_ordered_function_call(item, after_item_id=after_item_id))
                 else:
-                    recorded_items.append(chat.add_item(item))
+                    recorded_items.append(chat.add_item(item, after_item_id=after_item_id))
         for recorded in recorded_items:
             if recorded_item_ids is not None and recorded.id is not None:
                 recorded_item_ids.add(recorded.id)
@@ -597,6 +598,10 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         response = request.response
         original_chat = runtime_config.chat
         out_of_band = is_out_of_band(response)
+        # Snapshot the end of the conversation before generating so this turn's
+        # output is written back at its own position even when non-interrupting
+        # speech appends a newer user message while the model is still running.
+        history_anchor_id = original_chat.history_anchor_id()
         if not out_of_band and original_chat.has_pending_tool_calls():
             yield EndOfResponse(
                 turn_id=ctx.turn_id,
@@ -676,6 +681,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         response_key=request.response_key,
                         recorded_item_ids=ctx.recorded_item_ids,
                         recorded_call_ids=ctx.recorded_call_ids,
+                        after_item_id=history_anchor_id,
                     )
                     if not recorded:
                         ctx.cancelled = True
@@ -714,6 +720,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     response_key=request.response_key,
                     recorded_item_ids=ctx.recorded_item_ids,
                     recorded_call_ids=ctx.recorded_call_ids,
+                    after_item_id=history_anchor_id,
                 )
                 if commit_allowed:
                     ctx.history_parts_committed = len(ctx.output_parts)
