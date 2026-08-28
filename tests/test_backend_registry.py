@@ -65,6 +65,7 @@ def test_builtin_registry_lookup_and_cli_choices_share_one_catalog():
     assert STT_BACKENDS["parakeet-tdt"].kind == "stt"
     assert STT_BACKENDS["openai"].kind == "stt"
     assert STT_BACKENDS["openai-realtime"].capabilities.streams_audio_chunks
+    assert STT_BACKENDS["vllm-realtime"].capabilities.streams_audio_chunks
     assert not STT_BACKENDS["openai"].capabilities.streams_audio_chunks
     assert LLM_BACKENDS["responses-api"].kind == "llm"
     assert TTS_BACKENDS["qwen3"].kind == "tts"
@@ -241,13 +242,24 @@ def test_openai_stt_backend_constructs_through_registry(monkeypatch):
     assert isinstance(stt, OpenAICompatibleSTTHandler)
 
 
-def test_streaming_stt_backend_parses_and_constructs_through_registry():
-    args = parse_arguments(["--stt", "openai-realtime"])
+@pytest.mark.parametrize(
+    ("backend_name", "expected_type", "expected_rate"),
+    [
+        ("openai-realtime", "OpenAIRealtimeSTTHandler", 24000),
+        ("vllm-realtime", "VLLMRealtimeSTTHandler", 16000),
+    ],
+)
+def test_streaming_stt_backends_parse_and_construct_through_registry(
+    backend_name,
+    expected_type,
+    expected_rate,
+):
+    args = parse_arguments(["--stt", backend_name])
 
     handler = create_backend_handler(args.stt_backend, _context())
 
-    assert type(handler).__name__ == "OpenAIRealtimeSTTHandler"
-    assert handler.audio_sample_rate == 24000
+    assert type(handler).__name__ == expected_type
+    assert handler.audio_sample_rate == expected_rate
     assert args.stt_backend.config["base_url"].endswith("/v1")
     handler.cleanup()
 

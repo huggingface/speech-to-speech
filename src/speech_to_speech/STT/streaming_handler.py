@@ -170,6 +170,50 @@ class OpenAIRealtimeProtocol:
 
 
 @dataclass(frozen=True)
+class VLLMRealtimeProtocol:
+    """vLLM's distinct, experimental Realtime transcription wire dialect."""
+
+    model: str
+    language: str | None
+    audio_sample_rate: int
+
+    name = "vllm-realtime"
+    requires_session_updated = False
+
+    def session_update(self) -> dict[str, Any]:
+        return {"type": "session.update", "model": self.model}
+
+    def start_utterance(self) -> dict[str, Any] | None:
+        return {"type": "input_audio_buffer.commit", "final": False}
+
+    def append_audio(self, audio: bytes) -> dict[str, Any]:
+        return {
+            "type": "input_audio_buffer.append",
+            "audio": base64.b64encode(audio).decode("ascii"),
+        }
+
+    def finish_utterance(self) -> dict[str, Any]:
+        return {"type": "input_audio_buffer.commit", "final": True}
+
+    def discard_utterance(self) -> dict[str, Any] | None:
+        # vLLM currently has no per-buffer clear event. Closing the socket is
+        # the only way to guarantee rejected PCM cannot reach the next turn.
+        return None
+
+    def parse_event(self, event: dict[str, Any]) -> _ProtocolEvent:
+        event_type = event.get("type")
+        if event_type == "transcription.delta":
+            delta = event.get("delta")
+            return _ProtocolEvent("delta", text=delta if isinstance(delta, str) else "")
+        if event_type == "transcription.done":
+            text = event.get("text")
+            return _ProtocolEvent("completed", text=text if isinstance(text, str) else "")
+        if event_type == "error":
+            return _ProtocolEvent("error", message=_remote_error_message(event))
+        return _ProtocolEvent("ignore")
+
+
+@dataclass(frozen=True)
 class _AppendAudio:
     generation: int
     audio: bytes
@@ -644,6 +688,9 @@ class _StreamingSession:
                         event.content_index,
                     )
                     return
+            elif event.kind in {"delta", "failed"} and active_commit is None and not utterance_has_audio:
+                logger.debug("Ignoring unowned %s STT event without an item ID", self.protocol.name)
+                return
             if event.kind == "delta":
                 if not event.text:
                     return
@@ -859,8 +906,9 @@ class _StreamingSession:
 class StatefulStreamingSTTHandler(BaseSTTHandler):
     """STT handler that pairs incremental PCM ingress with local VAD commits."""
 
-    protocol_type: type[OpenAIRealtimeProtocol]
+    protocol_type: type[OpenAIRealtimeProtocol] | type[VLLMRealtimeProtocol]
     include_model_query = False
+    experimental = False
 
     def setup(
         self,
@@ -881,6 +929,8 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
             raise ValueError("Streaming STT audio_sample_rate must be > 0")
         if connect_timeout <= 0 or final_timeout <= 0:
             raise ValueError("Streaming STT timeouts must be > 0")
+        if self.protocol_type is VLLMRealtimeProtocol and audio_sample_rate != PIPELINE_SAMPLE_RATE:
+            raise ValueError("vLLM Realtime STT requires 16 kHz PCM")
 
         self.speculative_turns = speculative_turns
         self.final_revision_settle_s = 0.0
@@ -917,6 +967,8 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
             speculative_turns=speculative_turns,
             pipeline_index=pipeline_index,
         )
+        if self.experimental:
+            logger.warning("%s protocol is experimental", protocol.name)
 
     def append_audio(self, audio: bytes) -> None:
         with self._audio_lock:
@@ -1000,3 +1052,8 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
 class OpenAIRealtimeSTTHandler(StatefulStreamingSTTHandler):
     protocol_type = OpenAIRealtimeProtocol
     include_model_query = True
+
+
+class VLLMRealtimeSTTHandler(StatefulStreamingSTTHandler):
+    protocol_type = VLLMRealtimeProtocol
+    experimental = True

@@ -37,6 +37,7 @@ from speech_to_speech.arguments_classes.responses_api_language_model_arguments i
     ResponsesApiLanguageModelHandlerArguments,
 )
 from speech_to_speech.arguments_classes.supertonic_tts_arguments import SupertonicTTSHandlerArguments
+from speech_to_speech.arguments_classes.vllm_realtime_stt_arguments import VLLMRealtimeSTTHandlerArguments
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -431,6 +432,14 @@ STT_BACKENDS = build_backend_registry(
             OpenAIRealtimeSTTHandlerArguments,
             _create_streaming_stt("OpenAIRealtimeSTTHandler"),
             config_prefix="openai_realtime_stt",
+            capabilities=BackendCapabilities(streams_audio_chunks=True),
+        ),
+        BackendSpec(
+            "vllm-realtime",
+            "stt",
+            VLLMRealtimeSTTHandlerArguments,
+            _create_streaming_stt("VLLMRealtimeSTTHandler"),
+            config_prefix="vllm_realtime_stt",
             capabilities=BackendCapabilities(streams_audio_chunks=True),
         ),
     ],
