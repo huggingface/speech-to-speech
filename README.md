@@ -620,7 +620,15 @@ See [ModuleArguments](./src/speech_to_speech/arguments_classes/module_arguments.
 - LLM backend (`--llm_backend`: `transformers`, `mlx-lm`, `responses-api`, or `chat-completions`)
 - TTS implementation (`--tts`)
 - logging level
+- transcript logging (`--log_transcripts`)
 - realtime pipeline pool size (`--num_pipelines`)
+
+Logs are content-free by default: transcript-bearing records report a character count rather
+than the text, because logs are commonly retained by service managers, containers and hosted
+log aggregators. Pass `--log_transcripts` to include full user and assistant transcripts when
+debugging STT, LLM, TTS or Realtime behaviour; it logs a warning at startup because enabling
+it writes conversation content wherever those logs are collected. The `talk` client takes the
+same flag, as `--log-transcripts` or `--log_transcripts`.
 
 ### VAD Parameters
 
