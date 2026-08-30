@@ -71,6 +71,7 @@ from speech_to_speech.pipeline.events import (
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
 from speech_to_speech.pipeline.queue_types import TextPromptItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.turn_latency import TurnLatencyStore, TurnLatencyTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 from speech_to_speech.utils.utils import _generate_id
 
@@ -235,6 +236,7 @@ class ConnState(BaseModel):
     speculative_user_speech_stopped_at_s: Optional[float] = None
     speculative_user_item_id: Optional[str] = None
     speculative_audio_duration_s: float = 0.0
+    turn_latency: TurnLatencyTracker = Field(default_factory=TurnLatencyTracker)
     # Client conversation.item.create items that arrived while a response was
     # generating. Applying them mid-generation races the LLM handler's chat
     # write-back (cross-thread), so they are buffered here and flushed in order
@@ -298,12 +300,14 @@ class RealtimeService:
         should_listen: ThreadingEvent | None = None,
         chat_size: int = 10,
         speculative_turns: SpeculativeTurnTracker | None = None,
+        turn_latency_store: TurnLatencyStore | None = None,
         default_instructions: str | None = None,
     ) -> None:
         self.text_prompt_queue = text_prompt_queue
         self.should_listen = should_listen
         self._chat_size = chat_size
         self.speculative_turns = speculative_turns
+        self.turn_latency_store = turn_latency_store or TurnLatencyStore()
         self._default_instructions = default_instructions
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
@@ -666,6 +670,9 @@ class RealtimeService:
             st.speculative_user_turn_id = event.turn_id
             st.speculative_user_turn_revision = event.turn_revision
             st.speculative_user_speech_stopped_at_s = event.speech_stopped_at_s
+            tracker = self.turn_latency_store.get_or_create(event.turn_id, event.turn_revision)
+            if tracker is not None:
+                st.turn_latency = tracker
 
         queue = self.text_prompt_queue
         if queue and transcript:
@@ -711,6 +718,9 @@ class RealtimeService:
             st.speculative_user_turn_id = event.turn_id
             st.speculative_user_turn_revision = event.turn_revision
             st.speculative_user_speech_stopped_at_s = event.speech_stopped_at_s
+            tracker = self.turn_latency_store.get_or_create(event.turn_id, event.turn_revision)
+            if tracker is not None:
+                st.turn_latency = tracker
 
         queue = self.text_prompt_queue
         if queue:

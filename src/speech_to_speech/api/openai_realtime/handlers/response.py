@@ -75,6 +75,21 @@ class ResponseHandler(RealtimeBaseHandler):
         st.clear_pending_response(effective_response_key)
         return st.current_response_id, self._current_item_id(conn_id)
 
+    def _log_turn_latency(self, st: ConnState, status: _ResponseStatus) -> None:
+        tracker = self._service.turn_latency_store.pop(
+            st.speculative_user_turn_id,
+            st.speculative_user_turn_revision,
+        )
+        if tracker is None and st.turn_latency.turn_id is not None:
+            tracker = st.turn_latency
+        if tracker is None or tracker.turn_id is None:
+            return
+        tracker.status = status
+        line = tracker.format_log_line()
+        if line:
+            logger.info(line)
+        st.turn_latency.reset()
+
     def _end_response(self, conn_id: str, status: _ResponseStatus = "completed") -> None:
         st = self._state(conn_id)
         if status == "cancelled":
@@ -82,6 +97,7 @@ class ResponseHandler(RealtimeBaseHandler):
         else:
             st.response_usage.responses_completed += 1
         self._service.total_usage += st.response_usage
+        self._log_turn_latency(st, status)
         logger.info(
             "Response done (status=%s) — this response: input_tokens=%d, output_tokens=%d, audio=%.2fs"
             " | cumulative: input_tokens=%d, output_tokens=%d, audio=%.2fs",
