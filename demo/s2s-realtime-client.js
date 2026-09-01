@@ -48,10 +48,19 @@ import { extractResponseTranscript, trimTrailingSlash } from "./ws/codec.js";
 import { OrbVisualiser, VIS_FFT_SIZE } from "./ws/orb-visualizer.js";
 import { SentAudioRecorder } from "./ws/user-audio-recorder.js";
 
-const AUDIO_SAMPLE_RATE = 24_000;
+export const AUDIO_SAMPLE_RATE = 24_000;
+export const AUDIO_WORKLET_VERSION = "audio-24k-v1";
 const MIC_CHUNK_MS = 40;
+const CAPTURE_CONFIG_TIMEOUT_MS = 2_000;
 const SPEAKING_OPEN_DB = -50;
 const SPEAKING_HANG_MS = 250;
+
+/** @param {string} name @param {URL} base */
+export function versionedAudioWorkletUrl(name, base) {
+  const url = new URL(name, base);
+  url.searchParams.set("v", AUDIO_WORKLET_VERSION);
+  return url.href;
+}
 
 /** @param {string} message @param {string} code @param {object} [extra] */
 function codedError(message, code, extra) {
@@ -273,22 +282,53 @@ export class S2sRealtimeClient extends EventTarget {
 
     if (this.options.transport === "websocket") {
       const base = new URL("./worklets/", import.meta.url);
-      await ctx.audioWorklet.addModule(new URL("mic-capture.js", base).href);
-      await ctx.audioWorklet.addModule(new URL("audio-playback.js", base).href);
+      await ctx.audioWorklet.addModule(versionedAudioWorkletUrl("mic-capture.js", base));
+      await ctx.audioWorklet.addModule(versionedAudioWorkletUrl("audio-playback.js", base));
       const capture = new AudioWorkletNode(ctx, "mic-capture", {
         numberOfInputs: 1,
         numberOfOutputs: 0,
-        processorOptions: { chunkMs: MIC_CHUNK_MS },
+        processorOptions: {
+          chunkMs: MIC_CHUNK_MS,
+          targetRate: AUDIO_SAMPLE_RATE,
+          version: AUDIO_WORKLET_VERSION,
+        },
       });
-      capture.port.onmessage = (event) => {
-        if (event.data instanceof ArrayBuffer) this._onMicChunk(event.data);
-        else if (event.data?.kind === "level") {
-          this.dispatchEvent(new CustomEvent("input-level", { detail: { rms: event.data.rms } }));
-        }
-      };
+      const captureConfigured = new Promise((resolve, reject) => {
+        const timeout = window.setTimeout(() => {
+          reject(new Error(
+            "The microphone audio processor did not report its sample rate. "
+            + "Close every tab for this demo, reopen it, and try again.",
+          ));
+        }, CAPTURE_CONFIG_TIMEOUT_MS);
+        capture.port.onmessage = (event) => {
+          if (event.data instanceof ArrayBuffer) {
+            this._onMicChunk(event.data);
+          } else if (event.data?.kind === "level") {
+            this.dispatchEvent(new CustomEvent("input-level", { detail: { rms: event.data.rms } }));
+          } else if (event.data?.kind === "capture-config") {
+            window.clearTimeout(timeout);
+            const inputRate = Number(event.data.inputRate);
+            const outputRate = Number(event.data.outputRate);
+            const version = String(event.data.version || "unknown");
+            console.info(
+              `[audio] capture worklet ${version}: ${inputRate} Hz -> ${outputRate} Hz`,
+            );
+            if (outputRate !== AUDIO_SAMPLE_RATE || version !== AUDIO_WORKLET_VERSION) {
+              reject(new Error(
+                `Microphone sample-rate mismatch: processor ${version} outputs ${outputRate} Hz; `
+                + `the client expects ${AUDIO_SAMPLE_RATE} Hz.`,
+              ));
+              return;
+            }
+            resolve(undefined);
+          }
+        };
+      });
+      capture.port.postMessage({ kind: "probe" });
       capture.port.postMessage({ kind: "gate", ...this._noiseGate });
       micSrc.connect(capture);
       this._captureNode = capture;
+      await captureConfigured;
 
       const playback = new AudioWorkletNode(ctx, "audio-playback", {
         numberOfInputs: 0,
