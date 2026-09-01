@@ -69,8 +69,8 @@ from speech_to_speech.pipeline.messages import (
     TokenUsage,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.pipeline.turn_latency import bind_active_turn_latency_tracker
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
+from speech_to_speech.pipeline.turn_latency import bind_active_turn_latency_tracker
 from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
 
 try:
@@ -671,7 +671,15 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         try:
             store = getattr(self, "turn_latency_store", None)
-            tracker = store.get_or_create(ctx.turn_id, ctx.turn_revision) if store else None
+            tracker = (
+                store.get_or_create_response(
+                    request.response_key,
+                    turn_id=ctx.turn_id,
+                    turn_revision=ctx.turn_revision,
+                )
+                if store
+                else None
+            )
             llm_start_s = perf_counter()
             with bind_active_turn_latency_tracker(tracker):
                 for chunk in self._generate(active_chat, language_code, gen, ctx, runtime_config, response):

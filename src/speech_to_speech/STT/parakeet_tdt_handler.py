@@ -297,7 +297,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
 
         # Handle final transcription (send to LLM)
         store = getattr(self, "turn_latency_store", None)
-        tracker = store.get_or_create(vad_audio.turn_id, vad_audio.turn_revision) if store else None
+        tracker = store.get_or_create_for_turn(vad_audio.turn_id, vad_audio.turn_revision) if store else None
         with bind_active_turn_latency_tracker(tracker):
             logger.info(
                 "Parakeet final STT start turn=%s rev=%s audio=%.3fs age=%.3fs",

@@ -71,8 +71,8 @@ from speech_to_speech.pipeline.events import (
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
 from speech_to_speech.pipeline.queue_types import TextPromptItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.pipeline.turn_latency import TurnLatencyStore, TurnLatencyTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
+from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
@@ -236,7 +236,6 @@ class ConnState(BaseModel):
     speculative_user_speech_stopped_at_s: Optional[float] = None
     speculative_user_item_id: Optional[str] = None
     speculative_audio_duration_s: float = 0.0
-    turn_latency: TurnLatencyTracker = Field(default_factory=TurnLatencyTracker)
     # Client conversation.item.create items that arrived while a response was
     # generating. Applying them mid-generation races the LLM handler's chat
     # write-back (cross-thread), so they are buffered here and flushed in order
@@ -359,6 +358,7 @@ class RealtimeService:
                 st.response_usage.input_tokens += input_tokens
                 st.response_usage.output_tokens += output_tokens
             self.total_usage += st.response_usage
+            self.turn_latency_store.clear_session(conn_id)
             logger.info(
                 "Session %s unregistered — cumulative: input_tokens=%d, output_tokens=%d, audio=%.2fs",
                 conn_id,
@@ -369,6 +369,21 @@ class RealtimeService:
 
     def _state(self, conn_id: str) -> ConnState:
         return self._conns[conn_id]
+
+    def bind_response_latency_tracker(
+        self,
+        conn_id: str,
+        response_key: str,
+        *,
+        turn_id: str | None = None,
+        turn_revision: int | None = None,
+    ) -> None:
+        self.turn_latency_store.get_or_create_response(
+            response_key,
+            turn_id=turn_id,
+            turn_revision=turn_revision,
+            session_id=conn_id,
+        )
 
     @property
     def connection_ids(self) -> list[str]:
@@ -670,9 +685,6 @@ class RealtimeService:
             st.speculative_user_turn_id = event.turn_id
             st.speculative_user_turn_revision = event.turn_revision
             st.speculative_user_speech_stopped_at_s = event.speech_stopped_at_s
-            tracker = self.turn_latency_store.get_or_create(event.turn_id, event.turn_revision)
-            if tracker is not None:
-                st.turn_latency = tracker
 
         queue = self.text_prompt_queue
         if queue and transcript:
@@ -682,6 +694,12 @@ class RealtimeService:
                 turn_id=event.turn_id,
                 turn_revision=event.turn_revision,
                 speech_stopped_at_s=event.speech_stopped_at_s,
+            )
+            self.bind_response_latency_tracker(
+                conn_id,
+                request.response_key,
+                turn_id=event.turn_id,
+                turn_revision=event.turn_revision,
             )
             st.mark_response_pending(request.response_key)
             queue.put(request)
@@ -718,9 +736,6 @@ class RealtimeService:
             st.speculative_user_turn_id = event.turn_id
             st.speculative_user_turn_revision = event.turn_revision
             st.speculative_user_speech_stopped_at_s = event.speech_stopped_at_s
-            tracker = self.turn_latency_store.get_or_create(event.turn_id, event.turn_revision)
-            if tracker is not None:
-                st.turn_latency = tracker
 
         queue = self.text_prompt_queue
         if queue:
@@ -731,6 +746,12 @@ class RealtimeService:
                 turn_id=event.turn_id,
                 turn_revision=event.turn_revision,
                 speech_stopped_at_s=event.speech_stopped_at_s,
+            )
+            self.bind_response_latency_tracker(
+                conn_id,
+                request.response_key,
+                turn_id=event.turn_id,
+                turn_revision=event.turn_revision,
             )
             st.mark_response_pending(request.response_key)
             queue.put(request)

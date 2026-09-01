@@ -38,8 +38,8 @@ from speech_to_speech.pipeline.messages import (
     TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.pipeline.turn_latency import active_turn_latency_tracker, bind_active_turn_latency_tracker
 from speech_to_speech.pipeline.transcript_logging import log_exception
+from speech_to_speech.pipeline.turn_latency import active_turn_latency_tracker, bind_active_turn_latency_tracker
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 
 logger = logging.getLogger(__name__)
@@ -850,7 +850,15 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         console.print(f"[green]ASSISTANT: {text}")
 
         store = getattr(self, "turn_latency_store", None)
-        tracker = store.get_or_create(tts_input.turn_id, tts_input.turn_revision) if store else None
+        tracker = (
+            store.get_or_create_response(
+                tts_input.response_key,
+                turn_id=tts_input.turn_id,
+                turn_revision=tts_input.turn_revision,
+            )
+            if store and tts_input.response_key is not None
+            else None
+        )
         try:
             with bind_active_turn_latency_tracker(tracker):
                 if self._has_voice_clone_reference():
