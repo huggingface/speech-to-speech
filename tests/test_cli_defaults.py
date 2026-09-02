@@ -312,9 +312,20 @@ def test_parse_arguments_accepts_qwen3_tts_ggml_options():
     assert qwen3_config["ref_rvq"] == "/voices/ref.rvq"
 
 
-@pytest.mark.parametrize("command", ["serve", "talk", "local"])
+@pytest.mark.parametrize("command", ["serve", "talk", "local", "setup", "doctor"])
 def test_cli_exposes_command_family(command):
     assert parse_command([command]) == (command, [])
+
+
+def test_plain_local_uses_existing_default_profile(monkeypatch, tmp_path):
+    profile = tmp_path / "default.json"
+    profile.write_text("{}")
+    monkeypatch.setattr("speech_to_speech.cli.default_profile_path", lambda: profile)
+
+    from speech_to_speech.cli import resolve_local_profile_args
+
+    assert resolve_local_profile_args([]) == [str(profile)]
+    assert resolve_local_profile_args(["--stt", "whisper"]) == ["--stt", "whisper"]
 
 
 def test_local_pipeline_arguments_support_smart_turn():
