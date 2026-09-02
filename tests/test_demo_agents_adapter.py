@@ -135,7 +135,7 @@ async function setupAudio(captureConfig) {
         onmessage: null,
         postMessage: (message) => {
           this.messages.push(message);
-          if (name === "mic-capture" && message?.kind === "probe") {
+          if (name === "mic-capture" && message?.kind === "probe" && captureConfig !== undefined) {
             this.port.onmessage?.({ data: captureConfig });
           }
         },
@@ -182,6 +182,23 @@ try {
 }
 if (!String(mismatch?.message).includes("sample-rate mismatch")) {
   throw new Error(`stale worklet was not rejected: ${mismatch}`);
+}
+
+const realSetTimeout = window.setTimeout;
+window.setTimeout = (callback) => {
+  queueMicrotask(callback);
+  return 1;
+};
+let noConfig;
+try {
+  await setupAudio(undefined);
+} catch (error) {
+  noConfig = error;
+} finally {
+  window.setTimeout = realSetTimeout;
+}
+if (!String(noConfig?.message).includes("did not report")) {
+  throw new Error(`non-reporting stale worklet was not rejected: ${noConfig}`);
 }
 """
     )
