@@ -265,3 +265,81 @@ if (spawned !== 1 || view._activeUserBubble !== bubble) {
 }
 """
     )
+
+
+def test_audio_asset_version_propagates_to_the_worklets():
+    index = (REPO_ROOT / "demo/index.html").read_text()
+    main = (REPO_ROOT / "demo/main.js").read_text()
+    client = (REPO_ROOT / "demo/s2s-realtime-client.js").read_text()
+
+    version = "audio-24k-v1"
+    assert f"main.js?v={version}" in index
+    assert f"s2s-realtime-client.js?v={version}" in main
+    assert f'AUDIO_WORKLET_VERSION = "{version}"' in client
+    assert 'versionedAudioWorkletUrl("mic-capture.js", base)' in client
+    assert 'versionedAudioWorkletUrl("audio-playback.js", base)' in client
+
+
+def test_mic_capture_reports_and_resamples_to_24khz_without_changing_pitch():
+    _run_node(
+        """
+import fs from "node:fs";
+import vm from "node:vm";
+
+const messages = [];
+const processors = {};
+class AudioWorkletProcessor {
+  constructor() {
+    this.port = {
+      onmessage: null,
+      postMessage(message) { messages.push(message); },
+    };
+  }
+}
+const source = fs.readFileSync("./demo/worklets/mic-capture.js", "utf8");
+vm.runInNewContext(source, {
+  AudioWorkletProcessor,
+  sampleRate: 48000,
+  registerProcessor(name, constructor) { processors[name] = constructor; },
+});
+
+const CaptureProcessor = processors["mic-capture"];
+if (!CaptureProcessor) throw new Error("mic-capture processor was not registered");
+const processor = new CaptureProcessor({
+  processorOptions: {
+    chunkMs: 40,
+    targetRate: 24000,
+    version: "audio-24k-v1",
+  },
+});
+processor.port.onmessage({ data: { kind: "probe" } });
+
+const config = messages.find((message) => message?.kind === "capture-config");
+if (!config) throw new Error("capture worklet did not report its configuration");
+if (config.inputRate !== 48000 || config.outputRate !== 24000) {
+  throw new Error(`unexpected sample-rate handshake: ${JSON.stringify(config)}`);
+}
+if (config.version !== "audio-24k-v1") {
+  throw new Error(`unexpected worklet version: ${config.version}`);
+}
+
+const input = new Float32Array(1920);
+for (let i = 0; i < input.length; i++) {
+  input[i] = 0.5 * Math.sin(2 * Math.PI * 1000 * i / 48000);
+}
+processor.process([[input]]);
+
+const pcmBuffer = messages.find((message) => message?.byteLength === 1920);
+if (!pcmBuffer) throw new Error("expected one 40 ms PCM16 chunk at 24 kHz");
+const pcm = new Int16Array(pcmBuffer);
+let zeroCrossings = 0;
+for (let i = 1; i < pcm.length; i++) {
+  if ((pcm[i - 1] < 0 && pcm[i] >= 0) || (pcm[i - 1] >= 0 && pcm[i] < 0)) {
+    zeroCrossings += 1;
+  }
+}
+if (zeroCrossings < 78 || zeroCrossings > 82) {
+  throw new Error(`resampling changed the 1 kHz tone pitch: ${zeroCrossings} crossings`);
+}
+"""
+    )
