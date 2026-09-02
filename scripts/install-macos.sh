@@ -4,7 +4,7 @@ set -eu
 SPEECH_TO_SPEECH_VERSION="0.2.13"
 UV_VERSION="0.11.30"
 PYTHON_VERSION="3.11.13"
-UV_SHA256="2b9e582af54f84fa50c115427451a6c13e80f43b52f8282b8af5791077317bbf"
+UV_SHA256="9bed3567d496d8dab84ecf7a1247551ac94ef1baaebb7b65df008dd93e9dc357"
 CONSTRAINTS_SHA256="729a123b7a7119f78c4c21eb582bf6f6fe535850346b3eb588af8783ed18b8ab"
 RELEASE_REF="v${SPEECH_TO_SPEECH_VERSION}"
 REPOSITORY_RAW="https://raw.githubusercontent.com/huggingface/speech-to-speech/${RELEASE_REF}"
@@ -65,6 +65,10 @@ UV_TOOL_DIR="$app_root/tools" UV_TOOL_BIN_DIR="$bin_dir" "$uv_bin" tool install 
     --python "$PYTHON_VERSION" \
     --constraints "$constraints" \
     "speech-to-speech==${SPEECH_TO_SPEECH_VERSION}" >>"$log_file" 2>&1
+
+if [ "${S2S_INSTALL_ENV_ONLY:-0}" = "1" ]; then
+    exit 0
+fi
 
 printf 'Environment installed. Starting guided setup…\n' | tee -a "$log_file"
 "$bin_dir/speech-to-speech" setup

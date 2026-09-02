@@ -26,10 +26,13 @@ class MacOSKeychain:
         self._runner = runner
         self._secret_prompt = secret_prompt
 
-    def prompt_and_store(self, url: str) -> CredentialRef:
+    def prompt(self, url: str) -> str:
         secret = self._secret_prompt(f"API key for {url}: ")
         if not secret:
             raise ValueError("An API key is required for the selected endpoint.")
+        return secret
+
+    def store(self, url: str, secret: str) -> CredentialRef:
         reference = CredentialRef(account_for_url(url))
         result = self._runner(
             [

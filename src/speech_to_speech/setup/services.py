@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import httpx
 
@@ -30,16 +30,20 @@ def endpoint_ready(base_url: str) -> bool:
 class ManagedProcess:
     process: Any
     base_url: str
+    log_handle: TextIO | None = None
 
     def stop(self) -> None:
-        if self.process.poll() is not None:
-            return
-        self.process.terminate()
         try:
-            self.process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.wait(timeout=2)
+            if self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=2)
+        finally:
+            if self.log_handle:
+                self.log_handle.close()
 
 
 class ManagedServiceRunner:
@@ -51,12 +55,16 @@ class ManagedServiceRunner:
         port_picker: Callable[[], int] = available_loopback_port,
         readiness: Callable[[str], bool] = endpoint_ready,
         sleep: Callable[[float], None] = time.sleep,
+        log_path: Path | None = None,
+        startup_timeout_s: float = 120,
     ) -> None:
         self.llama_server = str(llama_server)
         self._popen = popen
         self._port_picker = port_picker
         self._readiness = readiness
         self._sleep = sleep
+        self.log_path = log_path
+        self.startup_timeout_s = startup_timeout_s
 
     def start(self, spec: ManagedService) -> ManagedProcess:
         port = self._port_picker()
@@ -76,14 +84,30 @@ class ManagedServiceRunner:
             "-fa",
             "on",
         ]
-        process = self._popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        managed = ManagedProcess(process, base_url)
-        for _ in range(100):
+        log_handle = None
+        if self.log_path:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_handle = self.log_path.open("a", encoding="utf-8")
+        try:
+            process = self._popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=log_handle or subprocess.DEVNULL,
+                text=True,
+            )
+        except Exception:
+            if log_handle:
+                log_handle.close()
+            raise
+        managed = ManagedProcess(process, base_url, log_handle)
+        for _ in range(max(1, int(self.startup_timeout_s / 0.1))):
             status = process.poll()
             if status is not None:
+                if log_handle:
+                    log_handle.close()
                 raise RuntimeError(f"Managed llama.cpp exited with status {status} before becoming ready.")
             if self._readiness(base_url):
                 return managed
             self._sleep(0.1)
         managed.stop()
-        raise RuntimeError("Managed llama.cpp did not become ready within 10 seconds.")
+        raise RuntimeError(f"Managed llama.cpp did not become ready within {self.startup_timeout_s:g} seconds.")

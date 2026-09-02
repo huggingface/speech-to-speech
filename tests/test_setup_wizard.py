@@ -1,5 +1,5 @@
 from speech_to_speech.setup.endpoints import EndpointCandidate, EndpointCapabilities
-from speech_to_speech.setup.models import SetupProfile
+from speech_to_speech.setup.models import CredentialRef, SetupProfile
 from speech_to_speech.setup.system import GIB, SystemSnapshot
 from speech_to_speech.setup.wizard import SetupWizard, run_profiled_local
 
@@ -72,15 +72,41 @@ def test_wizard_defaults_to_gemma_at_24_gib_and_qwen_below_it(tmp_path):
     assert profiles[1].pipeline["model_name"] == "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 
 
-def test_wizard_prompts_for_auth_only_after_protected_endpoint_is_selected(tmp_path):
-    from speech_to_speech.setup.models import CredentialRef
+def test_wizard_persists_installed_paths_for_all_mlx_models(tmp_path):
+    saved = []
 
+    def install(choice):
+        path = tmp_path / choice.model_id.replace("/", "--")
+        path.mkdir()
+        return path
+
+    wizard = SetupWizard(
+        io=ScriptedIO([0, 0, 0]),
+        inspect=lambda: snapshot(16 * GIB),
+        discover=lambda: [],
+        scan_caches=lambda custom: ([], []),
+        install=install,
+        save=lambda profile: saved.append(profile) or tmp_path / "default.json",
+    )
+
+    assert wizard.run() == 0
+    profile = saved[0]
+    assert profile.pipeline["parakeet_tdt_model_name"].startswith(str(tmp_path))
+    assert profile.pipeline["model_name"].startswith(str(tmp_path))
+    assert profile.pipeline["kokoro_model_name"].startswith(str(tmp_path))
+
+
+def test_wizard_prompts_for_auth_only_after_protected_endpoint_is_selected(tmp_path):
     class FakeKeychain:
         def __init__(self):
             self.prompted = []
 
-        def prompt_and_store(self, url):
+        def prompt(self, url):
             self.prompted.append(url)
+            return "runtime-key"
+
+        def store(self, url, secret):
+            assert secret == "runtime-key"
             return CredentialRef("endpoint-test")
 
         def get(self, reference):
@@ -107,6 +133,33 @@ def test_wizard_prompts_for_auth_only_after_protected_endpoint_is_selected(tmp_p
     assert profiles[0].credentials["llm"].account == "endpoint-test"
 
 
+def test_wizard_does_not_store_key_for_endpoint_that_fails_validation(tmp_path):
+    class FakeKeychain:
+        stored = False
+
+        def prompt(self, url):
+            return "runtime-key"
+
+        def store(self, url, secret):
+            self.stored = True
+            return CredentialRef("endpoint-test")
+
+    keychain = FakeKeychain()
+    wizard = SetupWizard(
+        io=ScriptedIO([0, 0, 0]),
+        inspect=snapshot,
+        discover=lambda: [EndpointCandidate("http://127.0.0.1:9000/v1", requires_auth=True)],
+        scan_caches=lambda custom: ([], []),
+        install=lambda choice: None,
+        save=lambda profile: tmp_path / "default.json",
+        keychain=keychain,
+        validate_endpoint=lambda *args, **kwargs: False,
+    )
+
+    assert wizard.run() == 1
+    assert keychain.stored is False
+
+
 def test_profile_launch_resolves_secret_only_in_memory():
     profile = SetupProfile(
         pipeline={
@@ -116,8 +169,6 @@ def test_profile_launch_resolves_secret_only_in_memory():
             "responses_api_base_url": "http://127.0.0.1:8080/v1",
         }
     )
-    from speech_to_speech.setup.models import CredentialRef
-
     profile.credentials["llm"] = CredentialRef("endpoint-test")
     calls = []
 

@@ -20,7 +20,8 @@ def test_keychain_prompts_hidden_and_passes_secret_over_stdin():
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     keychain = MacOSKeychain(runner=runner, secret_prompt=lambda prompt: prompts.append(prompt) or "my-key")
-    reference = keychain.prompt_and_store("http://127.0.0.1:8080/v1")
+    secret = keychain.prompt("http://127.0.0.1:8080/v1")
+    reference = keychain.store("http://127.0.0.1:8080/v1", secret)
 
     assert prompts == ["API key for http://127.0.0.1:8080/v1: "]
     command, kwargs = calls[0]
@@ -35,6 +36,6 @@ def test_keychain_errors_never_include_secret():
 
     keychain = MacOSKeychain(runner=runner, secret_prompt=lambda _: "my-key")
     with pytest.raises(RuntimeError) as error:
-        keychain.prompt_and_store("http://127.0.0.1:8080/v1")
+        keychain.store("http://127.0.0.1:8080/v1", "my-key")
 
     assert "my-key" not in str(error.value)

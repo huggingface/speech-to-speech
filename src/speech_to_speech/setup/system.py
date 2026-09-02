@@ -35,6 +35,8 @@ class ModelChoice:
 class CachedModel:
     model_id: str
     size_bytes: int
+    path: Path
+    complete: bool = True
 
 
 @dataclass(frozen=True)
@@ -122,7 +124,7 @@ def scan_model_caches(
         else:
             cache = scan_hf()
         for repo in cache.repos:
-            model = CachedModel(repo.repo_id, int(repo.size_on_disk))
+            model = CachedModel(repo.repo_id, int(repo.size_on_disk), Path(repo.repo_path), complete=False)
             _remember_largest(found, model)
     except Exception as error:
         diagnostics.append(f"Could not inspect the Hugging Face cache: {error}")
@@ -135,7 +137,7 @@ def scan_model_caches(
             for model_dir in custom.glob("models--*--*"):
                 model_id = model_dir.name.removeprefix("models--").replace("--", "/")
                 size = sum(path.stat().st_size for path in model_dir.rglob("*") if path.is_file())
-                model = CachedModel(model_id, size)
+                model = CachedModel(model_id, size, model_dir, complete=False)
                 _remember_largest(found, model)
         except OSError as error:
             diagnostics.append(f"Could not inspect custom model directory {custom}: {error}")
@@ -146,7 +148,7 @@ def scan_model_caches(
                     continue
                 model_id = model_dir.name.replace("--", "/")
                 size = sum(path.stat().st_size for path in model_dir.rglob("*") if path.is_file())
-                model = CachedModel(model_id, size)
+                model = CachedModel(model_id, size, model_dir)
                 _remember_largest(found, model)
         except OSError as error:
             diagnostics.append(f"Could not inspect managed model directory {managed_directory}: {error}")
@@ -154,7 +156,8 @@ def scan_model_caches(
 
 
 def _remember_largest(found: dict[str, CachedModel], model: CachedModel) -> None:
-    if model.size_bytes > (found[model.model_id].size_bytes if model.model_id in found else 0):
+    current = found.get(model.model_id)
+    if current is None or (model.complete, model.size_bytes) > (current.complete, current.size_bytes):
         found[model.model_id] = model
 
 
@@ -167,6 +170,8 @@ def estimate_required_space(
 ) -> DiskEstimate:
     cached_by_id: dict[str, int] = {}
     for model in cached_models:
+        if not model.complete:
+            continue
         cached_by_id[model.model_id] = max(cached_by_id.get(model.model_id, 0), model.size_bytes)
     missing = sum(max(0, choice.estimated_bytes - cached_by_id.get(choice.model_id, 0)) for choice in choices)
     reserve = max(2 * GIB, (missing * 20 + 99) // 100)

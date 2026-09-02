@@ -71,10 +71,23 @@ def run_doctor(
         except Exception:
             problems += 1
             emit("[red]A saved endpoint credential is missing from macOS Keychain; rerun setup.[/red]")
-    configured_url = profile.pipeline.get("responses_api_base_url")
-    if configured_url and configured_url not in endpoint_urls():
+    model_paths = [
+        profile.pipeline.get("parakeet_tdt_model_name"),
+        profile.pipeline.get("kokoro_model_name"),
+        profile.pipeline.get("model_name") if profile.pipeline.get("llm_backend") == "mlx-lm" else None,
+        *(service.model_path for service in profile.managed_services),
+    ]
+    if any(isinstance(value, str) and Path(value).is_absolute() and not Path(value).exists() for value in model_paths):
         problems += 1
-        emit("[red]The configured local endpoint is not currently available.[/red]")
+        emit("[red]A configured local model is missing; rerun setup.[/red]")
+    configured_urls = {
+        value
+        for key in ("openai_stt_base_url", "responses_api_base_url", "openai_tts_base_url")
+        if isinstance((value := profile.pipeline.get(key)), str) and value
+    }
+    if configured_urls - endpoint_urls():
+        problems += 1
+        emit("[red]A configured local endpoint is not currently available.[/red]")
     if profile.managed_services:
         checker = runtime_present or _managed_runtime_present
         if not checker():

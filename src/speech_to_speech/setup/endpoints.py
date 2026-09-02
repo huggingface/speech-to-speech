@@ -122,13 +122,15 @@ def _probe_port(port: int, request: Request, timeout: float) -> EndpointCandidat
         "speech": "audio/speech",
     }
     available: dict[str, bool] = {}
+    requires_auth = False
     for capability, route in routes.items():
         try:
             response = request("OPTIONS", f"{root}/{route}", {}, timeout)
+            requires_auth |= response.status_code in {401, 403}
             available[capability] = _route_available(response.status_code)
         except Exception:
             available[capability] = False
-    return EndpointCandidate(root, models, EndpointCapabilities(**available))
+    return EndpointCandidate(root, models, EndpointCapabilities(**available), requires_auth)
 
 
 def discover_endpoints(

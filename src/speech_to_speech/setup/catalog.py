@@ -3,7 +3,7 @@ from __future__ import annotations
 from speech_to_speech.setup.system import GIB, ModelChoice
 
 PARAKEET = ModelChoice("Parakeet TDT 0.6B (small, recommended)", "mlx-community/parakeet-tdt-0.6b-v3", "mlx", 2 * GIB)
-KOKORO = ModelChoice("Kokoro 82M (small, recommended)", "hexgrad/Kokoro-82M", "mlx", GIB)
+KOKORO = ModelChoice("Kokoro 82M (small, recommended)", "mlx-community/Kokoro-82M-bf16", "mlx", GIB)
 QWEN_SMALL = ModelChoice(
     "Qwen3 4B MLX 4-bit (small)",
     "mlx-community/Qwen3-4B-Instruct-2507-4bit",

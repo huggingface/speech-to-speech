@@ -41,10 +41,11 @@ def test_installer_pins_environment_and_exact_package():
     assert 'SPEECH_TO_SPEECH_VERSION="0.2.13"' in script
     assert 'UV_VERSION="0.11.30"' in script
     assert 'PYTHON_VERSION="3.11.13"' in script
-    assert 'UV_SHA256="2b9e582af54f84fa50c115427451a6c13e80f43b52f8282b8af5791077317bbf"' in script
+    assert 'UV_SHA256="9bed3567d496d8dab84ecf7a1247551ac94ef1baaebb7b65df008dd93e9dc357"' in script
     assert "macos-arm64-constraints.txt" in script
     assert "speech-to-speech==${SPEECH_TO_SPEECH_VERSION}" in script
     assert "--constraints" in script
+    assert "S2S_INSTALL_ENV_ONLY" in script
 
 
 def test_installer_has_valid_posix_shell_syntax():

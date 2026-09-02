@@ -50,6 +50,17 @@ def test_discovery_keeps_auth_endpoint_without_leaking_or_posting():
     assert all("Authorization" not in headers for _, headers in calls)
 
 
+def test_discovery_detects_route_auth_when_models_are_public():
+    def request(method, url, headers, timeout):
+        if url.endswith("/models"):
+            return ProbeResponse(200, '{"data": [{"id": "local-model"}]}')
+        return ProbeResponse(403, "")
+
+    candidate = discover_endpoints(ports=[1234], request=request)[0]
+
+    assert candidate.requires_auth is True
+
+
 def test_discovery_ignores_malformed_and_unreachable_services():
     def request(method, url, headers, timeout):
         if ":1111/" in url:

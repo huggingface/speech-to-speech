@@ -103,6 +103,9 @@ On an Apple Silicon Mac, the versioned installer creates an isolated uv/Python 3
 compatible OpenAI-style endpoints already listening on loopback, checks cached models and free space, then asks
 three short questions for STT, LLM, and TTS:
 
+> The installer below becomes available when v0.2.13 is tagged and published. Until then, use the standard
+> installation from the current release. Release preparation updates this tag and the installer pins together.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/huggingface/speech-to-speech/v0.2.13/scripts/install-macos.sh | sh
 ```

@@ -108,6 +108,7 @@ class SetupWizard:
             return 1
 
         cached, cache_diagnostics = self.scan_caches(self.custom_directories)
+        cached_paths = {model.model_id: model.path for model in cached if model.complete}
         for diagnostic in cache_diagnostics:
             self.io.print(f"[yellow]{diagnostic}[/yellow]")
         endpoints = self.discover()
@@ -143,10 +144,16 @@ class SetupWizard:
             ("llm", llm_endpoint, llm.model_id),
             ("tts", tts_endpoint, tts.model_id),
         )
+        secrets: dict[str, str] = {}
+        references: dict[str, CredentialRef] = {}
         for stage, endpoint, model_id in selected_endpoints:
             if endpoint is None:
                 continue
-            api_key = self.keychain.get(profile.credentials[stage]) if stage in profile.credentials else None
+            api_key = None
+            if endpoint.requires_auth:
+                if endpoint.base_url not in secrets:
+                    secrets[endpoint.base_url] = self.keychain.prompt(endpoint.base_url)
+                api_key = secrets[endpoint.base_url]
             validation_stage = (
                 "responses"
                 if stage == "llm" and not endpoint.capabilities.chat_completions and endpoint.capabilities.responses
@@ -155,13 +162,25 @@ class SetupWizard:
             if not self.validate_endpoint(endpoint.base_url, stage=validation_stage, model=model_id, api_key=api_key):
                 self.io.print(f"[red]The selected {stage.upper()} endpoint did not pass validation.[/red]")
                 return 1
+            if api_key:
+                if endpoint.base_url not in references:
+                    references[endpoint.base_url] = self.keychain.store(endpoint.base_url, api_key)
+                profile.credentials[stage] = references[endpoint.base_url]
         for choice in install_choices:
-            installed = self.install(choice)
-            if choice is llm and llm.runtime == "llama.cpp" and isinstance(installed, Path):
+            installed = cached_paths.get(choice.model_id) or self.install(choice)
+            if not isinstance(installed, Path):
+                continue
+            if choice is stt:
+                profile.pipeline["parakeet_tdt_model_name"] = str(installed)
+            elif choice is tts:
+                profile.pipeline["kokoro_model_name"] = str(installed)
+            elif llm.runtime == "llama.cpp":
                 matches = sorted(installed.rglob("*Q4_0*.gguf"))
                 if not matches:
                     raise FileNotFoundError(f"The downloaded Gemma Q4_0 GGUF was not found under {installed}.")
                 profile.managed_services[0] = replace(profile.managed_services[0], model_path=str(matches[0]))
+            else:
+                profile.pipeline["model_name"] = str(installed)
         if llm.runtime == "llama.cpp" and self.install_runtime:
             self.install_runtime()
         path = self.save(profile)
@@ -260,14 +279,6 @@ class SetupWizard:
             profile.managed_services.append(ManagedService(f"{llm.model_id}:{llm.variant}"))
         else:
             pipeline["llm_backend"] = "mlx-lm"
-        stored_by_url: dict[str, CredentialRef] = {}
-        for stage, selected in (("stt", stt_endpoint), ("llm", llm_endpoint), ("tts", tts_endpoint)):
-            if selected and selected.requires_auth:
-                reference = stored_by_url.get(selected.base_url)
-                if reference is None:
-                    reference = self.keychain.prompt_and_store(selected.base_url)
-                    stored_by_url[selected.base_url] = reference
-                profile.credentials[stage] = reference
         return profile
 
 
@@ -293,6 +304,10 @@ def _find_llama_server() -> Path:
     if not matches:
         raise FileNotFoundError("Managed llama.cpp is missing; rerun 'speech-to-speech setup'.")
     return matches[0]
+
+
+def _llama_log_path() -> Path:
+    return Path.home() / "Library" / "Logs" / "speech-to-speech" / "llama-server.log"
 
 
 def guided_audio_check(io: WizardIO) -> bool:
@@ -336,7 +351,7 @@ def run_profiled_local(
             runner = (
                 service_runner_factory()
                 if service_runner_factory
-                else ManagedServiceRunner(llama_server=_find_llama_server())
+                else ManagedServiceRunner(llama_server=_find_llama_server(), log_path=_llama_log_path())
             )
             process = runner.start(service)
             processes.append(process)

@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 
 from speech_to_speech.setup.models import ManagedService
@@ -36,6 +38,7 @@ def test_managed_llama_uses_dynamic_loopback_port_and_expected_model(monkeypatch
     command = calls[0][0]
     assert command[:5] == ["/runtime/llama-server", "--host", "127.0.0.1", "--port", "54321"]
     assert command[command.index("-hf") + 1] == spec.model
+    assert calls[0][1]["stderr"] != subprocess.PIPE
     assert managed.base_url == "http://127.0.0.1:54321/v1"
     managed.stop()
     assert process.terminated is True
