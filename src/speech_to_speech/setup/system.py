@@ -4,7 +4,7 @@ import platform
 import shutil
 import subprocess
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -171,4 +171,3 @@ def estimate_required_space(
     reserve = max(2 * GIB, (missing * 20 + 99) // 100)
     required = missing + reserve
     return DiskEstimate(missing, reserve, required, free_bytes, force or free_bytes >= required, force)
-
