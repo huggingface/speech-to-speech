@@ -14,6 +14,12 @@ from speech_to_speech.setup.system import ModelChoice
 
 Progress = Callable[[str], None]
 
+LLAMA_CPP_TAG = "b10760"
+LLAMA_CPP_MACOS_ARM64_URL = (
+    "https://github.com/ggml-org/llama.cpp/releases/download/b10760/llama-b10760-bin-macos-arm64.tar.gz"
+)
+LLAMA_CPP_MACOS_ARM64_SHA256 = "4451e74e6f6d76838b6a10be8c0224d74f0fe2b2c9c23e9a4ff46c33855dd782"
+
 
 def _snapshot_download(**kwargs: Any) -> str:
     from huggingface_hub import snapshot_download
@@ -91,4 +97,3 @@ class AssetInstaller:
             if root not in target.parents and target != root:
                 raise ValueError("llama.cpp archive contains an unsafe path")
         package.extractall(destination, filter="data")
-

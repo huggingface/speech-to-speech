@@ -14,7 +14,7 @@ from speech_to_speech.pipeline.transcript_logging import (
     set_log_transcripts,
     warn_if_log_transcripts_enabled,
 )
-from speech_to_speech.setup.profiles import default_profile_path
+from speech_to_speech.setup.profiles import default_profile_path, load_profile
 
 Command = Literal["serve", "talk", "local", "setup", "doctor"]
 
@@ -218,10 +218,16 @@ def main() -> None:
         run_realtime_audio_client(config)
         return
 
+    if command == "local":
+        resolved_args = resolve_local_profile_args(command_args)
+        if not command_args and resolved_args:
+            from speech_to_speech.setup.wizard import run_profiled_local
+
+            run_profiled_local(load_profile(default_profile_path()))
+            return
+        command_args = resolved_args
     from speech_to_speech.s2s_pipeline import run_pipeline_command
 
-    if command == "local":
-        command_args = resolve_local_profile_args(command_args)
     run_pipeline_command(command, command_args)
 
 
