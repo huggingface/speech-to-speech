@@ -41,7 +41,14 @@ def parse_listening_ports(output: str) -> list[int]:
         if not line.startswith("n"):
             continue
         address = line[1:]
-        if not (address.startswith("127.") or address.startswith("[::1]:") or address.startswith("localhost:")):
+        if not (
+            address.startswith("127.")
+            or address.startswith("[::1]:")
+            or address.startswith("localhost:")
+            or address.startswith("*:")
+            or address.startswith("0.0.0.0:")
+            or address.startswith("[::]:")
+        ):
             continue
         try:
             ports.add(int(address.rsplit(":", 1)[1].split(" ", 1)[0]))
@@ -61,7 +68,12 @@ def listening_loopback_ports() -> list[int]:
 
 
 def _http_request(method: str, url: str, headers: dict[str, str], timeout: float) -> ProbeResponse:
-    kwargs: dict[str, Any] = {"headers": headers, "timeout": timeout, "follow_redirects": False}
+    kwargs: dict[str, Any] = {
+        "headers": headers,
+        "timeout": timeout,
+        "follow_redirects": False,
+        "verify": False,
+    }
     response = httpx.request(method, url, **kwargs)
     return ProbeResponse(response.status_code, response.text)
 
@@ -77,23 +89,30 @@ def _minimal_payload(url: str, model: str = "") -> dict[str, Any]:
 
 
 def _route_available(status_code: int) -> bool:
-    return status_code not in {404, 405} and status_code < 500
+    # 405 is useful here: the route exists but the server does not implement OPTIONS.
+    return status_code != 404 and status_code < 500
 
 
 def _probe_port(port: int, request: Request, timeout: float) -> EndpointCandidate | None:
-    root = f"http://127.0.0.1:{port}/v1"
-    try:
-        models_response = request("GET", f"{root}/models", {}, timeout)
-    except Exception:
-        return None
-    if models_response.status_code in {401, 403}:
-        return EndpointCandidate(root, requires_auth=True)
-    if models_response.status_code != 200:
-        return None
-    try:
-        payload = json.loads(models_response.text)
-        models = tuple(item["id"] for item in payload["data"] if isinstance(item.get("id"), str))
-    except (KeyError, TypeError, json.JSONDecodeError):
+    root = ""
+    models: tuple[str, ...] | None = None
+    for scheme in ("http", "https"):
+        root = f"{scheme}://127.0.0.1:{port}/v1"
+        try:
+            models_response = request("GET", f"{root}/models", {}, timeout)
+        except Exception:
+            continue
+        if models_response.status_code in {401, 403}:
+            return EndpointCandidate(root, requires_auth=True)
+        if models_response.status_code != 200:
+            continue
+        try:
+            payload = json.loads(models_response.text)
+            models = tuple(item["id"] for item in payload["data"] if isinstance(item.get("id"), str))
+        except (KeyError, TypeError, json.JSONDecodeError):
+            continue
+        break
+    if models is None:
         return None
 
     routes = {
@@ -136,7 +155,12 @@ def validate_selected_endpoint(
     request: Request = _http_request,
     timeout: float = 10.0,
 ) -> bool:
-    routes = {"llm": "chat/completions", "stt": "audio/transcriptions", "tts": "audio/speech"}
+    routes = {
+        "llm": "chat/completions",
+        "responses": "responses",
+        "stt": "audio/transcriptions",
+        "tts": "audio/speech",
+    }
     if stage not in routes:
         raise ValueError(f"Unsupported endpoint stage: {stage}")
     headers = {"Content-Type": "application/json"}
@@ -144,14 +168,47 @@ def validate_selected_endpoint(
         headers = {"Authorization": f"Bearer {api_key}", **headers}
     url = f"{base_url.rstrip('/')}/{routes[stage]}"
     if request is _http_request:
-        http_response = httpx.post(
-            url,
-            headers=headers,
-            json=_minimal_payload(url, model),
-            timeout=timeout,
-            follow_redirects=False,
-        )
+        if stage == "stt":
+            headers.pop("Content-Type")
+            http_response = httpx.post(
+                url,
+                headers=headers,
+                data={"model": model},
+                files={"file": ("setup-check.wav", _silent_wav(), "audio/wav")},
+                timeout=timeout,
+                follow_redirects=False,
+                verify=False,
+            )
+        else:
+            http_response = httpx.post(
+                url,
+                headers=headers,
+                json=_minimal_payload(url, model),
+                timeout=timeout,
+                follow_redirects=False,
+                verify=False,
+            )
         response = ProbeResponse(http_response.status_code, http_response.text)
     else:
         response = request("POST", url, headers, timeout)
     return 200 <= response.status_code < 300
+
+
+def _silent_wav() -> bytes:
+    # PCM WAV: mono, 16-bit, 16 kHz, 100 ms of silence.
+    data_size = 3200
+    return (
+        b"RIFF"
+        + (36 + data_size).to_bytes(4, "little")
+        + b"WAVEfmt "
+        + (16).to_bytes(4, "little")
+        + (1).to_bytes(2, "little")
+        + (1).to_bytes(2, "little")
+        + (16000).to_bytes(4, "little")
+        + (32000).to_bytes(4, "little")
+        + (2).to_bytes(2, "little")
+        + (16).to_bytes(2, "little")
+        + b"data"
+        + data_size.to_bytes(4, "little")
+        + bytes(data_size)
+    )

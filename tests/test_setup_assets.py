@@ -50,4 +50,3 @@ def test_runtime_install_rejects_checksum_mismatch(tmp_path):
         installer.install_runtime("https://example.test/llama.tar.gz", expected)
 
     assert not (tmp_path / "runtime").exists()
-

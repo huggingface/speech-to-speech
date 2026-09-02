@@ -64,6 +64,7 @@ def load_profile(path: Path | None = None) -> SetupProfile:
                 model=value["model"],
                 runtime=value["runtime"],
                 args=tuple(value.get("args", ())),
+                model_path=value.get("model_path"),
             )
             for value in data.get("managed_services", [])
         ],

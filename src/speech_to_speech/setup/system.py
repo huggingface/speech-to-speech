@@ -54,9 +54,7 @@ class DiskEstimate:
 
 
 def _read_sysctl(name: str) -> int:
-    result = subprocess.run(
-        ["/usr/sbin/sysctl", "-n", name], capture_output=True, text=True, check=True
-    )
+    result = subprocess.run(["/usr/sbin/sysctl", "-n", name], capture_output=True, text=True, check=True)
     return int(result.stdout.strip())
 
 
@@ -124,6 +122,7 @@ def scan_model_caches(
     custom_directories: Iterable[Path] = (),
     *,
     scan_hf: Callable[[], Any] | None = None,
+    managed_directory: Path | None = None,
 ) -> tuple[list[CachedModel], list[str]]:
     diagnostics: list[str] = []
     found: dict[tuple[str, Path], CachedModel] = {}
@@ -152,6 +151,17 @@ def scan_model_caches(
                 found[(model.model_id, model.path)] = model
         except OSError as error:
             diagnostics.append(f"Could not inspect custom model directory {custom}: {error}")
+    if managed_directory and managed_directory.exists():
+        try:
+            for model_dir in managed_directory.iterdir():
+                if not model_dir.is_dir() or not (model_dir / ".complete").is_file():
+                    continue
+                model_id = model_dir.name.replace("--", "/")
+                size = sum(path.stat().st_size for path in model_dir.rglob("*") if path.is_file())
+                model = CachedModel(model_id, size, model_dir)
+                found[(model.model_id, model.path)] = model
+        except OSError as error:
+            diagnostics.append(f"Could not inspect managed model directory {managed_directory}: {error}")
     return list(found.values()), diagnostics
 
 
@@ -165,9 +175,7 @@ def estimate_required_space(
     cached_by_id: dict[str, int] = {}
     for model in cached_models:
         cached_by_id[model.model_id] = cached_by_id.get(model.model_id, 0) + model.size_bytes
-    missing = sum(
-        max(0, choice.estimated_bytes - cached_by_id.get(choice.model_id, 0)) for choice in choices
-    )
+    missing = sum(max(0, choice.estimated_bytes - cached_by_id.get(choice.model_id, 0)) for choice in choices)
     reserve = max(2 * GIB, (missing * 20 + 99) // 100)
     required = missing + reserve
     return DiskEstimate(missing, reserve, required, free_bytes, force or free_bytes >= required, force)

@@ -63,14 +63,14 @@ class ManagedServiceRunner:
             raise ValueError(f"Unsupported managed runtime: {spec.runtime}")
         port = self._port_picker()
         base_url = f"http://127.0.0.1:{port}/v1"
+        model_arguments = ["-m", spec.model_path] if spec.model_path else ["-hf", spec.model]
         command = [
             self.llama_server,
             "--host",
             "127.0.0.1",
             "--port",
             str(port),
-            "-hf",
-            spec.model,
+            *model_arguments,
             "-c",
             "16384",
             "-np",

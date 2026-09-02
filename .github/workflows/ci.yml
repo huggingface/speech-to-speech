@@ -164,3 +164,15 @@ jobs:
           unset OPENAI_API_KEY
           # Validate the installed entry point without loading models or calling OpenAI.
           python tests/install_smoke.py
+          speech-to-speech setup --help
+          speech-to-speech doctor --help
+
+  macos-onboarding-bootstrap:
+    name: macOS onboarding bootstrap gates
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+      - name: Exercise the installer without downloads
+        env:
+          S2S_INSTALL_TEST_ONLY: "1"
+        run: scripts/install-macos.sh

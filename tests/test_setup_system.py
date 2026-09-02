@@ -70,6 +70,19 @@ def test_scan_model_caches_normalizes_hugging_face_and_custom_directories(tmp_pa
     assert diagnostics == []
 
 
+def test_scan_model_caches_includes_completed_installer_managed_models(tmp_path):
+    managed = tmp_path / "models"
+    model = managed / "mlx-community--parakeet-tdt-0.6b-v3"
+    model.mkdir(parents=True)
+    (model / ".complete").touch()
+    (model / "weights.bin").write_bytes(b"weights")
+
+    models, diagnostics = scan_model_caches(scan_hf=lambda: SimpleNamespace(repos=[]), managed_directory=managed)
+
+    assert [(item.model_id, item.size_bytes) for item in models] == [("mlx-community/parakeet-tdt-0.6b-v3", 7)]
+    assert diagnostics == []
+
+
 def test_disk_estimate_uses_missing_bytes_plus_exact_safety_reserve():
     choice = ModelChoice("llm", "Example", "org/model", "mlx", 10 * GIB)
     cached = [CachedModel("org/model", 4 * GIB, Path("/cache/model"))]

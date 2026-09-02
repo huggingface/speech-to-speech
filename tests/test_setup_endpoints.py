@@ -9,13 +9,9 @@ from speech_to_speech.setup.endpoints import (
 
 
 def test_lsof_parser_finds_arbitrary_loopback_ports_only():
-    output = "\n".join(
-        [
-            "p10", "n127.0.0.1:8080", "p11", "n[::1]:9090", "p12", "n*:3000", "p13", "n10.0.0.2:4000"
-        ]
-    )
+    output = "\n".join(["p10", "n127.0.0.1:8080", "p11", "n[::1]:9090", "p12", "n*:3000", "p13", "n10.0.0.2:4000"])
 
-    assert parse_listening_ports(output) == [8080, 9090]
+    assert parse_listening_ports(output) == [3000, 8080, 9090]
 
 
 def test_discovery_is_engine_independent_read_only_and_classifies_routes():
@@ -82,4 +78,3 @@ def test_selected_endpoint_validation_is_the_only_place_that_posts():
             {"Authorization": "Bearer top-secret", "Content-Type": "application/json"},
         )
     ]
-

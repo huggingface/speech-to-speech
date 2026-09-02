@@ -54,3 +54,19 @@ def test_managed_service_reports_early_crash():
 
     with pytest.raises(RuntimeError, match="exited with status 7"):
         runner.start(ManagedService("llm", "org/model:Q4", "llama.cpp"))
+
+
+def test_managed_llama_uses_installed_model_path_when_available():
+    process = FakeProcess()
+    commands = []
+    runner = ManagedServiceRunner(
+        llama_server="llama-server",
+        popen=lambda command, **kwargs: commands.append(command) or process,
+        port_picker=lambda: 54321,
+        readiness=lambda url: True,
+    )
+
+    runner.start(ManagedService("llm", "org/model:Q4", "llama.cpp", model_path="/models/model.Q4_0.gguf"))
+
+    assert "-hf" not in commands[0]
+    assert commands[0][commands[0].index("-m") + 1] == "/models/model.Q4_0.gguf"

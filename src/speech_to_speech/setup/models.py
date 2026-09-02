@@ -16,6 +16,7 @@ class ManagedService:
     model: str
     runtime: str
     args: tuple[str, ...] = ()
+    model_path: str | None = None
 
 
 @dataclass
@@ -25,4 +26,3 @@ class SetupProfile:
     credentials: dict[str, CredentialRef] = field(default_factory=dict)
     managed_services: list[ManagedService] = field(default_factory=list)
     schema_version: int = 1
-

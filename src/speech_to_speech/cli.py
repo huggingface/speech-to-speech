@@ -204,12 +204,16 @@ def main() -> None:
     if command == "setup":
         from speech_to_speech.setup.wizard import run_setup
 
-        run_setup(command_args)
+        result = run_setup(command_args)
+        if result:
+            raise SystemExit(result)
         return
     if command == "doctor":
         from speech_to_speech.setup.doctor import run_doctor
 
-        run_doctor(command_args)
+        result = run_doctor(command_args)
+        if result:
+            raise SystemExit(result)
         return
     if command == "talk":
         config = parse_talk_arguments(command_args)

@@ -64,6 +64,11 @@ class AssetInstaller:
 
     def install_runtime(self, url: str, sha256: str, progress: Progress | None = None) -> Path:
         self.root.mkdir(parents=True, exist_ok=True)
+        destination = self.root / "runtime" / sha256[:12]
+        if destination.is_dir() and any(destination.rglob("llama-server")):
+            if progress:
+                progress("Using cached llama.cpp runtime")
+            return destination
         with tempfile.TemporaryDirectory(prefix="runtime-download-", dir=self.root) as temporary_name:
             temporary = Path(temporary_name)
             archive = temporary / "runtime.tar.gz"
@@ -77,7 +82,6 @@ class AssetInstaller:
             extracted.mkdir()
             with tarfile.open(archive, "r:gz") as package:
                 self._safe_extract(package, extracted)
-            destination = self.root / "runtime" / sha256[:12]
             destination.parent.mkdir(parents=True, exist_ok=True)
             staged = destination.parent / f".{destination.name}.new"
             if staged.exists():

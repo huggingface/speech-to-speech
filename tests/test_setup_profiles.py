@@ -12,12 +12,8 @@ def test_profile_round_trip_is_versioned_private_and_secret_free(tmp_path):
     profile = SetupProfile(
         name="default",
         pipeline={"stt": "parakeet-tdt", "llm_backend": "responses-api", "tts": "kokoro"},
-        credentials={
-            "llm": CredentialRef(service="speech-to-speech", account="endpoint-127.0.0.1-8080")
-        },
-        managed_services=[
-            ManagedService(kind="llm", model="ggml-org/gemma-4-12B-it-GGUF:Q4_0", runtime="llama.cpp")
-        ],
+        credentials={"llm": CredentialRef(service="speech-to-speech", account="endpoint-127.0.0.1-8080")},
+        managed_services=[ManagedService(kind="llm", model="ggml-org/gemma-4-12B-it-GGUF:Q4_0", runtime="llama.cpp")],
     )
 
     save_profile(profile, path)
