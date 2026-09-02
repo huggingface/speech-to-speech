@@ -232,3 +232,6 @@ uv.lock
 
 # JavaScript dependencies
 node_modules/
+
+# Local feature worktrees
+.worktrees/
