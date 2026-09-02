@@ -21,7 +21,7 @@ class IntegrationIO:
 
 
 class FakeKeychain:
-    reference = CredentialRef("speech-to-speech", "endpoint-integration")
+    reference = CredentialRef("endpoint-integration")
 
     def prompt_and_store(self, url):
         return self.reference
@@ -38,9 +38,9 @@ def test_discover_choose_save_resolve_and_launch_without_persisting_secret(tmp_p
     endpoint = EndpointCandidate("http://127.0.0.1:61234/v1", requires_auth=True)
     wizard = SetupWizard(
         io=IntegrationIO(),
-        inspect=lambda: SystemSnapshot("Darwin", "arm64", False, 24 * GIB, "gemma", 30 * GIB, 1, 1, True),
+        inspect=lambda: SystemSnapshot(24 * GIB, 30 * GIB, 1, 1, True),
         discover=lambda: [endpoint],
-        scan_caches=lambda custom: ([CachedModel(PARAKEET.model_id, PARAKEET.estimated_bytes, tmp_path)], []),
+        scan_caches=lambda custom: ([CachedModel(PARAKEET.model_id, PARAKEET.estimated_bytes)], []),
         install=lambda choice: installed.append(choice.model_id),
         save=lambda profile: save_profile(profile, profile_path),
         keychain=FakeKeychain(),

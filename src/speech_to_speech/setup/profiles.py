@@ -20,28 +20,20 @@ def save_profile(profile: SetupProfile, path: Path | None = None) -> Path:
     destination = path or default_profile_path()
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(asdict(profile), indent=2, sort_keys=True) + "\n"
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
-    temporary = Path(temporary_name)
+    temporary: Path | None = None
     try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", prefix=f".{destination.name}.", dir=destination.parent, delete=False
+        ) as handle:
+            temporary = Path(handle.name)
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, destination)
-    except BaseException:
-        os.close(descriptor) if _descriptor_is_open(descriptor) else None
-        temporary.unlink(missing_ok=True)
-        raise
+    finally:
+        if temporary:
+            temporary.unlink(missing_ok=True)
     return destination
-
-
-def _descriptor_is_open(descriptor: int) -> bool:
-    try:
-        os.fstat(descriptor)
-    except OSError:
-        return False
-    return True
 
 
 def load_profile(path: Path | None = None) -> SetupProfile:
@@ -55,15 +47,11 @@ def load_profile(path: Path | None = None) -> SetupProfile:
         )
     return SetupProfile(
         schema_version=version,
-        name=data.get("name", "default"),
         pipeline=data.get("pipeline", {}),
         credentials={name: CredentialRef(**value) for name, value in data.get("credentials", {}).items()},
         managed_services=[
             ManagedService(
-                kind=value["kind"],
                 model=value["model"],
-                runtime=value["runtime"],
-                args=tuple(value.get("args", ())),
                 model_path=value.get("model_path"),
             )
             for value in data.get("managed_services", [])

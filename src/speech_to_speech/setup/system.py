@@ -13,11 +13,7 @@ GIB = 1024**3
 
 @dataclass(frozen=True)
 class SystemSnapshot:
-    system: str
-    machine: str
-    translated: bool
     memory_bytes: int
-    memory_tier: str
     free_bytes: int
     audio_input_count: int
     audio_output_count: int
@@ -27,7 +23,6 @@ class SystemSnapshot:
 
 @dataclass(frozen=True)
 class ModelChoice:
-    kind: str
     label: str
     model_id: str
     runtime: str
@@ -40,17 +35,14 @@ class ModelChoice:
 class CachedModel:
     model_id: str
     size_bytes: int
-    path: Path
 
 
 @dataclass(frozen=True)
 class DiskEstimate:
     missing_bytes: int
     reserve_bytes: int
-    required_bytes: int
     free_bytes: int
     can_install: bool
-    forced: bool = False
 
 
 def _read_sysctl(name: str) -> int:
@@ -105,11 +97,7 @@ def inspect_system(
         diagnostics.append("The guided local installer requires Apple Silicon macOS (Darwin arm64).")
 
     return SystemSnapshot(
-        system=detected_system,
-        machine=detected_machine,
-        translated=translated,
         memory_bytes=memory_bytes,
-        memory_tier="gemma" if memory_bytes >= 24 * GIB else "small",
         free_bytes=free_bytes,
         audio_input_count=audio_input_count,
         audio_output_count=audio_output_count,
@@ -125,7 +113,7 @@ def scan_model_caches(
     managed_directory: Path | None = None,
 ) -> tuple[list[CachedModel], list[str]]:
     diagnostics: list[str] = []
-    found: dict[tuple[str, Path], CachedModel] = {}
+    found: dict[str, CachedModel] = {}
     try:
         if scan_hf is None:
             from huggingface_hub import scan_cache_dir
@@ -134,8 +122,8 @@ def scan_model_caches(
         else:
             cache = scan_hf()
         for repo in cache.repos:
-            model = CachedModel(repo.repo_id, int(repo.size_on_disk), Path(repo.repo_path))
-            found[(model.model_id, model.path)] = model
+            model = CachedModel(repo.repo_id, int(repo.size_on_disk))
+            _remember_largest(found, model)
     except Exception as error:
         diagnostics.append(f"Could not inspect the Hugging Face cache: {error}")
 
@@ -147,8 +135,8 @@ def scan_model_caches(
             for model_dir in custom.glob("models--*--*"):
                 model_id = model_dir.name.removeprefix("models--").replace("--", "/")
                 size = sum(path.stat().st_size for path in model_dir.rglob("*") if path.is_file())
-                model = CachedModel(model_id, size, model_dir)
-                found[(model.model_id, model.path)] = model
+                model = CachedModel(model_id, size)
+                _remember_largest(found, model)
         except OSError as error:
             diagnostics.append(f"Could not inspect custom model directory {custom}: {error}")
     if managed_directory and managed_directory.exists():
@@ -158,11 +146,16 @@ def scan_model_caches(
                     continue
                 model_id = model_dir.name.replace("--", "/")
                 size = sum(path.stat().st_size for path in model_dir.rglob("*") if path.is_file())
-                model = CachedModel(model_id, size, model_dir)
-                found[(model.model_id, model.path)] = model
+                model = CachedModel(model_id, size)
+                _remember_largest(found, model)
         except OSError as error:
             diagnostics.append(f"Could not inspect managed model directory {managed_directory}: {error}")
     return list(found.values()), diagnostics
+
+
+def _remember_largest(found: dict[str, CachedModel], model: CachedModel) -> None:
+    if model.size_bytes > (found[model.model_id].size_bytes if model.model_id in found else 0):
+        found[model.model_id] = model
 
 
 def estimate_required_space(
@@ -174,8 +167,7 @@ def estimate_required_space(
 ) -> DiskEstimate:
     cached_by_id: dict[str, int] = {}
     for model in cached_models:
-        cached_by_id[model.model_id] = cached_by_id.get(model.model_id, 0) + model.size_bytes
+        cached_by_id[model.model_id] = max(cached_by_id.get(model.model_id, 0), model.size_bytes)
     missing = sum(max(0, choice.estimated_bytes - cached_by_id.get(choice.model_id, 0)) for choice in choices)
     reserve = max(2 * GIB, (missing * 20 + 99) // 100)
-    required = missing + reserve
-    return DiskEstimate(missing, reserve, required, free_bytes, force or free_bytes >= required, force)
+    return DiskEstimate(missing, reserve, free_bytes, force or free_bytes >= missing + reserve)

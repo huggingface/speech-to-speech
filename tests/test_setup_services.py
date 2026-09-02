@@ -29,7 +29,7 @@ def test_managed_llama_uses_dynamic_loopback_port_and_expected_model(monkeypatch
         port_picker=lambda: 54321,
         readiness=lambda url: True,
     )
-    spec = ManagedService("llm", "ggml-org/gemma-4-12B-it-GGUF:Q4_0", "llama.cpp")
+    spec = ManagedService("ggml-org/gemma-4-12B-it-GGUF:Q4_0")
 
     managed = runner.start(spec)
 
@@ -53,7 +53,7 @@ def test_managed_service_reports_early_crash():
     )
 
     with pytest.raises(RuntimeError, match="exited with status 7"):
-        runner.start(ManagedService("llm", "org/model:Q4", "llama.cpp"))
+        runner.start(ManagedService("org/model:Q4"))
 
 
 def test_managed_llama_uses_installed_model_path_when_available():
@@ -66,7 +66,7 @@ def test_managed_llama_uses_installed_model_path_when_available():
         readiness=lambda url: True,
     )
 
-    runner.start(ManagedService("llm", "org/model:Q4", "llama.cpp", model_path="/models/model.Q4_0.gguf"))
+    runner.start(ManagedService("org/model:Q4", model_path="/models/model.Q4_0.gguf"))
 
     assert "-hf" not in commands[0]
     assert commands[0][commands[0].index("-m") + 1] == "/models/model.Q4_0.gguf"

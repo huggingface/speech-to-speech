@@ -8,7 +8,7 @@ from speech_to_speech.setup.system import ModelChoice
 
 
 def test_asset_installer_reuses_complete_model_cache(tmp_path):
-    choice = ModelChoice("stt", "Parakeet", "org/model", "mlx", 10)
+    choice = ModelChoice("Parakeet", "org/model", "mlx", 10)
     target = tmp_path / "models" / "org--model"
     target.mkdir(parents=True)
     (target / ".complete").touch()
@@ -21,7 +21,7 @@ def test_asset_installer_reuses_complete_model_cache(tmp_path):
 
 
 def test_asset_installer_uses_resumable_hub_download_and_patterns(tmp_path):
-    choice = ModelChoice("llm", "Gemma", "ggml-org/gemma", "llama.cpp", 10, allow_patterns=("*Q4_0*",))
+    choice = ModelChoice("Gemma", "ggml-org/gemma", "llama.cpp", 10, allow_patterns=("*Q4_0*",))
     calls = []
 
     def download(**kwargs):

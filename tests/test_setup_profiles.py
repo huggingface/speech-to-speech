@@ -10,10 +10,9 @@ from speech_to_speech.setup.profiles import load_profile, save_profile
 def test_profile_round_trip_is_versioned_private_and_secret_free(tmp_path):
     path = tmp_path / "default.json"
     profile = SetupProfile(
-        name="default",
         pipeline={"stt": "parakeet-tdt", "llm_backend": "responses-api", "tts": "kokoro"},
-        credentials={"llm": CredentialRef(service="speech-to-speech", account="endpoint-127.0.0.1-8080")},
-        managed_services=[ManagedService(kind="llm", model="ggml-org/gemma-4-12B-it-GGUF:Q4_0", runtime="llama.cpp")],
+        credentials={"llm": CredentialRef(account="endpoint-127.0.0.1-8080")},
+        managed_services=[ManagedService(model="ggml-org/gemma-4-12B-it-GGUF:Q4_0")],
     )
 
     save_profile(profile, path)
@@ -27,7 +26,7 @@ def test_profile_round_trip_is_versioned_private_and_secret_free(tmp_path):
 
 def test_profile_rejects_unknown_schema_version(tmp_path):
     path = tmp_path / "future.json"
-    path.write_text('{"schema_version": 99, "name": "default", "pipeline": {}}')
+    path.write_text('{"schema_version": 99, "pipeline": {}}')
 
     with pytest.raises(ValueError, match="schema version 99"):
         load_profile(path)

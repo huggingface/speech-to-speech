@@ -114,11 +114,11 @@ class SetupWizard:
         catalog = curated_catalog(system.memory_bytes)
 
         stt_endpoint, stt = self._choose_speech_endpoint(
-            "Which speech-to-text model?", catalog.choices["stt"], endpoints, "transcriptions"
+            "Which speech-to-text model?", catalog["stt"], endpoints, "transcriptions"
         )
-        llm_endpoint, llm = self._choose_llm(endpoints, catalog.choices["llm"])
+        llm_endpoint, llm = self._choose_llm(endpoints, catalog["llm"])
         tts_endpoint, tts = self._choose_speech_endpoint(
-            "Which text-to-speech model?", catalog.choices["tts"], endpoints, "speech"
+            "Which text-to-speech model?", catalog["tts"], endpoints, "speech"
         )
         install_choices = [
             *((stt,) if not stt_endpoint else ()),
@@ -187,10 +187,6 @@ class SetupWizard:
             return run_profiled_local(profile)
         return 0
 
-    def _choose_model(self, prompt: str, choices: Sequence[ModelChoice]) -> ModelChoice:
-        index = self.io.choose(prompt, [choice.label for choice in choices], default=0)
-        return choices[index]
-
     def _choose_speech_endpoint(
         self,
         prompt: str,
@@ -210,7 +206,7 @@ class SetupWizard:
         if selected < len(choices):
             return None, choices[selected]
         endpoint, model_id = endpoint_options[selected - len(choices)]
-        return endpoint, ModelChoice("endpoint", model_id, model_id, "endpoint", 0)
+        return endpoint, ModelChoice(model_id, model_id, "endpoint", 0)
 
     def _choose_llm(
         self, endpoints: Sequence[EndpointCandidate], choices: Sequence[ModelChoice]
@@ -226,7 +222,7 @@ class SetupWizard:
         selected = self.io.choose("Which language model?", labels, default=0)
         if selected < len(endpoint_options):
             endpoint, model_id = endpoint_options[selected]
-            return endpoint, ModelChoice("llm", model_id, model_id, "endpoint", 0)
+            return endpoint, ModelChoice(model_id, model_id, "endpoint", 0)
         return None, choices[selected - len(endpoint_options)]
 
     def _profile(
@@ -261,7 +257,7 @@ class SetupWizard:
             pipeline["responses_api_base_url"] = llm_endpoint.base_url
         elif llm.runtime == "llama.cpp":
             pipeline["llm_backend"] = "chat-completions"
-            profile.managed_services.append(ManagedService("llm", f"{llm.model_id}:{llm.variant}", "llama.cpp"))
+            profile.managed_services.append(ManagedService(f"{llm.model_id}:{llm.variant}"))
         else:
             pipeline["llm_backend"] = "mlx-lm"
         stored_by_url: dict[str, CredentialRef] = {}
@@ -344,8 +340,7 @@ def run_profiled_local(
             )
             process = runner.start(service)
             processes.append(process)
-            if service.kind == "llm":
-                config["responses_api_base_url"] = process.base_url
+            config["responses_api_base_url"] = process.base_url
         (pipeline_runner or run_pipeline_command)("local", _pipeline_args(config))
     finally:
         for process in reversed(processes):

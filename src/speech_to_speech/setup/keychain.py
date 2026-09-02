@@ -30,7 +30,7 @@ class MacOSKeychain:
         secret = self._secret_prompt(f"API key for {url}: ")
         if not secret:
             raise ValueError("An API key is required for the selected endpoint.")
-        reference = CredentialRef(KEYCHAIN_SERVICE, account_for_url(url))
+        reference = CredentialRef(account_for_url(url))
         result = self._runner(
             [
                 "/usr/bin/security",
@@ -39,7 +39,7 @@ class MacOSKeychain:
                 "-a",
                 reference.account,
                 "-s",
-                reference.service,
+                KEYCHAIN_SERVICE,
                 "-w",
             ],
             input=secret,
@@ -59,7 +59,7 @@ class MacOSKeychain:
                 "-a",
                 reference.account,
                 "-s",
-                reference.service,
+                KEYCHAIN_SERVICE,
                 "-w",
             ],
             capture_output=True,
@@ -78,7 +78,7 @@ class MacOSKeychain:
                 "-a",
                 reference.account,
                 "-s",
-                reference.service,
+                KEYCHAIN_SERVICE,
             ],
             capture_output=True,
             text=True,

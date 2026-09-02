@@ -9,7 +9,7 @@ def test_doctor_reports_healthy_profile():
     result = run_doctor(
         [],
         profile_loader=lambda: profile,
-        inspect=lambda: SystemSnapshot("Darwin", "arm64", False, 24 * GIB, "gemma", 20 * GIB, 1, 1, True),
+        inspect=lambda: SystemSnapshot(24 * GIB, 20 * GIB, 1, 1, True),
         credential_getter=lambda ref: "secret",
         emit=messages.append,
     )
@@ -20,11 +20,11 @@ def test_doctor_reports_healthy_profile():
 
 def test_doctor_reports_missing_keychain_and_audio_without_secret():
     messages = []
-    profile = SetupProfile(credentials={"llm": CredentialRef("speech-to-speech", "missing")})
+    profile = SetupProfile(credentials={"llm": CredentialRef("missing")})
     result = run_doctor(
         [],
         profile_loader=lambda: profile,
-        inspect=lambda: SystemSnapshot("Darwin", "arm64", False, 16 * GIB, "small", 20 * GIB, 0, 0, True),
+        inspect=lambda: SystemSnapshot(16 * GIB, 20 * GIB, 0, 0, True),
         credential_getter=lambda ref: (_ for _ in ()).throw(RuntimeError("secret=top-secret")),
         emit=messages.append,
     )

@@ -59,8 +59,6 @@ class ManagedServiceRunner:
         self._sleep = sleep
 
     def start(self, spec: ManagedService) -> ManagedProcess:
-        if spec.runtime != "llama.cpp":
-            raise ValueError(f"Unsupported managed runtime: {spec.runtime}")
         port = self._port_picker()
         base_url = f"http://127.0.0.1:{port}/v1"
         model_arguments = ["-m", spec.model_path] if spec.model_path else ["-hf", spec.model]
@@ -77,7 +75,6 @@ class ManagedServiceRunner:
             "1",
             "-fa",
             "on",
-            *spec.args,
         ]
         process = self._popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         managed = ManagedProcess(process, base_url)

@@ -14,7 +14,6 @@ from speech_to_speech.setup.system import ModelChoice
 
 Progress = Callable[[str], None]
 
-LLAMA_CPP_TAG = "b10760"
 LLAMA_CPP_MACOS_ARM64_URL = (
     "https://github.com/ggml-org/llama.cpp/releases/download/b10760/llama-b10760-bin-macos-arm64.tar.gz"
 )

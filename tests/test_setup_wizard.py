@@ -23,7 +23,7 @@ class ScriptedIO:
 
 
 def snapshot(memory=24 * GIB, free=40 * GIB):
-    return SystemSnapshot("Darwin", "arm64", False, memory, "gemma", free, 1, 1, True)
+    return SystemSnapshot(memory, free, 1, 1, True)
 
 
 def test_wizard_prefers_discovered_llm_and_small_local_speech_models(tmp_path):
@@ -81,7 +81,7 @@ def test_wizard_prompts_for_auth_only_after_protected_endpoint_is_selected(tmp_p
 
         def prompt_and_store(self, url):
             self.prompted.append(url)
-            return CredentialRef("speech-to-speech", "endpoint-test")
+            return CredentialRef("endpoint-test")
 
         def get(self, reference):
             return "runtime-key"
@@ -118,7 +118,7 @@ def test_profile_launch_resolves_secret_only_in_memory():
     )
     from speech_to_speech.setup.models import CredentialRef
 
-    profile.credentials["llm"] = CredentialRef("speech-to-speech", "endpoint-test")
+    profile.credentials["llm"] = CredentialRef("endpoint-test")
     calls = []
 
     run_profiled_local(
