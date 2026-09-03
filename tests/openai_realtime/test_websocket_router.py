@@ -323,9 +323,13 @@ class TestClientEventDispatch:
                     release_created_send.set()
 
                 created = ws.receive_json()
+                item_added = ws.receive_json()
+                part_added = ws.receive_json()
                 delta = ws.receive_json()
                 assert created["type"] == "response.created"
                 assert created["response"]["metadata"] == {"s2s_demo_create_id": "create_followup"}
+                assert item_added["type"] == "response.output_item.added"
+                assert part_added["type"] == "response.content_part.added"
                 assert delta["type"] == "response.output_audio_transcript.delta"
                 assert delta["delta"] == "prefetched"
 
@@ -430,6 +434,32 @@ class TestClientEventDispatch:
                 service.response._ensure_response(conn_id)
                 ws.send_json({"type": "response.cancel"})
                 assert ws.receive_json()["type"] == "response.done"
+
+    def test_response_cancel_closes_message_lifecycle(self, setup):
+        app, _, _, output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                output_queue.put(AssistantOutputEvent(text="partial"))
+                streamed = [ws.receive_json() for _ in range(4)]
+                assert [event["type"] for event in streamed] == [
+                    "response.created",
+                    "response.output_item.added",
+                    "response.content_part.added",
+                    "response.output_audio_transcript.delta",
+                ]
+
+                ws.send_json({"type": "response.cancel"})
+                terminal = [ws.receive_json() for _ in range(4)]
+                assert [event["type"] for event in terminal] == [
+                    "response.output_audio_transcript.done",
+                    "response.content_part.done",
+                    "response.output_item.done",
+                    "response.done",
+                ]
+                assert terminal[2]["item"]["status"] == "incomplete"
+                assert terminal[3]["response"]["status"] == "cancelled"
+                assert terminal[2]["item"] == terminal[3]["response"]["output"][0]
 
     def test_response_cancel_flushes_queues(self, setup):
         app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
@@ -539,7 +569,11 @@ class TestSendLoop:
                 msg1 = ws.receive_json()
                 assert msg1["type"] == "response.created"
                 msg2 = ws.receive_json()
-                assert msg2["type"] == "response.output_audio.delta"
+                assert msg2["type"] == "response.output_item.added"
+                msg3 = ws.receive_json()
+                assert msg3["type"] == "response.content_part.added"
+                msg4 = ws.receive_json()
+                assert msg4["type"] == "response.output_audio.delta"
 
     def test_audio_output_sends_response_created_and_delta(self, setup):
         app, _, _, output_queue, *_ = setup
@@ -551,8 +585,16 @@ class TestSendLoop:
                 assert msg1["type"] == "response.created"
                 assert msg1["response"]["status"] == "in_progress"
                 msg2 = ws.receive_json()
-                assert msg2["type"] == "response.output_audio.delta"
-                assert "delta" in msg2
+                assert msg2["type"] == "response.output_item.added"
+                msg3 = ws.receive_json()
+                assert msg3["type"] == "response.content_part.added"
+                msg4 = ws.receive_json()
+                assert msg4["type"] == "response.output_audio.delta"
+                assert "delta" in msg4
+                assert {msg2["response_id"], msg3["response_id"], msg4["response_id"]} == {msg1["response"]["id"]}
+                assert msg2["item"]["id"] == msg3["item_id"] == msg4["item_id"]
+                assert msg3["content_index"] == msg4["content_index"] == 0
+                assert msg2["output_index"] == msg3["output_index"] == msg4["output_index"] == 0
 
     def test_audio_output_batches_immediately_available_chunks(self, setup):
         app, _, _, output_queue, *_ = setup
@@ -567,15 +609,21 @@ class TestSendLoop:
                 assert msg1["type"] == "response.created"
 
                 msg2 = ws.receive_json()
-                assert msg2["type"] == "response.output_audio.delta"
-                decoded = base64.b64decode(msg2["delta"])
+                assert msg2["type"] == "response.output_item.added"
+                msg3 = ws.receive_json()
+                assert msg3["type"] == "response.content_part.added"
+                msg4 = ws.receive_json()
+                assert msg4["type"] == "response.output_audio.delta"
+                decoded = base64.b64decode(msg4["delta"])
                 assert len(decoded) == len(_pcm_bytes(512))
 
-                msg3 = ws.receive_json()
-                msg4 = ws.receive_json()
-                types = {msg3["type"], msg4["type"]}
-                assert "response.output_audio.done" in types
-                assert "response.done" in types
+                terminal = [ws.receive_json() for _ in range(4)]
+                assert [event["type"] for event in terminal] == [
+                    "response.output_audio.done",
+                    "response.content_part.done",
+                    "response.output_item.done",
+                    "response.done",
+                ]
 
     def test_end_marker_sends_finish_events(self, setup):
         app, _, _, output_queue, *_ = setup
@@ -584,13 +632,17 @@ class TestSendLoop:
                 ws.receive_json()
                 output_queue.put(_pcm_bytes(256))
                 ws.receive_json()  # response.created
+                ws.receive_json()  # output_item.added
+                ws.receive_json()  # content_part.added
                 ws.receive_json()  # audio delta
                 output_queue.put(PIPELINE_END)
-                msg1 = ws.receive_json()
-                msg2 = ws.receive_json()
-                types = {msg1["type"], msg2["type"]}
-                assert "response.output_audio.done" in types
-                assert "response.done" in types
+                terminal = [ws.receive_json() for _ in range(4)]
+                assert [event["type"] for event in terminal] == [
+                    "response.output_audio.done",
+                    "response.content_part.done",
+                    "response.output_item.done",
+                    "response.done",
+                ]
 
     def test_text_output_sends_pipeline_events(self, setup):
         app, _, _, _, text_output_queue, *_ = setup
@@ -747,6 +799,8 @@ class TestSendLoop:
                 output_queue.put(AudioOutput(audio=_pcm_bytes(512), cancel_generation=current_generation))
 
                 assert ws.receive_json()["type"] == "response.created"
+                assert ws.receive_json()["type"] == "response.output_item.added"
+                assert ws.receive_json()["type"] == "response.content_part.added"
                 delta = ws.receive_json()
 
                 assert delta["type"] == "response.output_audio.delta"

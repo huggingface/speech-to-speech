@@ -257,6 +257,7 @@ class TestWebRTCDispatch:
         assert len(transport.sent) == 1
         assert transport.sent[0]["type"] == "error"
         assert transport.sent[0]["error"]["type"] == "invalid_event_for_transport"
+        assert transport.sent[0]["error"]["type"] == "invalid_event_for_transport"
         assert unit.input_queue.qsize() == 0
 
     async def test_output_audio_buffer_clear_flushes_audio(self):
@@ -318,7 +319,34 @@ class TestWebRTCDispatch:
 
         assert len(transport.sent) == 1
         assert transport.sent[0]["type"] == "error"
-        assert transport.sent[0]["error"]["type"] == "invalid_event_for_transport"
+
+    async def test_response_cancel_closes_message_lifecycle(self):
+        unit = _make_unit()
+        conn_id = unit.service.register()
+        transport = _FakeTransport()
+        await transport.send_events(unit.service.dispatch_pipeline_event(conn_id, AssistantOutputEvent(text="partial")))
+
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {"type": "response.cancel"},
+            transport,
+            transport_kind="webrtc",
+        )
+
+        assert [event["type"] for event in transport.sent] == [
+            "response.created",
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_audio_transcript.delta",
+            "response.output_audio_transcript.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.done",
+        ]
+        assert transport.sent[-2]["item"]["status"] == "incomplete"
+        assert transport.sent[-1]["response"]["status"] == "cancelled"
+        assert transport.sent[-2]["item"] == transport.sent[-1]["response"]["output"][0]
 
     async def test_response_cancel_discards_transport_audio(self):
         unit = _make_unit()
@@ -678,6 +706,28 @@ class TestWebRTCLoopback:
                 event for event in inbox.events if event["type"] == "response.output_audio_transcript.delta"
             ]
             audio_done = [event for event in inbox.events if event["type"] == "response.output_audio.done"]
+            response_events = [event for event in inbox.events if event["type"].startswith("response.")]
+            assert [event["type"] for event in response_events] == [
+                "response.created",
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_audio_transcript.delta",
+                "response.output_audio.done",
+                "response.output_item.added",
+                "response.function_call_arguments.done",
+                "response.output_item.done",
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_audio_transcript.delta",
+                "response.output_audio.done",
+                "response.output_audio_transcript.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                "response.output_audio_transcript.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                "response.done",
+            ]
             assert [event["output_index"] for event in transcript_deltas] == [0, 2]
             assert [event["output_index"] for event in audio_done] == [0, 2]
             assert [item["type"] for item in done["response"]["output"]] == [

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from openai.types.realtime import (
     ConversationItem,
@@ -10,6 +10,8 @@ from openai.types.realtime import (
     ResponseAudioDoneEvent,
     ResponseAudioTranscriptDeltaEvent,
     ResponseAudioTranscriptDoneEvent,
+    ResponseContentPartAddedEvent,
+    ResponseContentPartDoneEvent,
     ResponseCreatedEvent,
     ResponseCreateEvent,
     ResponseDoneEvent,
@@ -25,6 +27,14 @@ from openai.types.realtime.realtime_response import Audio, AudioOutput
 from openai.types.realtime.realtime_response_status import Error as RealtimeResponseStatusError
 from openai.types.realtime.realtime_response_status import RealtimeResponseStatus
 from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
+from openai.types.realtime.realtime_response_usage_input_token_details import (
+    RealtimeResponseUsageInputTokenDetails,
+)
+from openai.types.realtime.realtime_response_usage_output_token_details import (
+    RealtimeResponseUsageOutputTokenDetails,
+)
+from openai.types.realtime.response_content_part_added_event import Part as AddedContentPart
+from openai.types.realtime.response_content_part_done_event import Part as DoneContentPart
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
 from speech_to_speech.LLM.chat import ChatItemError, add_supported_item
@@ -454,7 +464,17 @@ class ResponseHandler(RealtimeBaseHandler):
             metadata=metadata,
             output=self._build_output_items(conn_id, status),
             usage=RealtimeResponseUsage(
+                input_token_details=RealtimeResponseUsageInputTokenDetails(
+                    audio_tokens=0,
+                    cached_tokens=0,
+                    image_tokens=0,
+                    text_tokens=st.response_usage.input_tokens,
+                ),
                 input_tokens=st.response_usage.input_tokens,
+                output_token_details=RealtimeResponseUsageOutputTokenDetails(
+                    audio_tokens=0,
+                    text_tokens=st.response_usage.output_tokens,
+                ),
                 output_tokens=st.response_usage.output_tokens,
                 total_tokens=st.response_usage.input_tokens + st.response_usage.output_tokens,
             ),
@@ -482,18 +502,10 @@ class ResponseHandler(RealtimeBaseHandler):
         output_by_index: dict[int, ConversationItem] = {}
         for pending in st.pending_text_outputs:
             output_index = int(pending["output_index"])
-            text = self._assistant_text(pending, response_wants_audio(st.current_response_params))
-            if response_wants_audio(st.current_response_params):
-                content = Content(type="output_audio", transcript=text)
-            else:
-                content = Content(type="output_text", text=text)
-            output_by_index[output_index] = RealtimeConversationItemAssistantMessage(
-                type="message",
-                role="assistant",
-                id=str(pending["item_id"]),
-                object="realtime.item",
-                status=assistant_status,
-                content=[content],
+            output_by_index[output_index] = self._build_message_item(
+                pending,
+                response_wants_audio(st.current_response_params),
+                assistant_status,
             )
 
         for output_index, call in st.pending_function_calls.items():
@@ -514,6 +526,137 @@ class ResponseHandler(RealtimeBaseHandler):
         if wants_audio:
             return " ".join(str(part).strip() for part in parts if str(part).strip())
         return "".join(str(part) for part in parts)
+
+    def _build_message_item(
+        self,
+        pending: dict[str, object],
+        wants_audio: bool,
+        status: Literal["completed", "incomplete"],
+    ) -> RealtimeConversationItemAssistantMessage:
+        text = self._assistant_text(pending, wants_audio)
+        content = (
+            Content(type="output_audio", transcript=text) if wants_audio else Content(type="output_text", text=text)
+        )
+        return RealtimeConversationItemAssistantMessage(
+            type="message",
+            role="assistant",
+            id=str(pending["item_id"]),
+            object="realtime.item",
+            status=status,
+            content=[content],
+        )
+
+    def _begin_message_output(
+        self,
+        conn_id: str,
+        pending: dict[str, object],
+        wants_audio: bool,
+    ) -> list[ServerEvent]:
+        """Open one assistant message and its single content part."""
+        if pending.get("lifecycle_started"):
+            return []
+        pending["lifecycle_started"] = True
+        resp_id, _ = self._ensure_response(conn_id)
+        item_id = str(pending["item_id"])
+        output_index = cast(int, pending["output_index"])
+        item = RealtimeConversationItemAssistantMessage(
+            type="message",
+            role="assistant",
+            id=item_id,
+            object="realtime.item",
+            status="in_progress",
+            content=[],
+        )
+        part = (
+            AddedContentPart(type="audio", audio="", transcript="")
+            if wants_audio
+            else AddedContentPart(type="text", text="")
+        )
+        return [
+            ResponseOutputItemAddedEvent(
+                type="response.output_item.added",
+                event_id=self._next_event_id(),
+                item=item,
+                output_index=output_index,
+                response_id=resp_id,
+            ),
+            ResponseContentPartAddedEvent(
+                type="response.content_part.added",
+                event_id=self._next_event_id(),
+                content_index=0,
+                item_id=item_id,
+                output_index=output_index,
+                part=part,
+                response_id=resp_id,
+            ),
+        ]
+
+    def _finish_message_output(
+        self,
+        conn_id: str,
+        pending: dict[str, object],
+        status: Literal["completed", "incomplete"],
+        wants_audio: bool,
+        response_key: str | None = None,
+    ) -> list[ServerEvent]:
+        """Close one assistant message after its modality-specific done events."""
+        if pending.get("lifecycle_done"):
+            return []
+        events = self._begin_message_output(conn_id, pending, wants_audio)
+        resp_id, _ = self._ensure_response(conn_id, response_key)
+        item_id = str(pending["item_id"])
+        output_index = cast(int, pending["output_index"])
+        text = self._assistant_text(pending, wants_audio)
+        if wants_audio:
+            if text:
+                events.append(
+                    ResponseAudioTranscriptDoneEvent(
+                        type="response.output_audio_transcript.done",
+                        event_id=self._next_event_id(),
+                        content_index=0,
+                        item_id=item_id,
+                        output_index=output_index,
+                        response_id=resp_id,
+                        transcript=text,
+                    )
+                )
+            part = DoneContentPart(type="audio", audio="", transcript=text)
+        else:
+            events.append(
+                ResponseTextDoneEvent(
+                    type="response.output_text.done",
+                    event_id=self._next_event_id(),
+                    content_index=0,
+                    item_id=item_id,
+                    output_index=output_index,
+                    response_id=resp_id,
+                    text=text,
+                )
+            )
+            part = DoneContentPart(type="text", text=text)
+        item = self._build_message_item(pending, wants_audio, status)
+        events.extend(
+            [
+                ResponseContentPartDoneEvent(
+                    type="response.content_part.done",
+                    event_id=self._next_event_id(),
+                    content_index=0,
+                    item_id=item_id,
+                    output_index=output_index,
+                    part=part,
+                    response_id=resp_id,
+                ),
+                ResponseOutputItemDoneEvent(
+                    type="response.output_item.done",
+                    event_id=self._next_event_id(),
+                    item=item,
+                    output_index=output_index,
+                    response_id=resp_id,
+                ),
+            ]
+        )
+        pending["lifecycle_done"] = True
+        return events
 
     # ── Public handlers ───────────────────────────
 
@@ -686,40 +829,11 @@ class ResponseHandler(RealtimeBaseHandler):
                 status = "failed"
             resp_id, _ = self._ensure_response(conn_id)
             wants_audio = response_wants_audio(st.current_response_params)
-            function_call_only = bool(st.pending_function_calls) and not st.pending_text_outputs
-            if wants_audio and not function_call_only:
+            if wants_audio and st.pending_text_outputs:
                 events.extend(self.finish_audio_output(conn_id, response_key))
-                for pending in st.pending_text_outputs:
-                    transcript = self._assistant_text(pending, wants_audio=True)
-                    if not transcript:
-                        continue
-                    events.append(
-                        ResponseAudioTranscriptDoneEvent(
-                            type="response.output_audio_transcript.done",
-                            event_id=self._next_event_id(),
-                            content_index=0,
-                            item_id=str(pending["item_id"]),
-                            output_index=int(pending["output_index"]),
-                            response_id=resp_id,
-                            transcript=transcript,
-                        )
-                    )
-            else:
-                for pending in st.pending_text_outputs:
-                    text = self._assistant_text(pending, wants_audio=False)
-                    if not text:
-                        continue
-                    events.append(
-                        ResponseTextDoneEvent(
-                            type="response.output_text.done",
-                            event_id=self._next_event_id(),
-                            content_index=0,
-                            item_id=str(pending["item_id"]),
-                            output_index=int(pending["output_index"]),
-                            response_id=resp_id,
-                            text=text,
-                        )
-                    )
+            item_status: Literal["completed", "incomplete"] = "completed" if status == "completed" else "incomplete"
+            for pending in st.pending_text_outputs:
+                events.extend(self._finish_message_output(conn_id, pending, item_status, wants_audio, response_key))
             terminal_response = self._build_response(conn_id, status, reason)
             function_outputs = {
                 getattr(item, "call_id", None): item
@@ -846,6 +960,7 @@ class ResponseHandler(RealtimeBaseHandler):
                 else:
                     st.pending_text_outputs.append({"item_id": item_id, "output_index": output_idx, "parts": []})
                     pending = st.pending_text_outputs[-1]
+                events.extend(self._begin_message_output(conn_id, pending, wants_audio))
                 parts = pending["parts"]
                 assert isinstance(parts, list)
                 if wants_audio:
