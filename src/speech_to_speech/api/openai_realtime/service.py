@@ -215,9 +215,9 @@ class ConnState(BaseModel):
     current_output_index: int | None = None
     current_output_kind: Literal["text", "tool_call"] | None = None
     audio_output_started: bool = False
-    # Each entry contains item_id, output_index, and the contiguous text parts
-    # for one assistant message. Kept as plain internal data to avoid coupling
-    # connection state to protocol event models.
+    # Each entry contains one message's identity, text parts, and lifecycle
+    # flags. Kept as plain internal data to avoid coupling connection state to
+    # protocol event models.
     pending_text_outputs: list[dict[str, Any]] = Field(default_factory=list)
     # Keyed by output index so response.done can preserve interleaving with
     # assistant message items.

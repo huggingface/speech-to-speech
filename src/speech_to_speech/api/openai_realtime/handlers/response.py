@@ -658,6 +658,41 @@ class ResponseHandler(RealtimeBaseHandler):
         pending["lifecycle_done"] = True
         return events
 
+    def _finish_current_message_output(
+        self,
+        conn_id: str,
+        response_key: str | None = None,
+    ) -> list[ServerEvent]:
+        """Close the active message before the next output item begins."""
+        st = self._state(conn_id)
+        output_index = st.pending_assistant_output_index
+        if output_index is None and st.current_output_kind == "text":
+            output_index = st.current_output_index
+        if output_index is None:
+            return []
+        pending = next(
+            (
+                item
+                for item in st.pending_text_outputs
+                if int(item["output_index"]) == output_index and not item.get("lifecycle_done")
+            ),
+            None,
+        )
+        if pending is None:
+            return []
+        wants_audio = response_wants_audio(st.current_response_params)
+        events = self.finish_audio_output(conn_id, response_key) if wants_audio else []
+        events.extend(
+            self._finish_message_output(
+                conn_id,
+                pending,
+                "completed",
+                wants_audio,
+                response_key,
+            )
+        )
+        return events
+
     # ── Public handlers ───────────────────────────
 
     def handle_response_create(self, conn_id: str, event: ResponseCreateEvent) -> ServerEvent | None:
@@ -918,7 +953,7 @@ class ResponseHandler(RealtimeBaseHandler):
                 # The side channel already exposed this tool call. Its ordered
                 # copy still marks the point where preceding audio is complete.
                 if any(isinstance(part, AssistantToolCallPart) for part in event.parts):
-                    return self.finish_audio_output(conn_id, event.response_key)
+                    return self._finish_current_message_output(conn_id, event.response_key)
                 logger.debug("Dropping duplicate assistant output sequence %d", output_sequence)
                 return events
             if output_sequence > st.next_assistant_output_sequence:
@@ -995,7 +1030,7 @@ class ResponseHandler(RealtimeBaseHandler):
                 st.last_item_id = item_id
             elif isinstance(part, AssistantToolCallPart):
                 if not _early_tool_call:
-                    events.extend(self.finish_audio_output(conn_id, event.response_key))
+                    events.extend(self._finish_current_message_output(conn_id, event.response_key))
                 tool = part.tool
                 function_item_id = tool.id or _generate_id("item")
                 output_idx, function_item_id = self._output_part_context(

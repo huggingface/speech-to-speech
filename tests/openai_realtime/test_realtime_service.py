@@ -3055,6 +3055,9 @@ class TestDispatchPipelineEvent:
             "response.output_item.added",
             "response.content_part.added",
             "response.output_audio_transcript.delta",
+            "response.output_audio_transcript.done",
+            "response.content_part.done",
+            "response.output_item.done",
             "response.output_item.added",
             "response.function_call_arguments.done",
             "response.output_item.done",
@@ -3063,7 +3066,7 @@ class TestDispatchPipelineEvent:
             "response.output_item.done",
         ]
         transcript = events[2]
-        first_tool = events[4]
+        first_tool = events[7]
         assert isinstance(transcript, ResponseAudioTranscriptDeltaEvent)
         assert transcript.output_index == 0
         assert isinstance(first_tool, ResponseFunctionCallArgumentsDoneEvent)
@@ -3071,13 +3074,13 @@ class TestDispatchPipelineEvent:
         assert first_tool.name == "get_weather"
         assert first_tool.call_id == "c1"
         assert json.loads(first_tool.arguments) == {"city": "Paris"}
-        assert isinstance(events[5], ResponseOutputItemDoneEvent)
-        assert events[5].item.status == "completed"
-        assert events[5].item.call_id == "c1"
-        assert isinstance(events[7], ResponseFunctionCallArgumentsDoneEvent)
-        assert events[7].output_index == 2
         assert isinstance(events[8], ResponseOutputItemDoneEvent)
-        assert events[8].item.call_id == "c2"
+        assert events[8].item.status == "completed"
+        assert events[8].item.call_id == "c1"
+        assert isinstance(events[10], ResponseFunctionCallArgumentsDoneEvent)
+        assert events[10].output_index == 2
+        assert isinstance(events[11], ResponseOutputItemDoneEvent)
+        assert events[11].item.call_id == "c2"
 
     def test_assistant_text_tools_only(self, service, conn_id):
         service.response._ensure_response(conn_id)
@@ -3120,6 +3123,9 @@ class TestDispatchPipelineEvent:
             "response.output_item.added",
             "response.content_part.added",
             "response.output_audio_transcript.delta",
+            "response.output_audio_transcript.done",
+            "response.content_part.done",
+            "response.output_item.done",
             "response.output_item.added",
             "response.function_call_arguments.done",
             "response.output_item.done",
@@ -3139,7 +3145,6 @@ class TestDispatchPipelineEvent:
         transcript_done = [event for event in terminal if isinstance(event, ResponseAudioTranscriptDoneEvent)]
         response_done = next(event for event in terminal if isinstance(event, ResponseDoneEvent))
         assert [(event.output_index, event.transcript) for event in transcript_done] == [
-            (1, "between"),
             (3, "after"),
         ]
         assert [item.type for item in response_done.response.output] == [
@@ -3251,7 +3256,12 @@ class TestDispatchPipelineEvent:
                 parts=[tool],
             ),
         )
-        assert [event.type for event in ordered_tool] == ["response.output_audio.done"]
+        assert [event.type for event in ordered_tool] == [
+            "response.output_audio.done",
+            "response.output_audio_transcript.done",
+            "response.content_part.done",
+            "response.output_item.done",
+        ]
 
         terminal = service.finish_response(conn_id)
         response_done = next(event for event in terminal if isinstance(event, ResponseDoneEvent))
@@ -3319,6 +3329,9 @@ class TestDispatchPipelineEvent:
             "response.output_item.added",
             "response.content_part.added",
             "response.output_text.delta",
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
             "response.output_item.added",
             "response.function_call_arguments.done",
             "response.output_item.done",
@@ -3326,11 +3339,11 @@ class TestDispatchPipelineEvent:
             "response.content_part.added",
             "response.output_text.delta",
         ]
-        assert [event.output_index for event in events] == [0, 0, 0, 1, 1, 1, 2, 2, 2]
+        assert [event.output_index for event in events] == [0, 0, 0, 0, 0, 0, 1, 1, 1, 2, 2, 2]
 
         done_events = service.finish_response(conn_id)
         text_done = [event for event in done_events if isinstance(event, ResponseTextDoneEvent)]
-        assert [(event.output_index, event.text) for event in text_done] == [(0, "before"), (2, "after")]
+        assert [(event.output_index, event.text) for event in text_done] == [(2, "after")]
         response_done = done_events[-1]
         assert isinstance(response_done, ResponseDoneEvent)
         assert [item.type for item in response_done.response.output] == ["message", "function_call", "message"]
@@ -3423,14 +3436,16 @@ class TestDispatchPipelineEvent:
         assert isinstance(events[0], ResponseOutputItemAddedEvent)
         assert isinstance(events[1], ResponseContentPartAddedEvent)
         assert isinstance(events[2], ResponseTextDeltaEvent)
-        assert not any(isinstance(e, ResponseTextDoneEvent) for e in events)
-        assert isinstance(events[3], ResponseOutputItemAddedEvent)
-        tool_event = events[4]
+        assert isinstance(events[3], ResponseTextDoneEvent)
+        assert isinstance(events[4], ResponseContentPartDoneEvent)
+        assert isinstance(events[5], ResponseOutputItemDoneEvent)
+        assert isinstance(events[6], ResponseOutputItemAddedEvent)
+        tool_event = events[7]
         assert isinstance(tool_event, ResponseFunctionCallArgumentsDoneEvent)
         assert tool_event.output_index == 1
         assert tool_event.name == "get_weather"
-        assert isinstance(events[5], ResponseOutputItemDoneEvent)
-        assert events[5].item.call_id == "c1"
+        assert isinstance(events[8], ResponseOutputItemDoneEvent)
+        assert events[8].item.call_id == "c1"
 
     def test_assistant_text_waits_for_pending_reopen_and_drops_confirmed_stale_turn(
         self,

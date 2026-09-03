@@ -945,6 +945,15 @@ class TestSDKToolCalling:
             assert event.type == TRANSCRIPT_DELTA
             assert event.delta == "Checking weather"
 
+            # The ordered tool call closes the message item before its own item begins.
+            event = await _recv(conn)
+            assert event.type == TRANSCRIPT_DONE
+            event = await _recv(conn)
+            assert event.type == CONTENT_PART_DONE
+            event = await _recv(conn)
+            assert event.type == OUTPUT_ITEM_DONE
+            assert event.item.type == "message"
+
             event = await _recv(conn)
             assert event.type == OUTPUT_ITEM_ADDED
             assert event.item.call_id == "call_xyz"
@@ -960,14 +969,6 @@ class TestSDKToolCalling:
             assert event.item.call_id == "call_xyz"
             assert event.item.status == "completed"
 
-            event = await _recv(conn)
-            assert event.type == TRANSCRIPT_DONE
-
-            event = await _recv(conn)
-            assert event.type == CONTENT_PART_DONE
-            event = await _recv(conn)
-            assert event.type == OUTPUT_ITEM_DONE
-            assert event.item.type == "message"
             event = await _recv(conn)
             assert event.type == RESPONSE_DONE
 
