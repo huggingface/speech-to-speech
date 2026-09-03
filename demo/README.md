@@ -217,6 +217,7 @@ leaves the app unmetered. Tunable via env:
 |-----|---------|------|
 | `LIMIT_ANON_SEC` | `300` | Daily seconds for anonymous visitors (5 min) |
 | `LIMIT_FREE_SEC` | `600` | Daily seconds for signed-in non-PRO users (10 min) |
+| `LB_HF_TOKEN` | _(falls back to user OAuth)_ | Optional Space secret sent in standard `Authorization` to authenticate requests at the HF Inference Endpoint ingress; per-user attribution continues through `X-Reachy-Mini-Authorization` |
 | `UNLIMITED_ORGS` | _(adds to defaults)_ | Extra HF org names whose members get **unlimited** usage, like PRO |
 | `USAGE_HASH_SECRET` | _(random)_ | HMAC secret for hashing identity keys + signing the anon cookie |
 
