@@ -30,6 +30,7 @@ from speech_to_speech.arguments_classes.parakeet_tdt_arguments import (
     ParakeetTDTSTTHandlerArguments,
 )
 from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
+from speech_to_speech.arguments_classes.qwen3_asr_stt_arguments import Qwen3ASRSTTHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
     ResponsesApiLanguageModelHandlerArguments,
@@ -380,6 +381,17 @@ STT_BACKENDS = build_backend_registry(
             ),
             config_prefix="paraformer_stt",
             required_extra="paraformer",
+        ),
+        BackendSpec(
+            "qwen3-asr",
+            "stt",
+            Qwen3ASRSTTHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.STT.qwen3_asr_handler",
+                "Qwen3ASRSTTHandler",
+                attach_speculative_turns=True,
+            ),
+            config_prefix="qwen3_asr",
         ),
         BackendSpec(
             "openai",
