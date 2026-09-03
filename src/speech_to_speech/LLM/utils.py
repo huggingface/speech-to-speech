@@ -208,6 +208,8 @@ WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
     "kk": "kazakh",
     "sq": "albanian",
     "sw": "swahili",
+    # Qwen3-ASR reports Filipino as "fil"; Whisper only knows "tl" (Tagalog) above.
+    "fil": "filipino",
     "gl": "galician",
     "mr": "marathi",
     "pa": "punjabi",

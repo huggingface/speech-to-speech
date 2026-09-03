@@ -47,6 +47,7 @@ _STT_HANDLER_MODULES = [
     "speech_to_speech.STT.mlx_audio_whisper_handler",
     "speech_to_speech.STT.lightning_whisper_mlx_handler",
     "speech_to_speech.STT.faster_whisper_handler",
+    "speech_to_speech.STT.qwen3_asr_handler",
 ]
 
 # These have no optional top-level dependency, so a skip here means something is wrong
@@ -55,6 +56,7 @@ _ALWAYS_IMPORTABLE = {
     "speech_to_speech.STT.parakeet_tdt_handler",
     "speech_to_speech.STT.whisper_stt_handler",
     "speech_to_speech.STT.mlx_audio_whisper_handler",
+    "speech_to_speech.STT.qwen3_asr_handler",
     # Importable via the stub above, so a skip here would mean the stub stopped working.
     "speech_to_speech.STT.faster_whisper_handler",
 }
@@ -120,7 +122,8 @@ def test_language_names_are_lowercase_and_non_empty():
 
 def test_whisper_language_coverage_is_complete():
     """Whisper reports 100 languages; a missing name silently drops the prompt."""
-    assert len(WHISPER_LANGUAGE_TO_LLM_LANGUAGE) == 100
+    # Other backends add codes Whisper lacks (Qwen3-ASR reports Filipino as "fil"), hence at least.
+    assert len(WHISPER_LANGUAGE_TO_LLM_LANGUAGE) >= 100
     # Spot-check languages that only Whisper-family backends can report.
     for code in ("ar", "tr", "he", "th", "yue", "haw"):
         assert code in WHISPER_LANGUAGE_TO_LLM_LANGUAGE
