@@ -64,6 +64,11 @@ SERPER_KEY = os.environ.get("SERPER_API_KEY", "").strip()
 # When empty, the user may instead set a direct s2s server URL in Settings and the
 # browser connects to it straight (no load balancer).
 LOAD_BALANCER_URL = os.environ.get("LOAD_BALANCER_URL", "").strip()
+# Optional service credential for the Hugging Face Inference Endpoint ingress in
+# front of the load balancer. Keep this separate from the visitor's OAuth token:
+# ingress consumes the standard Authorization header, while the load-balancer
+# app receives the dedicated Reachy header below for per-user attribution.
+LB_HF_TOKEN = os.environ.get("LB_HF_TOKEN", "").strip()
 # Direct s2s server URL pinned by the deploy. Takes priority over the load
 # balancer: when set, ALL LB logic is disabled (no /api/session proxy, no queue,
 # no limiter, no sign-in) and the browser connects to this URL directly. Unlike
@@ -133,6 +138,14 @@ SERPER_URL = "https://google.serper.dev/search"
 MAX_RESULTS = 5
 HERE = os.path.dirname(os.path.abspath(__file__))
 LB_USER_AGENT = "speech-to-speech-demo"
+LB_FAILURE_HEADER_NAMES = (
+    "content-type",
+    "server",
+    "x-request-id",
+    "ratelimit",
+    "ratelimit-policy",
+    "retry-after",
+)
 
 app = FastAPI(title="s2s-demo")
 
@@ -403,7 +416,7 @@ async def session(request: Request):
     if lb.status_code != 200:
         # The LB's error body may name the reason (e.g. capacity); it carries no
         # secret, so relay a trimmed copy.
-        logger.warning("Session handshake failed %s: %s", lb.status_code, lb.text[:300])
+        _log_load_balancer_failure("session handshake", lb)
         raise HTTPException(status_code=502, detail=f"Session handshake failed ({lb.status_code}).")
 
     data = lb.json()
@@ -435,21 +448,43 @@ def _login_required_response(reason: str, set_cookie=None) -> JSONResponse:
     return resp
 
 
-def _load_balancer_headers(request: Request) -> dict[str, str]:
+def _load_balancer_headers(request: Request | None = None) -> dict[str, str]:
     """Headers for the server-to-server session allocation request.
 
-    The dedicated authorization header matches the Reachy Mini client and lets
-    the load balancer validate and attribute an optional HF user token without
-    exposing it to browser JavaScript. Anonymous visitors send no credential.
+    A dedicated service token authenticates the Space to the HF ingress. The
+    signed-in visitor's OAuth token remains in the Reachy-specific header so the
+    load-balancer app can validate and attribute that user after ingress consumes
+    the standard Authorization header. When no service token is configured, a
+    signed-in user's token authenticates both hops; anonymous use remains allowed.
     """
     headers = {
         "Content-Type": "application/json",
         "User-Agent": LB_USER_AGENT,
     }
-    token = auth.current_access_token(request)
-    if token:
-        headers["X-Reachy-Mini-Authorization"] = f"Bearer {token}"
+    user_token = auth.current_access_token(request) if request is not None else None
+    gateway_token = LB_HF_TOKEN or user_token
+    if gateway_token:
+        headers["Authorization"] = f"Bearer {gateway_token}"
+    if user_token:
+        headers["X-Reachy-Mini-Authorization"] = f"Bearer {user_token}"
     return headers
+
+
+def _log_load_balancer_failure(operation: str, response: httpx.Response) -> None:
+    """Log enough ingress metadata to diagnose failures without credentials."""
+    response_headers = {
+        name: value
+        for name in LB_FAILURE_HEADER_NAMES
+        if (value := response.headers.get(name))
+    }
+    body = " ".join(response.text[:500].split())
+    logger.warning(
+        "Load balancer %s failed status=%s headers=%s body=%s",
+        operation,
+        response.status_code,
+        response_headers,
+        body,
+    )
 
 
 @app.get("/api/queue/{queue_id}")
@@ -470,7 +505,7 @@ async def queue_status(queue_id: str, request: Request):
     url = f"{LOAD_BALANCER_URL.rstrip('/')}/queue/{queue_id}"
     try:
         async with httpx.AsyncClient(timeout=15.0) as http:
-            lb = await http.get(url)
+            lb = await http.get(url, headers=_load_balancer_headers(request))
     except httpx.RequestError as exc:
         logger.warning("Load balancer unreachable: %r", exc)
         raise HTTPException(status_code=502, detail="Speech service unreachable.")
@@ -484,7 +519,7 @@ async def queue_status(queue_id: str, request: Request):
         return resp
 
     if lb.status_code != 200:
-        logger.warning("Queue poll failed %s: %s", lb.status_code, lb.text[:300])
+        _log_load_balancer_failure("queue poll", lb)
         raise HTTPException(status_code=502, detail=f"Queue poll failed ({lb.status_code}).")
 
     data = lb.json()
@@ -513,11 +548,11 @@ async def queue_status(queue_id: str, request: Request):
 
 
 @app.delete("/api/queue/{queue_id}")
-async def queue_leave(queue_id: str):
+async def queue_leave(queue_id: str, request: Request):
     """Leave the queue from the explicit 'Leave queue' button (a real fetch)."""
     if not LOAD_BALANCER_URL:
         raise HTTPException(status_code=404, detail="Not found.")
-    await _lb_leave(queue_id)
+    await _lb_leave(queue_id, request)
     return {"ok": True}
 
 
@@ -529,7 +564,7 @@ async def queue_end(request: Request):
         raise HTTPException(status_code=404, detail="Not found.")
     qid = await _queue_id(request)
     if qid:
-        await _lb_leave(qid)
+        await _lb_leave(qid, request)
     return {"ok": True}
 
 
@@ -553,12 +588,14 @@ async def _finalize_grant(data, keys, tier, tracked, set_cookie):
     return resp
 
 
-async def _lb_leave(queue_id: str) -> None:
+async def _lb_leave(queue_id: str, request: Request | None = None) -> None:
     """Best-effort: tell the LB to drop a waiting ticket."""
     url = f"{LOAD_BALANCER_URL.rstrip('/')}/queue/{queue_id}"
     try:
         async with httpx.AsyncClient(timeout=5.0) as http:
-            await http.delete(url)
+            response = await http.delete(url, headers=_load_balancer_headers(request))
+            if response.status_code not in {200, 404}:
+                _log_load_balancer_failure("queue leave", response)
     except httpx.RequestError as exc:
         logger.warning("Queue leave failed: %r", exc)
 

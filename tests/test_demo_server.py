@@ -194,7 +194,8 @@ def test_expiring_oauth_token_requires_fresh_login(monkeypatch):
     }
 
 
-def test_load_balancer_headers_forward_signed_in_user_token(monkeypatch):
+def test_load_balancer_headers_use_user_token_for_both_hops_without_service_token(monkeypatch):
+    monkeypatch.setattr(demo_server, "LB_HF_TOKEN", "")
     monkeypatch.setattr(
         demo_server.auth,
         "current_access_token",
@@ -202,6 +203,23 @@ def test_load_balancer_headers_forward_signed_in_user_token(monkeypatch):
     )
 
     assert demo_server._load_balancer_headers(object()) == {
+        "Authorization": "Bearer hf_user_token",
+        "Content-Type": "application/json",
+        "User-Agent": "speech-to-speech-demo",
+        "X-Reachy-Mini-Authorization": "Bearer hf_user_token",
+    }
+
+
+def test_load_balancer_headers_keep_service_and_user_tokens_separate(monkeypatch):
+    monkeypatch.setattr(demo_server, "LB_HF_TOKEN", "hf_service_token")
+    monkeypatch.setattr(
+        demo_server.auth,
+        "current_access_token",
+        lambda request: "hf_user_token",
+    )
+
+    assert demo_server._load_balancer_headers(object()) == {
+        "Authorization": "Bearer hf_service_token",
         "Content-Type": "application/json",
         "User-Agent": "speech-to-speech-demo",
         "X-Reachy-Mini-Authorization": "Bearer hf_user_token",
@@ -209,6 +227,7 @@ def test_load_balancer_headers_forward_signed_in_user_token(monkeypatch):
 
 
 def test_load_balancer_headers_keep_anonymous_requests_credential_free(monkeypatch):
+    monkeypatch.setattr(demo_server, "LB_HF_TOKEN", "")
     monkeypatch.setattr(demo_server.auth, "current_access_token", lambda request: None)
 
     headers = demo_server._load_balancer_headers(object())
@@ -217,6 +236,39 @@ def test_load_balancer_headers_keep_anonymous_requests_credential_free(monkeypat
         "Content-Type": "application/json",
         "User-Agent": "speech-to-speech-demo",
     }
+
+
+def test_load_balancer_headers_authenticate_anonymous_request_with_service_token(monkeypatch):
+    monkeypatch.setattr(demo_server, "LB_HF_TOKEN", "hf_service_token")
+    monkeypatch.setattr(demo_server.auth, "current_access_token", lambda request: None)
+
+    assert demo_server._load_balancer_headers(object()) == {
+        "Authorization": "Bearer hf_service_token",
+        "Content-Type": "application/json",
+        "User-Agent": "speech-to-speech-demo",
+    }
+
+
+def test_load_balancer_failure_logs_safe_diagnostic_headers(caplog):
+    response = httpx.Response(
+        429,
+        headers={
+            "Authorization": "Bearer secret",
+            "Content-Type": "text/html",
+            "RateLimit": '"api";r=0;t=42',
+            "Retry-After": "42",
+            "X-Request-Id": "request-id",
+        },
+        text="<html>\n  rate limited\n</html>",
+    )
+
+    with caplog.at_level("WARNING", logger="s2s.search"):
+        demo_server._log_load_balancer_failure("session handshake", response)
+
+    assert "request-id" in caplog.text
+    assert "retry-after" in caplog.text
+    assert "<html> rate limited </html>" in caplog.text
+    assert "Bearer secret" not in caplog.text
 
 
 async def test_session_preserves_load_balancer_authentication_failure(monkeypatch):
