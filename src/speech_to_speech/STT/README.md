@@ -89,7 +89,7 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
   - With `auto`, the model identifies the language of each final turn and reports it with the `-auto` suffix
   - Progressive (partial) windows are short and fool the language ID, so they reuse the language of the last final turn
   - A forced language is passed on every request and reported as is
-- Needs `transformers>=5.13.0`, which `pyproject.toml` already requires
+- Transformers versions: `pyproject.toml` already requires a version that knows `qwen3_asr`. The prompt and true language forcing need `transformers>=5.15.1` (the Linux pin); with 5.14.1 (the macOS pin) the language is a hint and the prompt is ignored with a warning
 
 ### 8) OpenAI-compatible endpoint (`--stt openai`)
 

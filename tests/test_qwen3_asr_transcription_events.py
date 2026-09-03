@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import logging
+from queue import Queue
+from threading import Event
 from typing import Any
 
 import numpy as np
 import pytest
 import torch
 
+from speech_to_speech.backend_registry import HandlerContext, create_backend_handler
+from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, VADAudio
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.s2s_pipeline import parse_arguments
 from speech_to_speech.STT import qwen3_asr_handler
 from speech_to_speech.STT.qwen3_asr_handler import (
     Qwen3ASRSTTHandler,
@@ -53,6 +59,12 @@ class _FakeProcessor:
 class _FakeModel:
     def __init__(self) -> None:
         self.generate_calls: list[dict[str, Any]] = []
+
+    def to(self, device: str) -> "_FakeModel":
+        return self
+
+    def eval(self) -> "_FakeModel":
+        return self
 
     def generate(self, **kwargs: Any) -> torch.Tensor:
         self.generate_calls.append(kwargs)
@@ -114,40 +126,47 @@ def test_language_to_code(value: str | None, expected: str | None) -> None:
     assert language_to_code(value) == expected
 
 
+def _hardware(monkeypatch: pytest.MonkeyPatch, *, cuda: bool, mps: bool = False, bf16: bool = True) -> None:
+    monkeypatch.setattr(qwen3_asr_handler.torch.cuda, "is_available", lambda: cuda)
+    monkeypatch.setattr(qwen3_asr_handler.torch.cuda, "is_bf16_supported", lambda: bf16)
+    monkeypatch.setattr(qwen3_asr_handler.torch.backends.mps, "is_available", lambda: mps)
+
+
 def test_resolve_device_auto_prefers_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(qwen3_asr_handler, "platform", "linux")
-    monkeypatch.setattr(qwen3_asr_handler.torch.cuda, "is_available", lambda: True)
+    _hardware(monkeypatch, cuda=True, mps=True)
     assert resolve_device("auto") == "cuda"
 
 
-def test_resolve_device_auto_falls_back_to_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(qwen3_asr_handler, "platform", "linux")
-    monkeypatch.setattr(qwen3_asr_handler.torch.cuda, "is_available", lambda: False)
-    assert resolve_device("auto") == "cpu"
-
-
-def test_resolve_device_auto_uses_mps_on_macos(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(qwen3_asr_handler, "platform", "darwin")
+def test_resolve_device_auto_uses_mps_when_cuda_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    _hardware(monkeypatch, cuda=False, mps=True)
     assert resolve_device("auto") == "mps"
 
 
+def test_resolve_device_auto_falls_back_to_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    _hardware(monkeypatch, cuda=False, mps=False)
+    assert resolve_device("auto") == "cpu"
+
+
 def test_resolve_device_keeps_explicit_choice(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(qwen3_asr_handler, "platform", "linux")
-    monkeypatch.setattr(qwen3_asr_handler.torch.cuda, "is_available", lambda: True)
+    _hardware(monkeypatch, cuda=True)
     assert resolve_device("cpu") == "cpu"
 
 
 @pytest.mark.parametrize(
-    ("dtype", "device", "expected"),
+    ("dtype", "device", "bf16", "expected"),
     [
-        ("auto", "cuda", torch.bfloat16),
-        ("auto", "mps", torch.float16),
-        ("auto", "cpu", torch.float32),
-        ("float16", "cpu", torch.float16),
-        ("bfloat16", "cuda", torch.bfloat16),
+        ("auto", "cuda", True, torch.bfloat16),
+        ("auto", "cuda", False, torch.float16),
+        ("auto", "mps", True, torch.float16),
+        ("auto", "cpu", True, torch.float32),
+        ("float16", "cpu", True, torch.float16),
+        ("bfloat16", "cuda", False, torch.bfloat16),
     ],
 )
-def test_resolve_torch_dtype(dtype: str, device: str, expected: torch.dtype) -> None:
+def test_resolve_torch_dtype(
+    monkeypatch: pytest.MonkeyPatch, dtype: str, device: str, bf16: bool, expected: torch.dtype
+) -> None:
+    _hardware(monkeypatch, cuda=True, bf16=bf16)
     assert resolve_torch_dtype(dtype, device) == expected
 
 
@@ -268,6 +287,38 @@ def test_prompt_and_generation_kwargs_are_forwarded() -> None:
     assert handler.model.generate_calls[0]["max_new_tokens"] == 64
 
 
+class _LegacyProcessor(_FakeProcessor):
+    """Transformers 5.14.1: ``apply_transcription_request`` takes no ``prompt`` and rejects unknown kwargs."""
+
+    def apply_transcription_request(self, audio: Any, language: str | None = None) -> _FakeInputs:  # type: ignore[override]
+        return super().apply_transcription_request(audio, language=language)
+
+
+def test_requests_omit_unset_language_and_prompt_for_older_transformers() -> None:
+    handler = _handler(processor=_LegacyProcessor())
+
+    result = list(handler.process(_vad_audio("final")))
+
+    assert isinstance(result[0], Transcription)
+    assert handler.processor.requests[0] == {"language": None, "prompt": None, "samples": 32000}
+
+
+def test_setup_drops_the_prompt_with_a_warning_when_the_processor_lacks_it(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake = _FakeTransformers()
+    fake.processor = _LegacyProcessor()
+    monkeypatch.setattr(qwen3_asr_handler, "transformers", fake)
+
+    handler = object.__new__(Qwen3ASRSTTHandler)
+    with caplog.at_level(logging.WARNING, logger="speech_to_speech.STT.qwen3_asr_handler"):
+        handler.setup(device="cpu", prompt="Vocabulary: Quilter.")
+
+    assert handler.prompt is None
+    assert "transformers>=5.15.1" in caplog.text
+    assert len(fake.model.generate_calls) == 1
+
+
 def test_generation_strips_the_prompt_tokens_before_decoding() -> None:
     class _RecordingProcessor(_FakeProcessor):
         decoded_length = 0
@@ -293,8 +344,6 @@ class _FakeTransformers:
     def __init__(self) -> None:
         self.processor = _FakeProcessor()
         self.model = _FakeModel()
-        self.model.eval = lambda: self.model  # type: ignore[attr-defined]
-        self.model.to = lambda device: self.model  # type: ignore[attr-defined]
         self.loaded: list[tuple[str, Any]] = []
 
         outer = self
@@ -342,7 +391,38 @@ def test_setup_does_not_share_generation_kwargs_between_handlers(monkeypatch: py
     assert second.gen_kwargs.get("max_new_tokens") != 1
 
 
-# ── registry wiring ──────────────────────────────────────────────────
+# ── registry and CLI wiring ──────────────────────────────────────────
+
+
+def _context() -> HandlerContext:
+    return HandlerContext(
+        stop_event=Event(),
+        queue_in=Queue(),
+        queue_out=Queue(),
+        text_output_queue=Queue(),
+        should_listen=Event(),
+        cancel_scope=CancelScope(),
+        speculative_turns=SpeculativeTurnTracker(),
+        pipeline_index=0,
+        sample_rate=16000,
+        enable_live_transcription=False,
+        live_transcription_update_interval=0.5,
+    )
+
+
+def test_cli_builds_a_qwen3_asr_handler_from_its_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeTransformers()
+    monkeypatch.setattr(qwen3_asr_handler, "transformers", fake)
+    args = parse_arguments(["--stt", "qwen3-asr", "--qwen3_asr_language", "fr", "--qwen3_asr_gen_max_new_tokens", "64"])
+    context = _context()
+
+    handler = create_backend_handler(args.stt_backend, context)
+
+    assert isinstance(handler, Qwen3ASRSTTHandler)
+    assert handler.speculative_turns is context.speculative_turns
+    assert handler.forced_language == "fr"
+    assert handler.gen_kwargs == {"max_new_tokens": 64}
+    assert ("processor", "Qwen/Qwen3-ASR-0.6B-hf") in fake.loaded
 
 
 def test_registry_normalizes_qwen3_asr_arguments() -> None:

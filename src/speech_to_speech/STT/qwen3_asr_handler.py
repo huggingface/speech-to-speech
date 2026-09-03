@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import inspect
 import logging
-from sys import platform
 from time import perf_counter
 from typing import Any, Iterator, Optional
 
@@ -39,12 +39,14 @@ def language_to_code(language: Optional[str]) -> Optional[str]:
 
 
 def resolve_device(device: str) -> str:
-    """Turn ``auto`` into a concrete device the same way the other local handlers do."""
+    """Turn ``auto`` into CUDA, then MPS, then CPU; keep an explicit choice as is."""
     if device != "auto":
         return device
-    if platform == "darwin":
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
         return "mps"
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    return "cpu"
 
 
 def resolve_torch_dtype(torch_dtype: str, device: str) -> torch.dtype:
@@ -52,10 +54,15 @@ def resolve_torch_dtype(torch_dtype: str, device: str) -> torch.dtype:
     if torch_dtype != "auto":
         return getattr(torch, torch_dtype)
     if device.startswith("cuda"):
-        return torch.bfloat16
+        return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     if device.startswith("mps"):
         return torch.float16
     return torch.float32
+
+
+def _accepts_prompt(processor: Any) -> bool:
+    """Transformers 5.15 added ``prompt`` to ``apply_transcription_request``; 5.14 rejects it."""
+    return "prompt" in inspect.signature(processor.apply_transcription_request).parameters
 
 
 class Qwen3ASRSTTHandler(BaseSTTHandler):
@@ -84,6 +91,9 @@ class Qwen3ASRSTTHandler(BaseSTTHandler):
         self.configure_language(language)
 
         self.processor = transformers.AutoProcessor.from_pretrained(model_name)
+        if self.prompt and not _accepts_prompt(self.processor):
+            logger.warning("Ignoring the Qwen3-ASR prompt: passing context needs transformers>=5.15.1.")
+            self.prompt = None
         model = transformers.AutoModelForMultimodalLM.from_pretrained(model_name, dtype=self.torch_dtype)
         self.model = model.to(self.device).eval()
         self.warmup()
@@ -106,8 +116,12 @@ class Qwen3ASRSTTHandler(BaseSTTHandler):
 
     def _transcribe(self, audio: np.ndarray, language: Optional[str]) -> tuple[str, Optional[str]]:
         """Run one generation. Return the text and the language name the model identified (auto mode only)."""
-        inputs = self.processor.apply_transcription_request(audio=audio, language=language, prompt=self.prompt)
-        inputs = inputs.to(self.device, self.torch_dtype)
+        request: dict[str, Any] = {"audio": audio}
+        if language is not None:
+            request["language"] = language
+        if self.prompt:
+            request["prompt"] = self.prompt
+        inputs = self.processor.apply_transcription_request(**request).to(self.device, self.torch_dtype)
         with torch.inference_mode():
             output_ids = self.model.generate(**inputs, **self.gen_kwargs)
         generated_ids = output_ids[:, inputs["input_ids"].shape[1] :]
