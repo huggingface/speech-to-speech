@@ -1075,25 +1075,39 @@ class TestSendLoop:
                 while not messages or messages[-1]["type"] != "response.done":
                     messages.append(ws.receive_json())
 
-                audio_deltas = [message for message in messages if message["type"] == "response.output_audio.delta"]
-                audio_done = [message for message in messages if message["type"] == "response.output_audio.done"]
-                transcript_deltas = [
-                    message for message in messages if message["type"] == "response.output_audio_transcript.delta"
+                response_events = [message for message in messages if message["type"].startswith("response.")]
+                assert [message["type"] for message in response_events] == [
+                    "response.created",
+                    "response.output_item.added",
+                    "response.content_part.added",
+                    "response.output_audio_transcript.delta",
+                    "response.output_audio_transcript.done",
+                    "response.content_part.done",
+                    "response.output_item.done",
+                    "response.output_item.added",
+                    "response.function_call_arguments.done",
+                    "response.output_item.done",
+                    "response.output_item.added",
+                    "response.content_part.added",
+                    "response.output_audio_transcript.delta",
+                    "response.output_audio.delta",
+                    "response.output_audio.done",
+                    "response.output_audio_transcript.done",
+                    "response.content_part.done",
+                    "response.output_item.done",
+                    "response.done",
                 ]
-                response_done = messages[-1]
-                assert [message["output_index"] for message in transcript_deltas] == [0, 2]
-                assert [message["output_index"] for message in audio_deltas] == [2]
-                assert [message["output_index"] for message in audio_done] == [2]
-                assert [item["type"] for item in response_done["response"]["output"]] == [
-                    "message",
-                    "function_call",
-                    "message",
+                item_events = response_events[1:-1]
+                assert [message["output_index"] for message in item_events] == [0] * 6 + [1] * 3 + [2] * 8
+                output = response_events[-1]["response"]["output"]
+                assert [item["type"] for item in output] == ["message", "function_call", "message"]
+                for message in item_events:
+                    item_id = message["item"]["id"] if "item" in message else message["item_id"]
+                    assert output[message["output_index"]]["id"] == item_id
+                assert [item["content"][0]["transcript"] for item in output if item["type"] == "message"] == [
+                    "before",
+                    "after",
                 ]
-                assert [
-                    item.get("content", [{}])[0].get("transcript")
-                    for item in response_done["response"]["output"]
-                    if item["type"] == "message"
-                ] == ["before", "after"]
 
     def test_whitespace_only_audio_response_completes_without_output_identity(self, setup):
         app, service, _, output_queue, *_ = setup

@@ -2588,7 +2588,34 @@ class TestResponseDoneOutputItems:
         events = service.finish_response(conn_id, status="cancelled", reason="client_cancelled")
         done = next(e for e in events if isinstance(e, ResponseDoneEvent))
         assert done.response.output
-        assert [item.status for item in done.response.output] == ["incomplete", "completed"]
+        # The ordered tool call closed the message as completed before the cancel.
+        assert [item.status for item in done.response.output] == ["completed", "completed"]
+
+    def test_cancelled_response_keeps_closed_message_status(self, service, conn_id):
+        service.response._ensure_response(conn_id)
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(
+                parts=[
+                    AssistantTextPart(text="before"),
+                    AssistantToolCallPart(
+                        tool={"type": "function_call", "call_id": "c1", "name": "tool", "arguments": "{}"}
+                    ),
+                    AssistantTextPart(text="after"),
+                ]
+            ),
+        )
+        closed = [event for event in events if isinstance(event, ResponseOutputItemDoneEvent)]
+        assert [(event.output_index, event.item.status) for event in closed] == [(0, "completed"), (1, "completed")]
+
+        terminal = service.finish_response(conn_id, status="cancelled", reason="client_cancelled")
+        late = [event for event in terminal if isinstance(event, ResponseOutputItemDoneEvent)]
+        assert [(event.output_index, event.item.status) for event in late] == [(2, "incomplete")]
+        response_done = next(event for event in terminal if isinstance(event, ResponseDoneEvent))
+        # A message closed as completed before the cancel keeps that status in response.done.
+        assert [item.status for item in response_done.response.output] == ["completed", "completed", "incomplete"]
+        assert response_done.response.output[0] == closed[0].item
+        assert response_done.response.output[2] == late[0].item
 
     def test_cancelled_response_marks_unfinished_function_call_incomplete(self, service, conn_id):
         service.dispatch_pipeline_event(

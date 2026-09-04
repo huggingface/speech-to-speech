@@ -502,10 +502,12 @@ class ResponseHandler(RealtimeBaseHandler):
         output_by_index: dict[int, ConversationItem] = {}
         for pending in st.pending_text_outputs:
             output_index = int(pending["output_index"])
+            # A message already closed keeps the status its output_item.done carried.
+            item_status = cast(Literal["completed", "incomplete"], pending.get("status", assistant_status))
             output_by_index[output_index] = self._build_message_item(
                 pending,
                 response_wants_audio(st.current_response_params),
-                assistant_status,
+                item_status,
             )
 
         for output_index, call in st.pending_function_calls.items():
@@ -655,6 +657,7 @@ class ResponseHandler(RealtimeBaseHandler):
                 ),
             ]
         )
+        pending["status"] = status
         pending["lifecycle_done"] = True
         return events
 
