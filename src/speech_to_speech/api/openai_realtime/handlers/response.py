@@ -454,6 +454,12 @@ class ResponseHandler(RealtimeBaseHandler):
         # Out-of-band responses are not threaded into any conversation: report a null id.
         conversation_id = None if is_out_of_band(rp) else st.conversation_id
 
+        # Report the modality this response was resolved to, using the same
+        # helper the event path uses, so the field and the events come from one
+        # decision. The two values are exclusive: "audio" already means audio
+        # plus its transcript.
+        output_modalities: list[Literal["text", "audio"]] = ["audio"] if response_wants_audio(rp) else ["text"]
+
         return RealtimeResponse(
             id=st.current_response_id,
             object="realtime.response",
@@ -462,6 +468,7 @@ class ResponseHandler(RealtimeBaseHandler):
             audio=Audio(output=AudioOutput(voice=voice)),  # type: ignore[arg-type]
             conversation_id=conversation_id,
             metadata=metadata,
+            output_modalities=output_modalities,
             output=self._build_output_items(conn_id, status),
             usage=RealtimeResponseUsage(
                 input_token_details=RealtimeResponseUsageInputTokenDetails(
@@ -853,10 +860,12 @@ class ResponseHandler(RealtimeBaseHandler):
     ) -> list[ServerEvent]:
         """Close the current response (audio/text done + response done).
 
-        Audio responses emit ``response.output_audio.done`` unless their only
-        output is a function call, followed by one terminal transcript event
-        for each ordered assistant message. Text-only responses likewise close
-        each assistant message, but only on ``status="completed"``.
+        An audio response emits ``response.output_audio.done`` only when audio
+        actually streamed: a response whose output is just a function call, or
+        one whose TTS produced no samples, has no audio stream to close. Either
+        way one terminal transcript event follows for each ordered assistant
+        message. Text-only responses likewise close each assistant message,
+        whatever the final status.
         """
         st = self._state(conn_id)
         events: list[ServerEvent] = []
@@ -1032,7 +1041,11 @@ class ResponseHandler(RealtimeBaseHandler):
                     )
                 st.last_item_id = item_id
             elif isinstance(part, AssistantToolCallPart):
-                if not _early_tool_call:
+                # An early tool call defers closing the message only while TTS
+                # still owes it audio. Text-only output has nothing to wait for,
+                # so it closes here; otherwise it would only close at response
+                # end, carrying the terminal status instead of its own.
+                if not _early_tool_call or not wants_audio:
                     events.extend(self._finish_current_message_output(conn_id, event.response_key))
                 tool = part.tool
                 function_item_id = tool.id or _generate_id("item")

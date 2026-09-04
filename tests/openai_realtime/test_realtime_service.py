@@ -3294,6 +3294,83 @@ class TestDispatchPipelineEvent:
         response_done = next(event for event in terminal if isinstance(event, ResponseDoneEvent))
         assert [item.type for item in response_done.response.output] == ["message", "function_call"]
 
+    def test_early_tool_call_closes_preceding_text_only_message(self, service, conn_id):
+        """A text-only message has no TTS to wait for, so an early tool closes it."""
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        response_key = "response_1"
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            output_modalities=["text"],
+        )
+        service.response._ensure_response(conn_id)
+        tool = AssistantToolCallPart(tool={"type": "function_call", "call_id": "c1", "name": "tool", "arguments": "{}"})
+
+        assert (
+            service.dispatch_pipeline_event(
+                conn_id,
+                AssistantToolCallReadyEvent(
+                    response_key=response_key,
+                    output_sequence=1,
+                    part=tool,
+                ),
+            )
+            == []
+        )
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(
+                response_key=response_key,
+                output_sequence=0,
+                parts=[AssistantTextPart(text="before")],
+            ),
+        )
+
+        # The first message finished streaming, so its lifecycle closes here
+        # rather than waiting for the cancel.
+        assert [event.type for event in events] == [
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_text.delta",
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.output_item.added",
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+        ]
+        assert [event.output_index for event in events] == [0, 0, 0, 0, 0, 0, 1, 1, 1]
+        closed_message = events[5]
+        assert isinstance(closed_message, ResponseOutputItemDoneEvent)
+        assert closed_message.item.status == "completed"
+
+        ordered_tool = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(
+                response_key=response_key,
+                output_sequence=1,
+                parts=[tool],
+            ),
+        )
+        assert [event.type for event in ordered_tool] == []
+
+        service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(
+                response_key=response_key,
+                output_sequence=2,
+                parts=[AssistantTextPart(text="after")],
+            ),
+        )
+
+        terminal = service.finish_response(conn_id, status="cancelled")
+        response_done = next(event for event in terminal if isinstance(event, ResponseDoneEvent))
+        assert [item.status for item in response_done.response.output] == [
+            "completed",
+            "completed",
+            "incomplete",
+        ]
+
     def test_later_audio_does_not_close_silent_intermediate_outputs(self, service, conn_id):
         response_key = "response_1"
         service.dispatch_pipeline_event(

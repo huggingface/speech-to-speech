@@ -44,6 +44,11 @@ from speech_to_speech.pipeline.messages import (
     ResponsePrefetchTransaction,
 )
 
+from .realtime_contract import (
+    assert_response_lifecycle_contract,
+    parse_wire_events,
+)
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -1108,6 +1113,86 @@ class TestSendLoop:
                     "before",
                     "after",
                 ]
+
+                # The same stream, checked against the OpenAI SDK's own models
+                # and the documented lifecycle rules.
+                assert_response_lifecycle_contract(
+                    parse_wire_events(response_events), wants_audio=True, expected_status="completed"
+                )
+
+    def test_early_tool_in_text_only_response_closes_the_message_over_the_socket(self, setup):
+        """The maintainer's repro, driven through the real transport.
+
+        Text-only output, the tool exposed early on the side channel, then the
+        ordered text, tool, text, then a client ``response.cancel`` while the
+        second message is still open. The first message finished streaming, so
+        its lifecycle must close at the tool boundary and keep ``completed``
+        through ``response.done``; only the open message may be ``incomplete``.
+        """
+        app, service, _, output_queue, text_output_queue, *_ = setup
+        tool = AssistantToolCallPart(tool={"type": "function_call", "call_id": "c1", "name": "tool", "arguments": "{}"})
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                ws.send_json({"type": "response.create", "response": {"output_modalities": ["text"]}})
+                created = ws.receive_json()
+                assert created["type"] == "response.created"
+                assert created["response"]["output_modalities"] == ["text"]
+                conn_id = service.connection_ids[0]
+                response_key = service._state(conn_id).current_response_key
+
+                # Side channel first, then the ordered stream catches up.
+                text_output_queue.put(
+                    AssistantToolCallReadyEvent(response_key=response_key, output_sequence=1, part=tool)
+                )
+                output_queue.put(
+                    AssistantOutputEvent(
+                        response_key=response_key,
+                        output_sequence=0,
+                        parts=[AssistantTextPart(text="before")],
+                    )
+                )
+                output_queue.put(AssistantOutputEvent(response_key=response_key, output_sequence=1, parts=[tool]))
+                output_queue.put(
+                    AssistantOutputEvent(
+                        response_key=response_key,
+                        output_sequence=2,
+                        parts=[AssistantTextPart(text="after")],
+                    )
+                )
+
+                # Wait until the second message is open on the wire, then cancel.
+                messages = [created]
+                while not (messages[-1]["type"] == "response.output_text.delta" and messages[-1]["output_index"] == 2):
+                    messages.append(ws.receive_json())
+                ws.send_json({"type": "response.cancel"})
+                while messages[-1]["type"] != "response.done":
+                    messages.append(ws.receive_json())
+
+                response_events = [message for message in messages if message["type"].startswith("response.")]
+                assert_response_lifecycle_contract(
+                    parse_wire_events(response_events),
+                    wants_audio=False,
+                    expected_status="cancelled",
+                )
+                closes = [
+                    (message["output_index"], message["item"]["status"])
+                    for message in response_events
+                    if message["type"] == "response.output_item.done"
+                ]
+                assert closes == [(0, "completed"), (1, "completed"), (2, "incomplete")]
+                final = response_events[-1]["response"]["output"]
+                assert [item["status"] for item in final] == ["completed", "completed", "incomplete"]
+                # The first message closed at the tool boundary, before the
+                # second message was even announced.
+                types = [message["type"] for message in response_events]
+                first_close = types.index("response.output_item.done")
+                second_message_added = [
+                    i
+                    for i, message in enumerate(response_events)
+                    if message["type"] == "response.output_item.added" and message["output_index"] == 2
+                ][0]
+                assert first_close < second_message_added
 
     def test_whitespace_only_audio_response_completes_without_output_identity(self, setup):
         app, service, _, output_queue, *_ = setup
