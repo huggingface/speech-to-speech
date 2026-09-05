@@ -76,7 +76,40 @@ During setup, the handler transcribes one second of synthetic silence through
 the configured endpoint. Endpoint, authentication, model, or response-format
 failures therefore prevent the realtime server from accepting sessions.
 
-Progressive requests are best-effort. Each pipeline keeps at most one
-progressive request in flight and drops newer progressive updates while it is
-running. A final request is submitted independently, so it does not wait for an
-in-flight progressive request; late progressive results are discarded.
+## Turn and session lifecycle
+
+Each pipeline delivers STT results asynchronously so HTTP work does not block
+session teardown. Final requests for distinct turns retain their order within
+that pipeline. They run independently of progressive work. Each pipeline retains
+at most eight pending finals in addition to its active final request. Once this
+queue is full, additional finals receive a sanitized `TranscriptionFailure`
+without uploading audio or retrying. Obsolete pending requests are removed before
+checking the limit, and accepted finals keep their order. This bounds the number
+of utterances retained behind a stalled request; it is not an estimate of server
+capacity.
+
+Progressive requests are best-effort: one is active per pipeline, and only the
+latest waiting cumulative window is retained. A final request cancels matching
+active progressive work and discards its pending window. Newer turn revisions
+invalidate older queued work and cancel older active requests. Relevance is
+checked before HTTP dispatch and while a request is running.
+
+Session end cancels active work and clears pending work. Results and failures
+carry a session generation that is checked atomically with queue publication,
+preventing old completions from appearing after teardown or in a reused session.
+Shutdown cancels the remaining requests and joins the pipeline's request workers.
+If a request worker cannot start, its pending work is cleared, final requests
+receive a sanitized failure, and shutdown still reaches the pipeline boundary.
+
+Cancellation remains active through connection establishment, upload, and
+response reads, even if a connection handoff consumes an initial cancellation
+signal. Transport cleanup completes before the request worker is reused, so an
+old blocked upload does not hold up a new session until its HTTP timeout.
+Server-side inference cancellation is best-effort: closing the client connection
+does not guarantee that the server stops GPU work. Stale-result filtering remains
+required even when a request has been cancelled.
+
+Client-side queue bounds apply separately to each pipeline. Pipelines do not
+share an admission queue or endpoint concurrency budget. STT server capacity,
+fleet routing, and provider quotas belong to the inference service or its shared
+proxy.
