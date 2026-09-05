@@ -25,6 +25,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+    "anyio>=4.0,<5",
     "fastapi>=0.115.0",
     "huggingface-hub>=0.34.0",
     "httpx>=0.28.0",
