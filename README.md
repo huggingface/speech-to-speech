@@ -144,6 +144,7 @@ pip install "speech-to-speech[omnivoice]"       # OmniVoice TTS (CUDA, Intel XPU
 pip install "speech-to-speech[faster-whisper]"  # Faster Whisper STT
 pip install "speech-to-speech[whisper-mlx]"     # Lightning Whisper MLX STT on macOS
 pip install "speech-to-speech[paraformer]"      # Paraformer STT through FunASR
+pip install "speech-to-speech[fireredvad]"      # FireRed streaming VAD
 pip install "speech-to-speech[nemo]"            # Parakeet Unified and Nemotron STT through NeMo
 pip install "speech-to-speech[mlx-lm]"          # mlx-vlm support for vision models on macOS
 ```

@@ -31,7 +31,8 @@ class FireRedProbModel:
 
     def __call__(self, x: torch.Tensor, sampling_rate: int) -> torch.Tensor:
         samples = x.detach().cpu().contiguous().view(-1).numpy().astype(np.float32, copy=False)
-        results = self.streamer.detect_chunk(samples)
+        # FireRed fbank trains on int16 PCM. VADIterator feeds Silero-scale [-1, 1].
+        results = self.streamer.detect_chunk(samples * 32768.0)
         if not results:
             return torch.tensor(0.0, dtype=torch.float32)
         return torch.tensor(float(results[-1].smoothed_prob), dtype=torch.float32)

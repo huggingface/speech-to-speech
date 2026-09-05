@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 
 from speech_to_speech.VAD.firered_vad_iterator import FireRedVadIterator
@@ -12,6 +13,7 @@ class _FakeFireRedStream:
         self._probs = iter(probs)
         self.reset_calls = 0
         self.chunks: list[int] = []
+        self.audio: list = []
 
     def reset(self) -> None:
         self.reset_calls += 1
@@ -19,6 +21,7 @@ class _FakeFireRedStream:
 
     def detect_chunk(self, audio_chunk) -> list[SimpleNamespace]:
         self.chunks.append(len(audio_chunk))
+        self.audio.append(audio_chunk)
         return [SimpleNamespace(smoothed_prob=next(self._probs))]
 
 
@@ -62,6 +65,24 @@ def test_firered_iterator_does_not_trigger_below_threshold() -> None:
     assert iterator.triggered is False
     assert iterator(chunk) is None
     assert iterator.triggered is False
+
+
+def test_firered_prob_model_scales_silero_audio_to_int16_peak() -> None:
+    streamer = _FakeFireRedStream([0.9])
+    iterator = FireRedVadIterator(
+        streamer,
+        threshold=0.5,
+        sampling_rate=16000,
+        min_silence_duration_ms=100,
+        speech_pad_ms=0,
+    )
+
+    assert iterator(torch.ones(512)) is None
+    assert len(streamer.audio) == 1
+    chunk = np.asarray(streamer.audio[0])
+    assert chunk.dtype == np.float32
+    assert float(chunk.max()) == 32768.0
+    assert float(chunk.min()) == 32768.0
 
 
 def test_firered_iterator_reset_states_clears_trigger_and_streamer() -> None:
