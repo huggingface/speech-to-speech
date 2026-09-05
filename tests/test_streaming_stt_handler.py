@@ -114,13 +114,16 @@ def _handler(
     queue_out: Queue[Any] | None = None,
     final_timeout: float = 1.0,
     connect_timeout: float = 0.5,
+    base_url: str = "ws://transcription.example/v1",
+    api_key: str | None = None,
 ):
     return handler_type(
         Event(),
         queue_in=Queue(),
         queue_out=queue_out if queue_out is not None else Queue(),
         setup_kwargs={
-            "base_url": "ws://transcription.example/v1",
+            "base_url": base_url,
+            "api_key": api_key,
             "model": "test-model",
             "audio_sample_rate": audio_sample_rate,
             "connect_timeout": connect_timeout,
@@ -384,16 +387,61 @@ def test_streaming_backends_interoperate_with_fake_websocket_server(handler_type
         server_thread.join(timeout=1)
 
 
-def test_openai_realtime_session_disables_remote_turn_detection() -> None:
-    protocol = OpenAIRealtimeProtocol(model="gpt-live-transcribe", language="en", audio_sample_rate=24000)
+@pytest.mark.parametrize(
+    ("model", "language", "language_field"),
+    [
+        ("gpt-live-transcribe", "en", {"languages": ["en"]}),
+        ("gpt-transcribe", "fr", {"languages": ["fr"]}),
+        ("gpt-4o-transcribe", "fr", {"language": "fr"}),
+    ],
+)
+def test_openai_realtime_session_disables_remote_turn_detection(model, language, language_field) -> None:
+    protocol = OpenAIRealtimeProtocol(model=model, language=language, audio_sample_rate=24000)
 
     update = protocol.session_update()
 
     audio_input = update["session"]["audio"]["input"]
     assert update["session"]["type"] == "transcription"
     assert audio_input["format"] == {"type": "audio/pcm", "rate": 24000}
-    assert audio_input["transcription"] == {"model": "gpt-live-transcribe", "languages": ["en"]}
+    assert audio_input["transcription"] == {"model": model, **language_field}
     assert audio_input["turn_detection"] is None
+
+
+@pytest.mark.parametrize(
+    ("base_url", "api_key", "expected_key"),
+    [
+        ("wss://api.openai.com/v1", None, "environment-key"),
+        ("https://api.openai.com/v1", None, "environment-key"),
+        (" https://api.openai.com/v1/ ", None, "environment-key"),
+        ("https://api.openai.com/v1/realtime?intent=transcription", None, "environment-key"),
+        ("https://api.openai.com/v1", "explicit-key", "explicit-key"),
+        ("https://api.openai.com/v1", "", None),
+        ("https://transcription.example/v1", None, None),
+        ("https://api.openai.com@transcription.example/v1", None, None),
+    ],
+)
+def test_openai_realtime_resolves_auth_after_endpoint_normalization(
+    monkeypatch, base_url, api_key, expected_key
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "environment-key")
+    session_updated = Event()
+
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        if _ack_session_update(event, socket):
+            session_updated.set()
+
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory, base_url=base_url, api_key=api_key)
+    try:
+        handler.append_audio(b"\x01\x00" * 512)
+        assert session_updated.wait(timeout=1)
+        endpoint, options = factory.calls[0]
+        expected_headers = {"Authorization": f"Bearer {expected_key}"} if expected_key else {}
+        assert options["headers"] == expected_headers
+        if expected_key == "environment-key":
+            assert endpoint.split("?", 1)[0] == "wss://api.openai.com/v1/realtime"
+    finally:
+        handler.cleanup()
 
 
 def test_vllm_realtime_uses_start_then_final_commit_lifecycle() -> None:
@@ -1586,12 +1634,16 @@ def test_openai_item_scoped_failure_returns_prompt_sanitized_failure_and_keeps_c
 
 def test_openai_precommit_item_failure_discards_same_turn_revisions() -> None:
     append_count = 0
+    buffers: dict[_FakeSocket, bytes] = {}
+    committed_audio: list[bytes] = []
 
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
         nonlocal append_count
         if _ack_session_update(event, socket):
+            buffers[socket] = b""
             return
         if event["type"] == "input_audio_buffer.append":
+            buffers[socket] += base64.b64decode(event["audio"])
             append_count += 1
             if append_count == 1:
                 socket.incoming.put(
@@ -1605,6 +1657,8 @@ def test_openai_precommit_item_failure_discards_same_turn_revisions() -> None:
                     )
                 )
         elif _is_final_commit(event):
+            committed_audio.append(buffers[socket])
+            buffers[socket] = b""
             socket.incoming.put(json.dumps(_completion_event("recovered", item_id="item_recovered")))
 
     factory = _SocketFactory(on_send)
@@ -1636,7 +1690,9 @@ def test_openai_precommit_item_failure_discards_same_turn_revisions() -> None:
 
     assert [output.text for output in recovered] == ["recovered"]
     assert append_count == 2
-    assert len(factory.instances) == 1
+    assert committed_audio == [b"\x03\x00" * 512]
+    assert len(factory.instances) == 2
+    assert factory.instances[0].closed
     handler.cleanup()
 
 

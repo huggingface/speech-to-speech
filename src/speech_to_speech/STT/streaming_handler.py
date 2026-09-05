@@ -83,7 +83,7 @@ class OpenAIRealtimeProtocol:
     def session_update(self) -> dict[str, Any]:
         transcription: dict[str, Any] = {"model": self.model}
         if self.language:
-            if self.model == "gpt-live-transcribe":
+            if self.model in {"gpt-live-transcribe", "gpt-transcribe"}:
                 transcription["languages"] = [self.language]
             else:
                 transcription["language"] = self.language
@@ -733,6 +733,7 @@ class _StreamingSession:
                     active_commit = None
                     audio_error = None
                 else:
+                    close_connection()
                     audio_error = message
                 audio_error_requires_close = False
                 reset_utterance()
@@ -954,20 +955,20 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
             if audio_sample_rate != PIPELINE_SAMPLE_RATE
             else None
         )
-        normalized_base_url = base_url.rstrip("/")
-        if api_key is None and normalized_base_url == OPENAI_REALTIME_BASE_URL:
-            api_key = os.getenv("OPENAI_API_KEY")
-        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         protocol = self.protocol_type(
             model=model.strip(),
             language=language.strip() if language else None,
             audio_sample_rate=audio_sample_rate,
         )
         endpoint_url = _endpoint_url(
-            normalized_base_url,
+            base_url,
             model.strip(),
             include_model_query=self.include_model_query,
         )
+        normalized_endpoint = urlsplit(endpoint_url)._replace(query="", fragment="").geturl()
+        if api_key is None and normalized_endpoint == f"{OPENAI_REALTIME_BASE_URL}/realtime":
+            api_key = os.getenv("OPENAI_API_KEY")
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self._session = _StreamingSession(
             protocol=protocol,
             endpoint_url=endpoint_url,
