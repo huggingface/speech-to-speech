@@ -407,8 +407,10 @@ class RealtimeService:
     def build_session_updated(self, conn_id: str) -> SessionUpdatedEvent:
         return self.session.build_session_updated(conn_id)
 
-    def handle_session_update(self, conn_id: str, event: SessionUpdateEvent) -> Optional[RealtimeErrorEvent]:
-        error = self.session.handle_session_update(conn_id, event)
+    def handle_session_update(
+        self, conn_id: str, event: SessionUpdateEvent, *, routing: SessionRouting | None = None
+    ) -> Optional[RealtimeErrorEvent]:
+        error = self.session.handle_session_update(conn_id, event, routing=routing)
         if error is None:
             # A prefetch captured the previous session configuration.
             self.response.discard_tool_followup_prefetch(conn_id)

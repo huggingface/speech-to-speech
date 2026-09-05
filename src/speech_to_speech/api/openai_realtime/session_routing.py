@@ -36,6 +36,7 @@ class LanguageCapabilities(BaseModel):
 class SpeechRoute(Route):
     protocol: Literal["speech"]
     voice: Identity
+    voices: list[Identity] = Field(default_factory=list)
 
 
 class SessionRoutes(BaseModel):
