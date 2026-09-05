@@ -349,3 +349,49 @@ def test_cancelled_generation_must_drain_before_switching(running_unit):
                 release.set()
     finally:
         release.set()
+
+
+def test_background_final_stt_must_drain_before_switching(running_unit, monkeypatch):
+    import numpy as np
+    from starlette.testclient import TestClient
+
+    from speech_to_speech.api.openai_realtime.session_routing import TranscriptionRoute
+    from speech_to_speech.api.openai_realtime.websocket_router import create_app
+    from speech_to_speech.pipeline.messages import VADAudio
+    from speech_to_speech.STT.openai_compatible_handler import HttpTranscriptionResult
+
+    unit, stop, _ = running_unit
+    entered, release = Event(), Event()
+
+    class BlockingTranscription:
+        def run(self, cancel_check):
+            entered.set()
+            assert release.wait(5)
+            return HttpTranscriptionResult(text="Hello")
+
+        def cancel(self, reason):
+            release.set()
+
+    monkeypatch.setattr(unit.handlers[0], "_make_operation", lambda *args, **kwargs: BlockingTranscription())
+    initial = route().model_copy(
+        update={
+            "routes": route().routes.model_copy(
+                update={"stt": TranscriptionRoute(model="asr", provider="hf", protocol="transcriptions")}
+            )
+        }
+    )
+    try:
+        with TestClient(create_app([unit], stop, session_routing_enabled=True)) as client:
+            with client.websocket_connect(
+                "/v1/realtime", headers={"X-Speech-Session-Routing": initial.model_dump_json()}
+            ) as ws:
+                ws.receive_json()
+                before = unit.service._state(unit.session.session_id).runtime_config
+                unit.input_queue.put(VADAudio(audio=np.zeros(160, dtype=np.float32), runtime_config=before))
+                assert entered.wait(1)
+                rejected = send_switch(ws, route("second"), model="second", instructions="must not apply")
+                assert rejected["type"] == "error"
+                assert rejected["error"]["event_id"] == "client-update"
+                assert unit.service._state(unit.session.session_id).runtime_config is before
+    finally:
+        release.set()
