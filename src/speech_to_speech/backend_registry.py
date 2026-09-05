@@ -23,6 +23,7 @@ from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
     MLXAudioWhisperSTTHandlerArguments,
 )
 from speech_to_speech.arguments_classes.omnivoice_tts_arguments import OmniVoiceTTSHandlerArguments
+from speech_to_speech.arguments_classes.openai_realtime_stt_arguments import OpenAIRealtimeSTTHandlerArguments
 from speech_to_speech.arguments_classes.openai_stt_arguments import OpenAICompatibleSTTHandlerArguments
 from speech_to_speech.arguments_classes.openai_tts_arguments import OpenAICompatibleTTSHandlerArguments
 from speech_to_speech.arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
@@ -36,6 +37,7 @@ from speech_to_speech.arguments_classes.responses_api_language_model_arguments i
     ResponsesApiLanguageModelHandlerArguments,
 )
 from speech_to_speech.arguments_classes.supertonic_tts_arguments import SupertonicTTSHandlerArguments
+from speech_to_speech.arguments_classes.vllm_realtime_stt_arguments import VLLMRealtimeSTTHandlerArguments
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -58,6 +60,7 @@ class BackendCapabilities:
     bypasses_transcription_notifier: bool = False
     supports_audio_input: bool = False
     supports_llm_proxy: bool = False
+    streams_audio_chunks: bool = False
 
 
 @dataclass(frozen=True)
@@ -285,6 +288,25 @@ def _create_openai_tts(context: HandlerContext, config: Mapping[str, Any]) -> An
     )
 
 
+def _create_streaming_stt(class_name: str) -> HandlerFactory:
+    def create(context: HandlerContext, config: Mapping[str, Any]) -> Any:
+        handler_class = _load_handler("speech_to_speech.STT.streaming_handler", class_name)
+        setup_kwargs = dict(config)
+        setup_kwargs.pop("gen_kwargs", None)
+        return handler_class(
+            context.stop_event,
+            queue_in=context.queue_in,
+            queue_out=context.queue_out,
+            setup_kwargs={
+                **setup_kwargs,
+                "speculative_turns": context.speculative_turns,
+                "pipeline_index": context.pipeline_index,
+            },
+        )
+
+    return create
+
+
 def _create_local_llm(backend: Literal["transformers", "mlx-lm"]) -> HandlerFactory:
     def create(context: HandlerContext, config: Mapping[str, Any]) -> Any:
         setup_kwargs = dict(config)
@@ -403,6 +425,22 @@ STT_BACKENDS = build_backend_registry(
                 attach_speculative_turns=True,
             ),
             config_prefix="openai_stt",
+        ),
+        BackendSpec(
+            "openai-realtime",
+            "stt",
+            OpenAIRealtimeSTTHandlerArguments,
+            _create_streaming_stt("OpenAIRealtimeSTTHandler"),
+            config_prefix="openai_realtime_stt",
+            capabilities=BackendCapabilities(streams_audio_chunks=True),
+        ),
+        BackendSpec(
+            "vllm-realtime",
+            "stt",
+            VLLMRealtimeSTTHandlerArguments,
+            _create_streaming_stt("VLLMRealtimeSTTHandler"),
+            config_prefix="vllm_realtime_stt",
+            capabilities=BackendCapabilities(streams_audio_chunks=True),
         ),
     ],
 )

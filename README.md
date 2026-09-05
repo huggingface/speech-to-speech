@@ -174,6 +174,8 @@ This installs the package in editable mode and makes the `speech-to-speech` CLI 
 | STT | [Paraformer](https://github.com/modelscope/FunASR) | CUDA / CPU | `paraformer` |
 | STT | [Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf) through Transformers | CUDA / CPU, Apple Silicon | built-in |
 | STT | OpenAI-compatible `/v1/audio/transcriptions` endpoint | local or remote HTTP server | built-in |
+| STT | OpenAI Realtime transcription | hosted or compatible WebSocket server | built-in |
+| STT | vLLM Realtime transcription (experimental) | local or remote vLLM server | built-in |
 | LLM | OpenAI-compatible API (`responses-api`, `chat-completions`) | hosted providers or self-hosted servers | built-in |
 | LLM | [Transformers](https://huggingface.co/models?pipeline_tag=text-generation&sort=trending) | CUDA / CPU | built-in |
 | LLM | [mlx-lm](https://github.com/ml-explore/mlx-lm) | Apple Silicon | built-in on macOS |
@@ -193,6 +195,8 @@ For client-only TTS serving with vLLM-Omni or another compatible server, see
 For client-only speech recognition with vLLM, OpenAI's hosted Transcription API,
 or another compatible server, see
 [OpenAI-compatible STT](./docs/openai-compatible-stt.md).
+For native incremental audio and partial transcripts, see
+[stateful streaming STT](./docs/openai-compatible-stt.md#stateful-streaming-stt).
 
 ## Commands
 
