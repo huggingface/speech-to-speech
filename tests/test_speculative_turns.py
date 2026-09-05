@@ -915,6 +915,70 @@ def test_vad_stitches_adjacent_short_segments_before_discarding():
     assert handler._pending_short_segment is None
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+def test_vad_keeps_short_segment_when_continuation_crosses_merge_expiry(streaming):
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    sink = _RecordingStreamingSTT()
+    if streaming:
+        handler.streaming_stt_sink = sink
+    handler.short_segment_merge_ms = 400
+    handler._hold_short_segment(np.ones(3200, dtype=np.float32), 200, 0, 200)
+
+    # Speech resumes after a 350ms gap, within the 400ms merge window, and
+    # continues past its expiry. Both fragments are too short individually.
+    for count in range(1, 9):
+        handler._total_samples = (550 + 32 * (count - 1)) * 16
+        chunks = [torch.ones(512) for _ in range(count)]
+        handler.iterator = _StaticVADIterator(
+            triggered=True,
+            vad_output=None,
+            buffer_chunks=chunks,
+            active_speech_samples=count * 512,
+        )
+        assert list(handler.process(_audio_bytes())) == []
+
+    handler.iterator = _StaticVADIterator(
+        triggered=False,
+        vad_output=[torch.ones(512) for _ in range(9)],
+        last_utterance_active_speech_samples=8 * 512,
+    )
+    outputs = list(handler.process(_audio_bytes()))
+
+    assert len(outputs) == 1
+    np.testing.assert_array_equal(
+        outputs[0].audio,
+        np.concatenate([np.ones(3200), np.zeros(5600), np.ones(9 * 512)]),
+    )
+    assert handler._pending_short_segment is None
+    assert sink.discard_count == 0
+    if streaming:
+        assert sink.commits == [("turn_1", 0)]
+
+
+@pytest.mark.parametrize("segment_state", ["silent", "speaking", "final"])
+def test_vad_discards_expired_fragment_before_streaming_new_audio(segment_state):
+    chunks = [torch.zeros(512) for _ in range(4)]
+    handler = _vad_handler_for_iterator(
+        _StaticVADIterator(
+            triggered=segment_state == "speaking",
+            vad_output=chunks if segment_state == "final" else None,
+            buffer_chunks=chunks if segment_state == "speaking" else [],
+            active_speech_samples=4 * 512,
+            last_utterance_active_speech_samples=4 * 512,
+        )
+    )
+    sink = _RecordingStreamingSTT()
+    handler.streaming_stt_sink = sink
+    handler.short_segment_merge_ms = 400
+    handler._hold_short_segment(np.ones(3200, dtype=np.float32), 200, 0, 200)
+    handler._total_samples = 800 * 16
+
+    assert list(handler.process(_audio_bytes())) == []
+
+    assert sink.events[:2] == ["discard", "append"]
+    assert sink.discard_count == 1
+
+
 def test_vad_pending_short_segment_contributes_to_early_speech_start():
     first_chunks = [torch.zeros(512) for _ in range(7)]
     current_chunks = [torch.zeros(512) for _ in range(8)]

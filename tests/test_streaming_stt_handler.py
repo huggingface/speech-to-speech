@@ -801,7 +801,8 @@ def test_connection_failure_before_turn_assignment_fails_the_first_concrete_turn
 
 
 @pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
-def test_setup_failure_discards_reopened_revisions_of_the_same_turn(handler_type, dialect) -> None:
+@pytest.mark.parametrize("discard_fragment", [False, True])
+def test_setup_failure_discards_reopened_revisions_of_the_same_turn(handler_type, dialect, discard_fragment) -> None:
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
         if _ack_session_update(event, socket, dialect):
             return
@@ -814,6 +815,10 @@ def test_setup_failure_discards_reopened_revisions_of_the_same_turn(handler_type
     handler.start_turn("turn_1", 0)
     handler.append_audio(b"\x01\x00" * 512)
     first = list(handler.process(_vad_final()))
+
+    if discard_fragment:
+        handler.append_audio(b"\x04\x00" * 512)
+        handler.discard_utterance()
 
     handler.append_audio(b"\x02\x00" * 512)
     handler.start_turn("turn_1", 1)
@@ -840,6 +845,32 @@ def test_setup_failure_discards_reopened_revisions_of_the_same_turn(handler_type
     assert [output.text for output in recovered] == ["recovered"]
     assert len(factory.calls) == 2
     handler.cleanup()
+
+
+@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
+def test_discard_of_failed_unassigned_audio_allows_a_new_turn(handler_type, dialect) -> None:
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        if _ack_session_update(event, socket, dialect):
+            return
+        if _is_final_commit(event, dialect):
+            socket.incoming.put(json.dumps(_completion_event("accepted", dialect=dialect)))
+
+    factory = _SocketFactory(on_send, fail_connects=1)
+    handler = _handler(factory, handler_type=handler_type)
+    accepted_chunk = b"\x02\x00" * 512
+    try:
+        handler.append_audio(b"\x01\x00" * 512)
+        handler.discard_utterance()
+        handler.append_audio(accepted_chunk)
+        handler.start_turn("turn_1", 0)
+
+        outputs = list(handler.process(_vad_final()))
+
+        assert [output.text for output in outputs] == ["accepted"]
+        assert len(factory.calls) == 2
+        assert [base64.b64decode(event["audio"]) for event in _append_events(factory.instances[0])] == [accepted_chunk]
+    finally:
+        handler.cleanup()
 
 
 @pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
@@ -1195,6 +1226,70 @@ def test_openai_precommit_item_failure_discards_same_turn_revisions() -> None:
     assert append_count == 2
     assert len(factory.instances) == 1
     handler.cleanup()
+
+
+@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
+def test_discard_behind_pending_final_preserves_accepted_turns(handler_type, dialect) -> None:
+    first_commit_seen = Event()
+    buffers: dict[_FakeSocket, bytes] = {}
+    committed_audio: list[bytes] = []
+
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        if _ack_session_update(event, socket, dialect):
+            buffers[socket] = b""
+        elif event["type"] == "input_audio_buffer.append":
+            buffers[socket] += base64.b64decode(event["audio"])
+        elif event["type"] == "input_audio_buffer.clear":
+            buffers[socket] = b""
+        elif _is_final_commit(event, dialect):
+            committed_audio.append(buffers[socket])
+            buffers[socket] = b""
+            index = len(committed_audio)
+            if index == 1:
+                first_commit_seen.set()
+            else:
+                socket.incoming.put(json.dumps(_completion_event(str(index), item_id=f"item_{index}", dialect=dialect)))
+
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory, handler_type=handler_type)
+    first, second, rejected, third = [bytes([value, 0]) * 512 for value in range(1, 5)]
+    try:
+        handler.start_turn("turn_1", 0)
+        handler.append_audio(first)
+        handler.commit_boundary("turn_1", 0)
+        assert first_commit_seen.wait(timeout=1)
+
+        handler.start_turn("turn_2", 0)
+        handler.append_audio(second)
+        handler.commit_boundary("turn_2", 0)
+        handler.append_audio(rejected)
+        handler.discard_utterance()
+        handler.start_turn("turn_3", 0)
+        handler.append_audio(third)
+        handler.commit_boundary("turn_3", 0)
+
+        # Let the worker encounter the discard while the first final is pending.
+        deadline = monotonic() + 1
+        while not handler._session._commands.empty():
+            assert monotonic() < deadline
+            Event().wait(0.001)
+        factory.instances[0].incoming.put(json.dumps(_completion_event("1", item_id="item_1", dialect=dialect)))
+
+        outputs = []
+        for index in range(1, 4):
+            outputs.extend(
+                handler.process(
+                    VADAudio(
+                        audio=np.zeros(512, dtype=np.float32), mode="final", turn_id=f"turn_{index}", turn_revision=0
+                    )
+                )
+            )
+
+        assert all(isinstance(output, Transcription) for output in outputs)
+        assert [output.text for output in outputs] == ["1", "2", "3"]
+        assert committed_audio == [first, second, third]
+    finally:
+        handler.cleanup()
 
 
 @pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)

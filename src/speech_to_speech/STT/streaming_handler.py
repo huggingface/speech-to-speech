@@ -490,7 +490,7 @@ class _StreamingSession:
         failed_turn_ids: set[str | None] = set()
         failed_turn_message: str | None = None
         pending_unassigned_audio: deque[_AppendAudio] = deque()
-        deferred_commands: deque[_StartTurn | _AppendAudio | _Commit] = deque()
+        deferred_commands: deque[_StartTurn | _AppendAudio | _Commit | _DiscardAudio] = deque()
 
         def reset_utterance() -> None:
             nonlocal utterance_started, utterance_has_audio, remote_hypothesis, turn_id, turn_revision
@@ -571,7 +571,10 @@ class _StreamingSession:
             reset_utterance()
             audio_error = None
             audio_error_requires_close = False
-            clear_failed_turn()
+            # Rejecting an unassigned fragment may clear its failure, but a
+            # known turn must still fail if it reopens with missing audio.
+            if None in failed_turn_ids:
+                clear_failed_turn()
 
         def send(event: dict[str, Any]) -> None:
             if connection is None:
@@ -788,16 +791,12 @@ class _StreamingSession:
             # A provider connection can have only one unscoped transcription
             # in flight. Preserve later-turn commands locally until the active
             # final result settles so they cannot mutate or contaminate it.
-            if active_commit is not None and isinstance(command, (_StartTurn, _AppendAudio, _Commit)):
+            if active_commit is not None and isinstance(command, (_StartTurn, _AppendAudio, _Commit, _DiscardAudio)):
                 deferred_commands.append(command)
                 command = None
 
             if isinstance(command, _DiscardAudio):
-                if active_commit is not None:
-                    deferred_commands.clear()
-                    command = None
-                else:
-                    discard_utterance()
+                discard_utterance()
 
             if isinstance(command, _StartTurn):
                 if failed_turn_ids:

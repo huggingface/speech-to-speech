@@ -587,14 +587,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         if not self.should_listen.is_set():
             return
 
-        # Clear an expired held fragment before forwarding the next chunk so
-        # provider state cannot mix a locally rejected segment into new speech.
-        self._discard_expired_pending_short_segment()
-
-        # Stateful STT receives the same accepted PCM chunk as local VAD. The
-        # sink enqueues transport work without blocking this VAD thread.
-        self._stream_audio_chunk(audio_chunk)
-
         # Normal listening mode
         self._log_chunks += 1
         audio_int16 = np.frombuffer(audio_chunk, dtype=np.int16)
@@ -602,9 +594,24 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         audio_float32 = int2float(audio_int16)
 
         vad_output = self.iterator(torch.from_numpy(audio_float32))
+        is_triggered_now = self.iterator.triggered
+
+        if getattr(self, "streaming_stt_sink", None) is not None and self._pending_short_segment is not None:
+            # Expiry follows the new segment's start, not the advancing clock
+            # while it is speaking. Clear rejected PCM before forwarding more.
+            if vad_output:
+                duration_ms = sum(len(chunk) for chunk in vad_output) / self.sample_rate * 1000
+            elif is_triggered_now:
+                duration_ms = self._speech_buffer_duration_ms()
+            else:
+                duration_ms = 0.0
+            self._discard_expired_pending_short_segment(max(0, self._audio_ms - int(duration_ms)))
+
+        # Stateful STT receives the same accepted PCM chunk as local VAD. The
+        # sink enqueues transport work without blocking this VAD thread.
+        self._stream_audio_chunk(audio_chunk)
 
         # Deferred speech_started: only emit once active VAD speech reaches the valid speech threshold.
-        is_triggered_now = self.iterator.triggered
         if is_triggered_now and not self._speech_started_emitted:
             segment_samples = sum(len(t) for t in self.iterator.buffer)
             segment_duration_ms = segment_samples / self.sample_rate * 1000
