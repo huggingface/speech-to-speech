@@ -3,9 +3,10 @@ from __future__ import annotations
 import io
 import json
 import wave
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from queue import Queue
-from threading import Event, Thread
+from threading import Barrier, Event, Thread
 
 import numpy as np
 import pytest
@@ -412,6 +413,31 @@ def test_final_request_does_not_wait_for_in_flight_progressive(monkeypatch):
     assert not handler_thread.is_alive()
 
 
+def test_final_requests_from_pipelines_using_the_same_endpoint_can_overlap(monkeypatch):
+    handlers = [_handler(monkeypatch, api_key="shared-endpoint-key") for _ in range(2)]
+    both_requests_started = Barrier(2)
+
+    class _ConcurrentOperation:
+        def run(self):
+            both_requests_started.wait(timeout=2)
+            return HttpTranscriptionResult(text="final", language="en")
+
+    for handler in handlers:
+        monkeypatch.setattr(handler, "_make_operation", lambda _audio: _ConcurrentOperation())
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(lambda handler=handler: list(handler.process(_audio()))) for handler in handlers]
+            outputs = [future.result(timeout=3) for future in futures]
+        for output in outputs:
+            assert len(output) == 1
+            assert isinstance(output[0], Transcription)
+            assert output[0].text == "final"
+    finally:
+        for handler in handlers:
+            handler.cleanup()
+
+
 def test_additional_progressive_requests_are_dropped_while_one_is_in_flight(monkeypatch):
     handler = _handler(monkeypatch)
     progressive_started = Event()
@@ -471,6 +497,56 @@ def test_session_end_suppresses_in_flight_progressive_result(monkeypatch):
     thread.join(timeout=1)
     assert not thread.is_alive()
     assert handler.queue_out.empty()
+
+
+@pytest.mark.parametrize("superseded_by", ["final", "new_revision", "session_end", "shutdown", "cleanup"])
+def test_obsolete_progressive_request_is_not_sent_before_worker_starts(monkeypatch, superseded_by):
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn-1", 0)
+    handler = _handler(monkeypatch, tracker=tracker)
+    worker_started = Event()
+    release_worker = Event()
+    run_progressive = handler._run_progressive_request
+
+    def delayed_worker(audio):
+        worker_started.set()
+        assert release_worker.wait(timeout=2)
+        run_progressive(audio)
+
+    monkeypatch.setattr(handler, "_run_progressive_request", delayed_worker)
+    _FakeOperation.results = [HttpTranscriptionResult(text="final")]
+    _FakeOperation.instances = []
+    thread = None
+    try:
+        assert list(handler.process(_audio("progressive"))) == []
+        thread = handler._progressive_thread
+        assert thread is not None
+        assert worker_started.wait(timeout=1)
+
+        if superseded_by == "final":
+            outputs = list(handler.process(_audio()))
+            assert len(outputs) == 1
+            assert isinstance(outputs[0], Transcription)
+            assert outputs[0].text == "final"
+        elif superseded_by == "new_revision":
+            tracker.observe("turn-1", 1)
+        elif superseded_by == "session_end":
+            handler.on_session_end()
+        elif superseded_by == "shutdown":
+            handler.stop_event.set()
+        else:
+            handler.cleanup()
+
+        release_worker.set()
+        thread.join(timeout=1)
+        assert not thread.is_alive()
+        assert len(_FakeOperation.instances) == (1 if superseded_by == "final" else 0)
+        assert handler.queue_out.empty()
+    finally:
+        release_worker.set()
+        if thread is not None:
+            thread.join(timeout=1)
+        handler.cleanup()
 
 
 def test_stale_revision_is_dropped_after_request(monkeypatch):

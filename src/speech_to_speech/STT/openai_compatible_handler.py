@@ -262,6 +262,9 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         if self.pipeline_index is not None:
             pipeline_log_ctx.set(self.pipeline_index)
         try:
+            # A final, reopened turn, or teardown can precede this thread's dispatch.
+            if not self._progressive_result_is_current(vad_audio):
+                return
             output = self._run_request(vad_audio)
             if not isinstance(output, PartialTranscription) or not self.should_emit_output(output):
                 return

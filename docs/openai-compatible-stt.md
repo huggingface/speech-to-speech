@@ -80,3 +80,12 @@ Progressive requests are best-effort. Each pipeline keeps at most one
 progressive request in flight and drops newer progressive updates while it is
 running. A final request is submitted independently, so it does not wait for an
 in-flight progressive request; late progressive results are discarded.
+
+The background worker rechecks whether its progressive request is still relevant
+before starting HTTP work. A final request, newer turn revision, session end, or
+shutdown can make that work obsolete before dispatch. Once HTTP work has begun,
+it may run until completion or timeout; stale-result filtering still applies.
+
+Pipelines do not share a client-side admission queue or endpoint concurrency
+budget. STT server capacity, fleet routing, and provider quotas belong to the
+inference service or its shared proxy.
