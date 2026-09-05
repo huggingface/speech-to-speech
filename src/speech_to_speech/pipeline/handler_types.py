@@ -34,7 +34,7 @@ VADOut: TypeAlias = VADAudio
 
 # ── STT stage ─────────────────────────────────────────────────────────
 STTIn: TypeAlias = VADAudio
-STTOut: TypeAlias = PartialTranscription | Transcription | TranscriptionFailure
+STTOut: TypeAlias = PartialTranscription | Transcription | TranscriptionFailure | VADAudio
 
 # ── LLM stage ─────────────────────────────────────────────────────────
 LLMIn: TypeAlias = GenerateResponseRequest

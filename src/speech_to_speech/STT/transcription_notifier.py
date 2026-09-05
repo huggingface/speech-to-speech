@@ -7,6 +7,7 @@ from typing import Iterator
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.events import (
+    AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     TranscriptionCompletedEvent,
     TranscriptionFailedEvent,
@@ -16,6 +17,7 @@ from speech_to_speech.pipeline.messages import (
     PartialTranscription,
     Transcription,
     TranscriptionFailure,
+    VADAudio,
 )
 from speech_to_speech.pipeline.queue_types import TextEventItem
 from speech_to_speech.pipeline.transcript_logging import transcript_for_log
@@ -40,6 +42,19 @@ class TranscriptionNotifier(BaseHandler[STTOut, LLMIn]):
         self.should_listen = should_listen
 
     def process(self, transcription: STTOut) -> Iterator[LLMIn]:
+        if isinstance(transcription, VADAudio):
+            if self.text_output_queue is not None:
+                self.text_output_queue.put(
+                    AudioInputCompletedEvent(
+                        audio=transcription.audio,
+                        audio_sample_rate=16000,
+                        audio_duration_s=len(transcription.audio) / 16000,
+                        turn_id=transcription.turn_id,
+                        turn_revision=transcription.turn_revision,
+                        speech_stopped_at_s=transcription.created_at_s,
+                    )
+                )
+            return
         if isinstance(transcription, PartialTranscription):
             if self.text_output_queue and transcription.text:
                 self.text_output_queue.put(

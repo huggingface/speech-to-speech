@@ -581,6 +581,8 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         routing = runtime_config.routing if runtime_config is not None else None
         payload = self._request_payload(text=text, voice=voice)
         if routing is not None:
+            if routing.routes.tts is None:
+                raise ValueError("No TTS model selected")
             payload["model"] = routing.routes.tts.model
         return HttpSpeechOperation(
             endpoint_url=self.endpoint_url,

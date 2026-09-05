@@ -44,7 +44,7 @@ class SessionHandler(RealtimeBaseHandler):
             logger.info(f"Session model set to: {model}")
 
         cfg = self._state(conn_id).runtime_config
-        if cfg.routing is not None and "model" in s.model_fields_set and model != cfg.routing.routes.llm.model:
+        if cfg.routing is not None and "model" in s.model_fields_set and model != cfg.session.model:
             return self.make_error(
                 message="The admitted model cannot be changed within this session.",
                 _type="invalid_request_error",

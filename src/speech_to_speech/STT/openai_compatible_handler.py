@@ -172,6 +172,12 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         if not self._is_request_relevant(vad_audio):
             return
 
+        cfg = vad_audio.runtime_config
+        if cfg is not None and cfg.routing is not None and cfg.routing.routes.stt is None:
+            if cfg.accepts_audio_input and vad_audio.mode != "progressive":
+                yield vad_audio
+            return
+
         if vad_audio.mode == "progressive":
             self._start_progressive_request(vad_audio)
             return
@@ -309,10 +315,13 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         self, audio: np.ndarray, *, runtime_config: RuntimeConfig | None = None
     ) -> HttpTranscriptionOperation:
         routing = runtime_config.routing if runtime_config is not None else None
+        route = routing.routes.stt if routing is not None else None
+        if routing is not None and route is None:
+            raise ValueError("No STT model selected")
         return HttpTranscriptionOperation(
             endpoint_url=self.endpoint_url,
             api_key=self.api_key,
-            model=routing.routes.stt.model if routing else self.model,
+            model=route.model if route is not None else self.model,
             wav_bytes=self._encode_wav(audio),
             language=self.language,
             response_format=self.response_format,
