@@ -348,8 +348,19 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
                 return
             message = str(exc) if isinstance(exc, TranscriptionRequestError) else "transcription request failed"
             if source.mode == "progressive":
-                logger.warning("OpenAI-compatible progressive STT failed: %s", message)
+                logger.warning(
+                    "OpenAI-compatible progressive STT failed turn=%s rev=%s: %s",
+                    source.turn_id,
+                    source.turn_revision,
+                    message,
+                )
                 return
+            logger.error(
+                "OpenAI-compatible STT failed turn=%s rev=%s: %s",
+                source.turn_id,
+                source.turn_revision,
+                message,
+            )
             self._publish_output(
                 request,
                 TranscriptionFailure(
