@@ -110,6 +110,7 @@ def _handler(
     audio_sample_rate: int = 16000,
     queue_out: Queue[Any] | None = None,
     final_timeout: float = 1.0,
+    connect_timeout: float = 0.5,
 ):
     return handler_type(
         Event(),
@@ -119,7 +120,7 @@ def _handler(
             "base_url": "ws://transcription.example/v1",
             "model": "test-model",
             "audio_sample_rate": audio_sample_rate,
-            "connect_timeout": 0.5,
+            "connect_timeout": connect_timeout,
             "final_timeout": final_timeout,
             "speculative_turns": tracker,
             "connect_factory": socket_factory,
@@ -1025,10 +1026,82 @@ def test_commit_deadline_includes_time_queued_before_remote_commit(handler_type,
         assert len(result) == 1
         assert isinstance(result[0], TranscriptionFailure)
         assert result[0].message == "streaming transcription timed out"
+        assert pending.done.wait(timeout=1)
         assert factory.instances[0].closed
         assert not any(_is_final_commit(event, dialect) for event in factory.instances[0].sent)
     finally:
         release_append.set()
+        handler.cleanup()
+
+
+@pytest.mark.parametrize("already_expired", [False, True])
+def test_caller_deadline_does_not_wait_for_session_setup_or_close(already_expired, monkeypatch) -> None:
+    setup_seen = Event()
+    close_started = Event()
+    release_close = Event()
+
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        if event["type"] == "session.update" and len(factory.instances) == 1:
+            # session.created arrived, but the provider never acknowledges
+            # session.update. Closing this connection can also block.
+            def slow_close() -> None:
+                close_started.set()
+                assert release_close.wait(timeout=1)
+                socket.closed = True
+
+            monkeypatch.setattr(socket, "close", slow_close)
+            setup_seen.set()
+        elif _ack_session_update(event, socket):
+            return
+        elif _is_final_commit(event):
+            socket.incoming.put(json.dumps(_completion_event("recovered")))
+
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory, final_timeout=0.08, connect_timeout=0.6)
+    try:
+        handler.start_turn("turn_1", 0)
+        handler.append_audio(b"\x01\x00" * 512)
+        handler.commit_boundary("turn_1", 0)
+        assert setup_seen.wait(timeout=1)
+        pending = handler._session._pending_commits[(handler._session.generation, "turn_1", 0)][0]
+        if already_expired:
+            pending.boundary_queued_at_s -= 1.0
+
+        started = monotonic()
+        result = list(handler.process(_vad_final()))
+        elapsed = monotonic() - started
+        assert elapsed < (0.04 if already_expired else 0.25)
+        assert len(result) == 1
+        assert isinstance(result[0], TranscriptionFailure)
+        assert result[0].message == "streaming transcription timed out"
+        assert not close_started.is_set()
+
+        # The worker still owns expiry and cleanup. A delayed setup reply and
+        # final must not turn the already timed-out request into a success.
+        release_close.set()
+        factory.instances[0].incoming.put(json.dumps({"type": "session.updated"}))
+        factory.instances[0].incoming.put(json.dumps(_completion_event("late final")))
+        assert pending.done.wait(timeout=1)
+        assert pending.result is None
+        assert factory.instances[0].closed
+        assert handler.queue_out.empty()
+
+        handler.start_turn("turn_2", 0)
+        handler.append_audio(b"\x02\x00" * 512)
+        recovered = list(
+            handler.process(
+                VADAudio(
+                    audio=np.zeros(160, dtype=np.float32),
+                    mode="final",
+                    turn_id="turn_2",
+                    turn_revision=0,
+                )
+            )
+        )
+        assert [output.text for output in recovered] == ["recovered"]
+        assert len(factory.instances) == 2
+    finally:
+        release_close.set()
         handler.cleanup()
 
 
@@ -1067,10 +1140,13 @@ def test_transcription_received_after_commit_deadline_is_rejected(
     try:
         handler.start_turn("turn_1", 0)
         handler.append_audio(b"\x01\x00" * 512)
+        handler.commit_boundary("turn_1", 0)
+        pending = handler._session._pending_commits[(handler._session.generation, "turn_1", 0)][0]
         result = list(handler.process(_vad_final()))
         assert len(result) == 1
         assert isinstance(result[0], TranscriptionFailure)
         assert result[0].message == "streaming transcription timed out"
+        assert pending.done.wait(timeout=1)
         assert handler.queue_out.empty()
         assert factory.instances[0].closed
     finally:

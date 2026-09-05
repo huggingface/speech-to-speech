@@ -434,9 +434,15 @@ class _StreamingSession:
                 boundary_queued_at_s=perf_counter(),
             )
             self._commands.put(commit)
-        while not commit.done.wait(timeout=0.05):
+        deadline = commit.boundary_queued_at_s + self.final_timeout
+        while not commit.done.wait(timeout=min(0.05, max(0.0, deadline - perf_counter()))):
             if self.stop_event.is_set() or generation != self.generation:
                 return None
+            if perf_counter() >= deadline:
+                # Setup or socket I/O may occupy the worker. Return promptly;
+                # the worker still owns expiry, late-event rejection, and close.
+                commit.error = "streaming transcription timed out"
+                break
         if generation != self.generation:
             return None
         return commit
