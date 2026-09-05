@@ -85,6 +85,33 @@ def test_smaller_context_and_unresolved_tools_are_rejected_without_changes():
     assert state.runtime_config is before
 
 
+@pytest.mark.parametrize("context, accepted", [(8192, False), (32768, True), (65536, True)])
+def test_llm_removal_preserves_context_floor_until_session_ends(context, accepted):
+    service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event())
+    sid = service.register(routing=route())
+    state = service._state(sid)
+    chat = state.runtime_config.chat
+    chat.add_item(make_user_message("Keep this conversation while the LLM is disabled."))
+    disabled = route().model_copy(update={"routes": route().routes.model_copy(update={"llm": None})})
+    assert service.handle_session_update(sid, event(models={"llm": None}), routing=disabled) is None
+    before = state.runtime_config
+    error = service.handle_session_update(
+        sid, event(model="second", instructions="new instructions"), routing=route("second", context=context)
+    )
+    assert (error is None) == accepted
+    assert state.runtime_config.chat is chat
+    assert "Keep this conversation" in str(chat.to_transformers_chat())
+    if not accepted:
+        assert state.runtime_config is before
+        assert state.runtime_config.routing.routes.llm is None
+        assert state.runtime_config.session.instructions != "new instructions"
+
+    # The constraint belongs to this conversation, never to a reused CPU slot.
+    service.unregister(sid)
+    new_sid = service.register(routing=disabled)
+    assert service.handle_session_update(new_sid, event(model="small"), routing=route("small", context=8192)) is None
+
+
 def test_public_models_cannot_change_or_fake_the_trusted_selection():
     service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event())
     sid = service.register(routing=route())
