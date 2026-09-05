@@ -517,24 +517,37 @@ def test_session_end_suppresses_in_flight_progressive_result(monkeypatch):
 
 
 @pytest.mark.parametrize("superseded_by", ["final", "new_revision", "session_end", "shutdown", "cleanup"])
+@pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning")
 def test_obsolete_progressive_request_is_not_sent_before_worker_starts(monkeypatch, superseded_by):
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn-1", 0)
     handler = _handler(monkeypatch, tracker=tracker)
     worker_started = Event()
     release_worker = Event()
+    relevance_checked = Event()
+    cancellation_done = Event()
     run_request = handler._run_request
+    cancel_request = handler._cancel_request
 
     def delayed_worker(request):
         if request.source.mode == "progressive":
             worker_started.set()
-            assert release_worker.wait(timeout=2)
+            release_worker.wait()
         run_request(request)
+        if request.source.mode == "progressive":
+            relevance_checked.set()
+
+    def observe_cancel(request, reason):
+        cancel_request(request, reason)
+        if reason == "shutdown":
+            cancellation_done.set()
 
     monkeypatch.setattr(handler, "_run_request", delayed_worker)
+    monkeypatch.setattr(handler, "_cancel_request", observe_cancel)
     _FakeOperation.results = [HttpTranscriptionResult(text="final")]
     _FakeOperation.instances = []
     thread = None
+    cleanup_thread = None
     try:
         assert list(handler.process(_audio("progressive"))) == []
         thread = handler._progressive_thread
@@ -553,17 +566,25 @@ def test_obsolete_progressive_request_is_not_sent_before_worker_starts(monkeypat
         elif superseded_by == "shutdown":
             handler.stop_event.set()
         else:
-            handler.cleanup()
+            cleanup_thread = Thread(target=handler.cleanup, daemon=True)
+            cleanup_thread.start()
+            assert cancellation_done.wait(timeout=1)
 
         release_worker.set()
         thread.join(timeout=1)
         assert not thread.is_alive()
+        assert relevance_checked.is_set()
+        if cleanup_thread is not None:
+            cleanup_thread.join(timeout=1)
+            assert not cleanup_thread.is_alive()
         assert len(_FakeOperation.instances) == (1 if superseded_by == "final" else 0)
         assert handler.queue_out.empty()
     finally:
         release_worker.set()
         if thread is not None:
             thread.join(timeout=1)
+        if cleanup_thread is not None:
+            cleanup_thread.join(timeout=1)
         handler.cleanup()
 
 
