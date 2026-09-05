@@ -83,6 +83,37 @@ def test_omnivoice_tts_backend_is_registered_as_optional():
     assert spec.required_extra == "omnivoice"
 
 
+def test_sensevoice_stt_backend_is_registered_with_its_optional_extra():
+    spec = STT_BACKENDS["sense-voice"]
+
+    assert spec.kind == "stt"
+    assert spec.config_prefix == "sense_voice_stt"
+    assert spec.required_extra == "sensevoice"
+
+
+def test_sensevoice_cli_config_is_normalized_for_the_handler():
+    args = parse_arguments(
+        [
+            "--stt",
+            "sense-voice",
+            "--sense_voice_stt_model_name",
+            "iic/SenseVoiceSmall",
+            "--sense_voice_stt_device",
+            "cpu",
+            "--sense_voice_stt_language",
+            "yue",
+        ]
+    )
+
+    assert args.stt_backend.name == "sense-voice"
+    assert args.stt_backend.config == {
+        "model_name": "iic/SenseVoiceSmall",
+        "device": "cpu",
+        "language": "yue",
+        "gen_kwargs": {},
+    }
+
+
 def test_omnivoice_cli_config_is_normalized_for_the_handler():
     args = parse_arguments(
         [
