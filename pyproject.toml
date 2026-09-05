@@ -72,6 +72,9 @@ chattts = [
 faster-whisper = [
     "faster-whisper>=1.0.3",
 ]
+fireredvad = [
+    "fireredvad",
+]
 kokoro = [
     "kokoro>=0.9.2; platform_system != 'Darwin'",
 ]

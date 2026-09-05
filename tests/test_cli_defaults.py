@@ -36,6 +36,9 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_profile():
     assert module_args.enable_live_transcription is True
     assert module_args.live_transcription_update_interval == 0.5
 
+    assert vad_args.vad == "silero"
+    assert vad_args.vad_firered_model_dir is None
+    assert vad_args.vad_firered_use_gpu is False
     assert vad_args.thresh == 0.6
     assert vad_args.min_silence_ms == 64
     assert vad_args.min_speech_ms == 384
@@ -65,6 +68,13 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_profile():
 
 def test_server_defaults_to_loopback():
     assert RealtimeServerArguments().host == "127.0.0.1"
+
+
+def test_vad_firered_flag_is_accepted():
+    args = parse_arguments(["--vad", "firered", "--vad_firered_model_dir", "/tmp/firered-stream-vad"])
+
+    assert args.vad_handler_kwargs.vad == "firered"
+    assert args.vad_handler_kwargs.vad_firered_model_dir == "/tmp/firered-stream-vad"
 
 
 def test_mac_optimal_settings_flag_does_not_select_a_command():
