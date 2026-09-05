@@ -101,11 +101,13 @@ Shutdown cancels the remaining requests and joins the pipeline's request workers
 If a request worker cannot start, its pending work is cleared, final requests
 receive a sanitized failure, and shutdown still reaches the pipeline boundary.
 
-Cancellation interrupts the client's asynchronous HTTP transport, including a
-request stalled before headers or in the response body. Server-side inference
-cancellation is best-effort: closing the client connection does not guarantee
-that the server stops GPU work. Stale-result filtering remains required even
-when a request has been cancelled.
+Cancellation remains active through connection establishment, upload, and
+response reads, even if a connection handoff consumes an initial cancellation
+signal. Transport cleanup completes before the request worker is reused, so an
+old blocked upload does not hold up a new session until its HTTP timeout.
+Server-side inference cancellation is best-effort: closing the client connection
+does not guarantee that the server stops GPU work. Stale-result filtering remains
+required even when a request has been cancelled.
 
 Client-side queue bounds apply separately to each pipeline. Pipelines do not
 share an admission queue or endpoint concurrency budget. STT server capacity,

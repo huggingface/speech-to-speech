@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import io
 import socket
+import wave
 from queue import Queue
 from threading import Event, Thread
 
+import anyio
 import numpy as np
 import pytest
 
@@ -137,6 +141,149 @@ def test_cancellation_interrupts_stalled_http_and_closes_socket(stalled_stt_endp
         stale.set()
         operation.cancel("shutdown")
         worker.join(timeout=2)
+
+
+@pytest.fixture
+def blocked_upload_endpoint():
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(0.1)
+    stopped = Event()
+    connections = []
+
+    def serve():
+        try:
+            while not stopped.is_set():
+                try:
+                    connection, _ = listener.accept()
+                except socket.timeout:
+                    continue
+                connections.append(connection)
+                if len(connections) == 1:
+                    # Never read the old upload; it cannot fit in the socket buffers.
+                    continue
+                connection.settimeout(3)
+                with connection, connection.makefile("rb") as request:
+                    request.readline()
+                    headers = {}
+                    while (line := request.readline()) not in (b"\r\n", b""):
+                        key, value = line.decode().split(":", 1)
+                        headers[key.lower()] = value.strip()
+                    body = request.read(int(headers["content-length"]))
+                    assert len(body) == int(headers["content-length"])
+                    response = b'{"text":"new session"}'
+                    connection.sendall(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                        + str(len(response)).encode()
+                        + b"\r\nConnection: close\r\n\r\n"
+                        + response
+                    )
+        except OSError:
+            if not stopped.is_set():
+                raise
+
+    def stop():
+        stopped.set()
+        listener.close()
+        for connection in connections:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
+
+    server = Thread(target=serve, daemon=True)
+    server.start()
+    try:
+        yield f"http://127.0.0.1:{listener.getsockname()[1]}/v1/audio/transcriptions", stop
+    finally:
+        stop()
+        server.join(timeout=2)
+        assert not server.is_alive()
+
+
+@pytest.mark.parametrize("cancel_at", ["connection_handoff", "upload"])
+def test_connection_cancellation_survives_blocked_upload_and_session_reuse(
+    blocked_upload_endpoint, monkeypatch, cancel_at
+):
+    url, stop_server = blocked_upload_endpoint
+    connected, first_cancel_consumed = Event(), Event()
+    connect_tcp = anyio.connect_tcp
+    sockets = []
+
+    async def connection_handoff(*args, **kwargs):
+        stream = await connect_tcp(*args, **kwargs)
+        sockets.append(stream.extra(anyio.abc.SocketAttribute.raw_socket))
+        if len(sockets) == 1:
+            sockets[0].setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+            if cancel_at == "connection_handoff":
+                connected.set()
+                try:
+                    await anyio.sleep_forever()
+                except asyncio.CancelledError:
+                    # Deterministically reproduce a connection handoff consuming the first
+                    # cancellation. The real HTTP upload must still remain cancellable.
+                    first_cancel_consumed.set()
+            else:
+                send = stream.send
+
+                async def send_upload(item):
+                    if len(item) >= 65536:
+                        connected.set()
+                    await send(item)
+
+                monkeypatch.setattr(stream, "send", send_upload)
+        return stream
+
+    monkeypatch.setattr(anyio, "connect_tcp", connection_handoff)
+    monkeypatch.setattr(stt_module.OpenAICompatibleSTTHandler, "warmup", lambda self: None)
+    handler = stt_module.OpenAICompatibleSTTHandler(
+        Event(),
+        queue_in=Queue(),
+        queue_out=Queue(),
+        setup_kwargs={"base_url": url.removesuffix("/audio/transcriptions")},
+    )
+    operations = []
+    make_operation = handler._make_operation
+
+    def record_operation(samples):
+        operation = make_operation(samples)
+        operations.append(operation)
+        return operation
+
+    monkeypatch.setattr(handler, "_make_operation", record_operation)
+    worker = Thread(target=handler.run, daemon=True)
+    worker.start()
+    try:
+        handler.queue_in.put(audio(samples=4 * 1024 * 1024))
+        assert connected.wait(3)
+        with wave.open(io.BytesIO(operations[0].wav_bytes)) as wav:
+            assert wav.getnframes() == 4 * 1024 * 1024
+            assert wav.getsampwidth() == 2
+        assert operations[0].timeout_s == 60
+        handler.queue_in.put(SESSION_END)
+        assert handler.queue_out.get(timeout=1) == SESSION_END
+        handler.queue_in.put(audio())  # Reuse the same turn/revision in a new session.
+        if cancel_at == "connection_handoff":
+            assert first_cancel_consumed.wait(1)
+        result = handler.queue_out.get(timeout=3)
+        assert isinstance(result, Transcription)
+        assert result.text == "new session"
+        assert len(operations) == 2
+        assert operations[0]._cancel_reason == "session_end"
+        assert operations[0]._worker_loop is None
+        assert operations[0]._worker_task is None
+        assert operations[0]._worker_cancel_scope is None
+        assert sockets[0].fileno() == -1
+        assert handler.queue_out.empty()
+    finally:
+        stop_server()
+        handler.stop_event.set()
+        handler.queue_in.put(PIPELINE_END)
+        worker.join(timeout=3)
+    assert not worker.is_alive()
 
 
 class ControlledOperation:

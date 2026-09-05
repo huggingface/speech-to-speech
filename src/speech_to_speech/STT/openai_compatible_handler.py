@@ -14,6 +14,7 @@ from threading import Event, Lock, RLock, Thread, current_thread
 from time import perf_counter
 from typing import Any, Iterator, Literal
 
+import anyio
 import httpx
 import numpy as np
 
@@ -67,6 +68,7 @@ class HttpTranscriptionOperation:
     _cancel_reason: str = field(default="superseded", init=False, repr=False)
     _worker_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
     _worker_task: asyncio.Task[HttpTranscriptionResult] | None = field(default=None, init=False, repr=False)
+    _worker_cancel_scope: anyio.CancelScope | None = field(default=None, init=False, repr=False)
 
     def run(self, cancel_check: Callable[[], bool] = lambda: False) -> HttpTranscriptionResult:
         self._raise_if_cancelled(cancel_check)
@@ -88,12 +90,10 @@ class HttpTranscriptionOperation:
         loop: asyncio.AbstractEventLoop | None = None
         try:
             loop = asyncio.new_event_loop()
-            task = loop.create_task(self._request_async())
+            task = loop.create_task(self._request_with_cancel_scope())
             with self._transport_lock:
                 self._worker_loop = loop
                 self._worker_task = task
-                if self._cancelled.is_set():
-                    task.cancel()
             result.set_result(loop.run_until_complete(task))
         except asyncio.CancelledError:
             result.set_exception(TranscriptionRequestCancelled(self._cancel_reason))
@@ -115,10 +115,10 @@ class HttpTranscriptionOperation:
                 return
             self._cancel_reason = reason
             self._cancelled.set()
-            loop, task = self._worker_loop, self._worker_task
-        if loop is not None and task is not None:
+            loop, scope = self._worker_loop, self._worker_cancel_scope
+        if loop is not None and scope is not None:
             try:
-                loop.call_soon_threadsafe(task.cancel)
+                loop.call_soon_threadsafe(scope.cancel)
             except RuntimeError:
                 # Completion may close the loop after the snapshot above.
                 pass
@@ -128,6 +128,21 @@ class HttpTranscriptionOperation:
             self.cancel("superseded")
         if self._cancelled.is_set():
             raise TranscriptionRequestCancelled(self._cancel_reason)
+
+    async def _request_with_cancel_scope(self) -> HttpTranscriptionResult:
+        # A connection handoff can consume a single Task.cancel(). Keep cancellation
+        # effective at later upload/read checkpoints until the request has settled.
+        with anyio.CancelScope() as scope:
+            with self._transport_lock:
+                self._worker_cancel_scope = scope
+                if self._cancelled.is_set():
+                    scope.cancel()
+            try:
+                return await self._request_async()
+            finally:
+                with self._transport_lock:
+                    self._worker_cancel_scope = None
+        raise TranscriptionRequestCancelled(self._cancel_reason)
 
     async def _request_async(self) -> HttpTranscriptionResult:
         headers = {}
@@ -162,12 +177,9 @@ class HttpTranscriptionOperation:
         except httpx.HTTPError as exc:
             raise TranscriptionRequestError(f"transcription transport failed: {type(exc).__name__}") from exc
         finally:
-            close_task = asyncio.create_task(client.aclose())
-            try:
-                await asyncio.shield(close_task)
-            except asyncio.CancelledError:
-                await close_task
-                raise
+            # Repeated cancellation must not interrupt release of the HTTP transport.
+            with anyio.CancelScope(shield=True):
+                await client.aclose()
 
     def _parse_response(self, body: bytes, content_type: str) -> HttpTranscriptionResult:
         if self.response_format == "text" or "text/plain" in content_type:
