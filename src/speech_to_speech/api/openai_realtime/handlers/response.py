@@ -458,7 +458,9 @@ class ResponseHandler(RealtimeBaseHandler):
         # helper the event path uses, so the field and the events come from one
         # decision. The two values are exclusive: "audio" already means audio
         # plus its transcript.
-        output_modalities: list[Literal["text", "audio"]] = ["audio"] if response_wants_audio(rp) else ["text"]
+        output_modalities: list[Literal["text", "audio"]] = (
+            ["audio"] if response_wants_audio(rp, st.runtime_config) else ["text"]
+        )
 
         return RealtimeResponse(
             id=st.current_response_id,
@@ -513,7 +515,7 @@ class ResponseHandler(RealtimeBaseHandler):
             item_status = cast(Literal["completed", "incomplete"], pending.get("status", assistant_status))
             output_by_index[output_index] = self._build_message_item(
                 pending,
-                response_wants_audio(st.current_response_params),
+                response_wants_audio(st.current_response_params, st.runtime_config),
                 item_status,
             )
 
@@ -690,7 +692,7 @@ class ResponseHandler(RealtimeBaseHandler):
         )
         if pending is None:
             return []
-        wants_audio = response_wants_audio(st.current_response_params)
+        wants_audio = response_wants_audio(st.current_response_params, st.runtime_config)
         events = self.finish_audio_output(conn_id, response_key) if wants_audio else []
         events.extend(
             self._finish_message_output(
@@ -712,7 +714,16 @@ class ResponseHandler(RealtimeBaseHandler):
         on failure, or ``None`` if there is no text_prompt_queue.
         """
         st = self._state(conn_id)
+        routing = st.runtime_config.routing
+        if routing is not None and routing.routes.llm is None:
+            return self.make_error("No LLM model selected for this session.", "invalid_request_error")
         if event.response:
+            if (
+                routing is not None
+                and routing.routes.tts is None
+                and "audio" in (event.response.output_modalities or [])
+            ):
+                return self.make_error("No TTS model selected for audio output.", "invalid_request_error")
             if event.response.tool_choice and not isinstance(event.response.tool_choice, str):
                 return self.make_error(
                     message="Only string tool_choice values are supported for now (auto, required, none).",
@@ -875,7 +886,7 @@ class ResponseHandler(RealtimeBaseHandler):
             if status == "completed" and st.response_failed:
                 status = "failed"
             resp_id, _ = self._ensure_response(conn_id)
-            wants_audio = response_wants_audio(st.current_response_params)
+            wants_audio = response_wants_audio(st.current_response_params, st.runtime_config)
             if wants_audio and st.pending_text_outputs:
                 events.extend(self.finish_audio_output(conn_id, response_key))
             item_status: Literal["completed", "incomplete"] = "completed" if status == "completed" else "incomplete"
@@ -977,7 +988,7 @@ class ResponseHandler(RealtimeBaseHandler):
                     st.next_assistant_output_sequence,
                     output_sequence,
                 )
-        wants_audio = response_wants_audio(st.current_response_params)
+        wants_audio = response_wants_audio(st.current_response_params, st.runtime_config)
         meaningful_parts = [
             part
             for part in event.parts

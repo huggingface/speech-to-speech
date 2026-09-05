@@ -248,8 +248,8 @@ def test_connection_cancellation_survives_blocked_upload_and_session_reuse(
     operations = []
     make_operation = handler._make_operation
 
-    def record_operation(samples):
-        operation = make_operation(samples)
+    def record_operation(samples, **kwargs):
+        operation = make_operation(samples, **kwargs)
         operations.append(operation)
         return operation
 
@@ -328,7 +328,7 @@ def handler_factory(monkeypatch):
             Event(), queue_in=Queue(), queue_out=Queue(), setup_kwargs={"speculative_turns": tracker}
         )
         pending = iter(operations)
-        monkeypatch.setattr(handler, "_make_operation", lambda audio: next(pending))
+        monkeypatch.setattr(handler, "_make_operation", lambda audio, **kwargs: next(pending))
         handlers.append((handler, operations))
         return handler
 
@@ -467,7 +467,7 @@ def test_teardown_during_audio_encoding_prevents_http_dispatch(handler_factory, 
     encoding = Event()
     resume = Event()
 
-    def encode(audio):
+    def encode(audio, **kwargs):
         encoding.set()
         assert resume.wait(2)
         return operation

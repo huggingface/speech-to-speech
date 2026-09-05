@@ -8,8 +8,12 @@ import numpy as np
 if TYPE_CHECKING:
     from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
+    from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 
-def response_wants_audio(response: RealtimeResponseCreateParams | None) -> bool:
+
+def response_wants_audio(
+    response: RealtimeResponseCreateParams | None, runtime_config: RuntimeConfig | None = None
+) -> bool:
     """Whether a response should produce audio (and audio events) vs. text only.
 
     Mirrors the OpenAI realtime semantics for ``output_modalities``: an absent
@@ -17,6 +21,11 @@ def response_wants_audio(response: RealtimeResponseCreateParams | None) -> bool:
     audio; a non-empty list without ``"audio"`` (e.g. ``["text"]``) means text
     only.
     """
+    if runtime_config is not None and runtime_config.routing is not None and runtime_config.routing.updates_enabled:
+        if runtime_config.routing.routes.tts is None:
+            return False
+        if response is None or response.output_modalities is None:
+            return "audio" in (runtime_config.session.output_modalities or ["audio"])
     if response is None:
         return True
     mods = response.output_modalities

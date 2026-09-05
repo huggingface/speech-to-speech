@@ -366,6 +366,14 @@ class Chat:
         with self._lock:
             return bool(self._pending_tool_calls)
 
+    def prepare_route_change(self) -> bool:
+        """At a drained turn boundary, detach the old provider's deferred compactor."""
+        with self._lock:
+            if self._pending_tool_calls or self._provisional_generations or self._compact_in_flight:
+                return False
+            self._deferred_compactor = None
+            return True
+
     def trim_if_needed(self, compactor: CompactFn | None = None) -> None:
         """Enforce the size limit after a generation completes. Fires when
         ``user_turn_count > size``.

@@ -414,6 +414,7 @@ def _build_handlers(
             setup_kwargs={
                 "text_output_queue": text_output_queue,
                 "should_listen": should_listen,
+                "sample_rate": vad_handler_kwargs.sample_rate,
             },
         )
         speech_input_handlers.append(transcription_notifier)
@@ -467,6 +468,7 @@ def _build_pipeline_unit(
     stt_backend: BackendSelection,
     llm_backend: BackendSelection,
     tts_backend: BackendSelection,
+    session_routing_enabled: bool = False,
 ) -> "PipelineUnit":
     """Build one isolated pipeline with its own state and queues.
 
@@ -481,6 +483,17 @@ def _build_pipeline_unit(
     stt_selection = stt_backend.copy_for_pipeline()
     llm_selection = llm_backend.copy_for_pipeline()
     tts_selection = tts_backend.copy_for_pipeline()
+    if session_routing_enabled:
+        if (
+            stt_selection.name != "openai"
+            or llm_selection.name not in {"chat-completions", "responses-api"}
+            or tts_selection.name != "openai"
+        ):
+            raise ValueError("session routing requires remote OpenAI-compatible STT, LLM and TTS adapters")
+        # Gateway pools own model readiness. Per-session CPU slots initialize
+        # clients and local resources without probing a bootstrap model.
+        for selection in (stt_selection, llm_selection, tts_selection):
+            selection.config["warmup_enabled"] = False
 
     should_listen = Event()
     response_playing = Event()
@@ -566,6 +579,7 @@ def build_pipeline(
             stt_backend=args.stt_backend,
             llm_backend=args.llm_backend,
             tts_backend=args.tts_backend,
+            session_routing_enabled=args.realtime_server_kwargs.session_routing_enabled,
         )
         for index in range(module_kwargs.num_pipelines)
     ]
@@ -575,6 +589,7 @@ def build_pipeline(
         pool=pool,
         host=host or args.realtime_server_kwargs.host,
         port=args.realtime_server_kwargs.port,
+        session_routing_enabled=args.realtime_server_kwargs.session_routing_enabled,
         llm_proxy_config=(
             build_llm_proxy_config(module_kwargs, args.llm_backend) if module_kwargs.enable_llm_proxy else None
         ),

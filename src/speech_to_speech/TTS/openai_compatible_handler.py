@@ -60,10 +60,12 @@ class HttpSpeechOperation:
         payload: dict[str, Any],
         timeout_s: float,
         response_format: str | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> None:
         self.endpoint_url = endpoint_url
         self.api_key = api_key
         self.payload = payload
+        self.extra_headers = dict(extra_headers or {})
         self.timeout_s = timeout_s
         self.response_format = response_format if response_format is not None else payload.get("response_format")
         self._cancelled = Event()
@@ -76,7 +78,7 @@ class HttpSpeechOperation:
         deadline_at_s = perf_counter() + self.timeout_s
         self._raise_if_stopped(cancel_check)
         results: Queue[tuple[bool, object]] = Queue(maxsize=_SPEECH_STREAM_QUEUE_MAXSIZE)
-        headers = {}
+        headers = dict(self.extra_headers)
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
@@ -380,6 +382,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         cancel_scope: CancelScope | None = None,
         speculative_turns: SpeculativeTurnTracker | None = None,
         gen_kwargs: dict[str, Any] | None = None,
+        warmup_enabled: bool = True,
     ) -> None:
         if response_format not in {"pcm", "wav"}:
             raise ValueError("OpenAI-compatible TTS currently supports response_format 'pcm' or 'wav'")
@@ -413,7 +416,8 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self._operation_lock = Lock()
         self._active_operation: HttpSpeechOperation | None = None
         self._failed_responses: set[tuple[int | None, str | None, str | None, int | None]] = set()
-        self.warmup()
+        if warmup_enabled:
+            self.warmup()
 
     def warmup(self) -> None:
         """Validate the configured speech endpoint before accepting sessions."""
@@ -501,7 +505,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         operation: HttpSpeechOperation | None = None
         try:
             voice = self._resolve_voice(tts_input.runtime_config, tts_input.response)
-            operation = self._make_operation(text=text, voice=voice)
+            operation = self._make_operation(text=text, voice=voice, runtime_config=tts_input.runtime_config)
             with self._operation_lock:
                 self._active_operation = operation
             source_chunks = operation.iter_bytes(cancel_check)
@@ -572,13 +576,21 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         *,
         text: str,
         voice: str | dict[str, str],
+        runtime_config: RuntimeConfig | None = None,
     ) -> HttpSpeechOperation:
+        routing = runtime_config.routing if runtime_config is not None else None
+        payload = self._request_payload(text=text, voice=voice)
+        if routing is not None:
+            if routing.routes.tts is None:
+                raise ValueError("No TTS model selected")
+            payload["model"] = routing.routes.tts.model
         return HttpSpeechOperation(
             endpoint_url=self.endpoint_url,
             api_key=self.api_key,
-            payload=self._request_payload(text=text, voice=voice),
+            payload=payload,
             timeout_s=self.timeout,
             response_format=self.response_format,
+            extra_headers=routing.headers("tts") if routing else None,
         )
 
     def _request_payload(
