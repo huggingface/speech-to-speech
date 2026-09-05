@@ -16,7 +16,7 @@ class VLLMRealtimeSTTHandlerArguments:
     )
     vllm_realtime_stt_model: str = field(
         default="Qwen/Qwen3-ASR-1.7B",
-        metadata={"help": "vLLM realtime-capable transcription model identifier."},
+        metadata={"help": "Realtime-capable model identifier; must match a model served by the vLLM endpoint."},
     )
     vllm_realtime_stt_audio_sample_rate: int = field(
         default=16000,

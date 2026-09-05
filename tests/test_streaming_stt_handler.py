@@ -29,7 +29,9 @@ from speech_to_speech.STT.streaming_handler import (
     _StreamingPCMResampler,
 )
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
+from speech_to_speech.VAD.vad_iterator import VADIterator
 from tests.test_speculative_turns import _audio_bytes, _StaticVADIterator, _vad_handler_for_iterator
+from tests.test_vad_iterator import _FakeVADModel
 
 DIALECT_CASES = [
     (OpenAIRealtimeSTTHandler, "openai"),
@@ -240,6 +242,84 @@ def test_openai_realtime_streams_each_chunk_once_then_explicitly_commits(caplog)
 
 
 @pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
+@pytest.mark.parametrize("speech_pad_ms", [0, 50])
+def test_streaming_vad_gates_idle_audio_and_keeps_partials_and_interruptions(
+    handler_type, dialect, speech_pad_ms
+) -> None:
+    # Two seconds of idle audio before each utterance, with 384ms of speech
+    # and the three 32ms chunks needed to finish a 64ms VAD silence window.
+    probabilities = ([0.1] * 63 + [0.9] * 12 + [0.1] * 3) * 2
+    vad = _vad_handler_for_iterator(
+        VADIterator(_FakeVADModel(probabilities), min_silence_duration_ms=64, speech_pad_ms=speech_pad_ms)
+    )
+    chunks = [np.full(512, index + 1, dtype=np.int16).tobytes() for index in range(len(probabilities))]
+    committed_audio: list[bytes] = []
+    current_audio = bytearray()
+
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        if _ack_session_update(event, socket, dialect):
+            return
+        item_id = f"item_{len(committed_audio) + 1}"
+        if event["type"] == "input_audio_buffer.append":
+            first_append = not current_audio
+            current_audio.extend(base64.b64decode(event["audio"]))
+            if first_append:
+                delta = {"type": "transcription.delta", "delta": "hello"}
+                if dialect == "openai":
+                    delta.update(
+                        type="conversation.item.input_audio_transcription.delta", item_id=item_id, content_index=0
+                    )
+                socket.incoming.put(json.dumps(delta))
+        elif _is_final_commit(event, dialect):
+            committed_audio.append(bytes(current_audio))
+            current_audio.clear()
+            socket.incoming.put(json.dumps(_completion_event("hello", item_id=item_id, dialect=dialect)))
+
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory, handler_type=handler_type, tracker=vad.speculative_turns)
+    vad.streaming_stt_sink = handler
+    assert vad.enable_realtime_transcription is False
+    try:
+        for turn_index in range(2):
+            start = turn_index * 78
+            idle = chunks[start : start + 63]
+            speech = chunks[start + 63 : start + 75]
+            trailing = chunks[start + 75 : start + 78]
+            for chunk in idle:
+                assert list(vad.process(chunk)) == []
+            for chunk in speech:
+                assert list(vad.process(chunk)) == []
+
+            turn_id = f"turn_{turn_index + 1}"
+            started = vad.text_output_queue.get_nowait()
+            assert isinstance(started, SpeechStartedEvent)
+            assert started.turn_id == turn_id
+            assert started.interrupt_response is True
+            assert handler.queue_out.get(timeout=1) == PartialTranscription(
+                text="hello", turn_id=turn_id, turn_revision=0
+            )
+
+            finals = [output for chunk in trailing for output in vad.process(chunk)]
+            assert len(finals) == 1
+            transcripts = list(handler.process(finals[0]))
+            assert len(transcripts) == 1
+            assert isinstance(transcripts[0], Transcription)
+            assert (transcripts[0].text, transcripts[0].turn_id) == ("hello", turn_id)
+            pad_bytes = speech_pad_ms * 16 * 2
+            prefix = b"".join(idle)[-pad_bytes:] if pad_bytes else b""
+            assert committed_audio[turn_index] == prefix + b"".join(speech + trailing)
+            # Assistant output commits the previous turn. Continued microphone
+            # capture must still detect the next user's interruption.
+            vad.speculative_turns.commit(turn_id, 0)
+            vad.text_output_queue.get_nowait()  # speech_stopped
+
+        assert len(committed_audio) == 2
+        assert len(factory.instances) == 1
+    finally:
+        handler.cleanup()
+
+
+@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
 @pytest.mark.parametrize("fallback_start", [False, True])
 def test_vad_speech_start_precedes_buffered_streaming_partial(
     handler_type, dialect, fallback_start, monkeypatch
@@ -433,9 +513,9 @@ def test_openai_realtime_resolves_auth_after_endpoint_normalization(
             session_updated.set()
 
     factory = _SocketFactory(on_send)
-    handler = _handler(factory, base_url=base_url, api_key=api_key)
+    handler = _handler(factory, base_url=base_url, api_key=api_key, audio_sample_rate=24000)
     try:
-        handler.append_audio(b"\x01\x00" * 512)
+        handler.append_audio(b"\x01\x00" * 4096)
         assert session_updated.wait(timeout=1)
         endpoint, options = factory.calls[0]
         expected_headers = {"Authorization": f"Bearer {expected_key}"} if expected_key else {}
@@ -446,7 +526,11 @@ def test_openai_realtime_resolves_auth_after_endpoint_normalization(
         handler.cleanup()
 
 
-def test_openai_realtime_official_url_uses_transcription_intent(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "base_url",
+    ["wss://api.openai.com/v1", "https://api.openai.com/v1/realtime?model=gpt-live-transcribe"],
+)
+def test_openai_realtime_official_url_uses_transcription_intent(monkeypatch, base_url) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "environment-key")
     session_updated = Event()
 
@@ -457,11 +541,12 @@ def test_openai_realtime_official_url_uses_transcription_intent(monkeypatch) -> 
     factory = _SocketFactory(on_send)
     handler = _handler(
         factory,
-        base_url="wss://api.openai.com/v1",
+        base_url=base_url,
         model="gpt-live-transcribe",
+        audio_sample_rate=24000,
     )
     try:
-        handler.append_audio(b"\x01\x00" * 512)
+        handler.append_audio(b"\x01\x00" * 4096)
         assert session_updated.wait(timeout=1)
         endpoint, _options = factory.calls[0]
         split = urlsplit(endpoint)
@@ -474,6 +559,17 @@ def test_openai_realtime_official_url_uses_transcription_intent(monkeypatch) -> 
         assert update["session"]["audio"]["input"]["transcription"]["model"] == "gpt-live-transcribe"
     finally:
         handler.cleanup()
+
+
+@pytest.mark.parametrize("audio_sample_rate", [16000, 48000])
+@pytest.mark.parametrize("base_url", ["wss://api.openai.com/v1", " https://api.openai.com/v1/realtime/ "])
+def test_hosted_openai_rejects_invalid_pcm_rate_before_connecting(audio_sample_rate, base_url) -> None:
+    factory = _SocketFactory(lambda _event, _socket: None)
+
+    with pytest.raises(ValueError, match="Hosted OpenAI Realtime STT requires 24 kHz PCM"):
+        _handler(factory, base_url=base_url, audio_sample_rate=audio_sample_rate)
+
+    assert factory.calls == []
 
 
 def test_vllm_realtime_url_omits_intent_and_model_query() -> None:

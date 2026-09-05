@@ -951,6 +951,17 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
             raise ValueError("Streaming STT timeouts must be > 0")
         if self.protocol_type is VLLMRealtimeProtocol and audio_sample_rate != PIPELINE_SAMPLE_RATE:
             raise ValueError("vLLM Realtime STT requires 16 kHz PCM")
+        endpoint_url = _endpoint_url(
+            base_url,
+            model.strip(),
+            include_model_query=self.include_model_query,
+        )
+        if (
+            self.protocol_type is OpenAIRealtimeProtocol
+            and urlsplit(endpoint_url).hostname == "api.openai.com"
+            and audio_sample_rate != 24000
+        ):
+            raise ValueError("Hosted OpenAI Realtime STT requires 24 kHz PCM")
 
         self.speculative_turns = speculative_turns
         self.final_revision_settle_s = 0.0
@@ -965,11 +976,6 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
             model=model.strip(),
             language=language.strip() if language else None,
             audio_sample_rate=audio_sample_rate,
-        )
-        endpoint_url = _endpoint_url(
-            base_url,
-            model.strip(),
-            include_model_query=self.include_model_query,
         )
         normalized_endpoint = urlsplit(endpoint_url)._replace(query="", fragment="").geturl()
         if api_key is None and normalized_endpoint == f"{OPENAI_REALTIME_BASE_URL}/realtime":

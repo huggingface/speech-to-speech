@@ -165,6 +165,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._pending_reopen_candidate: tuple[str, int, int] | None = None
         self._pending_short_segment: _PendingShortSegment | None = None
         self.streaming_stt_sink: Any | None = None
+        self._streaming_pre_speech = bytearray()
 
     @property
     def _audio_ms(self) -> int:
@@ -366,10 +367,20 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         except Exception:
             logger.exception("VAD: failed to mark the streaming STT turn")
 
-    def _stream_audio_chunk(self, audio_chunk: bytes) -> None:
+    def _stream_audio_chunk(self, audio_chunk: bytes, *, speech_active: bool) -> None:
         sink = getattr(self, "streaming_stt_sink", None)
         if sink is None:
             return
+        if not speech_active:
+            # Retain only VAD's configured pre-speech padding, without sending
+            # idle microphone audio to the provider.
+            self._streaming_pre_speech.extend(audio_chunk)
+            pad_bytes = self.iterator.speech_pad_samples * 2
+            del self._streaming_pre_speech[: max(0, len(self._streaming_pre_speech) - pad_bytes)]
+            return
+        if self._streaming_pre_speech:
+            audio_chunk = bytes(self._streaming_pre_speech) + audio_chunk
+            self._streaming_pre_speech.clear()
         try:
             sink.append_audio(audio_chunk)
         except Exception:
@@ -593,6 +604,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._total_samples += len(audio_int16)
         audio_float32 = int2float(audio_int16)
 
+        was_triggered = self.iterator.triggered
         vad_output = self.iterator(torch.from_numpy(audio_float32))
         is_triggered_now = self.iterator.triggered
 
@@ -607,9 +619,15 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 duration_ms = 0.0
             self._discard_expired_pending_short_segment(max(0, self._audio_ms - int(duration_ms)))
 
-        # Stateful STT receives the same accepted PCM chunk as local VAD. The
-        # sink enqueues transport work without blocking this VAD thread.
-        self._stream_audio_chunk(audio_chunk)
+        # Keep the triggering chunk, trailing silence, and bounded gaps between
+        # held fragments. Already-streamed gap audio is never sent as padding again.
+        self._stream_audio_chunk(
+            audio_chunk,
+            speech_active=was_triggered
+            or is_triggered_now
+            or bool(vad_output)
+            or self._pending_short_segment is not None,
+        )
 
         # Deferred speech_started: only emit once active VAD speech reaches the valid speech threshold.
         if is_triggered_now and not self._speech_started_emitted:
@@ -888,6 +906,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         streaming_stt_sink = getattr(self, "streaming_stt_sink", None)
         if streaming_stt_sink is not None:
             streaming_stt_sink.cancel_session()
+        self._streaming_pre_speech.clear()
         self.iterator.reset_states()
         self._pending_short_segment = None
         self.iterator.buffer = []

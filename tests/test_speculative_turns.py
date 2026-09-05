@@ -12,6 +12,8 @@ from speech_to_speech.pipeline.messages import VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.VAD.smart_turn import SmartTurnResult
 from speech_to_speech.VAD.vad_handler import VADHandler
+from speech_to_speech.VAD.vad_iterator import VADIterator
+from tests.test_vad_iterator import _FakeVADModel
 
 
 def test_pending_reopen_defers_commit_until_cancelled():
@@ -335,6 +337,7 @@ class _StaticVADIterator:
         last_utterance_active_speech_samples: int = 0,
     ) -> None:
         self.triggered = triggered
+        self.speech_pad_samples = 0
         self._vad_output = vad_output
         self.buffer = buffer_chunks or []
         self._speech_chunks = speech_chunks or self.buffer
@@ -398,6 +401,7 @@ def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
     handler._pending_reopen_candidate = None
     handler.short_segment_merge_ms = 0
     handler._pending_short_segment = None
+    handler._streaming_pre_speech = bytearray()
     return handler
 
 
@@ -492,6 +496,9 @@ class _RecordingStreamingSTT:
         self.discard_count += 1
         self.events.append("discard")
 
+    def cancel_session(self) -> None:
+        self.events.append("cancel")
+
     def commit_boundary(self, turn_id: str | None, turn_revision: int | None) -> None:
         self.commits.append((turn_id, turn_revision))
         self.events.append("commit")
@@ -516,6 +523,67 @@ def test_vad_streams_each_accepted_chunk_and_marks_the_confirmed_turn():
 
     assert sink.audio == [chunk]
     assert sink.turns == [("turn_1", 0)]
+
+
+def test_streaming_vad_preserves_held_fragment_gap_without_replaying_padding():
+    probabilities = [0.1] * 10 + [0.9] * 4 + [0.1] * 7 + [0.9] * 8 + [0.1] * 13
+    handler = _vad_handler_for_iterator(
+        VADIterator(_FakeVADModel(probabilities), min_silence_duration_ms=64, speech_pad_ms=50)
+    )
+    handler.short_segment_merge_ms = 384
+    sink = _RecordingStreamingSTT()
+    handler.streaming_stt_sink = sink
+    chunks = [np.full(512, index + 1, dtype=np.int16).tobytes() for index in range(len(probabilities))]
+
+    outputs = [output for chunk in chunks for output in handler.process(chunk)]
+
+    assert len(outputs) == 1
+    assert sink.commits == [("turn_1", 0)]
+    assert sink.discard_count == 0
+    # The 128ms fragment and 256ms continuation form one utterance, retaining
+    # their intervening silence exactly once even though VAD adds a new prefix.
+    assert b"".join(sink.audio) == b"".join(chunks[:10])[-1600:] + b"".join(chunks[10:32])
+    assert handler._pending_short_segment is None
+
+
+def test_streaming_vad_stops_forwarding_when_held_fragment_expires():
+    probabilities = [0.9] * 4 + [0.1] * 30
+    handler = _vad_handler_for_iterator(
+        VADIterator(_FakeVADModel(probabilities), min_silence_duration_ms=64, speech_pad_ms=50)
+    )
+    handler.short_segment_merge_ms = 128
+    sink = _RecordingStreamingSTT()
+    handler.streaming_stt_sink = sink
+    chunks = [np.full(512, index + 1, dtype=np.int16).tobytes() for index in range(len(probabilities))]
+
+    assert [output for chunk in chunks for output in handler.process(chunk)] == []
+
+    assert sink.discard_count == 1
+    assert sink.events[-1] == "discard"
+    assert sink.commits == []
+    # Four speech chunks, three endpointing chunks, and four merge-window
+    # chunks are sent; the remaining idle audio stays out of the provider.
+    assert b"".join(sink.audio) == b"".join(chunks[:11])
+
+
+def test_streaming_vad_clears_padding_between_sessions_and_respects_listening_gate():
+    handler = _vad_handler_for_iterator(VADIterator(_FakeVADModel([0.1] * 3 + [0.9]), speech_pad_ms=50))
+    sink = _RecordingStreamingSTT()
+    handler.streaming_stt_sink = sink
+    for value in range(1, 4):
+        assert list(handler.process(np.full(512, value, dtype=np.int16).tobytes())) == []
+    assert sink.audio == []
+
+    handler.on_session_end()
+    handler.should_listen.clear()
+    assert list(handler.process(b"\x09\x00" * 512)) == []
+    assert sink.audio == []
+    handler.should_listen.set()
+    speech = b"\x04\x00" * 512
+    assert list(handler.process(speech)) == []
+
+    assert sink.events == ["cancel", "append"]
+    assert sink.audio == [speech]
 
 
 def test_vad_discards_final_segment_when_active_speech_is_short():
@@ -975,7 +1043,7 @@ def test_vad_discards_expired_fragment_before_streaming_new_audio(segment_state)
 
     assert list(handler.process(_audio_bytes())) == []
 
-    assert sink.events[:2] == ["discard", "append"]
+    assert sink.events[:2] == (["discard"] if segment_state == "silent" else ["discard", "append"])
     assert sink.discard_count == 1
 
 

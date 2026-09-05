@@ -24,7 +24,7 @@ class OpenAIRealtimeSTTHandlerArguments:
     )
     openai_realtime_stt_audio_sample_rate: int = field(
         default=24000,
-        metadata={"help": "PCM sample rate advertised to the Realtime transcription session."},
+        metadata={"help": "PCM sample rate; hosted OpenAI Realtime requires 24000."},
     )
     openai_realtime_stt_connect_timeout: float = field(
         default=10.0,
