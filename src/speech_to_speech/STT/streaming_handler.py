@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import inspect
 import json
 import logging
 import os
@@ -126,6 +125,9 @@ class OpenAIRealtimeProtocol:
                 return _ProtocolEvent("ignore")
             return _ProtocolEvent("committed", item_id=item_id)
         content_index = event.get("content_index")
+        if event_type == "conversation.item.input_audio_transcription.delta" and "content_index" not in event:
+            # Deltas may omit the index; this adapter sends one audio part.
+            content_index = 0
         if event_type in {
             "conversation.item.input_audio_transcription.delta",
             "conversation.item.input_audio_transcription.completed",
@@ -290,15 +292,7 @@ def _join_transcripts(prefix: str, text: str) -> str:
 def _default_connect(url: str, *, headers: dict[str, str], open_timeout: float) -> _WebSocket:
     from websockets.sync.client import connect
 
-    kwargs: dict[str, Any] = {
-        "open_timeout": open_timeout,
-        "close_timeout": 1.0,
-    }
-    header_parameter = (
-        "additional_headers" if "additional_headers" in inspect.signature(connect).parameters else "extra_headers"
-    )
-    kwargs[header_parameter] = headers
-    return connect(url, **kwargs)
+    return connect(url, additional_headers=headers, open_timeout=open_timeout, close_timeout=1.0)
 
 
 def _endpoint_url(base_url: str, model: str, *, include_model_query: bool) -> str:
@@ -355,6 +349,7 @@ class _StreamingSession:
         endpoint_url: str,
         headers: dict[str, str],
         connect_timeout: float,
+        final_timeout: float,
         connect_factory: ConnectFactory,
         queue_out: Queue[Any],
         stop_event: Event,
@@ -365,6 +360,7 @@ class _StreamingSession:
         self.endpoint_url = endpoint_url
         self.headers = headers
         self.connect_timeout = connect_timeout
+        self.final_timeout = final_timeout
         self.connect_factory = connect_factory
         self.queue_out = queue_out
         self.stop_event = stop_event
@@ -421,7 +417,7 @@ class _StreamingSession:
         with self._commit_lock:
             return bool(self._pending_commits.get(key))
 
-    def commit(self, source: VADAudio, timeout_s: float) -> _Commit | None:
+    def commit(self, source: VADAudio) -> _Commit | None:
         generation = self.generation
         key = (generation, source.turn_id, source.turn_revision)
         with self._commit_lock:
@@ -438,15 +434,9 @@ class _StreamingSession:
                 boundary_queued_at_s=perf_counter(),
             )
             self._commands.put(commit)
-        deadline = monotonic() + timeout_s
-        while not commit.done.wait(timeout=min(0.05, max(0.0, deadline - monotonic()))):
+        while not commit.done.wait(timeout=0.05):
             if self.stop_event.is_set() or generation != self.generation:
                 return None
-            if monotonic() >= deadline:
-                self._close_connection()
-                commit.error = "streaming transcription timed out"
-                commit.done.set()
-                break
         if generation != self.generation:
             return None
         return commit
@@ -533,11 +523,10 @@ class _StreamingSession:
             commit.error = message
             commit.done.set()
 
-        def fail_connection(exc: BaseException) -> None:
+        def fail_connection(exc: BaseException, message: str = "streaming transcription connection failed") -> None:
             nonlocal active_commit, audio_error, audio_error_requires_close
             logger.warning("%s STT connection failed: %s", self.protocol.name, type(exc).__name__)
             close_connection()
-            message = "streaming transcription connection failed"
             if active_commit is not None:
                 poison_turn(active_commit.turn_id, message)
                 fail_commit(active_commit, message)
@@ -555,7 +544,9 @@ class _StreamingSession:
             pending_unassigned_audio.clear()
             if connection is not None and (utterance_started or utterance_has_audio):
                 discard_event = self.protocol.discard_utterance()
-                if discard_event is None:
+                if discard_event is None or active_item_id is None:
+                    # Clearing bytes cannot fence late transcripts for an item
+                    # whose identity we have not learned yet.
                     close_connection()
                 else:
                     try:
@@ -644,6 +635,9 @@ class _StreamingSession:
         def handle_protocol_event(event: _ProtocolEvent) -> None:
             nonlocal active_commit, active_item_id, active_content_index, remote_hypothesis
             nonlocal audio_error, audio_error_requires_close
+            if active_commit is not None and perf_counter() >= active_commit.boundary_queued_at_s + self.final_timeout:
+                fail_connection(TimeoutError(), "streaming transcription timed out")
+                return
             if event.kind == "ignore":
                 return
 
@@ -753,6 +747,10 @@ class _StreamingSession:
             audio_error_requires_close = False
 
         while True:
+            # VAD may drop a stale final before process() consumes its commit.
+            # The worker owns the deadline and releases deferred audio itself.
+            if active_commit is not None and perf_counter() >= active_commit.boundary_queued_at_s + self.final_timeout:
+                fail_connection(TimeoutError(), "streaming transcription timed out")
             command: _Command | None = None
             if active_commit is None and deferred_commands:
                 command = deferred_commands.popleft()
@@ -841,7 +839,10 @@ class _StreamingSession:
             elif isinstance(command, _Commit):
                 turn_id = command.turn_id
                 turn_revision = command.turn_revision
-                if audio_error is not None:
+                if perf_counter() >= command.boundary_queued_at_s + self.final_timeout:
+                    active_commit = command
+                    fail_connection(TimeoutError(), "streaming transcription timed out")
+                elif audio_error is not None:
                     should_close = audio_error_requires_close
                     fail_commit(command, audio_error)
                     audio_error = None
@@ -934,7 +935,6 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
         self.speculative_turns = speculative_turns
         self.final_revision_settle_s = 0.0
         self.audio_sample_rate = audio_sample_rate
-        self.final_timeout = final_timeout
         self._audio_lock = Lock()
         self._resampler = (
             _StreamingPCMResampler(PIPELINE_SAMPLE_RATE, audio_sample_rate)
@@ -960,6 +960,7 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
             endpoint_url=endpoint_url,
             headers=headers,
             connect_timeout=connect_timeout,
+            final_timeout=final_timeout,
             connect_factory=connect_factory or _default_connect,
             queue_out=self.queue_out,
             stop_event=self.stop_event,
@@ -1002,7 +1003,7 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
         if not self._session.has_pending_commit(vad_audio):
             self.commit_boundary(vad_audio.turn_id, vad_audio.turn_revision)
         generation = self._session.generation
-        commit = self._session.commit(vad_audio, self.final_timeout)
+        commit = self._session.commit(vad_audio)
         if commit is None or generation != self._session.generation:
             return
         if commit.error is not None:

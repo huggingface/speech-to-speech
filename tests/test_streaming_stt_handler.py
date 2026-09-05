@@ -17,6 +17,7 @@ from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.pipeline.control import SESSION_END
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, TranscriptionFailure, VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.STT import streaming_handler
 from speech_to_speech.STT.streaming_handler import (
     OpenAIRealtimeProtocol,
     OpenAIRealtimeSTTHandler,
@@ -108,6 +109,7 @@ def _handler(
     tracker: SpeculativeTurnTracker | None = None,
     audio_sample_rate: int = 16000,
     queue_out: Queue[Any] | None = None,
+    final_timeout: float = 1.0,
 ):
     return handler_type(
         Event(),
@@ -118,7 +120,7 @@ def _handler(
             "model": "test-model",
             "audio_sample_rate": audio_sample_rate,
             "connect_timeout": 0.5,
-            "final_timeout": 1.0,
+            "final_timeout": final_timeout,
             "speculative_turns": tracker,
             "connect_factory": socket_factory,
         },
@@ -368,6 +370,10 @@ def test_vllm_protocol_is_separate_from_openai_wire_shape() -> None:
         {
             "type": "conversation.item.input_audio_transcription.failed",
             "item_id": "item_1",
+        },
+        {
+            "type": "conversation.item.input_audio_transcription.failed",
+            "item_id": "item_1",
             "content_index": True,
         },
         {
@@ -382,6 +388,52 @@ def test_openai_realtime_ignores_transcription_events_without_valid_identity(eve
     protocol = OpenAIRealtimeProtocol(model="gpt-live-transcribe", language=None, audio_sample_rate=24000)
 
     assert protocol.parse_event(event).kind == "ignore"
+
+
+@pytest.mark.parametrize("content_index", [None, True, -1, 0.5, "0"])
+def test_openai_realtime_rejects_explicit_invalid_delta_content_index(content_index) -> None:
+    protocol = OpenAIRealtimeProtocol(model="gpt-live-transcribe", language=None, audio_sample_rate=24000)
+
+    assert (
+        protocol.parse_event(
+            {
+                "type": "conversation.item.input_audio_transcription.delta",
+                "item_id": "item_1",
+                "content_index": content_index,
+                "delta": "invalid index",
+            }
+        ).kind
+        == "ignore"
+    )
+
+
+def test_openai_realtime_delta_without_content_index_emits_live_partial() -> None:
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        if _ack_session_update(event, socket):
+            return
+        if event["type"] == "input_audio_buffer.append":
+            for delta in ["hello", " world"]:
+                socket.incoming.put(
+                    json.dumps(
+                        {
+                            "type": "conversation.item.input_audio_transcription.delta",
+                            "item_id": "item_1",
+                            "delta": delta,
+                        }
+                    )
+                )
+        elif _is_final_commit(event):
+            socket.incoming.put(json.dumps(_completion_event("hello world", item_id="item_1")))
+
+    handler = _handler(_SocketFactory(on_send))
+    try:
+        handler.start_turn("turn_1", 0)
+        handler.append_audio(b"\x01\x00" * 512)
+        assert handler.queue_out.get(timeout=1).text == "hello"
+        assert handler.queue_out.get(timeout=1).text == "hello world"
+        assert [output.text for output in handler.process(_vad_final())] == ["hello world"]
+    finally:
+        handler.cleanup()
 
 
 def test_openai_realtime_matches_deltas_and_completion_by_item_and_content_index() -> None:
@@ -874,6 +926,158 @@ def test_discard_of_failed_unassigned_audio_allows_a_new_turn(handler_type, dial
 
 
 @pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
+def test_unconsumed_stale_commit_times_out_and_releases_later_turns(handler_type, dialect) -> None:
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    first_commit_seen = Event()
+    recovered_commit_seen = Event()
+    commit_count = 0
+    reopened_chunk = b"\x02\x00" * 512
+
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        nonlocal commit_count
+        if _ack_session_update(event, socket, dialect):
+            return
+        if _is_final_commit(event, dialect):
+            commit_count += 1
+            if commit_count == 1:
+                first_commit_seen.set()
+            else:
+                socket.incoming.put(json.dumps(_completion_event("recovered", dialect=dialect)))
+                recovered_commit_seen.set()
+
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory, handler_type=handler_type, tracker=tracker, final_timeout=0.4)
+    try:
+        handler.start_turn("turn_1", 0)
+        handler.append_audio(b"\x01\x00" * 512)
+        handler.commit_boundary("turn_1", 0)
+        assert first_commit_seen.wait(timeout=1)
+        pending = handler._session._pending_commits[(handler._session.generation, "turn_1", 0)][0]
+        tracker.observe("turn_1", 1)
+        assert not handler.should_process_input(_vad_final())
+        # Never call process() for the stale final. Later commands must still
+        # run, and reopening the timed-out turn must not transcribe its suffix.
+        assert not pending.done.wait(timeout=0.2)
+        handler.start_turn("turn_1", 1)
+        handler.append_audio(reopened_chunk)
+        handler.commit_boundary("turn_1", 1)
+        tracker.observe("turn_2", 0)
+        handler.start_turn("turn_2", 0)
+        handler.append_audio(b"\x03\x00" * 512)
+        handler.commit_boundary("turn_2", 0)
+
+        assert pending.done.wait(timeout=0.8)
+        assert pending.error == "streaming transcription timed out"
+        assert factory.instances[0].closed
+        factory.instances[0].incoming.put(json.dumps(_completion_event("late stale final", dialect=dialect)))
+        assert recovered_commit_seen.wait(timeout=1)
+        reopened = list(handler.process(_vad_final(revision=1)))
+        assert len(reopened) == 1
+        assert isinstance(reopened[0], TranscriptionFailure)
+        recovered = list(
+            handler.process(
+                VADAudio(
+                    audio=np.zeros(160, dtype=np.float32),
+                    mode="final",
+                    turn_id="turn_2",
+                    turn_revision=0,
+                )
+            )
+        )
+        assert [output.text for output in recovered] == ["recovered"]
+        assert all(
+            base64.b64decode(event["audio"]) != reopened_chunk
+            for socket in factory.instances
+            for event in _append_events(socket)
+        )
+        assert len(factory.instances) == 2
+        assert handler.queue_out.empty()
+    finally:
+        handler.cleanup()
+
+
+@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
+def test_commit_deadline_includes_time_queued_before_remote_commit(handler_type, dialect) -> None:
+    append_seen = Event()
+    release_append = Event()
+
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        if _ack_session_update(event, socket, dialect):
+            return
+        if event["type"] == "input_audio_buffer.append":
+            append_seen.set()
+            assert release_append.wait(timeout=1)
+        elif _is_final_commit(event, dialect):
+            socket.incoming.put(json.dumps(_completion_event("too late", dialect=dialect)))
+
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory, handler_type=handler_type, final_timeout=0.05)
+    try:
+        handler.start_turn("turn_1", 0)
+        handler.append_audio(b"\x01\x00" * 512)
+        assert append_seen.wait(timeout=1)
+        handler.commit_boundary("turn_1", 0)
+        pending = handler._session._pending_commits[(handler._session.generation, "turn_1", 0)][0]
+        assert not pending.done.wait(timeout=0.1)
+        release_append.set()
+        result = list(handler.process(_vad_final()))
+        assert len(result) == 1
+        assert isinstance(result[0], TranscriptionFailure)
+        assert result[0].message == "streaming transcription timed out"
+        assert factory.instances[0].closed
+        assert not any(_is_final_commit(event, dialect) for event in factory.instances[0].sent)
+    finally:
+        release_append.set()
+        handler.cleanup()
+
+
+@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
+@pytest.mark.parametrize("late_partial", [False, True])
+def test_transcription_received_after_commit_deadline_is_rejected(
+    handler_type, dialect, late_partial, monkeypatch
+) -> None:
+    now = 100.0
+    monkeypatch.setattr(streaming_handler, "perf_counter", lambda: now)
+
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        nonlocal now
+        if _ack_session_update(event, socket, dialect):
+            return
+        if _is_final_commit(event, dialect):
+            # The deadline passes while the worker is waiting on the provider.
+            now += 2.0
+            if late_partial:
+                socket.incoming.put(
+                    json.dumps(
+                        {"type": "transcription.delta", "delta": "late"}
+                        if dialect == "vllm"
+                        else {
+                            "type": "conversation.item.input_audio_transcription.delta",
+                            "item_id": "item_late",
+                            "content_index": 0,
+                            "delta": "late",
+                        }
+                    )
+                )
+            socket.incoming.put(json.dumps(_completion_event("late", item_id="item_late", dialect=dialect)))
+
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory, handler_type=handler_type)
+    try:
+        handler.start_turn("turn_1", 0)
+        handler.append_audio(b"\x01\x00" * 512)
+        result = list(handler.process(_vad_final()))
+        assert len(result) == 1
+        assert isinstance(result[0], TranscriptionFailure)
+        assert result[0].message == "streaming transcription timed out"
+        assert handler.queue_out.empty()
+        assert factory.instances[0].closed
+    finally:
+        handler.cleanup()
+
+
+@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
 def test_connection_failure_discards_reopened_revisions_of_the_same_turn(handler_type, dialect) -> None:
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
@@ -1293,7 +1497,8 @@ def test_discard_behind_pending_final_preserves_accepted_turns(handler_type, dia
 
 
 @pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
-def test_discarded_audio_cannot_contaminate_the_next_turn(handler_type, dialect) -> None:
+@pytest.mark.parametrize("identity_known", [False, True])
+def test_discarded_audio_cannot_contaminate_the_next_turn(handler_type, dialect, identity_known) -> None:
     first_append_seen = Event()
     rejected_chunk = b"\x01\x00" * 512
     accepted_chunk = b"\x02\x00" * 512
@@ -1302,14 +1507,45 @@ def test_discarded_audio_cannot_contaminate_the_next_turn(handler_type, dialect)
         if _ack_session_update(event, socket, dialect):
             return
         if event["type"] == "input_audio_buffer.append" and base64.b64decode(event["audio"]) == rejected_chunk:
+            if identity_known:
+                socket.incoming.put(
+                    json.dumps(
+                        {"type": "transcription.delta", "delta": "rejected"}
+                        if dialect == "vllm"
+                        else {
+                            "type": "conversation.item.input_audio_transcription.delta",
+                            "item_id": "item_rejected",
+                            "content_index": 0,
+                            "delta": "rejected",
+                        }
+                    )
+                )
             first_append_seen.set()
+        elif event["type"] == "input_audio_buffer.append":
+            # A delayed event from the discarded buffer arrives only after
+            # the next buffer has audio. It must not acquire the next turn.
+            factory.instances[0].incoming.put(
+                json.dumps(
+                    {"type": "transcription.delta", "delta": " stale"}
+                    if dialect == "vllm"
+                    else {
+                        "type": "conversation.item.input_audio_transcription.delta",
+                        "item_id": "item_rejected",
+                        "content_index": 0,
+                        "delta": " stale",
+                    }
+                )
+            )
         elif _is_final_commit(event, dialect):
             socket.incoming.put(json.dumps(_completion_event("accepted", dialect=dialect)))
 
     factory = _SocketFactory(on_send)
     handler = _handler(factory, handler_type=handler_type)
+    handler.start_turn("turn_rejected", 0)
     handler.append_audio(rejected_chunk)
     assert first_append_seen.wait(timeout=1)
+    if identity_known:
+        assert handler.queue_out.get(timeout=1).text == "rejected"
 
     handler.discard_utterance()
     handler.start_turn("turn_1", 0)
@@ -1317,7 +1553,8 @@ def test_discarded_audio_cannot_contaminate_the_next_turn(handler_type, dialect)
     outputs = list(handler.process(_vad_final()))
 
     assert [output.text for output in outputs] == ["accepted"]
-    if dialect == "openai":
+    assert handler.queue_out.empty()
+    if dialect == "openai" and identity_known:
         events = factory.instances[0].sent
         clear_index = events.index({"type": "input_audio_buffer.clear"})
         accepted_index = next(
