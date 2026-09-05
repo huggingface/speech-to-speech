@@ -128,6 +128,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         speculative_turns: SpeculativeTurnTracker | None = None,
         final_revision_settle_s: float = 0.0,
         gen_kwargs: dict[str, Any] | None = None,
+        warmup_enabled: bool = True,
     ) -> None:
         if response_format not in {"json", "text"}:
             raise ValueError("OpenAI-compatible STT response_format must be 'json' or 'text'")
@@ -153,7 +154,8 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         self._progressive_lock = Lock()
         self._progressive_key: tuple[str | None, int | None] | None = None
         self._progressive_thread: Thread | None = None
-        self.warmup()
+        if warmup_enabled:
+            self.warmup()
 
     def warmup(self) -> None:
         """Validate the configured transcription endpoint before accepting sessions."""

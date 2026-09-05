@@ -22,6 +22,10 @@ The internal WebSocket handshake supplies `X-Speech-Session-Routing`:
 
 The configuration requires remote OpenAI-compatible STT and TTS handlers and a
 consistent Chat Completions or Responses LLM adapter across the CPU pool.
+In this mode, building CPU pipeline units initializes the remote clients without
+running inference against their bootstrap models. Gateway pools own readiness
+and model warmup; a failed optional model must not prevent the session service
+from starting. Without this opt-in, the adapters retain their startup warmups.
 Malformed, disabled, oversized, or mismatched handoffs fail before claiming a
 pipeline. URLs, credentials, catalogs, capacity policies and workers remain
 deployment-owned. All routes on a CPU worker must accept that worker's configured

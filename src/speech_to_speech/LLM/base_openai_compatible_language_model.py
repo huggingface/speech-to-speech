@@ -177,6 +177,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         audio_temperature: float = 0.0,
         audio_content_type: Literal["input_audio", "audio_url"] = "input_audio",
         audio_history_turns: int = 1,
+        warmup_enabled: bool = True,
         **_kwargs: Any,
     ) -> None:
         self.cancel_scope = cancel_scope
@@ -213,7 +214,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self._prefetch_workers_lock = Lock()
         self._prefetch_workers: set[Thread] = set()
         self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
-        self.warmup()
+        if warmup_enabled:
+            self.warmup()
 
     @staticmethod
     def _is_official_openai(base_url: Optional[str]) -> bool:

@@ -382,6 +382,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         cancel_scope: CancelScope | None = None,
         speculative_turns: SpeculativeTurnTracker | None = None,
         gen_kwargs: dict[str, Any] | None = None,
+        warmup_enabled: bool = True,
     ) -> None:
         if response_format not in {"pcm", "wav"}:
             raise ValueError("OpenAI-compatible TTS currently supports response_format 'pcm' or 'wav'")
@@ -415,7 +416,8 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self._operation_lock = Lock()
         self._active_operation: HttpSpeechOperation | None = None
         self._failed_responses: set[tuple[int | None, str | None, str | None, int | None]] = set()
-        self.warmup()
+        if warmup_enabled:
+            self.warmup()
 
     def warmup(self) -> None:
         """Validate the configured speech endpoint before accepting sessions."""
