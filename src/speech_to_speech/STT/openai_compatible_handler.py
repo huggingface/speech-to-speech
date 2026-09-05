@@ -275,8 +275,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             ):
                 return
             if mode == "progressive":
-                if "progressive" in self._workers_running:
-                    return
+                # Only the latest cumulative window is useful once this lane is free.
                 self._pending_progressive = request
             else:
                 for progressive in (self._pending_progressive, self._active.get("progressive")):

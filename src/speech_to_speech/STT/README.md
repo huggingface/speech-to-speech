@@ -97,8 +97,9 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - Endpoint: `POST /v1/audio/transcriptions`
 - Upload: mono PCM16 WAV at 16 kHz
 - Supports JSON (`{"text": "..."}`) and plain-text responses
-- Keeps at most one best-effort progressive request in flight per pipeline while
-  final requests are submitted independently; stale-turn filtering still applies
+- Keeps one active progressive request and the latest pending window per pipeline;
+  final requests proceed independently, with cancellation and session-safe delivery
+- Endpoint capacity and provider quotas remain the inference service/proxy's responsibility
 - See [`docs/openai-compatible-stt.md`](../../../docs/openai-compatible-stt.md)
 
 ## Language Abbreviations (ISO-style codes seen in STT handlers)

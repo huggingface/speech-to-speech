@@ -177,6 +177,7 @@ def test_final_stt_does_not_block_session_end_and_old_results_cannot_leak(handle
     try:
         handler.queue_in.put(audio())
         assert old.started.wait(1)
+        handler.queue_in.put(audio(turn="old-pending"))
         handler.queue_in.put(SESSION_END)
         assert handler.queue_out.get(timeout=1) == SESSION_END
         assert old.cancelled.is_set()
@@ -292,3 +293,105 @@ def test_shutdown_cancels_active_request_and_rejects_later_work(handler_factory)
     assert not handler._final_thread.is_alive()
     assert list(handler.process(audio(turn="later"))) == []
     assert handler.queue_out.empty()
+
+
+def test_final_discards_pending_progressive_and_rejects_later_windows(handler_factory):
+    progressive = ControlledOperation("partial", ignore_cancel=True)
+    final = ControlledOperation("final")
+    unused = ControlledOperation("obsolete pending")
+    handler = handler_factory(progressive, final, unused)
+    assert list(handler.process(audio("progressive"))) == []
+    assert progressive.started.wait(1)
+    assert list(handler.process(audio("progressive", samples=320))) == []
+    assert list(handler.process(audio())) == []
+    assert final.started.wait(1)
+    assert list(handler.process(audio("progressive", samples=480))) == []
+    final.release.set()
+    output = handler.queue_out.get(timeout=1)
+    assert isinstance(output, Transcription)
+    assert output.text == "final"
+    progressive.release.set()
+    handler._progressive_thread.join(timeout=1)
+    assert not handler._progressive_thread.is_alive()
+    assert not unused.started.is_set()
+    assert handler.queue_out.empty()
+
+
+def test_new_revision_replaces_old_active_and_pending_progressive_work(handler_factory):
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn-1", 0)
+    old = ControlledOperation("old", ignore_cancel=True)
+    latest = ControlledOperation("latest")
+    latest.release.set()
+    handler = handler_factory(old, latest, tracker=tracker)
+    assert list(handler.process(audio("progressive"))) == []
+    assert old.started.wait(1)
+    assert list(handler.process(audio("progressive", samples=320))) == []
+    tracker.observe("turn-1", 1)
+    assert list(handler.process(audio("progressive", revision=1, samples=480))) == []
+    assert old.cancelled.wait(1)
+    old.release.set()
+    output = handler.queue_out.get(timeout=1)
+    assert output.text == "latest"
+    assert output.turn_revision == 1
+    handler._progressive_thread.join(timeout=1)
+    assert not handler._progressive_thread.is_alive()
+    assert handler.queue_out.empty()
+
+
+def test_teardown_does_not_wait_for_a_completion_reopen_gate(handler_factory, monkeypatch):
+    operation = ControlledOperation()
+    operation.release.set()
+    handler = handler_factory(operation)
+    waiting = Event()
+    resume = Event()
+    teardown_done = Event()
+
+    def wait_for_reopen(output):
+        waiting.set()
+        assert resume.wait(2)
+        return True
+
+    def teardown():
+        handler.on_session_end()
+        teardown_done.set()
+
+    monkeypatch.setattr(handler, "should_emit_output", wait_for_reopen)
+    assert list(handler.process(audio())) == []
+    assert waiting.wait(1)
+    worker = Thread(target=teardown, daemon=True)
+    worker.start()
+    try:
+        assert teardown_done.wait(1)
+    finally:
+        resume.set()
+        worker.join(timeout=1)
+        handler._final_thread.join(timeout=1)
+    assert handler.queue_out.empty()
+
+
+def test_session_end_cancels_real_stalled_http(stalled_stt_endpoint, monkeypatch):
+    url, received, closed = stalled_stt_endpoint
+    monkeypatch.setattr(stt_module.OpenAICompatibleSTTHandler, "warmup", lambda self: None)
+    handler = stt_module.OpenAICompatibleSTTHandler(
+        Event(),
+        queue_in=Queue(),
+        queue_out=Queue(),
+        setup_kwargs={"base_url": url.removesuffix("/audio/transcriptions"), "timeout": 10},
+    )
+    worker = Thread(target=handler.run, daemon=True)
+    worker.start()
+    try:
+        handler.queue_in.put(audio())
+        assert received.wait(2)
+        handler.queue_in.put(SESSION_END)
+        assert handler.queue_out.get(timeout=1) == SESSION_END
+        assert closed.wait(1)
+        handler._final_thread.join(timeout=1)
+        assert not handler._final_thread.is_alive()
+        assert handler.queue_out.empty()
+    finally:
+        handler.stop_event.set()
+        handler.queue_in.put(PIPELINE_END)
+        worker.join(timeout=2)
+    assert not worker.is_alive()

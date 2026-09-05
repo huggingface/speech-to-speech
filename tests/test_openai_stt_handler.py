@@ -213,9 +213,9 @@ def _handler(
     return handler
 
 
-def _audio(mode: str = "final", *, revision: int = 0) -> VADAudio:
+def _audio(mode: str = "final", *, revision: int = 0, samples: int = 160) -> VADAudio:
     return VADAudio(
-        audio=np.zeros(160, dtype=np.float32),
+        audio=np.zeros(samples, dtype=np.float32),
         mode=mode,
         turn_id="turn-1",
         turn_revision=revision,
@@ -453,11 +453,11 @@ def test_final_requests_from_pipelines_using_the_same_endpoint_can_overlap(monke
             handler.cleanup()
 
 
-def test_additional_progressive_requests_are_dropped_while_one_is_in_flight(monkeypatch):
+def test_pending_progressive_requests_keep_only_the_latest_window(monkeypatch):
     handler = _handler(monkeypatch)
     progressive_started = Event()
     release_progressive = Event()
-    operation_count = 0
+    dispatched_samples = []
 
     class _BlockingProgressiveOperation(_FakeOperation):
         def run(self, cancel_check=lambda: False):
@@ -466,22 +466,24 @@ def test_additional_progressive_requests_are_dropped_while_one_is_in_flight(monk
             return HttpTranscriptionResult(text="partial")
 
     def make_operation(_audio):
-        nonlocal operation_count
-        operation_count += 1
+        dispatched_samples.append(len(_audio))
         return _BlockingProgressiveOperation()
 
     monkeypatch.setattr(handler, "_make_operation", make_operation)
 
     assert list(handler.process(_audio("progressive"))) == []
     assert progressive_started.wait(timeout=1)
-    assert list(handler.process(_audio("progressive"))) == []
-    assert operation_count == 1
+    assert list(handler.process(_audio("progressive", samples=320))) == []
+    assert list(handler.process(_audio("progressive", samples=480))) == []
+    assert dispatched_samples == [160]
 
     release_progressive.set()
     thread = handler._progressive_thread
     assert thread is not None
     thread.join(timeout=1)
     assert not thread.is_alive()
+    assert dispatched_samples == [160, 480]
+    assert handler.queue_out.qsize() == 2
     assert handler.queue_out.get_nowait() == PartialTranscription(
         text="partial",
         turn_id="turn-1",

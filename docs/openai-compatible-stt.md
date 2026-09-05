@@ -76,15 +76,28 @@ During setup, the handler transcribes one second of synthetic silence through
 the configured endpoint. Endpoint, authentication, model, or response-format
 failures therefore prevent the realtime server from accepting sessions.
 
-Progressive requests are best-effort. Each pipeline keeps at most one
-progressive request in flight and drops newer progressive updates while it is
-running. A final request is submitted independently, so it does not wait for an
-in-flight progressive request; late progressive results are discarded.
+## Turn and session lifecycle
 
-The background worker rechecks whether its progressive request is still relevant
-before starting HTTP work. A final request, newer turn revision, session end, or
-shutdown can make that work obsolete before dispatch. Once HTTP work has begun,
-it may run until completion or timeout; stale-result filtering still applies.
+Each pipeline delivers STT results asynchronously so HTTP work does not block
+session teardown. Final requests for distinct turns retain their order within
+that pipeline. They run independently of progressive work.
+
+Progressive requests are best-effort: one is active per pipeline, and only the
+latest waiting cumulative window is retained. A final request cancels matching
+active progressive work and discards its pending window. Newer turn revisions
+invalidate older queued work and cancel older active requests. Relevance is
+checked before HTTP dispatch and while a request is running.
+
+Session end cancels active work and clears pending work. Results and failures
+carry a session generation that is checked atomically with queue publication,
+preventing old completions from appearing after teardown or in a reused session.
+Shutdown cancels the remaining requests and joins the pipeline's request workers.
+
+Cancellation interrupts the client's asynchronous HTTP transport, including a
+request stalled before headers or in the response body. Server-side inference
+cancellation is best-effort: closing the client connection does not guarantee
+that the server stops GPU work. Stale-result filtering remains required even
+when a request has been cancelled.
 
 Pipelines do not share a client-side admission queue or endpoint concurrency
 budget. STT server capacity, fleet routing, and provider quotas belong to the
