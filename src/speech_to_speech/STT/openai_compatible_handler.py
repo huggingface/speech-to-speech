@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
 import os
 import wave
-from dataclasses import dataclass
-from threading import Lock, Thread
+from collections.abc import Callable
+from concurrent.futures import Future
+from dataclasses import dataclass, field
+from threading import Event, Lock, Thread
 from time import perf_counter
 from typing import Any, Iterator
 
@@ -34,15 +37,21 @@ class TranscriptionRequestError(RuntimeError):
     """Sanitized HTTP/protocol failure safe to surface to a client."""
 
 
+class TranscriptionRequestCancelled(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"transcription request cancelled: {reason}")
+
+
 @dataclass(frozen=True)
 class HttpTranscriptionResult:
     text: str
     language: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass
 class HttpTranscriptionOperation:
-    """One synchronous transcription request."""
+    """One cancellable HTTP request, independent of endpoint capacity."""
 
     endpoint_url: str
     api_key: str | None
@@ -52,8 +61,70 @@ class HttpTranscriptionOperation:
     response_format: str
     timeout_s: float
     extra_fields: dict[str, Any] | None = None
+    _cancelled: Event = field(default_factory=Event, init=False, repr=False)
+    _transport_lock: Any = field(default_factory=Lock, init=False, repr=False)
+    _cancel_reason: str = field(default="superseded", init=False, repr=False)
+    _worker_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
+    _worker_task: asyncio.Task[HttpTranscriptionResult] | None = field(default=None, init=False, repr=False)
 
-    def run(self) -> HttpTranscriptionResult:
+    def run(self, cancel_check: Callable[[], bool] = lambda: False) -> HttpTranscriptionResult:
+        self._raise_if_cancelled(cancel_check)
+        result: Future[HttpTranscriptionResult] = Future()
+        done = Event()
+        worker = Thread(target=self._run_http, args=(result, done), name="stt-http-reader", daemon=True)
+        worker.start()
+        try:
+            while not done.wait(0.05):
+                self._raise_if_cancelled(cancel_check)
+            self._raise_if_cancelled(cancel_check)
+            return result.result()
+        finally:
+            if not done.is_set():
+                self.cancel("shutdown")
+            worker.join()
+
+    def _run_http(self, result: Future[HttpTranscriptionResult], done: Event) -> None:
+        loop = asyncio.new_event_loop()
+        task = loop.create_task(self._request_async())
+        with self._transport_lock:
+            self._worker_loop = loop
+            self._worker_task = task
+            if self._cancelled.is_set():
+                task.cancel()
+        try:
+            result.set_result(loop.run_until_complete(task))
+        except asyncio.CancelledError:
+            result.set_exception(TranscriptionRequestCancelled(self._cancel_reason))
+        except Exception as exc:
+            result.set_exception(exc)
+        finally:
+            with self._transport_lock:
+                self._worker_loop = None
+                self._worker_task = None
+            loop.close()
+            done.set()
+
+    def cancel(self, reason: str = "superseded") -> None:
+        with self._transport_lock:
+            if self._cancelled.is_set():
+                return
+            self._cancel_reason = reason
+            self._cancelled.set()
+            loop, task = self._worker_loop, self._worker_task
+        if loop is not None and task is not None:
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                # Completion may close the loop after the snapshot above.
+                pass
+
+    def _raise_if_cancelled(self, cancel_check: Callable[[], bool]) -> None:
+        if cancel_check():
+            self.cancel("superseded")
+        if self._cancelled.is_set():
+            raise TranscriptionRequestCancelled(self._cancel_reason)
+
+    async def _request_async(self) -> HttpTranscriptionResult:
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -69,23 +140,29 @@ class HttpTranscriptionOperation:
             else:
                 data["language"] = self.language
 
+        client = httpx.AsyncClient(timeout=self.timeout_s)
         try:
-            response = httpx.post(
+            response = await client.post(
                 self.endpoint_url,
                 headers=headers,
                 data=data,
                 files={"file": ("audio.wav", self.wav_bytes, "audio/wav")},
-                timeout=self.timeout_s,
             )
             response.raise_for_status()
+            return self._parse_response(response.content, response.headers.get("content-type", ""))
         except httpx.HTTPStatusError as exc:
             raise TranscriptionRequestError(f"transcription server returned HTTP {exc.response.status_code}") from exc
         except httpx.TimeoutException as exc:
             raise TranscriptionRequestError("transcription request timed out") from exc
         except httpx.HTTPError as exc:
             raise TranscriptionRequestError(f"transcription transport failed: {type(exc).__name__}") from exc
-
-        return self._parse_response(response.content, response.headers.get("content-type", ""))
+        finally:
+            close_task = asyncio.create_task(client.aclose())
+            try:
+                await asyncio.shield(close_task)
+            except asyncio.CancelledError:
+                await close_task
+                raise
 
     def _parse_response(self, body: bytes, content_type: str) -> HttpTranscriptionResult:
         if self.response_format == "text" or "text/plain" in content_type:
