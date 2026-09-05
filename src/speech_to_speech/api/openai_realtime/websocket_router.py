@@ -553,11 +553,12 @@ async def _drain_for_routing_update(unit: PipelineUnit, session_id: str) -> None
     if not unit.text_output_queue.empty() or not unit.text_prompt_queue.empty():
         raise ValueError("Pipeline events are still pending; retry the model update after cleanup.")
     for handler in unit.handlers:
-        # A queue barrier covers serial work. Progressive STT and hidden LLM
+        # A queue barrier covers serial work. Remote STT and hidden LLM
         # prefetch also own background workers that must finish before a switch.
-        progressive = getattr(handler, "_progressive_thread", None)
-        if progressive is not None and progressive.is_alive():
-            raise ValueError("Transcription cleanup is still pending.")
+        for name in ("_progressive_thread", "_final_thread"):
+            worker = getattr(handler, name, None)
+            if worker is not None and worker.is_alive():
+                raise ValueError("Transcription cleanup is still pending.")
         workers_lock = getattr(handler, "_prefetch_workers_lock", None)
         if workers_lock is not None:
             with workers_lock:
