@@ -82,6 +82,9 @@ mlx-lm = [
     "mlx-lm==0.31.3; platform_system == 'Darwin'",
     "mlx-vlm==0.4.1; platform_system == 'Darwin'",
 ]
+nemo = [
+    "nemo_toolkit[asr]",
+]
 omnivoice = [
     "omnivoice>=0.2.1",
 ]
