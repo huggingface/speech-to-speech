@@ -36,6 +36,33 @@ def test_cancelled_transcription_does_not_start_http():
     assert cancelled.value.reason == "session_end"
 
 
+def test_http_worker_startup_failure_reaches_the_caller(monkeypatch):
+    def fail_loop_creation():
+        raise OSError("event loop unavailable")
+
+    monkeypatch.setattr(stt_module.asyncio, "new_event_loop", fail_loop_creation)
+    operation = _operation()
+    errors = []
+
+    def run():
+        try:
+            operation.run()
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = Thread(target=run, daemon=True)
+    worker.start()
+    try:
+        worker.join(timeout=1)
+        assert not worker.is_alive()
+        assert len(errors) == 1
+        assert isinstance(errors[0], OSError)
+        assert str(errors[0]) == "event loop unavailable"
+    finally:
+        operation.cancel("shutdown")
+        worker.join(timeout=1)
+
+
 @pytest.fixture(params=["headers", "body"])
 def stalled_stt_endpoint(request):
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -221,6 +248,32 @@ def test_teardown_fences_results_paused_immediately_before_publication(handler_f
         handler._final_thread.join(timeout=1)
         assert not handler._final_thread.is_alive()
         assert handler.queue_out.get_nowait() == SESSION_END
+        assert handler.queue_out.empty()
+    finally:
+        resume.set()
+
+
+def test_teardown_during_audio_encoding_prevents_http_dispatch(handler_factory, monkeypatch):
+    operation = ControlledOperation()
+    handler = handler_factory(operation)
+    encoding = Event()
+    resume = Event()
+
+    def encode(audio):
+        encoding.set()
+        assert resume.wait(2)
+        return operation
+
+    monkeypatch.setattr(handler, "_make_operation", encode)
+    try:
+        assert list(handler.process(audio())) == []
+        assert encoding.wait(1)
+        handler.on_session_end()
+        resume.set()
+        handler._final_thread.join(timeout=1)
+        assert not handler._final_thread.is_alive()
+        assert operation.cancelled.is_set()
+        assert not operation.started.is_set()
         assert handler.queue_out.empty()
     finally:
         resume.set()

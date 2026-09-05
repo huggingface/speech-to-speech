@@ -85,14 +85,15 @@ class HttpTranscriptionOperation:
             worker.join()
 
     def _run_http(self, result: Future[HttpTranscriptionResult], done: Event) -> None:
-        loop = asyncio.new_event_loop()
-        task = loop.create_task(self._request_async())
-        with self._transport_lock:
-            self._worker_loop = loop
-            self._worker_task = task
-            if self._cancelled.is_set():
-                task.cancel()
+        loop: asyncio.AbstractEventLoop | None = None
         try:
+            loop = asyncio.new_event_loop()
+            task = loop.create_task(self._request_async())
+            with self._transport_lock:
+                self._worker_loop = loop
+                self._worker_task = task
+                if self._cancelled.is_set():
+                    task.cancel()
             result.set_result(loop.run_until_complete(task))
         except asyncio.CancelledError:
             result.set_exception(TranscriptionRequestCancelled(self._cancel_reason))
@@ -102,8 +103,11 @@ class HttpTranscriptionOperation:
             with self._transport_lock:
                 self._worker_loop = None
                 self._worker_task = None
-            loop.close()
-            done.set()
+            try:
+                if loop is not None:
+                    loop.close()
+            finally:
+                done.set()
 
     def cancel(self, reason: str = "superseded") -> None:
         with self._transport_lock:
