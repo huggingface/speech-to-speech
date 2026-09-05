@@ -7,6 +7,7 @@ from queue import Queue
 from threading import Event, Thread
 from time import monotonic
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import numpy as np
 import pytest
@@ -116,6 +117,7 @@ def _handler(
     connect_timeout: float = 0.5,
     base_url: str = "ws://transcription.example/v1",
     api_key: str | None = None,
+    model: str = "test-model",
 ):
     return handler_type(
         Event(),
@@ -124,7 +126,7 @@ def _handler(
         setup_kwargs={
             "base_url": base_url,
             "api_key": api_key,
-            "model": "test-model",
+            "model": model,
             "audio_sample_rate": audio_sample_rate,
             "connect_timeout": connect_timeout,
             "final_timeout": final_timeout,
@@ -440,6 +442,64 @@ def test_openai_realtime_resolves_auth_after_endpoint_normalization(
         assert options["headers"] == expected_headers
         if expected_key == "environment-key":
             assert endpoint.split("?", 1)[0] == "wss://api.openai.com/v1/realtime"
+    finally:
+        handler.cleanup()
+
+
+def test_openai_realtime_official_url_uses_transcription_intent(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "environment-key")
+    session_updated = Event()
+
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        if _ack_session_update(event, socket):
+            session_updated.set()
+
+    factory = _SocketFactory(on_send)
+    handler = _handler(
+        factory,
+        base_url="wss://api.openai.com/v1",
+        model="gpt-live-transcribe",
+    )
+    try:
+        handler.append_audio(b"\x01\x00" * 512)
+        assert session_updated.wait(timeout=1)
+        endpoint, _options = factory.calls[0]
+        split = urlsplit(endpoint)
+        query = parse_qs(split.query)
+        assert split.geturl().split("?", 1)[0] == "wss://api.openai.com/v1/realtime"
+        assert query.get("intent") == ["transcription"]
+        assert "model" not in query
+        update = next(event for event in factory.instances[0].sent if event["type"] == "session.update")
+        assert update["session"]["type"] == "transcription"
+        assert update["session"]["audio"]["input"]["transcription"]["model"] == "gpt-live-transcribe"
+    finally:
+        handler.cleanup()
+
+
+def test_vllm_realtime_url_omits_intent_and_model_query() -> None:
+    session_started = Event()
+
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        if event["type"] == "input_audio_buffer.commit":
+            session_started.set()
+
+    factory = _SocketFactory(on_send)
+    handler = _handler(
+        factory,
+        handler_type=VLLMRealtimeSTTHandler,
+        base_url="ws://localhost:8000/v1",
+        model="mistralai/Voxtral-Mini-4B-Realtime-2602",
+    )
+    try:
+        handler.start_turn("turn_1", 0)
+        handler.append_audio(b"\x01\x00" * 512)
+        assert session_started.wait(timeout=1)
+        endpoint, _options = factory.calls[0]
+        split = urlsplit(endpoint)
+        query = parse_qs(split.query)
+        assert split.geturl().split("?", 1)[0] == "ws://localhost:8000/v1/realtime"
+        assert "intent" not in query
+        assert "model" not in query
     finally:
         handler.cleanup()
 

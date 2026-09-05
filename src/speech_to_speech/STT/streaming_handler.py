@@ -304,7 +304,13 @@ def _endpoint_url(base_url: str, model: str, *, include_model_query: bool) -> st
     if not path.endswith("/realtime"):
         path = f"{path}/realtime"
     query = dict(parse_qsl(split.query, keep_blank_values=True))
-    if include_model_query:
+    # Hosted OpenAI transcription sessions select the session type with
+    # intent=transcription. A transcription model in the query is rejected as
+    # the realtime session model.
+    if split.hostname == "api.openai.com":
+        query.setdefault("intent", "transcription")
+        query.pop("model", None)
+    elif include_model_query:
         query.setdefault("model", model)
     return urlunsplit((scheme, split.netloc, path, urlencode(query), ""))
 
