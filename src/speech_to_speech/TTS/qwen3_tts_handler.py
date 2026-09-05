@@ -39,6 +39,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception
+from speech_to_speech.pipeline.turn_latency import active_turn_latency_tracker, bind_active_turn_latency_tracker
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 
 logger = logging.getLogger(__name__)
@@ -712,7 +713,11 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 continue
 
             if first_chunk:
-                logger.info(f"Qwen3-TTS TTFA: {perf_counter() - start:.2f}s ({label})")
+                ttfa_s = perf_counter() - start
+                logger.info(f"Qwen3-TTS TTFA: {ttfa_s:.2f}s ({label})")
+                tracker = active_turn_latency_tracker()
+                if tracker is not None:
+                    tracker.record_tts_ttfa(ttfa_s)
                 first_chunk = False
 
             audio_chunk = self._resample_to_pipeline_sr(audio_chunk, sr)
@@ -844,24 +849,35 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         console.print(f"[green]ASSISTANT: {text}")
 
+        store = getattr(self, "turn_latency_store", None)
+        tracker = (
+            store.get_or_create_response(
+                tts_input.response_key,
+                turn_id=tts_input.turn_id,
+                turn_revision=tts_input.turn_revision,
+            )
+            if store and tts_input.response_key is not None
+            else None
+        )
         try:
-            if self._has_voice_clone_reference():
-                audio_iter = self._process_voice_clone(text)
-            elif model_type == "custom_voice":
-                audio_iter = self._process_custom_voice(text)
-            elif model_type == "voice_design":
-                audio_iter = self._process_voice_design(text)
-            else:
-                raise ValueError(
-                    "Qwen3-TTS Base model requires a voice-clone reference. "
-                    "Provide qwen3_tts_ref_audio or qwen3_tts_ref_spk, or use a CustomVoice/VoiceDesign model."
-                )
-            first_audio = True
-            for audio_chunk in audio_iter:
-                if first_audio:
-                    self._log_first_audio_latency(tts_input)
-                    first_audio = False
-                yield audio_chunk
+            with bind_active_turn_latency_tracker(tracker):
+                if self._has_voice_clone_reference():
+                    audio_iter = self._process_voice_clone(text)
+                elif model_type == "custom_voice":
+                    audio_iter = self._process_custom_voice(text)
+                elif model_type == "voice_design":
+                    audio_iter = self._process_voice_design(text)
+                else:
+                    raise ValueError(
+                        "Qwen3-TTS Base model requires a voice-clone reference. "
+                        "Provide qwen3_tts_ref_audio or qwen3_tts_ref_spk, or use a CustomVoice/VoiceDesign model."
+                    )
+                first_audio = True
+                for audio_chunk in audio_iter:
+                    if first_audio:
+                        self._log_first_audio_latency(tts_input)
+                        first_audio = False
+                    yield audio_chunk
         except Exception as exc:
             log_exception(logger, "Error during Qwen3-TTS generation", exc)
 
@@ -871,6 +887,9 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         latency_s = perf_counter() - tts_input.speech_stopped_at_s
         if latency_s < 0:
             return
+        tracker = active_turn_latency_tracker()
+        if tracker is not None:
+            tracker.record_e2e(latency_s)
         logger.info(
             "Last speech detected to first speech out: %.3fs (turn=%s rev=%s)",
             latency_s,

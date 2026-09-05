@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Sized
 from queue import Empty
 from threading import Lock, Thread
+from time import perf_counter
 from typing import Any, Literal, Optional, Protocol, runtime_checkable
 
 import torch
@@ -69,6 +70,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
+from speech_to_speech.pipeline.turn_latency import bind_active_turn_latency_tracker
 from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
 
 try:
@@ -668,26 +670,40 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             history_rolled_back = True
 
         try:
-            for chunk in self._generate(active_chat, language_code, gen, ctx, runtime_config, response):
-                chunk.response_key = request.response_key
-                chunk.prefetch_transaction = request.prefetch_transaction
-                new_parts = [part.model_copy(deep=True) for part in chunk.parts]
-                ctx.output_parts.extend(new_parts)
-                if not out_of_band and any(isinstance(part, AssistantToolCallPart) for part in new_parts):
-                    recorded = self._commit_ordered_output(
-                        original_chat,
-                        ctx.output_parts[ctx.history_parts_committed :],
-                        wants_audio=response_wants_audio(response),
-                        response_key=request.response_key,
-                        recorded_item_ids=ctx.recorded_item_ids,
-                        recorded_call_ids=ctx.recorded_call_ids,
-                        after_item_id=history_anchor_id,
-                    )
-                    if not recorded:
-                        ctx.cancelled = True
-                        break
-                    ctx.history_parts_committed = len(ctx.output_parts)
-                yield chunk
+            store = getattr(self, "turn_latency_store", None)
+            tracker = (
+                store.get_or_create_response(
+                    request.response_key,
+                    turn_id=ctx.turn_id,
+                    turn_revision=ctx.turn_revision,
+                )
+                if store
+                else None
+            )
+            llm_start_s = perf_counter()
+            with bind_active_turn_latency_tracker(tracker):
+                for chunk in self._generate(active_chat, language_code, gen, ctx, runtime_config, response):
+                    chunk.response_key = request.response_key
+                    chunk.prefetch_transaction = request.prefetch_transaction
+                    new_parts = [part.model_copy(deep=True) for part in chunk.parts]
+                    ctx.output_parts.extend(new_parts)
+                    if not out_of_band and any(isinstance(part, AssistantToolCallPart) for part in new_parts):
+                        recorded = self._commit_ordered_output(
+                            original_chat,
+                            ctx.output_parts[ctx.history_parts_committed :],
+                            wants_audio=response_wants_audio(response),
+                            response_key=request.response_key,
+                            recorded_item_ids=ctx.recorded_item_ids,
+                            recorded_call_ids=ctx.recorded_call_ids,
+                            after_item_id=history_anchor_id,
+                        )
+                        if not recorded:
+                            ctx.cancelled = True
+                            break
+                        ctx.history_parts_committed = len(ctx.output_parts)
+                    yield chunk
+            if tracker is not None:
+                tracker.record_llm(perf_counter() - llm_start_s)
 
             if ctx.stopped:
                 return
