@@ -129,6 +129,8 @@ model/provider plus the original allocator affinity ID.
 The initial compatibility boundary is deliberately limited: the same LLM adapter
 protocol, full-context continuation, an equal or larger declared context window,
 and capabilities for configured tools and retained images/audio/tool history.
+The context-window floor survives LLM removal and resets with the session;
+disabling and re-adding the stage cannot bypass it while retaining Chat.
 Unsupported voice choices fail during a routed update. No tokenizer conversion,
 backend-local continuation migration, in-flight generation migration or arbitrary
 local model loading is implemented.

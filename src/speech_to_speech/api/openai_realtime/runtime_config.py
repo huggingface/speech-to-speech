@@ -40,6 +40,8 @@ class RuntimeConfig(BaseModel):
 
     chat: Chat = Field(default_factory=lambda: Chat(10))
     routing: SessionRouting | None = Field(default=None, frozen=True)
+    # Retained history survives disabling LLM, so its window constraint must too.
+    llm_context_window_floor: int = Field(default=0, ge=0)
     session: RealtimeSessionCreateRequest = Field(
         default_factory=lambda: RealtimeSessionCreateRequest(type="realtime"),
         validate_default=True,
@@ -92,6 +94,10 @@ class RuntimeConfig(BaseModel):
         assert self.session.audio is not None and self.session.audio.output is not None
         self.session.audio.output.voice = routes.tts.voice if routes.tts is not None else None
         if self.routing.updates_enabled:
+            if routes.llm is not None:
+                self.llm_context_window_floor = max(
+                    self.llm_context_window_floor, routes.llm.capabilities.context_window or 0
+                )
             self.session = self.session.model_copy(update={"models": self.routing.models()})
             if routes.tts is None:
                 self.session.output_modalities = ["text"]

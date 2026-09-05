@@ -134,9 +134,8 @@ class SessionHandler(RealtimeBaseHandler):
         caps = new.capabilities
         if caps.context_window is None or caps.continuation != "full_context":
             raise ValueError("The selected LLM must declare its context window and support full retained context.")
-        if old is not None and (
-            new.protocol != old.protocol
-            or caps.context_window < (old.capabilities.context_window or caps.context_window)
+        if (old is not None and new.protocol != old.protocol) or caps.context_window < max(
+            previous.llm_context_window_floor, (old.capabilities.context_window or 0) if old is not None else 0
         ):
             raise ValueError("The destination must use the same protocol and an equal or larger context window.")
         if candidate.session.tools and not caps.tools:
