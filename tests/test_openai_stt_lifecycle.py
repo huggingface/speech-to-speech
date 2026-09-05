@@ -12,6 +12,8 @@ from speech_to_speech.pipeline.messages import PIPELINE_END, Transcription, Tran
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.STT import openai_compatible_handler as stt_module
 
+pytestmark = pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning")
+
 
 def _operation(url="http://127.0.0.1:1/v1/audio/transcriptions"):
     return stt_module.HttpTranscriptionOperation(
@@ -192,6 +194,65 @@ def handler_factory(monkeypatch):
 
 def audio(mode="final", *, turn="turn-1", revision=0, samples=160):
     return VADAudio(audio=np.zeros(samples, dtype=np.float32), mode=mode, turn_id=turn, turn_revision=revision)
+
+
+@pytest.mark.parametrize("mode", ["final", "progressive"])
+def test_worker_start_failure_does_not_block_pipeline_end(handler_factory, monkeypatch, caplog, mode):
+    class FailingWorker(Thread):
+        def start(self):
+            raise RuntimeError("sensitive startup detail")
+
+    monkeypatch.setattr(stt_module, "Thread", FailingWorker)
+    handler = handler_factory()
+    source = audio(mode, revision=3)
+    handler.queue_in.put(source)
+    handler.queue_in.put(PIPELINE_END)
+
+    handler.run()
+
+    if mode == "final":
+        failure = handler.queue_out.get_nowait()
+        assert isinstance(failure, TranscriptionFailure)
+        assert failure.message == "transcription worker could not start"
+        assert failure.turn_id == source.turn_id
+        assert failure.turn_revision == source.turn_revision
+        assert failure.speech_stopped_at_s == source.created_at_s
+    assert handler.queue_out.get_nowait() == PIPELINE_END
+    assert handler.queue_out.empty()
+    assert not handler._pending_finals
+    assert handler._pending_progressive is None
+    assert not handler._workers_running
+    assert getattr(handler, f"_{mode}_thread") is None
+    assert "sensitive startup detail" not in caplog.text
+
+
+def test_final_worker_can_start_after_an_earlier_start_failure(handler_factory, monkeypatch):
+    class FailsOnceWorker(Thread):
+        failed = False
+
+        def start(self):
+            if not self.failed:
+                type(self).failed = True
+                raise RuntimeError("cannot start worker")
+            super().start()
+
+    monkeypatch.setattr(stt_module, "Thread", FailsOnceWorker)
+    operation = ControlledOperation("later final")
+    operation.release.set()
+    handler = handler_factory(operation)
+
+    assert list(handler.process(audio(turn="failed"))) == []
+    failure = handler.queue_out.get_nowait()
+    assert isinstance(failure, TranscriptionFailure)
+    assert failure.turn_id == "failed"
+    assert list(handler.process(audio(turn="later"))) == []
+    result = handler.queue_out.get(timeout=1)
+    assert isinstance(result, Transcription)
+    assert result.turn_id == "later"
+    assert result.text == "later final"
+    handler._final_thread.join(timeout=1)
+    assert not handler._final_thread.is_alive()
+    assert handler.queue_out.empty()
 
 
 def test_final_stt_does_not_block_session_end_and_old_results_cannot_leak(handler_factory):

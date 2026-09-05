@@ -262,6 +262,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         mode: Literal["progressive", "final"] = "progressive" if vad_audio.mode == "progressive" else "final"
+        failed_requests: list[_TranscriptionRequest] = []
         with self._request_lock:
             request = _TranscriptionRequest(vad_audio, self._session_generation)
             if not self._request_is_current(request):
@@ -286,7 +287,17 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
                     if progressive is not None and progressive.source.turn_id == vad_audio.turn_id:
                         self._cancel_request(progressive, "final_received")
                 self._pending_finals.append(request)
-            self._start_worker(mode)
+            try:
+                self._start_worker(mode)
+            except Exception:
+                if mode == "final":
+                    failed_requests = list(self._pending_finals)
+                    self._pending_finals.clear()
+                else:
+                    failed_requests = [request]
+                    self._pending_progressive = None
+        for failed in failed_requests:
+            self._publish_failure(failed, "transcription worker could not start")
         # The handler must remain free to process SESSION_END and new revisions.
         yield from ()
 
@@ -300,6 +311,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             thread.start()
         except Exception:
             self._workers_running.discard(mode)
+            setattr(self, f"_{mode}_thread", None)
             raise
 
     def _worker(self, mode: str) -> None:
@@ -344,32 +356,8 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         except TranscriptionRequestCancelled:
             return
         except Exception as exc:
-            if not self._request_is_current(request):
-                return
             message = str(exc) if isinstance(exc, TranscriptionRequestError) else "transcription request failed"
-            if source.mode == "progressive":
-                logger.warning(
-                    "OpenAI-compatible progressive STT failed turn=%s rev=%s: %s",
-                    source.turn_id,
-                    source.turn_revision,
-                    message,
-                )
-                return
-            logger.error(
-                "OpenAI-compatible STT failed turn=%s rev=%s: %s",
-                source.turn_id,
-                source.turn_revision,
-                message,
-            )
-            self._publish_output(
-                request,
-                TranscriptionFailure(
-                    message=message,
-                    turn_id=source.turn_id,
-                    turn_revision=source.turn_revision,
-                    speech_stopped_at_s=source.created_at_s,
-                ),
-            )
+            self._publish_failure(request, message)
             return
 
         output: STTOut
@@ -393,6 +381,34 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
                 source.mode,
                 elapsed,
             )
+
+    def _publish_failure(self, request: _TranscriptionRequest, message: str) -> None:
+        if not self._request_is_current(request):
+            return
+        source = request.source
+        if source.mode == "progressive":
+            logger.warning(
+                "OpenAI-compatible progressive STT failed turn=%s rev=%s: %s",
+                source.turn_id,
+                source.turn_revision,
+                message,
+            )
+            return
+        logger.error(
+            "OpenAI-compatible STT failed turn=%s rev=%s: %s",
+            source.turn_id,
+            source.turn_revision,
+            message,
+        )
+        self._publish_output(
+            request,
+            TranscriptionFailure(
+                message=message,
+                turn_id=source.turn_id,
+                turn_revision=source.turn_revision,
+                speech_stopped_at_s=source.created_at_s,
+            ),
+        )
 
     def _publish_output(self, request: _TranscriptionRequest, output: STTOut) -> bool:
         # Waiting for a speculative reopen must not hold the teardown lock.
