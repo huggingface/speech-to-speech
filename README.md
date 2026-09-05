@@ -97,6 +97,49 @@ Every stage has multiple interchangeable backends, selected via CLI flags. The c
 
 Requires Python 3.10+.
 
+### Guided Apple Silicon setup
+
+On an Apple Silicon Mac, the versioned installer creates an isolated uv/Python 3.11 environment, discovers
+compatible OpenAI-style endpoints already listening on loopback, checks cached models and free space, then asks
+three short questions for STT, LLM, and TTS:
+
+> The installer below becomes available when v0.2.13 is tagged and published. Until then, use the standard
+> installation from the current release. Release preparation updates this tag and the installer pins together.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/huggingface/speech-to-speech/v0.2.13/scripts/install-macos.sh | sh
+```
+
+To inspect it before running:
+
+```bash
+curl -fsSLo install-macos.sh https://raw.githubusercontent.com/huggingface/speech-to-speech/v0.2.13/scripts/install-macos.sh
+less install-macos.sh
+sh install-macos.sh
+```
+
+The small defaults are Parakeet TDT for speech recognition and Kokoro 82M for speech output. An already-running
+compatible endpoint is preferred for the LLM, regardless of which inference engine provides it. If it requires
+authentication, setup asks for the key without echoing it and saves it in macOS Keychain. Without an endpoint,
+setup selects `ggml-org/gemma-4-12B-it-GGUF` Q4_0 on Macs with at least 24 GiB unified memory, or Qwen3 4B MLX
+4-bit on smaller Macs. Catalog estimates are approximately 2 GiB for Parakeet, 1 GiB for Kokoro, 8 GiB for
+Gemma, and 3 GiB for Qwen; setup calculates the actual missing-space estimate before downloading.
+
+Rerun or diagnose the setup at any time:
+
+```bash
+speech-to-speech setup
+speech-to-speech doctor
+speech-to-speech local
+```
+
+The default profile is stored at `~/Library/Application Support/speech-to-speech/profiles/default.json`; it holds
+Keychain references, never raw API keys. Setup and diagnostic logs are under
+`~/Library/Logs/speech-to-speech/`. Removing the uv tool does not remove downloaded models, profiles, Keychain
+items, or logs; remove those separately if you want a complete uninstall.
+
+### Standard installation
+
 ```bash
 pip install speech-to-speech
 ```

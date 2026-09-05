@@ -15,7 +15,9 @@ To prepare a release:
 1. Confirm the intended version is not already published on PyPI.
 2. Bump `version` in `pyproject.toml`.
 3. Bump `__version__` in `src/speech_to_speech/__init__.py`.
-4. Open and merge a pull request with only the release preparation changes.
+4. Update `SPEECH_TO_SPEECH_VERSION`, `RELEASE_REF`, and any pinned checksums in `scripts/install-macos.sh`;
+   regenerate `scripts/macos-arm64-constraints.txt`, update its checksum, and update the README installer tag.
+5. Open and merge a pull request with only the release preparation changes.
 
 To publish after the release PR is merged:
 

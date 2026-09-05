@@ -14,8 +14,9 @@ from speech_to_speech.pipeline.transcript_logging import (
     set_log_transcripts,
     warn_if_log_transcripts_enabled,
 )
+from speech_to_speech.setup.profiles import default_profile_path, load_profile
 
-Command = Literal["serve", "talk", "local"]
+Command = Literal["serve", "talk", "local", "setup", "doctor"]
 
 _LEGACY_MODE_COMMANDS: dict[str, Command] = {
     "realtime": "serve",
@@ -32,6 +33,8 @@ def _command_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("serve", add_help=False, help="Run the Realtime pipeline server.")
     subparsers.add_parser("talk", add_help=False, help="Connect microphone and speakers to a Realtime URL.")
     subparsers.add_parser("local", add_help=False, help="Run the server and audio client together over loopback.")
+    subparsers.add_parser("setup", add_help=False, help="Configure a local Apple Silicon speech stack.")
+    subparsers.add_parser("doctor", add_help=False, help="Check the local speech stack and its dependencies.")
     return parser
 
 
@@ -70,11 +73,11 @@ def parse_command(argv: Sequence[str] | None = None) -> tuple[Command, list[str]
     command_args = list(sys.argv[1:] if argv is None else argv)
     parser = _command_parser()
     if not command_args:
-        parser.error("a command is required: serve, talk, or local")
+        parser.error("a command is required: serve, talk, local, setup, or doctor")
     if command_args[0] in {"-h", "--help"}:
         parser.print_help()
         raise SystemExit(0)
-    if command_args[0] not in {"serve", "talk", "local"}:
+    if command_args[0] not in {"serve", "talk", "local", "setup", "doctor"}:
         legacy_mode, remaining = _extract_legacy_mode(command_args, parser)
         if legacy_mode is not None:
             legacy_command = _LEGACY_MODE_COMMANDS.get(legacy_mode)
@@ -90,9 +93,19 @@ def parse_command(argv: Sequence[str] | None = None) -> tuple[Command, list[str]
             )
             return legacy_command, remaining
     command = command_args[0]
-    if command not in {"serve", "talk", "local"}:
-        parser.error(f"unknown command {command!r}; choose serve, talk, or local")
+    if command not in {"serve", "talk", "local", "setup", "doctor"}:
+        parser.error(f"unknown command {command!r}; choose serve, talk, local, setup, or doctor")
     return command, command_args[1:]  # type: ignore[return-value]
+
+
+def resolve_local_profile_args(command_args: Sequence[str]) -> list[str]:
+    """Use the default profile only for an otherwise unconfigured local run."""
+
+    explicit = list(command_args)
+    if explicit:
+        return explicit
+    profile = default_profile_path()
+    return [str(profile)] if profile.is_file() else []
 
 
 def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
@@ -188,6 +201,20 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
 
 def main() -> None:
     command, command_args = parse_command()
+    if command == "setup":
+        from speech_to_speech.setup.wizard import run_setup
+
+        result = run_setup(command_args)
+        if result:
+            raise SystemExit(result)
+        return
+    if command == "doctor":
+        from speech_to_speech.setup.doctor import run_doctor
+
+        result = run_doctor(command_args)
+        if result:
+            raise SystemExit(result)
+        return
     if command == "talk":
         config = parse_talk_arguments(command_args)
         set_log_transcripts(config.log_transcripts)
@@ -195,6 +222,14 @@ def main() -> None:
         run_realtime_audio_client(config)
         return
 
+    if command == "local":
+        resolved_args = resolve_local_profile_args(command_args)
+        if not command_args and resolved_args:
+            from speech_to_speech.setup.wizard import run_profiled_local
+
+            run_profiled_local(load_profile(default_profile_path()))
+            return
+        command_args = resolved_args
     from speech_to_speech.s2s_pipeline import run_pipeline_command
 
     run_pipeline_command(command, command_args)
