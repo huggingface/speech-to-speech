@@ -73,12 +73,18 @@ chattts = [
 faster-whisper = [
     "faster-whisper>=1.0.3",
 ]
+fireredvad = [
+    "fireredvad",
+]
 kokoro = [
     "kokoro>=0.9.2; platform_system != 'Darwin'",
 ]
 mlx-lm = [
     "mlx-lm==0.31.3; platform_system == 'Darwin'",
     "mlx-vlm==0.4.1; platform_system == 'Darwin'",
+]
+nemo = [
+    "nemo_toolkit[asr]",
 ]
 omnivoice = [
     "omnivoice>=0.2.1",

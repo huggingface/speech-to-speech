@@ -22,12 +22,18 @@ from speech_to_speech.arguments_classes.language_model_arguments import Language
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
     MLXAudioWhisperSTTHandlerArguments,
 )
+from speech_to_speech.arguments_classes.nemotron_streaming_stt_arguments import (
+    NemotronStreamingSTTHandlerArguments,
+)
 from speech_to_speech.arguments_classes.omnivoice_tts_arguments import OmniVoiceTTSHandlerArguments
 from speech_to_speech.arguments_classes.openai_stt_arguments import OpenAICompatibleSTTHandlerArguments
 from speech_to_speech.arguments_classes.openai_tts_arguments import OpenAICompatibleTTSHandlerArguments
 from speech_to_speech.arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
 from speech_to_speech.arguments_classes.parakeet_tdt_arguments import (
     ParakeetTDTSTTHandlerArguments,
+)
+from speech_to_speech.arguments_classes.parakeet_unified_stt_arguments import (
+    ParakeetUnifiedSTTHandlerArguments,
 )
 from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_asr_stt_arguments import Qwen3ASRSTTHandlerArguments
@@ -369,6 +375,30 @@ STT_BACKENDS = build_backend_registry(
             ParakeetTDTSTTHandlerArguments,
             _create_parakeet,
             config_prefix="parakeet_tdt",
+        ),
+        BackendSpec(
+            "parakeet-unified",
+            "stt",
+            ParakeetUnifiedSTTHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.STT.nemo_asr_handler",
+                "NemoASRSTTHandler",
+                attach_speculative_turns=True,
+            ),
+            config_prefix="parakeet_unified",
+            required_extra="nemo",
+        ),
+        BackendSpec(
+            "nemotron-streaming",
+            "stt",
+            NemotronStreamingSTTHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.STT.nemo_asr_handler",
+                "NemoASRSTTHandler",
+                attach_speculative_turns=True,
+            ),
+            config_prefix="nemotron_streaming",
+            required_extra="nemo",
         ),
         BackendSpec(
             "paraformer",
