@@ -626,7 +626,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             active_speech_min_ms = self._active_speech_min_ms(effective_start_ms)
             if effective_active_speech_duration_ms >= active_speech_min_ms:
                 turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start(effective_start_ms)
-                self._notify_streaming_turn(turn_id, turn_revision)
                 self._speech_started_emitted = True
                 self._log_speech_starts += 1
                 logger.info(
@@ -646,6 +645,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                             reopened=reopened,
                         )
                     )
+                self._notify_streaming_turn(turn_id, turn_revision)
         elif not is_triggered_now and vad_output is None:
             self._discard_expired_pending_short_segment()
 
@@ -785,7 +785,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     )
                 if not self._speech_started_emitted:
                     turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start(start_ms)
-                    self._notify_streaming_turn(turn_id, turn_revision)
                     if self.text_output_queue:
                         self.text_output_queue.put(
                             SpeechStartedEvent(
@@ -796,6 +795,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                                 interrupt_response=False,
                             )
                         )
+                    self._notify_streaming_turn(turn_id, turn_revision)
                 else:
                     turn_id, turn_revision = self._current_turn_metadata()
                 self._log_speech_ends += 1

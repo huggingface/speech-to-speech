@@ -10,11 +10,13 @@ from typing import Any
 
 import numpy as np
 import pytest
+import torch
 from websockets.sync.server import serve
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.pipeline.control import SESSION_END
+from speech_to_speech.pipeline.events import SpeechStartedEvent
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, TranscriptionFailure, VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.STT import streaming_handler
@@ -26,6 +28,7 @@ from speech_to_speech.STT.streaming_handler import (
     _StreamingPCMResampler,
 )
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
+from tests.test_speculative_turns import _audio_bytes, _StaticVADIterator, _vad_handler_for_iterator
 
 DIALECT_CASES = [
     (OpenAIRealtimeSTTHandler, "openai"),
@@ -229,6 +232,89 @@ def test_openai_realtime_streams_each_chunk_once_then_explicitly_commits(caplog)
     assert "openai-realtime STT connection setup completed" in caplog.text
     assert "VAD commit to final transcript completed" in caplog.text
     handler.cleanup()
+
+
+@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
+@pytest.mark.parametrize("fallback_start", [False, True])
+def test_vad_speech_start_precedes_buffered_streaming_partial(
+    handler_type, dialect, fallback_start, monkeypatch
+) -> None:
+    chunks = [torch.zeros(512) for _ in range(20)]
+    vad = _vad_handler_for_iterator(
+        _StaticVADIterator(
+            triggered=not fallback_start,
+            vad_output=chunks if fallback_start else None,
+            buffer_chunks=chunks,
+            active_speech_samples=12 * 512,
+            last_utterance_active_speech_samples=12 * 512,
+        )
+    )
+    delta_queued = Event()
+
+    def delta_event(text: str) -> dict[str, Any]:
+        if dialect == "vllm":
+            return {"type": "transcription.delta", "delta": text}
+        return {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "remote_item",
+            "content_index": 0,
+            "delta": text,
+        }
+
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        if _ack_session_update(event, socket, dialect):
+            return
+        if event["type"] == "input_audio_buffer.append":
+            socket.incoming.put(json.dumps(delta_event("Hello there")))
+            delta_queued.set()
+
+    factory = _SocketFactory(on_send)
+    handler = _handler(factory, handler_type=handler_type, tracker=vad.speculative_turns)
+    vad.streaming_stt_sink = handler
+    notifier = TranscriptionNotifier(
+        Event(),
+        queue_in=Queue(),
+        queue_out=Queue(),
+        setup_kwargs={"text_output_queue": vad.text_output_queue},
+    )
+    service = RealtimeService(speculative_turns=vad.speculative_turns)
+    connection_id = service.register()
+    service._state(connection_id).runtime_config = RuntimeConfig()
+    start_turn = handler.start_turn
+
+    def start_and_publish_before_vad_resumes(turn_id, turn_revision) -> None:
+        # The worker reads the first delta after append, before handling this
+        # start command. Force its buffered partial through the real notifier
+        # before VAD can execute the statement after its notification call.
+        assert delta_queued.wait(timeout=1)
+        start_turn(turn_id, turn_revision)
+        partial = handler.queue_out.get(timeout=1)
+        assert partial.text == "Hello there"
+        list(notifier.process(partial))
+
+    monkeypatch.setattr(handler, "start_turn", start_and_publish_before_vad_resumes)
+    try:
+        list(vad.process(_audio_bytes()))
+        factory.instances[0].incoming.put(json.dumps(delta_event(" friend")))
+        partial = handler.queue_out.get(timeout=1)
+        assert partial.text == "Hello there friend"
+        list(notifier.process(partial))
+
+        pipeline_events = []
+        wire_events = []
+        while not vad.text_output_queue.empty():
+            event = vad.text_output_queue.get_nowait()
+            pipeline_events.append(event)
+            wire_events.extend(service.dispatch_pipeline_event(connection_id, event))
+        deltas = [event for event in wire_events if event.type == "conversation.item.input_audio_transcription.delta"]
+        assert [event.delta for event in deltas] == ["Hello"]
+        assert isinstance(pipeline_events[0], SpeechStartedEvent)
+        speech_started = next(event for event in wire_events if event.type == "input_audio_buffer.speech_started")
+        assert deltas[0].item_id == speech_started.item_id
+        assert deltas[0].content_index == 0
+    finally:
+        service.unregister(connection_id)
+        handler.cleanup()
 
 
 @pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
@@ -589,6 +675,52 @@ def test_commit_to_final_metric_starts_at_the_vad_boundary(caplog, handler_type,
     elapsed_s = float(metric.split("completed in ", 1)[1].split("s ", 1)[0])
     assert elapsed_s >= 0.1
     handler.cleanup()
+
+
+@pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)
+@pytest.mark.parametrize("consume_final", [False, True])
+def test_commit_to_final_metric_records_receipt_even_without_consumption(
+    caplog,
+    monkeypatch,
+    handler_type,
+    dialect,
+    consume_final,
+) -> None:
+    caplog.set_level("INFO")
+    now = 100.0
+    monkeypatch.setattr(streaming_handler, "perf_counter", lambda: now)
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+
+    def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
+        nonlocal now
+        if _ack_session_update(event, socket, dialect):
+            return
+        if _is_final_commit(event, dialect):
+            if not consume_final:
+                tracker.observe("turn_1", 1)
+            now += 0.125
+            socket.incoming.put(json.dumps(_completion_event("received", dialect=dialect)))
+
+    handler = _handler(_SocketFactory(on_send), handler_type=handler_type, tracker=tracker)
+    try:
+        handler.start_turn("turn_1", 0)
+        handler.append_audio(b"\x01\x00" * 512)
+        handler.commit_boundary("turn_1", 0)
+        pending = handler._session._pending_commits[(handler._session.generation, "turn_1", 0)][0]
+        assert pending.done.wait(timeout=1)
+        # Model the processing delay after the provider final already arrived.
+        now += 0.6
+        if consume_final:
+            assert [output.text for output in handler.process(_vad_final())] == ["received"]
+        else:
+            assert not handler.should_process_input(_vad_final())
+        metrics = [record for record in caplog.records if "VAD commit to final transcript" in record.getMessage()]
+        assert len(metrics) == 1
+        assert "completed in 0.125s turn=turn_1 rev=0" in metrics[0].getMessage()
+        assert metrics[0].threadName == handler._session._thread.name
+    finally:
+        handler.cleanup()
 
 
 @pytest.mark.parametrize(("handler_type", "dialect"), DIALECT_CASES)

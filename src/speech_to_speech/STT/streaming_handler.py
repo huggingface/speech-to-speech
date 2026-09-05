@@ -746,6 +746,13 @@ class _StreamingSession:
                 committed_prefixes[active_commit.turn_id] = combined
             active_commit.result = combined
             active_commit.language = event.language
+            logger.info(
+                "%s VAD commit to final transcript completed in %.3fs turn=%s rev=%s",
+                self.protocol.name,
+                perf_counter() - active_commit.boundary_queued_at_s,
+                active_commit.turn_id,
+                active_commit.turn_revision,
+            )
             active_commit.done.set()
             active_commit = None
             reset_utterance()
@@ -1027,13 +1034,6 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
                 speech_stopped_at_s=vad_audio.created_at_s,
             )
             return
-        logger.info(
-            "%s VAD commit to final transcript completed in %.3fs turn=%s rev=%s",
-            self.__class__.__name__,
-            perf_counter() - commit.boundary_queued_at_s,
-            vad_audio.turn_id,
-            vad_audio.turn_revision,
-        )
         if self.speculative_turns is not None and not self.speculative_turns.is_latest(
             vad_audio.turn_id,
             vad_audio.turn_revision,
