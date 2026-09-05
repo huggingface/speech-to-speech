@@ -205,6 +205,9 @@ class _TranscriptionRequest:
 class OpenAICompatibleSTTHandler(BaseSTTHandler):
     """Per-pipeline asynchronous STT with turn and session lifecycle ownership."""
 
+    # Bound retained utterances behind a stalled request, independently of server capacity.
+    _MAX_PENDING_FINAL_REQUESTS = 8
+
     def setup(
         self,
         base_url: str = "http://localhost:8000/v1",
@@ -263,6 +266,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         mode: Literal["progressive", "final"] = "progressive" if vad_audio.mode == "progressive" else "final"
         failed_requests: list[_TranscriptionRequest] = []
+        failure_message = "transcription worker could not start"
         with self._request_lock:
             request = _TranscriptionRequest(vad_audio, self._session_generation)
             if not self._request_is_current(request):
@@ -286,18 +290,23 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
                 for progressive in (self._pending_progressive, self._active.get("progressive")):
                     if progressive is not None and progressive.source.turn_id == vad_audio.turn_id:
                         self._cancel_request(progressive, "final_received")
-                self._pending_finals.append(request)
-            try:
-                self._start_worker(mode)
-            except Exception:
-                if mode == "final":
-                    failed_requests = list(self._pending_finals)
-                    self._pending_finals.clear()
-                else:
+                if len(self._pending_finals) >= self._MAX_PENDING_FINAL_REQUESTS:
                     failed_requests = [request]
-                    self._pending_progressive = None
+                    failure_message = "transcription queue is full"
+                else:
+                    self._pending_finals.append(request)
+            if not failed_requests:
+                try:
+                    self._start_worker(mode)
+                except Exception:
+                    if mode == "final":
+                        failed_requests = list(self._pending_finals)
+                        self._pending_finals.clear()
+                    else:
+                        failed_requests = [request]
+                        self._pending_progressive = None
         for failed in failed_requests:
-            self._publish_failure(failed, "transcription worker could not start")
+            self._publish_failure(failed, failure_message)
         # The handler must remain free to process SESSION_END and new revisions.
         yield from ()
 

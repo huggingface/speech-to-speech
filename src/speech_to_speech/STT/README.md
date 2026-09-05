@@ -99,6 +99,8 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - Supports JSON (`{"text": "..."}`) and plain-text responses
 - Keeps one active progressive request and the latest pending window per pipeline;
   final requests proceed independently, with cancellation and session-safe delivery
+- Bounds pending finals to eight per pipeline; overflow produces a typed failure
+  without uploading audio, and accepted finals retain their order
 - Endpoint capacity and provider quotas remain the inference service/proxy's responsibility
 - See [`docs/openai-compatible-stt.md`](../../../docs/openai-compatible-stt.md)
 

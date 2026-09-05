@@ -385,6 +385,105 @@ def test_final_requests_for_distinct_turns_keep_their_order(handler_factory):
     assert [output.text for output in outputs] == ["first", "second"]
 
 
+def test_pending_final_limit_rejects_overflow_and_preserves_accepted_order(handler_factory):
+    active = ControlledOperation("active")
+    accepted = [ControlledOperation(f"pending-{index}") for index in range(8)]
+    later = ControlledOperation("later")
+    for operation in [*accepted, later]:
+        operation.release.set()
+    handler = handler_factory(active, *accepted, later)
+    assert list(handler.process(audio(turn="active"))) == []
+    assert active.started.wait(1)
+
+    sources = [audio(turn=f"pending-{index}", revision=2) for index in range(100)]
+    for source in sources:
+        assert list(handler.process(source)) == []
+    assert len(handler._pending_finals) == 8
+    assert all(not operation.started.is_set() for operation in accepted)
+    failures = [handler.queue_out.get_nowait() for _ in sources[8:]]
+    assert all(isinstance(failure, TranscriptionFailure) for failure in failures)
+    assert [failure.turn_id for failure in failures] == [source.turn_id for source in sources[8:]]
+    assert all(failure.message == "transcription queue is full" for failure in failures)
+    assert all(failure.turn_revision == 2 for failure in failures)
+    assert [failure.speech_stopped_at_s for failure in failures] == [source.created_at_s for source in sources[8:]]
+    assert handler.queue_out.empty()
+
+    # Saturation is local to this pipeline, even with identical endpoint credentials.
+    independent = ControlledOperation("independent")
+    independent.release.set()
+    other_handler = handler_factory(independent)
+    assert other_handler.endpoint_url == handler.endpoint_url
+    assert other_handler.api_key == handler.api_key
+    assert list(other_handler.process(audio())) == []
+    assert other_handler.queue_out.get(timeout=1).text == "independent"
+    assert not active.finished.is_set()
+
+    active.release.set()
+    outputs = [handler.queue_out.get(timeout=1) for _ in range(9)]
+    assert all(isinstance(output, Transcription) for output in outputs)
+    assert [output.turn_id for output in outputs] == ["active", *[source.turn_id for source in sources[:8]]]
+    assert [output.text for output in outputs] == ["active", *[operation.text for operation in accepted]]
+    handler._final_thread.join(timeout=1)
+    assert not handler._final_thread.is_alive()
+    assert handler.queue_out.empty()
+    assert not later.started.is_set()
+    assert list(handler.process(audio(turn="later"))) == []
+    assert handler.queue_out.get(timeout=1).text == "later"
+
+
+def test_stale_pending_final_releases_space_before_queue_limit_is_checked(handler_factory, monkeypatch):
+    tracker = SpeculativeTurnTracker()
+    active, latest = ControlledOperation("active"), ControlledOperation("latest")
+    latest.release.set()
+    handler = handler_factory(active, latest, tracker=tracker)
+    monkeypatch.setattr(handler, "_MAX_PENDING_FINAL_REQUESTS", 1)
+    assert list(handler.process(audio(turn="active"))) == []
+    assert active.started.wait(1)
+    assert list(handler.process(audio(turn="pending"))) == []
+    tracker.observe("pending", 1)
+    assert list(handler.process(audio(turn="pending", revision=1))) == []
+    assert len(handler._pending_finals) == 1
+    assert handler.queue_out.empty()
+    active.release.set()
+    outputs = [handler.queue_out.get(timeout=1), handler.queue_out.get(timeout=1)]
+    assert [(output.turn_id, output.turn_revision) for output in outputs] == [("active", 0), ("pending", 1)]
+    assert outputs[1].text == "latest"
+
+
+def test_session_end_fences_overflow_failure_waiting_to_publish(handler_factory, monkeypatch):
+    active = ControlledOperation()
+    handler = handler_factory(active)
+    monkeypatch.setattr(handler, "_MAX_PENDING_FINAL_REQUESTS", 1)
+    assert list(handler.process(audio(turn="active"))) == []
+    assert active.started.wait(1)
+    assert list(handler.process(audio(turn="pending"))) == []
+    waiting, resume = Event(), Event()
+    publish = handler._publish_output
+
+    def pause_failure(request, output):
+        if isinstance(output, TranscriptionFailure):
+            waiting.set()
+            resume.wait()
+        return publish(request, output)
+
+    monkeypatch.setattr(handler, "_publish_output", pause_failure)
+    submitter = Thread(target=lambda: list(handler.process(audio(turn="overflow"))), daemon=True)
+    submitter.start()
+    try:
+        assert waiting.wait(1)
+        handler.on_session_end()
+        assert not handler._pending_finals
+        resume.set()
+        submitter.join(timeout=1)
+        handler._final_thread.join(timeout=1)
+        assert not submitter.is_alive()
+        assert not handler._final_thread.is_alive()
+        assert handler.queue_out.empty()
+    finally:
+        resume.set()
+        submitter.join(timeout=1)
+
+
 def test_final_failure_is_delivered_asynchronously(handler_factory):
     operation = ControlledOperation(error=stt_module.TranscriptionRequestError("transcription request timed out"))
     handler = handler_factory(operation)

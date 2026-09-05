@@ -80,7 +80,13 @@ failures therefore prevent the realtime server from accepting sessions.
 
 Each pipeline delivers STT results asynchronously so HTTP work does not block
 session teardown. Final requests for distinct turns retain their order within
-that pipeline. They run independently of progressive work.
+that pipeline. They run independently of progressive work. Each pipeline retains
+at most eight pending finals in addition to its active final request. Once this
+queue is full, additional finals receive a sanitized `TranscriptionFailure`
+without uploading audio or retrying. Obsolete pending requests are removed before
+checking the limit, and accepted finals keep their order. This bounds the number
+of utterances retained behind a stalled request; it is not an estimate of server
+capacity.
 
 Progressive requests are best-effort: one is active per pipeline, and only the
 latest waiting cumulative window is retained. A final request cancels matching
@@ -92,6 +98,8 @@ Session end cancels active work and clears pending work. Results and failures
 carry a session generation that is checked atomically with queue publication,
 preventing old completions from appearing after teardown or in a reused session.
 Shutdown cancels the remaining requests and joins the pipeline's request workers.
+If a request worker cannot start, its pending work is cleared, final requests
+receive a sanitized failure, and shutdown still reaches the pipeline boundary.
 
 Cancellation interrupts the client's asynchronous HTTP transport, including a
 request stalled before headers or in the response body. Server-side inference
@@ -99,6 +107,7 @@ cancellation is best-effort: closing the client connection does not guarantee
 that the server stops GPU work. Stale-result filtering remains required even
 when a request has been cancelled.
 
-Pipelines do not share a client-side admission queue or endpoint concurrency
-budget. STT server capacity, fleet routing, and provider quotas belong to the
-inference service or its shared proxy.
+Client-side queue bounds apply separately to each pipeline. Pipelines do not
+share an admission queue or endpoint concurrency budget. STT server capacity,
+fleet routing, and provider quotas belong to the inference service or its shared
+proxy.
