@@ -184,7 +184,10 @@ class _FakeOperation:
         self.kwargs = kwargs
         type(self).instances.append(self)
 
-    def run(self):
+    def cancel(self, reason="superseded"):
+        self.cancel_reason = reason
+
+    def run(self, cancel_check=lambda: False):
         if type(self).error is not None:
             raise type(self).error
         return type(self).results.pop(0)
@@ -217,6 +220,18 @@ def _audio(mode: str = "final", *, revision: int = 0) -> VADAudio:
         turn_id="turn-1",
         turn_revision=revision,
     )
+
+
+def _run_final(handler: OpenAICompatibleSTTHandler) -> list:
+    assert list(handler.process(_audio())) == []
+    thread = handler._final_thread
+    assert thread is not None
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    outputs = []
+    while not handler.queue_out.empty():
+        outputs.append(handler.queue_out.get_nowait())
+    return outputs
 
 
 def _run_progressive(handler: OpenAICompatibleSTTHandler) -> list[PartialTranscription]:
@@ -280,7 +295,7 @@ def test_openai_stt_returns_final_transcription(monkeypatch):
     handler = _handler(monkeypatch)
     _FakeOperation.results = [HttpTranscriptionResult(text="hello", language="en")]
 
-    outputs = list(handler.process(_audio()))
+    outputs = _run_final(handler)
 
     assert len(outputs) == 1
     assert isinstance(outputs[0], Transcription)
@@ -348,7 +363,7 @@ def test_final_transport_failure_does_not_create_a_transcription(monkeypatch):
     handler = _handler(monkeypatch)
     _FakeOperation.error = TranscriptionRequestError("transcription request timed out")
 
-    outputs = list(handler.process(_audio()))
+    outputs = _run_final(handler)
 
     assert len(outputs) == 1
     assert isinstance(outputs[0], TranscriptionFailure)
@@ -369,14 +384,14 @@ def test_final_request_does_not_wait_for_in_flight_progressive(monkeypatch):
     release_progressive = Event()
     final_started = Event()
 
-    class _BlockingProgressiveOperation:
-        def run(self):
+    class _BlockingProgressiveOperation(_FakeOperation):
+        def run(self, cancel_check=lambda: False):
             progressive_started.set()
             assert release_progressive.wait(timeout=2)
             return HttpTranscriptionResult(text="partial")
 
-    class _FinalOperation:
-        def run(self):
+    class _FinalOperation(_FakeOperation):
+        def run(self, cancel_check=lambda: False):
             final_started.set()
             return HttpTranscriptionResult(text="final", language="en")
 
@@ -417,8 +432,8 @@ def test_final_requests_from_pipelines_using_the_same_endpoint_can_overlap(monke
     handlers = [_handler(monkeypatch, api_key="shared-endpoint-key") for _ in range(2)]
     both_requests_started = Barrier(2)
 
-    class _ConcurrentOperation:
-        def run(self):
+    class _ConcurrentOperation(_FakeOperation):
+        def run(self, cancel_check=lambda: False):
             both_requests_started.wait(timeout=2)
             return HttpTranscriptionResult(text="final", language="en")
 
@@ -427,7 +442,7 @@ def test_final_requests_from_pipelines_using_the_same_endpoint_can_overlap(monke
 
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = [executor.submit(lambda handler=handler: list(handler.process(_audio()))) for handler in handlers]
+            futures = [executor.submit(lambda handler=handler: _run_final(handler)) for handler in handlers]
             outputs = [future.result(timeout=3) for future in futures]
         for output in outputs:
             assert len(output) == 1
@@ -444,8 +459,8 @@ def test_additional_progressive_requests_are_dropped_while_one_is_in_flight(monk
     release_progressive = Event()
     operation_count = 0
 
-    class _BlockingProgressiveOperation:
-        def run(self):
+    class _BlockingProgressiveOperation(_FakeOperation):
+        def run(self, cancel_check=lambda: False):
             progressive_started.set()
             assert release_progressive.wait(timeout=2)
             return HttpTranscriptionResult(text="partial")
@@ -479,8 +494,8 @@ def test_session_end_suppresses_in_flight_progressive_result(monkeypatch):
     progressive_started = Event()
     release_progressive = Event()
 
-    class _BlockingProgressiveOperation:
-        def run(self):
+    class _BlockingProgressiveOperation(_FakeOperation):
+        def run(self, cancel_check=lambda: False):
             progressive_started.set()
             assert release_progressive.wait(timeout=2)
             return HttpTranscriptionResult(text="old session")
@@ -506,14 +521,15 @@ def test_obsolete_progressive_request_is_not_sent_before_worker_starts(monkeypat
     handler = _handler(monkeypatch, tracker=tracker)
     worker_started = Event()
     release_worker = Event()
-    run_progressive = handler._run_progressive_request
+    run_request = handler._run_request
 
-    def delayed_worker(audio):
-        worker_started.set()
-        assert release_worker.wait(timeout=2)
-        run_progressive(audio)
+    def delayed_worker(request):
+        if request.source.mode == "progressive":
+            worker_started.set()
+            assert release_worker.wait(timeout=2)
+        run_request(request)
 
-    monkeypatch.setattr(handler, "_run_progressive_request", delayed_worker)
+    monkeypatch.setattr(handler, "_run_request", delayed_worker)
     _FakeOperation.results = [HttpTranscriptionResult(text="final")]
     _FakeOperation.instances = []
     thread = None
@@ -524,7 +540,7 @@ def test_obsolete_progressive_request_is_not_sent_before_worker_starts(monkeypat
         assert worker_started.wait(timeout=1)
 
         if superseded_by == "final":
-            outputs = list(handler.process(_audio()))
+            outputs = _run_final(handler)
             assert len(outputs) == 1
             assert isinstance(outputs[0], Transcription)
             assert outputs[0].text == "final"
@@ -555,13 +571,13 @@ def test_stale_revision_is_dropped_after_request(monkeypatch):
     handler = _handler(monkeypatch, tracker=tracker)
 
     class _ReopeningOperation(_FakeOperation):
-        def run(self):
+        def run(self, cancel_check=lambda: False):
             tracker.observe("turn-1", 1)
             return HttpTranscriptionResult(text="stale")
 
     monkeypatch.setattr(stt_module, "HttpTranscriptionOperation", _ReopeningOperation)
 
-    assert list(handler.process(_audio())) == []
+    assert _run_final(handler) == []
 
 
 def test_openai_api_key_is_not_sent_to_other_endpoints(monkeypatch):

@@ -6,12 +6,13 @@ import json
 import logging
 import os
 import wave
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from threading import Event, Lock, Thread
+from threading import Event, Lock, RLock, Thread, current_thread
 from time import perf_counter
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
 
 import httpx
 import numpy as np
@@ -189,8 +190,16 @@ class HttpTranscriptionOperation:
         )
 
 
+@dataclass(eq=False)
+class _TranscriptionRequest:
+    source: VADAudio
+    session_generation: int
+    operation: HttpTranscriptionOperation | None = None
+    cancelled: bool = False
+
+
 class OpenAICompatibleSTTHandler(BaseSTTHandler):
-    """Client handler for POST /v1/audio/transcriptions."""
+    """Per-pipeline asynchronous STT with turn and session lifecycle ownership."""
 
     def setup(
         self,
@@ -225,9 +234,15 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         self.speculative_turns = speculative_turns
         self.final_revision_settle_s = final_revision_settle_s
         self.gen_kwargs = gen_kwargs or {}
-        self._progressive_lock = Lock()
-        self._progressive_key: tuple[str | None, int | None] | None = None
+        self._request_lock = RLock()
+        self._session_generation = 0
+        self._closed = False
+        self._pending_finals: deque[_TranscriptionRequest] = deque()
+        self._pending_progressive: _TranscriptionRequest | None = None
+        self._active: dict[str, _TranscriptionRequest] = {}
+        self._workers_running: set[str] = set()
         self._progressive_thread: Thread | None = None
+        self._final_thread: Thread | None = None
         self.warmup()
 
     def warmup(self) -> None:
@@ -242,144 +257,179 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         )
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
-        if not self._is_request_relevant(vad_audio):
+        mode: Literal["progressive", "final"] = "progressive" if vad_audio.mode == "progressive" else "final"
+        with self._request_lock:
+            request = _TranscriptionRequest(vad_audio, self._session_generation)
+            if not self._request_is_current(request):
+                return
+            for active in self._active.values():
+                if not self._request_is_current(active):
+                    self._cancel_request(active, "superseded")
+            self._pending_finals = deque(r for r in self._pending_finals if self._request_is_current(r))
+            final_requests = [*self._pending_finals]
+            if "final" in self._active:
+                final_requests.append(self._active["final"])
+            key = self._revision_key(vad_audio)
+            if key is not None and any(
+                self._revision_key(r.source) == key and self._request_is_current(r) for r in final_requests
+            ):
+                return
+            if mode == "progressive":
+                if "progressive" in self._workers_running:
+                    return
+                self._pending_progressive = request
+            else:
+                for progressive in (self._pending_progressive, self._active.get("progressive")):
+                    if progressive is not None and progressive.source.turn_id == vad_audio.turn_id:
+                        self._cancel_request(progressive, "final_received")
+                self._pending_finals.append(request)
+            self._start_worker(mode)
+        # The handler must remain free to process SESSION_END and new revisions.
+        yield from ()
+
+    def _start_worker(self, mode: Literal["progressive", "final"]) -> None:
+        if mode in self._workers_running:
             return
+        thread = Thread(target=self._worker, args=(mode,), name=f"openai-stt-{mode}", daemon=True)
+        setattr(self, f"_{mode}_thread", thread)
+        self._workers_running.add(mode)
+        try:
+            thread.start()
+        except Exception:
+            self._workers_running.discard(mode)
+            raise
 
-        if vad_audio.mode == "progressive":
-            self._start_progressive_request(vad_audio)
-            return
+    def _worker(self, mode: str) -> None:
+        if self.pipeline_index is not None:
+            pipeline_log_ctx.set(self.pipeline_index)
+        try:
+            while True:
+                with self._request_lock:
+                    if mode == "final":
+                        request = self._pending_finals.popleft() if self._pending_finals else None
+                    else:
+                        request, self._pending_progressive = self._pending_progressive, None
+                    if request is None or self._closed:
+                        self._workers_running.discard(mode)
+                        return
+                    if not self._request_is_current(request):
+                        continue
+                    self._active[mode] = request
+                try:
+                    self._run_request(request)
+                finally:
+                    with self._request_lock:
+                        self._active.pop(mode, None)
+        finally:
+            with self._request_lock:
+                if getattr(self, f"_{mode}_thread") is current_thread():
+                    self._workers_running.discard(mode)
 
-        self._suppress_matching_progressive(vad_audio)
-        output = self._run_request(vad_audio)
-        if output is not None:
-            yield output
-
-    def _run_request(self, vad_audio: VADAudio) -> STTOut | None:
+    def _run_request(self, request: _TranscriptionRequest) -> None:
+        source = request.source
         started_at_s = perf_counter()
         try:
-            result = self._make_operation(vad_audio.audio).run()
+            if not self._request_is_current(request):
+                return
+            operation = self._make_operation(source.audio)
+            with self._request_lock:
+                request.operation = operation
+                if not self._request_is_current(request):
+                    operation.cancel("superseded")
+                    return
+            result = operation.run(cancel_check=lambda: not self._request_is_current(request))
+        except TranscriptionRequestCancelled:
+            return
         except Exception as exc:
-            if not self._is_request_relevant(vad_audio):
-                return None
+            if not self._request_is_current(request):
+                return
             message = str(exc) if isinstance(exc, TranscriptionRequestError) else "transcription request failed"
-            if vad_audio.mode == "progressive":
-                if self._progressive_result_is_current(vad_audio):
-                    logger.warning(
-                        "OpenAI-compatible progressive STT failed turn=%s rev=%s: %s",
-                        vad_audio.turn_id,
-                        vad_audio.turn_revision,
-                        message,
-                    )
-                return None
-            logger.error(
-                "OpenAI-compatible STT failed turn=%s rev=%s: %s",
-                vad_audio.turn_id,
-                vad_audio.turn_revision,
-                message,
+            if source.mode == "progressive":
+                logger.warning("OpenAI-compatible progressive STT failed: %s", message)
+                return
+            self._publish_output(
+                request,
+                TranscriptionFailure(
+                    message=message,
+                    turn_id=source.turn_id,
+                    turn_revision=source.turn_revision,
+                    speech_stopped_at_s=source.created_at_s,
+                ),
             )
-            return TranscriptionFailure(
-                message=message,
-                turn_id=vad_audio.turn_id,
-                turn_revision=vad_audio.turn_revision,
-                speech_stopped_at_s=vad_audio.created_at_s,
-            )
+            return
 
-        if not self._is_request_relevant(vad_audio):
-            return None
-
-        if vad_audio.mode == "progressive":
-            output: STTOut = PartialTranscription(
-                text=result.text,
-                turn_id=vad_audio.turn_id,
-                turn_revision=vad_audio.turn_revision,
-            )
+        output: STTOut
+        if source.mode == "progressive":
+            output = PartialTranscription(text=result.text, turn_id=source.turn_id, turn_revision=source.turn_revision)
         else:
             output = Transcription(
                 text=result.text,
                 language_code=result.language,
-                turn_id=vad_audio.turn_id,
-                turn_revision=vad_audio.turn_revision,
-                speech_stopped_at_s=vad_audio.created_at_s,
+                turn_id=source.turn_id,
+                turn_revision=source.turn_revision,
+                speech_stopped_at_s=source.created_at_s,
+            )
+        if self._publish_output(request, output):
+            elapsed = perf_counter() - started_at_s
+            self._times.append(elapsed)
+            logger.info(
+                "OpenAI-compatible STT request completed turn=%s rev=%s mode=%s in %.3fs",
+                source.turn_id,
+                source.turn_revision,
+                source.mode,
+                elapsed,
             )
 
-        logger.info(
-            "OpenAI-compatible STT request completed turn=%s rev=%s mode=%s in %.3fs",
-            vad_audio.turn_id,
-            vad_audio.turn_revision,
-            vad_audio.mode,
-            perf_counter() - started_at_s,
-        )
-        return output
+    def _publish_output(self, request: _TranscriptionRequest, output: STTOut) -> bool:
+        # Waiting for a speculative reopen must not hold the teardown lock.
+        if not self._request_is_current(request) or not self.should_emit_output(output):
+            return False
+        with self._request_lock:
+            if not self._request_is_current(request):
+                return False
+            self.before_emit_output(output)
+            self.queue_out.put(output)
+            return True
 
-    def _start_progressive_request(self, vad_audio: VADAudio) -> None:
-        with self._progressive_lock:
-            if self._progressive_thread is not None and self._progressive_thread.is_alive():
-                logger.debug(
-                    "Skipping OpenAI-compatible progressive STT while a request is in flight turn=%s rev=%s",
-                    vad_audio.turn_id,
-                    vad_audio.turn_revision,
-                )
-                return
-            self._progressive_key = self._request_key(vad_audio)
-            thread = Thread(
-                target=self._run_progressive_request,
-                args=(vad_audio,),
-                name=f"{self.__class__.__name__}-progressive",
-                daemon=True,
-            )
-            self._progressive_thread = thread
-            try:
-                thread.start()
-            except Exception:
-                self._progressive_key = None
-                self._progressive_thread = None
-                raise
-
-    def _run_progressive_request(self, vad_audio: VADAudio) -> None:
-        if self.pipeline_index is not None:
-            pipeline_log_ctx.set(self.pipeline_index)
-        try:
-            # A final, reopened turn, or teardown can precede this thread's dispatch.
-            if not self._progressive_result_is_current(vad_audio):
-                return
-            output = self._run_request(vad_audio)
-            if not isinstance(output, PartialTranscription) or not self.should_emit_output(output):
-                return
-            with self._progressive_lock:
-                if not self._progressive_result_is_current_locked(vad_audio):
-                    return
-                self.queue_out.put(output)
-        finally:
-            with self._progressive_lock:
-                self._progressive_key = None
-
-    def _suppress_matching_progressive(self, vad_audio: VADAudio) -> None:
-        key = self._request_key(vad_audio)
-        with self._progressive_lock:
-            if self._progressive_key == key:
-                self._progressive_key = None
-
-    def _progressive_result_is_current(self, vad_audio: VADAudio) -> bool:
-        with self._progressive_lock:
-            return self._progressive_result_is_current_locked(vad_audio)
-
-    def _progressive_result_is_current_locked(self, vad_audio: VADAudio) -> bool:
-        return self._progressive_key == self._request_key(vad_audio) and self._is_request_relevant(vad_audio)
+    def _request_is_current(self, request: _TranscriptionRequest) -> bool:
+        with self._request_lock:
+            if self._closed or self.stop_event.is_set() or request.cancelled:
+                return False
+            if request.session_generation != self._session_generation:
+                return False
+            source = request.source
+            if self._is_completed_final_revision(source):
+                return False
+            tracker = self.speculative_turns
+            return tracker is None or tracker.is_latest(source.turn_id, source.turn_revision)
 
     @staticmethod
-    def _request_key(vad_audio: VADAudio) -> tuple[str | None, int | None]:
-        return (vad_audio.turn_id, vad_audio.turn_revision)
+    def _cancel_request(request: _TranscriptionRequest, reason: str) -> None:
+        request.cancelled = True
+        if request.operation is not None:
+            request.operation.cancel(reason)
 
     def on_session_end(self) -> None:
-        with self._progressive_lock:
-            self._progressive_key = None
-        super().on_session_end()
+        with self._request_lock:
+            self._session_generation += 1
+            self._pending_finals.clear()
+            self._pending_progressive = None
+            for request in self._active.values():
+                self._cancel_request(request, "session_end")
+            super().on_session_end()
 
     def cleanup(self) -> None:
-        # A blocking HTTP request cannot be cancelled safely. Its daemon worker
-        # exits on the configured timeout; suppress any output after shutdown.
-        with self._progressive_lock:
-            self._progressive_key = None
+        with self._request_lock:
+            self._closed = True
+            self._session_generation += 1
+            self._pending_finals.clear()
+            self._pending_progressive = None
+            for request in self._active.values():
+                self._cancel_request(request, "shutdown")
+            workers = (self._final_thread, self._progressive_thread)
+        for worker in workers:
+            if worker is not None and worker is not current_thread():
+                worker.join(timeout=2)
 
     def _make_operation(self, audio: np.ndarray) -> HttpTranscriptionOperation:
         return HttpTranscriptionOperation(
@@ -411,9 +461,3 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             wav.setframerate(PIPELINE_SAMPLE_RATE)
             wav.writeframes(pcm.tobytes())
         return output.getvalue()
-
-    def _is_request_relevant(self, source: VADAudio) -> bool:
-        if self.stop_event.is_set():
-            return False
-        tracker = self.speculative_turns
-        return tracker is None or tracker.is_latest(source.turn_id, source.turn_revision)
