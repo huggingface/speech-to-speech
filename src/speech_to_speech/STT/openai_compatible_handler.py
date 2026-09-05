@@ -13,6 +13,7 @@ from typing import Any, Iterator
 import httpx
 import numpy as np
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import (
@@ -52,9 +53,10 @@ class HttpTranscriptionOperation:
     response_format: str
     timeout_s: float
     extra_fields: dict[str, Any] | None = None
+    extra_headers: dict[str, str] | None = None
 
     def run(self) -> HttpTranscriptionResult:
-        headers = {}
+        headers = dict(self.extra_headers or {})
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         data: dict[str, Any] = {
@@ -180,7 +182,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
     def _run_request(self, vad_audio: VADAudio) -> STTOut | None:
         started_at_s = perf_counter()
         try:
-            result = self._make_operation(vad_audio.audio).run()
+            result = self._make_operation(vad_audio.audio, runtime_config=vad_audio.runtime_config).run()
         except Exception as exc:
             if not self._is_request_relevant(vad_audio):
                 return None
@@ -301,16 +303,20 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         with self._progressive_lock:
             self._progressive_key = None
 
-    def _make_operation(self, audio: np.ndarray) -> HttpTranscriptionOperation:
+    def _make_operation(
+        self, audio: np.ndarray, *, runtime_config: RuntimeConfig | None = None
+    ) -> HttpTranscriptionOperation:
+        routing = runtime_config.routing if runtime_config is not None else None
         return HttpTranscriptionOperation(
             endpoint_url=self.endpoint_url,
             api_key=self.api_key,
-            model=self.model,
+            model=routing.routes.stt.model if routing else self.model,
             wav_bytes=self._encode_wav(audio),
             language=self.language,
             response_format=self.response_format,
             timeout_s=self.timeout,
             extra_fields=self.gen_kwargs,
+            extra_headers=routing.headers("stt") if routing else None,
         )
 
     @staticmethod

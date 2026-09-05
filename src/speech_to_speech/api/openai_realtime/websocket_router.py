@@ -499,7 +499,31 @@ def create_app(
     pool: list[PipelineUnit],
     stop_event: ThreadingEvent,
     llm_proxy_config: LLMProxyConfig | None = None,
+    session_routing_enabled: bool = False,
 ) -> FastAPI:
+    from speech_to_speech.api.openai_realtime.session_routing import SessionRouting
+
+    routing_protocol = None
+    if session_routing_enabled:
+        from speech_to_speech.LLM.chat_completions_language_model import ChatCompletionsApiModelHandler
+        from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
+        from speech_to_speech.STT.openai_compatible_handler import OpenAICompatibleSTTHandler
+        from speech_to_speech.TTS.openai_compatible_handler import OpenAICompatibleTTSHandler
+
+        for unit in pool:
+            if not any(isinstance(h, OpenAICompatibleSTTHandler) for h in unit.handlers) or not any(
+                isinstance(h, OpenAICompatibleTTSHandler) for h in unit.handlers
+            ):
+                raise ValueError("Session routing requires remote OpenAI-compatible STT and TTS handlers")
+            protocols = [
+                "chat_completions" if isinstance(h, ChatCompletionsApiModelHandler) else "responses"
+                for h in unit.handlers
+                if isinstance(h, (ChatCompletionsApiModelHandler, ResponsesApiModelHandler))
+            ]
+            if len(protocols) != 1 or routing_protocol not in (None, protocols[0]):
+                raise ValueError("Session routing requires one consistent remote LLM protocol across the pool")
+            routing_protocol = protocols[0]
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # One send loop per pipeline unit; each polls its own queues and forwards
@@ -545,6 +569,25 @@ def create_app(
         }
         await ws.accept(subprotocol="realtime" if "realtime" in offered_subprotocols else None)
 
+        routing = None
+        raw_routing = ws.headers.get("X-Speech-Session-Routing")
+        if raw_routing is not None:
+            try:
+                if not session_routing_enabled or len(raw_routing) > 4096:
+                    raise ValueError("Session routing is disabled or the handoff is too large")
+                routing = SessionRouting.model_validate_json(raw_routing)
+                if routing.routes.llm.protocol != routing_protocol:
+                    raise ValueError("Admitted LLM protocol does not match the CPU adapter")
+            except ValueError:
+                await send_ws_event(
+                    ws,
+                    build_error_event(
+                        "Invalid or unsupported session routing handoff.", error_type="invalid_request_error"
+                    ),
+                )
+                await ws.close(code=1008, reason="Invalid session routing")
+                return
+
         transport = WebSocketTransport(ws)
         unit = _claim_unit(transport)
         if unit is None:
@@ -567,7 +610,7 @@ def create_app(
         # releases the unit, even if session setup fails.
         session_id = ""
         try:
-            session_id = unit.service.register()
+            session_id = unit.service.register(routing=routing) if routing is not None else unit.service.register()
             unit.session.session_id = session_id
             logger.info(f"Client connected to pipeline {unit.index} (session {session_id})")
 

@@ -575,6 +575,7 @@ def build_pipeline(
         pool=pool,
         host=host or args.realtime_server_kwargs.host,
         port=args.realtime_server_kwargs.port,
+        session_routing_enabled=args.realtime_server_kwargs.session_routing_enabled,
         llm_proxy_config=(
             build_llm_proxy_config(module_kwargs, args.llm_backend) if module_kwargs.enable_llm_proxy else None
         ),

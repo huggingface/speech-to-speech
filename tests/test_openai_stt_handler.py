@@ -380,7 +380,7 @@ def test_final_request_does_not_wait_for_in_flight_progressive(monkeypatch):
             return HttpTranscriptionResult(text="final", language="en")
 
     operations = iter([_BlockingProgressiveOperation(), _FinalOperation()])
-    monkeypatch.setattr(handler, "_make_operation", lambda _audio: next(operations))
+    monkeypatch.setattr(handler, "_make_operation", lambda _audio, **_kwargs: next(operations))
     handler_thread = Thread(target=handler.run, daemon=True)
     handler_thread.start()
 
@@ -424,7 +424,7 @@ def test_additional_progressive_requests_are_dropped_while_one_is_in_flight(monk
             assert release_progressive.wait(timeout=2)
             return HttpTranscriptionResult(text="partial")
 
-    def make_operation(_audio):
+    def make_operation(_audio, **_kwargs):
         nonlocal operation_count
         operation_count += 1
         return _BlockingProgressiveOperation()
@@ -459,7 +459,7 @@ def test_session_end_suppresses_in_flight_progressive_result(monkeypatch):
             assert release_progressive.wait(timeout=2)
             return HttpTranscriptionResult(text="old session")
 
-    monkeypatch.setattr(handler, "_make_operation", lambda _audio: _BlockingProgressiveOperation())
+    monkeypatch.setattr(handler, "_make_operation", lambda _audio, **_kwargs: _BlockingProgressiveOperation())
 
     assert list(handler.process(_audio("progressive"))) == []
     assert progressive_started.wait(timeout=1)

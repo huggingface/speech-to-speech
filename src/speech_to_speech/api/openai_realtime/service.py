@@ -54,6 +54,7 @@ from speech_to_speech.api.openai_realtime.handlers import (
 )
 from speech_to_speech.api.openai_realtime.input_state import InputItemState
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.api.openai_realtime.session_routing import SessionRouting
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -331,12 +332,13 @@ class RealtimeService:
 
     # ── Connection lifecycle ─────────────────────
 
-    def register(self) -> str:
+    def register(self, *, routing: SessionRouting | None = None) -> str:
         """Register a new connection and return its session_id."""
         if self.speculative_turns:
             self.speculative_turns.reset()
         state = ConnState(
             runtime_config=RuntimeConfig(
+                routing=routing,
                 chat=Chat(self._chat_size),
                 session=RealtimeSessionCreateRequest(
                     type="realtime",
@@ -344,6 +346,11 @@ class RealtimeService:
                 ),
             )
         )
+        if routing is not None:
+            state.runtime_config.session.model = routing.routes.llm.model
+            assert state.runtime_config.session.audio is not None
+            assert state.runtime_config.session.audio.output is not None
+            state.runtime_config.session.audio.output.voice = routing.routes.tts.voice
         self._conns[state.session_id] = state
         self.total_usage.connections += 1
         return state.session_id

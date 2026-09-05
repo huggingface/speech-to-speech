@@ -272,7 +272,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         ...
 
     @abstractmethod
-    def _build_compaction_generate_fn(self) -> CompactGenerateFn:
+    def _build_compaction_generate_fn(self, request_overrides: dict[str, Any] | None = None) -> CompactGenerateFn:
         """Return a ``(system, user) -> text`` fn used to compact long histories."""
         ...
 
@@ -783,8 +783,16 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 else:
                     provider_request_started = True
 
+                    routing = turn.runtime_config.routing
+                    route_kwargs = (
+                        {"model": routing.routes.llm.model, "extra_headers": routing.headers("llm")}
+                        if routing is not None
+                        else {}
+                    )
+                    request_kwargs = {**optional_kwargs, **route_kwargs}
+
                     def make_request() -> Any:
-                        return (request_fn or self._request)(api_input, optional_kwargs)
+                        return (request_fn or self._request)(api_input, request_kwargs)
 
                     if turn.prefetch_transaction is not None:
                         events = self._iter_prefetch_events_interruptibly(
@@ -871,7 +879,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                                     original_chat.strip_images(consumed_image_ids)
                                     if history_commit_fn is not None:
                                         history_commit_fn()
-                                    original_chat.trim_if_needed(self.compactor)
+                                    compactor = self.compactor
+                                    if compactor is not None and route_kwargs:
+                                        compactor = build_compactor(self._build_compaction_generate_fn(route_kwargs))
+                                    original_chat.trim_if_needed(compactor)
                                 except Exception:
                                     original_chat.restore_history_cleanup(snapshot)
                                     raise
