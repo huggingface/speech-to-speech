@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from queue import Queue
 from threading import Event
-from typing import Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import numpy as np
 import torch
@@ -20,6 +20,9 @@ from speech_to_speech.pipeline.queue_types import TextEventItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.utils import int2float
 from speech_to_speech.VAD.vad_iterator import VADIterator
+
+if TYPE_CHECKING:
+    from speech_to_speech.VAD.firered_vad_iterator import FireRedVadIterator
 
 logger = logging.getLogger(__name__)
 
@@ -124,13 +127,19 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         )
         self.vad = vad
         self.model = None
-        self.iterator: VADIterator
+        self.iterator: VADIterator | FireRedVadIterator
         if vad == "firered":
             from speech_to_speech.VAD.firered_vad_iterator import FireRedVadIterator, load_firered_streamer
 
             if not vad_firered_model_dir:
                 raise ValueError("--vad firered requires --vad_firered_model_dir")
-            streamer = load_firered_streamer(vad_firered_model_dir, use_gpu=vad_firered_use_gpu)
+            streamer = load_firered_streamer(
+                vad_firered_model_dir,
+                use_gpu=vad_firered_use_gpu,
+                speech_threshold=thresh,
+                min_silence_duration_ms=min_silence_ms,
+                speech_pad_ms=speech_pad_ms,
+            )
             self.iterator = FireRedVadIterator(
                 streamer,
                 threshold=thresh,

@@ -1,13 +1,12 @@
-"""FireRed streaming VAD as a drop-in speech-probability source for VADIterator."""
+"""FireRed streaming VAD backend using FireRedStreamVad start and end events."""
 
 from __future__ import annotations
 
+from collections import deque
 from typing import Protocol
 
 import numpy as np
 import torch
-
-from speech_to_speech.VAD.vad_iterator import VADIterator
 
 _FIRERED_WINDOW_SAMPLES = 400
 _FIRERED_HOP_SAMPLES = 160
@@ -15,6 +14,8 @@ _FIRERED_HOP_SAMPLES = 160
 
 class FireRedFrameResult(Protocol):
     smoothed_prob: float
+    is_speech_start: bool
+    is_speech_end: bool
 
 
 class FireRedStreamer(Protocol):
@@ -23,39 +24,8 @@ class FireRedStreamer(Protocol):
     def detect_chunk(self, audio_chunk: np.ndarray) -> list[FireRedFrameResult]: ...
 
 
-class FireRedProbModel:
-    """Adapt FireRedStreamVad.detect_chunk to the Silero model() call shape."""
-
-    def __init__(self, streamer: FireRedStreamer) -> None:
-        self.streamer = streamer
-        self._tail = np.zeros(0, dtype=np.float32)
-        self._last_prob = 0.0
-
-    def reset_states(self) -> None:
-        self._tail = np.zeros(0, dtype=np.float32)
-        self._last_prob = 0.0
-        self.streamer.reset()
-
-    def __call__(self, x: torch.Tensor, sampling_rate: int) -> torch.Tensor:
-        samples = x.detach().cpu().contiguous().view(-1).numpy().astype(np.float32, copy=False)
-        # FireRed fbank trains on int16 PCM. VADIterator feeds Silero-scale [-1, 1].
-        audio = np.concatenate((self._tail, samples * 32768.0))
-        if len(audio) < _FIRERED_WINDOW_SAMPLES:
-            self._tail = audio
-            return torch.tensor(self._last_prob, dtype=torch.float32)
-        # detect_chunk restarts fbank, so feed complete 400-sample windows at a 160-sample hop.
-        n_frames = (len(audio) - _FIRERED_WINDOW_SAMPLES) // _FIRERED_HOP_SAMPLES + 1
-        chunk_end = _FIRERED_WINDOW_SAMPLES + (n_frames - 1) * _FIRERED_HOP_SAMPLES
-        results = self.streamer.detect_chunk(audio[:chunk_end])
-        self._tail = audio[n_frames * _FIRERED_HOP_SAMPLES :]
-        if not results:
-            return torch.tensor(0.0, dtype=torch.float32)
-        self._last_prob = float(results[-1].smoothed_prob)
-        return torch.tensor(self._last_prob, dtype=torch.float32)
-
-
-class FireRedVadIterator(VADIterator):
-    """Same trigger/silence/pad behaviour as Silero, with FireRed speech scores."""
+class FireRedVadIterator:
+    """PCM buffer and prefix pad for VADHandler, driven by FireRed start/end events."""
 
     def __init__(
         self,
@@ -66,16 +36,180 @@ class FireRedVadIterator(VADIterator):
         min_silence_duration_ms: int = 300,
         speech_pad_ms: int = 30,
     ) -> None:
-        super().__init__(
-            FireRedProbModel(streamer),
-            threshold=threshold,
-            sampling_rate=sampling_rate,
-            min_silence_duration_ms=min_silence_duration_ms,
-            speech_pad_ms=speech_pad_ms,
-        )
+        if sampling_rate != 16000:
+            raise ValueError("FireRedVadIterator only supports a sampling rate of 16000")
+
+        self.streamer = streamer
+        self.sampling_rate = sampling_rate
+        self.buffer: list[torch.Tensor] = []
+        self.prefix_buffer: list[torch.Tensor] = []
+        self.active_speech_samples = 0
+        self.last_utterance_active_speech_samples = 0
+        self._pre_speech_buffer: deque[torch.Tensor] = deque()
+        self._pre_speech_samples = 0
+        self._tail = np.zeros(0, dtype=np.float32)
+        self.speech_pad_samples = int(sampling_rate * speech_pad_ms / 1000)
+        self._threshold = threshold
+        self._min_silence_samples = sampling_rate * min_silence_duration_ms / 1000
+        self._apply_threshold(threshold)
+        self._apply_min_silence_samples(self._min_silence_samples)
+        self.reset_states()
+
+    @property
+    def threshold(self) -> float:
+        return self._threshold
+
+    @threshold.setter
+    def threshold(self, value: float) -> None:
+        self._threshold = value
+        self._apply_threshold(value)
+
+    @property
+    def min_silence_samples(self) -> float:
+        return self._min_silence_samples
+
+    @min_silence_samples.setter
+    def min_silence_samples(self, value: float) -> None:
+        self._min_silence_samples = value
+        self._apply_min_silence_samples(value)
+
+    def _apply_threshold(self, value: float) -> None:
+        config = getattr(self.streamer, "config", None)
+        if config is not None and hasattr(config, "speech_threshold"):
+            config.speech_threshold = value
+        postprocessor = getattr(self.streamer, "postprocessor", None)
+        if postprocessor is not None and hasattr(postprocessor, "speech_threshold"):
+            postprocessor.speech_threshold = value
+
+    def _apply_min_silence_samples(self, samples: float) -> None:
+        min_silence_frame = max(1, round(samples / self.sampling_rate * 100))
+        config = getattr(self.streamer, "config", None)
+        if config is not None and hasattr(config, "min_silence_frame"):
+            config.min_silence_frame = min_silence_frame
+        postprocessor = getattr(self.streamer, "postprocessor", None)
+        if postprocessor is not None and hasattr(postprocessor, "min_silence_frame"):
+            postprocessor.min_silence_frame = min_silence_frame
+
+    def reset_states(self) -> None:
+        self._tail = np.zeros(0, dtype=np.float32)
+        self.triggered = False
+        self.buffer = []
+        self.prefix_buffer = []
+        self.active_speech_samples = 0
+        self.last_utterance_active_speech_samples = 0
+        self._pre_speech_buffer.clear()
+        self._pre_speech_samples = 0
+        self.streamer.reset()
+
+    def _num_samples(self, chunk: torch.Tensor) -> int:
+        return len(chunk[0]) if chunk.dim() == 2 else len(chunk)
+
+    def _trim_pre_speech_buffer(self) -> None:
+        while (
+            self.speech_pad_samples > 0
+            and self._pre_speech_buffer
+            and self._pre_speech_samples > self.speech_pad_samples
+        ):
+            first = self._pre_speech_buffer[0]
+            first_samples = self._num_samples(first)
+            excess = self._pre_speech_samples - self.speech_pad_samples
+
+            if excess >= first_samples:
+                self._pre_speech_buffer.popleft()
+                self._pre_speech_samples -= first_samples
+                continue
+
+            if first.dim() == 2:
+                self._pre_speech_buffer[0] = first[:, excess:]
+            else:
+                self._pre_speech_buffer[0] = first[excess:]
+            self._pre_speech_samples -= excess
+
+    def _remember_pre_speech(self, chunk: torch.Tensor) -> None:
+        if self.speech_pad_samples <= 0:
+            self._pre_speech_buffer.clear()
+            self._pre_speech_samples = 0
+            return
+
+        self._pre_speech_buffer.append(chunk)
+        self._pre_speech_samples += self._num_samples(chunk)
+        self._trim_pre_speech_buffer()
+
+    def speech_buffer(self) -> list[torch.Tensor]:
+        if not self.prefix_buffer:
+            return list(self.buffer)
+        return [*self.prefix_buffer, *self.buffer]
+
+    def _detect_frames(self, x: torch.Tensor) -> list[FireRedFrameResult]:
+        samples = x.detach().cpu().contiguous().view(-1).numpy().astype(np.float32, copy=False)
+        # FireRed fbank trains on int16 PCM. Incoming audio is Silero-scale [-1, 1].
+        audio = np.concatenate((self._tail, samples * 32768.0))
+        if len(audio) < _FIRERED_WINDOW_SAMPLES:
+            self._tail = audio
+            return []
+        # detect_chunk restarts fbank, so feed complete 400-sample windows at a 160-sample hop.
+        n_frames = (len(audio) - _FIRERED_WINDOW_SAMPLES) // _FIRERED_HOP_SAMPLES + 1
+        chunk_end = _FIRERED_WINDOW_SAMPLES + (n_frames - 1) * _FIRERED_HOP_SAMPLES
+        results = self.streamer.detect_chunk(audio[:chunk_end])
+        self._tail = audio[n_frames * _FIRERED_HOP_SAMPLES :]
+        return results
+
+    def _append_chunk(self, x: torch.Tensor) -> None:
+        self.buffer.append(x)
+        self.active_speech_samples += self._num_samples(x)
+
+    def _end_utterance(self) -> list[torch.Tensor]:
+        self.triggered = False
+        spoken_utterance = self.speech_buffer()
+        self.last_utterance_active_speech_samples = self.active_speech_samples
+        self.active_speech_samples = 0
+        self.buffer = []
+        self.prefix_buffer = []
+        return spoken_utterance
+
+    @torch.no_grad()
+    def __call__(self, x: torch.Tensor) -> list[torch.Tensor] | None:
+        if not torch.is_tensor(x):
+            try:
+                x = torch.Tensor(x)
+            except Exception:
+                raise TypeError("Audio cannot be casted to tensor. Cast it manually")
+
+        frames = self._detect_frames(x)
+        chunk_in_buffer = False
+
+        for frame in frames:
+            if frame.is_speech_start and not self.triggered:
+                self.triggered = True
+                self.prefix_buffer = list(self._pre_speech_buffer)
+                self._pre_speech_buffer.clear()
+                self._pre_speech_samples = 0
+                self.buffer.append(x)
+                chunk_in_buffer = True
+                self.active_speech_samples = self._num_samples(x)
+                self.last_utterance_active_speech_samples = 0
+            if frame.is_speech_end and self.triggered:
+                if not chunk_in_buffer:
+                    self.buffer.append(x)
+                return self._end_utterance()
+
+        if self.triggered:
+            if not chunk_in_buffer:
+                self._append_chunk(x)
+            return None
+
+        self._remember_pre_speech(x)
+        return None
 
 
-def load_firered_streamer(model_dir: str, *, use_gpu: bool = False) -> FireRedStreamer:
+def load_firered_streamer(
+    model_dir: str,
+    *,
+    use_gpu: bool = False,
+    speech_threshold: float = 0.5,
+    min_silence_duration_ms: int = 300,
+    speech_pad_ms: int = 30,
+) -> FireRedStreamer:
     try:
         from fireredvad import FireRedStreamVad, FireRedStreamVadConfig
     except ImportError as exc:
@@ -83,5 +217,10 @@ def load_firered_streamer(model_dir: str, *, use_gpu: bool = False) -> FireRedSt
             "FireRedVAD is not installed. Install the optional extra with "
             '`pip install "speech-to-speech[fireredvad]"` or `pip install fireredvad`.'
         ) from exc
-    config = FireRedStreamVadConfig(use_gpu=use_gpu)
+    config = FireRedStreamVadConfig(
+        use_gpu=use_gpu,
+        speech_threshold=speech_threshold,
+        min_silence_frame=max(1, round(min_silence_duration_ms / 10)),
+        pad_start_frame=max(0, round(speech_pad_ms / 10)),
+    )
     return FireRedStreamVad.from_pretrained(model_dir, config)

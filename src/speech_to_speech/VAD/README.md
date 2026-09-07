@@ -5,7 +5,9 @@ Turn detection still runs in `VADHandler`. The speech-probability source is sele
 ## Backends (`--vad`)
 
 - `silero` (default) — Silero VAD via `VADIterator`
-- `firered` — FireRed streaming VAD, same trigger/silence/pad logic as Silero
+- `firered` — FireRed streaming VAD via `FireRedStreamVad` start and end events
+
+FireRed uses `FireRedStreamVad` speech-start and speech-end events. It does not use Silero trigger or min-silence hangover logic.
 
 Streaming FireRedVAD has no published benchmark yet. Silero remains the default.
 
