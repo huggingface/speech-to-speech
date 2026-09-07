@@ -124,6 +124,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         )
         self.vad = vad
         self.model = None
+        self.iterator: VADIterator
         if vad == "firered":
             from speech_to_speech.VAD.firered_vad_iterator import FireRedVadIterator, load_firered_streamer
 
