@@ -9,6 +9,9 @@ import torch
 
 from speech_to_speech.VAD.vad_iterator import VADIterator
 
+_FIRERED_WINDOW_SAMPLES = 400
+_FIRERED_HOP_SAMPLES = 160
+
 
 class FireRedFrameResult(Protocol):
     smoothed_prob: float
@@ -25,17 +28,30 @@ class FireRedProbModel:
 
     def __init__(self, streamer: FireRedStreamer) -> None:
         self.streamer = streamer
+        self._tail = np.zeros(0, dtype=np.float32)
+        self._last_prob = 0.0
 
     def reset_states(self) -> None:
+        self._tail = np.zeros(0, dtype=np.float32)
+        self._last_prob = 0.0
         self.streamer.reset()
 
     def __call__(self, x: torch.Tensor, sampling_rate: int) -> torch.Tensor:
         samples = x.detach().cpu().contiguous().view(-1).numpy().astype(np.float32, copy=False)
         # FireRed fbank trains on int16 PCM. VADIterator feeds Silero-scale [-1, 1].
-        results = self.streamer.detect_chunk(samples * 32768.0)
+        audio = np.concatenate((self._tail, samples * 32768.0))
+        if len(audio) < _FIRERED_WINDOW_SAMPLES:
+            self._tail = audio
+            return torch.tensor(self._last_prob, dtype=torch.float32)
+        # detect_chunk restarts fbank, so feed complete 400-sample windows at a 160-sample hop.
+        n_frames = (len(audio) - _FIRERED_WINDOW_SAMPLES) // _FIRERED_HOP_SAMPLES + 1
+        chunk_end = _FIRERED_WINDOW_SAMPLES + (n_frames - 1) * _FIRERED_HOP_SAMPLES
+        results = self.streamer.detect_chunk(audio[:chunk_end])
+        self._tail = audio[n_frames * _FIRERED_HOP_SAMPLES :]
         if not results:
             return torch.tensor(0.0, dtype=torch.float32)
-        return torch.tensor(float(results[-1].smoothed_prob), dtype=torch.float32)
+        self._last_prob = float(results[-1].smoothed_prob)
+        return torch.tensor(self._last_prob, dtype=torch.float32)
 
 
 class FireRedVadIterator(VADIterator):

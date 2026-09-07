@@ -15,7 +15,7 @@ Install the optional extra and download Stream-VAD weights:
 
 ```bash
 pip install "speech-to-speech[fireredvad]"
-huggingface-cli download FireRedTeam/FireRedVAD --local-dir ./pretrained_models/FireRedVAD
+hf download FireRedTeam/FireRedVAD --local-dir ./pretrained_models/FireRedVAD
 ```
 
 Then:

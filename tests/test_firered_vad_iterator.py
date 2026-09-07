@@ -14,6 +14,7 @@ class _FakeFireRedStream:
         self.reset_calls = 0
         self.chunks: list[int] = []
         self.audio: list = []
+        self.frame_count = 0
 
     def reset(self) -> None:
         self.reset_calls += 1
@@ -22,6 +23,9 @@ class _FakeFireRedStream:
     def detect_chunk(self, audio_chunk) -> list[SimpleNamespace]:
         self.chunks.append(len(audio_chunk))
         self.audio.append(audio_chunk)
+        length = len(audio_chunk)
+        if length >= 400:
+            self.frame_count += (length - 400) // 160 + 1
         return [SimpleNamespace(smoothed_prob=next(self._probs))]
 
 
@@ -80,6 +84,7 @@ def test_firered_prob_model_scales_silero_audio_to_int16_peak() -> None:
     assert iterator(torch.ones(512)) is None
     assert len(streamer.audio) == 1
     chunk = np.asarray(streamer.audio[0])
+    assert len(chunk) == 400
     assert chunk.dtype == np.float32
     assert float(chunk.max()) == 32768.0
     assert float(chunk.min()) == 32768.0
@@ -102,3 +107,56 @@ def test_firered_iterator_reset_states_clears_trigger_and_streamer() -> None:
     assert iterator.triggered is False
     assert iterator.buffer == []
     assert streamer.reset_calls == resets_before + 1
+
+
+def test_firered_prob_model_overlaps_successive_512_sample_chunks() -> None:
+    streamer = _FakeFireRedStream([0.9, 0.9])
+    iterator = FireRedVadIterator(
+        streamer,
+        threshold=0.5,
+        sampling_rate=16000,
+        min_silence_duration_ms=100,
+        speech_pad_ms=0,
+    )
+    first_chunk = torch.arange(512, dtype=torch.float32) / 512
+    iterator(first_chunk)
+    iterator(torch.ones(512, dtype=torch.float32))
+
+    assert streamer.chunks[0] == 400
+    first_scaled = first_chunk.numpy() * 32768.0
+    second_feed = np.asarray(streamer.audio[1])
+    assert np.array_equal(second_feed[: 512 - 160], first_scaled[160:])
+
+
+def test_firered_prob_model_keeps_continuous_frame_count_across_512_chunks() -> None:
+    streamer = _FakeFireRedStream([0.9] * 100)
+    iterator = FireRedVadIterator(
+        streamer,
+        threshold=0.5,
+        sampling_rate=16000,
+        min_silence_duration_ms=100,
+        speech_pad_ms=0,
+    )
+    chunk = torch.ones(512)
+    for _ in range(100):
+        iterator(chunk)
+    assert streamer.frame_count == 318
+
+
+def test_firered_iterator_reset_states_clears_waveform_tail() -> None:
+    streamer = _FakeFireRedStream([0.9, 0.9])
+    iterator = FireRedVadIterator(
+        streamer,
+        threshold=0.5,
+        sampling_rate=16000,
+        min_silence_duration_ms=100,
+        speech_pad_ms=0,
+    )
+    iterator(torch.ones(512))
+    iterator.reset_states()
+    iterator(torch.full((512,), 0.25))
+
+    fed = np.asarray(streamer.audio[-1])
+    assert len(fed) == 400
+    assert float(fed.max()) == 0.25 * 32768.0
+    assert float(fed.min()) == 0.25 * 32768.0
