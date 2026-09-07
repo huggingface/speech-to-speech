@@ -201,8 +201,8 @@ def test_firered_iterator_is_not_vad_iterator() -> None:
 def test_firered_iterator_keeps_start_after_end_in_same_chunk() -> None:
     streamer = _FakeFireRedStream(
         [
-            _frame(is_speech_start=True),
-            _frame(is_speech_end=True),
+            _frame(is_speech_start=True, is_speech=True),
+            _frame(is_speech_end=True, is_speech=False, smoothed_prob=0.0),
             _frame(is_speech_start=True),
             _frame(),
         ]
@@ -223,6 +223,7 @@ def test_firered_iterator_keeps_start_after_end_in_same_chunk() -> None:
     spoken_utterance = iterator(second_chunk)
 
     assert spoken_utterance is not None
+    assert iterator.last_utterance_active_speech_samples == 160
     assert iterator.triggered is True
     assert torch.equal(spoken_utterance[0], first_chunk)
     assert torch.equal(iterator.buffer[0], second_chunk)
@@ -236,9 +237,9 @@ def test_firered_iterator_does_not_count_trailing_silence_as_active_speech() -> 
     streamer = _FakeFireRedStream(
         [
             _frame(is_speech_start=True, is_speech=True),
-            _frame(is_speech=False),
-            _frame(is_speech=False),
-            _frame(is_speech=False, is_speech_end=True),
+            _frame(is_speech=False, smoothed_prob=0.0),
+            _frame(is_speech=False, smoothed_prob=0.0),
+            _frame(is_speech=False, is_speech_end=True, smoothed_prob=0.0),
         ]
     )
     iterator = FireRedVadIterator(

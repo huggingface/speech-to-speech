@@ -16,6 +16,7 @@ class FireRedFrameResult(Protocol):
     smoothed_prob: float
     is_speech_start: bool
     is_speech_end: bool
+    is_speech: bool
 
 
 class FireRedStreamer(Protocol):
@@ -193,7 +194,6 @@ class FireRedVadIterator:
                 self.buffer.append(x)
                 chunk_in_buffer = True
                 self.active_speech_samples = 0
-                self.last_utterance_active_speech_samples = 0
             if self.triggered and self._frame_is_speech(frame):
                 self.active_speech_samples += _FIRERED_HOP_SAMPLES
             if frame.is_speech_end and self.triggered:
@@ -201,6 +201,7 @@ class FireRedVadIterator:
                     self.buffer.append(x)
                 ended_utterance = self._end_utterance()
                 chunk_in_buffer = False
+                # Keep looping so a 20 s split can keep the new start; this chunk may sit in both buffers.
 
         if ended_utterance is not None:
             return ended_utterance
