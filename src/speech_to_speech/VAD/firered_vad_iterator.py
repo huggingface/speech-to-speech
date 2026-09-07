@@ -156,7 +156,12 @@ class FireRedVadIterator:
 
     def _append_chunk(self, x: torch.Tensor) -> None:
         self.buffer.append(x)
-        self.active_speech_samples += self._num_samples(x)
+
+    def _frame_is_speech(self, frame: FireRedFrameResult) -> bool:
+        is_speech = getattr(frame, "is_speech", None)
+        if is_speech is not None:
+            return bool(is_speech)
+        return frame.smoothed_prob >= self.threshold
 
     def _end_utterance(self) -> list[torch.Tensor]:
         self.triggered = False
@@ -177,6 +182,7 @@ class FireRedVadIterator:
 
         frames = self._detect_frames(x)
         chunk_in_buffer = False
+        ended_utterance: list[torch.Tensor] | None = None
 
         for frame in frames:
             if frame.is_speech_start and not self.triggered:
@@ -186,12 +192,18 @@ class FireRedVadIterator:
                 self._pre_speech_samples = 0
                 self.buffer.append(x)
                 chunk_in_buffer = True
-                self.active_speech_samples = self._num_samples(x)
+                self.active_speech_samples = 0
                 self.last_utterance_active_speech_samples = 0
+            if self.triggered and self._frame_is_speech(frame):
+                self.active_speech_samples += _FIRERED_HOP_SAMPLES
             if frame.is_speech_end and self.triggered:
                 if not chunk_in_buffer:
                     self.buffer.append(x)
-                return self._end_utterance()
+                ended_utterance = self._end_utterance()
+                chunk_in_buffer = False
+
+        if ended_utterance is not None:
+            return ended_utterance
 
         if self.triggered:
             if not chunk_in_buffer:

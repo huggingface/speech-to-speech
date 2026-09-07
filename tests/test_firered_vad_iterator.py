@@ -12,11 +12,13 @@ def _frame(
     smoothed_prob: float = 0.9,
     is_speech_start: bool = False,
     is_speech_end: bool = False,
+    is_speech: bool | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         smoothed_prob=smoothed_prob,
         is_speech_start=is_speech_start,
         is_speech_end=is_speech_end,
+        is_speech=is_speech,
     )
 
 
@@ -194,3 +196,65 @@ def test_firered_iterator_is_not_vad_iterator() -> None:
     iterator.min_silence_samples = 1600
     assert iterator.threshold == 0.7
     assert iterator.min_silence_samples == 1600
+
+
+def test_firered_iterator_keeps_start_after_end_in_same_chunk() -> None:
+    streamer = _FakeFireRedStream(
+        [
+            _frame(is_speech_start=True),
+            _frame(is_speech_end=True),
+            _frame(is_speech_start=True),
+            _frame(),
+        ]
+    )
+    iterator = FireRedVadIterator(
+        streamer,
+        threshold=0.5,
+        sampling_rate=16000,
+        min_silence_duration_ms=100,
+        speech_pad_ms=0,
+    )
+
+    first_chunk = torch.ones(512)
+    second_chunk = torch.ones(512) * 2
+    third_chunk = torch.ones(512) * 3
+
+    assert iterator(first_chunk) is None
+    spoken_utterance = iterator(second_chunk)
+
+    assert spoken_utterance is not None
+    assert iterator.triggered is True
+    assert torch.equal(spoken_utterance[0], first_chunk)
+    assert torch.equal(iterator.buffer[0], second_chunk)
+
+    assert iterator(third_chunk) is None
+    assert iterator.triggered is True
+    assert torch.equal(iterator.buffer[-1], third_chunk)
+
+
+def test_firered_iterator_does_not_count_trailing_silence_as_active_speech() -> None:
+    streamer = _FakeFireRedStream(
+        [
+            _frame(is_speech_start=True, is_speech=True),
+            _frame(is_speech=False),
+            _frame(is_speech=False),
+            _frame(is_speech=False, is_speech_end=True),
+        ]
+    )
+    iterator = FireRedVadIterator(
+        streamer,
+        threshold=0.5,
+        sampling_rate=16000,
+        min_silence_duration_ms=100,
+        speech_pad_ms=0,
+    )
+
+    first_chunk = torch.ones(512)
+    second_chunk = torch.ones(512) * 2
+
+    assert iterator(first_chunk) is None
+    spoken_utterance = iterator(second_chunk)
+
+    assert spoken_utterance is not None
+    assert sum(len(chunk) for chunk in spoken_utterance) == 1024
+    assert iterator.last_utterance_active_speech_samples == 160
