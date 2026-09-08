@@ -10,6 +10,7 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - `faster-whisper` → `STT/faster_whisper_handler.py`
 - `parakeet-tdt` → `STT/parakeet_tdt_handler.py`
 - `parakeet-unified` → `STT/nemo_asr_handler.py`
+- `nemotron-streaming` → `STT/nemo_asr_handler.py`
 - `paraformer` → `STT/paraformer_handler.py`
 - `qwen3-asr` → `STT/qwen3_asr_handler.py`
 - `openai` → `STT/openai_compatible_handler.py`
@@ -115,6 +116,17 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - Device flag: `--parakeet_unified_device` (default `auto`)
 - The pipeline transcribes each VAD utterance with NeMo `ASRModel.transcribe` (offline API)
 
+### 10) Nemotron Streaming (`--stt nemotron-streaming`)
+
+- Handler: `NemoASRSTTHandler`
+- Install: `pip install "speech-to-speech[nemo]"`
+- Model flag: `--nemotron_streaming_model_name`
+- Default model: `nvidia/nemotron-speech-streaming-en-0.6b`
+- Override: `nvidia/nemotron-3.5-asr-streaming-0.6b` for multilingual
+- Language flag: `--nemotron_streaming_language` (default `en`)
+- Device flag: `--nemotron_streaming_device` (default `auto`)
+- The pipeline transcribes each VAD utterance with NeMo `ASRModel.transcribe` (offline API)
+
 ## Language Abbreviations (ISO-style codes seen in STT handlers)
 
 | Code | Language |
@@ -217,6 +229,17 @@ speech-to-speech serve --stt qwen3-asr \
 ```bash
 pip install "speech-to-speech[nemo]"
 speech-to-speech serve --stt parakeet-unified
+```
+
+The pipeline transcribes VAD utterances with NeMo `ASRModel.transcribe` (offline API).
+
+### Nemotron Streaming
+
+```bash
+pip install "speech-to-speech[nemo]"
+speech-to-speech serve --stt nemotron-streaming
+speech-to-speech serve --stt nemotron-streaming \
+  --nemotron_streaming_model_name nvidia/nemotron-3.5-asr-streaming-0.6b
 ```
 
 The pipeline transcribes VAD utterances with NeMo `ASRModel.transcribe` (offline API).
