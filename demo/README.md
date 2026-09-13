@@ -262,12 +262,28 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
 
 ## Audio pipeline notes
 
+- **WebSocket startup buffer**: Settings → Playback startup buffer (ms) controls
+  how much assistant audio is accumulated before each response starts playing.
+  The default is 0 (immediate playback). The setting is saved in this browser
+  and applies on the next conversation; it does not affect WebRTC or the Python
+  client's `--playback-buffer-ms` setting. Missing, invalid, or negative values
+  fall back to the default.
+  Buffering counts PCM samples, not elapsed time. After the threshold is reached,
+  later chunks stream immediately without rebuffering. Completed short responses
+  and valid incomplete responses release their remaining audio; interruption,
+  cancellation, failure, and disconnect discard pending audio. Each new response
+  gets a fresh startup gate without cutting off already released audio.
+  In [issue #557](https://github.com/huggingface/speech-to-speech/issues/557),
+  1200 ms resolved glitches in the reporter's local TTS setup. This is a tuning
+  example, not a universal optimum: larger values add startup latency, and no
+  finite reserve can prevent all underruns from sustained slower-than-realtime
+  generation.
 - **Input**: `getUserMedia({ echoCancellation, noiseSuppression, autoGainControl })`
   feeds the `mic-capture` worklet at the `AudioContext` rate. The worklet
   resamples to 24 kHz (boxcar lowpass + decimation on the 48 -> 24 fast
   path, linear interpolation fallback for odd rates) and packs Int16 LE.
 - **Browser cache safety**: the entry module, realtime client, and both audio
-  worklet URLs share the `audio-24k-v1` cache key. The client also waits for
+  worklet URLs share the `audio-24k-v2` cache key. The client also waits for
   the capture worklet to report the same version and a 24 kHz output rate
   before opening a session. When the browser-audio contract or sample rate
   changes, bump the key in `index.html`, `main.js`, and

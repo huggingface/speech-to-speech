@@ -53,7 +53,9 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
         case "audio":
           if (data.samples instanceof Float32Array && data.samples.length > 0) {
             this._queue.push(data.samples);
-            if (!this._playing) {
+            // A clear may still be fading the previous response out. New
+            // audio must cancel that stop or it will strand the new queue.
+            if (!this._playing || this._fadeOut > 0) {
               this._playing = true;
               this._fadeIn = FADE_FRAMES;
               this._fadeOut = 0;

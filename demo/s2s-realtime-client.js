@@ -41,6 +41,7 @@
  * @property {ToolDef[]} [tools]
  * @property {NoiseGate} [noiseGate]
  * @property {string} [audioOutputId]
+ * @property {number} [playbackBufferMs] WebSocket startup reserve; applies on the next connection.
  * @property {(call: {name: string, arguments: string, callId: string}) => Promise<{output: string, image?: string}>} [executeTool]
  */
 
@@ -49,11 +50,19 @@ import { OrbVisualiser, VIS_FFT_SIZE } from "./ws/orb-visualizer.js";
 import { SentAudioRecorder } from "./ws/user-audio-recorder.js";
 
 export const AUDIO_SAMPLE_RATE = 24_000;
-export const AUDIO_WORKLET_VERSION = "audio-24k-v1";
+export const AUDIO_WORKLET_VERSION = "audio-24k-v2";
+export const DEFAULT_PLAYBACK_BUFFER_MS = 0;
 const MIC_CHUNK_MS = 40;
 const CAPTURE_CONFIG_TIMEOUT_MS = 2_000;
 const SPEAKING_OPEN_DB = -50;
 const SPEAKING_HANG_MS = 250;
+
+/** @param {unknown} value */
+export function normalizePlaybackBufferMs(value) {
+  const ms = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+  return typeof ms === "number" && Number.isFinite(ms) && ms >= 0
+    ? ms : DEFAULT_PLAYBACK_BUFFER_MS;
+}
 
 /** @param {string} name @param {URL} base */
 export function versionedAudioWorkletUrl(name, base) {
@@ -107,6 +116,8 @@ export class S2sRealtimeClient extends EventTarget {
     this._micSrc = null;
     this._captureNode = null;
     this._playbackNode = null;
+    this._playbackThreshold = Math.ceil(AUDIO_SAMPLE_RATE * normalizePlaybackBufferMs(options.playbackBufferMs) / 1000);
+    this._resetPlaybackBuffer();
     this._micAnalyser = null;
     this._outAnalyser = null;
     this._remoteSrc = null;
@@ -203,6 +214,7 @@ export class S2sRealtimeClient extends EventTarget {
     this._transport.on("connection_change", (state) => {
       if (state === "disconnected" && !this._closing && this._status !== "error") {
         this._setStatus("error");
+        if (this.options.transport === "websocket") this._clearPlayback();
         this.dispatchEvent(new CustomEvent("error", {
           detail: { error: new Error("Realtime transport disconnected") },
         }));
@@ -399,20 +411,62 @@ export class S2sRealtimeClient extends EventTarget {
 
   /** @param {{data: ArrayBuffer, responseId?: string}} event */
   _onAudio(event) {
-    if (this.options.transport !== "websocket" || !this._playbackNode) return;
+    if (this.options.transport !== "websocket" || !this._playbackNode || this._closed || this._status === "error") return;
+    // The SDK emits response.created before audio. Only that response may
+    // enqueue samples; interruption/completion revoke this permission.
+    if (!this._playbackResponseId || event.responseId !== this._playbackResponseId || !event.data.byteLength) return;
     const view = new DataView(event.data);
     const samples = new Float32Array(event.data.byteLength / 2);
     for (let i = 0; i < samples.length; i += 1) {
       const sample = view.getInt16(i * 2, true);
       samples[i] = sample < 0 ? sample / 0x8000 : sample / 0x7fff;
     }
-    this._playbackNode.port.postMessage({ kind: "audio", samples }, [samples.buffer]);
-    if (event.responseId) this._audibleResponses.add(event.responseId);
+    this._enqueuePlayback(samples);
+  }
+
+  /** @param {Float32Array} samples */
+  _enqueuePlayback(samples) {
+    this._pendingPlayback.push(samples);
+    this._pendingPlaybackSamples += samples.length;
+    if (this._playbackStarted || this._pendingPlaybackSamples >= this._playbackThreshold) this._releasePlayback();
+  }
+
+  _releasePlayback() {
+    if (!this._pendingPlayback.length) return;
+    for (const samples of this._pendingPlayback) {
+      this._playbackNode.port.postMessage({ kind: "audio", samples }, [samples.buffer]);
+    }
+    this._pendingPlayback = [];
+    this._pendingPlaybackSamples = 0;
+    this._playbackStarted = true;
+    this._audibleResponses.add(this._playbackResponseId);
     this._aiSpeaking = true;
     this._markAudible();
   }
 
+  /** Reset only the startup gate, leaving already released audio to drain.
+   * @param {string} [responseId] */
+  _resetPlaybackBuffer(responseId = "") {
+    this._playbackResponseId = responseId;
+    /** @type {Float32Array[]} */
+    this._pendingPlayback = [];
+    this._pendingPlaybackSamples = 0;
+    this._playbackStarted = false;
+  }
+
+  /** @param {string} responseId @param {string} status */
+  _finishPlayback(responseId, status) {
+    if (!responseId || responseId !== this._playbackResponseId) return;
+    if (status === "completed" || status === "incomplete") {
+      this._releasePlayback();
+      this._resetPlaybackBuffer();
+    } else {
+      this._clearPlayback();
+    }
+  }
+
   _clearPlayback() {
+    this._resetPlaybackBuffer();
     this._playbackNode?.port.postMessage({ kind: "clear" });
     this._aiSpeaking = false;
   }
@@ -426,6 +480,7 @@ export class S2sRealtimeClient extends EventTarget {
 
   /** @param {any} event */
   _onTransportEvent(event) {
+    if (this.options.transport === "websocket" && (this._closed || this._status === "error")) return;
     const type = event?.type;
     if (typeof type !== "string") return;
     if (this._debug) console.debug(`[${this.options.transport}]`, event);
@@ -460,6 +515,7 @@ export class S2sRealtimeClient extends EventTarget {
       case "response.created":
         this._responseRequested = false;
         this._activeResponseId = event.response?.id ?? "";
+        if (this.options.transport === "websocket") this._resetPlaybackBuffer(this._activeResponseId);
         if (this._status === "connected" || this._status === "user-speaking") this._setStatus("processing");
         break;
       case "response.content_part.added":
@@ -547,10 +603,16 @@ export class S2sRealtimeClient extends EventTarget {
       }
       case "response.done": {
         const responseId = event.response?.id ?? "";
-        this._responseRequested = false;
-        this._activeResponseId = "";
-        this._aiSpeaking = false;
-        if (this._status === "ai-speaking" || this._status === "processing") this._setStatus("connected");
+        if (this.options.transport === "websocket") {
+          this._finishPlayback(responseId, event.response?.status ?? "completed");
+        }
+        // Still finish the old transcript, but never reset a newer WS turn.
+        if (this.options.transport !== "websocket" || responseId === this._activeResponseId) {
+          this._responseRequested = false;
+          this._activeResponseId = "";
+          this._aiSpeaking = false;
+          if (this._status === "ai-speaking" || this._status === "processing") this._setStatus("connected");
+        }
         const transcript = extractResponseTranscript(event.response) || this._asstDisplay(responseId) || "";
         this.dispatchEvent(new CustomEvent("response-finished", { detail: {
           responseId,
@@ -775,6 +837,7 @@ export class S2sRealtimeClient extends EventTarget {
   async close() {
     this._closed = true;
     this._closing = true;
+    if (this.options.transport === "websocket") this._clearPlayback();
     this._userAudioRecorder.reset();
     this._userTranscriptByItem.clear();
     this._currentUserItemId = "";
