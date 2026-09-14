@@ -12,19 +12,42 @@ import time
 from queue import Empty, Queue
 from threading import Event as ThreadingEvent
 
+import numpy as np
 import pytest
 from starlette.testclient import TestClient
-from starlette.websockets import WebSocketState
 
 import speech_to_speech.api.openai_realtime.websocket_router as router_module
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService
-from speech_to_speech.api.openai_realtime.transports import WebSocketTransport
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
-from speech_to_speech.pipeline.events import AssistantTextEvent, SpeechStartedEvent, TokenUsageEvent
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
+from speech_to_speech.pipeline.events import (
+    AssistantOutputEvent,
+    AssistantResponseDoneEvent,
+    AssistantToolCallReadyEvent,
+    AudioInputCompletedEvent,
+    PipelineEvent,
+    ResponseFailedEvent,
+    ResponseGenerationDoneEvent,
+    SpeechStartedEvent,
+    TokenUsageEvent,
+    TranscriptionFailedEvent,
+)
+from speech_to_speech.pipeline.messages import (
+    AUDIO_RESPONSE_DONE,
+    PIPELINE_END,
+    AssistantTextPart,
+    AssistantToolCallPart,
+    AudioOutput,
+    GenerateResponseRequest,
+    ResponsePrefetchTransaction,
+)
+
+from .realtime_contract import (
+    assert_response_lifecycle_contract,
+    parse_wire_events,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -116,16 +139,6 @@ def _pcm_bytes(n_samples: int) -> bytes:
     return b"\x00" * (n_samples * 2)
 
 
-class _FakeWebSocket:
-    application_state = WebSocketState.CONNECTED
-
-    def __init__(self):
-        self.sent: list[dict] = []
-
-    async def send_json(self, payload: dict) -> None:
-        self.sent.append(payload)
-
-
 # ===================================================================
 # Connection
 # ===================================================================
@@ -140,6 +153,20 @@ class TestConnection:
                 assert msg["type"] == "session.created"
                 assert msg["event_id"].startswith("event_")
                 assert msg["session"]["id"].startswith("session_")
+
+    def test_selects_realtime_subprotocol_for_browser_sdk(self, setup):
+        app, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect(
+                "/v1/realtime",
+                subprotocols=[
+                    "realtime",
+                    "openai-insecure-api-key.test-key",
+                    "openai-agents-sdk.0.14.3",
+                ],
+            ) as ws:
+                assert ws.accepted_subprotocol == "realtime"
+                assert ws.receive_json()["type"] == "session.created"
 
     def test_second_connection_rejected(self, setup):
         app, *_ = setup
@@ -197,6 +224,29 @@ class TestClientEventDispatch:
                 cid = service.connection_ids[0]
                 assert service._state(cid).runtime_config.session.audio.output.voice == "coral"
 
+    def test_session_update_receives_session_updated_confirmation(self, setup):
+        """The OpenAI Realtime protocol requires a session.updated reply to
+        every successful session.update, unless there is an error:
+        https://platform.openai.com/docs/api-reference/realtime-server-events/session/updated
+        """
+        app, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                ws.send_json(
+                    {
+                        "type": "session.update",
+                        "session": {
+                            "type": "realtime",
+                            "audio": {"output": {"voice": "coral"}},
+                        },
+                    }
+                )
+                msg = ws.receive_json()
+                assert msg["type"] == "session.updated"
+                assert msg["event_id"].startswith("event_")
+                assert msg["session"]["audio"]["output"]["voice"] == "coral"
+
     def test_conversation_item_create_returns_events(self, setup):
         app, *_ = setup
         with TestClient(app) as client:
@@ -223,10 +273,162 @@ class TestClientEventDispatch:
                 ws.receive_json()
                 conn_id = list(service._conns.keys())[0]
                 service.response._ensure_response(conn_id)
-                ws.send_json({"type": "response.create"})
+                ws.send_json({"type": "response.create", "event_id": "client_create_1"})
                 msg = ws.receive_json()
                 assert msg["type"] == "error"
                 assert "another response is in progress" in msg["error"]["message"].lower()
+                assert msg["error"]["event_id"] == "client_create_1"
+                assert msg["event_id"] != "client_create_1"
+
+    def test_prefetched_output_waits_until_response_created_send_completes(self, setup, monkeypatch):
+        app, service, _, output_queue, *_ = setup
+        created_send_started = ThreadingEvent()
+        release_created_send = ThreadingEvent()
+        send_attempts: list[list[str]] = []
+        original_send_events = router_module.WebSocketTransport.send_events
+
+        async def blocked_send_events(transport, events):
+            event_types = [event.type for event in events]
+            send_attempts.append(event_types)
+            if event_types == ["response.created"]:
+                created_send_started.set()
+                while not release_created_send.is_set():
+                    await asyncio.sleep(0.001)
+            await original_send_events(transport, events)
+
+        monkeypatch.setattr(router_module.WebSocketTransport, "send_events", blocked_send_events)
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                conn_id = service.connection_ids[0]
+                st = service._state(conn_id)
+                request = GenerateResponseRequest(runtime_config=st.runtime_config)
+                st.tool_followup_prefetch_request = request
+                st.tool_followup_prefetch_origin_response_key = "response_origin"
+                st.mark_response_pending(request.response_key)
+                output_queue.put(AssistantOutputEvent(text="prefetched", response_key=request.response_key))
+
+                # Give the send loop time to encounter and hold the output.
+                time.sleep(0.1)
+                ws.send_json(
+                    {
+                        "type": "response.create",
+                        "response": {"metadata": {"s2s_demo_create_id": "create_followup"}},
+                    }
+                )
+
+                assert created_send_started.wait(timeout=1.0)
+                try:
+                    # Keep the transport blocked long enough for the independent
+                    # send loop to run. It must not even attempt the buffered
+                    # delta until response.created has reached the transport.
+                    time.sleep(0.1)
+                    assert send_attempts == [["response.created"]]
+                finally:
+                    release_created_send.set()
+
+                created = ws.receive_json()
+                item_added = ws.receive_json()
+                part_added = ws.receive_json()
+                delta = ws.receive_json()
+                assert created["type"] == "response.created"
+                assert created["response"]["metadata"] == {"s2s_demo_create_id": "create_followup"}
+                assert item_added["type"] == "response.output_item.added"
+                assert part_added["type"] == "response.content_part.added"
+                assert delta["type"] == "response.output_audio_transcript.delta"
+                assert delta["delta"] == "prefetched"
+
+    def test_early_tool_call_waits_until_response_created_send_completes(self, setup, monkeypatch):
+        app, service, _, _, text_output_queue, *_ = setup
+        created_send_started = ThreadingEvent()
+        release_created_send = ThreadingEvent()
+        send_attempts: list[list[str]] = []
+        original_send_events = router_module.WebSocketTransport.send_events
+
+        async def blocked_send_events(transport, events):
+            event_types = [event.type for event in events]
+            send_attempts.append(event_types)
+            if event_types == ["response.created"]:
+                created_send_started.set()
+                while not release_created_send.is_set():
+                    await asyncio.sleep(0.001)
+            await original_send_events(transport, events)
+
+        monkeypatch.setattr(router_module.WebSocketTransport, "send_events", blocked_send_events)
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                ws.send_json({"type": "response.create"})
+                assert created_send_started.wait(timeout=1.0)
+                conn_id = service.connection_ids[0]
+                response_key = service._state(conn_id).current_response_key
+                text_output_queue.put(
+                    AssistantToolCallReadyEvent(
+                        response_key=response_key,
+                        output_sequence=0,
+                        part=AssistantToolCallPart(
+                            tool={
+                                "type": "function_call",
+                                "call_id": "call_early",
+                                "name": "lookup",
+                                "arguments": "{}",
+                            }
+                        ),
+                    )
+                )
+
+                try:
+                    time.sleep(0.1)
+                    assert send_attempts == [["response.created"]]
+                finally:
+                    release_created_send.set()
+
+                assert ws.receive_json()["type"] == "response.created"
+                added = ws.receive_json()
+                assert added["type"] == "response.output_item.added"
+                assert added["item"]["call_id"] == "call_early"
+                tool = ws.receive_json()
+                assert tool["type"] == "response.function_call_arguments.done"
+                assert tool["call_id"] == "call_early"
+                item_done = ws.receive_json()
+                assert item_done["type"] == "response.output_item.done"
+                assert item_done["item"]["call_id"] == "call_early"
+
+    def test_failed_prefetch_logical_done_bypasses_output_gate_and_forces_fresh_create(self, setup):
+        app, service, _, output_queue, text_output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                conn_id = service.connection_ids[0]
+                st = service._state(conn_id)
+                origin_key = "response_origin"
+                st.generation_done_tool_calls[origin_key] = {"call_1"}
+                request = GenerateResponseRequest(
+                    runtime_config=st.runtime_config,
+                    prefetch_transaction=ResponsePrefetchTransaction(),
+                )
+                st.tool_followup_prefetch_request = request
+                st.tool_followup_prefetch_origin_response_key = origin_key
+                st.mark_response_pending(request.response_key)
+
+                # The LM marks failed hidden work unclaimable synchronously;
+                # queue dispatch may still race the client event task.
+                assert request.prefetch_transaction is not None
+                request.prefetch_transaction.discard()
+                output_queue.put(ResponseFailedEvent(message="hidden failure", response_key=request.response_key))
+                text_output_queue.put(
+                    ResponseGenerationDoneEvent(
+                        response_key=request.response_key,
+                        succeeded=False,
+                    )
+                )
+                ws.send_json({"type": "response.create"})
+                created = ws.receive_json()
+                assert created["type"] == "response.created"
+                replacement = service.text_prompt_queue.get_nowait()
+                assert isinstance(replacement, GenerateResponseRequest)
+                assert replacement.response_key != request.response_key
+                assert request.response_key in st.closed_response_keys
 
     def test_response_cancel_returns_events(self, setup):
         app, service, *_ = setup
@@ -236,11 +438,33 @@ class TestClientEventDispatch:
                 conn_id = list(service._conns.keys())[0]
                 service.response._ensure_response(conn_id)
                 ws.send_json({"type": "response.cancel"})
-                msg1 = ws.receive_json()
-                msg2 = ws.receive_json()
-                types = {msg1["type"], msg2["type"]}
-                assert "response.output_audio.done" in types
-                assert "response.done" in types
+                assert ws.receive_json()["type"] == "response.done"
+
+    def test_response_cancel_closes_message_lifecycle(self, setup):
+        app, _, _, output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                output_queue.put(AssistantOutputEvent(text="partial"))
+                streamed = [ws.receive_json() for _ in range(4)]
+                assert [event["type"] for event in streamed] == [
+                    "response.created",
+                    "response.output_item.added",
+                    "response.content_part.added",
+                    "response.output_audio_transcript.delta",
+                ]
+
+                ws.send_json({"type": "response.cancel"})
+                terminal = [ws.receive_json() for _ in range(4)]
+                assert [event["type"] for event in terminal] == [
+                    "response.output_audio_transcript.done",
+                    "response.content_part.done",
+                    "response.output_item.done",
+                    "response.done",
+                ]
+                assert terminal[2]["item"]["status"] == "incomplete"
+                assert terminal[3]["response"]["status"] == "cancelled"
+                assert terminal[2]["item"] == terminal[3]["response"]["output"][0]
 
     def test_response_cancel_flushes_queues(self, setup):
         app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
@@ -252,10 +476,9 @@ class TestClientEventDispatch:
                 response_playing.set()
                 output_queue.put(_pcm_bytes(256))
                 output_queue.put(_pcm_bytes(256))
-                text_output_queue.put(AssistantTextEvent(text="stale"))
+                output_queue.put(AssistantOutputEvent(text="stale"))
                 ws.send_json({"type": "response.cancel"})
-                ws.receive_json()  # response.output_audio.done
-                ws.receive_json()  # response.done
+                assert ws.receive_json()["type"] == "response.done"
                 time.sleep(0.1)
                 assert output_queue.empty()
                 assert text_output_queue.empty()
@@ -274,6 +497,35 @@ class TestClientEventDispatch:
                 time.sleep(0.1)
                 assert not cancel_scope.discarding
 
+    def test_response_cancel_clears_pending_implicit_response(self, setup):
+        app, service, _, _, _, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                generation = cancel_scope.generation
+                service.dispatch_pipeline_event(
+                    conn_id,
+                    AudioInputCompletedEvent(
+                        audio=np.zeros(1600, dtype=np.float32),
+                        audio_duration_s=0.1,
+                    ),
+                )
+                state = service._state(conn_id)
+                assert state.response_pending is True
+                assert not service.text_prompt_queue.empty()
+
+                ws.send_json({"type": "response.cancel"})
+                time.sleep(0.1)
+
+                assert cancel_scope.generation == generation + 1
+                assert service.text_prompt_queue.empty()
+                assert state.response_pending is False
+                assert state.pending_response_keys == set()
+
+                ws.send_json({"type": "response.create"})
+                assert ws.receive_json()["type"] == "response.created"
+
     def test_response_cancel_late_audio_is_discarded(self, setup):
         """Audio arriving after response.cancel is silently dropped (discard guard)."""
         app, service, _, output_queue, _, _, _, response_playing, cancel_scope = setup
@@ -284,8 +536,7 @@ class TestClientEventDispatch:
                 service.response._ensure_response(conn_id)
                 response_playing.set()
                 ws.send_json({"type": "response.cancel"})
-                ws.receive_json()  # response.output_audio.done
-                ws.receive_json()  # response.done
+                assert ws.receive_json()["type"] == "response.done"
                 time.sleep(0.1)
                 assert cancel_scope.discarding
                 output_queue.put(_pcm_bytes(256))
@@ -323,7 +574,11 @@ class TestSendLoop:
                 msg1 = ws.receive_json()
                 assert msg1["type"] == "response.created"
                 msg2 = ws.receive_json()
-                assert msg2["type"] == "response.output_audio.delta"
+                assert msg2["type"] == "response.output_item.added"
+                msg3 = ws.receive_json()
+                assert msg3["type"] == "response.content_part.added"
+                msg4 = ws.receive_json()
+                assert msg4["type"] == "response.output_audio.delta"
 
     def test_audio_output_sends_response_created_and_delta(self, setup):
         app, _, _, output_queue, *_ = setup
@@ -335,8 +590,16 @@ class TestSendLoop:
                 assert msg1["type"] == "response.created"
                 assert msg1["response"]["status"] == "in_progress"
                 msg2 = ws.receive_json()
-                assert msg2["type"] == "response.output_audio.delta"
-                assert "delta" in msg2
+                assert msg2["type"] == "response.output_item.added"
+                msg3 = ws.receive_json()
+                assert msg3["type"] == "response.content_part.added"
+                msg4 = ws.receive_json()
+                assert msg4["type"] == "response.output_audio.delta"
+                assert "delta" in msg4
+                assert {msg2["response_id"], msg3["response_id"], msg4["response_id"]} == {msg1["response"]["id"]}
+                assert msg2["item"]["id"] == msg3["item_id"] == msg4["item_id"]
+                assert msg3["content_index"] == msg4["content_index"] == 0
+                assert msg2["output_index"] == msg3["output_index"] == msg4["output_index"] == 0
 
     def test_audio_output_batches_immediately_available_chunks(self, setup):
         app, _, _, output_queue, *_ = setup
@@ -351,15 +614,21 @@ class TestSendLoop:
                 assert msg1["type"] == "response.created"
 
                 msg2 = ws.receive_json()
-                assert msg2["type"] == "response.output_audio.delta"
-                decoded = base64.b64decode(msg2["delta"])
+                assert msg2["type"] == "response.output_item.added"
+                msg3 = ws.receive_json()
+                assert msg3["type"] == "response.content_part.added"
+                msg4 = ws.receive_json()
+                assert msg4["type"] == "response.output_audio.delta"
+                decoded = base64.b64decode(msg4["delta"])
                 assert len(decoded) == len(_pcm_bytes(512))
 
-                msg3 = ws.receive_json()
-                msg4 = ws.receive_json()
-                types = {msg3["type"], msg4["type"]}
-                assert "response.output_audio.done" in types
-                assert "response.done" in types
+                terminal = [ws.receive_json() for _ in range(4)]
+                assert [event["type"] for event in terminal] == [
+                    "response.output_audio.done",
+                    "response.content_part.done",
+                    "response.output_item.done",
+                    "response.done",
+                ]
 
     def test_end_marker_sends_finish_events(self, setup):
         app, _, _, output_queue, *_ = setup
@@ -368,13 +637,17 @@ class TestSendLoop:
                 ws.receive_json()
                 output_queue.put(_pcm_bytes(256))
                 ws.receive_json()  # response.created
+                ws.receive_json()  # output_item.added
+                ws.receive_json()  # content_part.added
                 ws.receive_json()  # audio delta
                 output_queue.put(PIPELINE_END)
-                msg1 = ws.receive_json()
-                msg2 = ws.receive_json()
-                types = {msg1["type"], msg2["type"]}
-                assert "response.output_audio.done" in types
-                assert "response.done" in types
+                terminal = [ws.receive_json() for _ in range(4)]
+                assert [event["type"] for event in terminal] == [
+                    "response.output_audio.done",
+                    "response.content_part.done",
+                    "response.output_item.done",
+                    "response.done",
+                ]
 
     def test_text_output_sends_pipeline_events(self, setup):
         app, _, _, _, text_output_queue, *_ = setup
@@ -397,9 +670,8 @@ class TestSendLoop:
                 response_playing.set()
                 # Trigger barge-in
                 text_output_queue.put(SpeechStartedEvent())
-                ws.receive_json()  # input_audio_buffer.speech_started
-                ws.receive_json()  # response.output_audio.done
-                ws.receive_json()  # response.done
+                types = {ws.receive_json()["type"], ws.receive_json()["type"]}
+                assert types == {"input_audio_buffer.speech_started", "response.done"}
                 time.sleep(0.1)
                 assert cancel_scope.discarding
                 output_queue.put(AUDIO_RESPONSE_DONE)
@@ -413,7 +685,16 @@ class TestSendLoop:
                 ws.receive_json()  # session.created
                 conn_id = list(service._conns.keys())[0]
                 stale_generation = cancel_scope.generation
-                service._state(conn_id).response_pending = True
+                service.dispatch_pipeline_event(
+                    conn_id,
+                    AudioInputCompletedEvent(
+                        audio=np.zeros(1600, dtype=np.float32),
+                        audio_duration_s=0.1,
+                    ),
+                )
+                state = service._state(conn_id)
+                assert service.text_prompt_queue.qsize() == 1
+                pending_key = next(iter(state.pending_response_keys))
 
                 text_output_queue.put(SpeechStartedEvent())
                 msg = ws.receive_json()
@@ -422,8 +703,10 @@ class TestSendLoop:
                 time.sleep(0.15)
                 assert cancel_scope.discarding
                 assert cancel_scope.generation == stale_generation + 1
-                assert service._state(conn_id).response_pending is False
-                assert service._state(conn_id).in_response is False
+                assert service.text_prompt_queue.empty()
+                assert state.response_pending is False
+                assert state.in_response is False
+                assert pending_key in state.closed_response_keys
                 assert not response_playing.is_set()
 
                 output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=stale_generation))
@@ -446,6 +729,69 @@ class TestSendLoop:
                 assert not cancel_scope.discarding
                 assert service._state(conn_id).response_pending is True
 
+    def test_stale_cleanup_cancels_active_response_before_next_response(self, setup):
+        app, service, _, output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                response_a = "response_a"
+                response_b = "response_b"
+                service.response._ensure_response(conn_id, response_a)
+                state = service._state(conn_id)
+                state.mark_response_pending(response_b)
+                output_queue.put(
+                    AudioOutput(
+                        audio=AUDIO_RESPONSE_DONE,
+                        response_key=response_a,
+                        cleanup_only=True,
+                    )
+                )
+                output_queue.put(AssistantOutputEvent(text="fresh", response_key=response_b))
+                output_queue.put(AssistantResponseDoneEvent(response_key=response_b))
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_b))
+
+                messages = []
+                while len([message for message in messages if message["type"] == "response.done"]) < 2:
+                    messages.append(ws.receive_json())
+
+                done = [message for message in messages if message["type"] == "response.done"]
+                assert [message["response"]["status"] for message in done] == ["cancelled", "completed"]
+                assert any(
+                    message["type"] == "response.output_audio_transcript.delta" and message["delta"] == "fresh"
+                    for message in messages
+                )
+                assert state.in_response is False
+                assert state.response_pending is False
+                assert state.pending_response_keys == set()
+
+    def test_stale_cleanup_preserves_pending_token_usage_globally(self, setup):
+        app, service, _, output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = next(iter(service._conns))
+                response_key = "cancelled_pending_response"
+                state = service._state(conn_id)
+                state.mark_response_pending(response_key)
+                output_queue.put(TokenUsageEvent(response_key=response_key, input_tokens=11, output_tokens=7))
+                output_queue.put(
+                    AudioOutput(
+                        audio=AUDIO_RESPONSE_DONE,
+                        response_key=response_key,
+                        cleanup_only=True,
+                    )
+                )
+
+                deadline = time.monotonic() + 1.0
+                while response_key not in state.closed_response_keys and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+                assert response_key in state.closed_response_keys
+                assert state.pending_token_usage == {}
+                assert service.total_usage.input_tokens == 11
+                assert service.total_usage.output_tokens == 7
+
     def test_stale_tagged_audio_is_dropped_after_interruption(self, setup):
         app, _, _, output_queue, _, _, _, _, cancel_scope = setup
         with TestClient(app) as client:
@@ -458,10 +804,198 @@ class TestSendLoop:
                 output_queue.put(AudioOutput(audio=_pcm_bytes(512), cancel_generation=current_generation))
 
                 assert ws.receive_json()["type"] == "response.created"
+                assert ws.receive_json()["type"] == "response.output_item.added"
+                assert ws.receive_json()["type"] == "response.content_part.added"
                 delta = ws.receive_json()
 
                 assert delta["type"] == "response.output_audio.delta"
                 assert len(base64.b64decode(delta["delta"])) == len(_pcm_bytes(512))
+
+    def test_stale_response_failure_does_not_leak_into_current_response(self, setup):
+        app, _, _, output_queue, _, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                stale_event = ResponseFailedEvent(message="stale failure", response_key="stale")
+                stale_event.cancel_generation = cancel_scope.generation
+                cancel_scope.cancel()
+                response_key = "fresh"
+                output_queue.put(stale_event)
+                output_queue.put(
+                    AssistantOutputEvent(
+                        text="fresh response",
+                        response_key=response_key,
+                        cancel_generation=cancel_scope.generation,
+                    )
+                )
+                output_queue.put(
+                    AssistantResponseDoneEvent(
+                        response_key=response_key,
+                        cancel_generation=cancel_scope.generation,
+                    )
+                )
+                output_queue.put(
+                    AudioOutput(
+                        audio=AUDIO_RESPONSE_DONE,
+                        response_key=response_key,
+                        cancel_generation=cancel_scope.generation,
+                    )
+                )
+
+                messages = []
+                while not messages or messages[-1]["type"] != "response.done":
+                    messages.append(ws.receive_json())
+
+                assert not any(message["type"] == "error" for message in messages)
+                assert messages[-1]["response"]["usage"]["total_tokens"] == 0
+
+    def test_cancelled_usage_on_ordered_path_does_not_leak_into_next_response(self, setup):
+        app, service, _, output_queue, _, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                conn_id = service.connection_ids[0]
+                stale_generation = cancel_scope.generation
+                service.response._ensure_response(conn_id, "cancelled")
+                ws.send_json({"type": "response.cancel"})
+                assert ws.receive_json()["type"] == "response.done"
+
+                output_queue.put(
+                    TokenUsageEvent(
+                        input_tokens=11,
+                        output_tokens=7,
+                        response_key="cancelled",
+                        cancel_generation=stale_generation,
+                    )
+                )
+                deadline = time.monotonic() + 1
+                while service.total_usage.input_tokens != 11 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+                output_queue.put(
+                    AudioOutput(
+                        audio=AUDIO_RESPONSE_DONE,
+                        response_key="cancelled",
+                        cancel_generation=stale_generation,
+                    )
+                )
+                deadline = time.monotonic() + 1
+                while cancel_scope.discarding and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+                output_queue.put(AssistantOutputEvent(text="fresh", response_key="fresh"))
+                output_queue.put(AssistantResponseDoneEvent(response_key="fresh"))
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key="fresh"))
+                messages = []
+                while not messages or messages[-1]["type"] != "response.done":
+                    messages.append(ws.receive_json())
+
+                assert service.total_usage.input_tokens == 11
+                assert service.total_usage.output_tokens == 7
+                assert messages[-1]["response"]["usage"]["total_tokens"] == 0
+
+    def test_cancelled_response_key_cannot_reopen_while_idle(self, setup):
+        app, service, _, output_queue, _, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+
+                ws.send_json({"type": "response.create"})
+                assert ws.receive_json()["type"] == "response.created"
+                request = service.text_prompt_queue.get_nowait()
+                ws.send_json({"type": "response.cancel"})
+                assert ws.receive_json()["type"] == "response.done"
+
+                # The cancelled request may only begin processing after cancel,
+                # so generation alone cannot distinguish this output as stale.
+                current_generation = cancel_scope.generation
+                output_queue.put(
+                    AssistantOutputEvent(
+                        text="late response",
+                        response_key=request.response_key,
+                        cancel_generation=current_generation,
+                    )
+                )
+                output_queue.put(
+                    AssistantResponseDoneEvent(
+                        response_key=request.response_key,
+                        cancel_generation=current_generation,
+                    )
+                )
+                output_queue.put(
+                    AudioOutput(
+                        audio=AUDIO_RESPONSE_DONE,
+                        response_key=request.response_key,
+                        cancel_generation=current_generation,
+                    )
+                )
+                time.sleep(0.15)
+
+                state = service._state(list(service._conns.keys())[0])
+                assert not state.in_response
+                assert service.total_usage.responses_completed == 0
+                assert output_queue.empty()
+
+    def test_partial_failed_response_drains_audio_before_failed_done(self, setup):
+        app, _, _, output_queue, _, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                response_key = "response_1"
+                generation = cancel_scope.generation
+                output_queue.put(
+                    AssistantOutputEvent(
+                        parts=[AssistantTextPart(text="partial response")],
+                        response_key=response_key,
+                        cancel_generation=generation,
+                    )
+                )
+                output_queue.put(
+                    AudioOutput(
+                        audio=_pcm_bytes(256),
+                        response_key=response_key,
+                        cancel_generation=generation,
+                    )
+                )
+
+                messages = []
+                while not any(message["type"] == "response.output_audio.delta" for message in messages):
+                    messages.append(ws.receive_json())
+
+                output_queue.put(
+                    AudioOutput(
+                        audio=_pcm_bytes(128),
+                        response_key=response_key,
+                        cancel_generation=generation,
+                    )
+                )
+                output_queue.put(
+                    ResponseFailedEvent(
+                        message="provider stream failed",
+                        response_key=response_key,
+                        cancel_generation=generation,
+                    )
+                )
+                output_queue.put(
+                    AudioOutput(
+                        audio=AUDIO_RESPONSE_DONE,
+                        response_key=response_key,
+                        cancel_generation=generation,
+                    )
+                )
+
+                while not messages or messages[-1]["type"] != "response.done":
+                    messages.append(ws.receive_json())
+
+                created = [message for message in messages if message["type"] == "response.created"]
+                deltas = [message for message in messages if message["type"] == "response.output_audio.delta"]
+                errors = [message for message in messages if message["type"] == "error"]
+                assert len(created) == 1
+                assert len(deltas) == 2
+                assert len(errors) == 1
+                assert messages[-1]["response"]["id"] == created[0]["response"]["id"]
+                assert messages[-1]["response"]["status"] == "failed"
+                assert messages.index(errors[0]) < messages.index(messages[-1])
 
     def test_current_generation_text_survives_stuck_discarding(self, setup):
         """Regression: a fresh response's transcript must survive a stuck discard guard.
@@ -474,7 +1008,7 @@ class TestSendLoop:
         ``response.output_audio_transcript.done``. The text is now discarded by the same
         generation-aware rule as audio, so a current-generation transcript is kept.
         """
-        app, _, _, output_queue, text_output_queue, _, _, _, cancel_scope = setup
+        app, _, _, output_queue, _, _, _, _, cancel_scope = setup
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()  # session.created
@@ -482,7 +1016,7 @@ class TestSendLoop:
                 current_generation = cancel_scope.generation
                 assert cancel_scope.discarding
 
-                text_output_queue.put(AssistantTextEvent(text="hello there", cancel_generation=current_generation))
+                output_queue.put(AssistantOutputEvent(text="hello there", cancel_generation=current_generation))
                 output_queue.put(AudioOutput(audio=_pcm_bytes(256), cancel_generation=current_generation))
                 output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=current_generation))
 
@@ -497,6 +1031,227 @@ class TestSendLoop:
                         break
                 assert "response.output_audio_transcript.done" in types
                 assert transcript == "hello there"
+
+    def test_audio_batching_preserves_ordered_output_boundaries(self, setup):
+        app, _, _, output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                response_key = "response_1"
+                output_queue.put(
+                    AssistantOutputEvent(
+                        response_key=response_key,
+                        parts=[AssistantTextPart(text="before")],
+                    )
+                )
+                output_queue.put(
+                    AssistantOutputEvent(
+                        response_key=response_key,
+                        parts=[
+                            AssistantToolCallPart(
+                                tool={
+                                    "type": "function_call",
+                                    "call_id": "c1",
+                                    "name": "tool",
+                                    "arguments": "{}",
+                                }
+                            )
+                        ],
+                    )
+                )
+                output_queue.put(
+                    AssistantOutputEvent(
+                        response_key=response_key,
+                        parts=[AssistantTextPart(text="after")],
+                    )
+                )
+                output_queue.put(AssistantResponseDoneEvent(response_key=response_key))
+                # The first text segment intentionally produces no audio. The
+                # later segment must still retain its post-tool output index.
+                output_queue.put(
+                    AudioOutput(
+                        audio=_pcm_bytes(256),
+                        response_key=response_key,
+                    )
+                )
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key))
+
+                messages = []
+                while not messages or messages[-1]["type"] != "response.done":
+                    messages.append(ws.receive_json())
+
+                response_events = [message for message in messages if message["type"].startswith("response.")]
+                assert [message["type"] for message in response_events] == [
+                    "response.created",
+                    "response.output_item.added",
+                    "response.content_part.added",
+                    "response.output_audio_transcript.delta",
+                    "response.output_audio_transcript.done",
+                    "response.content_part.done",
+                    "response.output_item.done",
+                    "response.output_item.added",
+                    "response.function_call_arguments.done",
+                    "response.output_item.done",
+                    "response.output_item.added",
+                    "response.content_part.added",
+                    "response.output_audio_transcript.delta",
+                    "response.output_audio.delta",
+                    "response.output_audio.done",
+                    "response.output_audio_transcript.done",
+                    "response.content_part.done",
+                    "response.output_item.done",
+                    "response.done",
+                ]
+                item_events = response_events[1:-1]
+                assert [message["output_index"] for message in item_events] == [0] * 6 + [1] * 3 + [2] * 8
+                output = response_events[-1]["response"]["output"]
+                assert [item["type"] for item in output] == ["message", "function_call", "message"]
+                for message in item_events:
+                    item_id = message["item"]["id"] if "item" in message else message["item_id"]
+                    assert output[message["output_index"]]["id"] == item_id
+                assert [item["content"][0]["transcript"] for item in output if item["type"] == "message"] == [
+                    "before",
+                    "after",
+                ]
+
+                # The same stream, checked against the OpenAI SDK's own models
+                # and the documented lifecycle rules.
+                assert_response_lifecycle_contract(
+                    parse_wire_events(response_events), wants_audio=True, expected_status="completed"
+                )
+
+    def test_early_tool_in_text_only_response_closes_the_message_over_the_socket(self, setup):
+        """The maintainer's repro, driven through the real transport.
+
+        Text-only output, the tool exposed early on the side channel, then the
+        ordered text, tool, text, then a client ``response.cancel`` while the
+        second message is still open. The first message finished streaming, so
+        its lifecycle must close at the tool boundary and keep ``completed``
+        through ``response.done``; only the open message may be ``incomplete``.
+        """
+        app, service, _, output_queue, text_output_queue, *_ = setup
+        tool = AssistantToolCallPart(tool={"type": "function_call", "call_id": "c1", "name": "tool", "arguments": "{}"})
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                ws.send_json({"type": "response.create", "response": {"output_modalities": ["text"]}})
+                created = ws.receive_json()
+                assert created["type"] == "response.created"
+                assert created["response"]["output_modalities"] == ["text"]
+                conn_id = service.connection_ids[0]
+                response_key = service._state(conn_id).current_response_key
+
+                # Side channel first, then the ordered stream catches up.
+                text_output_queue.put(
+                    AssistantToolCallReadyEvent(response_key=response_key, output_sequence=1, part=tool)
+                )
+                output_queue.put(
+                    AssistantOutputEvent(
+                        response_key=response_key,
+                        output_sequence=0,
+                        parts=[AssistantTextPart(text="before")],
+                    )
+                )
+                output_queue.put(AssistantOutputEvent(response_key=response_key, output_sequence=1, parts=[tool]))
+                output_queue.put(
+                    AssistantOutputEvent(
+                        response_key=response_key,
+                        output_sequence=2,
+                        parts=[AssistantTextPart(text="after")],
+                    )
+                )
+
+                # Wait until the second message is open on the wire, then cancel.
+                messages = [created]
+                while not (messages[-1]["type"] == "response.output_text.delta" and messages[-1]["output_index"] == 2):
+                    messages.append(ws.receive_json())
+                ws.send_json({"type": "response.cancel"})
+                while messages[-1]["type"] != "response.done":
+                    messages.append(ws.receive_json())
+
+                response_events = [message for message in messages if message["type"].startswith("response.")]
+                assert_response_lifecycle_contract(
+                    parse_wire_events(response_events),
+                    wants_audio=False,
+                    expected_status="cancelled",
+                )
+                closes = [
+                    (message["output_index"], message["item"]["status"])
+                    for message in response_events
+                    if message["type"] == "response.output_item.done"
+                ]
+                assert closes == [(0, "completed"), (1, "completed"), (2, "incomplete")]
+                final = response_events[-1]["response"]["output"]
+                assert [item["status"] for item in final] == ["completed", "completed", "incomplete"]
+                # The first message closed at the tool boundary, before the
+                # second message was even announced.
+                types = [message["type"] for message in response_events]
+                first_close = types.index("response.output_item.done")
+                second_message_added = [
+                    i
+                    for i, message in enumerate(response_events)
+                    if message["type"] == "response.output_item.added" and message["output_index"] == 2
+                ][0]
+                assert first_close < second_message_added
+
+    def test_whitespace_only_audio_response_completes_without_output_identity(self, setup):
+        app, service, _, output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                response_key = "response_whitespace"
+                service._state(conn_id).mark_response_pending(response_key)
+                output_queue.put(
+                    AssistantOutputEvent(
+                        response_key=response_key,
+                        parts=[AssistantTextPart(text="   \n")],
+                    )
+                )
+                output_queue.put(AssistantResponseDoneEvent(response_key=response_key))
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key))
+
+                messages = []
+                while not messages or messages[-1]["type"] != "response.done":
+                    messages.append(ws.receive_json())
+
+                assert [message["type"] for message in messages] == ["response.created", "response.done"]
+                assert messages[-1]["response"]["output"] == []
+                assert not service._state(conn_id).in_response
+
+    def test_response_keys_keep_consecutive_silent_responses_separate(self, setup):
+        app, service, _, output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = list(service._conns.keys())[0]
+                state = service._state(conn_id)
+                for response_key, text in (("response_1", "first"), ("response_2", "second")):
+                    state.mark_response_pending(response_key)
+                    output_queue.put(AssistantOutputEvent(response_key=response_key, text=text))
+                    output_queue.put(AssistantResponseDoneEvent(response_key=response_key))
+                    output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key))
+
+                messages = []
+                while sum(message["type"] == "response.done" for message in messages) < 2:
+                    messages.append(ws.receive_json())
+
+                done = [message for message in messages if message["type"] == "response.done"]
+                assert len(done) == 2
+                assert [
+                    message["delta"]
+                    for message in messages
+                    if message["type"] == "response.output_audio_transcript.delta"
+                ] == ["first", "second"]
+                assert [item["content"][0]["transcript"] for item in done[0]["response"]["output"]] == ["first"]
+                assert [item["content"][0]["transcript"] for item in done[1]["response"]["output"]] == ["second"]
+                first_done_index = messages.index(done[0])
+                second_created_index = next(
+                    index
+                    for index, message in enumerate(messages)
+                    if index > first_done_index and message["type"] == "response.created"
+                )
+                assert first_done_index < second_created_index
 
     def test_stale_tagged_response_done_does_not_finish_current_response(self, setup):
         app, service, _, output_queue, _, _, _, _, cancel_scope = setup
@@ -517,120 +1272,41 @@ class TestSendLoop:
                 assert state.in_response
                 assert state.current_response_id == current_response_id
 
-    def test_response_done_drains_pending_token_usage_before_finish(self, setup):
+    def test_response_done_observes_ordered_usage_despite_text_backlog(self, setup):
         app, service, _, output_queue, text_output_queue, *_ = setup
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()  # session.created
                 conn_id = list(service._conns.keys())[0]
+                response_key = "response_1"
 
-                text_output_queue.put(
-                    AssistantTextEvent(
+                for _ in range(5):
+                    text_output_queue.put(PipelineEvent(type="test_backlog"))
+
+                output_queue.put(
+                    AssistantOutputEvent(
+                        response_key=response_key,
                         text="",
                         tools=[{"type": "function_call", "call_id": "c1", "name": "f1", "arguments": "{}"}],
                     )
                 )
-                text_output_queue.put(TokenUsageEvent(input_tokens=10, output_tokens=5))
-                output_queue.put(AUDIO_RESPONSE_DONE)
+                output_queue.put(TokenUsageEvent(response_key=response_key, input_tokens=10, output_tokens=5))
+                output_queue.put(AssistantResponseDoneEvent(response_key=response_key))
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key))
 
+                assert ws.receive_json()["type"] == "response.created"
+                assert ws.receive_json()["type"] == "response.output_item.added"
                 assert ws.receive_json()["type"] == "response.function_call_arguments.done"
-                msg1 = ws.receive_json()
-                msg2 = ws.receive_json()
-                assert {msg1["type"], msg2["type"]} == {"response.output_audio.done", "response.done"}
+                assert ws.receive_json()["type"] == "response.output_item.done"
+                done = ws.receive_json()
+                assert done["type"] == "response.done"
+                assert done["response"]["usage"]["input_tokens"] == 10
+                assert done["response"]["usage"]["output_tokens"] == 5
 
                 assert service.total_usage.input_tokens == 10
                 assert service.total_usage.output_tokens == 5
                 assert service._state(conn_id).response_usage.input_tokens == 0
                 assert service._state(conn_id).response_usage.output_tokens == 0
-
-    def test_response_completion_drain_sends_pending_tool_before_done(self, setup):
-        _, service, input_queue, output_queue, text_output_queue, should_listen, _, response_playing, cancel_scope = (
-            setup
-        )
-        unit = PipelineUnit(
-            index=0,
-            service=service,
-            cancel_scope=cancel_scope,
-            should_listen=should_listen,
-            response_playing=response_playing,
-            input_queue=input_queue,
-            output_queue=output_queue,
-            text_output_queue=text_output_queue,
-            text_prompt_queue=Queue(),
-            handlers=[],
-        )
-        conn_id = service.register()
-        response_id, _ = service.response._ensure_response(conn_id)
-        text_output_queue.put(
-            AssistantTextEvent(
-                text="",
-                tools=[
-                    {
-                        "type": "function_call",
-                        "call_id": "c1",
-                        "name": "play_emotion",
-                        "arguments": '{"emotion":"loving"}',
-                    }
-                ],
-            )
-        )
-        text_output_queue.put(TokenUsageEvent(input_tokens=10, output_tokens=5))
-        ws = _FakeWebSocket()
-
-        asyncio.run(router_module._drain_pending_response_events(WebSocketTransport(ws), unit, conn_id))
-        done_events = service.finish_response(conn_id)
-
-        assert [payload["type"] for payload in ws.sent] == ["response.function_call_arguments.done"]
-        assert [event.type for event in done_events] == ["response.output_audio.done", "response.done"]
-        assert ws.sent[0]["response_id"] == response_id
-        assert done_events[1].response.id == response_id
-        assert done_events[1].response.usage.input_tokens == 10
-        assert done_events[1].response.usage.output_tokens == 5
-        assert text_output_queue.empty()
-
-    def test_response_completion_drain_preserves_usage_across_non_response_boundary(self, setup):
-        _, service, input_queue, output_queue, text_output_queue, should_listen, _, response_playing, cancel_scope = (
-            setup
-        )
-        unit = PipelineUnit(
-            index=0,
-            service=service,
-            cancel_scope=cancel_scope,
-            should_listen=should_listen,
-            response_playing=response_playing,
-            input_queue=input_queue,
-            output_queue=output_queue,
-            text_output_queue=text_output_queue,
-            text_prompt_queue=Queue(),
-            handlers=[],
-        )
-        conn_id = service.register()
-        response_id, _ = service.response._ensure_response(conn_id)
-        text_output_queue.put(
-            AssistantTextEvent(
-                text="",
-                tools=[{"type": "function_call", "call_id": "c1", "name": "play_emotion", "arguments": "{}"}],
-            )
-        )
-        text_output_queue.put(SpeechStartedEvent())
-        text_output_queue.put(TokenUsageEvent(input_tokens=10, output_tokens=5))
-        text_output_queue.put(AssistantTextEvent(text="queued after boundary"))
-        ws = _FakeWebSocket()
-
-        asyncio.run(router_module._drain_pending_response_events(WebSocketTransport(ws), unit, conn_id))
-        done_events = service.finish_response(conn_id)
-
-        assert [payload["type"] for payload in ws.sent] == ["response.function_call_arguments.done"]
-        assert ws.sent[0]["response_id"] == response_id
-        assert done_events[1].response.usage.input_tokens == 10
-        assert done_events[1].response.usage.output_tokens == 5
-
-        boundary = text_output_queue.get_nowait()
-        queued_assistant = text_output_queue.get_nowait()
-        assert isinstance(boundary, SpeechStartedEvent)
-        assert isinstance(queued_assistant, AssistantTextEvent)
-        assert queued_assistant.text == "queued after boundary"
-        assert text_output_queue.empty()
 
     def test_speech_started_does_not_cancel_when_interrupt_disabled(self, setup):
         """With interrupt_response=False, speech during playback should NOT cancel or flush."""
@@ -700,7 +1376,7 @@ class TestCleanup:
             assert len(service._conns) == 0
 
     def test_last_disconnect_cancels_and_clears_response_state(self, setup):
-        app, service, input_queue, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
+        app, service, input_queue, output_queue, _, _, _, response_playing, cancel_scope = setup
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
@@ -708,14 +1384,53 @@ class TestCleanup:
                 service.response._ensure_response(conn_id)
                 response_playing.set()
                 output_queue.put(_pcm_bytes(256))
-                text_output_queue.put(AssistantTextEvent(text="stale"))
+                output_queue.put(AssistantOutputEvent(text="stale"))
             _simulate_session_end_drain(input_queue, output_queue)
             time.sleep(0.3)
 
         assert not cancel_scope.discarding
         assert cancel_scope.generation == 2
         assert not response_playing.is_set()
-        assert text_output_queue.empty()
+        assert output_queue.empty()
+
+    def test_disconnect_drains_output_held_for_unclaimed_prefetch(self):
+        unit = _make_unit(0)
+        app = create_app(pool=[unit], stop_event=ThreadingEvent())
+        cleanup: list[str] = []
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                assert unit.session is not None
+                conn_id = unit.session.session_id
+                st = unit.service._state(conn_id)
+                transaction = ResponsePrefetchTransaction()
+                request = GenerateResponseRequest(
+                    runtime_config=st.runtime_config,
+                    prefetch_transaction=transaction,
+                )
+                st.tool_followup_prefetch_request = request
+                st.tool_followup_prefetch_origin_response_key = "response_origin"
+                st.mark_response_pending(request.response_key)
+                transaction.complete(lambda: cleanup.append("committed"))
+                unit.output_queue.put(
+                    TokenUsageEvent(response_key=request.response_key, input_tokens=11, output_tokens=4)
+                )
+                unit.output_queue.put(
+                    TokenUsageEvent(response_key=request.response_key, input_tokens=6, output_tokens=2)
+                )
+                unit.output_queue.put(AssistantOutputEvent(text="queued", response_key=request.response_key))
+                time.sleep(0.1)
+                assert isinstance(unit.session.pending_output_item, TokenUsageEvent)
+
+            _simulate_session_end_drain(unit.input_queue, unit.output_queue)
+            time.sleep(0.3)
+
+            assert unit.session is None
+            assert unit.service.connection_ids == []
+            transaction.claim()
+            assert cleanup == []
+            assert unit.service.total_usage.input_tokens == 17
+            assert unit.service.total_usage.output_tokens == 6
 
 
 # ===================================================================
@@ -724,6 +1439,32 @@ class TestCleanup:
 
 
 class TestDrainRelease:
+    def test_barge_in_flush_preserves_completed_audio_input(self):
+        q: Queue = Queue()
+        audio_event = AudioInputCompletedEvent(audio=np.zeros(1600, dtype=np.float32), audio_duration_s=0.1)
+        q.put(AssistantOutputEvent(text="stale"))
+        q.put(audio_event)
+
+        router_module._flush_queue(q, preserve=router_module._keep_user_text_event)
+
+        assert q.get_nowait() is audio_event
+        assert q.empty()
+
+    def test_barge_in_flush_preserves_transcription_failure(self):
+        q: Queue = Queue()
+        failure_event = TranscriptionFailedEvent(
+            message="transcription request timed out",
+            turn_id="turn-1",
+            turn_revision=0,
+        )
+        q.put(AssistantOutputEvent(text="stale"))
+        q.put(failure_event)
+
+        router_module._flush_queue(q, preserve=router_module._keep_user_text_event)
+
+        assert q.get_nowait() is failure_event
+        assert q.empty()
+
     def test_barge_in_flush_preserves_session_end(self):
         """The output_queue flush on barge-in must not swallow an in-flight
         SESSION_END — losing it would leave the release task waiting forever."""
@@ -731,7 +1472,7 @@ class TestDrainRelease:
         q.put(_pcm_bytes(10))
         q.put(PipelineControlMessage(SESSION_END.kind, session_id="sess_a"))
         q.put(_pcm_bytes(10))
-        router_module._flush_queue(q, preserve=router_module._keep_audio_sentinel)
+        router_module._flush_queue(q, preserve=router_module._keep_cancel_bookkeeping)
         assert is_control_message(q.get_nowait(), SESSION_END.kind)
         assert q.empty()
 

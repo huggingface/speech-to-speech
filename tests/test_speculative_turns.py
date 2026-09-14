@@ -4,12 +4,16 @@ from threading import Event, Thread
 from typing import Literal
 
 import numpy as np
+import pytest
 import torch
 
 from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
 from speech_to_speech.pipeline.messages import VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.VAD.smart_turn import SmartTurnResult
 from speech_to_speech.VAD.vad_handler import VADHandler
+from speech_to_speech.VAD.vad_iterator import VADIterator
+from tests.test_vad_iterator import _FakeVADModel
 
 
 def test_pending_reopen_defers_commit_until_cancelled():
@@ -163,6 +167,88 @@ def test_is_latest_after_stability_window_catches_reopen_started_during_wait():
     thread.join(timeout=1.0)
 
 
+def test_is_latest_after_stability_window_survives_cancelled_reopen_candidate():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    started = Event()
+    result: list[bool] = []
+
+    def wait_for_stability():
+        started.set()
+        result.append(tracker.is_latest_after_stability_window("turn_1", 0, settle_s=0.2))
+
+    thread = Thread(target=wait_for_stability)
+    thread.start()
+    assert started.wait(timeout=1.0)
+
+    time.sleep(0.02)
+    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+    time.sleep(0.02)
+    tracker.cancel_reopen_candidate("turn_1", candidate_revision)
+
+    time.sleep(0.03)
+    assert thread.is_alive()
+    assert result == []
+
+    thread.join(timeout=1.0)
+    assert not thread.is_alive()
+    assert result == [True]
+
+
+def test_commit_after_reset_does_not_resurrect_untracked_turn():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    tracker.reset()
+
+    tracker.commit("turn_1", 0)
+
+    assert tracker._committed_revision == {}
+    assert not tracker.is_committed("turn_1", 0)
+
+
+def test_commit_after_prune_does_not_resurrect_untracked_turn():
+    tracker = SpeculativeTurnTracker(max_tracked_turns=1)
+    tracker.observe("turn_1", 0)
+    tracker.observe("turn_2", 0)
+
+    tracker.commit("turn_1", 0)
+
+    assert list(tracker._latest_revision) == ["turn_2"]
+    assert tracker._committed_revision == {}
+
+
+@pytest.mark.parametrize(
+    "commit_method",
+    [
+        "commit_if_latest_after_pending_reopen",
+        "commit_if_latest_after_reopen_grace",
+        "try_commit_if_latest_after_pending_reopen",
+        "try_commit_if_latest_after_reopen_grace",
+    ],
+)
+def test_commit_if_latest_variants_keep_untracked_turn_out_of_committed_state(commit_method):
+    """An untracked turn still reports success -- callers treat `False` as "drop this
+    output" -- but it must not be written back into `_committed_revision`."""
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    tracker.reset()
+
+    assert getattr(tracker, commit_method)("turn_1", 0) is True
+    assert tracker._committed_revision == {}
+
+
+def test_reused_turn_id_after_reset_is_not_reported_as_committed():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    tracker.reset()
+    tracker.commit("turn_1", 0)
+
+    tracker.observe("turn_1", 0)
+
+    assert not tracker.is_committed("turn_1", 0)
+    assert tracker.begin_reopen_candidate("turn_1", 0) == 1
+
+
 def test_vad_direct_reopen_path_uses_tracker_candidate_protocol():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
@@ -251,6 +337,7 @@ class _StaticVADIterator:
         last_utterance_active_speech_samples: int = 0,
     ) -> None:
         self.triggered = triggered
+        self.speech_pad_samples = 0
         self._vad_output = vad_output
         self.buffer = buffer_chunks or []
         self._speech_chunks = speech_chunks or self.buffer
@@ -262,6 +349,17 @@ class _StaticVADIterator:
 
     def speech_buffer(self) -> list[torch.Tensor]:
         return self._speech_chunks
+
+
+class _StaticSmartTurnAnalyzer:
+    def __init__(self, *results: SmartTurnResult) -> None:
+        self._results = iter(results)
+        self.calls: list[np.ndarray] = []
+
+    def predict(self, audio: np.ndarray, *, sample_rate: int) -> SmartTurnResult:
+        assert sample_rate == 16000
+        self.calls.append(audio.copy())
+        return next(self._results)
 
 
 def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
@@ -277,9 +375,12 @@ def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
     handler.realtime_processing_pause = 0.5
     handler.text_output_queue = Queue()
     handler.speculative_turns = SpeculativeTurnTracker()
-    handler.speculative_reopen_ms = 1000
-    handler.unanswered_reopen_ms = handler.speculative_reopen_ms
+    handler.speculative_reopen_ms = 800
+    handler.unanswered_reopen_ms = 7000
     handler._last_turn_detection = None
+    handler.smart_turn_analyzer = None
+    handler.smart_turn_max_wait_ms = 2000
+    handler.smart_turn_incomplete_delay_ms = 600
     handler.iterator = iterator
     handler.audio_enhancement = False
     handler.last_process_time = 0.0
@@ -294,11 +395,13 @@ def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
     handler._current_turn_id = None
     handler._current_turn_revision = None
     handler._speculative_audio_prefix = None
+    handler._speculative_raw_audio_prefix = None
     handler._last_final_wall_time = None
     handler._last_final_audio_ms = None
     handler._pending_reopen_candidate = None
     handler.short_segment_merge_ms = 0
     handler._pending_short_segment = None
+    handler._streaming_pre_speech = bytearray()
     return handler
 
 
@@ -373,21 +476,114 @@ def test_vad_interruption_emits_after_active_speech_threshold():
     assert handler._speech_started_emitted is True
 
 
-def test_vad_live_transcription_without_speculative_turns_stops_listening_on_final():
-    final_chunks = [torch.zeros(512) for _ in range(31)]
+class _RecordingStreamingSTT:
+    def __init__(self) -> None:
+        self.audio: list[bytes] = []
+        self.turns: list[tuple[str | None, int | None]] = []
+        self.commits: list[tuple[str | None, int | None]] = []
+        self.discard_count = 0
+        self.events: list[str] = []
+
+    def append_audio(self, chunk: bytes) -> None:
+        self.audio.append(chunk)
+        self.events.append("append")
+
+    def start_turn(self, turn_id: str | None, turn_revision: int | None) -> None:
+        self.turns.append((turn_id, turn_revision))
+        self.events.append("start")
+
+    def discard_utterance(self) -> None:
+        self.discard_count += 1
+        self.events.append("discard")
+
+    def cancel_session(self) -> None:
+        self.events.append("cancel")
+
+    def commit_boundary(self, turn_id: str | None, turn_revision: int | None) -> None:
+        self.commits.append((turn_id, turn_revision))
+        self.events.append("commit")
+
+
+def test_vad_streams_each_accepted_chunk_and_marks_the_confirmed_turn():
+
+    chunks = [torch.zeros(512) for _ in range(20)]
     iterator = _StaticVADIterator(
-        triggered=False,
-        vad_output=final_chunks,
-        last_utterance_active_speech_samples=12 * 512,
+        triggered=True,
+        vad_output=None,
+        buffer_chunks=chunks,
+        speech_chunks=chunks,
+        active_speech_samples=12 * 512,
     )
     handler = _vad_handler_for_iterator(iterator)
-    handler.enable_realtime_transcription = True
-    handler.speculative_turns = None
+    sink = _RecordingStreamingSTT()
+    handler.streaming_stt_sink = sink
+    chunk = _audio_bytes()
 
-    outputs = list(handler.process(_audio_bytes()))
+    assert list(handler.process(chunk)) == []
+
+    assert sink.audio == [chunk]
+    assert sink.turns == [("turn_1", 0)]
+
+
+def test_streaming_vad_preserves_held_fragment_gap_without_replaying_padding():
+    probabilities = [0.1] * 10 + [0.9] * 4 + [0.1] * 7 + [0.9] * 8 + [0.1] * 13
+    handler = _vad_handler_for_iterator(
+        VADIterator(_FakeVADModel(probabilities), min_silence_duration_ms=64, speech_pad_ms=50)
+    )
+    handler.short_segment_merge_ms = 384
+    sink = _RecordingStreamingSTT()
+    handler.streaming_stt_sink = sink
+    chunks = [np.full(512, index + 1, dtype=np.int16).tobytes() for index in range(len(probabilities))]
+
+    outputs = [output for chunk in chunks for output in handler.process(chunk)]
 
     assert len(outputs) == 1
-    assert not handler.should_listen.is_set()
+    assert sink.commits == [("turn_1", 0)]
+    assert sink.discard_count == 0
+    # The 128ms fragment and 256ms continuation form one utterance, retaining
+    # their intervening silence exactly once even though VAD adds a new prefix.
+    assert b"".join(sink.audio) == b"".join(chunks[:10])[-1600:] + b"".join(chunks[10:32])
+    assert handler._pending_short_segment is None
+
+
+def test_streaming_vad_stops_forwarding_when_held_fragment_expires():
+    probabilities = [0.9] * 4 + [0.1] * 30
+    handler = _vad_handler_for_iterator(
+        VADIterator(_FakeVADModel(probabilities), min_silence_duration_ms=64, speech_pad_ms=50)
+    )
+    handler.short_segment_merge_ms = 128
+    sink = _RecordingStreamingSTT()
+    handler.streaming_stt_sink = sink
+    chunks = [np.full(512, index + 1, dtype=np.int16).tobytes() for index in range(len(probabilities))]
+
+    assert [output for chunk in chunks for output in handler.process(chunk)] == []
+
+    assert sink.discard_count == 1
+    assert sink.events[-1] == "discard"
+    assert sink.commits == []
+    # Four speech chunks, three endpointing chunks, and four merge-window
+    # chunks are sent; the remaining idle audio stays out of the provider.
+    assert b"".join(sink.audio) == b"".join(chunks[:11])
+
+
+def test_streaming_vad_clears_padding_between_sessions_and_respects_listening_gate():
+    handler = _vad_handler_for_iterator(VADIterator(_FakeVADModel([0.1] * 3 + [0.9]), speech_pad_ms=50))
+    sink = _RecordingStreamingSTT()
+    handler.streaming_stt_sink = sink
+    for value in range(1, 4):
+        assert list(handler.process(np.full(512, value, dtype=np.int16).tobytes())) == []
+    assert sink.audio == []
+
+    handler.on_session_end()
+    handler.should_listen.clear()
+    assert list(handler.process(b"\x09\x00" * 512)) == []
+    assert sink.audio == []
+    handler.should_listen.set()
+    speech = b"\x04\x00" * 512
+    assert list(handler.process(speech)) == []
+
+    assert sink.events == ["cancel", "append"]
+    assert sink.audio == [speech]
 
 
 def test_vad_discards_final_segment_when_active_speech_is_short():
@@ -398,11 +594,47 @@ def test_vad_discards_final_segment_when_active_speech_is_short():
         last_utterance_active_speech_samples=11 * 512,
     )
     handler = _vad_handler_for_iterator(iterator)
+    sink = _RecordingStreamingSTT()
+    handler.streaming_stt_sink = sink
 
     outputs = list(handler.process(_audio_bytes()))
 
     assert outputs == []
     assert handler.text_output_queue.empty()
+    assert sink.discard_count == 1
+
+
+def test_vad_queues_streaming_commit_before_emitting_an_accepted_final():
+    handler = _vad_handler_for_iterator(
+        _StaticVADIterator(
+            triggered=False,
+            vad_output=[torch.zeros(512) for _ in range(31)],
+            last_utterance_active_speech_samples=12 * 512,
+        )
+    )
+    sink = _RecordingStreamingSTT()
+    handler.streaming_stt_sink = sink
+
+    outputs = list(handler.process(_audio_bytes()))
+
+    assert len(outputs) == 1
+    assert sink.commits == [(outputs[0].turn_id, outputs[0].turn_revision)]
+    assert sink.events == ["append", "start", "commit"]
+
+
+def test_vad_discards_streamed_audio_after_a_phantom_trigger():
+    handler = _vad_handler_for_iterator(
+        _StaticVADIterator(
+            triggered=False,
+            vad_output=[],
+        )
+    )
+    sink = _RecordingStreamingSTT()
+    handler.streaming_stt_sink = sink
+
+    assert list(handler.process(_audio_bytes())) == []
+
+    assert sink.discard_count == 1
 
 
 def _drive_final_segment(handler: VADHandler, active_chunks: int = 12, segment_chunks: int = 31) -> list:
@@ -414,6 +646,117 @@ def _drive_final_segment(handler: VADHandler, active_chunks: int = 12, segment_c
     return list(handler.process(_audio_bytes()))
 
 
+def test_vad_complete_smart_turn_selects_shorter_speculative_grace():
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    handler.smart_turn_analyzer = _StaticSmartTurnAnalyzer(
+        SmartTurnResult(complete=True, probability=0.98, inference_ms=12.5)
+    )
+
+    outputs = _drive_final_segment(handler)
+
+    assert len(outputs) == 1
+    assert outputs[0].processing_delay_s == 0.0
+    grace = handler.speculative_turns._reopen_grace["turn_1"]
+    assert grace.revision == 0
+    assert 0.6 < grace.deadline - time.monotonic() <= 0.8
+
+
+def test_vad_incomplete_smart_turn_selects_longer_speculative_grace():
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    analyzer = _StaticSmartTurnAnalyzer(SmartTurnResult(complete=False, probability=0.2, inference_ms=12.5))
+    handler.smart_turn_analyzer = analyzer
+
+    outputs = _drive_final_segment(handler)
+
+    assert len(outputs) == 1
+    assert outputs[0].processing_delay_s == 0.6
+    grace = handler.speculative_turns._reopen_grace["turn_1"]
+    assert grace.revision == 0
+    assert 1.8 < grace.deadline - time.monotonic() <= 2.0
+    np.testing.assert_array_equal(analyzer.calls[0], outputs[0].audio)
+
+
+def test_vad_incomplete_smart_turn_commits_after_longer_grace_without_resumed_speech():
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    handler.smart_turn_max_wait_ms = 50
+    handler.smart_turn_analyzer = _StaticSmartTurnAnalyzer(
+        SmartTurnResult(complete=False, probability=0.2, inference_ms=12.5)
+    )
+
+    outputs = _drive_final_segment(handler)
+
+    assert len(outputs) == 1
+    assert handler.speculative_turns.try_commit_if_latest_after_reopen_grace("turn_1", 0) is None
+    time.sleep(0.06)
+    assert handler.speculative_turns.try_commit_if_latest_after_reopen_grace("turn_1", 0) is True
+    assert handler.speculative_turns.is_committed("turn_1", 0)
+
+
+def test_vad_resumed_speech_during_smart_turn_grace_creates_new_revision():
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    analyzer = _StaticSmartTurnAnalyzer(
+        SmartTurnResult(complete=False, probability=0.2, inference_ms=12.5),
+        SmartTurnResult(complete=True, probability=0.9, inference_ms=12.5),
+    )
+    handler.smart_turn_analyzer = analyzer
+
+    first_outputs = _drive_final_segment(handler)
+    assert len(first_outputs) == 1
+    assert (first_outputs[0].turn_id, first_outputs[0].turn_revision) == ("turn_1", 0)
+    _drain_text_events(handler)
+
+    # Resume after the normal 800ms grace but before Smart Turn's 2000ms
+    # incomplete-turn grace has elapsed.
+    handler._total_samples = int(1.5 * handler.sample_rate)
+    resumed_outputs = _drive_final_segment(handler, active_chunks=12, segment_chunks=12)
+
+    assert len(resumed_outputs) == 1
+    assert (resumed_outputs[0].turn_id, resumed_outputs[0].turn_revision) == ("turn_1", 1)
+    assert not handler.speculative_turns.is_latest("turn_1", 0)
+    assert handler.speculative_turns.is_latest("turn_1", 1)
+    assert len(analyzer.calls) == 2
+    assert len(analyzer.calls[1]) == len(first_outputs[0].audio) + 12 * 512
+
+
+def test_vad_reanalyzes_resumed_turn_with_raw_audio_after_enhancement():
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    analyzer = _StaticSmartTurnAnalyzer(
+        SmartTurnResult(complete=False, probability=0.2, inference_ms=12.5),
+        SmartTurnResult(complete=True, probability=0.9, inference_ms=12.5),
+    )
+    handler.smart_turn_analyzer = analyzer
+    handler.audio_enhancement = True
+
+    def enhance_audio(audio: np.ndarray) -> np.ndarray:
+        audio += 1.0
+        return audio
+
+    handler._apply_audio_enhancement = enhance_audio
+
+    first_outputs = _drive_final_segment(handler)
+    assert len(first_outputs) == 1
+    np.testing.assert_array_equal(first_outputs[0].audio, np.ones(31 * 512, dtype=np.float32))
+
+    handler._total_samples = int(1.5 * handler.sample_rate)
+    resumed_outputs = _drive_final_segment(handler, active_chunks=12, segment_chunks=12)
+
+    assert len(resumed_outputs) == 1
+    assert len(analyzer.calls) == 2
+    np.testing.assert_array_equal(analyzer.calls[0], np.zeros(31 * 512, dtype=np.float32))
+    np.testing.assert_array_equal(analyzer.calls[1], np.zeros(43 * 512, dtype=np.float32))
+    np.testing.assert_array_equal(resumed_outputs[0].audio, np.ones(43 * 512, dtype=np.float32))
+
+
+def test_vad_max_speech_is_enforced_before_smart_turn():
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    analyzer = _StaticSmartTurnAnalyzer(SmartTurnResult(complete=False, probability=0.2, inference_ms=12.5))
+    handler.smart_turn_analyzer = analyzer
+    handler.max_speech_ms = 1500
+
+    assert _drive_final_segment(handler, segment_chunks=63) == []
+    assert analyzer.calls == []
+
+
 def _handler_after_soft_ended_turn() -> VADHandler:
     handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
     outputs = _drive_final_segment(handler, active_chunks=12, segment_chunks=12)
@@ -423,7 +766,8 @@ def _handler_after_soft_ended_turn() -> VADHandler:
     return handler
 
 
-def test_continuation_start_confirms_at_lower_bar():
+def test_soft_ended_direct_audio_turn_reopens_at_revision_one():
+    # Keep the turn uncommitted to model generation still being in flight.
     handler = _handler_after_soft_ended_turn()
     handler.min_speech_continuation_ms = 192
     chunks = [torch.zeros(512) for _ in range(8)]
@@ -531,7 +875,7 @@ def test_vad_reopens_unanswered_turn_after_grace_window():
         handler.text_output_queue.get_nowait()
 
     # Advance the audio clock so the resumed speech starts well past
-    # speculative_reopen_ms (1000) but within unanswered_reopen_ms (8000).
+    # speculative_reopen_ms (800) but within unanswered_reopen_ms (8000).
     handler._total_samples = 16000 * 3
 
     outputs = _drive_final_segment(handler)
@@ -637,6 +981,70 @@ def test_vad_stitches_adjacent_short_segments_before_discarding():
     assert started.interrupt_response is False
     assert isinstance(stopped, SpeechStoppedEvent)
     assert handler._pending_short_segment is None
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_vad_keeps_short_segment_when_continuation_crosses_merge_expiry(streaming):
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    sink = _RecordingStreamingSTT()
+    if streaming:
+        handler.streaming_stt_sink = sink
+    handler.short_segment_merge_ms = 400
+    handler._hold_short_segment(np.ones(3200, dtype=np.float32), 200, 0, 200)
+
+    # Speech resumes after a 350ms gap, within the 400ms merge window, and
+    # continues past its expiry. Both fragments are too short individually.
+    for count in range(1, 9):
+        handler._total_samples = (550 + 32 * (count - 1)) * 16
+        chunks = [torch.ones(512) for _ in range(count)]
+        handler.iterator = _StaticVADIterator(
+            triggered=True,
+            vad_output=None,
+            buffer_chunks=chunks,
+            active_speech_samples=count * 512,
+        )
+        assert list(handler.process(_audio_bytes())) == []
+
+    handler.iterator = _StaticVADIterator(
+        triggered=False,
+        vad_output=[torch.ones(512) for _ in range(9)],
+        last_utterance_active_speech_samples=8 * 512,
+    )
+    outputs = list(handler.process(_audio_bytes()))
+
+    assert len(outputs) == 1
+    np.testing.assert_array_equal(
+        outputs[0].audio,
+        np.concatenate([np.ones(3200), np.zeros(5600), np.ones(9 * 512)]),
+    )
+    assert handler._pending_short_segment is None
+    assert sink.discard_count == 0
+    if streaming:
+        assert sink.commits == [("turn_1", 0)]
+
+
+@pytest.mark.parametrize("segment_state", ["silent", "speaking", "final"])
+def test_vad_discards_expired_fragment_before_streaming_new_audio(segment_state):
+    chunks = [torch.zeros(512) for _ in range(4)]
+    handler = _vad_handler_for_iterator(
+        _StaticVADIterator(
+            triggered=segment_state == "speaking",
+            vad_output=chunks if segment_state == "final" else None,
+            buffer_chunks=chunks if segment_state == "speaking" else [],
+            active_speech_samples=4 * 512,
+            last_utterance_active_speech_samples=4 * 512,
+        )
+    )
+    sink = _RecordingStreamingSTT()
+    handler.streaming_stt_sink = sink
+    handler.short_segment_merge_ms = 400
+    handler._hold_short_segment(np.ones(3200, dtype=np.float32), 200, 0, 200)
+    handler._total_samples = 800 * 16
+
+    assert list(handler.process(_audio_bytes())) == []
+
+    assert sink.events[:2] == (["discard"] if segment_state == "silent" else ["discard", "append"])
+    assert sink.discard_count == 1
 
 
 def test_vad_pending_short_segment_contributes_to_early_speech_start():
@@ -776,7 +1184,9 @@ def _vad_audio(
 def test_vad_drops_superseded_progressive_audio_from_output_queue():
     handler = object.__new__(VADHandler)
     handler.queue_out = Queue()
-    handler.speculative_turns = None
+    handler.speculative_turns = SpeculativeTurnTracker()
+    handler.speculative_turns.observe("turn_1", 0)
+    handler.speculative_turns.observe("turn_2", 0)
     first_progressive = _vad_audio()
     final_audio = _vad_audio(mode="final")
     second_progressive = _vad_audio()
@@ -814,7 +1224,9 @@ def test_vad_drops_stale_progressive_revisions_from_output_queue():
 def test_vad_final_audio_replaces_queued_progressive_audio_for_same_revision():
     handler = object.__new__(VADHandler)
     handler.queue_out = Queue()
-    handler.speculative_turns = None
+    handler.speculative_turns = SpeculativeTurnTracker()
+    handler.speculative_turns.observe("turn_1", 0)
+    handler.speculative_turns.observe("turn_2", 0)
     progressive_audio = _vad_audio()
     final_audio = _vad_audio(mode="final")
     other_turn_progressive = _vad_audio(turn_id="turn_2")

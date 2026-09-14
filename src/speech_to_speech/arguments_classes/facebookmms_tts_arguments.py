@@ -3,9 +3,9 @@ from dataclasses import dataclass, field
 
 @dataclass
 class FacebookMMSTTSHandlerArguments:
-    facebook_mms_model_name: str = field(
-        default="facebook/mms-tts-eng",
-        metadata={"help": "The model name to use. Default is 'facebook/mms-tts-eng'."},
+    facebook_mms_model_name: str | None = field(
+        default=None,
+        metadata={"help": "Optional model override. By default, select the Facebook MMS model from --tts_language."},
     )
     tts_language: str = field(
         default="en",

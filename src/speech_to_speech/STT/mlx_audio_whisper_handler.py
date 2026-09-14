@@ -7,7 +7,7 @@ import numpy as np
 from rich.console import Console
 
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
-from speech_to_speech.pipeline.messages import Transcription
+from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 
@@ -164,6 +164,14 @@ class MLXAudioWhisperSTTHandler(BaseSTTHandler):
 
         if self.start_language == "auto":
             language_code += "-auto"
+
+        if vad_audio.mode == "progressive":
+            yield PartialTranscription(
+                text=pred_text,
+                turn_id=vad_audio.turn_id,
+                turn_revision=vad_audio.turn_revision,
+            )
+            return
 
         yield Transcription(
             text=pred_text,

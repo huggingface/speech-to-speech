@@ -9,8 +9,9 @@ from lightning_whisper_mlx import LightningWhisperMLX
 from rich.console import Console
 
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
-from speech_to_speech.pipeline.messages import Transcription
+from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+from speech_to_speech.utils.mlx_lock import MLXLockContext
 
 logger = logging.getLogger(__name__)
 
@@ -63,29 +64,30 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
         dummy_input = np.array([0] * 512)
 
         for _ in range(n_steps):
-            _ = self.model.transcribe(dummy_input)["text"].strip()
+            with MLXLockContext(handler_name=self.__class__.__name__):
+                _ = self.model.transcribe(dummy_input)["text"].strip()
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("infering whisper...")
 
         audio = vad_audio.audio
         if self.start_language != "auto":
-            transcription_dict = self.model.transcribe(audio, language=self.start_language)
+            with MLXLockContext(handler_name=self.__class__.__name__):
+                transcription_dict = self.model.transcribe(audio, language=self.start_language)
         else:
-            transcription_dict = self.model.transcribe(audio)
+            with MLXLockContext(handler_name=self.__class__.__name__):
+                transcription_dict = self.model.transcribe(audio)
             language_code = transcription_dict["language"]
             if language_code not in SUPPORTED_LANGUAGES:
                 logger.warning(f"Whisper detected unsupported language: {language_code}")
-                if self.last_language in SUPPORTED_LANGUAGES:  # reprocess with the last language
-                    transcription_dict = self.model.transcribe(audio, language=self.last_language)
-                else:
-                    transcription_dict = {"text": "", "language": "en"}
             else:
                 self.last_language = language_code
 
         pred_text = transcription_dict["text"].strip()
         language_code = transcription_dict["language"]
-        torch.mps.empty_cache()
+        # Same idea as ChatTTSHandler: MPS cache clear only on Apple Silicon.
+        if self.device == "mps":
+            torch.mps.empty_cache()
 
         logger.debug("finished whisper inference")
         console.print(f"[yellow]USER: {pred_text}")
@@ -93,6 +95,14 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
 
         if self.start_language == "auto":
             language_code += "-auto"
+
+        if vad_audio.mode == "progressive":
+            yield PartialTranscription(
+                text=pred_text,
+                turn_id=vad_audio.turn_id,
+                turn_revision=vad_audio.turn_revision,
+            )
+            return
 
         yield Transcription(
             text=pred_text,

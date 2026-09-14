@@ -10,6 +10,8 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - `faster-whisper` → `STT/faster_whisper_handler.py`
 - `parakeet-tdt` → `STT/parakeet_tdt_handler.py`
 - `paraformer` → `STT/paraformer_handler.py`
+- `qwen3-asr` → `STT/qwen3_asr_handler.py`
+- `openai` → `STT/openai_compatible_handler.py`
 
 ## Language Support by Handler
 
@@ -75,6 +77,33 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
   - Depends on selected FunASR model checkpoint
   - Default setup is Chinese-oriented (`zh`)
 
+### 7) Qwen3-ASR (`--stt qwen3-asr`)
+
+- Handler: `Qwen3ASRSTTHandler`
+- Model flag: `--qwen3_asr_model_name` (default `Qwen/Qwen3-ASR-0.6B-hf`; `Qwen/Qwen3-ASR-1.7B-hf` is more accurate)
+- Language flag: `--qwen3_asr_language` (ISO code or name, default `auto`)
+- Context flag: `--qwen3_asr_prompt` (optional hotwords or domain context)
+- Supported languages: the 30 in the checkpoint's language table
+  - `ar`, `yue`, `zh`, `cs`, `da`, `nl`, `en`, `fil`, `fi`, `fr`, `de`, `el`, `hi`, `hu`, `id`, `it`, `ja`, `ko`, `mk`, `ms`, `fa`, `pl`, `pt`, `ro`, `ru`, `es`, `sv`, `th`, `tr`, `vi`
+- Behavior:
+  - With `auto`, the model identifies the language of each final turn and reports it with the `-auto` suffix
+  - Progressive (partial) windows are short and fool the language ID, so they reuse the language of the last final turn
+  - A forced language is passed on every request and reported as is
+- Transformers versions: `pyproject.toml` already requires a version that knows `qwen3_asr`. The prompt and true language forcing need `transformers>=5.15.1` (the Linux pin); with 5.14.1 (the macOS pin) the language is a hint and the prompt is ignored with a warning
+
+### 8) OpenAI-compatible endpoint (`--stt openai`)
+
+- Handler: `OpenAICompatibleSTTHandler`
+- Endpoint: `POST /v1/audio/transcriptions`
+- Upload: mono PCM16 WAV at 16 kHz
+- Supports JSON (`{"text": "..."}`) and plain-text responses
+- Keeps one active progressive request and the latest pending window per pipeline;
+  final requests proceed independently, with cancellation and session-safe delivery
+- Bounds pending finals to eight per pipeline; overflow produces a typed failure
+  without uploading audio, and accepted finals retain their order
+- Endpoint capacity and provider quotas remain the inference service/proxy's responsibility
+- See [`docs/openai-compatible-stt.md`](../../../docs/openai-compatible-stt.md)
+
 ## Language Abbreviations (ISO-style codes seen in STT handlers)
 
 | Code | Language |
@@ -115,20 +144,20 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 ### Whisper (Transformers)
 
 ```bash
-python s2s_pipeline.py --stt whisper --language en
-python s2s_pipeline.py --stt whisper --language auto
+speech-to-speech serve --stt whisper --language en
+speech-to-speech serve --stt whisper --language auto
 ```
 
 ### Whisper MLX (LightningWhisperMLX)
 
 ```bash
-python s2s_pipeline.py --stt whisper-mlx --language auto --device mps
+speech-to-speech serve --stt whisper-mlx --language auto --device mps
 ```
 
 ### MLX Audio Whisper
 
 ```bash
-python s2s_pipeline.py --stt mlx-audio-whisper \
+speech-to-speech serve --stt mlx-audio-whisper \
   --mlx_audio_whisper_model_name mlx-community/whisper-large-v3-turbo \
   --language auto
 ```
@@ -136,7 +165,7 @@ python s2s_pipeline.py --stt mlx-audio-whisper \
 ### Faster-Whisper
 
 ```bash
-python s2s_pipeline.py --stt faster-whisper \
+speech-to-speech serve --stt faster-whisper \
   --faster_whisper_stt_model_name large-v3 \
   --faster_whisper_stt_gen_language en
 ```
@@ -144,14 +173,14 @@ python s2s_pipeline.py --stt faster-whisper \
 ### Parakeet TDT
 
 ```bash
-python s2s_pipeline.py --stt parakeet-tdt --parakeet_tdt_device auto
-python s2s_pipeline.py --stt parakeet-tdt --parakeet_tdt_language de
+speech-to-speech serve --stt parakeet-tdt --parakeet_tdt_device auto
+speech-to-speech serve --stt parakeet-tdt --parakeet_tdt_language de
 ```
 
 With live transcription (MLX or CUDA/nano-parakeet backend):
 
 ```bash
-python s2s_pipeline.py --stt parakeet-tdt \
+speech-to-speech serve --stt parakeet-tdt \
   --enable_live_transcription \
   --live_transcription_update_interval 0.25
 ```
@@ -159,5 +188,15 @@ python s2s_pipeline.py --stt parakeet-tdt \
 ### Paraformer
 
 ```bash
-python s2s_pipeline.py --stt paraformer --paraformer_stt_model_name paraformer-zh
+speech-to-speech serve --stt paraformer --paraformer_stt_model_name paraformer-zh
+```
+
+### Qwen3-ASR
+
+```bash
+speech-to-speech serve --stt qwen3-asr
+speech-to-speech serve --stt qwen3-asr --qwen3_asr_language fr
+speech-to-speech serve --stt qwen3-asr \
+  --qwen3_asr_model_name Qwen/Qwen3-ASR-1.7B-hf \
+  --qwen3_asr_prompt "Vocabulary: Quilter, apostle."
 ```

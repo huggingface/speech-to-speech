@@ -1,9 +1,17 @@
 """
 Global MLX lock to prevent concurrent Metal/MLX model access.
 
-MLX models (STT, LLM, TTS) cannot be used concurrently from multiple threads
-on Apple Silicon due to Metal command buffer limitations. This module provides
-a global lock that all MLX handlers should acquire before using their models.
+The pipeline's MLX models (STT, LLM, TTS) share Apple Silicon Metal resources.
+This module provides a global lock that all MLX handlers acquire before using
+their models.
+
+MLX 0.32.0 documents support for independent computations from multiple threads,
+but that does not make the full speech pipeline safe without serialization. We
+tested the pinned stack (mlx/metal 0.32.0, mlx-lm 0.31.3, mlx-audio 0.4.7) from
+GitHub issue #386: two concurrent handlers were stable, while unrestricted
+three-way STT/LLM/TTS load intermittently caused a Metal MMU GPU restart with
+Lightning Whisper and a Parakeet decoder IndexError. Keep this lock until the
+complete three-way pipeline is proven stable, not merely the MLX core runtime.
 """
 
 import logging

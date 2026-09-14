@@ -61,4 +61,9 @@ class RealtimeServer:
         watcher = threading.Thread(target=_watch_stop, daemon=True)
         watcher.start()
 
-        server.run()
+        try:
+            server.run()
+        finally:
+            # A bind/startup failure must also stop the model threads. During a
+            # normal shutdown the event is already set by ThreadManager.
+            self.stop_event.set()

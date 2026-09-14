@@ -34,6 +34,10 @@ class SessionState(BaseModel):
     transport: Optional[SessionTransport] = None
     session_id: str = ""
     pending_output_item: Any = None
+    # Response-keyed side-channel events can be generated before a hidden
+    # prefetch is claimed. Keep them ordered and private without letting one
+    # blocked event stall unrelated origin-response output.
+    pending_text_output_items: list[Any] = Field(default_factory=list)
     drained: asyncio.Event = Field(default_factory=asyncio.Event)
     # Wall-clock time when the client disconnected (route handler released its
     # claim). `None` while the client is still active. Used by /v1/pool to

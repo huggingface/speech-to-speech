@@ -1,6 +1,8 @@
 # Repository Instructions
 
 - Never include `codex` in branch names or pull request titles.
+- Never merge a pull request into `main` unless the user explicitly asks the agent to perform the merge and then confirms when asked immediately before the merge. Requests to review, fix, prepare, finish, or get a pull request ready do not count as merge authorization. Once the pull request is ready, report its status and ask for confirmation; merge only after a clear follow-up confirmation.
+- For existing/open pull requests, do not amend, squash, rebase-rewrite, or force-push follow-up changes. Make new commits and push normally unless explicitly asked to rewrite history.
 - Keep release pull requests focused on version metadata and release documentation.
 - Do not commit local build artifacts such as `dist/`, `build/`, or generated wheel/sdist files.
 

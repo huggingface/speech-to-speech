@@ -51,7 +51,7 @@ import auth
 import httpx
 import limiter
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -64,6 +64,11 @@ SERPER_KEY = os.environ.get("SERPER_API_KEY", "").strip()
 # When empty, the user may instead set a direct s2s server URL in Settings and the
 # browser connects to it straight (no load balancer).
 LOAD_BALANCER_URL = os.environ.get("LOAD_BALANCER_URL", "").strip()
+# Optional service credential for the Hugging Face Inference Endpoint ingress in
+# front of the load balancer. Keep this separate from the visitor's OAuth token:
+# ingress consumes the standard Authorization header, while the load-balancer
+# app receives the dedicated Reachy header below for per-user attribution.
+LB_HF_TOKEN = os.environ.get("LB_HF_TOKEN", "").strip()
 # Direct s2s server URL pinned by the deploy. Takes priority over the load
 # balancer: when set, ALL LB logic is disabled (no /api/session proxy, no queue,
 # no limiter, no sign-in) and the browser connects to this URL directly. Unlike
@@ -133,8 +138,35 @@ SERPER_URL = "https://google.serper.dev/search"
 MAX_RESULTS = 5
 HERE = os.path.dirname(os.path.abspath(__file__))
 LB_USER_AGENT = "speech-to-speech-demo"
+LB_FAILURE_HEADER_NAMES = (
+    "content-type",
+    "server",
+    "x-request-id",
+    "ratelimit",
+    "ratelimit-policy",
+    "retry-after",
+)
 
 app = FastAPI(title="s2s-demo")
+
+
+@app.get("/vendor/openai-realtime-agents.umd.js", include_in_schema=False)
+def agents_sdk_bundle():
+    """Serve the exact npm-pinned browser bundle without committing build output."""
+    bundled = os.path.join(HERE, "vendor", "openai-realtime-agents.umd.js")
+    installed = os.path.join(
+        HERE,
+        "node_modules",
+        "@openai",
+        "agents-realtime",
+        "dist",
+        "bundle",
+        "openai-realtime-agents.umd.js",
+    )
+    path = bundled if os.path.isfile(bundled) else installed
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=503, detail="Run npm ci in demo/")
+    return FileResponse(path, media_type="text/javascript")
 
 # Wire HF OAuth before the app serves (no-op unless the OAuth env is present).
 # Sign-in only matters when we're metering (prod Space), so gate it on that.
@@ -195,8 +227,8 @@ async def me(request: Request):
     sets the anonymous tracking cookie when first seen."""
     if not LIMITER_ENABLED:
         return {"enabled": False}
-    view = auth.user_view(request)
     tier, keys, set_cookie = auth.resolve_identity(request)
+    view = auth.user_view(request, tier=tier)
     unlimited = limiter.budget_for(tier) is None
     rem = None if unlimited else await asyncio.to_thread(limiter.remaining, keys, tier)
     out = {
@@ -328,6 +360,10 @@ async def session(request: Request):
         # never call this. 404 so it's indistinguishable from a missing route.
         raise HTTPException(status_code=404, detail="Not found.")
 
+    login_reason = auth.oauth_login_required_reason(request)
+    if login_reason:
+        return _login_required_response(login_reason)
+
     tier, keys, set_cookie = auth.resolve_identity(request)
     # Metering runs only on the deployed Space; off-Space the LB still proxies but
     # nothing is tracked. Within metering, unlimited tiers (pro, org) aren't either.
@@ -367,10 +403,20 @@ async def session(request: Request):
                 auth.set_anon_cookie(resp, set_cookie)
             return resp
 
+    if lb.status_code == 401:
+        body = _safe_json(lb)
+        reason = body.get("reason", "login_required")
+        if reason == "token_invalid":
+            session = getattr(request, "scope", {}).get("session")
+            if isinstance(session, dict):
+                session.pop("oauth_info", None)
+        logger.info("Session authentication rejected: %s", reason)
+        return _login_required_response(reason, set_cookie)
+
     if lb.status_code != 200:
         # The LB's error body may name the reason (e.g. capacity); it carries no
         # secret, so relay a trimmed copy.
-        logger.warning("Session handshake failed %s: %s", lb.status_code, lb.text[:300])
+        _log_load_balancer_failure("session handshake", lb)
         raise HTTPException(status_code=502, detail=f"Session handshake failed ({lb.status_code}).")
 
     data = lb.json()
@@ -388,21 +434,57 @@ async def session(request: Request):
     return await _finalize_grant(data, keys, tier, tracked, set_cookie)
 
 
-def _load_balancer_headers(request: Request) -> dict[str, str]:
+def _login_required_response(reason: str, set_cookie=None) -> JSONResponse:
+    """Actionable 401 understood by the browser's login-required flow."""
+    resp = JSONResponse(
+        {
+            "reason": reason,
+            "loginUrl": auth.OAUTH_LOGIN_PATH if AUTH_ENABLED else None,
+        },
+        status_code=401,
+    )
+    if set_cookie:
+        auth.set_anon_cookie(resp, set_cookie)
+    return resp
+
+
+def _load_balancer_headers(request: Request | None = None) -> dict[str, str]:
     """Headers for the server-to-server session allocation request.
 
-    The dedicated authorization header matches the Reachy Mini client and lets
-    the load balancer validate and attribute an optional HF user token without
-    exposing it to browser JavaScript. Anonymous visitors send no credential.
+    A dedicated service token authenticates the Space to the HF ingress. The
+    signed-in visitor's OAuth token remains in the Reachy-specific header so the
+    load-balancer app can validate and attribute that user after ingress consumes
+    the standard Authorization header. When no service token is configured, a
+    signed-in user's token authenticates both hops; anonymous use remains allowed.
     """
     headers = {
         "Content-Type": "application/json",
         "User-Agent": LB_USER_AGENT,
     }
-    token = auth.current_access_token(request)
-    if token:
-        headers["X-Reachy-Mini-Authorization"] = f"Bearer {token}"
+    user_token = auth.current_access_token(request) if request is not None else None
+    gateway_token = LB_HF_TOKEN or user_token
+    if gateway_token:
+        headers["Authorization"] = f"Bearer {gateway_token}"
+    if user_token:
+        headers["X-Reachy-Mini-Authorization"] = f"Bearer {user_token}"
     return headers
+
+
+def _log_load_balancer_failure(operation: str, response: httpx.Response) -> None:
+    """Log enough ingress metadata to diagnose failures without credentials."""
+    response_headers = {
+        name: value
+        for name in LB_FAILURE_HEADER_NAMES
+        if (value := response.headers.get(name))
+    }
+    body = " ".join(response.text[:500].split())
+    logger.warning(
+        "Load balancer %s failed status=%s headers=%s body=%s",
+        operation,
+        response.status_code,
+        response_headers,
+        body,
+    )
 
 
 @app.get("/api/queue/{queue_id}")
@@ -413,13 +495,17 @@ async def queue_status(queue_id: str, request: Request):
     if not LOAD_BALANCER_URL:
         raise HTTPException(status_code=404, detail="Not found.")
 
+    login_reason = auth.oauth_login_required_reason(request)
+    if login_reason:
+        return _login_required_response(login_reason)
+
     tier, keys, set_cookie = auth.resolve_identity(request)
     tracked = LIMITER_ENABLED and limiter.budget_for(tier) is not None
 
     url = f"{LOAD_BALANCER_URL.rstrip('/')}/queue/{queue_id}"
     try:
         async with httpx.AsyncClient(timeout=15.0) as http:
-            lb = await http.get(url)
+            lb = await http.get(url, headers=_load_balancer_headers(request))
     except httpx.RequestError as exc:
         logger.warning("Load balancer unreachable: %r", exc)
         raise HTTPException(status_code=502, detail="Speech service unreachable.")
@@ -433,7 +519,7 @@ async def queue_status(queue_id: str, request: Request):
         return resp
 
     if lb.status_code != 200:
-        logger.warning("Queue poll failed %s: %s", lb.status_code, lb.text[:300])
+        _log_load_balancer_failure("queue poll", lb)
         raise HTTPException(status_code=502, detail=f"Queue poll failed ({lb.status_code}).")
 
     data = lb.json()
@@ -462,11 +548,11 @@ async def queue_status(queue_id: str, request: Request):
 
 
 @app.delete("/api/queue/{queue_id}")
-async def queue_leave(queue_id: str):
+async def queue_leave(queue_id: str, request: Request):
     """Leave the queue from the explicit 'Leave queue' button (a real fetch)."""
     if not LOAD_BALANCER_URL:
         raise HTTPException(status_code=404, detail="Not found.")
-    await _lb_leave(queue_id)
+    await _lb_leave(queue_id, request)
     return {"ok": True}
 
 
@@ -478,7 +564,7 @@ async def queue_end(request: Request):
         raise HTTPException(status_code=404, detail="Not found.")
     qid = await _queue_id(request)
     if qid:
-        await _lb_leave(qid)
+        await _lb_leave(qid, request)
     return {"ok": True}
 
 
@@ -502,12 +588,14 @@ async def _finalize_grant(data, keys, tier, tracked, set_cookie):
     return resp
 
 
-async def _lb_leave(queue_id: str) -> None:
+async def _lb_leave(queue_id: str, request: Request | None = None) -> None:
     """Best-effort: tell the LB to drop a waiting ticket."""
     url = f"{LOAD_BALANCER_URL.rstrip('/')}/queue/{queue_id}"
     try:
         async with httpx.AsyncClient(timeout=5.0) as http:
-            await http.delete(url)
+            response = await http.delete(url, headers=_load_balancer_headers(request))
+            if response.status_code not in {200, 404}:
+                _log_load_balancer_failure("queue leave", response)
     except httpx.RequestError as exc:
         logger.warning("Queue leave failed: %r", exc)
 

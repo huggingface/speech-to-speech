@@ -30,12 +30,14 @@ from openai.types.realtime.realtime_conversation_item_user_message import (
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
 from speech_to_speech.LLM.chat import (
+    AUDIO_INPUT_HISTORY_PLACEHOLDER,
     Chat,
     ChatItemError,
     CompactionResult,
     build_active_chat,
     make_assistant_message,
     make_system_message,
+    make_user_audio_message,
     make_user_message,
 )
 
@@ -141,6 +143,15 @@ class TestFactoryHelpers:
         assert msg.content[0].type == "input_text"
         assert msg.content[0].text == "hello"
 
+    def test_make_user_audio_message(self):
+        msg = make_user_audio_message("abc123")
+        assert isinstance(msg, RealtimeConversationItemUserMessage)
+        assert msg.role == "user"
+        assert msg.type == "message"
+        assert len(msg.content) == 1
+        assert msg.content[0].type == "input_audio"
+        assert msg.content[0].audio == "abc123"
+
     def test_make_assistant_message(self):
         msg = make_assistant_message("world")
         assert isinstance(msg, RealtimeConversationItemAssistantMessage)
@@ -244,6 +255,23 @@ class TestAddItemEviction:
         assert "message" in remaining_types
         assert chat.buffer[0].content[0].text == "t2"
 
+    def test_eviction_removes_late_output_with_its_call(self):
+        chat = Chat(size=2)
+        chat.add_item(_user("u0"))
+        chat.add_ordered_function_call(_fc("c1"))
+        chat.add_item(_assistant("a0"))
+        chat.add_item(_user("u1"))
+        chat.add_item(_user("u2"))
+        chat.add_item(_user("u3"))
+        chat.add_item(_fco("c1"))
+        chat.add_item(_assistant("late"))
+
+        chat.trim_if_needed()
+
+        assert not any(isinstance(item, RealtimeConversationItemFunctionCall) for item in chat.buffer)
+        assert not any(isinstance(item, RealtimeConversationItemFunctionCallOutput) for item in chat.buffer)
+        assert all(item["type"] != "function_call_output" for item in chat.to_responses_api_chat())
+
     def test_size_zero_evicts_every_user_message(self):
         chat = Chat(size=0)
         chat.add_item(_user("a"))
@@ -301,6 +329,32 @@ class TestAppendToolOutput:
         chat.append_tool_output("call_c1", fco)
 
         assert fc.status == "incomplete"
+
+    def test_ordered_output_appends_chronologically_and_serializes_adjacent(self):
+        chat = Chat(size=5)
+        before = _assistant("before")
+        call = _fc("c1")
+        after = _assistant("after")
+        output = _fco("c1")
+        chat.add_item(before)
+        chat.add_ordered_function_call(call)
+        chat.add_item(after)
+
+        chat.add_item(output)
+
+        assert chat.buffer == [before, call, after, output]
+        assert [item["type"] for item in chat.to_responses_api_chat()] == [
+            "message",
+            "function_call",
+            "function_call_output",
+            "message",
+        ]
+        assert [item["role"] for item in chat.to_transformers_chat()] == [
+            "assistant",
+            "assistant",
+            "tool",
+            "assistant",
+        ]
 
     def test_reinjection_path(self):
         chat = Chat(size=1)
@@ -368,6 +422,14 @@ class TestAddItem:
         chat.add_item(msg)
         assert len(chat.buffer[0].content) == 1
         assert chat.buffer[0].content[0].type == "input_text"
+
+    def test_user_message_keeps_audio_content_with_base64_audio(self):
+        chat = Chat(size=5)
+        msg = make_user_audio_message("abc123")
+        chat.add_item(msg)
+        assert len(chat.buffer[0].content) == 1
+        assert chat.buffer[0].content[0].type == "input_audio"
+        assert chat.buffer[0].content[0].audio == "abc123"
 
     def test_user_message_keeps_image_content(self):
         chat = Chat(size=5)
@@ -468,6 +530,87 @@ class TestAddItem:
         with pytest.raises(ChatItemError, match="call_"):
             chat.add_item(fc)
 
+    def test_cancelled_response_rejects_late_provisional_items_atomically(self):
+        chat = Chat(size=5)
+        response_key = "cancelled_response"
+        chat.rollback_provisional_generation(response_key)
+
+        recorded = chat.add_provisional_generation_items(response_key, [_assistant("late"), _fc("late")])
+
+        assert recorded is None
+        assert chat.buffer == []
+        assert not chat.has_pending_tool_calls()
+        chat.rollback_generation(None, item_ids=set(), call_ids=set(), response_key=response_key)
+        assert chat._cancelled_provisional_generations == {}
+
+    def test_invalid_provisional_batch_rolls_back_earlier_items(self):
+        chat = Chat(size=5)
+        existing = chat.add_item(_user("existing"))
+        invalid_call = RealtimeConversationItemFunctionCall(
+            type="function_call",
+            id="invalid",
+            call_id="call_bad",
+            name="bad",
+            arguments="{}",
+        )
+
+        with pytest.raises(ChatItemError, match="fc_"):
+            chat.add_provisional_generation_items(
+                "failed_response",
+                [_assistant("must roll back"), invalid_call],
+            )
+
+        assert chat.buffer == [existing]
+        assert not chat.has_pending_tool_calls()
+        assert chat._provisional_generations == {}
+
+    def test_generation_stays_provisional_until_response_delivery(self):
+        chat = Chat(size=5)
+        response_key = "completed_response"
+        eager = chat.add_provisional_generation_items(response_key, [_assistant("before"), _fc("final")])
+        assert eager is not None
+
+        trailing = chat.add_provisional_generation_items(response_key, [_assistant("after")])
+        chat.rollback_provisional_generation(response_key)
+
+        assert trailing is not None
+        assert chat.buffer == []
+        assert chat._provisional_generations == {}
+
+    def test_delivered_generation_is_no_longer_rollbackable(self):
+        chat = Chat(size=5)
+        response_key = "completed_response"
+        recorded = chat.add_provisional_generation_items(
+            response_key,
+            [_assistant("before"), _fc("final"), _assistant("after")],
+        )
+
+        chat.finalize_provisional_generation(response_key)
+        chat.rollback_provisional_generation(response_key)
+
+        assert recorded is not None
+        assert [item.type for item in chat.buffer] == ["message", "function_call", "message"]
+        assert chat._provisional_generations == {}
+
+    def test_committed_user_input_survives_response_delivery_cancellation(self):
+        chat = Chat(size=5)
+        response_key = "completed_model_request"
+        user = _user("keep me")
+        assert user.id is None
+        assert chat.add_provisional_generation_items(response_key, [user]) is not None
+        assert user.id is not None
+        recorded = chat.add_provisional_generation_items(
+            response_key,
+            [_assistant("unseen"), _fc("unseen")],
+            committed_item_ids={user.id},
+        )
+        assert recorded is not None
+
+        chat.rollback_provisional_generation(response_key)
+
+        assert chat.buffer == [user]
+        assert not chat.has_pending_tool_calls()
+
     # -- Function call output --
 
     def test_function_call_output_delegates_to_append_tool_output(self):
@@ -532,6 +675,25 @@ class TestToResponseApiChat:
         assert content[0]["type"] == "input_text"
         assert content[1]["type"] == "input_image"
         assert content[1]["image_url"] == "http://img.png"
+
+    def test_user_audio_message_becomes_role_preserving_placeholder(self):
+        chat = Chat(size=5)
+        chat.add_item(make_user_audio_message("abc123"))
+
+        result = chat.to_responses_api_chat()
+
+        assert result == [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": AUDIO_INPUT_HISTORY_PLACEHOLDER,
+                    }
+                ],
+            }
+        ]
 
     def test_assistant_message(self):
         chat = Chat(size=5)
@@ -741,6 +903,43 @@ class TestToTransformersChat:
         assert result[3]["name"] == "action"
         assert result[4] == {"role": "assistant", "content": "All set."}
 
+    def test_function_call_carries_empty_content(self):
+        chat = Chat(size=5)
+        chat.add_item(_fc("c1", "search", '{"query": "test"}'))
+        chat.add_item(_fco("c1", "ok"))
+        entry = chat.to_transformers_chat()[0]
+        assert entry["content"] == ""
+
+    def test_every_assistant_entry_exposes_content(self):
+        chat = Chat(size=10)
+        chat.add_item(_user("Do it"))
+        chat.add_item(_fc("c1", "action", '{"a": 1}'))
+        chat.add_item(_fco("c1", "done"))
+        chat.add_item(_assistant("All set."))
+
+        assistant_entries = [m for m in chat.to_transformers_chat() if m["role"] == "assistant"]
+        assert len(assistant_entries) == 2
+        assert all("content" in m for m in assistant_entries)
+
+    def test_function_call_renders_in_template_reading_content(self):
+        """Chat templates read ``content`` on every assistant message, tool calls included.
+
+        Concatenation mirrors what the Qwen3 template does; a missing key would
+        leave an undefined value here and raise rather than render empty.
+        """
+        sandbox = pytest.importorskip("jinja2.sandbox")
+
+        chat = Chat(size=5)
+        chat.add_item(_user("What's the weather?"))
+        chat.add_item(_fc("c1", "get_weather", '{"city": "Paris"}'))
+        chat.add_item(_fco("c1", "18C, clear"))
+
+        template = sandbox.ImmutableSandboxedEnvironment().from_string(
+            "{% for m in messages %}{{ m.role + ':' + m.content + '\\n' }}{% endfor %}"
+        )
+        rendered = template.render(messages=chat.to_transformers_chat())
+        assert "assistant:\n" in rendered
+
 
 # ===================================================================
 # 9. TestCopyAndReset
@@ -949,6 +1148,45 @@ def _make_stub_compactor(
 
 
 class TestCompaction:
+    def test_cancelled_provisional_history_is_not_compacted(self):
+        chat = Chat(size=2)
+        captured: list = []
+        compactor = _make_stub_compactor(captured=captured)
+        chat.add_item(_user("u0"))
+        chat.add_item(_assistant("a0"))
+        chat.add_item(_user("u1"))
+        chat.add_provisional_generation_items("response-1", [_assistant("cancelled answer")])
+        chat.add_item(_user("u2"))
+
+        chat.trim_if_needed(compactor)
+
+        assert captured == []
+        assert chat._compact_thread is None
+
+        chat.rollback_provisional_generation("response-1")
+        _wait_thread(chat)
+
+        assert len(captured) == 1
+        assert "cancelled answer" not in str(captured[0])
+        assert "cancelled answer" not in str(chat.to_responses_api_chat())
+
+    def test_finalized_provisional_history_resumes_deferred_compaction(self):
+        chat = Chat(size=2)
+        captured: list = []
+        compactor = _make_stub_compactor(captured=captured)
+        chat.add_item(_user("u0"))
+        chat.add_item(_assistant("a0"))
+        chat.add_item(_user("u1"))
+        chat.add_provisional_generation_items("response-1", [_assistant("delivered answer")])
+        chat.add_item(_user("u2"))
+
+        chat.trim_if_needed(compactor)
+        chat.finalize_provisional_generation("response-1")
+        _wait_thread(chat)
+
+        assert len(captured) == 1
+        assert "delivered answer" in str(captured[0])
+
     def test_compaction_replaces_old_turns(self):
         chat = Chat(size=2)
         compactor = _make_stub_compactor("U", "A")
@@ -1084,6 +1322,33 @@ class TestCompaction:
         # Both fc and fco should be gone.
         assert not any(isinstance(x, RealtimeConversationItemFunctionCall) for x in chat.buffer)
         assert not any(isinstance(x, RealtimeConversationItemFunctionCallOutput) for x in chat.buffer)
+
+    def test_compaction_keeps_late_call_output_pair_out_of_snapshot(self):
+        chat = Chat(size=2)
+        captured: list = []
+        compactor = _make_stub_compactor(captured=captured)
+        chat.add_item(_user("u0"))
+        chat.add_ordered_function_call(_fc("c1"))
+        chat.add_item(_assistant("a0"))
+        chat.add_item(_user("u1"))
+        chat.add_item(_assistant("a1"))
+        chat.add_item(_user("u2"))
+        chat.add_item(_assistant("a2"))
+        chat.add_item(_user("u3"))
+        chat.add_item(_fco("c1"))
+        chat.add_item(_assistant("late"))
+
+        chat.trim_if_needed(compactor)
+        _wait_thread(chat)
+
+        assert len(captured) == 1
+        assert all(item["type"] not in {"function_call", "function_call_output"} for item in captured[0])
+        call_items = [item for item in chat.buffer if isinstance(item, RealtimeConversationItemFunctionCall)]
+        output_items = [item for item in chat.buffer if isinstance(item, RealtimeConversationItemFunctionCallOutput)]
+        assert len(call_items) == len(output_items) == 1
+        serialized_types = [item["type"] for item in chat.to_responses_api_chat()]
+        call_index = serialized_types.index("function_call")
+        assert serialized_types[call_index + 1] == "function_call_output"
 
     def test_keeps_fc_when_fco_arrives_during_compaction(self):
         chat = Chat(size=2)
@@ -1278,3 +1543,130 @@ class TestBuildActiveChat:
 
         with pytest.raises(ChatItemError):
             build_active_chat(original, resp)
+
+
+# ===================================================================
+# Turn ordering under overlapping (non-interrupting) speech
+# ===================================================================
+
+
+def _texts(chat: Chat) -> list[str]:
+    return [part.text for item in chat.buffer for part in getattr(item, "content", []) if part.text]
+
+
+class TestTurnOrdering:
+    def test_generation_output_stays_ahead_of_speech_that_arrived_meanwhile(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("A"))
+        anchor = chat.history_anchor_id()
+        chat.add_item(_user("B"))
+
+        recorded = chat.add_provisional_generation_items("response-a", [_assistant("answer A")], after_item_id=anchor)
+
+        assert recorded is not None
+        assert _texts(chat) == ["A", "answer A", "B"]
+
+    def test_multi_item_generation_keeps_its_own_emission_order(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("A"))
+        anchor = chat.history_anchor_id()
+        chat.add_item(_user("B"))
+
+        chat.add_provisional_generation_items(
+            "response-a",
+            [_assistant("first"), _fc("call_a"), _assistant("second")],
+            after_item_id=anchor,
+        )
+
+        assert [item.type for item in chat.buffer] == [
+            "message",
+            "message",
+            "function_call",
+            "message",
+            "message",
+        ]
+        assert _texts(chat) == ["A", "first", "second", "B"]
+
+    def test_generation_started_on_empty_history_precedes_later_speech(self):
+        chat = Chat(size=5)
+        anchor = chat.history_anchor_id()
+        chat.add_item(_user("B"))
+
+        chat.add_item(_assistant("out of the blue"), after_item_id=anchor)
+
+        assert _texts(chat) == ["out of the blue", "B"]
+
+    def test_output_is_appended_when_its_anchor_turn_is_gone(self):
+        chat = Chat(size=5)
+        user_a = chat.add_item(_user("A"))
+        anchor = chat.history_anchor_id()
+        chat.add_item(_user("B"))
+        assert user_a.id is not None
+        assert chat.remove_user_message(user_a.id)
+
+        chat.add_item(_assistant("answer A"), after_item_id=anchor)
+
+        assert _texts(chat) == ["B", "answer A"]
+
+    def test_ordered_function_call_is_placed_in_its_own_turn(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("A"))
+        anchor = chat.history_anchor_id()
+        chat.add_item(_user("B"))
+
+        chat.add_ordered_function_call(_fc("call_a"), after_item_id=anchor)
+
+        assert [item.type for item in chat.buffer] == ["message", "function_call", "message"]
+
+    def test_unpaired_ordered_call_hides_its_own_turn_but_not_later_speech(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("A"))
+        anchor = chat.history_anchor_id()
+        chat.add_item(_user("B"))
+
+        chat.add_provisional_generation_items(
+            "response-a",
+            [_assistant("before the call"), _fc("call_a"), _assistant("after the call")],
+            after_item_id=anchor,
+        )
+
+        # The unpaired call and the text emitted after it are not serializable
+        # yet, but the newer user turn still has to reach the provider.
+        assert [(item["role"], item["content"][0]["text"]) for item in chat.to_responses_api_chat()] == [
+            ("user", "A"),
+            ("assistant", "before the call"),
+            ("user", "B"),
+        ]
+        assert [(item["role"], item["content"]) for item in chat.to_transformers_chat()] == [
+            ("user", "A"),
+            ("assistant", "before the call"),
+            ("user", "B"),
+        ]
+
+    def test_paired_call_is_serialized_once_its_output_arrives_after_later_speech(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("A"))
+        anchor = chat.history_anchor_id()
+        chat.add_item(_user("B"))
+        chat.add_provisional_generation_items("response-a", [_fc("call_a")], after_item_id=anchor)
+
+        chat.add_item(_fco("call_a", output="result"))
+
+        assert [item["type"] for item in chat.to_responses_api_chat()] == [
+            "message",
+            "function_call",
+            "function_call_output",
+            "message",
+        ]
+
+    def test_second_commit_of_a_turn_follows_the_items_it_already_wrote(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("A"))
+        anchor = chat.history_anchor_id()
+        chat.add_provisional_generation_items("response-a", [_assistant("first")], after_item_id=anchor)
+        chat.add_item(_user("B"))
+
+        # Same stale anchor: the trailing commit must land after "first", not before it.
+        chat.add_provisional_generation_items("response-a", [_assistant("second")], after_item_id=anchor)
+
+        assert _texts(chat) == ["A", "first", "second", "B"]

@@ -1,0 +1,19 @@
+{
+  "name": "speech-to-speech-realtime-compat",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:agents:adapter": "node --test tests/agents-adapter.test.mjs",
+    "test:agents:ws": "node --test tests/agents-websocket.test.mjs",
+    "test:agents:webrtc": "node --test tests/agents-webrtc.test.mjs",
+    "test:agents": "npm run test:agents:adapter && npm run test:agents:ws && npm run test:agents:webrtc"
+  },
+  "dependencies": {
+    "@openai/agents": "0.14.3",
+    "hono": "4.13.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
+  }
+}

@@ -18,7 +18,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 - Shared args (from base): `--model_name`, `--chat_size`, `--init_chat_prompt`, `--enable_lang_prompt`
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech serve \
   --llm_backend transformers \
   --model_name Qwen/Qwen3-4B-Instruct-2507 \
   --llm_device cuda \
@@ -40,9 +40,9 @@ Common options:
 - Backend-specific args prefix: same as Transformers (`--llm_*`)
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech serve \
   --llm_backend mlx-lm \
-  --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16 \
+  --model_name mlx-community/Qwen3-4B-Instruct-2507-4bit \
   --llm_device mps \
   --llm_gen_max_new_tokens 128
 ```
@@ -61,9 +61,9 @@ Common options:
 - Shared args (from base): `--model_name`, `--chat_size`, `--init_chat_prompt`, `--enable_lang_prompt`
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech serve \
   --llm_backend responses-api \
-  --model_name gpt-5.4-mini \
+  --model_name gpt-5.6-terra \
   --responses_api_api_key YOUR_API_KEY \
   --responses_api_base_url https://api.example.com/v1 \
   --responses_api_stream true
@@ -87,7 +87,7 @@ This helps the assistant respond in the detected language. The behavior is opt-i
 ### CUDA setup
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech serve \
   --llm_backend transformers \
   --model_name microsoft/Phi-3-mini-4k-instruct
 ```
@@ -95,45 +95,43 @@ python s2s_pipeline.py \
 ### Local Mac setup
 
 ```bash
-python s2s_pipeline.py \
-  --local_mac_optimal_settings \
-  --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+speech-to-speech local \
+  --mac-optimal-settings \
+  --model_name mlx-community/Qwen3-4B-Instruct-2507-4bit
 ```
 
-`--local_mac_optimal_settings` already sets `--llm_backend mlx-lm` and will default the model to `mlx-community/Qwen3-4B-Instruct-2507-bf16` if not overridden.
+`--mac-optimal-settings` sets `--llm_backend mlx-lm` and defaults the model to `mlx-community/Qwen3-4B-Instruct-2507-4bit` if not overridden. The command independently selects whether to run only the server or compose it with the audio client.
 
 ### Realtime (OpenAI-compatible) setup
 
-Run the server in realtime mode, then connect with the realtime client:
+Run the server, then connect with the packaged audio client:
 
 ```bash
-# 1. Start the pipeline in realtime mode
-python s2s_pipeline.py \
-  --mode realtime \
+# 1. Start the pipeline server
+speech-to-speech serve \
   --llm_backend mlx-lm \
-  --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16 \
-  --ws_host 0.0.0.0 \
-  --ws_port 8765
+  --model_name mlx-community/Qwen3-4B-Instruct-2507-4bit \
+  --host 0.0.0.0 \
+  --port 8765
 
-# 2. Connect with the realtime client
-python listen_and_play_realtime.py --host 127.0.0.1 --port 8765
+# 2. Connect with the audio client
+speech-to-speech talk --url ws://127.0.0.1:8765/v1/realtime
 ```
 
-Or with `--local_mac_optimal_settings` on Apple Silicon:
+Or with `--mac-optimal-settings` on Apple Silicon:
 
 ```bash
-python s2s_pipeline.py \
-  --local_mac_optimal_settings \
-  --mode realtime \
-  --ws_host 0.0.0.0 \
-  --ws_port 8765
+speech-to-speech serve \
+  --mac-optimal-settings \
+  --host 0.0.0.0 \
+  --port 8765
 ```
 
 ### Remote API setup
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech serve \
   --llm_backend responses-api \
-  --model_name gpt-5.4-mini \
+  --model_name gpt-5.6-terra \
   --responses_api_api_key YOUR_API_KEY
 ```

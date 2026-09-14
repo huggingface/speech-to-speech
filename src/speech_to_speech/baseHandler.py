@@ -11,8 +11,10 @@ from typing import Any, Generic, Iterator, TypeVar, cast
 import numpy as np
 
 from speech_to_speech.pipeline.control import PipelineControlMessage, is_control_message, SESSION_END
+from speech_to_speech.pipeline.events import PipelineEvent, TokenUsageEvent
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
-from speech_to_speech.pipeline.messages import PIPELINE_END, AudioOutput, EndOfResponse
+from speech_to_speech.pipeline.messages import PIPELINE_END, AudioOutput, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.transcript_logging import log_exception
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +54,22 @@ class BaseHandler(Generic[InT, OutT]):
         raise NotImplementedError
 
     def should_process_input(self, item: InT) -> bool:
+        if isinstance(item, TTSInput) and item.prefetch_transaction is not None:
+            prefetch_transaction = item.prefetch_transaction
+            # Hidden follow-up LM work may overlap the origin TTS, but synthesis
+            # itself starts only after the standard response.create claims it.
+            # Discard releases this serial worker without entering a TTS backend.
+            while not self.stop_event.is_set() and not prefetch_transaction.wait_until_resolved(0.05):
+                pass
+            if not prefetch_transaction.claimed:
+                logger.debug("%s: dropping unclaimed prefetch input", self.__class__.__name__)
+                return False
         cancel_scope = getattr(self, "cancel_scope", None)
         cancel_generation = getattr(item, "cancel_generation", None)
         if (
             cancel_scope is not None
             and cancel_generation is not None
-            and not isinstance(item, EndOfResponse)
+            and not isinstance(item, (EndOfResponse, TokenUsageEvent))
             and cancel_scope.is_stale(cancel_generation)
         ):
             logger.debug(
@@ -76,9 +88,18 @@ class BaseHandler(Generic[InT, OutT]):
 
     def output_for_queue(self, output: OutT, source_input: InT) -> OutT | AudioOutput:
         cancel_generation = getattr(source_input, "cancel_generation", None)
-        if cancel_generation is not None and (isinstance(output, bytes) or hasattr(output, "tobytes")):
+        response_key = getattr(source_input, "response_key", None)
+        cleanup_only = getattr(source_input, "cleanup_only", False)
+        if (cancel_generation is not None or response_key is not None or cleanup_only) and (
+            isinstance(output, bytes) or hasattr(output, "tobytes")
+        ):
             audio = cast(bytes | np.ndarray, output)
-            return AudioOutput(audio=audio, cancel_generation=cancel_generation)
+            return AudioOutput(
+                audio=audio,
+                cancel_generation=cancel_generation,
+                response_key=response_key,
+                cleanup_only=cleanup_only,
+            )
         return output
 
     def run(self) -> None:
@@ -96,11 +117,8 @@ class BaseHandler(Generic[InT, OutT]):
                 logger.debug(f"{self.__class__.__name__}: session end received")
                 try:
                     self.on_session_end()
-                except Exception as e:
-                    logger.error(
-                        f"{self.__class__.__name__}: Error in on_session_end(): {type(e).__name__}: {e}",
-                        exc_info=True,
-                    )
+                except Exception as exc:
+                    log_exception(logger, f"{self.__class__.__name__}: Error in on_session_end()", exc)
                 self.queue_out.put(item)
                 continue
 
@@ -115,6 +133,12 @@ class BaseHandler(Generic[InT, OutT]):
 
             typed_item = cast(InT, item)
             if not self.should_process_input(typed_item):
+                continue
+
+            # Response events share the TTS queue with their audio. Forwarding
+            # them here preserves the model's exact text/tool/audio order.
+            if isinstance(item, PipelineEvent):
+                self.queue_out.put(cast(OutT, item))
                 continue
 
             start_time = perf_counter()
@@ -133,8 +157,8 @@ class BaseHandler(Generic[InT, OutT]):
                     )
                     self.queue_out.put(queued_output)
                     start_time = perf_counter()
-            except Exception as e:
-                logger.error(f"{self.__class__.__name__}: Error in process(): {type(e).__name__}: {e}", exc_info=True)
+            except Exception as exc:
+                log_exception(logger, f"{self.__class__.__name__}: Error in process()", exc)
 
         self.cleanup()
         self.queue_out.put(PIPELINE_END)

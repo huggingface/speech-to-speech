@@ -10,7 +10,7 @@ import pytest
 
 import speech_to_speech.TTS.qwen3_tts_handler as qwen3_tts_module
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 
@@ -148,6 +148,86 @@ def test_setup_passes_torch_backend_override_off_darwin(monkeypatch):
     assert handler.backend == "faster_qwen3_tts"
     assert handler.faster_backend == "torch"
     assert recorded["backend"] == "torch"
+
+
+def test_setup_passes_ggml_model_and_cache_options_to_faster_backend(monkeypatch, tmp_path):
+    recorded = {}
+    talker_path = tmp_path / "talker-Q4_K_M.gguf"
+    codec_path = tmp_path / "codec-BF16.gguf"
+    talker_path.touch()
+    codec_path.touch()
+
+    class _FakeFasterQwen3TTS:
+        @classmethod
+        def from_pretrained(cls, model_name, **kwargs):
+            recorded["model_name"] = model_name
+            recorded.update(kwargs)
+            return SimpleNamespace()
+
+    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
+    monkeypatch.setitem(sys.modules, "faster_qwen3_tts", SimpleNamespace(FasterQwen3TTS=_FakeFasterQwen3TTS))
+    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.setup(
+        Event(),
+        model_name="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+        backend="ggml",
+        ggml_quantization="q4_k_m",
+        gguf_talker_path=talker_path,
+        gguf_codec_path=codec_path,
+        ref_cache_dir=tmp_path / "voice-cache",
+    )
+
+    assert handler.ggml_quantization == "Q4_K_M"
+    assert recorded["model_name"] == "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+    assert recorded["backend"] == "ggml"
+    assert recorded["quant"] == "Q4_K_M"
+    assert recorded["gguf_talker_path"] == talker_path.resolve()
+    assert recorded["gguf_codec_path"] == codec_path.resolve()
+    assert recorded["qwentts_ref_cache_dir"] == (tmp_path / "voice-cache").resolve()
+
+
+def test_setup_passes_ggml_quantization_for_hub_model(monkeypatch):
+    recorded = {}
+
+    class _FakeFasterQwen3TTS:
+        @classmethod
+        def from_pretrained(cls, model_name, **kwargs):
+            recorded["model_name"] = model_name
+            recorded.update(kwargs)
+            return SimpleNamespace()
+
+    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
+    monkeypatch.setitem(sys.modules, "faster_qwen3_tts", SimpleNamespace(FasterQwen3TTS=_FakeFasterQwen3TTS))
+    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.setup(Event(), ggml_quantization="q8_0")
+
+    assert recorded["quant"] == "Q8_0"
+    assert recorded["gguf_talker_path"] is None
+    assert recorded["gguf_codec_path"] is None
+
+
+def test_setup_rejects_incomplete_local_gguf_pair(monkeypatch, tmp_path):
+    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
+    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(Qwen3TTSHandler)
+
+    with pytest.raises(ValueError, match="gguf_talker_path.*gguf_codec_path"):
+        handler.setup(Event(), gguf_talker_path=tmp_path / "talker.gguf")
+
+
+def test_setup_rejects_cached_ggml_references_with_torch_backend(monkeypatch):
+    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
+    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
+
+    handler = object.__new__(Qwen3TTSHandler)
+
+    with pytest.raises(ValueError, match="cached .* references require backend='ggml'"):
+        handler.setup(Event(), backend="torch", ref_spk="voice.spk")
 
 
 def test_setup_defaults_to_custom_voice_profile_off_darwin(monkeypatch):
@@ -331,6 +411,22 @@ def test_mlx_helper_methods_use_model_config_and_streaming_conversion():
     assert handler._mlx_streaming_interval() == pytest.approx(0.64)
 
 
+def test_local_gguf_filename_takes_precedence_when_inferring_model_type():
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    handler.gguf_talker_path = Path("qwen-talker-1.7b-base-Q4_K_M.gguf")
+
+    assert handler._infer_model_type_from_name() == "base"
+
+
+def test_local_gguf_parent_directory_does_not_affect_model_type_inference():
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    handler.gguf_talker_path = Path("/srv/database/qwen-talker-1.7b-Q4_K_M.gguf")
+
+    assert handler._infer_model_type_from_name() == "custom_voice"
+
+
 def test_prepare_mlx_ref_audio_normalizes_file_and_caches_result(monkeypatch, tmp_path):
     source = tmp_path / "source.wav"
     source.write_bytes(b"fake")
@@ -430,6 +526,30 @@ def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     end_outputs = list(handler.process(EndOfResponse()))
 
     assert end_outputs == [AUDIO_RESPONSE_DONE]
+
+
+def test_stale_keyed_terminal_becomes_cleanup_after_lm_tts_handoff():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0)
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.speculative_turns = tracker
+    terminal = EndOfResponse(
+        response_key="response_1",
+        turn_id="turn_1",
+        turn_revision=0,
+        cancel_generation=7,
+    )
+    tracker.observe("turn_1", 1)
+
+    outputs = list(handler.process(terminal))
+    queued = handler.output_for_queue(outputs[0], terminal)
+
+    assert outputs == [AUDIO_RESPONSE_DONE]
+    assert terminal.cleanup_only is True
+    assert isinstance(queued, AudioOutput)
+    assert queued.response_key == "response_1"
+    assert queued.cancel_generation == 7
+    assert queued.cleanup_only is True
 
 
 def test_process_waits_for_pending_reopen_and_drops_stale_tts_input():
@@ -683,6 +803,45 @@ def test_process_voice_clone_passes_none_non_streaming_mode_when_unset(monkeypat
     assert captured["non_streaming_mode"] is None
 
 
+def test_process_voice_clone_uses_precomputed_ggml_references_without_audio(monkeypatch):
+    captured = {}
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.should_listen = Event()
+    handler.cancel_scope = None
+    handler.ref_audio = None
+    handler.ref_spk = Path("voice.spk")
+    handler.ref_rvq = Path("voice.rvq")
+    handler.ref_text = "Reference text."
+    handler.speaker = None
+    handler.instruct = None
+    handler.language = "English"
+    handler.xvec_only = False
+    handler.parity_mode = False
+    handler.non_streaming_mode = True
+    handler.streaming_chunk_size = 8
+    handler.max_new_tokens = 360
+    handler.blocksize = 512
+    handler.backend = "faster_qwen3_tts"
+    handler.faster_backend = "ggml"
+    handler.queue_in = Queue()
+    handler.model = SimpleNamespace(
+        model=SimpleNamespace(model=SimpleNamespace(tts_model_type="base")),
+        generate_voice_clone_streaming=lambda **kwargs: (
+            captured.update(kwargs),
+            iter([(_audible_stream_chunk(), 16000, {})]),
+        )[1],
+    )
+
+    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+
+    outputs = list(handler.process(TTSInput(text="Hello there.")))
+
+    assert len(outputs) == 1
+    assert captured["ref_audio"] is None
+    assert captured["ref_spk"] == Path("voice.spk")
+    assert captured["ref_rvq"] == Path("voice.rvq")
+
+
 @pytest.mark.parametrize("override", [None, False, True])
 def test_process_custom_voice_passes_non_streaming_mode_to_faster_backend(monkeypatch, override):
     captured = {}
@@ -766,6 +925,23 @@ def test_estimate_max_new_tokens_scales_with_utterance_length():
     assert long_budget > short_budget
     assert long_budget % handler.streaming_chunk_size == 0
     assert long_budget <= handler.max_new_tokens
+
+
+def test_estimate_max_new_tokens_uses_cjk_speaking_rate():
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.streaming_chunk_size = 8
+    handler.max_new_tokens = 1536
+
+    short_text = "我懂，心情不好时会让人特别疲惫。"
+    long_text = (
+        "上海是一座充满活力的现代化大都市，既有繁华的金融中心和摩天大楼，也有老城厢的弄堂风情"
+        "和江南水乡的韵味。这里交通便利，餐饮选择丰富，从精致西餐到地道小馆应有尽有。同时，上海"
+        "还是文化与创新的交汇点，艺术展览、科技展会和国际活动频繁。如果你喜欢快节奏的生活和多元"
+        "的氛围，上海会是个很吸引人的地方。你想了解哪方面的具体信息呢？"
+    )
+
+    assert handler._estimate_max_new_tokens(short_text) == 360
+    assert handler._estimate_max_new_tokens(long_text) == 576
 
 
 def test_estimate_max_new_tokens_respects_configured_cap():

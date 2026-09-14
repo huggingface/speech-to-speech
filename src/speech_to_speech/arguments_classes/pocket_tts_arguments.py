@@ -29,3 +29,7 @@ class PocketTTSHandlerArguments:
         default=50,
         metadata={"help": "Maximum number of tokens to generate per sentence in Pocket TTS. Default is 50."},
     )
+    pocket_tts_language: str = field(
+        default="english",
+        metadata={"help": "PocketTTS language/model configuration to load."},
+    )

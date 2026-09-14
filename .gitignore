@@ -229,3 +229,6 @@ dmypy.json
 cover/
 .tox/
 uv.lock
+
+# JavaScript dependencies
+node_modules/

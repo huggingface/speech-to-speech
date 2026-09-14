@@ -11,9 +11,6 @@ from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 console = Console()
@@ -32,9 +29,10 @@ class ParaformerSTTHandler(BaseSTTHandler):
         device: str = "cuda",
         gen_kwargs: dict[str, Any] = {},
     ) -> None:
-        print(model_name)
+        logger.info("Loading Paraformer STT model: %s", model_name)
         if len(model_name.split("/")) > 1:
             model_name = model_name.split("/")[-1]
+        self.language = model_name.split("-")[1] if "-" in model_name else "zh"
         self.device = device
         try:
             from funasr import AutoModel
@@ -59,7 +57,9 @@ class ParaformerSTTHandler(BaseSTTHandler):
         logger.debug("infering paraformer...")
 
         pred_text = self.model.generate(vad_audio.audio)[0]["text"].strip().replace(" ", "")
-        torch.mps.empty_cache()
+        # Same idea as ChatTTSHandler: MPS cache clear only on Apple Silicon.
+        if self.device == "mps":
+            torch.mps.empty_cache()
 
         logger.debug("finished paraformer inference")
         console.print(f"[yellow]USER: {pred_text}")
@@ -73,6 +73,7 @@ class ParaformerSTTHandler(BaseSTTHandler):
         else:
             yield Transcription(
                 text=pred_text,
+                language_code=self.language,
                 turn_id=vad_audio.turn_id,
                 turn_revision=vad_audio.turn_revision,
                 speech_stopped_at_s=vad_audio.created_at_s,

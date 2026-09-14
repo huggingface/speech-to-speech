@@ -6,7 +6,10 @@ from speech_to_speech.pipeline.control import (
     is_control_message,
 )
 from speech_to_speech.pipeline.events import (
+    AssistantOutputEvent,
+    AssistantResponseDoneEvent,
     AssistantTextEvent,
+    AudioInputCompletedEvent,
     PartialTranscriptionEvent,
     PipelineEvent,
     SpeechStartedEvent,
@@ -17,6 +20,9 @@ from speech_to_speech.pipeline.events import (
 from speech_to_speech.pipeline.messages import (
     AUDIO_RESPONSE_DONE,
     PIPELINE_END,
+    AssistantOutputPart,
+    AssistantTextPart,
+    AssistantToolCallPart,
     EndOfResponse,
     GenerateResponseRequest,
     LLMResponseChunk,
@@ -30,7 +36,13 @@ from speech_to_speech.pipeline.messages import (
 
 __all__ = [
     "AUDIO_RESPONSE_DONE",
+    "AssistantOutputEvent",
+    "AssistantOutputPart",
+    "AssistantResponseDoneEvent",
+    "AssistantTextPart",
     "AssistantTextEvent",
+    "AssistantToolCallPart",
+    "AudioInputCompletedEvent",
     "CancelScope",
     "ControlKind",
     "EndOfResponse",

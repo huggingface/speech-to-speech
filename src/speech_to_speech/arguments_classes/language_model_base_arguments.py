@@ -33,8 +33,8 @@ class LanguageModelBaseArguments:
     enable_lang_prompt: bool = field(
         default=False,
         metadata={
-            "help": "When True, append a user message instructing the model to reply in the detected/selected "
-            "language (e.g. 'Please reply to my message in French.'). Default is False."
+            "help": "When True, add a language instruction to the system prompt for the current turn "
+            "(e.g. 'Please reply to my message in French.'). Default is False."
         },
     )
     compact_history: bool = field(
