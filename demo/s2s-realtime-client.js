@@ -431,7 +431,9 @@ export class S2sRealtimeClient extends EventTarget {
     if (this._debug) console.debug(`[${this.options.transport}]`, event);
     switch (type) {
       case "input_audio_buffer.speech_started": {
-        this._clearPlayback();
+        if (!this._aiSpeaking) {
+          this._clearPlayback();
+        }
         const itemId = typeof event.item_id === "string" ? event.item_id : "";
         this._currentUserItemId = itemId;
         if (this.options.transport === "websocket") {
@@ -547,6 +549,9 @@ export class S2sRealtimeClient extends EventTarget {
       }
       case "response.done": {
         const responseId = event.response?.id ?? "";
+        if (event.response?.status === "cancelled") {
+          this._clearPlayback();
+        }
         this._responseRequested = false;
         this._activeResponseId = "";
         this._aiSpeaking = false;

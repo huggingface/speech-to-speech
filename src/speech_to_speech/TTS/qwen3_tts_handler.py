@@ -90,6 +90,24 @@ QWEN3_LANGUAGE_ALIASES = {
 }
 
 
+class _MLXChunkIterator:
+    """Acquires the global MLX lock for each generated chunk, releasing it in between."""
+
+    def __init__(self, gen: Any, handler_name: str = "Qwen3TTS", timeout: float = 10.0) -> None:
+        self._gen = iter(gen)
+        self._handler_name = handler_name
+        self._timeout = timeout
+
+    def __iter__(self) -> _MLXChunkIterator:
+        return self
+
+    def __next__(self) -> Any:
+        with MLXLockContext(handler_name=self._handler_name, timeout=self._timeout) as acquired:
+            if not acquired:
+                raise TimeoutError("Timed out waiting for MLX lock")
+            return next(self._gen)
+
+
 class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
     """
     Handles Text-to-Speech using Qwen3-TTS.
@@ -900,13 +918,14 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         with MLXLockContext(handler_name="Qwen3TTS", timeout=10.0) as acquired:
             if not acquired:
                 raise TimeoutError("Timed out waiting for MLX lock")
-            yield from self._stream(
-                generation_fn(
-                    **self._mlx_stream_kwargs(max_tokens=max_tokens),
-                    **generation_kwargs,
-                ),
-                label=label,
+            raw_gen = generation_fn(
+                **self._mlx_stream_kwargs(max_tokens=max_tokens),
+                **generation_kwargs,
             )
+        yield from self._stream(
+            _MLXChunkIterator(raw_gen, handler_name="Qwen3TTS", timeout=10.0),
+            label=label,
+        )
 
     def _process_voice_clone(self, text: str) -> Iterator[bytes | np.ndarray]:
         utterance_max_new_tokens = self._estimate_max_new_tokens(text)
