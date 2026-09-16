@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from rich.console import Console
 
+from speech_to_speech.LLM.utils import WHISPER_LANGUAGE_TO_LLM_LANGUAGE
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
@@ -15,6 +16,8 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 SAMPLE_RATE = 16000
+
+SUPPORTED_LANGUAGES = ["en"]
 
 
 def resolve_device(device: str) -> str:
@@ -36,6 +39,30 @@ def _extract_text(result: Any) -> str:
     return str(result)
 
 
+def _reported_language_code(start_language: str) -> str:
+    requested = (start_language or "").strip() or "en"
+    if requested.lower() == "auto":
+        return "en"
+    return requested
+
+
+def _warn_reported_language(start_language: str) -> None:
+    requested = (start_language or "").strip() or "en"
+    if requested.lower() == "auto":
+        logger.warning(
+            "NeMo Parakeet Unified does not detect language; %r is a request, not a code. Reporting %r instead.",
+            start_language,
+            "en",
+        )
+        return
+    if requested not in WHISPER_LANGUAGE_TO_LLM_LANGUAGE:
+        logger.warning(
+            "Unknown language code %r for parakeet_unified_language; "
+            "--enable_lang_prompt and some TTS backends may not resolve it.",
+            requested,
+        )
+
+
 class NemoASRSTTHandler(BaseSTTHandler):
     """Speech to text with a NeMo ASR checkpoint through ASRModel.transcribe."""
 
@@ -48,7 +75,10 @@ class NemoASRSTTHandler(BaseSTTHandler):
     ) -> None:
         logger.info("Loading NeMo ASR STT model: %s", model_name)
         self.device = resolve_device(device)
-        self.language = language
+        self.start_language = (language or "").strip() or "en"
+        _warn_reported_language(self.start_language)
+        self.language = _reported_language_code(self.start_language)
+        self.last_language = self.language
         self.model_name = model_name
         self.gen_kwargs = dict(gen_kwargs or {})
 

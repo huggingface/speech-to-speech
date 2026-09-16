@@ -137,9 +137,60 @@ def test_setup_calls_from_pretrained_with_model_name(monkeypatch: pytest.MonkeyP
     handler.setup(model_name="nvidia/parakeet-unified-en-0.6b", device="cpu", language="en")
 
     assert "nvidia/parakeet-unified-en-0.6b" in FakeASRModel.loaded
+    assert handler.start_language == "en"
     assert handler.language == "en"
+    assert handler.last_language == "en"
     assert handler.device == "cpu"
     assert handler.model_name == "nvidia/parakeet-unified-en-0.6b"
+
+
+def test_auto_is_reported_as_english(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    class FakeASRModel:
+        @classmethod
+        def from_pretrained(cls, *args: Any, **kwargs: Any) -> FakeASRModel:
+            return cls()
+
+        def to(self, device: str) -> FakeASRModel:
+            return self
+
+        def transcribe(self, audio: Any) -> list[str]:
+            return ["warmup"]
+
+    _install_fake_nemo(monkeypatch, FakeASRModel)
+    handler = object.__new__(NemoASRSTTHandler)
+    with caplog.at_level("WARNING"):
+        handler.setup(model_name="nvidia/parakeet-unified-en-0.6b", device="cpu", language="auto")
+
+    assert handler.start_language == "auto"
+    assert handler.language == "en"
+    assert handler.last_language == "en"
+    assert "not a code" in caplog.text
+
+    events = list(handler.process(_vad_audio("final")))
+    assert events[0].language_code == "en"
+
+
+def test_unknown_language_code_warns_but_is_reported(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    class FakeASRModel:
+        @classmethod
+        def from_pretrained(cls, *args: Any, **kwargs: Any) -> FakeASRModel:
+            return cls()
+
+        def to(self, device: str) -> FakeASRModel:
+            return self
+
+        def transcribe(self, audio: Any) -> list[str]:
+            return ["warmup"]
+
+    _install_fake_nemo(monkeypatch, FakeASRModel)
+    handler = object.__new__(NemoASRSTTHandler)
+    with caplog.at_level("WARNING"):
+        handler.setup(model_name="nvidia/parakeet-unified-en-0.6b", device="cpu", language="xx")
+
+    assert handler.language == "xx"
+    assert "Unknown language code" in caplog.text
 
 
 def test_missing_nemo_names_the_nemo_extra(monkeypatch: pytest.MonkeyPatch) -> None:
