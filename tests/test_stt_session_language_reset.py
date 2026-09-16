@@ -32,6 +32,18 @@ _STT_HANDLERS = [
     ("speech_to_speech.STT.qwen3_asr_handler", "Qwen3ASRSTTHandler", {}),
 ]
 
+# Backends with no optional top-level dependency, or one stubbed below. A skip for any of
+# these means the import broke, not that an extra is missing -- so fail instead of passing
+# vacuously, which is how a half-installed environment hid four of these locally.
+_ALWAYS_IMPORTABLE = {
+    "speech_to_speech.STT.parakeet_tdt_handler",
+    "speech_to_speech.STT.whisper_stt_handler",
+    "speech_to_speech.STT.mlx_audio_whisper_handler",
+    "speech_to_speech.STT.qwen3_asr_handler",
+    "speech_to_speech.STT.faster_whisper_handler",
+    "speech_to_speech.STT.lightning_whisper_mlx_handler",
+}
+
 # Optional third-party imports stubbed so every backend stays checkable without its extra.
 _STUBS = {
     "speech_to_speech.STT.faster_whisper_handler": ("faster_whisper", "WhisperModel"),
@@ -54,6 +66,16 @@ def _load(module_name: str, class_name: str):
             return None
 
 
+def _require(module_name: str, class_name: str):
+    """Load a handler, failing rather than skipping when it should always be importable."""
+    cls = _load(module_name, class_name)
+    if cls is None:
+        if module_name in _ALWAYS_IMPORTABLE:
+            pytest.fail(f"{module_name} should be importable (stubbed if it needs an extra)")
+        pytest.skip(f"{module_name} requires an optional dependency")
+    return cls
+
+
 def _handler(cls, extra, *, start_language, last_language):
     handler = object.__new__(cls)
     handler.start_language = start_language
@@ -63,44 +85,101 @@ def _handler(cls, extra, *, start_language, last_language):
     return handler
 
 
-@pytest.mark.parametrize(("module_name", "class_name", "extra"), _STT_HANDLERS)
-def test_detected_language_does_not_survive_the_session(module_name, class_name, extra):
-    """In auto mode the next client must start from "detect", not the last detection."""
-    cls = _load(module_name, class_name)
-    if cls is None:
-        pytest.skip(f"{module_name} requires an optional dependency")
+# Expected `last_language` after a session ends, per configured `start_language`. Asserting
+# the exact value rather than "not the old one" -- a loose check passes when the reset leaves
+# "auto" behind, which is a language *request*, not a code, and is what `setup` rejects.
+_EXPECTED_AFTER_RESET = {
+    # handler class: {start_language: expected last_language}
+    "ParakeetTDTSTTHandler": {None: "en", "auto": "en", "de": "de"},
+    "_default": {None: None, "auto": None, "de": "de"},
+}
 
-    handler = _handler(cls, extra, start_language=None, last_language="de")
+
+def _expected(class_name: str, start_language):
+    table = _EXPECTED_AFTER_RESET.get(class_name, _EXPECTED_AFTER_RESET["_default"])
+    return table[start_language]
+
+
+@pytest.mark.parametrize("start_language", [None, "auto"])
+@pytest.mark.parametrize(("module_name", "class_name", "extra"), _STT_HANDLERS)
+def test_detected_language_does_not_survive_the_session(module_name, class_name, extra, start_language):
+    """In auto mode the next client must start from "detect", not the last detection."""
+    cls = _require(module_name, class_name)
+
+    handler = _handler(cls, extra, start_language=start_language, last_language="de")
 
     handler.on_session_end()
 
-    assert handler.last_language != "de", (
-        f"{class_name} carried the previous session's detected language into the next one"
+    expected = _expected(class_name, start_language)
+    assert handler.last_language == expected, (
+        f"{class_name} with start_language={start_language!r} left {handler.last_language!r}, expected {expected!r}"
     )
+
+
+@pytest.mark.parametrize(("module_name", "class_name", "extra"), _STT_HANDLERS)
+def test_auto_never_becomes_the_fallback_language(module_name, class_name, extra):
+    """ "auto" is a request to detect. Leaving it in `last_language` makes it a language code,
+    which Qwen3-ASR would report as "auto-auto" and Parakeet as a bare "auto"."""
+    cls = _require(module_name, class_name)
+
+    handler = _handler(cls, extra, start_language="auto", last_language="de")
+
+    handler.on_session_end()
+
+    assert handler.last_language != "auto"
 
 
 @pytest.mark.parametrize(("module_name", "class_name", "extra"), _STT_HANDLERS)
 def test_configured_language_survives_the_session(module_name, class_name, extra):
     """A user-configured language is process-level config, not per-conversation state."""
-    cls = _load(module_name, class_name)
-    if cls is None:
-        pytest.skip(f"{module_name} requires an optional dependency")
+    cls = _require(module_name, class_name)
 
     handler = _handler(cls, extra, start_language="de", last_language="fr")
 
     handler.on_session_end()
 
-    assert handler.last_language == "de"
+    assert handler.last_language == _expected(class_name, "de")
 
 
-def test_parakeet_keeps_its_english_fallback():
-    """Parakeet already reset, with its own default. That behaviour is unchanged."""
-    cls = _load("speech_to_speech.STT.parakeet_tdt_handler", "ParakeetTDTSTTHandler")
-    handler = _handler(cls, {"enable_live_transcription": False}, start_language=None, last_language="de")
+@pytest.mark.parametrize("start_language", [None, "auto"])
+def test_parakeet_keeps_its_english_fallback(start_language):
+    """Parakeet already reset, with its own "en" default. Its override runs after super(),
+    and "auto" is truthy, so it used to re-assign "auto" over the base reset."""
+    cls = _require("speech_to_speech.STT.parakeet_tdt_handler", "ParakeetTDTSTTHandler")
+    handler = _handler(cls, {"enable_live_transcription": False}, start_language=start_language, last_language="de")
 
     handler.on_session_end()
 
     assert handler.last_language == "en"
+
+
+def test_qwen3_records_the_configured_language():
+    """The base reset restores `start_language`, so a handler has to set it for a fixed
+    language to survive the session."""
+    cls = _require("speech_to_speech.STT.qwen3_asr_handler", "Qwen3ASRSTTHandler")
+    handler = object.__new__(cls)
+
+    handler.configure_language("de")
+
+    assert handler.start_language == "de"
+    assert handler.forced_language == "de"
+
+    handler.last_language = "fr"
+    handler.on_session_end()
+    assert handler.last_language == "de"
+
+
+def test_qwen3_auto_does_not_survive_as_a_code():
+    cls = _require("speech_to_speech.STT.qwen3_asr_handler", "Qwen3ASRSTTHandler")
+    handler = object.__new__(cls)
+    handler.configure_language("auto")
+    handler.last_language = "de"
+
+    handler.on_session_end()
+
+    assert handler.last_language is None
+    # Would otherwise be reported as "auto-auto".
+    assert handler._final_language_code(None) == "en-auto"
 
 
 # --- the base-class contract --------------------------------------------------------------

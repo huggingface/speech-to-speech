@@ -100,6 +100,7 @@ class Qwen3ASRSTTHandler(BaseSTTHandler):
 
     def configure_language(self, language: Optional[str]) -> None:
         """Set the forced language, or ``None`` for per-turn detection."""
+        self.start_language = language
         requested = (language or "").strip()
         if requested.lower() in ("", "auto"):
             self.forced_language: Optional[str] = None

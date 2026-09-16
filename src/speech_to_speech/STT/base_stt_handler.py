@@ -21,10 +21,8 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
     speculative_turns: SpeculativeTurnTracker | None = None
     final_revision_settle_s: float = 0.0
 
-    # Shared language convention: `start_language` is what the user configured and lives for
-    # the process, `last_language` is per-conversation detection state that on_session_end
-    # clears. Declared here so the reset applies to every backend, including ones that never
-    # set them.
+    # `start_language` is the user's configuration; `last_language` is per-conversation
+    # detection state. Declared here so the session reset covers every backend.
     start_language: Any = None
     last_language: Any = None
 
@@ -218,14 +216,11 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
     def reset_session_language(self) -> None:
         """Drop the language detected for the finished conversation.
 
-        Pipeline units are reused across clients, so a detected language left behind is the
-        previous conversation's. Backends consult `last_language` when detection yields
-        nothing, and Qwen3-ASR forces progressive requests with it, so a new client would be
-        transcribed in the old client's language until their first final turn re-detects.
-        Resetting to `start_language` restores whatever the user configured -- including
-        `None`, which means "detect per turn".
+        Units are reused across clients, so a leftover detection belongs to the previous
+        one. Restores what ``setup`` established: the configured language, or ``None`` for
+        ``auto``, which is a request to detect rather than a language code.
         """
-        self.last_language = self.start_language
+        self.last_language = None if self.start_language == "auto" else self.start_language
 
     def on_session_end(self) -> None:
         if hasattr(self, "_completed_final_revision_keys"):
