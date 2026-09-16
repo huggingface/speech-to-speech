@@ -20,6 +20,7 @@ from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
+    ResponseReasoningItem,
     ResponseTextDeltaEvent,
 )
 from openai.types.responses.response_output_text import ResponseOutputText
@@ -84,6 +85,61 @@ def _make_function_call_done_event(name="camera", arguments="{}"):
             name=name,
             arguments=arguments,
         ),
+    )
+
+
+def _reasoning_item(rid="rs_1", *, summary_text="plan", encrypted_content="gAAAA"):
+    return ResponseReasoningItem(
+        id=rid,
+        type="reasoning",
+        summary=[{"type": "summary_text", "text": summary_text}],
+        encrypted_content=encrypted_content,
+    )
+
+
+def _provider_function_call(
+    *,
+    call_id="call_original",
+    item_id="fc_orig",
+    name="camera",
+    arguments="{}",
+):
+    return ResponseFunctionToolCall(
+        type="function_call",
+        call_id=call_id,
+        id=item_id,
+        name=name,
+        arguments=arguments,
+    )
+
+
+def _output_item_done(item, output_index=0, sequence_number=1):
+    return ResponseOutputItemDoneEvent(
+        type="response.output_item.done",
+        output_index=output_index,
+        sequence_number=sequence_number,
+        item=item,
+    )
+
+
+def _follow_up_text_response(stream, text="It's a cat."):
+    if stream:
+        return _make_stream(
+            [
+                _make_text_delta_event(text),
+                _make_output_item_done_event(content=text),
+            ]
+        )
+    return _make_response(
+        output=[
+            ResponseOutputMessage(
+                id="msg_follow",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[ResponseOutputText(type="output_text", text=text, annotations=[])],
+            )
+        ]
     )
 
 
@@ -1708,3 +1764,121 @@ def test_response_history_precedes_speech_that_arrived_during_generation():
     list(handler.process(request))
 
     assert [part.text for item in chat.buffer for part in item.content if part.text] == ["A", "answer A", "B"]
+
+
+def _reasoning_continuation_create(stream, first_output):
+    creates = []
+
+    def fake_create(**kwargs):
+        creates.append(kwargs)
+        if len(creates) == 1:
+            if stream:
+                return _make_stream(
+                    [_output_item_done(item, index, index + 1) for index, item in enumerate(first_output)]
+                )
+            return _make_response(output=list(first_output))
+        return _follow_up_text_response(stream)
+
+    return creates, fake_create
+
+
+@pytest.mark.parametrize("stream", [True, False])
+def test_process_replays_reasoning_and_provider_ids_on_tool_continuation(stream):
+    handler = _make_handler(stream=stream)
+    reasoning = _reasoning_item()
+    function_call = _provider_function_call()
+    creates, fake_create = _reasoning_continuation_create(stream, [reasoning, function_call])
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+
+    request = _make_request("What do you see?")
+    outputs = list(handler.process(request))
+    tool_chunks = [output for output in outputs if isinstance(output, LLMResponseChunk) and output.tools]
+    assert len(tool_chunks) == 1
+    assert tool_chunks[0].tools[0].call_id == "call_original"
+    assert tool_chunks[0].tools[0].id == "fc_orig"
+
+    request.runtime_config.chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id="call_original",
+            output="a cat",
+        )
+    )
+    list(handler.process(GenerateResponseRequest(runtime_config=request.runtime_config)))
+
+    assert len(creates) == 2
+    assert creates[0]["include"] == ["reasoning.encrypted_content"]
+    assert creates[1]["include"] == ["reasoning.encrypted_content"]
+    second_input = creates[1]["input"]
+    types = [item["type"] for item in second_input]
+    idx = types.index("reasoning")
+    assert types[idx : idx + 3] == ["reasoning", "function_call", "function_call_output"]
+    assert second_input[idx]["id"] == "rs_1"
+    assert second_input[idx]["type"] == "reasoning"
+    assert second_input[idx]["encrypted_content"] == "gAAAA"
+    assert second_input[idx]["summary"] == [{"text": "plan", "type": "summary_text"}]
+    assert second_input[idx + 1]["id"] == "fc_orig"
+    assert second_input[idx + 1]["call_id"] == "call_original"
+    assert second_input[idx + 2]["call_id"] == "call_original"
+    assert second_input[idx + 2]["output"] == "a cat"
+
+
+@pytest.mark.parametrize("stream", [True, False])
+def test_process_replays_two_calls_when_outputs_arrive_in_reverse_order(stream):
+    handler = _make_handler(stream=stream)
+    first_output = [
+        _reasoning_item("rs_1"),
+        _provider_function_call(call_id="call_original", item_id="fc_orig", name="camera"),
+        _reasoning_item("rs_2", summary_text="next", encrypted_content="gBBBB"),
+        _provider_function_call(call_id="call_second", item_id="fc_other", name="lights"),
+    ]
+    creates, fake_create = _reasoning_continuation_create(stream, first_output)
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+
+    request = _make_request("Check camera and lights")
+    outputs = list(handler.process(request))
+    tool_chunks = [output for output in outputs if isinstance(output, LLMResponseChunk) and output.tools]
+    assert [tool.call_id for chunk in tool_chunks for tool in chunk.tools] == ["call_original", "call_second"]
+
+    chat = request.runtime_config.chat
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id="call_second",
+            output="off",
+        )
+    )
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id="call_original",
+            output="a cat",
+        )
+    )
+    list(handler.process(GenerateResponseRequest(runtime_config=request.runtime_config)))
+
+    relevant = [
+        item
+        for item in creates[1]["input"]
+        if item["type"] in {"reasoning", "function_call", "function_call_output"}
+    ]
+    assert [item["type"] for item in relevant] == [
+        "reasoning",
+        "function_call",
+        "function_call_output",
+        "reasoning",
+        "function_call",
+        "function_call_output",
+    ]
+    assert relevant[0]["id"] == "rs_1"
+    assert relevant[0]["encrypted_content"] == "gAAAA"
+    assert relevant[1]["id"] == "fc_orig"
+    assert relevant[1]["call_id"] == "call_original"
+    assert relevant[2]["call_id"] == "call_original"
+    assert relevant[2]["output"] == "a cat"
+    assert relevant[3]["id"] == "rs_2"
+    assert relevant[3]["encrypted_content"] == "gBBBB"
+    assert relevant[4]["id"] == "fc_other"
+    assert relevant[4]["call_id"] == "call_second"
+    assert relevant[5]["call_id"] == "call_second"
+    assert relevant[5]["output"] == "off"

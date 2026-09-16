@@ -19,7 +19,6 @@ import numpy as np
 from nltk import sent_tokenize
 from openai import OpenAI
 from openai.types.realtime.conversation_item import (
-    RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
 )
 from openai.types.realtime.realtime_conversation_item_assistant_message import (
@@ -32,8 +31,11 @@ from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import (
     Chat,
     ChatItemError,
+    ReasoningRecord,
     SupportedItem,
     build_active_chat,
+    hosted_assistant_message,
+    hosted_function_call,
     make_system_message,
     make_user_audio_message,
 )
@@ -86,12 +88,19 @@ class AssistantMessage(BaseModel):
     """A complete assistant turn to write back to history."""
 
     content: list[AssistantContent]
+    leading_reasoning: tuple[ReasoningRecord, ...] = ()
 
 
 class ToolCall(BaseModel):
-    """A complete function tool call (``call_id`` / ``id`` already regenerated)."""
+    """A complete function tool call.
+
+    IDs are whatever the producing backend set. Responses may keep provider ids;
+    Chat Completions mints ``call_`` / ``fc_`` ids. ``leading_reasoning`` is
+    domain-only and is not copied onto client tool parts.
+    """
 
     item: ResponseFunctionToolCall
+    leading_reasoning: tuple[ReasoningRecord, ...] = ()
 
 
 class Usage(BaseModel):
@@ -536,7 +545,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             prefetch_transaction=turn.prefetch_transaction,
         )
 
-    def _record_tool_call(self, state: _GenState, turn: _Turn, item: ResponseFunctionToolCall) -> Iterator[LLMOut]:
+    def _record_tool_call(self, state: _GenState, turn: _Turn, event: ToolCall) -> Iterator[LLMOut]:
         """Emit a tool call, persisting it (and any assistant text seen so far)
         to history *before* it is forwarded to the client.
 
@@ -550,15 +559,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         Out-of-band turns never touch the default conversation, and a stale turn
         records nothing (it is not forwarded to the client either)."""
+        item = event.item
         state.tools.append(item)
-        fc_item = RealtimeConversationItemFunctionCall(
-            type="function_call",
-            name=item.name,
-            arguments=item.arguments,
-            call_id=item.call_id,
-            id=item.id,
-            status=item.status,
-        )
+        fc_item = hosted_function_call(item, event.leading_reasoning)
         if self._turn_is_cancelled(turn) or not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
             logger.info("LLM generation cancelled (stale speculative turn)")
             return
@@ -618,9 +621,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 break
 
             if isinstance(event, AssistantMessage):
-                state.pending.append(
-                    RealtimeConversationItemAssistantMessage(type="message", role="assistant", content=event.content)
-                )
+                state.pending.append(hosted_assistant_message(event.content, event.leading_reasoning))
             elif isinstance(event, ToolCall):
                 # Flush any pending spoken text before emitting the tool call.
                 if printable_text.strip():
@@ -633,7 +634,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         break
                     yield from _flush(sentence_batch)
                     sentence_batch = []
-                yield from self._record_tool_call(state, turn, event.item)
+                yield from self._record_tool_call(state, turn, event)
             elif isinstance(event, TextDelta):
                 if not turn.wants_audio:
                     # Text-only: forward verbatim. Keep every character (no
@@ -701,11 +702,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 cancelled = True
                 break
             if isinstance(event, AssistantMessage):
-                state.pending.append(
-                    RealtimeConversationItemAssistantMessage(type="message", role="assistant", content=event.content)
-                )
+                state.pending.append(hosted_assistant_message(event.content, event.leading_reasoning))
             elif isinstance(event, ToolCall):
-                yield from self._record_tool_call(state, turn, event.item)
+                yield from self._record_tool_call(state, turn, event)
             elif isinstance(event, TextDelta):
                 # Text-only keeps every character verbatim; audio strips markdown
                 # and TTS-unfriendly symbols. Not per-delta here: each TextDelta
