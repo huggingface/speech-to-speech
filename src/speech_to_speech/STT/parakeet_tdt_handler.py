@@ -122,8 +122,8 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
             gen_kwargs: Additional generation kwargs
         """
         self.gen_kwargs = gen_kwargs
-        self.start_language = language
-        self.last_language = language if language else "en"
+        self.start_language = self._normalize_language(language)
+        self.last_language = self.start_language if self.start_language else "en"
         self.enable_live_transcription = enable_live_transcription
         self.live_transcription_update_interval = live_transcription_update_interval
         self.compute_lock = Lock()
@@ -327,8 +327,9 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                     lock_scope_s = perf_counter() - lock_scope_start_s
 
             # Validate and update language
-            if language_code and language_code in SUPPORTED_LANGUAGES:
-                self.last_language = language_code
+            base_code = language_code.removesuffix("-auto") if language_code else None
+            if base_code and base_code in SUPPORTED_LANGUAGES:
+                self.last_language = base_code
             else:
                 language_code = self.last_language
 
@@ -401,6 +402,22 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         code = detected.iso_code_639_1.name.lower()
         # Map back lingua-specific codes to our supported codes
         return {v: k for k, v in _LINGUA_CODE_MAP.items()}.get(code, code)
+
+    def _resolve_language(self, pred_text: str) -> str:
+        """Resolve the language to report: pinned as-is, detected tagged with -auto."""
+        if self.start_language:
+            return self.start_language
+        detected_lang = self._detect_language_from_text(pred_text)
+        logger.debug("Parakeet detected language: %s", detected_lang)
+        return f"{detected_lang}-auto" if detected_lang else self.last_language
+
+    def _normalize_language(self, language: Optional[str]) -> Optional[str]:
+        if not isinstance(language, str):
+            return None
+        language = language.strip()
+        if not language or language.lower() in ("auto", "none", "null"):
+            return None
+        return language
 
     @contextmanager
     def _compute_lock_context(self, handler_name: str, timeout: float) -> Iterator[bool]:
@@ -575,14 +592,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
             return pred_text, language_code
 
         # Determine language
-        if self.start_language and self.start_language != "auto":
-            language_code = self.start_language
-        else:
-            detected_lang = self._detect_language_from_text(pred_text)
-            if detected_lang:
-                language_code = detected_lang
-            else:
-                language_code = self.last_language
+        language_code = self._resolve_language(pred_text)
 
         return pred_text, language_code
 
@@ -603,18 +613,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
             pred_text = str(result).strip()
 
         # Determine language:
-        # 1. Use fixed language if specified by user
-        # 2. Try to detect from transcribed text using langdetect
-        # 3. Fall back to last known language
-        if self.start_language and self.start_language != "auto":
-            language_code = self.start_language
-        else:
-            # Detect language from transcribed text
-            detected_lang = self._detect_language_from_text(pred_text)
-            if detected_lang:
-                language_code = detected_lang
-            else:
-                language_code = self.last_language
+        language_code = self._resolve_language(pred_text)
 
         return pred_text, language_code
 
@@ -622,14 +621,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         """Process audio using nano-parakeet backend."""
         pred_text = self.model.transcribe(audio_input).strip()
 
-        if self.start_language and self.start_language != "auto":
-            language_code = self.start_language
-        else:
-            detected_lang = self._detect_language_from_text(pred_text)
-            if detected_lang:
-                language_code = detected_lang
-            else:
-                language_code = self.last_language
+        language_code = self._resolve_language(pred_text)
 
         return pred_text, language_code
 
