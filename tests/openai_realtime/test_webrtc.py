@@ -30,14 +30,17 @@ av = pytest.importorskip("av")
 import httpx  # noqa: E402  (ships with the openai dependency)
 from aioice.ice import Connection  # noqa: E402
 from aiortc import RTCPeerConnection, RTCSessionDescription  # noqa: E402
+from aiortc.codecs.opus import OpusEncoder  # noqa: E402
 from aiortc.mediastreams import AudioStreamTrack, MediaStreamError  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
+import speech_to_speech.api.openai_realtime.webrtc_session as webrtc_session_module  # noqa: E402
 import speech_to_speech.api.openai_realtime.websocket_router as router_module  # noqa: E402
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit  # noqa: E402
 from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService  # noqa: E402
 from speech_to_speech.api.openai_realtime.transports import SessionTransport  # noqa: E402
 from speech_to_speech.api.openai_realtime.webrtc_session import (  # noqa: E402
+    AUDIO_PTIME,
     WEBRTC_FRAME_SAMPLES,
     WEBRTC_SAMPLE_RATE,
     PcmResampler,
@@ -62,6 +65,10 @@ from speech_to_speech.pipeline.messages import (  # noqa: E402
 from .test_openai_client import _ServerEnv  # noqa: E402
 
 PIPELINE_SAMPLE_RATE = 16_000
+IDLE_RECV_OBSERVATION_S = AUDIO_PTIME * 2
+POST_IDLE_PAUSE_S = AUDIO_PTIME * 3
+PACING_ASSERTION_MIN_S = AUDIO_PTIME / 2
+RECV_TIMEOUT_S = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +198,48 @@ class TestPcmResampler:
 
 
 class TestPipelineAudioTrack:
-    async def test_recv_returns_written_audio_then_silence(self):
+    async def test_recv_waits_for_audio_when_idle(self):
+        track = PipelineAudioTrack()
+        recv_task = asyncio.create_task(track.recv())
+
+        try:
+            track.write(b"")
+            await asyncio.sleep(IDLE_RECV_OBSERVATION_S)
+            assert not recv_task.done()
+
+            payload = (np.ones(WEBRTC_FRAME_SAMPLES, dtype=np.int16) * 5).tobytes()
+            track.write(payload)
+            frame = await asyncio.wait_for(recv_task, timeout=RECV_TIMEOUT_S)
+            assert np.all(frame.to_ndarray() == 5)
+        finally:
+            recv_task.cancel()
+            await asyncio.gather(recv_task, return_exceptions=True)
+            track.stop()
+
+    async def test_recv_resumes_with_continuous_encoded_timestamps(self, monkeypatch):
+        clock_now = [0.0]
+        monkeypatch.setattr(webrtc_session_module.time, "time", lambda: clock_now[0])
+        track = PipelineAudioTrack()
+        track.write(b"\x00" * WEBRTC_FRAME_SAMPLES * 2)
+        first_frame = await track.recv()
+
+        recv_task = asyncio.create_task(track.recv())
+        await asyncio.sleep(0)
+        clock_now[0] = POST_IDLE_PAUSE_S
+        track.write(b"\x00" * WEBRTC_FRAME_SAMPLES * 2 * 2)
+        resumed_frame = await asyncio.wait_for(recv_task, timeout=RECV_TIMEOUT_S)
+
+        start = time.monotonic()
+        following_frame = await track.recv()
+        elapsed = time.monotonic() - start
+        assert elapsed >= PACING_ASSERTION_MIN_S
+
+        encoder = OpusEncoder()
+        encoded_timestamps = [encoder.encode(frame)[1] for frame in (first_frame, resumed_frame, following_frame)]
+        assert encoded_timestamps[2] - encoded_timestamps[1] == WEBRTC_FRAME_SAMPLES
+        track.stop()
+
+    async def test_recv_returns_written_audio(self):
         track = PipelineAudioTrack()
         payload = (np.ones(WEBRTC_FRAME_SAMPLES, dtype=np.int16) * 5).tobytes()
         track.write(payload)
@@ -199,9 +247,6 @@ class TestPipelineAudioTrack:
         frame = await track.recv()
         assert frame.sample_rate == WEBRTC_SAMPLE_RATE
         assert np.all(frame.to_ndarray() == 5)
-
-        frame = await track.recv()  # buffer now empty → silence
-        assert np.all(frame.to_ndarray() == 0)
         track.stop()
 
     async def test_recv_paces_to_wall_clock(self):
@@ -224,15 +269,16 @@ class TestPipelineAudioTrack:
 
         track.clear()
         assert track.buffered_bytes == 0
-        frame = await track.recv()
-        assert np.all(frame.to_ndarray() == 0)
         track.stop()
 
-    async def test_recv_after_stop_raises(self):
+    async def test_stop_wakes_pending_recv_and_raises(self):
         track = PipelineAudioTrack()
+        recv_task = asyncio.create_task(track.recv())
+        await asyncio.sleep(IDLE_RECV_OBSERVATION_S)
         track.stop()
+
         with pytest.raises(MediaStreamError):
-            await track.recv()
+            await asyncio.wait_for(recv_task, timeout=RECV_TIMEOUT_S)
 
 
 # ---------------------------------------------------------------------------

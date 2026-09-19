@@ -103,10 +103,10 @@ class PipelineAudioTrack(MediaStreamTrack):
 
     The send loop pushes generated audio in via ``write()`` (faster than
     real time); ``recv()`` paces delivery against the wall clock like
-    aiortc's built-in AudioStreamTrack, emitting silence when the buffer is
-    empty so the RTP stream stays continuous. ``clear()`` drops unplayed
-    audio — this is the server-side equivalent of the client's speaker
-    buffer, so barge-in must flush it for interruption to be audible.
+    aiortc's built-in AudioStreamTrack, waiting when the buffer is empty.
+    ``clear()`` drops unplayed audio — this is the server-side equivalent of
+    the client's speaker buffer, so barge-in must flush it for interruption
+    to be audible.
     """
 
     kind = "audio"
@@ -114,14 +114,23 @@ class PipelineAudioTrack(MediaStreamTrack):
     def __init__(self) -> None:
         super().__init__()
         self._buffer = bytearray()
+        self._data_available = asyncio.Event()
         self._start: Optional[float] = None
         self._timestamp = 0
 
     def write(self, pcm: bytes) -> None:
+        if not pcm:
+            return
         self._buffer.extend(pcm)
+        self._data_available.set()
 
     def clear(self) -> None:
         del self._buffer[:]
+        self._data_available.clear()
+
+    def stop(self) -> None:
+        super().stop()
+        self._data_available.set()
 
     @property
     def buffered_bytes(self) -> int:
@@ -131,12 +140,26 @@ class PipelineAudioTrack(MediaStreamTrack):
         if self.readyState != "live":
             raise MediaStreamError
 
+        waited_for_audio = False
+        while not self._buffer:
+            self._data_available.clear()
+            if self._buffer:
+                break
+            waited_for_audio = True
+            await self._data_available.wait()
+            if self.readyState != "live":
+                raise MediaStreamError
+
+        now = time.time()
         if self._start is None:
-            self._start = time.time()
+            self._start = now
             self._timestamp = 0
+        elif waited_for_audio:
+            self._timestamp += WEBRTC_FRAME_SAMPLES
+            self._start = now - (self._timestamp / WEBRTC_SAMPLE_RATE)
         else:
             self._timestamp += WEBRTC_FRAME_SAMPLES
-            wait = self._start + (self._timestamp / WEBRTC_SAMPLE_RATE) - time.time()
+            wait = self._start + (self._timestamp / WEBRTC_SAMPLE_RATE) - now
             if wait > 0:
                 await asyncio.sleep(wait)
 
