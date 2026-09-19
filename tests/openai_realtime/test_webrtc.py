@@ -216,6 +216,21 @@ class TestPipelineAudioTrack:
             await asyncio.gather(recv_task, return_exceptions=True)
             track.stop()
 
+    async def test_recv_handles_audio_arriving_during_wait_setup(self, monkeypatch):
+        track = PipelineAudioTrack()
+        payload = (np.ones(WEBRTC_FRAME_SAMPLES, dtype=np.int16) * 5).tobytes()
+        original_clear = track._data_available.clear
+
+        def clear_with_concurrent_write():
+            original_clear()
+            track.write(payload)
+
+        monkeypatch.setattr(track._data_available, "clear", clear_with_concurrent_write)
+        frame = await asyncio.wait_for(track.recv(), timeout=RECV_TIMEOUT_S)
+
+        assert np.all(frame.to_ndarray() == 5)
+        track.stop()
+
     async def test_recv_resumes_with_continuous_encoded_timestamps(self, monkeypatch):
         clock_now = [0.0]
         monkeypatch.setattr(webrtc_session_module.time, "time", lambda: clock_now[0])
