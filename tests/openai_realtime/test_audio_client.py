@@ -165,6 +165,7 @@ def test_audio_client_sends_realtime_session_configuration():
         "type": "session.update",
         "session": {
             "type": "realtime",
+            "extensions": ["speech_to_speech.input_audio_transcription.snapshot"],
             "instructions": "Be concise",
             "audio": {
                 "input": {
@@ -444,6 +445,75 @@ def test_audio_client_accumulates_incremental_user_transcription_deltas(capsys):
 
     assert renderer.user_transcript_by_item == {}
     assert "USER: user partial" in capsys.readouterr().out
+
+
+def test_audio_client_renders_snapshots_and_replaces_on_completion(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    for event in (
+        SimpleNamespace(type="input_audio_buffer.speech_started", item_id="item_1"),
+        SimpleNamespace(
+            type="speech_to_speech.input_audio_transcription.snapshot",
+            item_id="item_1",
+            transcript="hello brave",
+        ),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="item_1",
+            delta="hello",
+        ),
+        SimpleNamespace(
+            type="speech_to_speech.input_audio_transcription.snapshot",
+            item_id="item_1",
+            transcript="hello brave new",
+        ),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="item_1",
+            transcript="hello brave new world",
+        ),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    assert renderer.user_transcript_by_item == {}
+    assert renderer.user_snapshot_by_item == {}
+    out = capsys.readouterr().out
+    assert "USER: hello brave new world" in out
+
+
+def test_audio_client_clears_snapshots_and_deltas_on_transcription_failed(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+
+    for event in (
+        SimpleNamespace(type="input_audio_buffer.speech_started", item_id="item_1"),
+        SimpleNamespace(
+            type="speech_to_speech.input_audio_transcription.snapshot",
+            item_id="item_1",
+            transcript="hello brave",
+        ),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="item_1",
+            delta="hello",
+        ),
+        SimpleNamespace(
+            type="conversation.item.input_audio_transcription.failed",
+            item_id="item_1",
+            error=SimpleNamespace(
+                type="transcription_error",
+                message="transcription timed out",
+            ),
+        ),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    assert renderer.user_transcript_by_item == {}
+    assert renderer.user_snapshot_by_item == {}
+    assert renderer.live_user_width == 0
+    out = capsys.readouterr().out
+    assert "ERROR: transcription_error: transcription timed out" in out
 
 
 def test_audio_client_tracks_overlapping_user_transcriptions_by_item(capsys):

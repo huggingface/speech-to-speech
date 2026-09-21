@@ -26,6 +26,9 @@ from openai.types.realtime.realtime_conversation_item_user_message import (
 )
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
+from speech_to_speech.api.openai_realtime.input_state import (
+    SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
+)
 from speech_to_speech.LLM.chat import ChatItemError, add_supported_item
 from speech_to_speech.pipeline.events import (
     PartialTranscriptionEvent,
@@ -264,8 +267,21 @@ class ConversationHandler(RealtimeBaseHandler):
 
         previous = input_item.latest_transcript
         input_item.latest_transcript = hypothesis
+
+        events: list[ServerEvent] = []
+        if st.runtime_config.input_audio_transcription_snapshots_enabled:
+            events.append(
+                SpeechToSpeechInputAudioTranscriptionSnapshotEvent(
+                    type="speech_to_speech.input_audio_transcription.snapshot",
+                    event_id=self._next_event_id(),
+                    item_id=item_id,
+                    content_index=0,
+                    transcript=hypothesis,
+                )
+            )
+
         if not previous:
-            return []
+            return events
 
         stable_words = _stable_transcript_words(previous, hypothesis)
         emitted_words = _transcript_words(input_item.transcript_prefix)
@@ -281,15 +297,15 @@ class ConversationHandler(RealtimeBaseHandler):
                 transcript_for_log(input_item.transcript_prefix),
                 transcript_for_log(hypothesis),
             )
-            return []
+            return events
 
         new_words = stable_words[len(emitted_words) :]
         if not new_words:
-            return []
+            return events
 
         delta = (" " if emitted_words else "") + " ".join(word[0] for word in new_words)
         input_item.transcript_prefix += delta
-        return [
+        events.append(
             ConversationItemInputAudioTranscriptionDeltaEvent(
                 type="conversation.item.input_audio_transcription.delta",
                 event_id=self._next_event_id(),
@@ -297,7 +313,8 @@ class ConversationHandler(RealtimeBaseHandler):
                 item_id=item_id,
                 delta=delta,
             )
-        ]
+        )
+        return events
 
     def terminalize_input_item(
         self,

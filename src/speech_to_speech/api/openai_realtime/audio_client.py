@@ -194,6 +194,7 @@ def build_session_update(config: RealtimeAudioClientConfig) -> dict[str, Any]:
 
     session: dict[str, Any] = {
         "type": "realtime",
+        "extensions": ["speech_to_speech.input_audio_transcription.snapshot"],
         "audio": {
             "input": input_config,
             "output": output_config,
@@ -280,6 +281,7 @@ class _FriendlyEventRenderer:
     def __init__(self) -> None:
         # Input transcription events can arrive out of order across items.
         self.user_transcript_by_item: dict[str | None, str] = {}
+        self.user_snapshot_by_item: dict[str | None, str] = {}
         self.live_user_width = 0
         self.saw_user_speech = False
         self.live_assistant_stream: _AssistantTranscriptStream | None = None
@@ -380,12 +382,21 @@ def handle_server_event(
         renderer.saw_user_speech = True
     elif event.type == "input_audio_buffer.speech_stopped":
         return
+    elif event.type == "speech_to_speech.input_audio_transcription.snapshot":
+        renderer.finish_live_assistant_text()
+        item_id = getattr(event, "item_id", None)
+        transcript = getattr(event, "transcript", "") or ""
+        renderer.user_snapshot_by_item[item_id] = transcript
+        display_text = transcript.strip()
+        if display_text:
+            renderer.render_live_user_text(display_text)
     elif event.type == "conversation.item.input_audio_transcription.delta":
         renderer.finish_live_assistant_text()
         item_id = getattr(event, "item_id", None)
         transcript = renderer.user_transcript_by_item.get(item_id, "") + (event.delta or "")
         renderer.user_transcript_by_item[item_id] = transcript
-        display_text = transcript.strip()
+        snapshot = renderer.user_snapshot_by_item.get(item_id)
+        display_text = (snapshot if snapshot is not None else transcript).strip()
         if display_text:
             renderer.render_live_user_text(display_text)
     elif event.type == "conversation.item.input_audio_transcription.completed":
@@ -394,6 +405,21 @@ def handle_server_event(
         transcript = event.transcript or ""
         renderer.render_live_user_text(transcript.strip(), final=True)
         renderer.user_transcript_by_item.pop(item_id, None)
+        renderer.user_snapshot_by_item.pop(item_id, None)
+    elif event.type == "conversation.item.input_audio_transcription.failed":
+        renderer.clear_live_user_text()
+        renderer.finish_live_assistant_text()
+        item_id = getattr(event, "item_id", None)
+        renderer.user_transcript_by_item.pop(item_id, None)
+        renderer.user_snapshot_by_item.pop(item_id, None)
+        error = getattr(event, "error", None)
+        err_type = getattr(error, "type", "transcription_error") if error else "transcription_error"
+        err_msg = (
+            getattr(error, "message", "Input audio transcription failed")
+            if error
+            else "Input audio transcription failed"
+        )
+        print(f"ERROR: {err_type}: {err_msg}", flush=True)
     elif event.type == "response.created":
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()
