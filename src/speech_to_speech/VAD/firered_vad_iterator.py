@@ -46,6 +46,7 @@ class FireRedVadIterator:
         self.prefix_buffer: list[torch.Tensor] = []
         self.active_speech_samples = 0
         self.last_utterance_active_speech_samples = 0
+        self._candidate_speech_samples = 0
         self._pre_speech_buffer: deque[torch.Tensor] = deque()
         self._pre_speech_samples = 0
         self._tail = np.zeros(0, dtype=np.float32)
@@ -98,6 +99,7 @@ class FireRedVadIterator:
         self.prefix_buffer = []
         self.active_speech_samples = 0
         self.last_utterance_active_speech_samples = 0
+        self._candidate_speech_samples = 0
         self._pre_speech_buffer.clear()
         self._pre_speech_samples = 0
         self.streamer.reset()
@@ -186,6 +188,11 @@ class FireRedVadIterator:
         ended_utterance: list[torch.Tensor] | None = None
 
         for frame in frames:
+            if not self.triggered:
+                if self._frame_is_speech(frame):
+                    self._candidate_speech_samples += _FIRERED_HOP_SAMPLES
+                else:
+                    self._candidate_speech_samples = 0
             if frame.is_speech_start and not self.triggered:
                 self.triggered = True
                 self.prefix_buffer = list(self._pre_speech_buffer)
@@ -193,8 +200,9 @@ class FireRedVadIterator:
                 self._pre_speech_samples = 0
                 self.buffer.append(x)
                 chunk_in_buffer = True
-                self.active_speech_samples = 0
-            if self.triggered and self._frame_is_speech(frame):
+                self.active_speech_samples = self._candidate_speech_samples
+                self._candidate_speech_samples = 0
+            elif self.triggered and self._frame_is_speech(frame):
                 self.active_speech_samples += _FIRERED_HOP_SAMPLES
             if frame.is_speech_end and self.triggered:
                 if not chunk_in_buffer:

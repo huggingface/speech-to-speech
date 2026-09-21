@@ -259,3 +259,56 @@ def test_firered_iterator_does_not_count_trailing_silence_as_active_speech() -> 
     assert spoken_utterance is not None
     assert sum(len(chunk) for chunk in spoken_utterance) == 1024
     assert iterator.last_utterance_active_speech_samples == 160
+
+
+def test_firered_iterator_counts_speech_hops_before_start_confirmation() -> None:
+    streamer = _FakeFireRedStream(
+        [_frame(is_speech=True) for _ in range(7)]
+        + [
+            _frame(is_speech_start=True, is_speech=True),
+            _frame(is_speech=False, is_speech_end=True, smoothed_prob=0.0),
+        ]
+    )
+    iterator = FireRedVadIterator(
+        streamer,
+        threshold=0.5,
+        sampling_rate=16000,
+        min_silence_duration_ms=100,
+        speech_pad_ms=0,
+    )
+
+    chunk = torch.ones(512)
+    spoken_utterance = None
+    for _ in range(8):
+        spoken_utterance = iterator(chunk)
+        if spoken_utterance is not None:
+            break
+
+    assert spoken_utterance is not None
+    assert iterator.last_utterance_active_speech_samples == 8 * 160
+
+
+def test_firered_iterator_counts_forty_three_speech_hops_including_pre_start() -> None:
+    streamer = _FakeFireRedStream(
+        [_frame(is_speech=True) for _ in range(7)]
+        + [_frame(is_speech_start=True, is_speech=True)]
+        + [_frame(is_speech=True) for _ in range(35)]
+        + [_frame(is_speech=False, is_speech_end=True, smoothed_prob=0.0)]
+    )
+    iterator = FireRedVadIterator(
+        streamer,
+        threshold=0.5,
+        sampling_rate=16000,
+        min_silence_duration_ms=100,
+        speech_pad_ms=0,
+    )
+
+    chunk = torch.ones(512)
+    spoken_utterance = None
+    for _ in range(32):
+        spoken_utterance = iterator(chunk)
+        if spoken_utterance is not None:
+            break
+
+    assert spoken_utterance is not None
+    assert iterator.last_utterance_active_speech_samples == 43 * 160
