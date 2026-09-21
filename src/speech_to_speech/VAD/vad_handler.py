@@ -243,7 +243,11 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._speculative_raw_audio_prefix = None
         self._last_final_wall_time = None
         self._last_final_audio_ms = None
-        self.speculative_turns.observe(self._current_turn_id, self._current_turn_revision)
+        self.speculative_turns.observe(
+            self._current_turn_id,
+            self._current_turn_revision,
+            order=self._turn_counter,
+        )
         return self._current_turn_id, self._current_turn_revision
 
     def _speech_buffer_duration_ms(self) -> float:

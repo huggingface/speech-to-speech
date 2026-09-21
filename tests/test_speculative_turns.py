@@ -43,6 +43,134 @@ def test_confirmed_reopen_makes_previous_revision_stale():
     assert tracker.is_latest("turn_1", 1)
 
 
+def test_newer_conversation_order_supersedes_uncommitted_turn():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0, order=1)
+
+    tracker.observe("turn_2", 0, order=2)
+
+    assert not tracker.is_latest("turn_1", 0)
+    assert tracker.is_latest("turn_2", 0)
+
+
+def test_reopen_revision_keeps_its_conversation_order():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0, order=1)
+    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+
+    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+
+    assert tracker._turn_order == {"turn_1": 1}
+    assert not tracker.is_latest("turn_1", 0)
+    assert tracker.is_latest("turn_1", 1)
+
+
+def test_late_commit_from_superseded_turn_is_rejected():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0, order=1)
+    tracker.observe("turn_2", 0, order=2)
+
+    assert not tracker.commit_if_latest_after_pending_reopen("turn_1", 0)
+    assert not tracker.is_committed("turn_1", 0)
+
+
+def test_committed_turn_remains_valid_after_conversation_advances():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0, order=1)
+    tracker.commit("turn_1", 0)
+
+    tracker.observe("turn_2", 0, order=2)
+
+    assert tracker.is_latest("turn_1", 0)
+    assert tracker.is_latest("turn_2", 0)
+
+
+def test_committed_exemption_does_not_override_newer_revision():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0, order=1)
+    tracker.commit("turn_1", 0)
+
+    tracker.observe("turn_1", 1)
+
+    assert not tracker.is_latest("turn_1", 0)
+    assert tracker.is_latest("turn_1", 1)
+
+
+def test_pending_reopen_cannot_resurrect_superseded_turn():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0, order=1)
+    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+
+    tracker.observe("turn_2", 0, order=2)
+
+    assert not tracker.has_pending_reopen("turn_1", 0)
+    assert not tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+    assert not tracker.is_latest("turn_1", 1)
+
+
+def test_newer_turn_releases_older_reopen_grace_waiter_as_stale():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0, order=1)
+    tracker.start_reopen_grace("turn_1", 0, grace_s=1.0)
+    result: list[bool] = []
+
+    thread = Thread(target=lambda: result.append(tracker.is_latest_after_reopen_grace("turn_1", 0)))
+    thread.start()
+    time.sleep(0.02)
+
+    tracker.observe("turn_2", 0, order=2)
+    thread.join(timeout=0.5)
+
+    assert not thread.is_alive()
+    assert result == [False]
+
+
+def test_reset_clears_conversation_order_for_reused_turn_ids():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0, order=1)
+    tracker.observe("turn_2", 0, order=2)
+
+    tracker.reset()
+    tracker.observe("turn_1", 0, order=1)
+
+    assert tracker._latest_order == 1
+    assert tracker.is_latest("turn_1", 0)
+
+
+def test_pruned_ordered_turn_stays_stale():
+    tracker = SpeculativeTurnTracker(max_tracked_turns=1)
+    tracker.observe("turn_1", 0, order=1)
+    tracker.observe("turn_2", 0, order=2)
+
+    assert "turn_1" not in tracker._latest_revision
+    assert "turn_1" not in tracker._turn_order
+    assert not tracker.is_latest("turn_1", 0)
+    assert tracker.is_latest("turn_2", 0)
+
+
+def test_pruning_preserves_committed_work_exemption():
+    tracker = SpeculativeTurnTracker(max_tracked_turns=1)
+    tracker.observe("turn_1", 0, order=1)
+    tracker.commit("turn_1", 0)
+
+    tracker.observe("turn_2", 0, order=2)
+
+    assert "turn_1" not in tracker._latest_revision
+    assert tracker.is_committed("turn_1", 0)
+    assert tracker.is_latest("turn_1", 0)
+
+
+def test_delayed_older_observation_cannot_prune_current_order():
+    tracker = SpeculativeTurnTracker(max_tracked_turns=1)
+    tracker.observe("turn_2", 0, order=2)
+
+    tracker.observe("turn_1", 0, order=1)
+
+    assert list(tracker._latest_revision) == ["turn_2"]
+    assert tracker.is_latest("turn_2", 0)
+    assert not tracker.is_latest("turn_1", 0)
+
+
 def test_tracker_prunes_old_turn_revisions():
     tracker = SpeculativeTurnTracker(max_tracked_turns=2)
     tracker.observe("turn_1", 0)
@@ -310,6 +438,7 @@ def test_vad_starts_new_turn_after_committed_turn_would_have_reopened():
     turn_id, revision, reopened = handler._ensure_turn_for_speech_start(1100)
 
     assert (turn_id, revision, reopened) == ("turn_2", 0, False)
+    assert tracker._turn_order["turn_2"] == 2
     assert tracker.is_committed("turn_1", 0)
     assert tracker.is_latest("turn_2", 0)
 

@@ -22,7 +22,7 @@ class _ReopenGrace:
 
 
 class SpeculativeTurnTracker:
-    """Thread-safe revision tracker for raw-audio speculative turns."""
+    """Thread-safe revision and conversation-order tracker for speculative turns."""
 
     _PENDING_REOPEN_WAIT_TIMEOUT_S = 2.0
     _MAX_TRACKED_TURNS = 2048
@@ -31,34 +31,54 @@ class SpeculativeTurnTracker:
         self._condition = Condition()
         self._max_tracked_turns = max_tracked_turns
         self._latest_revision: OrderedDict[str, int] = OrderedDict()
+        self._turn_order: dict[str, int] = {}
+        self._latest_order: int | None = None
         self._committed_revision: dict[str, int] = {}
+        self._committed_ordered_revisions: set[tuple[str, int]] = set()
         self._pending_reopen: dict[str, _PendingReopen] = {}
         self._reopen_grace: dict[str, _ReopenGrace] = {}
 
-    def observe(self, turn_id: str | None, revision: int | None) -> None:
+    def observe(self, turn_id: str | None, revision: int | None, *, order: int | None = None) -> None:
         if turn_id is None or revision is None:
             return
         with self._condition:
+            existing_order = self._turn_order.get(turn_id)
+            if order is not None and existing_order is not None and order != existing_order:
+                raise ValueError(f"Conversation order for {turn_id!r} changed from {existing_order} to {order}")
+
+            if order is not None:
+                self._turn_order[turn_id] = order
+                if self._latest_order is None or order > self._latest_order:
+                    self._latest_order = order
+                    self._drop_superseded_reopen_state_locked()
+
             current = self._latest_revision.get(turn_id, -1)
             if revision > current:
                 self._latest_revision[turn_id] = revision
                 self._latest_revision.move_to_end(turn_id)
                 self._prune_tracked_turns()
-                logger.debug("Observed speculative turn %s revision %d", turn_id, revision)
+                logger.debug(
+                    "Observed speculative turn %s revision %d order %s",
+                    turn_id,
+                    revision,
+                    self._turn_order.get(turn_id),
+                )
+                self._condition.notify_all()
+            elif order is not None:
                 self._condition.notify_all()
 
     def is_latest(self, turn_id: str | None, revision: int | None) -> bool:
         if turn_id is None or revision is None:
             return True
         with self._condition:
-            return self._latest_revision.get(turn_id, revision) == revision
+            return self._is_latest_locked(turn_id, revision)
 
     def is_latest_after_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool:
         if turn_id is None or revision is None:
             return True
         with self._condition:
             self._wait_for_pending_reopen_locked(turn_id, revision, self._PENDING_REOPEN_WAIT_TIMEOUT_S)
-            return self._latest_revision.get(turn_id, revision) == revision
+            return self._is_latest_locked(turn_id, revision)
 
     def try_is_latest_after_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool | None:
         """Non-blocking variant of ``is_latest_after_pending_reopen``.
@@ -71,14 +91,14 @@ class SpeculativeTurnTracker:
         with self._condition:
             if self._has_pending_reopen_locked(turn_id, revision):
                 return None
-            return self._latest_revision.get(turn_id, revision) == revision
+            return self._is_latest_locked(turn_id, revision)
 
     def is_latest_after_reopen_grace(self, turn_id: str | None, revision: int | None) -> bool:
         if turn_id is None or revision is None:
             return True
         with self._condition:
             self._wait_for_reopen_gate_locked(turn_id, revision)
-            return self._latest_revision.get(turn_id, revision) == revision
+            return self._is_latest_locked(turn_id, revision)
 
     def try_is_latest_after_reopen_grace(self, turn_id: str | None, revision: int | None) -> bool | None:
         if turn_id is None or revision is None:
@@ -93,7 +113,7 @@ class SpeculativeTurnTracker:
                 > 0
             ):
                 return None
-            return self._latest_revision.get(turn_id, revision) == revision
+            return self._is_latest_locked(turn_id, revision)
 
     def commit_if_latest_after_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool:
         if turn_id is None or revision is None:
@@ -160,7 +180,7 @@ class SpeculativeTurnTracker:
         if turn_id is None or revision is None or grace_s <= 0:
             return
         with self._condition:
-            if self._latest_revision.get(turn_id, revision) != revision:
+            if not self._is_latest_locked(turn_id, revision):
                 return
             if self._committed_revision.get(turn_id, -1) >= revision:
                 return
@@ -188,7 +208,7 @@ class SpeculativeTurnTracker:
             return self.is_latest_after_pending_reopen(turn_id, revision)
         with self._condition:
             deadline = time.monotonic() + settle_s
-            while self._latest_revision.get(turn_id, revision) == revision:
+            while self._is_latest_locked(turn_id, revision):
                 if self._has_pending_reopen_locked(turn_id, revision):
                     self._wait_for_pending_reopen_locked(
                         turn_id,
@@ -200,7 +220,7 @@ class SpeculativeTurnTracker:
                 if remaining <= 0:
                     break
                 self._condition.wait(remaining)
-            return self._latest_revision.get(turn_id, revision) == revision
+            return self._is_latest_locked(turn_id, revision)
 
     def commit(self, turn_id: str | None, revision: int | None) -> None:
         if turn_id is None or revision is None:
@@ -220,7 +240,11 @@ class SpeculativeTurnTracker:
         with self._condition:
             committed = self._committed_revision.get(turn_id)
             if committed is None:
-                return False
+                if revision is None:
+                    return any(
+                        committed_turn_id == turn_id for committed_turn_id, _ in self._committed_ordered_revisions
+                    )
+                return (turn_id, revision) in self._committed_ordered_revisions
             return revision is None or committed >= revision
 
     def begin_reopen_candidate(self, turn_id: str | None, revision: int | None) -> int | None:
@@ -229,7 +253,7 @@ class SpeculativeTurnTracker:
         with self._condition:
             if self._committed_revision.get(turn_id, -1) >= revision:
                 return None
-            if self._latest_revision.get(turn_id, revision) != revision:
+            if not self._is_latest_locked(turn_id, revision):
                 return None
 
             pending = self._pending_reopen.get(turn_id)
@@ -273,7 +297,7 @@ class SpeculativeTurnTracker:
                 self._prune_tracked_turns()
                 self._condition.notify_all()
                 return False
-            if self._latest_revision.get(turn_id, base_revision) != base_revision:
+            if not self._is_latest_locked(turn_id, base_revision):
                 del self._pending_reopen[turn_id]
                 self._prune_tracked_turns()
                 self._condition.notify_all()
@@ -321,19 +345,19 @@ class SpeculativeTurnTracker:
 
         Returns whether the caller's output for *revision* is still valid.
 
-        A turn that is no longer tracked is deliberately not written back:
-        ``_prune_tracked_turns`` only walks ``_latest_revision``, so a committed
-        entry without a tracked turn would never be reclaimed, and a recycled
-        turn id would then read as already committed. Such a commit still
-        reports success, since dropping the output of a turn the tracker simply
-        no longer knows about would be worse than emitting it.
+        A revision-only turn that is no longer tracked still reports success,
+        since dropping work the tracker never ordered would be worse than
+        emitting it. Once ordered tracking is active, unknown turns are stale:
+        this keeps pruned work from becoming valid again.
         """
+        if not self._is_latest_locked(turn_id, revision):
+            return False
         latest = self._latest_revision.get(turn_id)
         if latest is None:
             return True
-        if revision != latest:
-            return False
         self._committed_revision[turn_id] = revision
+        if turn_id in self._turn_order:
+            self._committed_ordered_revisions.add((turn_id, revision))
         logger.debug("Committed speculative turn %s revision %d", turn_id, revision)
         self._condition.notify_all()
         return True
@@ -342,11 +366,37 @@ class SpeculativeTurnTracker:
         pending = self._pending_reopen.get(turn_id)
         return pending is not None and pending.base_revision == revision
 
+    def _is_latest_locked(self, turn_id: str, revision: int) -> bool:
+        latest = self._latest_revision.get(turn_id)
+        if latest is not None and latest != revision:
+            return False
+        if (turn_id, revision) in self._committed_ordered_revisions:
+            return True
+        if latest is None:
+            return self._latest_order is None
+
+        order = self._turn_order.get(turn_id)
+        if order is None:
+            return self._latest_order is None
+        return order == self._latest_order
+
+    def _drop_superseded_reopen_state_locked(self) -> None:
+        if self._latest_order is None:
+            return
+        for turn_id in list(self._pending_reopen):
+            order = self._turn_order.get(turn_id)
+            if order is not None and order < self._latest_order:
+                del self._pending_reopen[turn_id]
+        for turn_id in list(self._reopen_grace):
+            order = self._turn_order.get(turn_id)
+            if order is not None and order < self._latest_order:
+                del self._reopen_grace[turn_id]
+
     def _reopen_grace_remaining_locked(self, turn_id: str, revision: int) -> float:
         grace = self._reopen_grace.get(turn_id)
         if grace is None or grace.revision != revision:
             return 0.0
-        if self._latest_revision.get(turn_id, revision) != revision:
+        if not self._is_latest_locked(turn_id, revision):
             del self._reopen_grace[turn_id]
             return 0.0
         remaining = grace.deadline - time.monotonic()
@@ -357,9 +407,9 @@ class SpeculativeTurnTracker:
         return remaining
 
     def _wait_for_reopen_gate_locked(self, turn_id: str, revision: int) -> None:
-        while self._latest_revision.get(turn_id, revision) == revision:
+        while self._is_latest_locked(turn_id, revision):
             self._wait_for_pending_reopen_locked(turn_id, revision, self._PENDING_REOPEN_WAIT_TIMEOUT_S)
-            if self._latest_revision.get(turn_id, revision) != revision:
+            if not self._is_latest_locked(turn_id, revision):
                 return
             remaining = self._reopen_grace_remaining_locked(turn_id, revision)
             if remaining <= 0:
@@ -390,27 +440,35 @@ class SpeculativeTurnTracker:
             return
 
         self._drop_expired_reopen_graces_locked()
+        current_turn_ids = {turn_id for turn_id, order in self._turn_order.items() if order == self._latest_order}
         prunable_turn_ids = [
             turn_id
             for turn_id in self._latest_revision
-            if turn_id not in self._pending_reopen and turn_id not in self._reopen_grace
+            if turn_id not in self._pending_reopen
+            and turn_id not in self._reopen_grace
+            and turn_id not in current_turn_ids
         ]
-        while len(prunable_turn_ids) > self._max_tracked_turns:
+        prunable_limit = max(0, self._max_tracked_turns - len(current_turn_ids))
+        while len(prunable_turn_ids) > prunable_limit:
             turn_id = prunable_turn_ids.pop(0)
             self._latest_revision.pop(turn_id, None)
+            self._turn_order.pop(turn_id, None)
             self._committed_revision.pop(turn_id, None)
             self._reopen_grace.pop(turn_id, None)
 
     def _drop_expired_reopen_graces_locked(self) -> None:
         now = time.monotonic()
         for turn_id, grace in list(self._reopen_grace.items()):
-            if self._latest_revision.get(turn_id, grace.revision) != grace.revision or grace.deadline <= now:
+            if not self._is_latest_locked(turn_id, grace.revision) or grace.deadline <= now:
                 del self._reopen_grace[turn_id]
 
     def reset(self) -> None:
         with self._condition:
             self._latest_revision.clear()
+            self._turn_order.clear()
+            self._latest_order = None
             self._committed_revision.clear()
+            self._committed_ordered_revisions.clear()
             self._pending_reopen.clear()
             self._reopen_grace.clear()
             self._condition.notify_all()
