@@ -405,7 +405,10 @@ def _build_handlers(
         enable_live_transcription=module_kwargs.enable_live_transcription,
         live_transcription_update_interval=module_kwargs.live_transcription_update_interval,
     )
-    speech_input_handlers = [create_backend_handler(stt_backend, stt_context)]
+    stt_handler = create_backend_handler(stt_backend, stt_context)
+    if stt_backend.spec.capabilities.streams_audio_chunks:
+        vad.streaming_stt_sink = stt_handler
+    speech_input_handlers = [stt_handler]
     if needs_notifier:
         transcription_notifier = TranscriptionNotifier(
             stop_event,
@@ -506,7 +509,7 @@ def _build_pipeline_unit(
         default_instructions=default_instructions,
     )
 
-    if module_kwargs.enable_live_transcription:
+    if module_kwargs.enable_live_transcription and not stt_selection.spec.capabilities.streams_audio_chunks:
         vad_kw.enable_realtime_transcription = True
         vad_kw.realtime_processing_pause = module_kwargs.live_transcription_update_interval
 

@@ -9,6 +9,7 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - `mlx-audio-whisper` → `STT/mlx_audio_whisper_handler.py`
 - `faster-whisper` → `STT/faster_whisper_handler.py`
 - `parakeet-tdt` → `STT/parakeet_tdt_handler.py`
+- `parakeet-unified` → `STT/nemo_asr_handler.py`
 - `paraformer` → `STT/paraformer_handler.py`
 - `qwen3-asr` → `STT/qwen3_asr_handler.py`
 - `openai` → `STT/openai_compatible_handler.py`
@@ -97,9 +98,22 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - Endpoint: `POST /v1/audio/transcriptions`
 - Upload: mono PCM16 WAV at 16 kHz
 - Supports JSON (`{"text": "..."}`) and plain-text responses
-- Keeps at most one best-effort progressive request in flight per pipeline while
-  final requests are submitted independently; stale-turn filtering still applies
+- Keeps one active progressive request and the latest pending window per pipeline;
+  final requests proceed independently, with cancellation and session-safe delivery
+- Bounds pending finals to eight per pipeline; overflow produces a typed failure
+  without uploading audio, and accepted finals retain their order
+- Endpoint capacity and provider quotas remain the inference service/proxy's responsibility
 - See [`docs/openai-compatible-stt.md`](../../../docs/openai-compatible-stt.md)
+
+### 9) Parakeet Unified (`--stt parakeet-unified`)
+
+- Handler: `NemoASRSTTHandler`
+- Install: `pip install "speech-to-speech[nemo]"`
+- Model flag: `--parakeet_unified_model_name`
+- Default model: `nvidia/parakeet-unified-en-0.6b`
+- Language flag: `--parakeet_unified_language` (default `en`)
+- Device flag: `--parakeet_unified_device` (default `auto`)
+- The pipeline transcribes each VAD utterance with NeMo `ASRModel.transcribe` (offline API)
 
 ## Language Abbreviations (ISO-style codes seen in STT handlers)
 
@@ -197,3 +211,12 @@ speech-to-speech serve --stt qwen3-asr \
   --qwen3_asr_model_name Qwen/Qwen3-ASR-1.7B-hf \
   --qwen3_asr_prompt "Vocabulary: Quilter, apostle."
 ```
+
+### Parakeet Unified
+
+```bash
+pip install "speech-to-speech[nemo]"
+speech-to-speech serve --stt parakeet-unified
+```
+
+The pipeline transcribes VAD utterances with NeMo `ASRModel.transcribe` (offline API).
