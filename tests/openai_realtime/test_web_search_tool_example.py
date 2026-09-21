@@ -28,7 +28,8 @@ class FakeAsyncClient:
 
 
 @pytest.mark.asyncio
-async def test_serper_search_returns_answer_and_organic_results(monkeypatch):
+@pytest.mark.parametrize("url", ["https://google.serper.dev/search", "https://api.litescrape.com/search"])
+async def test_serper_search_returns_answer_and_organic_results(monkeypatch, url):
     captured = {}
     response = FakeResponse(
         200,
@@ -40,6 +41,7 @@ async def test_serper_search_returns_answer_and_organic_results(monkeypatch):
         },
     )
     monkeypatch.setattr(realtime_web_search_tool, "SERPER_API_KEY", "test-key")
+    monkeypatch.setattr(realtime_web_search_tool, "SERPER_URL", url)
     monkeypatch.setattr(
         realtime_web_search_tool.httpx,
         "AsyncClient",
@@ -51,7 +53,7 @@ async def test_serper_search_returns_answer_and_organic_results(monkeypatch):
     assert result.output["answer"] == "21°C"
     assert result.output["results"] == [{"title": "Forecast", "snippet": "Sunny", "url": "https://example.com/weather"}]
     assert captured == {
-        "url": realtime_web_search_tool.SERPER_URL,
+        "url": url,
         "headers": {"X-API-KEY": "test-key", "Content-Type": "application/json"},
         "json": {"q": "weather in Bern", "num": realtime_web_search_tool.MAX_RESULTS},
     }

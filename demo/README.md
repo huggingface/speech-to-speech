@@ -197,13 +197,31 @@ new `RealtimeSession` after connection.
 The assistant can call two tools mid-conversation (toggle them from the **Tools**
 button, top-right):
 
-- **Web search** — Google results via Serper.dev, proxied server-side so the key
-  never reaches the browser. Set `SERPER_API_KEY` as an env var / Space secret.
-  Without it, the tool is disabled unless the user pastes their own key in the
-  Tools panel.
+- **Web search** — Google results via Serper.dev or a compatible endpoint,
+  proxied server-side so the key never reaches the browser. Set `SERPER_API_KEY`
+  as an env var / Space secret. Without it, the tool is disabled unless the user
+  pastes their own key in the Tools panel.
 - **Camera** — while enabled, a live self-view shows bottom-left; when the model
   calls the tool, the current frame is sent to the vision-language model so it can
   see what you're showing it.
+
+Web search supports any Serper.dev-compatible endpoint, including providers such
+as [litescrape.com](https://litescrape.com/blog/serper-migration),
+[serpbase.dev](https://serpbase.dev/docs), and others. Set the provider's full search
+endpoint and API key before starting the demo (or set them as Space secrets and
+restart). For example, with Litescrape:
+
+```bash
+export SERPER_URL="https://api.litescrape.com/search"
+export SERPER_API_KEY="your-litescrape-key"
+```
+
+`SERPER_URL` is the full search endpoint, not a base URL. Unset or blank keeps
+Serper as the default. Both the server key and any Tools-panel key must be issued
+by the configured provider. The endpoint must accept the existing `X-API-KEY`
+header and `q`/`num` JSON payload and return Serper-compatible search results.
+The [Python web-search example](../examples/realtime_web_search_tool.py) uses the same
+settings. Requests and result parsing are otherwise unchanged.
 
 ## Usage limits (deployed Space only)
 

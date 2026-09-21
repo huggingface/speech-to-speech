@@ -133,7 +133,7 @@ def _webrtc_calls_url(s2s_url: str) -> str:
     return urlunsplit((scheme, parts.netloc, path.rstrip("/") + "/calls", parts.query, ""))
 
 
-SERPER_URL = "https://google.serper.dev/search"
+SERPER_URL = os.environ.get("SERPER_URL", "").strip() or "https://google.serper.dev/search"
 # Cap results so the tool output stays small enough to feed back to the model.
 MAX_RESULTS = 5
 HERE = os.path.dirname(os.path.abspath(__file__))

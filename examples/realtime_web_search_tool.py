@@ -1,4 +1,9 @@
-"""Serper-backed Google search tool for the packaged Realtime audio client."""
+"""Serper-compatible Google search tool for the packaged Realtime audio client.
+
+For Litescrape, set SERPER_URL=https://api.litescrape.com/search and put a
+Litescrape-issued key in SERPER_API_KEY before starting the client.
+Serper remains the default when SERPER_URL is unset or blank.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +19,7 @@ from speech_to_speech.api.openai_realtime.audio_client import ToolResult
 logger = logging.getLogger(__name__)
 
 SERPER_API_KEY = os.environ.get("SERPER_API_KEY", "").strip()
-SERPER_URL = "https://google.serper.dev/search"
+SERPER_URL = os.environ.get("SERPER_URL", "").strip() or "https://google.serper.dev/search"
 MAX_RESULTS = 5
 
 TOOLS = [
