@@ -24,10 +24,13 @@ ARG PREFETCH=0
 ARG SUBSET=vibe
 RUN if [ "$PREFETCH" = "1" ]; then python docker/prefetch_eval_assets.py "$SUBSET"; fi
 RUN install -m 0755 docker/big-bench-audio-entrypoint.sh /usr/local/bin/vibe-check \
-    && mkdir -p /home/user /output /opt/hf-cache /opt/torch-cache \
-    && chown -R 1000:0 /home/user /output /opt/hf-cache /opt/torch-cache /opt/nltk_data
+    && mkdir -p /home/user /output /opt/hf-cache /opt/torch-cache /usr/src/app/src/speech_to_speech/tmp \
+    && chown -R 1000:0 /home/user /output /opt/hf-cache /opt/torch-cache /opt/nltk_data /usr/src/app/src/speech_to_speech/tmp
 # Ubuntu 24.04 already supplies UID 1000. Use the numeric ID for Space compatibility.
 USER 1000
+# The engine sets TORCHINDUCTOR_CACHE_DIR inside its package; exercise that
+# import as the runtime user so cache permission errors fail the image build.
+RUN python -c "from speech_to_speech import s2s_pipeline; import torch._dynamo"
 # Keep the image-building Space healthy without loading models or using a GPU.
 # Jobs override this with `vibe-check`.
 CMD ["python", "-m", "http.server", "7860", "--directory", "/tmp"]
