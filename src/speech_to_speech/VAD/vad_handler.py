@@ -186,7 +186,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._log_speech_ends = 0
         self._log_progressive_yields = 0
         self._speech_started_emitted = False
-        self._turn_counter = 0
         self._current_turn_id: str | None = None
         self._current_turn_revision: int | None = None
         self._speculative_audio_prefix: np.ndarray | None = None
@@ -236,18 +235,11 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
     def _start_new_turn(self) -> tuple[str, int]:
         self._cancel_pending_reopen()
-        self._turn_counter += 1
-        self._current_turn_id = f"turn_{self._turn_counter}"
-        self._current_turn_revision = 0
+        self._current_turn_id, self._current_turn_revision = self.speculative_turns.start_turn()
         self._speculative_audio_prefix = None
         self._speculative_raw_audio_prefix = None
         self._last_final_wall_time = None
         self._last_final_audio_ms = None
-        self.speculative_turns.observe(
-            self._current_turn_id,
-            self._current_turn_revision,
-            order=self._turn_counter,
-        )
         return self._current_turn_id, self._current_turn_revision
 
     def _speech_buffer_duration_ms(self) -> float:
@@ -949,7 +941,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.last_process_time = 0.0
         self._total_samples = 0
         self._speech_started_emitted = False
-        self._turn_counter = 0
         self._current_turn_id = None
         self._current_turn_revision = None
         self._speculative_audio_prefix = None

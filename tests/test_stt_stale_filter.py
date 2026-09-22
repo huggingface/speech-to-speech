@@ -234,6 +234,7 @@ def test_stt_handler_bulk_drops_queued_progressives_after_final_emit():
     for _ in range(3):
         queue_in.put(_vad_audio(revision=0, mode="progressive"))
     queue_in.put(_vad_audio(turn_id="turn_2", revision=0, mode="progressive"))
+    tracker.start_turn()
 
     assert not handler.should_process_input(_vad_audio(revision=0, mode="progressive"))
     remaining = queue_in.get_nowait()
@@ -277,14 +278,11 @@ def test_stt_handler_bulk_drops_progressives_queued_before_matching_final():
     queue_in.put(_vad_audio(revision=0, mode="progressive"))
     queue_in.put(_vad_audio(revision=0, mode="final"))
     queue_in.put(_vad_audio(turn_id="turn_2", revision=0, mode="progressive"))
+    tracker.start_turn()
 
-    assert handler._drop_stale_queued_inputs() == 1
-    first = queue_in.get_nowait()
-    second = queue_in.get_nowait()
+    assert handler._drop_stale_queued_inputs() == 2
+    remaining = queue_in.get_nowait()
 
-    assert isinstance(first, VADAudio)
-    assert first.mode == "final"
-    assert first.turn_id == "turn_1"
-    assert isinstance(second, VADAudio)
-    assert second.turn_id == "turn_2"
+    assert isinstance(remaining, VADAudio)
+    assert remaining.turn_id == "turn_2"
     assert queue_in.empty()

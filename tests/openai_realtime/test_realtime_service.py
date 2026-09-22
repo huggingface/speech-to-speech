@@ -3584,6 +3584,48 @@ class TestDispatchPipelineEvent:
         assert service._state(conn_id).current_response_id is None
         service.unregister(conn_id)
 
+    def test_new_turn_drops_uncommitted_older_assistant_output(self, runtime_config, should_listen):
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+        tracker.start_turn()
+        tracker.start_turn()
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(text="stale", turn_id="turn_1", turn_revision=0),
+        )
+
+        assert events == []
+        assert service._state(conn_id).current_response_id is None
+        assert service._state(conn_id).runtime_config.chat.buffer == []
+        service.unregister(conn_id)
+
+    def test_response_terminal_releases_committed_older_turn(self, runtime_config, should_listen):
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+        tracker.start_turn()
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(text="accepted", turn_id="turn_1", turn_revision=0),
+        )
+        tracker.start_turn()
+
+        assert events
+        assert tracker.is_latest("turn_1", 0)
+        assert tracker.is_latest("turn_2", 0)
+
+        service.finish_response(conn_id)
+
+        assert not tracker.is_latest("turn_1", 0)
+        assert not tracker.is_committed("turn_1", 0)
+        assert tracker.is_latest("turn_2", 0)
+        service.unregister(conn_id)
+
     def test_assistant_text_waits_for_pending_reopen_and_emits_cancelled_reopen(
         self,
         runtime_config,

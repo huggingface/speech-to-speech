@@ -105,6 +105,11 @@ class ResponseHandler(RealtimeBaseHandler):
         )
         st.response_usage.reset()
         completed_response_key = st.current_response_key
+        if self._service.speculative_turns is not None:
+            self._service.speculative_turns.close(
+                st.current_response_turn_id,
+                st.current_response_turn_revision,
+            )
         completed_with_tools = bool(st.pending_function_calls)
         if (
             status == "completed"
@@ -125,6 +130,8 @@ class ResponseHandler(RealtimeBaseHandler):
                 st.completed_tool_response_keys.pop(completed_response_key, None)
         st.current_response_id = None
         st.current_response_key = None
+        st.current_response_turn_id = None
+        st.current_response_turn_revision = None
         st.response_failed = False
         st.response_error_type = None
         st.current_item_id = None
@@ -289,6 +296,8 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_response_params = event.response
         st.current_response_id = _generate_id("resp")
         st.current_response_key = request.response_key
+        st.current_response_turn_id = request.turn_id
+        st.current_response_turn_revision = request.turn_revision
         st.response_created_pending_key = request.response_key
         self._start_item(conn_id)
         logger.debug("Standard response.create claimed internal tool follow-up prefetch")
@@ -793,6 +802,8 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_response_params = event.response
         st.current_response_id = _generate_id("resp")
         st.current_response_key = request.response_key
+        st.current_response_turn_id = request.turn_id
+        st.current_response_turn_revision = request.turn_revision
         st.response_created_pending_key = request.response_key
         self._start_item(conn_id)
 
@@ -958,6 +969,9 @@ class ResponseHandler(RealtimeBaseHandler):
                 logger.debug("Dropping stale assistant output for turn=%s rev=%s", event.turn_id, event.turn_revision)
                 return []
         st = self._state(conn_id)
+        if st.current_response_turn_id is None and event.turn_id is not None:
+            st.current_response_turn_id = event.turn_id
+            st.current_response_turn_revision = event.turn_revision
         events: list[ServerEvent] = []
         output_sequence = event.output_sequence
         if output_sequence is not None:
