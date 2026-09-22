@@ -133,3 +133,19 @@ python -m pytest tests/evals -q
 
 Unit tests use synthetic protocol events and do not download models or start
 paid jobs. The real GPU smoke run is a separate integration check.
+
+## Development validation (2026-09-22)
+
+The [personal-profile L4 smoke Job](https://huggingface.co/jobs/Steveeeeeeen/6ab2595852d0dbd7f1d7e2f6)
+completed with all four categories producing audio and zero engine errors. Three
+of four answers were correct; median time to first audio was 1.86 seconds.
+This is a smoke result, not an accuracy estimate for the full dataset.
+The [JSON report](https://huggingface.co/datasets/Steveeeeeeen/s2s-big-bench-audio-results/blob/main/reports/20260922T103259-6ab2595852d0dbd7f1d7e2f6.json)
+and engine logs are private to the development account.
+
+The run used the GGML server arguments now selected by default. The optional
+Torch TTS configuration failed model initialization with `MimiConfig.rope_theta`
+under Transformers 5.17.0 and faster-qwen3-tts 0.4.0; it is not a validated
+configuration for this image. Its failed Job and engine log are retained in the
+same account. No engine source workaround was introduced for that dependency
+incompatibility.
