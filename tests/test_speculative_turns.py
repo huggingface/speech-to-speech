@@ -53,6 +53,33 @@ def test_newer_conversation_order_supersedes_uncommitted_turn():
     assert tracker.is_latest("turn_2", 0)
 
 
+def test_new_turn_drops_inflight_uncommitted_generation():
+    tracker = SpeculativeTurnTracker()
+    tracker.observe("turn_1", 0, order=1)
+    generation_started = Event()
+    generation_finished = Event()
+    accepted_outputs: list[str] = []
+
+    def finish_slow_generation():
+        generation_started.set()
+        assert generation_finished.wait(timeout=1.0)
+        if tracker.is_latest("turn_1", 0):
+            accepted_outputs.append("stale turn_1 reply")
+
+    thread = Thread(target=finish_slow_generation)
+    thread.start()
+    assert generation_started.wait(timeout=1.0)
+
+    tracker.observe("turn_2", 0, order=2)
+    generation_finished.set()
+    thread.join(timeout=1.0)
+    if tracker.is_latest("turn_2", 0):
+        accepted_outputs.append("current turn_2 reply")
+
+    assert not thread.is_alive()
+    assert accepted_outputs == ["current turn_2 reply"]
+
+
 def test_reopen_revision_keeps_its_conversation_order():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0, order=1)
