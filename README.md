@@ -598,6 +598,7 @@ Language coverage depends on the STT and TTS backends you pick, not on the pipel
 | TTS | Kokoro | Multiple language/voice mappings, depending on backend availability |
 | TTS | ChatTTS | English and Chinese |
 | TTS | MMS TTS | Broad multilingual coverage through MMS checkpoints |
+| TTS | OmniVoice | 600+ languages; voice cloning, design, and automatic voice selection |
 
 Make sure the STT, LLM, and TTS you pair all cover your target language(s). Two usage patterns:
 
