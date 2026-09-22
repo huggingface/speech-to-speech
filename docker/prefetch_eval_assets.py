@@ -1,12 +1,8 @@
-"""Bake every model and recording the vibe check needs into the image.
+"""Warm STT, VAD and evaluation-audio caches during an optional image build.
 
-A Jobs container is billed per second and starts with an empty cache, so anything
-downloaded at run time is paid for on every run and is one Hub outage away from a
-failed job. Pulling it at build time also means the image pins exactly what a run
-will load, which is the point of a comparison harness.
-
-Model ids are imported from the pipeline where they are module constants, so this
-cannot silently drift from what the server actually loads.
+The default GGML TTS backend resolves its own quantized weights at runtime.
+These downloads warm mutable model caches; only evaluation audio has a pinned
+revision in the committed subset manifest.
 """
 
 from __future__ import annotations
@@ -15,7 +11,6 @@ import sys
 
 from huggingface_hub import hf_hub_download, snapshot_download
 
-from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
 from speech_to_speech.evals.big_bench_audio.dataset import load_subset, resolve_audio
 from speech_to_speech.VAD.smart_turn import MODEL_FILENAME, MODEL_REPO_ID
 
@@ -24,8 +19,7 @@ PARAKEET_REPO_ID = "nvidia/parakeet-tdt-0.6b-v3"
 
 
 def fetch_speech_models() -> None:
-    tts_repo = Qwen3TTSHandlerArguments().qwen3_tts_model_name
-    for repo_id in (PARAKEET_REPO_ID, tts_repo):
+    for repo_id in (PARAKEET_REPO_ID,):
         print(f"prefetch model {repo_id}", flush=True)
         snapshot_download(repo_id)
 

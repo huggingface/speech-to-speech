@@ -26,7 +26,7 @@ def main() -> int:
         "--tts",
         "qwen3",
         "--qwen3_tts_backend",
-        "torch",
+        "ggml",
         "--llm_backend",
         "chat-completions",
         "--model_name",

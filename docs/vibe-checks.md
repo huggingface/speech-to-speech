@@ -39,7 +39,7 @@ Inference Providers are billed to the personal account. Only launch the jobs
 you need; no recurring jobs or automatic GPU CI are configured.
 
 The default stack is Parakeet TDT, `Qwen/Qwen3.5-9B:together` through HF
-Inference Providers (Chat Completions), and Qwen3-TTS with its Torch backend.
+Inference Providers (Chat Completions), and Qwen3-TTS with its default GGML backend.
 The token requires Jobs, repository-write, and Inference Providers permissions.
 Credentials are passed as secrets and read from environment variables.
 
@@ -65,7 +65,7 @@ leave time for model downloads, initialization, and all questions.
 `Dockerfile.eval` installs the engine from the uploaded source. Dependencies are
 resolved at build time and runtime package versions are recorded in reports.
 Optional build arguments: `EXTRAS="kokoro supertonic"` installs extra backends;
-`PREFETCH=1` warms the default speech-model/audio caches. Prefetch is a download
+`PREFETCH=1` warms the STT, VAD, and audio caches; GGML TTS weights download at runtime. Prefetch is a download
 optimization, not a model-revision pin. The Space upload script creates the
 `source-revision.txt` required by the Dockerfile.
 
