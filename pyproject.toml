@@ -41,7 +41,7 @@ dependencies = [
     "scipy>=1.10.0",
     "sounddevice==0.5.3; platform_system == 'Darwin'",
     "sounddevice>=0.5.0; platform_system != 'Darwin'",
-    "soundfile>=0.13.0; platform_system == 'Darwin'",
+    "soundfile>=0.13.0",
     "soxr>=0.3.2",
     "torch==2.11.0; platform_system == 'Darwin'",
     "torch>=2.4.0; platform_system != 'Darwin'",
@@ -50,7 +50,7 @@ dependencies = [
     "transformers==5.14.1; platform_system == 'Darwin'",
     "transformers>=5.15.1,<6; platform_system != 'Darwin'",
     "uvicorn>=0.30.0",
-    "websockets>=12.0",
+    "websockets>=14.0",
     "nano-parakeet>=0.2.0; platform_system != 'Darwin'",
     "faster-qwen3-tts[ggml]>=0.4.0; platform_system != 'Darwin' and platform_system != 'Windows'",
     "faster-qwen3-tts>=0.4.0; platform_system == 'Windows'",
@@ -138,7 +138,7 @@ include = ["speech_to_speech*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]
-speech_to_speech = ["TTS/*.wav"]
+speech_to_speech = ["TTS/*.wav", "evals/big_bench_audio/subsets/*.json"]
 
 [tool.ruff]
 src = ["src"]

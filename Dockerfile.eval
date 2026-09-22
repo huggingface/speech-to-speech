@@ -1,0 +1,33 @@
+# Built by a private Docker Space; GPU execution happens in Hugging Face Jobs.
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 \
+    PATH="/usr/src/app/.venv/bin:${PATH}" \
+    HF_HOME=/opt/hf-cache TORCH_HOME=/opt/torch-cache NLTK_DATA=/opt/nltk_data
+WORKDIR /usr/src/app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git libportaudio2 libsndfile1 ffmpeg python3 python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+RUN python3 -m pip install --no-cache-dir --break-system-packages uv
+ARG EXTRAS=""
+COPY pyproject.toml README.md LICENSE MANIFEST.in ./
+RUN set -eu; flags=""; for extra in $EXTRAS; do flags="$flags --extra $extra"; done; \
+    uv sync --python /usr/bin/python3 --no-install-project --no-dev $flags
+COPY src ./src
+COPY docker ./docker
+# Written by prepare_eval_space.py, so reports identify the uploaded source tree.
+COPY source-revision.txt /opt/source-revision.txt
+RUN set -eu; flags=""; for extra in $EXTRAS; do flags="$flags --extra $extra"; done; \
+    uv sync --python /usr/bin/python3 --no-dev $flags
+RUN python -c "import nltk; [nltk.download(p, download_dir='/opt/nltk_data', raise_on_error=True) for p in ('punkt_tab', 'averaged_perceptron_tagger_eng')]"
+# Optional cache warming. Hub model defaults are mutable; this does not pin them.
+ARG PREFETCH=0
+ARG SUBSET=vibe
+RUN if [ "$PREFETCH" = "1" ]; then python docker/prefetch_eval_assets.py "$SUBSET"; fi
+RUN install -m 0755 docker/big-bench-audio-entrypoint.sh /usr/local/bin/vibe-check \
+    && useradd --create-home --uid 1000 user \
+    && mkdir -p /output /opt/hf-cache /opt/torch-cache \
+    && chown -R user:user /output /opt/hf-cache /opt/torch-cache /opt/nltk_data /usr/src/app
+USER user
+# Keep the image-building Space healthy without loading models or using a GPU.
+# Jobs override this with `vibe-check`.
+CMD ["python", "-m", "http.server", "7860", "--directory", "/tmp"]
