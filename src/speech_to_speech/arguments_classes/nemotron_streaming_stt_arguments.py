@@ -6,7 +6,7 @@ class NemotronStreamingSTTHandlerArguments:
     nemotron_streaming_model_name: str = field(
         default="nvidia/nemotron-speech-streaming-en-0.6b",
         metadata={
-            "help": "The NeMo Nemotron streaming ASR checkpoint. Default is 'nvidia/nemotron-speech-streaming-en-0.6b'. For 'nvidia/nemotron-3.5-asr-streaming-0.6b', also set --nemotron_streaming_language to the expected spoken language."
+            "help": "The NeMo Nemotron streaming ASR checkpoint. Default is 'nvidia/nemotron-speech-streaming-en-0.6b'. Use 'nvidia/nemotron-3.5-asr-streaming-0.6b' for multilingual detection per utterance."
         },
     )
     nemotron_streaming_device: str = field(
@@ -16,6 +16,6 @@ class NemotronStreamingSTTHandlerArguments:
     nemotron_streaming_language: str = field(
         default="en",
         metadata={
-            "help": "The fixed language code reported with every final transcription (for example, 'fr' for French). Does not detect language or condition the ASR model. Default is 'en'."
+            "help": "Fallback language code when the checkpoint does not emit a language tag. The English-only checkpoint always reports this value. Nemotron 3.5 reports the detected tag per utterance. Default is 'en'."
         },
     )
