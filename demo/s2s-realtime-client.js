@@ -2,8 +2,8 @@
 /**
  * Demo adapter around the official OpenAI Agents SDK RealtimeSession.
  *
- * Protocol ownership stays with the SDK's stock WebSocket and WebRTC
- * transports. This adapter only preserves demo concerns: the HF queue grant,
+ * Protocol handling uses the SDK transports, with WebSocket interruption
+ * accounting delegated to the browser renderer. Demo concerns include the HF queue grant,
  * browser audio graphs, user-audio replay, visualization, and UI events.
  *
  * @typedef {"websocket" | "webrtc"} TransportKind
@@ -50,7 +50,7 @@ import { OrbVisualiser, VIS_FFT_SIZE } from "./ws/orb-visualizer.js";
 import { SentAudioRecorder } from "./ws/user-audio-recorder.js";
 
 export const AUDIO_SAMPLE_RATE = 24_000;
-export const AUDIO_WORKLET_VERSION = "audio-24k-v2";
+export const AUDIO_WORKLET_VERSION = "audio-24k-v3";
 export const DEFAULT_PLAYBACK_BUFFER_MS = 0;
 const MIC_CHUNK_MS = 40;
 const CAPTURE_CONFIG_TIMEOUT_MS = 2_000;
@@ -118,6 +118,9 @@ export class S2sRealtimeClient extends EventTarget {
     this._playbackNode = null;
     this._playbackThreshold = Math.ceil(AUDIO_SAMPLE_RATE * normalizePlaybackBufferMs(options.playbackBufferMs) / 1000);
     this._resetPlaybackBuffer();
+    this._playbackItems = new Map();
+    this._playbackInterruptions = new Map();
+    this._playbackClearId = 0;
     this._micAnalyser = null;
     this._outAnalyser = null;
     this._remoteSrc = null;
@@ -183,7 +186,14 @@ export class S2sRealtimeClient extends EventTarget {
     await this._setupAudio();
     const { OpenAIRealtimeWebRTC, OpenAIRealtimeWebSocket, RealtimeSession } = sdk();
     if (this.options.transport === "websocket") {
-      this._transport = new OpenAIRealtimeWebSocket({ useInsecureApiKey: true });
+      // The SDK clock starts at receipt and forgets the item on audio.done.
+      // Our browser queue owns the actual playout position instead.
+      this._transport = new class extends OpenAIRealtimeWebSocket {
+        interrupt(cancelOngoingResponse = true) {
+          if (cancelOngoingResponse) this._cancelResponse();
+          this.emit("audio_interrupted");
+        }
+      }({ useInsecureApiKey: true });
     } else {
       // Keep startup noise from racing the initial config and greeting. The
       // prior demo client held this same gate until its data channel was ready.
@@ -221,7 +231,10 @@ export class S2sRealtimeClient extends EventTarget {
       }
     });
     this._session.on("audio", (event) => this._onAudio(event));
-    this._session.on("audio_interrupted", () => this._clearPlayback());
+    this._session.on("audio_interrupted", () => {
+      if (this.options.transport === "websocket") this._interruptPlayback();
+      else this._clearPlayback();
+    });
 
     await this._session.connect({ apiKey: "s2s-local", url });
     if (this.options.transport === "webrtc") this._attachRtcOutput();
@@ -347,6 +360,7 @@ export class S2sRealtimeClient extends EventTarget {
         numberOfOutputs: 1,
         outputChannelCount: [1],
       });
+      playback.port.onmessage = (event) => this._onPlaybackMessage(event.data);
       playback.port.postMessage({ kind: "config", inputRate: AUDIO_SAMPLE_RATE });
       const output = ctx.createAnalyser();
       output.fftSize = VIS_FFT_SIZE;
@@ -421,20 +435,23 @@ export class S2sRealtimeClient extends EventTarget {
       const sample = view.getInt16(i * 2, true);
       samples[i] = sample < 0 ? sample / 0x8000 : sample / 0x7fff;
     }
-    this._enqueuePlayback(samples);
+    const key = this._playbackAudioKey;
+    const item = this._playbackItems.get(key);
+    if (item) item.samples += samples.length;
+    this._enqueuePlayback(samples, key);
   }
 
-  /** @param {Float32Array} samples */
-  _enqueuePlayback(samples) {
-    this._pendingPlayback.push(samples);
+  /** @param {Float32Array} samples @param {string} key */
+  _enqueuePlayback(samples, key) {
+    this._pendingPlayback.push({ samples, key });
     this._pendingPlaybackSamples += samples.length;
     if (this._playbackStarted || this._pendingPlaybackSamples >= this._playbackThreshold) this._releasePlayback();
   }
 
   _releasePlayback() {
     if (!this._pendingPlayback.length) return;
-    for (const samples of this._pendingPlayback) {
-      this._playbackNode.port.postMessage({ kind: "audio", samples }, [samples.buffer]);
+    for (const { samples, key } of this._pendingPlayback) {
+      this._playbackNode.port.postMessage({ kind: "audio", samples, key }, [samples.buffer]);
     }
     this._pendingPlayback = [];
     this._pendingPlaybackSamples = 0;
@@ -448,7 +465,8 @@ export class S2sRealtimeClient extends EventTarget {
    * @param {string} [responseId] */
   _resetPlaybackBuffer(responseId = "") {
     this._playbackResponseId = responseId;
-    /** @type {Float32Array[]} */
+    this._playbackAudioKey = "";
+    /** @type {{samples: Float32Array, key: string}[]} */
     this._pendingPlayback = [];
     this._pendingPlaybackSamples = 0;
     this._playbackStarted = false;
@@ -460,12 +478,46 @@ export class S2sRealtimeClient extends EventTarget {
     if (status === "completed" || status === "incomplete") {
       this._releasePlayback();
       this._resetPlaybackBuffer();
+    } else if (this._playbackStarted) {
+      this._interruptPlayback();
     } else {
-      this._clearPlayback();
+      this._resetPlaybackBuffer();
+    }
+  }
+
+  _interruptPlayback() {
+    if (this.options.transport !== "websocket") return;
+    const clearId = ++this._playbackClearId;
+    this._playbackInterruptions.set(clearId, this._playbackItems);
+    this._playbackItems = new Map();
+    this._resetPlaybackBuffer();
+    // The acknowledgement includes samples rendered while the main thread
+    // was busy, and captures the position exactly when the queue is cleared.
+    this._playbackNode?.port.postMessage({ kind: "clear", clearId });
+    this._aiSpeaking = false;
+  }
+
+  _onPlaybackMessage(message) {
+    if (message?.kind !== "cleared") return;
+    const items = this._playbackInterruptions.get(message.clearId);
+    this._playbackInterruptions.delete(message.clearId);
+    if (!items || this._closed || this._status === "error") return;
+    const played = new Map(message.played);
+    for (const [key, item] of items) {
+      const samples = Math.min(item.samples, played.get(key) ?? 0);
+      if (samples >= item.samples) continue;
+      this._transport?.sendEvent({
+        type: "conversation.item.truncate",
+        item_id: item.itemId,
+        content_index: item.contentIndex,
+        audio_end_ms: Math.max(0, Math.floor(samples / AUDIO_SAMPLE_RATE * 1000)),
+      });
     }
   }
 
   _clearPlayback() {
+    this._playbackInterruptions.clear();
+    this._playbackItems.clear();
     this._resetPlaybackBuffer();
     this._playbackNode?.port.postMessage({ kind: "clear" });
     this._aiSpeaking = false;
@@ -485,8 +537,20 @@ export class S2sRealtimeClient extends EventTarget {
     if (typeof type !== "string") return;
     if (this._debug) console.debug(`[${this.options.transport}]`, event);
     switch (type) {
+      case "response.output_audio.delta": {
+        if (this.options.transport !== "websocket" || event.response_id !== this._playbackResponseId) break;
+        const key = JSON.stringify([event.item_id, event.content_index]);
+        this._playbackAudioKey = key;
+        if (!this._playbackItems.has(key)) {
+          this._playbackItems.set(key, {
+            itemId: event.item_id, contentIndex: event.content_index, samples: 0,
+          });
+        }
+        break;
+      }
       case "input_audio_buffer.speech_started": {
-        this._clearPlayback();
+        // WebSocket calls interrupt() after dispatching this raw event.
+        if (this.options.transport !== "websocket") this._clearPlayback();
         const itemId = typeof event.item_id === "string" ? event.item_id : "";
         this._currentUserItemId = itemId;
         if (this.options.transport === "websocket") {
@@ -606,13 +670,10 @@ export class S2sRealtimeClient extends EventTarget {
         if (this.options.transport === "websocket") {
           this._finishPlayback(responseId, event.response?.status ?? "completed");
         }
-        // Still finish the old transcript, but never reset a newer WS turn.
-        if (this.options.transport !== "websocket" || responseId === this._activeResponseId) {
-          this._responseRequested = false;
-          this._activeResponseId = "";
-          this._aiSpeaking = false;
-          if (this._status === "ai-speaking" || this._status === "processing") this._setStatus("connected");
-        }
+        this._responseRequested = false;
+        this._activeResponseId = "";
+        this._aiSpeaking = false;
+        if (this._status === "ai-speaking" || this._status === "processing") this._setStatus("connected");
         const transcript = extractResponseTranscript(event.response) || this._asstDisplay(responseId) || "";
         this.dispatchEvent(new CustomEvent("response-finished", { detail: {
           responseId,

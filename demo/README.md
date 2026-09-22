@@ -251,7 +251,7 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
 | `ui/dom.js` | Shared helpers: `$`, `escHtml`, `truncateError`, `DEBUG` |
 | `auth.py` | HF OAuth + per-request identity (tier, hashed keys) |
 | `limiter.py` | SQLite per-day talk-time budget (chunked server-clock reservation) |
-| `s2s-realtime-client.js` | Narrow demo adapter around one Agents SDK `RealtimeSession` and the stock WebSocket/WebRTC transports |
+| `s2s-realtime-client.js` | Narrow demo adapter around one Agents SDK `RealtimeSession` and SDK transports with browser-owned WebSocket truncation |
 | `package.json` / `package-lock.json` | Exact official Agents SDK and browser-test dependency pins |
 | `ws/codec.js` | base64 <-> PCM helpers + transcript extraction (pure) |
 | `ws/user-audio-recorder.js` | Bounded sent-PCM buffer + VAD slicing + browser-playable WAV wrapping |
@@ -272,7 +272,8 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
   later chunks stream immediately without rebuffering. Completed short responses
   and valid incomplete responses release their remaining audio; interruption,
   cancellation, failure, and disconnect discard pending audio. Each new response
-  gets a fresh startup gate without cutting off already released audio.
+  gets a fresh startup gate without cutting off already released audio. Cancelling
+  a response still below its threshold discards only its private startup buffer.
   In [issue #557](https://github.com/huggingface/speech-to-speech/issues/557),
   1200 ms resolved glitches in the reporter's local TTS setup. This is a tuning
   example, not a universal optimum: larger values add startup latency, and no
@@ -283,7 +284,7 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
   resamples to 24 kHz (boxcar lowpass + decimation on the 48 -> 24 fast
   path, linear interpolation fallback for odd rates) and packs Int16 LE.
 - **Browser cache safety**: the entry module, realtime client, and both audio
-  worklet URLs share the `audio-24k-v2` cache key. The client also waits for
+  worklet URLs share the `audio-24k-v3` cache key. The client also waits for
   the capture worklet to report the same version and a 24 kHz output rate
   before opening a session. When the browser-audio contract or sample rate
   changes, bump the key in `index.html`, `main.js`, and
@@ -296,10 +297,14 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
   and is posted to the `audio-playback` worklet. The worklet maintains a
   per-context ring buffer, linearly interpolates 24 -> 48, and applies
   short 32-frame fades on entry/exit to suppress clicks.
-- **Barge-in**: when the server VAD detects user speech mid-response
-  (`input_audio_buffer.speech_started` while `ai-speaking`), the client
-  posts `{ kind: "clear" }` to the playback worklet to wipe the queue
-  immediately. The server itself cancels the in-flight response.
+- **Barge-in**: server VAD and explicit SDK interruptions clear the WebSocket
+  playback queue. The worklet acknowledges the clear with rendered PCM counts
+  per item/content part, excluding startup delay and underrun silence. The client
+  sends `conversation.item.truncate` for unheard audio using those counts (zero
+  before playback starts), retaining identities even after audio/response done.
+  This overrides the SDK's receipt-time interruption clock. Server VAD cancels
+  the in-flight response; explicit interruptions use the SDK cancellation hook.
+  See the [Realtime interruption guidance](https://developers.openai.com/api/docs/guides/realtime-conversations#handling-interruptions).
 
 ## Credits
 

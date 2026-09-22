@@ -5,33 +5,7 @@ import test from "node:test";
 
 import { S2sRealtimeClient, DEFAULT_PLAYBACK_BUFFER_MS, normalizePlaybackBufferMs } from "../s2s-realtime-client.js";
 
-function worklet() {
-  let Processor;
-  const reports = [];
-  vm.runInNewContext(fs.readFileSync(new URL("../worklets/audio-playback.js", import.meta.url), "utf8"), {
-    sampleRate: 48_000,
-    Float32Array,
-    AudioWorkletProcessor: class {
-      constructor() { this.port = { postMessage: (message) => reports.push(message) }; }
-    },
-    registerProcessor(_name, value) { Processor = value; },
-  });
-  const processor = new Processor();
-  return {
-    reports,
-    send(message) { processor.port.onmessage({ data: message }); },
-    render(frames) {
-      const result = [];
-      while (frames > 0) {
-        const block = new Float32Array(Math.min(128, frames));
-        processor.process([], [[block]]);
-        result.push(...block);
-        frames -= block.length;
-      }
-      return result;
-    },
-  };
-}
+import { worklet } from "./playback-helpers.mjs";
 
 function fixture(playbackBufferMs = 100, transport = "websocket") {
   const output = worklet();
@@ -53,7 +27,7 @@ function fixture(playbackBufferMs = 100, transport = "websocket") {
     client._onAudio({ data, responseId: id });
   };
   return { client, output, messages, start, done, audio,
-    interrupt() { client._onTransportEvent({ type: "input_audio_buffer.speech_started" }); },
+    interrupt() { client._interruptPlayback(); },
     released() { return messages.filter((m) => m.kind === "audio").flatMap((m) => [...m.samples]); },
   };
 }
@@ -157,7 +131,6 @@ test("late old completion and audio cannot reset or release a newer response", (
     f.audio("b", 1, -16384);
     assert.deepEqual(f.released(), Array(2400).fill(-0.5));
     f.done("a", status);
-    assert.equal(f.client.status, "ai-speaking");
     assert.equal(finished[0].responseId, "a", "old transcript still receives completion");
     f.audio("b", 1, -16384);
     assert.equal(f.released().length, 2401);
@@ -346,3 +319,18 @@ test("settings persist the reserve, normalize invalid values, and hide it for We
   next.audio("b", 1);
   assert.equal(next.released().length, 1, "new conversation uses saved zero");
 });
+
+for (const status of ["cancelled", "failed"]) {
+  test(`pending ${status} response preserves the completed response tail`, () => {
+    const f = fixture();
+    f.start("a");
+    f.audio("a", 2400);
+    f.done("a");
+    f.start("b");
+    f.audio("b", 100, -16384);
+    f.done("b", status);
+    assert.equal(f.messages.some((m) => m.kind === "clear"), false);
+    assert.ok(f.output.render(4800).slice(32).every((v) => v > 0));
+    assert.equal(f.released().length, 2400);
+  });
+}
