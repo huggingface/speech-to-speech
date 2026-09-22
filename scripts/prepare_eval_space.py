@@ -35,7 +35,7 @@ def prepare(destination: Path) -> str:
         "---\ntitle: S2S Big Bench Audio Jobs image\nsdk: docker\napp_port: 7860\nlicense: apache-2.0\n---\n\n"
         "Private development image for Hugging Face Jobs. The Space builds the image; "
         "run `vibe-check` in a GPU Job to evaluate the engine.\n\n"
-        f"Source revision: `{revision}`\n\n" + readme.read_text()
+        "The source revision is recorded in `source-revision.txt`.\n\n" + readme.read_text()
     )
     return revision
 
