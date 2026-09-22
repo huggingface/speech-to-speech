@@ -123,7 +123,7 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - Model flag: `--nemotron_streaming_model_name`
 - Default model: `nvidia/nemotron-speech-streaming-en-0.6b`
 - Override: `nvidia/nemotron-3.5-asr-streaming-0.6b` for multilingual
-- Language flag: `--nemotron_streaming_language` (default `en`)
+- Language flag: `--nemotron_streaming_language` (default `en`); fixed language metadata reported with each final transcription, not language detection or a model language prompt
 - Device flag: `--nemotron_streaming_device` (default `auto`)
 - The pipeline transcribes each VAD utterance with NeMo `ASRModel.transcribe` (offline API)
 
@@ -238,8 +238,16 @@ The pipeline transcribes VAD utterances with NeMo `ASRModel.transcribe` (offline
 ```bash
 pip install "speech-to-speech[nemo]"
 speech-to-speech serve --stt nemotron-streaming
+# French speech with the multilingual checkpoint:
 speech-to-speech serve --stt nemotron-streaming \
-  --nemotron_streaming_model_name nvidia/nemotron-3.5-asr-streaming-0.6b
+  --nemotron_streaming_model_name nvidia/nemotron-3.5-asr-streaming-0.6b \
+  --nemotron_streaming_language fr
 ```
+
+Set `--nemotron_streaming_language` to the language you expect to speak. Changing
+the checkpoint alone leaves the reported language as `en`, which is used by the
+optional LLM language prompt and language-sensitive TTS backends. The flag labels
+every final transcription with one fixed language; it does not detect language
+or condition the ASR model. This example assumes French speech throughout the session.
 
 The pipeline transcribes VAD utterances with NeMo `ASRModel.transcribe` (offline API).
