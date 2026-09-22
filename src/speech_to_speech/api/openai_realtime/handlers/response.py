@@ -92,7 +92,7 @@ class ResponseHandler(RealtimeBaseHandler):
         tracker.status = status
         line = tracker.format_log_line()
         if line:
-            logger.info(line)
+            logger.info("%s response_key=%s", line, response_key)
 
     def _end_response(self, conn_id: str, status: _ResponseStatus = "completed") -> None:
         st = self._state(conn_id)
