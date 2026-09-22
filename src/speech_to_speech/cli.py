@@ -154,6 +154,7 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
     )
     parser.add_argument(
         "--connection-retry-timeout",
+        dest="connection_retry_timeout_s",
         type=float,
         default=defaults.connection_retry_timeout_s,
         help="Seconds to wait for the Realtime endpoint to become available.",
@@ -179,7 +180,7 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         print_json=namespace.print_json,
         block_mic_during_playback=namespace.block_mic_during_playback,
         log_transcripts=namespace.log_transcripts,
-        connection_retry_timeout_s=namespace.connection_retry_timeout,
+        connection_retry_timeout_s=namespace.connection_retry_timeout_s,
         tools=tools,
         tool_executor=tool_executor,
         tool_response_create=tool_response_create,
