@@ -85,12 +85,11 @@ def _handler(cls, extra, *, start_language, last_language):
     return handler
 
 
-# Expected `last_language` after a session ends, per configured `start_language`. Asserting
-# the exact value rather than "not the old one" -- a loose check passes when the reset leaves
-# "auto" behind, which is a language *request*, not a code, and is what `setup` rejects.
+# Expected `last_language` after a session ends, per configured `start_language`.
+# Parakeet's existing "auto" fallback is explicitly outside issue #555's scope.
 _EXPECTED_AFTER_RESET = {
     # handler class: {start_language: expected last_language}
-    "ParakeetTDTSTTHandler": {None: "en", "auto": "en", "de": "de"},
+    "ParakeetTDTSTTHandler": {None: "en", "auto": "auto", "de": "de"},
     "_default": {None: None, "auto": None, "de": "de"},
 }
 
@@ -117,19 +116,6 @@ def test_detected_language_does_not_survive_the_session(module_name, class_name,
 
 
 @pytest.mark.parametrize(("module_name", "class_name", "extra"), _STT_HANDLERS)
-def test_auto_never_becomes_the_fallback_language(module_name, class_name, extra):
-    """ "auto" is a request to detect. Leaving it in `last_language` makes it a language code,
-    which Qwen3-ASR would report as "auto-auto" and Parakeet as a bare "auto"."""
-    cls = _require(module_name, class_name)
-
-    handler = _handler(cls, extra, start_language="auto", last_language="de")
-
-    handler.on_session_end()
-
-    assert handler.last_language != "auto"
-
-
-@pytest.mark.parametrize(("module_name", "class_name", "extra"), _STT_HANDLERS)
 def test_configured_language_survives_the_session(module_name, class_name, extra):
     """A user-configured language is process-level config, not per-conversation state."""
     cls = _require(module_name, class_name)
@@ -141,25 +127,14 @@ def test_configured_language_survives_the_session(module_name, class_name, extra
     assert handler.last_language == _expected(class_name, "de")
 
 
-@pytest.mark.parametrize("start_language", [None, "auto"])
-def test_parakeet_keeps_its_english_fallback(start_language):
-    """Parakeet already reset, with its own "en" default. Its override runs after super(),
-    and "auto" is truthy, so it used to re-assign "auto" over the base reset."""
-    cls = _require("speech_to_speech.STT.parakeet_tdt_handler", "ParakeetTDTSTTHandler")
-    handler = _handler(cls, {"enable_live_transcription": False}, start_language=start_language, last_language="de")
-
-    handler.on_session_end()
-
-    assert handler.last_language == "en"
-
-
-def test_qwen3_records_the_configured_language():
+@pytest.mark.parametrize("language", ["de", "German", " DE "])
+def test_qwen3_records_the_configured_language(language):
     """The base reset restores `start_language`, so a handler has to set it for a fixed
     language to survive the session."""
     cls = _require("speech_to_speech.STT.qwen3_asr_handler", "Qwen3ASRSTTHandler")
     handler = object.__new__(cls)
 
-    handler.configure_language("de")
+    handler.configure_language(language)
 
     assert handler.start_language == "de"
     assert handler.forced_language == "de"

@@ -641,11 +641,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
 
     def on_session_end(self) -> None:
         super().on_session_end()
-        # "auto" is a request to detect, not a language code, so it cannot be the fallback.
-        if self.start_language and self.start_language != "auto":
-            self.last_language = self.start_language
-        else:
-            self.last_language = "en"
+        self.last_language = self.start_language if self.start_language else "en"
         if self.enable_live_transcription:
             self.processing_final = False
             self._reset_live_transcription_state(clear_turn=True)

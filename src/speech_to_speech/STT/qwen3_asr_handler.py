@@ -100,13 +100,13 @@ class Qwen3ASRSTTHandler(BaseSTTHandler):
 
     def configure_language(self, language: Optional[str]) -> None:
         """Set the forced language, or ``None`` for per-turn detection."""
-        self.start_language = language
         requested = (language or "").strip()
         if requested.lower() in ("", "auto"):
             self.forced_language: Optional[str] = None
         else:
             # Pass unknown codes through: the processor validates what the checkpoint supports.
             self.forced_language = language_to_code(requested) or requested
+        self.start_language = self.forced_language
         self.last_language: Optional[str] = self.forced_language
 
     def warmup(self) -> None:
