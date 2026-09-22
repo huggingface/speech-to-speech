@@ -491,6 +491,7 @@ class RealtimeService:
         for response_key in tuple(st.pending_response_keys):
             st.runtime_config.chat.rollback_provisional_generation(response_key)
             self.close_response_key(conn_id, response_key)
+            self.turn_latency_store.discard_response(response_key, session_id=conn_id)
         st.generation_done_tool_calls.clear()
         st.completed_tool_response_keys.clear()
         if not st.in_response:

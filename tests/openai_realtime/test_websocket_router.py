@@ -514,6 +514,8 @@ class TestClientEventDispatch:
                 state = service._state(conn_id)
                 assert state.response_pending is True
                 assert not service.text_prompt_queue.empty()
+                pending_key = next(iter(state.pending_response_keys))
+                assert pending_key in service.turn_latency_store._trackers
 
                 ws.send_json({"type": "response.cancel"})
                 time.sleep(0.1)
@@ -522,6 +524,8 @@ class TestClientEventDispatch:
                 assert service.text_prompt_queue.empty()
                 assert state.response_pending is False
                 assert state.pending_response_keys == set()
+                assert service.turn_latency_store._trackers == {}
+                assert service.turn_latency_store.active_session_count == 0
 
                 ws.send_json({"type": "response.create"})
                 assert ws.receive_json()["type"] == "response.created"
@@ -695,6 +699,7 @@ class TestSendLoop:
                 state = service._state(conn_id)
                 assert service.text_prompt_queue.qsize() == 1
                 pending_key = next(iter(state.pending_response_keys))
+                assert pending_key in service.turn_latency_store._trackers
 
                 text_output_queue.put(SpeechStartedEvent())
                 msg = ws.receive_json()
@@ -707,6 +712,8 @@ class TestSendLoop:
                 assert state.response_pending is False
                 assert state.in_response is False
                 assert pending_key in state.closed_response_keys
+                assert service.turn_latency_store._trackers == {}
+                assert service.turn_latency_store.active_session_count == 0
                 assert not response_playing.is_set()
 
                 output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=stale_generation))
