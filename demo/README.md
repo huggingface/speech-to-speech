@@ -284,7 +284,7 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
   resamples to 24 kHz (boxcar lowpass + decimation on the 48 -> 24 fast
   path, linear interpolation fallback for odd rates) and packs Int16 LE.
 - **Browser cache safety**: the entry module, realtime client, and both audio
-  worklet URLs share the `audio-24k-v3` cache key. The client also waits for
+  worklet URLs share the `audio-24k-v2` cache key. The client also waits for
   the capture worklet to report the same version and a 24 kHz output rate
   before opening a session. When the browser-audio contract or sample rate
   changes, bump the key in `index.html`, `main.js`, and

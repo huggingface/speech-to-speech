@@ -274,7 +274,7 @@ def test_audio_asset_version_propagates_to_the_worklets():
     main = (REPO_ROOT / "demo/main.js").read_text()
     client = (REPO_ROOT / "demo/s2s-realtime-client.js").read_text()
 
-    version = "audio-24k-v3"
+    version = "audio-24k-v2"
     assert f"main.js?v={version}" in index
     assert f"s2s-realtime-client.js?v={version}" in main
     assert f'AUDIO_WORKLET_VERSION = "{version}"' in client
@@ -311,7 +311,7 @@ const processor = new CaptureProcessor({
   processorOptions: {
     chunkMs: 40,
     targetRate: 24000,
-    version: "audio-24k-v3",
+    version: "audio-24k-v2",
   },
 });
 processor.port.onmessage({ data: { kind: "probe" } });
@@ -321,7 +321,7 @@ if (!config) throw new Error("capture worklet did not report its configuration")
 if (config.inputRate !== 48000 || config.outputRate !== 24000) {
   throw new Error(`unexpected sample-rate handshake: ${JSON.stringify(config)}`);
 }
-if (config.version !== "audio-24k-v3") {
+if (config.version !== "audio-24k-v2") {
   throw new Error(`unexpected worklet version: ${config.version}`);
 }
 
