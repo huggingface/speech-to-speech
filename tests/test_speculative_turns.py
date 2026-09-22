@@ -132,7 +132,7 @@ def test_closing_current_turn_prevents_late_output_and_reopen():
     tracker.close("turn_1", 0)
 
     assert not tracker.is_latest("turn_1", 0)
-    assert tracker.is_committed("turn_1", 0)
+    assert not tracker.is_committed("turn_1", 0)
     assert tracker.begin_reopen_candidate("turn_1", 0) is None
 
 

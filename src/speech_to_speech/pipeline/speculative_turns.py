@@ -184,7 +184,7 @@ class SpeculativeTurnTracker:
         if turn_id is None or revision is None or grace_s <= 0:
             return
         with self._condition:
-            if not self._is_current_locked(turn_id, revision) or self._is_committed_locked(turn_id, revision):
+            if not self._is_current_locked(turn_id, revision) or self._blocks_reopen_locked(turn_id, revision):
                 return
             deadline = time.monotonic() + grace_s
             existing = self._reopen_grace
@@ -259,11 +259,7 @@ class SpeculativeTurnTracker:
         if turn_id is None:
             return False
         with self._condition:
-            return (
-                self._closed_current is not None
-                and self._closed_current.turn_id == turn_id
-                and (revision is None or self._closed_current.revision == revision)
-            ) or any(
+            return any(
                 reference.turn_id == turn_id and (revision is None or reference.revision == revision)
                 for reference in self._committed
             )
@@ -272,7 +268,7 @@ class SpeculativeTurnTracker:
         if turn_id is None or revision is None:
             return None
         with self._condition:
-            if not self._is_current_locked(turn_id, revision) or self._is_committed_locked(turn_id, revision):
+            if not self._is_current_locked(turn_id, revision) or self._blocks_reopen_locked(turn_id, revision):
                 return None
             pending = self._pending_reopen
             if pending is not None:
@@ -302,7 +298,7 @@ class SpeculativeTurnTracker:
             pending = self._pending_reopen
             if pending != _PendingReopen(turn_id, base_revision, candidate_revision):
                 return False
-            if not self._is_current_locked(turn_id, base_revision) or self._is_committed_locked(
+            if not self._is_current_locked(turn_id, base_revision) or self._blocks_reopen_locked(
                 turn_id,
                 base_revision,
             ):
@@ -372,7 +368,8 @@ class SpeculativeTurnTracker:
         )
         return current or self._committed_reference_locked(turn_id, revision) is not None
 
-    def _is_committed_locked(self, turn_id: str, revision: int) -> bool:
+    def _blocks_reopen_locked(self, turn_id: str, revision: int) -> bool:
+        """Return whether accepted or finished output makes reopening unsafe."""
         return self._is_closed_current_locked(turn_id, revision) or (
             self._committed_reference_locked(turn_id, revision) is not None
         )
