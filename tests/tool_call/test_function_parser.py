@@ -223,17 +223,15 @@ def _make_tool(name: str, properties: dict, required: list[str] | None = None) -
 
 
 class TestToRealtimeToolCall:
-    def test_positional_args_stripped_when_required_present(self):
+    def test_positional_and_named_for_same_parameter_raises(self):
         fc = FunctionToolCall(
             function_name="greet",
             parameters={"__arg_0__": 1, "msg": "hi"},
             original_string="greet(1, msg='hi')",
         )
         tool = _make_tool("greet", {"msg": {"type": "string"}}, required=["msg"])
-        result = fc.to_realtime_function_tool_call([tool])
-        args = json.loads(result.arguments)
-        assert "__arg_0__" not in args
-        assert args == {"msg": "hi"}
+        with pytest.raises(ValueError, match="both a positional and a named value"):
+            fc.to_realtime_function_tool_call([tool])
 
     def test_undeclared_args_stripped_when_required_present(self):
         fc = FunctionToolCall(
@@ -247,17 +245,27 @@ class TestToRealtimeToolCall:
         assert "bogus" not in args
         assert args == {"msg": "hi"}
 
-    def test_raises_when_required_missing_after_strip(self):
+    def test_positional_binds_and_undeclared_named_still_stripped(self):
         fc = FunctionToolCall(
             function_name="greet",
             parameters={"__arg_0__": 1, "bogus": 2},
             original_string="greet(1, bogus=2)",
         )
         tool = _make_tool("greet", {"msg": {"type": "string"}}, required=["msg"])
+        result = fc.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"msg": 1}
+
+    def test_raises_when_required_missing_and_nothing_to_bind(self):
+        fc = FunctionToolCall(
+            function_name="greet",
+            parameters={"bogus": 2},
+            original_string="greet(bogus=2)",
+        )
+        tool = _make_tool("greet", {"msg": {"type": "string"}}, required=["msg"])
         with pytest.raises(ValueError, match="Missing required"):
             fc.to_realtime_function_tool_call([tool])
 
-    def test_succeeds_with_no_required_after_full_strip(self):
+    def test_optional_only_tool_keeps_the_positional_value(self):
         fc = FunctionToolCall(
             function_name="noop",
             parameters={"__arg_0__": 1, "yy": 2},
@@ -265,8 +273,7 @@ class TestToRealtimeToolCall:
         )
         tool = _make_tool("noop", {"x": {"type": "integer"}})
         result = fc.to_realtime_function_tool_call([tool])
-        args = json.loads(result.arguments)
-        assert args == {}
+        assert json.loads(result.arguments) == {"x": 1}
 
     def test_no_collision_with_real_arg_prefix(self):
         """A real parameter named 'arg_0' should NOT be stripped."""
@@ -283,3 +290,85 @@ class TestToRealtimeToolCall:
         result = fc.to_realtime_function_tool_call([tool])
         args = json.loads(result.arguments)
         assert args == {"arg_0": 10, "x": 5}
+
+
+class TestPositionalArgumentBinding:
+    """Positional calls bind against the signature the tool prompt renders."""
+
+    def test_single_positional_binds_to_required_parameter(self):
+        tool = _make_tool("list_slots", {"month": {"type": "string"}}, required=["month"])
+        (call,) = parse_function_call("list_slots('June')")
+        result = call.to_realtime_function_tool_call([tool])
+        assert result.name == "list_slots"
+        assert json.loads(result.arguments) == {"month": "June"}
+
+    def test_multiple_positionals_bind_in_order(self):
+        tool = _make_tool(
+            "hold_slot",
+            {"date": {"type": "string"}, "time": {"type": "string"}},
+            required=["date", "time"],
+        )
+        (call,) = parse_function_call("hold_slot('2026-06-01', '14:30')")
+        result = call.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"date": "2026-06-01", "time": "14:30"}
+
+    def test_mixed_positional_and_named(self):
+        tool = _make_tool(
+            "hold_slot",
+            {"date": {"type": "string"}, "time": {"type": "string"}},
+            required=["date"],
+        )
+        (call,) = parse_function_call("hold_slot('2026-06-01', time='14:30')")
+        result = call.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"date": "2026-06-01", "time": "14:30"}
+
+    def test_named_only_call_is_unchanged(self):
+        tool = _make_tool("list_slots", {"month": {"type": "string"}}, required=["month"])
+        (call,) = parse_function_call("list_slots(month='June')")
+        result = call.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"month": "June"}
+
+    def test_binds_against_signature_order_not_schema_order(self):
+        # signature_from_schema moves required-without-default parameters first,
+        # so a positional value binds to 'month', not to the optional 'limit'.
+        tool = _make_tool(
+            "list_slots",
+            {"limit": {"type": "integer", "default": 10}, "month": {"type": "string"}},
+            required=["month"],
+        )
+        (call,) = parse_function_call("list_slots('June')")
+        result = call.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"month": "June"}
+
+    def test_positional_can_fill_an_optional_parameter(self):
+        tool = _make_tool(
+            "list_slots",
+            {"month": {"type": "string"}, "limit": {"type": "integer", "default": 10}},
+            required=["month"],
+        )
+        (call,) = parse_function_call("list_slots('June', 5)")
+        result = call.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"month": "June", "limit": 5}
+
+    def test_too_many_positionals_raise(self):
+        tool = _make_tool("list_slots", {"month": {"type": "string"}}, required=["month"])
+        (call,) = parse_function_call("list_slots('June', 5)")
+        with pytest.raises(ValueError, match="Too many positional arguments"):
+            call.to_realtime_function_tool_call([tool])
+
+    def test_duplicate_positional_and_named_raises(self):
+        tool = _make_tool("list_slots", {"month": {"type": "string"}}, required=["month"])
+        (call,) = parse_function_call("list_slots('June', month='July')")
+        with pytest.raises(ValueError, match="both a positional and a named value"):
+            call.to_realtime_function_tool_call([tool])
+
+    def test_without_tools_positional_arguments_are_still_dropped(self):
+        (call,) = parse_function_call("list_slots('June')")
+        result = call.to_realtime_function_tool_call()
+        assert json.loads(result.arguments) == {}
+
+    def test_positional_call_on_a_no_parameter_tool_raises(self):
+        tool = _make_tool("ping", {})
+        (call,) = parse_function_call("ping('now')")
+        with pytest.raises(ValueError, match="Too many positional arguments"):
+            call.to_realtime_function_tool_call([tool])
