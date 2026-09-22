@@ -106,6 +106,7 @@ class Qwen3ASRSTTHandler(BaseSTTHandler):
         else:
             # Pass unknown codes through: the processor validates what the checkpoint supports.
             self.forced_language = language_to_code(requested) or requested
+        self.start_language = self.forced_language
         self.last_language: Optional[str] = self.forced_language
 
     def warmup(self) -> None:
