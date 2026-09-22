@@ -64,6 +64,9 @@ def test_builtin_registry_lookup_and_cli_choices_share_one_catalog():
     assert tuple(TTS_BACKENDS) == module_fields["tts"].metadata["choices"]
     assert STT_BACKENDS["parakeet-tdt"].kind == "stt"
     assert STT_BACKENDS["openai"].kind == "stt"
+    assert STT_BACKENDS["openai-realtime"].capabilities.streams_audio_chunks
+    assert STT_BACKENDS["vllm-realtime"].capabilities.streams_audio_chunks
+    assert not STT_BACKENDS["openai"].capabilities.streams_audio_chunks
     assert LLM_BACKENDS["responses-api"].kind == "llm"
     assert TTS_BACKENDS["qwen3"].kind == "tts"
     assert TTS_BACKENDS["openai"].kind == "tts"
@@ -237,6 +240,83 @@ def test_openai_stt_backend_constructs_through_registry(monkeypatch):
     stt = create_backend_handler(args.stt_backend, _context())
 
     assert isinstance(stt, OpenAICompatibleSTTHandler)
+
+
+@pytest.mark.parametrize(
+    ("backend_name", "expected_type", "expected_rate"),
+    [
+        ("openai-realtime", "OpenAIRealtimeSTTHandler", 24000),
+        ("vllm-realtime", "VLLMRealtimeSTTHandler", 16000),
+    ],
+)
+def test_streaming_stt_backends_parse_and_construct_through_registry(
+    backend_name,
+    expected_type,
+    expected_rate,
+):
+    args = parse_arguments(["--stt", backend_name])
+
+    handler = create_backend_handler(args.stt_backend, _context())
+
+    assert type(handler).__name__ == expected_type
+    assert handler.audio_sample_rate == expected_rate
+    assert args.stt_backend.config["base_url"].endswith("/v1")
+    handler.cleanup()
+
+
+def test_streaming_stt_backend_is_attached_to_vad_without_changing_notifier_path(monkeypatch):
+    class DummyHandler:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    class DummyNotifier(DummyHandler):
+        pass
+
+    streaming_handler = object()
+
+    def stt_factory(_context, _config):
+        return streaming_handler
+
+    def other_factory(_context, _config):
+        return object()
+
+    stt_spec = BackendSpec(
+        "streaming-stt",
+        "stt",
+        FakeArguments,
+        stt_factory,
+        capabilities=BackendCapabilities(streams_audio_chunks=True),
+    )
+    llm_spec = BackendSpec("future-llm", "llm", FakeArguments, other_factory)
+    tts_spec = BackendSpec("future-tts", "tts", FakeArguments, other_factory)
+
+    monkeypatch.setattr(s2s_pipeline, "VADHandler", DummyHandler)
+    monkeypatch.setattr(s2s_pipeline, "TranscriptionNotifier", DummyNotifier)
+    monkeypatch.setattr("speech_to_speech.LLM.lm_output_processor.LMOutputProcessor", DummyHandler)
+
+    handlers = s2s_pipeline._build_handlers(
+        stop_event=Event(),
+        should_listen=Event(),
+        recv_audio_chunks_queue=Queue(),
+        spoken_prompt_queue=Queue(),
+        stt_output_queue=Queue(),
+        text_prompt_queue=Queue(),
+        lm_response_queue=Queue(),
+        lm_processed_queue=Queue(),
+        send_audio_chunks_queue=Queue(),
+        text_output_queue=Queue(),
+        module_kwargs=ModuleArguments(),
+        vad_handler_kwargs=VADHandlerArguments(),
+        stt_backend=BackendSelection(stt_spec, stt_spec.normalize(FakeArguments())),
+        llm_backend=BackendSelection(llm_spec, llm_spec.normalize(FakeArguments())),
+        tts_backend=BackendSelection(tts_spec, tts_spec.normalize(FakeArguments())),
+        speculative_turns=SpeculativeTurnTracker(),
+        cancel_scope=CancelScope(),
+        pipeline_index=0,
+    )
+
+    assert handlers[0].streaming_stt_sink is streaming_handler
+    assert any(isinstance(handler, DummyNotifier) for handler in handlers)
 
 
 def test_new_stt_backend_gets_transcription_notifier_by_default(monkeypatch):

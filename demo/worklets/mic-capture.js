@@ -22,7 +22,7 @@
  *     mic meter can show the live level against the threshold.
  */
 
-const TARGET_RATE = 24000;
+const DEFAULT_TARGET_RATE = 24000;
 const DEFAULT_CHUNK_MS = 40;
 // Gate envelope timing (fixed; only the threshold is user-tunable).
 const GATE_ATTACK_MS = 5; // open almost instantly so word onsets survive
@@ -33,9 +33,14 @@ class MicCaptureProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
     const chunkMs = options?.processorOptions?.chunkMs ?? DEFAULT_CHUNK_MS;
+    const requestedRate = Number(options?.processorOptions?.targetRate);
+    this._targetRate = Number.isFinite(requestedRate) && requestedRate > 0
+      ? requestedRate
+      : DEFAULT_TARGET_RATE;
+    this._version = String(options?.processorOptions?.version || "unknown");
     this._inputRate = sampleRate;
-    this._ratio = this._inputRate / TARGET_RATE;
-    this._chunkSamples = Math.round((TARGET_RATE * chunkMs) / 1000);
+    this._ratio = this._inputRate / this._targetRate;
+    this._chunkSamples = Math.round((this._targetRate * chunkMs) / 1000);
     this._scratch = new Float32Array(0);
     this._decimated = new Float32Array(this._chunkSamples);
     this._enabled = true;
@@ -45,14 +50,21 @@ class MicCaptureProcessor extends AudioWorkletProcessor {
     this._thresholdLin = 0; // linear amplitude; signal RMS must exceed this to open
     this._gateGain = 1; // smoothed gain currently applied
     this._holdRemaining = 0; // samples left before the gate may start closing
-    this._attackCoef = Math.exp(-1 / ((GATE_ATTACK_MS / 1000) * TARGET_RATE));
-    this._releaseCoef = Math.exp(-1 / ((GATE_RELEASE_MS / 1000) * TARGET_RATE));
-    this._holdSamples = Math.round((GATE_HOLD_MS / 1000) * TARGET_RATE);
+    this._attackCoef = Math.exp(-1 / ((GATE_ATTACK_MS / 1000) * this._targetRate));
+    this._releaseCoef = Math.exp(-1 / ((GATE_RELEASE_MS / 1000) * this._targetRate));
+    this._holdSamples = Math.round((GATE_HOLD_MS / 1000) * this._targetRate);
 
     this.port.onmessage = (e) => {
       const data = e.data;
       if (data?.kind === "enable") this._enabled = !!data.value;
-      else if (data?.kind === "gate") {
+      else if (data?.kind === "probe") {
+        this.port.postMessage({
+          kind: "capture-config",
+          inputRate: this._inputRate,
+          outputRate: this._targetRate,
+          version: this._version,
+        });
+      } else if (data?.kind === "gate") {
         this._gateEnabled = !!data.enabled;
         // dB -> linear amplitude. When off, threshold 0 keeps the gate open.
         this._thresholdLin = data.enabled ? Math.pow(10, data.thresholdDb / 20) : 0;

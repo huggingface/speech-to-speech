@@ -287,6 +287,8 @@ class AudioHandler(RealtimeBaseHandler):
             conn_id,
             item_id,
         )
+        pending = next(item for item in st.pending_text_outputs if int(item["output_index"]) == output_index)
+        events.extend(self._service.response._begin_message_output(conn_id, pending, wants_audio=True))
         st.audio_output_started = True
         return resp_id, assistant_item_id, output_index, events
 

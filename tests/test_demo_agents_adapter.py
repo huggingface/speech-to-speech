@@ -100,6 +100,110 @@ for (const [transport, url] of [
     )
 
 
+def test_websocket_audio_setup_requires_the_versioned_24khz_worklet():
+    _run_node(
+        """
+globalThis.window = globalThis;
+globalThis.requestAnimationFrame = () => 1;
+globalThis.document = { documentElement: { style: { setProperty() {}, removeProperty() {} } } };
+
+const { S2sRealtimeClient } = await import("./demo/s2s-realtime-client.js");
+
+async function setupAudio(captureConfig) {
+  const modules = [];
+  const nodes = [];
+  const analyser = () => ({
+    fftSize: 0,
+    smoothingTimeConstant: 0,
+    frequencyBinCount: 128,
+    connect() {},
+    getByteFrequencyData() {},
+  });
+  const context = {
+    state: "running",
+    destination: {},
+    audioWorklet: { async addModule(url) { modules.push(url); } },
+    createMediaStreamSource() { return { connect() {} }; },
+    createAnalyser: analyser,
+  };
+  globalThis.AudioWorkletNode = class AudioWorkletNode {
+    constructor(_context, name, options) {
+      this.name = name;
+      this.options = options;
+      this.messages = [];
+      this.port = {
+        onmessage: null,
+        postMessage: (message) => {
+          this.messages.push(message);
+          if (name === "mic-capture" && message?.kind === "probe" && captureConfig !== undefined) {
+            this.port.onmessage?.({ data: captureConfig });
+          }
+        },
+      };
+      nodes.push(this);
+    }
+    connect() {}
+  };
+
+  const client = new S2sRealtimeClient({
+    transport: "websocket",
+    directUrl: "ws://unused",
+    audioContext: context,
+    micStream: {},
+  });
+  await client._setupAudio();
+  return { modules, nodes };
+}
+
+const good = await setupAudio({
+  kind: "capture-config",
+  inputRate: 48000,
+  outputRate: 24000,
+  version: "audio-24k-v1",
+});
+if (good.modules.length !== 2 || good.modules.some((url) => !url.endsWith("?v=audio-24k-v1"))) {
+  throw new Error(`audio worklets were not versioned: ${JSON.stringify(good.modules)}`);
+}
+const capture = good.nodes.find((node) => node.name === "mic-capture");
+if (capture?.options?.processorOptions?.targetRate !== 24000) {
+  throw new Error("capture worklet was not configured for 24 kHz");
+}
+
+let mismatch;
+try {
+  await setupAudio({
+    kind: "capture-config",
+    inputRate: 48000,
+    outputRate: 16000,
+    version: "stale-16k",
+  });
+} catch (error) {
+  mismatch = error;
+}
+if (!String(mismatch?.message).includes("sample-rate mismatch")) {
+  throw new Error(`stale worklet was not rejected: ${mismatch}`);
+}
+
+const realSetTimeout = window.setTimeout;
+window.setTimeout = (callback) => {
+  queueMicrotask(callback);
+  return 1;
+};
+let noConfig;
+try {
+  await setupAudio(undefined);
+} catch (error) {
+  noConfig = error;
+} finally {
+  window.setTimeout = realSetTimeout;
+}
+if (!String(noConfig?.message).includes("did not report")) {
+  throw new Error(`non-reporting stale worklet was not rejected: ${noConfig}`);
+}
+"""
+    )
+
+
 def test_adapter_delegates_tools_to_realtime_session():
     _run_node(
         """

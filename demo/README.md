@@ -217,6 +217,7 @@ leaves the app unmetered. Tunable via env:
 |-----|---------|------|
 | `LIMIT_ANON_SEC` | `300` | Daily seconds for anonymous visitors (5 min) |
 | `LIMIT_FREE_SEC` | `600` | Daily seconds for signed-in non-PRO users (10 min) |
+| `LB_HF_TOKEN` | _(falls back to user OAuth)_ | Optional Space secret sent in standard `Authorization` to authenticate requests at the HF Inference Endpoint ingress; per-user attribution continues through `X-Reachy-Mini-Authorization` |
 | `UNLIMITED_ORGS` | _(adds to defaults)_ | Extra HF org names whose members get **unlimited** usage, like PRO |
 | `USAGE_HASH_SECRET` | _(random)_ | HMAC secret for hashing identity keys + signing the anon cookie |
 
@@ -265,6 +266,12 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
   feeds the `mic-capture` worklet at the `AudioContext` rate. The worklet
   resamples to 24 kHz (boxcar lowpass + decimation on the 48 -> 24 fast
   path, linear interpolation fallback for odd rates) and packs Int16 LE.
+- **Browser cache safety**: the entry module, realtime client, and both audio
+  worklet URLs share the `audio-24k-v1` cache key. The client also waits for
+  the capture worklet to report the same version and a 24 kHz output rate
+  before opening a session. When the browser-audio contract or sample rate
+  changes, bump the key in `index.html`, `main.js`, and
+  `AUDIO_WORKLET_VERSION` in `s2s-realtime-client.js` together.
 - **User replay**: the WebSocket client retains only a bounded copy of PCM it
   actually sends. `speech_started` / `speech_stopped` timestamps select each
   utterance, which is wrapped as an in-memory WAV and attached to the user row.
