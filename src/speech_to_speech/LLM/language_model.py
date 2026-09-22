@@ -681,29 +681,33 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 else None
             )
             llm_start_s = perf_counter()
-            with bind_active_turn_latency_tracker(tracker):
-                for chunk in self._generate(active_chat, language_code, gen, ctx, runtime_config, response):
-                    chunk.response_key = request.response_key
-                    chunk.prefetch_transaction = request.prefetch_transaction
-                    new_parts = [part.model_copy(deep=True) for part in chunk.parts]
-                    ctx.output_parts.extend(new_parts)
-                    if not out_of_band and any(isinstance(part, AssistantToolCallPart) for part in new_parts):
-                        recorded = self._commit_ordered_output(
-                            original_chat,
-                            ctx.output_parts[ctx.history_parts_committed :],
-                            wants_audio=response_wants_audio(response),
-                            response_key=request.response_key,
-                            recorded_item_ids=ctx.recorded_item_ids,
-                            recorded_call_ids=ctx.recorded_call_ids,
-                            after_item_id=history_anchor_id,
-                        )
-                        if not recorded:
-                            ctx.cancelled = True
-                            break
-                        ctx.history_parts_committed = len(ctx.output_parts)
-                    yield chunk
-            if tracker is not None:
-                tracker.record_llm(perf_counter() - llm_start_s)
+            try:
+                with bind_active_turn_latency_tracker(tracker):
+                    for chunk in self._generate(active_chat, language_code, gen, ctx, runtime_config, response):
+                        chunk.response_key = request.response_key
+                        chunk.prefetch_transaction = request.prefetch_transaction
+                        new_parts = [part.model_copy(deep=True) for part in chunk.parts]
+                        ctx.output_parts.extend(new_parts)
+                        if not out_of_band and any(isinstance(part, AssistantToolCallPart) for part in new_parts):
+                            recorded = self._commit_ordered_output(
+                                original_chat,
+                                ctx.output_parts[ctx.history_parts_committed :],
+                                wants_audio=response_wants_audio(response),
+                                response_key=request.response_key,
+                                recorded_item_ids=ctx.recorded_item_ids,
+                                recorded_call_ids=ctx.recorded_call_ids,
+                                after_item_id=history_anchor_id,
+                            )
+                            if not recorded:
+                                ctx.cancelled = True
+                                break
+                            ctx.history_parts_committed = len(ctx.output_parts)
+                        yield chunk
+            finally:
+                # Publish the elapsed work before the failure handler yields a
+                # terminal that can finish the response on another thread.
+                if tracker is not None:
+                    tracker.record_llm(perf_counter() - llm_start_s)
 
             if ctx.stopped:
                 return
