@@ -86,6 +86,7 @@ class ResponseHandler(RealtimeBaseHandler):
         return st.current_response_id, self._current_item_id(conn_id)
 
     def _log_turn_latency(self, st: ConnState, status: _ResponseStatus, response_key: str | None) -> None:
+        assert status != "in_progress", "Latency is only finalized for terminal responses"
         tracker = self._service.turn_latency_store.pop(response_key, session_id=st.session_id)
         if tracker is None or tracker.turn_id is None:
             return
