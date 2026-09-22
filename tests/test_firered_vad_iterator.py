@@ -312,3 +312,33 @@ def test_firered_iterator_counts_forty_three_speech_hops_including_pre_start() -
 
     assert spoken_utterance is not None
     assert iterator.last_utterance_active_speech_samples == 43 * 160
+
+
+def test_firered_discards_rejected_candidate_audio_without_padding() -> None:
+    frames = (
+        [_frame(is_speech=True) for _ in range(5)]
+        + [_frame(is_speech=False, smoothed_prob=0.0)]
+        + [_frame(is_speech=True) for _ in range(7)]
+        + [_frame(is_speech=True, is_speech_start=True)]
+        + [_frame(is_speech=False, smoothed_prob=0.0, is_speech_end=True)]
+    )
+    iterator = FireRedVadIterator(_FakeFireRedStream(frames), speech_pad_ms=0)
+    audio = torch.arange(4096, dtype=torch.float32)
+    utterances = [result for chunk in audio.split(512) if (result := iterator(chunk)) is not None]
+    assert len(utterances) == 1
+    retained = torch.cat(utterances[0])
+    assert torch.equal(retained, audio[6 * 160 : 6 * 160 + len(retained)])
+    assert iterator.last_utterance_active_speech_samples == 8 * 160
+
+
+def test_firered_reset_discards_unconfirmed_audio() -> None:
+    frames = [_frame(is_speech=True) for _ in range(7)] + [_frame(is_speech=True, is_speech_start=True)]
+    iterator = FireRedVadIterator(_FakeFireRedStream(frames), speech_pad_ms=0)
+    iterator(torch.full((512,), -1.0))
+    assert iterator._pre_speech_samples > 0
+    iterator.reset_states()
+    for _ in range(3):
+        iterator(torch.ones(512))
+    assert iterator.triggered
+    assert torch.equal(torch.cat(iterator.speech_buffer()), torch.ones(1536))
+    assert iterator.active_speech_samples == 8 * 160

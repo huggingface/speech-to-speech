@@ -402,14 +402,15 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         sink = getattr(self, "streaming_stt_sink", None)
         if sink is None:
             return
+        pad_bytes = getattr(self.iterator, "pre_speech_samples", self.iterator.speech_pad_samples) * 2
         if not speech_active:
-            # Retain only VAD's configured pre-speech padding, without sending
-            # idle microphone audio to the provider.
+            # Retain padding and any speech awaiting detector confirmation,
+            # without sending idle microphone audio to the provider.
             self._streaming_pre_speech.extend(audio_chunk)
-            pad_bytes = self.iterator.speech_pad_samples * 2
             del self._streaming_pre_speech[: max(0, len(self._streaming_pre_speech) - pad_bytes)]
             return
         if self._streaming_pre_speech:
+            del self._streaming_pre_speech[: max(0, len(self._streaming_pre_speech) - pad_bytes)]
             audio_chunk = bytes(self._streaming_pre_speech) + audio_chunk
             self._streaming_pre_speech.clear()
         try:

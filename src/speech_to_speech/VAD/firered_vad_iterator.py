@@ -107,15 +107,11 @@ class FireRedVadIterator:
     def _num_samples(self, chunk: torch.Tensor) -> int:
         return len(chunk[0]) if chunk.dim() == 2 else len(chunk)
 
-    def _trim_pre_speech_buffer(self) -> None:
-        while (
-            self.speech_pad_samples > 0
-            and self._pre_speech_buffer
-            and self._pre_speech_samples > self.speech_pad_samples
-        ):
+    def _trim_pre_speech_buffer(self, keep_samples: int) -> None:
+        while self._pre_speech_buffer and self._pre_speech_samples > keep_samples:
             first = self._pre_speech_buffer[0]
             first_samples = self._num_samples(first)
-            excess = self._pre_speech_samples - self.speech_pad_samples
+            excess = self._pre_speech_samples - keep_samples
 
             if excess >= first_samples:
                 self._pre_speech_buffer.popleft()
@@ -129,14 +125,17 @@ class FireRedVadIterator:
             self._pre_speech_samples -= excess
 
     def _remember_pre_speech(self, chunk: torch.Tensor) -> None:
-        if self.speech_pad_samples <= 0:
-            self._pre_speech_buffer.clear()
-            self._pre_speech_samples = 0
-            return
-
         self._pre_speech_buffer.append(chunk)
         self._pre_speech_samples += self._num_samples(chunk)
-        self._trim_pre_speech_buffer()
+        # Keep unconfirmed speech and the analysis tail even when padding is disabled.
+        self._trim_pre_speech_buffer(max(self.speech_pad_samples, self._candidate_speech_samples + len(self._tail)))
+
+    @property
+    def pre_speech_samples(self) -> int:
+        """Audio before the current chunk needed by the streaming STT buffer."""
+        if self.triggered:
+            return sum(self._num_samples(chunk) for chunk in self.prefix_buffer)
+        return self._pre_speech_samples
 
     def speech_buffer(self) -> list[torch.Tensor]:
         if not self.prefix_buffer:
@@ -187,7 +186,7 @@ class FireRedVadIterator:
         chunk_in_buffer = False
         ended_utterance: list[torch.Tensor] | None = None
 
-        for frame in frames:
+        for frame_index, frame in enumerate(frames):
             if not self.triggered:
                 if self._frame_is_speech(frame):
                     self._candidate_speech_samples += _FIRERED_HOP_SAMPLES
@@ -195,6 +194,15 @@ class FireRedVadIterator:
                     self._candidate_speech_samples = 0
             if frame.is_speech_start and not self.triggered:
                 self.triggered = True
+                # Locate the first candidate hop relative to this input chunk. The
+                # remaining hops and analysis tail have already consumed audio too.
+                candidate_prefix_samples = (
+                    self._candidate_speech_samples
+                    + (len(frames) - frame_index - 1) * _FIRERED_HOP_SAMPLES
+                    + len(self._tail)
+                    - self._num_samples(x)
+                )
+                self._trim_pre_speech_buffer(max(self.speech_pad_samples, candidate_prefix_samples))
                 self.prefix_buffer = list(self._pre_speech_buffer)
                 self._pre_speech_buffer.clear()
                 self._pre_speech_samples = 0
