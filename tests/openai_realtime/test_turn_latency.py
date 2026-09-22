@@ -1,33 +1,40 @@
 """Latency records emitted by the actual response lifecycle."""
 
 import logging
+from queue import Queue
+from threading import Event
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from openai.types.realtime import ConversationItemCreateEvent, ResponseCreateEvent
 from openai.types.realtime.conversation_item import RealtimeConversationItemFunctionCall
 
 import speech_to_speech.LLM.language_model as language_model_module
+import speech_to_speech.TTS.qwen3_tts_handler as qwen3_tts_module
 from speech_to_speech.LLM.language_model import LanguageModelHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
+    AssistantResponseDoneEvent,
     PipelineEvent,
     ResponseGenerationDoneEvent,
     SpeechStartedEvent,
     TranscriptionCompletedEvent,
 )
-from speech_to_speech.pipeline.messages import AssistantToolCallPart, EndOfResponse, LLMResponseChunk
+from speech_to_speech.pipeline.messages import AssistantToolCallPart, EndOfResponse, LLMResponseChunk, TTSInput
+from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 
 LATENCY_LOGGER = "speech_to_speech.api.openai_realtime.handlers.response"
 
 
-def _queue_turn(service, conn_id, *, turn_id="turn_1", revision=0, interrupt=True, reopened=False):
+def _queue_turn(service, conn_id, *, turn_id="turn_1", revision=0, interrupt=True, reopened=False, stt_s=0.12):
     service.dispatch_pipeline_event(
         conn_id,
         SpeechStartedEvent(turn_id=turn_id, turn_revision=revision, interrupt_response=interrupt, reopened=reopened),
     )
     pending = service.turn_latency_store.get_or_create_for_turn(turn_id, revision)
-    pending.record_stt(0.12)
+    pending.record_stt(stt_s)
     service.dispatch_pipeline_event(
         conn_id,
         TranscriptionCompletedEvent(transcript="Hello", turn_id=turn_id, turn_revision=revision),
@@ -82,6 +89,133 @@ def test_failed_generation_records_duration_before_terminal_output(
     assert len(done) == 1
     assert done[0].response.status == "failed"
     assert service.turn_latency_store._trackers == {}
+
+
+@pytest.mark.parametrize("status", ["completed", "cancelled", "failed", "incomplete"])
+def test_terminal_response_emits_one_latency_record(service, conn_id, caplog, status):
+    request = _queue_turn(service, conn_id)
+    tracker = service.turn_latency_store.get_or_create_response(request.response_key)
+    tracker.record_llm(1.28)
+    tracker.record_tts_ttfa(0.16)
+    tracker.record_e2e(1.61)
+    tracker.record_mlx_lock_wait(0.03)
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=request.response_key))
+
+    with caplog.at_level(logging.INFO, logger=LATENCY_LOGGER):
+        events = service.finish_response(conn_id, status=status, response_key=request.response_key)
+        service.finish_response(conn_id, status=status, response_key=request.response_key)
+
+    assert _latency_lines(caplog) == [
+        "Turn turn_1 rev=0 latency: stt=0.12s llm=1.28s tts_ttfa=0.16s e2e=1.61s "
+        f"mlx_lock_wait=0.03s status={status} response_key={request.response_key}"
+    ]
+    done = [event for event in events if event.type == "response.done"]
+    assert len(done) == 1
+    assert done[0].response.status == status
+    assert service.turn_latency_store._trackers == {}
+    assert service.turn_latency_store.active_session_count == 0
+
+
+@pytest.mark.parametrize("new_turn,revision,reopened", [("turn_2", 0, False), ("turn_1", 1, True)])
+def test_non_interrupting_speech_keeps_original_response_attribution(
+    service, conn_id, caplog, new_turn, revision, reopened
+):
+    original = _queue_turn(service, conn_id)
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=original.response_key))
+    newer = _queue_turn(
+        service, conn_id, turn_id=new_turn, revision=revision, interrupt=False, reopened=reopened, stt_s=0.34
+    )
+    assert service._state(conn_id).current_response_key == original.response_key
+
+    with caplog.at_level(logging.INFO, logger=LATENCY_LOGGER):
+        service.finish_response(conn_id, response_key=original.response_key)
+        assert newer.response_key in service.turn_latency_store._trackers
+        service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=newer.response_key))
+        service.finish_response(conn_id, response_key=newer.response_key)
+
+    lines = _latency_lines(caplog)
+    assert len(lines) == 2
+    assert "Turn turn_1 rev=0 latency: stt=0.12s" in lines[0]
+    assert f"response_key={original.response_key}" in lines[0]
+    assert f"Turn {new_turn} rev={revision} latency: stt=0.34s" in lines[1]
+    assert f"response_key={newer.response_key}" in lines[1]
+
+
+def test_unregister_clears_unfinished_measurements_before_session_reuse(service, conn_id, caplog):
+    request = _queue_turn(service, conn_id)
+    old = service.turn_latency_store.get_or_create_response(request.response_key)
+    old.record_llm(9.0)
+    old.record_tts_ttfa(8.0)
+    old.record_e2e(7.0)
+    service.turn_latency_store.get_or_create_for_turn("turn_2", 0).record_stt(6.0)
+
+    service.unregister(conn_id)
+    assert service.turn_latency_store._trackers == {}
+    assert service.turn_latency_store._pending_turn == {}
+    assert service.turn_latency_store.active_session_count == 0
+
+    new_conn_id = service.register()
+    try:
+        fresh = _queue_turn(service, new_conn_id)
+        service.dispatch_pipeline_event(new_conn_id, AssistantResponseDoneEvent(response_key=fresh.response_key))
+        with caplog.at_level(logging.INFO, logger=LATENCY_LOGGER):
+            service.finish_response(new_conn_id, response_key=fresh.response_key)
+        lines = _latency_lines(caplog)
+        assert len(lines) == 1
+        assert "stt=0.12s llm=n/a tts_ttfa=n/a e2e=n/a" in lines[0]
+        assert f"response_key={fresh.response_key}" in lines[0]
+    finally:
+        service.unregister(new_conn_id)
+
+
+def test_multiple_qwen_segments_keep_first_audio_timings_in_terminal_log(service, conn_id, monkeypatch, caplog):
+    request = _queue_turn(service, conn_id)
+    clock = [10.0]
+    durations = iter([0.25, 0.75])
+    generated_texts = []
+
+    def generate_custom_voice(**kwargs):
+        generated_texts.append(kwargs["text"])
+        clock[0] += next(durations)
+        yield SimpleNamespace(audio=np.full(512, 0.1, dtype=np.float32), sample_rate=16000)
+
+    def load_model(self, model_name):
+        self.model = SimpleNamespace(
+            config=SimpleNamespace(tts_model_type="custom_voice"), generate_custom_voice=generate_custom_voice
+        )
+
+    monkeypatch.setattr(qwen3_tts_module, "platform", "darwin")
+    monkeypatch.setattr(qwen3_tts_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", load_model)
+    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.setup(Event())
+    handler.queue_in = Queue()
+    handler.turn_latency_store = service.turn_latency_store
+
+    for start, text in [(10.0, "First sentence."), (20.0, "Second sentence.")]:
+        clock[0] = start
+        output = list(
+            handler.process(
+                TTSInput(
+                    text=text,
+                    response_key=request.response_key,
+                    turn_id=request.turn_id,
+                    turn_revision=request.turn_revision,
+                    speech_stopped_at_s=8.0,
+                )
+            )
+        )
+        assert len(output) == 1
+        assert np.any(output[0])
+
+    assert generated_texts == ["First sentence.", "Second sentence."]
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=request.response_key))
+    with caplog.at_level(logging.INFO, logger=LATENCY_LOGGER):
+        service.finish_response(conn_id, response_key=request.response_key)
+    lines = _latency_lines(caplog)
+    assert len(lines) == 1
+    assert "tts_ttfa=0.25s e2e=2.25s" in lines[0]
 
 
 @pytest.mark.parametrize("followup_status", ["completed", "cancelled"])
