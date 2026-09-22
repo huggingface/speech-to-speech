@@ -599,6 +599,9 @@ Language coverage depends on the STT and TTS backends you pick, not on the pipel
 | TTS | ChatTTS | English and Chinese |
 | TTS | MMS TTS | Broad multilingual coverage through MMS checkpoints |
 | TTS | OmniVoice | 600+ languages; voice cloning, design, and automatic voice selection |
+| TTS | Supertonic | 32 languages |
+| TTS | Pocket TTS | English, French, German, Portuguese, Italian, Spanish |
+| TTS | OpenAI-compatible `/v1/audio/speech` endpoint | Depends on the connected TTS server/model |
 
 Make sure the STT, LLM, and TTS you pair all cover your target language(s). Two usage patterns:
 
