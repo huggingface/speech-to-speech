@@ -25,6 +25,7 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
     # detection state. Declared here so the session reset covers every backend.
     start_language: Any = None
     last_language: Any = None
+
     def output_for_queue(self, output: STTOut, source_input: STTIn) -> STTOut:
         # The background worker overlaps inference with STT. Resolve only now,
         # without waiting: a late result is explicitly incomplete, not a reason
