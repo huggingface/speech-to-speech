@@ -184,5 +184,14 @@ class BaseHandler(Generic[InT, OutT]):
     def cleanup(self) -> None:
         pass
 
+    def has_pending_session_work(self) -> bool:
+        """Report work retained outside the serial queue after a routing barrier.
+
+        Called while new session input is paused. Handlers with background work
+        or buffered input must override this and synchronize with their workers.
+        Purely serial handlers are idle once the barrier has passed.
+        """
+        return False
+
     def on_session_end(self) -> None:
         pass

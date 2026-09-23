@@ -755,3 +755,16 @@ def test_session_end_cancels_real_stalled_http(stalled_stt_endpoint, monkeypatch
         handler.queue_in.put(PIPELINE_END)
         worker.join(timeout=2)
     assert not worker.is_alive()
+
+
+@pytest.mark.parametrize("mode", ["final", "progressive"])
+def test_routing_readiness_waits_for_provider_cleanup(handler_factory, mode):
+    operation = ControlledOperation("completed")
+    handler = handler_factory(operation)
+    assert not handler.has_pending_session_work()
+    assert list(handler.process(audio(mode))) == []
+    assert operation.started.wait(1)
+    assert handler.has_pending_session_work()
+    operation.release.set()
+    getattr(handler, f"_{mode}_thread").join(timeout=1)
+    assert not handler.has_pending_session_work()

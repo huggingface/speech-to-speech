@@ -451,6 +451,7 @@ def test_vad_pending_reopen_starts_before_active_speech_threshold():
     assert list(handler.process(_audio_bytes())) == []
 
     assert tracker.has_pending_reopen("turn_1", 0)
+    assert handler.has_pending_session_work()
     tracker.commit("turn_1", 0)
     assert not tracker.is_committed("turn_1", 0)
     assert handler.text_output_queue.empty()
@@ -965,6 +966,7 @@ def test_vad_stitches_adjacent_short_segments_before_discarding():
     assert list(handler.process(_audio_bytes())) == []
     assert handler.text_output_queue.empty()
     assert handler._pending_short_segment is not None
+    assert handler.has_pending_session_work()
 
     handler.iterator = _StaticVADIterator(
         triggered=False,
@@ -981,6 +983,7 @@ def test_vad_stitches_adjacent_short_segments_before_discarding():
     assert started.interrupt_response is False
     assert isinstance(stopped, SpeechStoppedEvent)
     assert handler._pending_short_segment is None
+    assert not handler.has_pending_session_work()
 
 
 @pytest.mark.parametrize("streaming", [False, True])

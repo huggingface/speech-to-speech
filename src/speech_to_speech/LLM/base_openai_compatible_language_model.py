@@ -217,6 +217,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         if warmup_enabled:
             self.warmup()
 
+    def has_pending_session_work(self) -> bool:
+        with self._prefetch_workers_lock:
+            return bool(self._prefetch_workers)
+
     @staticmethod
     def _is_official_openai(base_url: Optional[str]) -> bool:
         """Whether ``base_url`` points at the official OpenAI server.

@@ -474,6 +474,18 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         if request.operation is not None:
             request.operation.cancel(reason)
 
+    def has_pending_session_work(self) -> bool:
+        with self._request_lock:
+            return bool(
+                self._pending_finals
+                or self._pending_progressive is not None
+                or self._active
+                or any(
+                    worker is not None and worker.is_alive()
+                    for worker in (self._final_thread, self._progressive_thread)
+                )
+            )
+
     def on_session_end(self) -> None:
         with self._request_lock:
             self._session_generation += 1

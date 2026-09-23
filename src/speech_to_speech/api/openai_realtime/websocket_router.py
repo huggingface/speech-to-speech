@@ -552,24 +552,8 @@ async def _drain_for_routing_update(unit: PipelineUnit, session_id: str) -> None
     require_idle()
     if not unit.text_output_queue.empty() or not unit.text_prompt_queue.empty():
         raise ValueError("Pipeline events are still pending; retry the model update after cleanup.")
-    for handler in unit.handlers:
-        # A queue barrier covers serial work. Remote STT and hidden LLM
-        # prefetch also own background workers that must finish before a switch.
-        for name in ("_progressive_thread", "_final_thread"):
-            worker = getattr(handler, name, None)
-            if worker is not None and worker.is_alive():
-                raise ValueError("Transcription cleanup is still pending.")
-        workers_lock = getattr(handler, "_prefetch_workers_lock", None)
-        if workers_lock is not None:
-            with workers_lock:
-                if handler._prefetch_workers:
-                    raise ValueError("Generation cleanup is still pending.")
-        if (
-            getattr(handler, "_speech_started_emitted", False)
-            or getattr(handler, "_pending_short_segment", None) is not None
-            or getattr(handler, "_pending_reopen_candidate", None) is not None
-        ):
-            raise ValueError("Input speech is still pending; finish the turn before changing models.")
+    if any(handler.has_pending_session_work() for handler in unit.handlers):
+        raise ValueError("Session work is still pending; finish the turn and wait for cleanup before changing models.")
 
 
 def create_app(
