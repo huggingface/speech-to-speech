@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 from typing import Any
@@ -49,6 +50,7 @@ def make_handler(
     handler = OmniVoiceTTSHandler.__new__(OmniVoiceTTSHandler)
     handler.model = model
     handler.voice_clone_prompt = voice_clone_prompt
+    handler.language_voice_clone_prompts = {}
     handler.instruct = instruct
     handler.language = language
     handler.num_steps = 32
@@ -126,6 +128,52 @@ def test_setup_loads_saved_voice_clone_prompt_once(monkeypatch: pytest.MonkeyPat
     assert prompt_loads == ["saved-voice.pt"]
     assert model.create_prompt_calls == []
     assert model.generate_calls[0]["voice_clone_prompt"] is saved_prompt
+
+
+def install_fake_omnivoice(monkeypatch: pytest.MonkeyPatch, model: FakeModel) -> None:
+    class FakeOmniVoice:
+        @classmethod
+        def from_pretrained(cls, *_args: Any, **_kwargs: Any) -> FakeModel:
+            return model
+
+    monkeypatch.setitem(
+        sys.modules,
+        "omnivoice",
+        SimpleNamespace(OmniVoice=FakeOmniVoice, VoiceClonePrompt=SimpleNamespace(load=lambda _path: object())),
+    )
+
+
+def test_ref_voices_dir_clones_the_reference_for_each_utterance_language(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    model = FakeModel()
+    install_fake_omnivoice(monkeypatch, model)
+    for code, transcript in {"fr": "Bonjour.", "es": "Hola."}.items():
+        (tmp_path / f"{code}.wav").write_bytes(b"")
+        (tmp_path / f"{code}.txt").write_text(f"{transcript}\n", encoding="utf-8")
+    handler = OmniVoiceTTSHandler.__new__(OmniVoiceTTSHandler)
+
+    handler.setup(Event(), ref_audio="default.wav", ref_text="Hello.", ref_voices_dir=str(tmp_path))
+    for language in ("fr", "es-419", "de", None):
+        list(handler.process(TTSInput(text="Ahoy.", language_code=language)))
+
+    assert [call["ref_text"] for call in model.create_prompt_calls] == ["Hello.", "Hola.", "Bonjour."]
+    prompts = handler.language_voice_clone_prompts
+    assert [call["voice_clone_prompt"] for call in model.generate_calls] == [
+        prompts["fr"],
+        prompts["es"],
+        handler.voice_clone_prompt,
+        handler.voice_clone_prompt,
+    ]
+
+
+def test_ref_voices_dir_rejects_a_reference_without_transcript(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    install_fake_omnivoice(monkeypatch, FakeModel())
+    (tmp_path / "fr.wav").write_bytes(b"")
+    handler = OmniVoiceTTSHandler.__new__(OmniVoiceTTSHandler)
+
+    with pytest.raises(ValueError, match="fr.txt"):
+        handler.setup(Event(), ref_voices_dir=str(tmp_path))
 
 
 @pytest.mark.parametrize(

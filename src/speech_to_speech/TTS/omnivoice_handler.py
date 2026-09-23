@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from math import gcd
+from pathlib import Path
 from threading import Event
 from typing import Any, Iterator
 
@@ -31,6 +32,7 @@ class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
         ref_audio: str | None = None,
         ref_text: str | None = None,
         voice_clone_prompt: str | None = None,
+        ref_voices_dir: str | None = None,
         instruct: str | None = None,
         language: str | None = None,
         num_steps: int = 32,
@@ -52,7 +54,9 @@ class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
             raise ValueError("ref_audio is required when ref_text is configured")
         if voice_clone_prompt is not None and ref_audio is not None:
             raise ValueError("voice_clone_prompt and ref_audio are mutually exclusive")
-        if instruct is not None and (voice_clone_prompt is not None or ref_audio is not None):
+        if instruct is not None and (
+            voice_clone_prompt is not None or ref_audio is not None or ref_voices_dir is not None
+        ):
             raise ValueError("instruct cannot be combined with voice-cloning configuration")
 
         import torch
@@ -96,6 +100,29 @@ class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
             self.voice_clone_prompt = self.model.create_voice_clone_prompt(ref_audio=ref_audio, ref_text=ref_text)
             logger.info("Prepared OmniVoice clone prompt from %r", ref_audio)
 
+        self.language_voice_clone_prompts: dict[str, Any] = {}
+        if ref_voices_dir is not None:
+            for audio_path in sorted(Path(ref_voices_dir).glob("*.wav")):
+                text_path = audio_path.with_suffix(".txt")
+                if not text_path.is_file():
+                    raise ValueError(f"{audio_path} has no matching transcript {text_path.name}")
+                self.language_voice_clone_prompts[audio_path.stem.lower()] = self.model.create_voice_clone_prompt(
+                    ref_audio=str(audio_path), ref_text=text_path.read_text(encoding="utf-8").strip()
+                )
+            if not self.language_voice_clone_prompts:
+                raise ValueError(f"ref_voices_dir {ref_voices_dir!r} contains no <language>.wav references")
+            logger.info(
+                "Prepared OmniVoice clone prompts for languages: %s", ", ".join(self.language_voice_clone_prompts)
+            )
+
+    def _voice_clone_prompt_for(self, language: str | None) -> Any:
+        if language:
+            code = language.lower()
+            for key in (code, code.split("-")[0]):
+                if key in self.language_voice_clone_prompts:
+                    return self.language_voice_clone_prompts[key]
+        return self.voice_clone_prompt
+
     def _is_cancelled(self, generation: int | None) -> bool:
         return generation is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(generation)
 
@@ -136,8 +163,9 @@ class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
         language = self.language or tts_input.language_code
         if language:
             generation_kwargs["language"] = language
-        if self.voice_clone_prompt is not None:
-            generation_kwargs["voice_clone_prompt"] = self.voice_clone_prompt
+        voice_clone_prompt = self._voice_clone_prompt_for(language)
+        if voice_clone_prompt is not None:
+            generation_kwargs["voice_clone_prompt"] = voice_clone_prompt
         elif self.instruct is not None:
             generation_kwargs["instruct"] = self.instruct
 
