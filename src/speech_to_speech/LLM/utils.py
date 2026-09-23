@@ -294,3 +294,36 @@ def image_url_to_pil(image_url: str) -> Image.Image:
     resp = requests.get(image_url, timeout=10)
     resp.raise_for_status()
     return Image.open(io.BytesIO(resp.content))
+
+
+def is_backchannel_turn(
+    transcript: str,
+    *,
+    duration_s: float = 0.0,
+    max_duration_s: float = 2.0,
+    max_words: int = 2,
+) -> bool:
+    """Determine whether a vocalization during active playback is a backchannel.
+
+    Fully language-agnostic: evaluates structural token invariants, absence of
+    exclamation/question syntax, and a duration ceiling. Zero wordlists.
+    """
+    clean = transcript.strip()
+    if not clean:
+        return True
+
+    # Any question or command/exclamation across scripts is an interruption
+    if clean.endswith(("?", "？", "¿", "!", "！")) or clean.startswith("¿"):
+        return False
+
+    if duration_s > max_duration_s:
+        return False
+
+    words = clean.split()
+    if len(words) > max_words:
+        return False
+
+    if len(words) == 1 and len(clean) > 8:
+        return False
+
+    return True

@@ -55,6 +55,8 @@ from speech_to_speech.api.openai_realtime.handlers import (
 from speech_to_speech.api.openai_realtime.input_state import InputItemState
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
+from speech_to_speech.LLM.utils import is_backchannel_turn
+from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -207,6 +209,10 @@ class ConnState(BaseModel):
     input_item_by_turn_revision: dict[tuple[str, int | None], str] = Field(default_factory=dict)
     input_items: dict[str, InputItemState] = Field(default_factory=dict)
     input_audio_duration_s: float = 0.0
+    tentative_interruption: bool = False
+    tentative_interruption_started_at: Optional[float] = None
+    user_speech_active: bool = False
+    needs_hard_cancel: bool = False
     last_item_id: Optional[str] = None
     current_response_params: RealtimeResponseCreateParams | None = None
     pending_assistant_item_id: Optional[str] = None
@@ -303,12 +309,14 @@ class RealtimeService:
         chat_size: int = 10,
         speculative_turns: SpeculativeTurnTracker | None = None,
         default_instructions: str | None = None,
+        cancel_scope: CancelScope | None = None,
     ) -> None:
         self.text_prompt_queue = text_prompt_queue
         self.should_listen = should_listen
         self._chat_size = chat_size
         self.speculative_turns = speculative_turns
         self._default_instructions = default_instructions
+        self.cancel_scope = cancel_scope
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
 
@@ -651,6 +659,24 @@ class RealtimeService:
 
         cfg = st.runtime_config
         transcript = event.transcript
+        extra_events: list[ServerEvent] = []
+
+        if st.tentative_interruption:
+            st.tentative_interruption = False
+            if transcript and is_backchannel_turn(
+                transcript,
+                duration_s=st.input_audio_duration_s,
+            ):
+                logger.info("Backchannel detected (%r); continuing active response", transcript)
+                if self.speculative_turns is not None:
+                    self.speculative_turns.commit(event.turn_id, event.turn_revision)
+                st.speculative_user_item_id = None
+                return [*completed_events]
+            st.needs_hard_cancel = True
+            extra_events.extend(self.response.finish_response(conn_id, status="cancelled", reason="turn_detected"))
+            if self.cancel_scope is not None:
+                self.cancel_scope.cancel()
+
         if transcript:
             if same_speculative_turn and st.speculative_user_item_id:
                 replaced = cfg.chat.replace_user_message_text(st.speculative_user_item_id, transcript)
@@ -683,7 +709,7 @@ class RealtimeService:
             st.mark_response_pending(request.response_key)
             queue.put(request)
 
-        return [*completed_events]
+        return [*extra_events, *completed_events]
 
     def _on_transcription_failed(self, conn_id: str, event: TranscriptionFailedEvent) -> list[ServerEvent]:
         """Surface a final STT failure without creating conversation or LLM work."""

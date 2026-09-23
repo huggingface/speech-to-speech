@@ -374,7 +374,8 @@ def handle_server_event(
         print("Connected.", flush=True)
     elif event.type == "input_audio_buffer.speech_started":
         renderer.finish_live_assistant_text()
-        playback.clear()
+        if getattr(event, "item_id", None) is None:
+            playback.clear()
         if renderer.saw_user_speech:
             print("", flush=True)
         renderer.saw_user_speech = True

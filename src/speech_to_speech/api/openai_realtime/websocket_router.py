@@ -822,6 +822,47 @@ def create_app(
                 transport = session.transport if session is not None else None
                 session_id = session.session_id if session is not None else None
 
+                if session_id is not None:
+                    st = unit.service._conns.get(session_id)
+                    if st is not None:
+                        if st.needs_hard_cancel:
+                            st.needs_hard_cancel = False
+                            st.tentative_interruption = False
+                            unit.service.close_pending_responses(session_id)
+                            _flush_queue(unit.output_queue, preserve=_keep_cancel_bookkeeping)
+                            _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
+                            if unit.response_playing.is_set():
+                                unit.response_playing.clear()
+                            if transport is not None:
+                                transport.discard_pending_audio()
+                            logger.info("Pipeline %d: speech confirmed interruption: cancelled response", unit.index)
+
+                        if (
+                            st.tentative_interruption
+                            and st.user_speech_active
+                            and st.tentative_interruption_started_at is not None
+                            and (time.monotonic() - st.tentative_interruption_started_at) > 1.2
+                        ):
+                            st.tentative_interruption = False
+                            unit.cancel_scope.cancel()
+                            events = unit.service.response.finish_response(
+                                session_id, status="cancelled", reason="turn_detected"
+                            )
+                            if transport is not None and events:
+                                await transport.send_events(events)
+                            unit.service.close_pending_responses(session_id)
+                            _flush_queue(unit.text_prompt_queue, preserve=_keep_pipeline_control)
+                            _flush_queue(unit.output_queue, preserve=_keep_cancel_bookkeeping)
+                            _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
+                            if unit.response_playing.is_set():
+                                unit.response_playing.clear()
+                            if transport is not None:
+                                transport.discard_pending_audio()
+                            logger.info(
+                                "Pipeline %d: speech duration exceeded backchannel limit: cancelled response",
+                                unit.index,
+                            )
+
                 # Text events first (speech_started cancels active response).
                 try:
                     text_msg = None
@@ -878,35 +919,54 @@ def create_app(
                             await transport.send_events(events)
 
                     if isinstance(text_msg, SpeechStartedEvent) and session_id:
-                        active_cfg = unit.service._state(session_id).runtime_config
+                        conn_st = unit.service._conns.get(session_id)
+                        active_cfg = conn_st.runtime_config if conn_st else None
                         interrupt_enabled = text_msg.interrupt_response and (
                             active_cfg is None or active_cfg.interrupt_response_enabled
                         )
-                        if interrupt_enabled and transport is not None:
-                            # Flush even when no response is active: the WebRTC
-                            # track can still hold unplayed audio from a response
-                            # whose done-sentinel was already observed —
-                            # finish_response() runs on the sentinel, not when
-                            # playback completes. No-op over WebSocket.
-                            transport.discard_pending_audio()
-                        if was_in_response or was_response_pending:
-                            if interrupt_enabled:
-                                unit.cancel_scope.cancel()
-                                unit.service.close_pending_responses(session_id)
-                                _flush_queue(unit.text_prompt_queue, preserve=_keep_pipeline_control)
-                                _flush_queue(unit.output_queue, preserve=_keep_cancel_bookkeeping)
-                                _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
-                                if unit.response_playing.is_set():
-                                    unit.response_playing.clear()
+                        backchannel_enabled = (
+                            active_cfg is not None
+                            and active_cfg.backchannel_filter_enabled
+                            and text_msg.turn_id is not None
+                        )
+                        if was_in_response and backchannel_enabled:
+                            if interrupt_enabled and conn_st is not None:
+                                conn_st.tentative_interruption = True
+                                conn_st.tentative_interruption_started_at = time.monotonic()
                                 logger.info(
-                                    "Pipeline %d: speech during %s: cancelled, queue flushed",
+                                    "Pipeline %d: speech during response: evaluating candidate backchannel",
                                     unit.index,
-                                    "response" if was_in_response else "pending response",
                                 )
                             else:
                                 logger.info(
                                     f"Pipeline {unit.index}: speech during response: interrupt_response disabled, ignoring"
                                 )
+                        else:
+                            if interrupt_enabled and transport is not None:
+                                # Flush even when no response is active: the WebRTC
+                                # track can still hold unplayed audio from a response
+                                # whose done-sentinel was already observed —
+                                # finish_response() runs on the sentinel, not when
+                                # playback completes. No-op over WebSocket.
+                                transport.discard_pending_audio()
+                            if was_in_response or was_response_pending:
+                                if interrupt_enabled:
+                                    unit.cancel_scope.cancel()
+                                    unit.service.close_pending_responses(session_id)
+                                    _flush_queue(unit.text_prompt_queue, preserve=_keep_pipeline_control)
+                                    _flush_queue(unit.output_queue, preserve=_keep_cancel_bookkeeping)
+                                    _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
+                                    if unit.response_playing.is_set():
+                                        unit.response_playing.clear()
+                                    logger.info(
+                                        "Pipeline %d: speech during %s: cancelled, queue flushed",
+                                        unit.index,
+                                        "response" if was_in_response else "pending response",
+                                    )
+                                else:
+                                    logger.info(
+                                        f"Pipeline {unit.index}: speech during response: interrupt_response disabled, ignoring"
+                                    )
                 except Empty:
                     pass
 

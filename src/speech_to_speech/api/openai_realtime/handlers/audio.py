@@ -168,9 +168,10 @@ class AudioHandler(RealtimeBaseHandler):
         events: list[ServerEvent] = []
         st = self._state(conn_id)
         interrupt_enabled = event.interrupt_response and st.runtime_config.interrupt_response_enabled
-        if st.in_response and interrupt_enabled:
+        backchannel_enabled = st.runtime_config.backchannel_filter_enabled and event.turn_id is not None
+        if st.in_response and interrupt_enabled and not backchannel_enabled:
             events.extend(response.finish_response(conn_id, status="cancelled", reason="turn_detected"))
-        if interrupt_enabled:
+        if interrupt_enabled and not backchannel_enabled:
             response.discard_tool_followup_prefetch(conn_id)
             st.generation_done_tool_calls.clear()
             st.completed_tool_response_keys.clear()
@@ -200,6 +201,7 @@ class AudioHandler(RealtimeBaseHandler):
             )
         if not is_reopen:
             st.response_usage.turns += 1
+        st.user_speech_active = True
         st.speculative_turn_id = event.turn_id
         st.speculative_turn_revision = event.turn_revision
         st.last_item_id = input_item_id
@@ -229,6 +231,7 @@ class AudioHandler(RealtimeBaseHandler):
             input_item = st.input_items.get(item_id)
             if input_item is not None:
                 input_item.audio_duration_s = event.duration_s
+        st.user_speech_active = False
         return [
             InputAudioBufferSpeechStoppedEvent(
                 type="input_audio_buffer.speech_stopped",

@@ -75,6 +75,21 @@ class RuntimeConfig(BaseModel):
             return True
         return val if val is not None else True
 
+    @property
+    def backchannel_filter_enabled(self) -> bool:
+        """Whether passive listener feedback continues active playback rather than cancelling."""
+        assert self.session.audio is not None and self.session.audio.input is not None
+        td = self.session.audio.input.turn_detection
+        if td is None:
+            return True
+        if hasattr(td, "backchannel_filter"):
+            val = td.backchannel_filter
+        elif isinstance(td, dict):
+            val = td.get("backchannel_filter", True)
+        else:
+            return True
+        return bool(val) if val is not None else True
+
     def apply_session_update(self, update: RealtimeSessionCreateRequest) -> None:
         """Merge non-None, explicitly-set fields from 'update' into the
         current 'session', preserving any fields not present in the update."""
