@@ -395,3 +395,31 @@ def test_background_final_stt_must_drain_before_switching(running_unit, monkeypa
                 assert unit.service._state(unit.session.session_id).runtime_config is before
     finally:
         release.set()
+
+
+def test_switch_asks_handler_to_report_pending_work(running_unit):
+    from starlette.testclient import TestClient
+
+    from speech_to_speech.api.openai_realtime.websocket_router import create_app
+    from speech_to_speech.baseHandler import BaseHandler
+
+    class BackgroundHandler(BaseHandler):
+        busy = True
+
+        def has_pending_session_work(self):
+            return self.busy
+
+    unit, stop, _ = running_unit
+    handler = BackgroundHandler(stop, Queue(), Queue())
+    unit.handlers.append(handler)
+    with TestClient(create_app([unit], stop, session_routing_enabled=True)) as client:
+        with client.websocket_connect(
+            "/v1/realtime", headers={"X-Speech-Session-Routing": route().model_dump_json()}
+        ) as ws:
+            ws.receive_json()
+            before = unit.service._state(unit.session.session_id).runtime_config
+            rejected = send_switch(ws, route("second"), model="second")
+            assert rejected["type"] == "error"
+            assert unit.service._state(unit.session.session_id).runtime_config is before
+            handler.busy = False
+            assert send_switch(ws, route("second"), model="second")["type"] == "session.updated"
