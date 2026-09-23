@@ -671,15 +671,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         try:
             store = getattr(self, "turn_latency_store", None)
-            tracker = (
-                store.get_or_create_response(
-                    request.response_key,
-                    turn_id=ctx.turn_id,
-                    turn_revision=ctx.turn_revision,
-                )
-                if store
-                else None
-            )
+            tracker = store.get_response(request.response_key) if store else None
             llm_start_s = perf_counter()
             try:
                 with bind_active_turn_latency_tracker(tracker):

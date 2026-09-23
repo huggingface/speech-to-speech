@@ -85,6 +85,19 @@ def test_turn_latency_store_pop_and_clear_session() -> None:
     assert store.active_session_count == 0
 
 
+def test_response_lookup_does_not_create_or_revive_trackers() -> None:
+    store = TurnLatencyStore()
+    assert store.get_response(None) is None
+    assert store.get_response("resp_a") is None
+    tracker = store.get_or_create_response("resp_a", turn_id="turn_1", turn_revision=0, session_id="sess_1")
+    assert store.get_response("resp_a") is tracker
+
+    store.discard_response("resp_a", session_id="sess_1")
+    assert store.get_response("resp_a") is None
+    assert store._trackers == {}
+    assert store.active_session_count == 0
+
+
 def test_clear_session_keeps_pending_while_other_sessions_active() -> None:
     store = TurnLatencyStore()
     store.get_or_create_response("resp_a", turn_id="turn_1", turn_revision=0, session_id="sess_1")

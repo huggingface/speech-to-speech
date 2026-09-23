@@ -850,15 +850,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         console.print(f"[green]ASSISTANT: {text}")
 
         store = getattr(self, "turn_latency_store", None)
-        tracker = (
-            store.get_or_create_response(
-                tts_input.response_key,
-                turn_id=tts_input.turn_id,
-                turn_revision=tts_input.turn_revision,
-            )
-            if store and tts_input.response_key is not None
-            else None
-        )
+        tracker = store.get_response(tts_input.response_key) if store else None
         try:
             with bind_active_turn_latency_tracker(tracker):
                 if self._has_voice_clone_reference():

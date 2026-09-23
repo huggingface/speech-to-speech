@@ -2,7 +2,7 @@
 
 import logging
 from queue import Queue
-from threading import Event
+from threading import Event, Thread
 from types import SimpleNamespace
 
 import numpy as np
@@ -14,6 +14,7 @@ import speech_to_speech.LLM.language_model as language_model_module
 import speech_to_speech.TTS.qwen3_tts_handler as qwen3_tts_module
 from speech_to_speech.LLM.language_model import LanguageModelHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
+from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -44,6 +45,62 @@ def _queue_turn(service, conn_id, *, turn_id="turn_1", revision=0, interrupt=Tru
 
 def _latency_lines(caplog):
     return [r.message for r in caplog.records if r.name == LATENCY_LOGGER and " latency: " in r.message]
+
+
+def test_cancelled_inflight_llm_cannot_recreate_latency_tracker(service, conn_id, monkeypatch):
+    request = _queue_turn(service, conn_id)
+    scope = CancelScope()
+    entered, resume = Event(), Event()
+    handler = object.__new__(LanguageModelHandler)
+    handler.cancel_scope = scope
+    handler.speculative_turns = None
+    handler.enable_lang_prompt = False
+    handler.compactor = None
+    handler.turn_latency_store = service.turn_latency_store
+    apply_instructions = LanguageModelHandler._apply_instructions
+
+    def pause_after_instructions(self, *args, **kwargs):
+        apply_instructions(self, *args, **kwargs)
+        entered.set()
+        assert resume.wait(5)
+
+    def cancelled_generation(self, chat, language_code, gen, ctx, runtime_config, response):
+        assert self._check_stop(gen, ctx)
+        return
+        yield
+
+    monkeypatch.setattr(LanguageModelHandler, "_apply_instructions", pause_after_instructions)
+    monkeypatch.setattr(LanguageModelHandler, "_generate", cancelled_generation)
+    outputs, errors = [], []
+
+    def work():
+        try:
+            outputs.extend(handler.process(request))
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = Thread(target=work)
+    worker.start()
+    try:
+        assert entered.wait(5)
+        service.handle_response_cancel(conn_id)
+        scope.cancel()
+        assert service.turn_latency_store._trackers == {}
+    finally:
+        resume.set()
+        worker.join(5)
+
+    assert not worker.is_alive()
+    assert not errors
+    assert outputs and isinstance(outputs[-1], EndOfResponse)
+    assert outputs[-1].response_key == request.response_key
+    # Check before the late terminal is delivered: it must not be responsible
+    # for cleaning up a tracker resurrected by the cancelled worker.
+    assert service.turn_latency_store._trackers == {}
+    service.close_response_key(conn_id, request.response_key)
+    service.unregister(conn_id)
+    assert service.turn_latency_store.active_session_count == 0
+    assert service.turn_latency_store._trackers == {}
 
 
 @pytest.mark.parametrize("partial_output", [False, True])

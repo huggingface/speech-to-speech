@@ -97,6 +97,9 @@ class TurnLatencyTracker:
 class TurnLatencyStore:
     """Thread-safe latency trackers keyed by response_key.
 
+    The realtime service creates response trackers before queueing work.
+    Workers only look them up so cancelled work cannot recreate a tracker.
+
     STT runs before a response_key exists, so interim measurements are held on
     a per-turn pending slot and merged when the response tracker is created.
 
@@ -173,6 +176,13 @@ class TurnLatencyStore:
                 tracker.turn_id = turn_id
                 tracker.turn_revision = turn_revision
             return tracker
+
+    def get_response(self, response_key: str | None) -> TurnLatencyTracker | None:
+        """Look up an existing response without reviving cancelled measurements."""
+        if response_key is None:
+            return None
+        with self._lock:
+            return self._trackers.get(response_key)
 
     def pop(self, response_key: str | None, *, session_id: str | None = None) -> TurnLatencyTracker | None:
         if response_key is None:
