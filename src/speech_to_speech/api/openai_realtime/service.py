@@ -491,7 +491,6 @@ class RealtimeService:
         for response_key in tuple(st.pending_response_keys):
             st.runtime_config.chat.rollback_provisional_generation(response_key)
             self.close_response_key(conn_id, response_key)
-            self.turn_latency_store.discard_response(response_key, session_id=conn_id)
         st.generation_done_tool_calls.clear()
         st.completed_tool_response_keys.clear()
         if not st.in_response:
@@ -503,12 +502,13 @@ class RealtimeService:
         st.response_pending = bool(st.pending_response_keys)
 
     def close_response_key(self, conn_id: str, response_key: str | None) -> None:
-        """Tombstone a response key without losing its pending provider usage."""
+        """Close a response, preserving usage and discarding unfinished timings."""
         st = self._state(conn_id)
         if response_key is not None:
             input_tokens, output_tokens = st.pending_token_usage.pop(response_key, (0, 0))
             self.total_usage.input_tokens += input_tokens
             self.total_usage.output_tokens += output_tokens
+            self.turn_latency_store.discard_response(response_key, session_id=conn_id)
         st.close_response_key(response_key)
 
     def handle_conversation_item_create(self, conn_id: str, event: ConversationItemCreateEvent) -> list[ServerEvent]:

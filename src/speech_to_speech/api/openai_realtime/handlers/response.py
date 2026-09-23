@@ -253,10 +253,6 @@ class ResponseHandler(RealtimeBaseHandler):
                     queue.not_full.notify()
         if request.prefetch_transaction is not None:
             request.prefetch_transaction.discard()
-        self._service.turn_latency_store.discard_response(
-            request.response_key,
-            session_id=st.session_id,
-        )
         st.runtime_config.chat.rollback_provisional_generation(request.response_key)
         self._service.close_response_key(conn_id, request.response_key)
         st.generation_done_tool_calls.pop(request.response_key, None)
