@@ -145,7 +145,7 @@ def test_mac_diarization_shortcut():
 
     assert args.module_kwargs.mac_optimal_settings is True
     assert args.module_kwargs.diarization_model_name == "nvidia/Nemotron-3-Diarization"
-    assert args.module_kwargs.diarization_revision == "refs/pr/1"
+    assert args.module_kwargs.diarization_revision is None
     assert args.module_kwargs.diarization_streaming_mode == "low_latency"
     assert args.module_kwargs.diarization_device == "mps"
     assert args.module_kwargs.stt == "parakeet-tdt"

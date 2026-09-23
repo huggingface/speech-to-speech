@@ -12,11 +12,11 @@ word timestamps.
 
 ## Setup
 
-This example uses the public [Transformers implementation](https://github.com/huggingface/transformers/pull/49056)
-and the model weights in the `refs/pr/1` revision of
+This example uses the merged [Transformers implementation](https://github.com/huggingface/transformers/pull/49056)
+and the weights on the main branch of
 [`nvidia/Nemotron-3-Diarization`](https://huggingface.co/nvidia/Nemotron-3-Diarization).
-The model and code are still being updated; use matching revisions until the
-Transformers release and the model main branch contain the final files.
+Until a Transformers package release includes this model, install the tested
+merge commit below.
 
 Use a dedicated environment from the repository root. This avoids changing the
 main application's Transformers pin (particularly the macOS pin). The demo loads
@@ -26,20 +26,20 @@ the package directly from `src`, so it does not require the full voice-agent sta
 python -m venv .venv-diarization
 source .venv-diarization/bin/activate
 python -m pip install torch numpy librosa sounddevice rich
-python -m pip install 'git+https://github.com/huggingface/transformers.git@4caba7a55a71993c72b6f7aeac8fdffff134b530'
+python -m pip install 'git+https://github.com/huggingface/transformers.git@8f080cb5aa480f794283c6e8618f917cc9a6506d'
 ```
 
-The examples below use the model revision shown in the upstream usage snippets.
-The loader checks for missing or unexpected weight keys so an incompatible model
-revision fails instead of silently running with partially initialized weights.
+The examples below use the model's main branch. The loader checks for missing
+or unexpected weight keys so an incompatible model revision fails instead of
+silently running with partially initialized weights.
 
 ## Microphone
 
 ```bash
 PYTHONPATH=src python -m speech_to_speech.diarization.demo \
   --microphone \
-  --model nvidia/Nemotron-3-Diarization --revision refs/pr/1 \
-  --device cuda --dtype bfloat16 --streaming-mode ultra_low_latency
+  --model nvidia/Nemotron-3-Diarization \
+  --device cuda --dtype bfloat16 --streaming-mode low_latency
 ```
 
 Press Ctrl-C to finish and flush the last audio window. `--input-device INDEX`
@@ -60,12 +60,12 @@ and shifting speaker timestamps.
 ```bash
 PYTHONPATH=src python -m speech_to_speech.diarization.demo \
   --audio conversation.wav --realtime \
-  --model nvidia/Nemotron-3-Diarization --revision refs/pr/1 \
+  --model nvidia/Nemotron-3-Diarization \
   --device cuda --dtype bfloat16
 
 PYTHONPATH=src python -m speech_to_speech.diarization.demo \
   --audio conversation.wav --json --transcribe openai/whisper-small \
-  --model nvidia/Nemotron-3-Diarization --revision refs/pr/1 \
+  --model nvidia/Nemotron-3-Diarization \
   --device cuda > conversation.jsonl
 ```
 
@@ -93,10 +93,9 @@ from speech_to_speech.diarization import StreamingDiarizer
 
 diarizer = StreamingDiarizer.from_pretrained(
     "nvidia/Nemotron-3-Diarization",
-    revision="refs/pr/1",
     device="cuda",
     dtype="bfloat16",
-    streaming_mode="ultra_low_latency",
+    streaming_mode="low_latency",
 )
 for block in audio_blocks:  # mono float arrays, continuous audio including silence
     for segment in diarizer.push(block, sample_rate=16000):
@@ -129,13 +128,12 @@ supporting Transformers version installed, run:
 speech-to-speech local --mac_optimal_settings --diarization
 ```
 
-`--diarization` selects the official model PR revision with `low_latency`
+`--diarization` selects the official model main branch with `low_latency`
 streaming. The Mac preset selects MPS. Both `--mac_optimal_settings` and
 `--mac-optimal-settings` are supported. To customize the model, use:
 
 ```bash
 --diarization_model_name nvidia/Nemotron-3-Diarization \
---diarization_revision refs/pr/1 \
 --diarization_device mps \
 --diarization_dtype float32 \
 --diarization_streaming_mode low_latency
@@ -159,8 +157,8 @@ uv pip install --python .venv-diarized-pipeline/bin/python \
 ```
 
 This overrides the macOS Transformers pin only in this environment. The override
-pins the tested commit from Transformers PR #49056; update it when the upstream
-implementation or published model revision changes.
+pins the tested merge commit from Transformers PR #49056. Use a supporting
+package release when one becomes available.
 
 The live path is:
 
@@ -230,8 +228,8 @@ missing activity. These tests require no checkpoint download.
 
 An earlier preview checkpoint was smoke-tested on eight seconds of the bundled
 `src/speech_to_speech/TTS/ref_audio.wav`, producing one speaker segment with valid
-timestamp bounds. The official checkpoint at `refs/pr/1` loaded with the exact
-Transformers PR commit above and processed a two-second silent input on CPU.
+timestamp bounds. The official checkpoint on main loaded with the exact merged
+Transformers commit above and processed a two-second silent input on CPU.
 Multi-speaker accuracy, noisy microphones, and GPU throughput still need
 evaluation on representative recordings.
 

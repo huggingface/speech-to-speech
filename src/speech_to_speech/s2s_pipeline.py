@@ -265,8 +265,6 @@ def parse_arguments(
     module_kwargs = by_type[ModuleArguments]
     if module_kwargs.diarization and module_kwargs.diarization_model_name is None:
         module_kwargs.diarization_model_name = "nvidia/Nemotron-3-Diarization"
-        if module_kwargs.diarization_revision is None:
-            module_kwargs.diarization_revision = "refs/pr/1"
     module_kwargs.stt = _stt_name
     module_kwargs.llm_backend = _llm_name
     module_kwargs.tts = _tts_name
