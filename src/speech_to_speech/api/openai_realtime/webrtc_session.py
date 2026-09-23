@@ -143,8 +143,6 @@ class PipelineAudioTrack(MediaStreamTrack):
         waited_for_audio = False
         while not self._buffer:
             self._data_available.clear()
-            if self._buffer:
-                break
             waited_for_audio = True
             await self._data_available.wait()
             if self.readyState != "live":
@@ -154,11 +152,12 @@ class PipelineAudioTrack(MediaStreamTrack):
         if self._start is None:
             self._start = now
             self._timestamp = 0
-        elif waited_for_audio:
-            self._timestamp += WEBRTC_FRAME_SAMPLES
-            self._start = now - (self._timestamp / WEBRTC_SAMPLE_RATE)
         else:
             self._timestamp += WEBRTC_FRAME_SAMPLES
+            if waited_for_audio:
+                # Re-anchor the media clock after an idle gap so pacing resumes
+                # from now instead of bursting to catch up the silent interval.
+                self._start = now - (self._timestamp / WEBRTC_SAMPLE_RATE)
             wait = self._start + (self._timestamp / WEBRTC_SAMPLE_RATE) - now
             if wait > 0:
                 await asyncio.sleep(wait)
