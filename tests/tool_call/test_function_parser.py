@@ -367,6 +367,20 @@ class TestPositionalArgumentBinding:
         result = call.to_realtime_function_tool_call()
         assert json.loads(result.arguments) == {}
 
+    def test_issue_577_ordering_example(self):
+        # From the issue: properties declared limit, then required query, render
+        # as search(query: str, limit: int = None), so the first positional
+        # argument binds to query.
+        tool = _make_tool(
+            "search",
+            {"limit": {"type": "integer"}, "query": {"type": "string"}},
+            required=["query"],
+        )
+        assert tool.to_code_prompt(include_args_doc=False).startswith("def search(query: str, limit: int = None)")
+        (call,) = parse_function_call("search('slots in June')")
+        result = call.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"query": "slots in June"}
+
     def test_positional_call_on_a_no_parameter_tool_raises(self):
         tool = _make_tool("ping", {})
         (call,) = parse_function_call("ping('now')")
