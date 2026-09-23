@@ -3,11 +3,13 @@ name: Update star history chart
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
+
+permissions: {}
 
 jobs:
   update-chart:
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
