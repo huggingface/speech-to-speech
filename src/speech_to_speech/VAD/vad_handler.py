@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from queue import Queue
 from threading import Event
-from typing import Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import numpy as np
 import torch
@@ -20,6 +20,9 @@ from speech_to_speech.pipeline.queue_types import TextEventItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.utils import int2float
 from speech_to_speech.VAD.vad_iterator import VADIterator
+
+if TYPE_CHECKING:
+    from speech_to_speech.VAD.firered_vad_iterator import FireRedVadIterator
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +83,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         smart_turn_max_wait_ms: int = 2000,
         smart_turn_incomplete_delay_ms: int = 600,
         smart_turn_cpu_count: int = 1,
+        vad: str = "silero",
+        vad_firered_model_dir: str | None = None,
+        vad_firered_use_gpu: bool = False,
     ) -> None:
         self.should_listen = should_listen
         self.sample_rate = sample_rate
@@ -119,19 +125,44 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             unanswered_reopen_ms,
             self.smart_turn_max_wait_ms if smart_turn else 0,
         )
-        self.model, _ = torch.hub.load(
-            "snakers4/silero-vad:master",
-            "silero_vad",
-            trust_repo=True,
-            skip_validation=True,
-        )
-        self.iterator = VADIterator(
-            self.model,
-            threshold=thresh,
-            sampling_rate=sample_rate,
-            min_silence_duration_ms=min_silence_ms,
-            speech_pad_ms=speech_pad_ms,
-        )
+        self.vad = vad
+        self.model = None
+        self.iterator: VADIterator | FireRedVadIterator
+        if vad == "firered":
+            from speech_to_speech.VAD.firered_vad_iterator import FireRedVadIterator, load_firered_streamer
+
+            if not vad_firered_model_dir:
+                raise ValueError("--vad firered requires --vad_firered_model_dir")
+            streamer = load_firered_streamer(
+                vad_firered_model_dir,
+                use_gpu=vad_firered_use_gpu,
+                speech_threshold=thresh,
+                min_silence_duration_ms=min_silence_ms,
+                speech_pad_ms=speech_pad_ms,
+            )
+            self.iterator = FireRedVadIterator(
+                streamer,
+                threshold=thresh,
+                sampling_rate=sample_rate,
+                min_silence_duration_ms=min_silence_ms,
+                speech_pad_ms=speech_pad_ms,
+            )
+        elif vad == "silero":
+            self.model, _ = torch.hub.load(
+                "snakers4/silero-vad:master",
+                "silero_vad",
+                trust_repo=True,
+                skip_validation=True,
+            )
+            self.iterator = VADIterator(
+                self.model,
+                threshold=thresh,
+                sampling_rate=sample_rate,
+                min_silence_duration_ms=min_silence_ms,
+                speech_pad_ms=speech_pad_ms,
+            )
+        else:
+            raise ValueError(f"Unknown VAD backend {vad!r}. Choose silero or firered.")
         self.audio_enhancement = audio_enhancement
         if audio_enhancement:
             if not HAS_DF:
@@ -164,6 +195,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._last_final_audio_ms: int | None = None
         self._pending_reopen_candidate: tuple[str, int, int] | None = None
         self._pending_short_segment: _PendingShortSegment | None = None
+        self.streaming_stt_sink: Any | None = None
+        self._streaming_pre_speech = bytearray()
 
     @property
     def _audio_ms(self) -> int:
@@ -356,6 +389,53 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
     def _current_turn_metadata(self) -> tuple[str | None, int | None]:
         return self._current_turn_id, self._current_turn_revision
 
+    def _notify_streaming_turn(self, turn_id: str | None, turn_revision: int | None) -> None:
+        sink = getattr(self, "streaming_stt_sink", None)
+        if sink is None:
+            return
+        try:
+            sink.start_turn(turn_id, turn_revision)
+        except Exception:
+            logger.exception("VAD: failed to mark the streaming STT turn")
+
+    def _stream_audio_chunk(self, audio_chunk: bytes, *, speech_active: bool) -> None:
+        sink = getattr(self, "streaming_stt_sink", None)
+        if sink is None:
+            return
+        pad_bytes = getattr(self.iterator, "pre_speech_samples", self.iterator.speech_pad_samples) * 2
+        if not speech_active:
+            # Retain padding and any speech awaiting detector confirmation,
+            # without sending idle microphone audio to the provider.
+            self._streaming_pre_speech.extend(audio_chunk)
+            del self._streaming_pre_speech[: max(0, len(self._streaming_pre_speech) - pad_bytes)]
+            return
+        if self._streaming_pre_speech:
+            del self._streaming_pre_speech[: max(0, len(self._streaming_pre_speech) - pad_bytes)]
+            audio_chunk = bytes(self._streaming_pre_speech) + audio_chunk
+            self._streaming_pre_speech.clear()
+        try:
+            sink.append_audio(audio_chunk)
+        except Exception:
+            logger.exception("VAD: failed to enqueue a streaming STT audio chunk")
+
+    def _discard_streaming_utterance(self) -> None:
+        sink = getattr(self, "streaming_stt_sink", None)
+        if sink is None:
+            return
+        try:
+            sink.discard_utterance()
+        except Exception:
+            logger.exception("VAD: failed to discard a rejected streaming STT utterance")
+
+    def _commit_streaming_turn(self, turn_id: str | None, turn_revision: int | None) -> None:
+        sink = getattr(self, "streaming_stt_sink", None)
+        if sink is None:
+            return
+        try:
+            sink.commit_boundary(turn_id, turn_revision)
+        except Exception:
+            logger.exception("VAD: failed to commit the streaming STT turn boundary")
+
     def _combined_turn_audio(self, current_segment: np.ndarray) -> np.ndarray:
         if self._speculative_audio_prefix is None:
             return current_segment
@@ -441,6 +521,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         if pending is None:
             return
         self._pending_short_segment = None
+        self._discard_streaming_utterance()
         logger.info(
             "VAD: discarding held short segment=%.0fms active=%.0fms (%s, active_min=%sms)",
             self._segment_duration_ms(pending.audio),
@@ -555,10 +636,32 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._total_samples += len(audio_int16)
         audio_float32 = int2float(audio_int16)
 
+        was_triggered = self.iterator.triggered
         vad_output = self.iterator(torch.from_numpy(audio_float32))
+        is_triggered_now = self.iterator.triggered
+
+        if getattr(self, "streaming_stt_sink", None) is not None and self._pending_short_segment is not None:
+            # Expiry follows the new segment's start, not the advancing clock
+            # while it is speaking. Clear rejected PCM before forwarding more.
+            if vad_output:
+                duration_ms = sum(len(chunk) for chunk in vad_output) / self.sample_rate * 1000
+            elif is_triggered_now:
+                duration_ms = self._speech_buffer_duration_ms()
+            else:
+                duration_ms = 0.0
+            self._discard_expired_pending_short_segment(max(0, self._audio_ms - int(duration_ms)))
+
+        # Keep the triggering chunk, trailing silence, and bounded gaps between
+        # held fragments. Already-streamed gap audio is never sent as padding again.
+        self._stream_audio_chunk(
+            audio_chunk,
+            speech_active=was_triggered
+            or is_triggered_now
+            or bool(vad_output)
+            or self._pending_short_segment is not None,
+        )
 
         # Deferred speech_started: only emit once active VAD speech reaches the valid speech threshold.
-        is_triggered_now = self.iterator.triggered
         if is_triggered_now and not self._speech_started_emitted:
             segment_samples = sum(len(t) for t in self.iterator.buffer)
             segment_duration_ms = segment_samples / self.sample_rate * 1000
@@ -592,6 +695,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                             reopened=reopened,
                         )
                     )
+                self._notify_streaming_turn(turn_id, turn_revision)
         elif not is_triggered_now and vad_output is None:
             self._discard_expired_pending_short_segment()
 
@@ -666,6 +770,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 if not self._speech_started_emitted:
                     self._cancel_pending_reopen()
                 self._speech_started_emitted = False
+                if self._pending_short_segment is None:
+                    self._discard_streaming_utterance()
                 self._discard_expired_pending_short_segment()
                 return
 
@@ -689,6 +795,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
             duration_exceeds_limit = duration_ms > self.max_speech_ms
             if active_speech_duration_ms < min_active_ms or duration_exceeds_limit:
+                held_for_merge = False
                 if (
                     self._short_segment_merge_window_ms() > 0
                     and raw_active_ms >= _SHORT_SEGMENT_MIN_FRAGMENT_MS
@@ -696,6 +803,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     and duration_ms <= self.max_speech_ms
                 ):
                     self._hold_short_segment(array, active_speech_duration_ms, start_ms, end_ms)
+                    held_for_merge = True
                 else:
                     logger.info(
                         "VAD: discarding segment=%.0fms active=%.0fms (active_min=%sms, segment_max=%sms)",
@@ -704,6 +812,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         min_active_ms,
                         self.max_speech_ms,
                     )
+                if not held_for_merge and self._pending_short_segment is None:
+                    self._discard_streaming_utterance()
                 if self._speech_started_emitted and self.text_output_queue:
                     turn_id, turn_revision = self._current_turn_metadata()
                     self.text_output_queue.put(
@@ -735,6 +845,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                                 interrupt_response=False,
                             )
                         )
+                    self._notify_streaming_turn(turn_id, turn_revision)
                 else:
                     turn_id, turn_revision = self._current_turn_metadata()
                 self._log_speech_ends += 1
@@ -772,6 +883,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     turn_revision,
                     reopen_grace_ms / 1000.0,
                 )
+                # Queue the provider boundary before yielding downstream. The
+                # next microphone chunk can then never overtake this commit.
+                self._commit_streaming_turn(turn_id, turn_revision)
                 yield VADAudio(
                     audio=output_array,
                     runtime_config=runtime_config,
@@ -821,6 +935,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         return enhanced.numpy().squeeze()
 
     def on_session_end(self):
+        streaming_stt_sink = getattr(self, "streaming_stt_sink", None)
+        if streaming_stt_sink is not None:
+            streaming_stt_sink.cancel_session()
+        self._streaming_pre_speech.clear()
         self.iterator.reset_states()
         self._pending_short_segment = None
         self.iterator.buffer = []
