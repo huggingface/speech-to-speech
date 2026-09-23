@@ -134,10 +134,49 @@ def test_mac_optimal_settings_preserves_explicit_component_device():
     assert args.tts_backend.config["device"] == "cpu"
 
 
-@pytest.mark.parametrize("flag", ["--local_mac_optimal_settings", "--mac_optimal_settings"])
+@pytest.mark.parametrize("flag", ["--local_mac_optimal_settings"])
 def test_noncanonical_mac_optimal_settings_flags_are_rejected(flag):
     with pytest.raises(ValueError, match=flag):
         parse_arguments([flag])
+
+
+def test_mac_diarization_shortcut():
+    args = parse_arguments(["--mac_optimal_settings", "--diarization"], command="local")
+
+    assert args.module_kwargs.mac_optimal_settings is True
+    assert args.module_kwargs.diarization_model_name == "nvidia/Nemotron-3-Diarization"
+    assert args.module_kwargs.diarization_revision == "refs/pr/1"
+    assert args.module_kwargs.diarization_streaming_mode == "low_latency"
+    assert args.module_kwargs.diarization_device == "mps"
+    assert args.module_kwargs.stt == "parakeet-tdt"
+    assert args.module_kwargs.llm_backend == "mlx-lm"
+
+
+def test_diarization_shortcut_preserves_custom_model():
+    args = parse_arguments(["--diarization", "--diarization_model_name", "custom/model"])
+
+    assert args.module_kwargs.diarization_model_name == "custom/model"
+    assert args.module_kwargs.diarization_revision is None
+
+
+def test_diarization_shortcut_preserves_explicit_settings():
+    args = parse_arguments(
+        [
+            "--mac_optimal_settings",
+            "--diarization",
+            "--diarization_revision",
+            "custom-ref",
+            "--diarization_device",
+            "cpu",
+        ]
+    )
+
+    assert args.module_kwargs.diarization_revision == "custom-ref"
+    assert args.module_kwargs.diarization_device == "cpu"
+
+
+def test_diarization_is_opt_in():
+    assert parse_arguments([]).module_kwargs.diarization_model_name is None
 
 
 # -- ParsedArguments dataclass tests ------------------------------------------

@@ -1,0 +1,2 @@
+# Until a Transformers release includes PR #49056. Keep this paired with the documented Hub revision.
+transformers @ git+https://github.com/huggingface/transformers.git@4caba7a55a71993c72b6f7aeac8fdffff134b530
