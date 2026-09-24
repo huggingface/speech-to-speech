@@ -2200,6 +2200,58 @@ class TestEncodeAudioChunk:
         assert isinstance(events[0], ResponseAudioDeltaEvent)
         assert events[0].content_index == 0
 
+    def test_24khz_output_resampling_is_continuous_across_chunks(self, service, conn_id):
+        service.handle_session_update(
+            conn_id,
+            SessionUpdateEvent(
+                type="session.update",
+                session={
+                    "type": "realtime",
+                    "audio": {"output": {"format": {"type": "audio/pcm", "rate": 24000}}},
+                },
+            ),
+        )
+        samples = np.round(np.sin(np.arange(4096) * 2 * np.pi * 997 / 16000) * 12000).astype("<i2")
+
+        deltas = []
+        for chunk in np.array_split(samples, 8):
+            deltas.extend(
+                event.delta
+                for event in service.encode_audio_chunk(conn_id, chunk.tobytes())
+                if isinstance(event, ResponseAudioDeltaEvent)
+            )
+        chunked = b"".join(base64.b64decode(delta) for delta in deltas)
+
+        service.finish_response(conn_id)
+        single_delta = next(
+            event.delta
+            for event in service.encode_audio_chunk(conn_id, samples.tobytes())
+            if isinstance(event, ResponseAudioDeltaEvent)
+        )
+        single = base64.b64decode(single_delta)
+
+        assert chunked == single
+
+    def test_output_resampler_is_released_when_response_finishes(self, service, conn_id):
+        service.handle_session_update(
+            conn_id,
+            SessionUpdateEvent(
+                type="session.update",
+                session={
+                    "type": "realtime",
+                    "audio": {"output": {"format": {"type": "audio/pcm", "rate": 24000}}},
+                },
+            ),
+        )
+        service.encode_audio_chunk(conn_id, _pcm_bytes(512))
+        state = service._state(conn_id)
+        assert state.output_audio_resampler is not None
+
+        service.finish_response(conn_id)
+
+        assert state.output_audio_resampler is None
+        assert state.output_audio_resampler_key is None
+
     def test_response_created_includes_metadata(self, service, conn_id):
         from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 

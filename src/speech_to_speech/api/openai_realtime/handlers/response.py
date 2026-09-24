@@ -138,6 +138,8 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_output_index = None
         st.current_output_kind = None
         st.audio_output_started = False
+        st.output_audio_resampler = None
+        st.output_audio_resampler_key = None
         st.pending_text_outputs = []
         st.pending_function_calls = {}
         st.finished_function_call_indices = set()
