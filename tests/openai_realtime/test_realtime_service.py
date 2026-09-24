@@ -4303,7 +4303,18 @@ class TestDispatchPipelineEvent:
         assert first_reopened_partial == []
         assert second_partial[0].item_id == item_id
         assert second_partial[0].delta == "hello"
-        assert completed[0].item_id == item_id
+        # The turn is still speculative, so its user item is not published yet.
+        assert completed == []
+        committed = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(text="hi", turn_id="turn_1", turn_revision=1),
+        )
+        assert [event.type for event in committed[:2]] == [
+            "input_audio_buffer.speech_stopped",
+            "conversation.item.input_audio_transcription.completed",
+        ]
+        assert committed[0].item_id == item_id
+        assert committed[1].item_id == item_id
         state = service._state(conn_id)
         assert item_id not in state.input_items
         assert state.current_input_item_id is None
