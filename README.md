@@ -711,6 +711,12 @@ gated by `--smart_turn_max_wait_ms` (2 seconds by default). If speech resumes du
 reopened as a newer revision, the accumulated audio is re-emitted, and work from the previous revision is
 discarded before it reaches the user.
 
+Revisions stay off the wire. A Realtime client is never told that speech stopped while the turn can still
+reopen: `input_audio_buffer.speech_stopped` and `conversation.item.input_audio_transcription.completed` wait
+until the server commits the turn. Each user item therefore stops once, its transcript is final when it
+arrives, and a client that builds history from standard events alone ends up with the same user turns as the
+model. Live `conversation.item.input_audio_transcription.delta` events keep flowing while the turn is open.
+
 The base package includes the quantized CPU runtime and enables Smart Turn by default:
 
 ```bash

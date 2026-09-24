@@ -92,12 +92,23 @@ export class SentAudioRecorder {
   /**
    * Remember where the backend says this speech item began. The event normally
    * arrives after confirmation, so the bounded pre-roll retains its onset.
+   *
+   * Speech that resumes inside one item starts again on the same id. The
+   * backend publishes a single stop for that item, so the recording keeps the
+   * earliest onset instead of clipping away everything said before the pause.
    * @param {{ itemId?: string, audioStartMs?: number }} boundary
    */
   speechStarted(boundary) {
     const itemId = boundary.itemId || `audio_${this._sentSamples}`;
     const requestedStartSample = this._sampleAtMs(boundary.audioStartMs, this._sentSamples);
-    this._active = { itemId, requestedStartSample };
+    if (this._active && this._active.itemId === itemId) {
+      this._active.requestedStartSample = Math.min(
+        this._active.requestedStartSample,
+        requestedStartSample,
+      );
+    } else {
+      this._active = { itemId, requestedStartSample };
+    }
     if (itemId !== this._lastItemId) {
       this._lastItemId = itemId;
       this._lastItemPcm = new Uint8Array(0);
