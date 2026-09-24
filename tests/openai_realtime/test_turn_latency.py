@@ -25,9 +25,11 @@ from speech_to_speech.pipeline.events import (
     TranscriptionCompletedEvent,
 )
 from speech_to_speech.pipeline.messages import (
+    PIPELINE_END,
     AssistantToolCallPart,
     EndOfResponse,
     LLMResponseChunk,
+    Transcription,
     TTSInput,
     VADAudio,
 )
@@ -134,6 +136,70 @@ def test_stale_final_stt_discards_only_superseded_revision(
     assert len(lines) == 1
     assert "Turn turn_1 rev=1" in lines[0]
     assert "stt=n/a" not in lines[0]
+    assert store._trackers == {}
+
+
+def test_stt_worker_discards_latency_when_revision_changes_during_inference(service, conn_id, caplog):
+    speculative_turns = SpeculativeTurnTracker()
+    service.speculative_turns = speculative_turns
+    service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
+    store = service.turn_latency_store
+    unrelated = store.get_or_create_for_turn("other_turn", 0)
+
+    handler = object.__new__(ParakeetTDTSTTHandler)
+    handler.enable_live_transcription = False
+    handler.backend = "mlx"
+    handler.last_language = "en"
+    handler.start_language = None
+    handler.turn_latency_store = store
+    handler.speculative_turns = speculative_turns
+    handler.stop_event = Event()
+    handler.queue_in = Queue()
+    handler.queue_out = Queue()
+    handler.pipeline_index = None
+    handler._times = []
+    handler.cleanup = lambda: None
+    handler._compute_lock_context = lambda **kwargs: nullcontext(True)
+    inference_calls = []
+
+    def infer(audio):
+        inference_calls.append(len(inference_calls))
+        if len(inference_calls) == 1:
+            # Reopening while the model runs makes the final output stale at
+            # the worker's output gate, before the notifier/service sees it.
+            speculative_turns.observe("turn_1", 1)
+            return "Superseded transcript", "en"
+        return "Current transcript", "en"
+
+    handler._process_mlx_final = infer
+    for revision in (0, 1):
+        handler.queue_in.put(
+            VADAudio(audio=np.zeros(1600, dtype=np.float32), mode="final", turn_id="turn_1", turn_revision=revision)
+        )
+    handler.queue_in.put(PIPELINE_END)
+    handler.run()
+
+    assert inference_calls == [0, 1]
+    output = handler.queue_out.get_nowait()
+    assert isinstance(output, Transcription)
+    assert output.turn_revision == 1
+    assert handler.queue_out.get_nowait() == PIPELINE_END
+    assert handler.queue_out.empty()
+    assert set(store._pending_turn) == {("other_turn", 0), ("turn_1", 1)}
+    current_stt_s = store._pending_turn[("turn_1", 1)].stt_s
+
+    notifier = object.__new__(TranscriptionNotifier)
+    notifier.setup(text_output_queue=Queue(), should_listen=Event())
+    list(notifier.process(output))
+    service.dispatch_pipeline_event(conn_id, notifier.text_output_queue.get_nowait())
+    request = service.text_prompt_queue.get_nowait()
+    assert store.get_response(request.response_key).stt_s == current_stt_s
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=request.response_key))
+    with caplog.at_level(logging.INFO, logger=LATENCY_LOGGER):
+        service.finish_response(conn_id, response_key=request.response_key)
+    assert len(_latency_lines(caplog)) == 1
+    assert "Turn turn_1 rev=1" in _latency_lines(caplog)[0]
+    assert store._pending_turn == {("other_turn", 0): unrelated}
     assert store._trackers == {}
 
 
