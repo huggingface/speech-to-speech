@@ -958,14 +958,16 @@ class ResponseHandler(RealtimeBaseHandler):
                 logger.debug("Dropping stale assistant output for turn=%s rev=%s", event.turn_id, event.turn_revision)
                 return []
         st = self._state(conn_id)
-        events: list[ServerEvent] = []
+        # Accepting this output commits the turn it answers. The user item that
+        # prompted it is permanent from here, so it is published first.
+        events: list[ServerEvent] = self._service.audio.resolve_input_terminals(conn_id)
         output_sequence = event.output_sequence
         if output_sequence is not None:
             if output_sequence < st.next_assistant_output_sequence:
                 # The side channel already exposed this tool call. Its ordered
                 # copy still marks the point where preceding audio is complete.
                 if any(isinstance(part, AssistantToolCallPart) for part in event.parts):
-                    return self._finish_current_message_output(conn_id, event.response_key)
+                    return events + self._finish_current_message_output(conn_id, event.response_key)
                 logger.debug("Dropping duplicate assistant output sequence %d", output_sequence)
                 return events
             if output_sequence > st.next_assistant_output_sequence:
