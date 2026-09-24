@@ -579,6 +579,8 @@ class RealtimeService:
         if is_stale is None:
             return None
         if is_stale:
+            if isinstance(event, TranscriptionCompletedEvent):
+                self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
             logger.info(
                 "Ignoring stale %s for turn=%s rev=%s",
                 event.type,
@@ -655,6 +657,7 @@ class RealtimeService:
         st = self._state(conn_id)
         completed_events = self.conversation.on_transcription_completed(conn_id, event)
         if not completed_events:
+            self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
             return []
         input_duration_s = cast(UsageTranscriptTextUsageDuration, completed_events[0].usage).seconds
         self.response.discard_tool_followup_prefetch(conn_id)
@@ -708,6 +711,8 @@ class RealtimeService:
             )
             st.mark_response_pending(request.response_key)
             queue.put(request)
+        else:
+            self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
 
         return [*completed_events]
 

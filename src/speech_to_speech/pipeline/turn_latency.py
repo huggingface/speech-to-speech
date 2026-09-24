@@ -30,6 +30,13 @@ def bind_active_turn_latency_tracker(tracker: TurnLatencyTracker | None):
 
 @dataclass
 class TurnLatencyTracker:
+    """Server timings, not an additive breakdown or client playback latency.
+
+    ``llm_s`` covers generation, including lock waits. ``tts_ttfa_s`` ends at
+    the first model audio chunk before trimming and block assembly; ``e2e_s``
+    ends at the first yielded TTS audio. Tool follow-ups use separate trackers.
+    """
+
     turn_id: str | None = None
     turn_revision: int | None = None
     stt_s: float | None = None
@@ -38,20 +45,6 @@ class TurnLatencyTracker:
     e2e_s: float | None = None
     mlx_lock_wait_s: float = 0.0
     status: TurnLatencyStatus = "completed"
-
-    def reset(
-        self,
-        turn_id: str | None = None,
-        turn_revision: int | None = None,
-    ) -> None:
-        self.turn_id = turn_id
-        self.turn_revision = turn_revision
-        self.stt_s = None
-        self.llm_s = None
-        self.tts_ttfa_s = None
-        self.e2e_s = None
-        self.mlx_lock_wait_s = 0.0
-        self.status = "completed"
 
     def record_stt(self, seconds: float) -> None:
         self.stt_s = max(0.0, seconds)
@@ -105,10 +98,10 @@ class TurnLatencyStore:
 
     Session cleanup: response trackers are indexed by ``session_id`` so
     ``unregister`` can drop only that session's in-flight measurements.
-    Pending turn slots are not session-tagged (STT runs on the shared pipeline
-    without conn context), so they are cleared only once the last tracked
-    session has been removed — which matches the one-active-session-per-pipeline
-    unit model used by the realtime server.
+    Empty or stale final transcripts discard their pending turn slots. Remaining
+    slots are not session-tagged (STT runs without conn context), so teardown
+    clears them once the last tracked session has been removed — which matches
+    the one-active-session-per-pipeline unit model used by the realtime server.
     """
 
     def __init__(self) -> None:
@@ -148,6 +141,13 @@ class TurnLatencyStore:
                 tracker = TurnLatencyTracker(turn_id=turn_id, turn_revision=key[1])
                 self._pending_turn[key] = tracker
             return tracker
+
+    def discard_pending_turn(self, turn_id: str | None, turn_revision: int | None) -> None:
+        """Drop final STT measurements that will not be consumed by a response."""
+        if turn_id is None:
+            return
+        with self._lock:
+            self._pending_turn.pop(self._turn_key(turn_id, turn_revision), None)
 
     def get_or_create_response(
         self,

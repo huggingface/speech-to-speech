@@ -103,12 +103,12 @@ def acquire_mlx_lock(timeout: float | None = None, handler_name: str = "Unknown"
     start = perf_counter()
     acquired = _mlx_lock.acquire(timeout=timeout) if timeout else _mlx_lock.acquire(blocking=True)
     wait_s = perf_counter() - start
+    tracker = active_turn_latency_tracker()
+    if tracker is not None:
+        tracker.record_mlx_lock_wait(wait_s)
 
     if acquired:
         depth = _record_lock_acquired(handler_name)
-        tracker = active_turn_latency_tracker()
-        if tracker is not None and wait_s > 0.0:
-            tracker.record_mlx_lock_wait(wait_s)
         if wait_s >= 0.25:
             logger.info(
                 "%s: MLX lock acquired after %.2fs (previous_owner=%s, depth=%d)",

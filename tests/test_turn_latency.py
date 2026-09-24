@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from speech_to_speech.pipeline.turn_latency import TurnLatencyStore, TurnLatencyTracker
+from threading import Lock
+
+import speech_to_speech.utils.mlx_lock as mlx_lock
+from speech_to_speech.pipeline.turn_latency import (
+    TurnLatencyStore,
+    TurnLatencyTracker,
+    bind_active_turn_latency_tracker,
+)
 
 
 def test_turn_latency_tracker_format_log_line() -> None:
@@ -20,9 +27,8 @@ def test_turn_latency_tracker_format_log_line() -> None:
     )
 
 
-def test_turn_latency_tracker_record_and_reset() -> None:
-    tracker = TurnLatencyTracker()
-    tracker.reset("turn_2", 1)
+def test_turn_latency_tracker_record() -> None:
+    tracker = TurnLatencyTracker(turn_id="turn_2", turn_revision=1)
     tracker.record_stt(0.5)
     tracker.record_llm(2.0)
     tracker.record_tts_ttfa(0.2)
@@ -41,9 +47,19 @@ def test_turn_latency_tracker_record_and_reset() -> None:
     assert "mlx_lock_wait=0.15s" in line
     assert "status=cancelled" in line
 
-    tracker.reset()
-    assert tracker.turn_id is None
-    assert tracker.format_log_line() is None
+    assert TurnLatencyTracker().format_log_line() is None
+
+
+def test_timed_out_mlx_lock_acquisition_records_wait(monkeypatch) -> None:
+    lock = Lock()
+    monkeypatch.setattr(mlx_lock, "_mlx_lock", lock)
+    tracker = TurnLatencyTracker(turn_id="turn_1", turn_revision=0)
+    with lock, bind_active_turn_latency_tracker(tracker):
+        with mlx_lock.MLXLockContext(handler_name="test-timeout", timeout=0.01) as acquired:
+            assert not acquired
+
+    assert tracker.mlx_lock_wait_s >= 0.01
+    assert not lock.locked()
 
 
 def test_turn_latency_tracker_first_write_wins_for_ttfa_and_e2e() -> None:

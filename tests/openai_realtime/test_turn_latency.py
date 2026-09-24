@@ -1,6 +1,7 @@
 """Latency records emitted by the actual response lifecycle."""
 
 import logging
+from contextlib import nullcontext
 from queue import Queue
 from threading import Event, Thread
 from types import SimpleNamespace
@@ -23,7 +24,16 @@ from speech_to_speech.pipeline.events import (
     SpeechStartedEvent,
     TranscriptionCompletedEvent,
 )
-from speech_to_speech.pipeline.messages import AssistantToolCallPart, EndOfResponse, LLMResponseChunk, TTSInput
+from speech_to_speech.pipeline.messages import (
+    AssistantToolCallPart,
+    EndOfResponse,
+    LLMResponseChunk,
+    TTSInput,
+    VADAudio,
+)
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
+from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 
 LATENCY_LOGGER = "speech_to_speech.api.openai_realtime.handlers.response"
@@ -45,6 +55,86 @@ def _queue_turn(service, conn_id, *, turn_id="turn_1", revision=0, interrupt=Tru
 
 def _latency_lines(caplog):
     return [r.message for r in caplog.records if r.name == LATENCY_LOGGER and " latency: " in r.message]
+
+
+@pytest.fixture
+def final_stt_event(service):
+    """Run final STT and notification with model inference and locking stubbed."""
+    handler = object.__new__(ParakeetTDTSTTHandler)
+    handler.enable_live_transcription = False
+    handler.backend = "mlx"
+    handler.last_language = "en"
+    handler.start_language = None
+    handler.turn_latency_store = service.turn_latency_store
+    handler._compute_lock_context = lambda **kwargs: nullcontext(True)
+    notifier = object.__new__(TranscriptionNotifier)
+    notifier.setup(text_output_queue=Queue(), should_listen=Event())
+
+    def transcribe(turn_id, revision, text):
+        handler._process_mlx_final = lambda audio: (text, "en")
+        audio = VADAudio(audio=np.zeros(1600, dtype=np.float32), mode="final", turn_id=turn_id, turn_revision=revision)
+        for transcription in handler.process(audio):
+            list(notifier.process(transcription))
+        return notifier.text_output_queue.get_nowait()
+
+    return transcribe
+
+
+def test_empty_final_stt_discards_only_its_pending_measurement(service, conn_id, final_stt_event):
+    store = service.turn_latency_store
+    other = store.get_or_create_for_turn("other_turn", 0)
+    other.record_stt(0.4)
+
+    for index in range(3):
+        turn_id = f"turn_empty_{index}"
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id=turn_id, turn_revision=0))
+        event = final_stt_event(turn_id, 0, "")
+        assert (turn_id, 0) in store._pending_turn
+        events = service.dispatch_pipeline_event(conn_id, event)
+
+        assert [event.type for event in events] == ["conversation.item.input_audio_transcription.completed"]
+        assert events[0].transcript == ""
+        assert service.text_prompt_queue.empty()
+        assert store._pending_turn == {("other_turn", 0): other}
+        assert store._trackers == {}
+
+
+@pytest.mark.parametrize("stt_finishes_after_reopen", [False, True])
+def test_stale_final_stt_discards_only_superseded_revision(
+    service, conn_id, final_stt_event, caplog, stt_finishes_after_reopen
+):
+    service.speculative_turns = SpeculativeTurnTracker()
+    service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
+    if not stt_finishes_after_reopen:
+        stale = final_stt_event("turn_1", 0, "Old transcript")
+
+    service.dispatch_pipeline_event(
+        conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True, interrupt_response=False)
+    )
+    if stt_finishes_after_reopen:
+        stale = final_stt_event("turn_1", 0, "Old transcript")
+    current = final_stt_event("turn_1", 1, "Current transcript")
+    store = service.turn_latency_store
+    current_tracker = store._pending_turn[("turn_1", 1)]
+    assert ("turn_1", 0) in store._pending_turn
+
+    assert service.dispatch_pipeline_event(conn_id, stale) == []
+    assert service.text_prompt_queue.empty()
+    assert store._pending_turn == {("turn_1", 1): current_tracker}
+
+    service.dispatch_pipeline_event(conn_id, current)
+    request = service.text_prompt_queue.get_nowait()
+    tracker = store.get_response(request.response_key)
+    assert tracker.stt_s == current_tracker.stt_s
+    assert store._pending_turn == {}
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=request.response_key))
+    with caplog.at_level(logging.INFO, logger=LATENCY_LOGGER):
+        service.finish_response(conn_id, response_key=request.response_key)
+    lines = _latency_lines(caplog)
+    assert len(lines) == 1
+    assert "Turn turn_1 rev=1" in lines[0]
+    assert "stt=n/a" not in lines[0]
+    assert store._trackers == {}
 
 
 def test_cancelled_inflight_llm_cannot_recreate_latency_tracker(service, conn_id, monkeypatch):
