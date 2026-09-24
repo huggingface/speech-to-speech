@@ -187,15 +187,20 @@ other results in the report.
 
 The runner waits for `session.updated` before sending audio, raises the session
 VAD silence threshold to 900 ms, and appends two seconds of silence to finish the
-turn. A second distinct speech-input item marks the question as a split even if
-its response has not arrived yet; reopening the same input item is allowed.
-Multiple responses also mark a split. The last received transcript is retained
-for diagnosis but the item is an error. Increase `--silence-ms` and
+turn. A new speech-input item after a public response has begun marks the question
+as a split, even if its next response has not arrived. Before any public response,
+item IDs may change when speculative speech reopens after final transcription;
+these changes are allowed. Multiple responses also mark a split. The last received
+transcript is retained for diagnosis but the item is an error. Increase `--silence-ms` and
 `--trailing-silence-ms` together if needed. `--speed 1` uses real-time pacing;
 faster playback changes queueing and invalidates realistic latency comparisons.
 `--response-timeout` bounds the wait after all input audio and trailing silence
 have been sent, even while output events continue arriving. A response completed
 within that budget remains valid during the final observation window.
+Before streaming each question, session-capacity refusals are retried for up to
+`--response-timeout` seconds (180 by default), allowing an earlier provider
+request to drain after disconnection. This wait does not consume question retries
+or send audio. Other connection/configuration errors fail normally.
 
 Forty questions is a regression sample, not a leaderboard benchmark. Comparisons
 show accuracy changes in percentage points, sample sizes, and latency changes;
@@ -263,3 +268,21 @@ reviewers without access to that account. GPU validation applies to the source
 revision recorded above. Subsequent fixes to Space synchronization, audio-loading
 failures, judge verdicts, split detection, and response deadlines are covered by local regression tests and CI; the
 GPU comparison has not been rerun for those fixes.
+
+
+## Follow-up live validation
+
+The [40-question run at `5aa4a3c`](https://huggingface.co/jobs/Steveeeeeeen/6ab530af6b030d633f68e615)
+exposed an evaluation bug: finalized speculative transcripts can reopen with a new
+input-item ID before any public response. Three such questions were falsely
+flagged as splits. A provider HTTP 429 with a 60-second retry kept the last
+session draining; the remaining 23 questions exhausted their short connection
+retries. Fourteen questions produced correct spoken answers. This failed run is
+not a model-accuracy comparison; its report and logs are retained in the private
+results dataset.
+
+The runner now permits input-ID changes before a public response and waits for
+session capacity within a bounded budget. Regression tests include actual
+service serialization with final transcription before reopening, continued
+split detection after a response, recovery from capacity refusals, and capacity
+timeout. A local WebSocket check also exercises both fixes together.

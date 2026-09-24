@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 BYTES_PER_SAMPLE = 2
 # How often the consumer re-checks whether the question has finished streaming.
 _PRE_SEND_POLL_S = 0.25
+_SESSION_RETRY_S = 1.0
 
 DEFAULT_INSTRUCTIONS = (
     "You are taking a spoken reasoning test. The user reads one self-contained question aloud. "
@@ -178,7 +179,7 @@ async def _consume(ws: Any, config: RunnerConfig, capture: _TurnCapture, audio_s
     """Read server events into *capture* until the turn settles, times out, or errors."""
     current: Optional[_ResponseCapture] = None
     deadline: Optional[float] = None
-    input_items: set[str] = set()
+    input_item_id: Optional[str] = None
 
     def ensure_current() -> _ResponseCapture:
         nonlocal current
@@ -223,12 +224,14 @@ async def _consume(ws: Any, config: RunnerConfig, capture: _TurnCapture, audio_s
         if kind == "input_audio_buffer.speech_started":
             item_id = event.get("item_id")
             if item_id:
-                input_items.add(item_id)
-            if len(input_items) > 1:
-                # A second input item proves a split, even if its response is
-                # still waiting on STT/LLM. Reopening the same item is allowed.
-                capture.error = f"split_turn ({len(input_items)} input items)"
-                return
+                # Final STT releases item identity; a speculative reopen can
+                # therefore get a new ID before any public response exists.
+                # Once a response has begun, a new input means it answered only
+                # part of this recording, even if the next response is delayed.
+                if input_item_id is not None and item_id != input_item_id and capture.responses:
+                    capture.error = "split_turn (2 input items)"
+                    return
+                input_item_id = item_id
         elif kind == "conversation.item.input_audio_transcription.completed":
             capture.input_transcript = " ".join(
                 part for part in (capture.input_transcript, event.get("transcript", "")) if part
@@ -270,23 +273,44 @@ async def open_session(config: RunnerConfig) -> Any:
     import websockets
 
     headers = [("Authorization", f"Bearer {config.api_key}")] if config.api_key else None
-    async with websockets.connect(
-        config.url,
-        max_size=2**24,
-        max_queue=2048,
-        additional_headers=headers,
-        open_timeout=config.connect_timeout_s,
-    ) as ws:
-        first = json.loads(await asyncio.wait_for(ws.recv(), timeout=config.connect_timeout_s))
-        if first.get("type") == "error":
-            raise RuntimeError(str(first.get("error", {}).get("message") or "connection rejected"))
-        if first.get("type") != "session.created":
-            raise RuntimeError(f"unexpected first event: {first.get('type')!r}")
-        await ws.send(json.dumps(build_session_update(config)))
-        updated = json.loads(await asyncio.wait_for(ws.recv(), timeout=config.connect_timeout_s))
-        if updated.get("type") != "session.updated":
-            raise RuntimeError(f"session configuration rejected: {updated.get('error') or updated.get('type')}")
-        yield ws
+    # A disconnected question may still be draining an in-flight provider
+    # request. Wait for capacity before sending the next question, independently
+    # of its retry budget. Other handshake errors remain immediate failures.
+    deadline = time.monotonic() + config.response_timeout_s
+
+    def handshake_timeout() -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("session_capacity_timeout")
+        return min(config.connect_timeout_s, remaining)
+
+    while True:
+        async with websockets.connect(
+            config.url,
+            max_size=2**24,
+            max_queue=2048,
+            additional_headers=headers,
+            open_timeout=handshake_timeout(),
+        ) as ws:
+            first = json.loads(await asyncio.wait_for(ws.recv(), timeout=handshake_timeout()))
+            if first.get("type") == "error":
+                error = first.get("error", {})
+                if error.get("type") != "session_limit_reached":
+                    raise RuntimeError(str(error.get("message") or "connection rejected"))
+            else:
+                if first.get("type") != "session.created":
+                    raise RuntimeError(f"unexpected first event: {first.get('type')!r}")
+                await ws.send(json.dumps(build_session_update(config)))
+                updated = json.loads(await asyncio.wait_for(ws.recv(), timeout=handshake_timeout()))
+                if updated.get("type") != "session.updated":
+                    raise RuntimeError(f"session configuration rejected: {updated.get('error') or updated.get('type')}")
+                yield ws
+                return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("session_capacity_timeout")
+        logger.info("Session capacity busy; waiting for the previous question to drain")
+        await asyncio.sleep(min(_SESSION_RETRY_S, remaining))
 
 
 async def run_item(config: RunnerConfig, item: EvalItem, pcm: bytes) -> ItemResult:

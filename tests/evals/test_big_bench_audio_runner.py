@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from speech_to_speech.api.openai_realtime.service import RealtimeService
+from speech_to_speech.api.openai_realtime.service import RealtimeService, build_error_event
 from speech_to_speech.evals.big_bench_audio import runner as bba
 from speech_to_speech.evals.big_bench_audio.dataset import EvalItem, Subset
 from speech_to_speech.evals.big_bench_audio.report import aggregate
@@ -21,7 +21,12 @@ from speech_to_speech.evals.big_bench_audio.runner import (
     run_item,
     run_subset,
 )
-from speech_to_speech.pipeline.events import AssistantOutputEvent, SpeechStartedEvent, SpeechStoppedEvent
+from speech_to_speech.pipeline.events import (
+    AssistantOutputEvent,
+    SpeechStartedEvent,
+    SpeechStoppedEvent,
+    TranscriptionCompletedEvent,
+)
 
 ITEM = EvalItem(id=7, category="web_of_lies", official_answer="Yes", file_name="data/question_7.mp3")
 
@@ -169,7 +174,7 @@ async def test_a_question_split_into_several_turns_is_flagged(monkeypatch):
     result = await run_item(cfg, ITEM, pcm_for(cfg))
 
     assert result.error is not None and result.error.startswith("split_turn")
-    assert result.reply == "Final answer: Yes"  # the last turn heard the whole question
+    assert result.reply == "Final answer: Yes"  # retain the last reply for diagnosis
 
 
 @pytest.mark.parametrize("reopened", [False, True])
@@ -205,6 +210,71 @@ async def test_speech_items_detect_a_split_before_the_next_response(monkeypatch,
         assert socket.closed
     finally:
         service.unregister(sid)
+
+
+@pytest.mark.parametrize("after_response", [False, True])
+async def test_final_transcription_then_reopen_uses_new_item_identity(monkeypatch, after_response):
+    service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event())
+    sid = service.register()
+    try:
+        events = []
+        for event in (
+            SpeechStartedEvent(turn_id="first", turn_revision=0),
+            SpeechStoppedEvent(turn_id="first", turn_revision=0),
+            TranscriptionCompletedEvent(transcript="First premise.", turn_id="first", turn_revision=0),
+            SpeechStartedEvent(turn_id="first", turn_revision=1, reopened=True),
+        ):
+            events += service.dispatch_pipeline_event(sid, event)
+        events += service.dispatch_pipeline_event(sid, AssistantOutputEvent(text="Final answer: Yes"))
+        events += service.encode_audio_chunk(sid, b"\x01\x00" * 320)
+        events += service.finish_response(sid)
+        # Repeating the current input identity must not be mistaken for a split
+        # just because a speculative revision used another ID earlier.
+        events += service.dispatch_pipeline_event(
+            sid,
+            SpeechStartedEvent(
+                turn_id="second" if after_response else "first", turn_revision=2, reopened=not after_response
+            ),
+        )
+        wire = [event.model_dump(exclude_none=True) for event in events]
+        ids = [event["item_id"] for event in wire if event["type"] == "input_audio_buffer.speech_started"]
+        assert ids[0] != ids[1]
+        assert (ids[1] != ids[2]) == after_response
+        socket = install(monkeypatch, FakeSocket(wire, respond_after=4))
+        result = await run_item(config(), ITEM, pcm_for(config()))
+        assert result.reply == "Final answer: Yes"
+        assert bool(result.error) == after_response
+        assert aggregate([result])["totals"]["correct"] == int(not after_response)
+        assert socket.closed
+    finally:
+        service.unregister(sid)
+
+
+@pytest.mark.parametrize("recovers", [False, True])
+async def test_session_capacity_wait_is_bounded_and_does_not_send_audio(monkeypatch, recovers):
+    monkeypatch.setattr(bba, "_SESSION_RETRY_S", 0.01)
+    sockets = []
+    rejection = build_error_event("All 1 session slots are in use.", "session_limit_reached").model_dump(
+        exclude_none=True
+    )
+
+    def connect(*args, **kwargs):
+        ready = recovers and len(sockets) >= 3
+        socket = FakeSocket(transcript_events("Final answer: Yes"), respond_after=4, first=None if ready else rejection)
+        sockets.append(socket)
+        return socket
+
+    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=connect))
+    cfg = config(response_timeout_s=0.1)
+    result = await asyncio.wait_for(run_item(cfg, ITEM, pcm_for(cfg)), timeout=1)
+    assert len(sockets) >= 3
+    assert all(socket.closed for socket in sockets)
+    assert all(socket.appends == 0 for socket in (sockets[:-1] if recovers else sockets))
+    if recovers:
+        assert result.error is None and result.correct is True
+        assert sockets[-1].appends == 4
+    else:
+        assert "session_capacity_timeout" in result.error
 
 
 @pytest.mark.parametrize("completed", [False, True])
@@ -257,12 +327,13 @@ async def test_a_server_error_event_ends_the_item(monkeypatch):
 
 async def test_a_rejected_connection_is_reported_as_an_item_error(monkeypatch):
     cfg = config()
-    rejection = {"type": "error", "error": {"message": "session_limit_reached"}}
-    install(monkeypatch, FakeSocket([], respond_after=4, first=rejection))
+    rejection = build_error_event("Invalid API key", "authentication_error").model_dump(exclude_none=True)
+    socket = install(monkeypatch, FakeSocket([], respond_after=4, first=rejection))
 
     result = await run_item(cfg, ITEM, pcm_for(cfg))
 
-    assert "session_limit_reached" in result.error
+    assert "Invalid API key" in result.error
+    assert socket.closed and socket.appends == 0
 
 
 async def test_input_transcription_is_kept_for_debugging(monkeypatch):
