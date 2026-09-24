@@ -272,25 +272,43 @@ def test_vad_idle_audio_never_reaches_diarization_and_preroll_is_sent_once(monke
     assert sum(output.mode == "final" for output in outputs) == 1
 
 
-def test_unavailable_llm_metadata_is_compact_and_hides_invalid_labels():
+def test_unavailable_llm_metadata_hides_invalid_labels():
     attribution = SpeakerAttribution(
         available=False,
         complete=True,
         intervals=[SpeakerInterval(speaker=2, start=0, end=1)],
     )
-    assert attribution.for_llm("hello", include_explanation=False) == "[speaker=unknown, complete=false]\nhello"
+    text = attribution.for_llm("hello")
+    assert "speaker_2" not in text
+    assert text.endswith("[speaker=unknown, complete=false]\nhello")
 
 
-def test_only_first_speaker_turn_has_explanation(service, conn_id, runtime_config):
-    for turn in range(2):
-        service.dispatch_pipeline_event(
+@pytest.mark.parametrize("history_size", [1, 10])
+def test_speaker_explanation_survives_history_eviction(service, conn_id, runtime_config, history_size):
+    runtime_config.chat.size = history_size
+    first_item_id = None
+    for turn in range(history_size + 2):
+        wire = service.dispatch_pipeline_event(
             conn_id,
             TranscriptionCompletedEvent(
                 transcript=f"hello {turn}",
-                speaker_attribution=SpeakerAttribution(intervals=[SpeakerInterval(speaker=turn, start=0, end=1)]),
+                speaker_attribution=SpeakerAttribution(
+                    intervals=[SpeakerInterval(speaker=speaker, start=0, end=1) for speaker in (0, 1)],
+                    complete=False,
+                ),
             ),
         )
+        assert wire[0].transcript == f"hello {turn}"
+        if first_item_id is None:
+            first_item_id = service._state(conn_id).speculative_user_item_id
+        runtime_config.chat.trim_if_needed()
+
+    assert all(item.id != first_item_id for item in runtime_config.chat.buffer)
     messages = [m["content"] for m in runtime_config.chat.to_transformers_chat() if m["role"] == "user"]
-    assert "Speaker IDs are anonymous" in messages[0]
-    assert "available" not in messages[1]
-    assert messages[1] == "[speaker=speaker_1, complete=true]\nhello 1"
+    assert len(messages) == history_size
+    for message in messages:
+        assert "Speaker IDs are anonymous and stable only within this session" in message
+        assert "individual words are not attributed" in message
+        assert "additional speakers may be missing" in message
+        assert "do not read them aloud" in message
+    assert messages[-1].endswith(f"[speaker=speaker_0,speaker_1, complete=false]\nhello {history_size + 1}")

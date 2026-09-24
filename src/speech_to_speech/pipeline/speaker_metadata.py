@@ -28,23 +28,20 @@ class SpeakerAttribution(BaseModel):
             durations[interval.speaker] = durations.get(interval.speaker, 0.0) + max(0.0, interval.end - interval.start)
         return ",".join(f"speaker_{speaker}={seconds:.3f}s" for speaker, seconds in sorted(durations.items())) or "none"
 
-    def for_llm(self, transcript: str, *, include_explanation: bool = True) -> str:
+    def for_llm(self, transcript: str) -> str:
         if not transcript:
             return transcript
         speakers = sorted({interval.speaker for interval in self.intervals}) if self.available else []
         labels = ",".join(f"speaker_{speaker}" for speaker in speakers) or "unknown"
         complete = str(self.complete and self.available).lower()
         header = f"[speaker={labels}, complete={complete}]"
+        # Each turn must retain its meaning when older chat history is evicted.
         explanation = (
-            (
-                "Speaker IDs are anonymous and stable only within this session. "
-                "These labels are metadata, not spoken words; do not read them aloud. "
-                "Multiple labels indicate detected speaker activity; individual words are not attributed. "
-                "Do not assume who said each part. 'unknown' means no reliable speaker label is available. "
-                "complete=false means attribution is incomplete or unavailable; additional speakers may be missing.\n"
-            )
-            if include_explanation
-            else ""
+            "Speaker IDs are anonymous and stable only within this session. "
+            "These labels are metadata, not spoken words; do not read them aloud. "
+            "Multiple labels indicate detected speaker activity; individual words are not attributed. "
+            "Do not assume who said each part. 'unknown' means no reliable speaker label is available. "
+            "complete=false means attribution is incomplete or unavailable; additional speakers may be missing.\n"
         )
         return f"{explanation}{header}\n{transcript}"
 

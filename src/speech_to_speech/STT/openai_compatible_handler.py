@@ -439,7 +439,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             if not self._request_is_current(request):
                 return False
             self.before_emit_output(output)
-            self.queue_out.put(output)
+            self.queue_out.put(self.output_for_queue(output, request.source))
             return True
 
     def _request_is_current(self, request: _TranscriptionRequest) -> bool:

@@ -13,6 +13,13 @@ import pytest
 
 from speech_to_speech.pipeline.control import SESSION_END
 from speech_to_speech.pipeline.messages import PIPELINE_END, Transcription, TranscriptionFailure, VADAudio
+from speech_to_speech.pipeline.speaker_metadata import (
+    PendingSpeakerAttribution,
+    SpeakerAttribution,
+    SpeakerAttributionFuture,
+    SpeakerInterval,
+    SpeakerSession,
+)
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.STT import openai_compatible_handler as stt_module
 
@@ -341,6 +348,48 @@ def handler_factory(monkeypatch):
 
 def audio(mode="final", *, turn="turn-1", revision=0, samples=160):
     return VADAudio(audio=np.zeros(samples, dtype=np.float32), mode=mode, turn_id=turn, turn_revision=revision)
+
+
+@pytest.mark.parametrize("attribution_state", ["ready", "pending", "invalid", "direct", "disabled"])
+def test_http_final_preserves_speaker_attribution_without_waiting(handler_factory, attribution_state):
+    operation = ControlledOperation("hello")
+    handler = handler_factory(operation)
+    source = audio(revision=2)
+    attribution = SpeakerAttribution(intervals=[SpeakerInterval(speaker=1, start=0, end=0.01)])
+    future = SpeakerAttributionFuture()
+    session = SpeakerSession()
+    if attribution_state == "direct":
+        source.speaker_attribution = attribution
+    elif attribution_state != "disabled":
+        source.speaker_pending = PendingSpeakerAttribution(((future, session, 0),))
+
+    assert list(handler.process(source)) == []
+    assert operation.started.wait(1)
+    # Resolve during transcription, so publication must use the latest result.
+    if attribution_state in {"ready", "invalid"}:
+        future.set_result(attribution)
+    if attribution_state == "invalid":
+        session.invalid.set()
+    operation.release.set()
+
+    result = handler.queue_out.get(timeout=1)
+    assert isinstance(result, Transcription)
+    assert result.text == "hello"
+    assert (result.turn_id, result.turn_revision) == (source.turn_id, source.turn_revision)
+    if attribution_state in {"ready", "direct"}:
+        assert result.speaker_attribution == attribution
+    elif attribution_state == "disabled":
+        assert result.speaker_attribution is None
+    else:
+        assert result.speaker_attribution is not None
+        assert not result.speaker_attribution.complete
+        assert result.speaker_attribution.intervals == []
+        assert result.speaker_attribution.available == (attribution_state == "pending")
+        if attribution_state == "pending":
+            assert not future.done()  # Publishing did not wait for diarization.
+            future.set_result(attribution)
+            assert not result.speaker_attribution.complete
+            assert result.speaker_attribution.intervals == []
 
 
 @pytest.mark.parametrize("mode", ["final", "progressive"])
