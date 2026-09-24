@@ -96,23 +96,13 @@ class SessionHandler(RealtimeBaseHandler):
             voice = candidate.session.audio.output.voice
             audio = event.session.audio
             explicit_voice = audio is not None and audio.output is not None and "voice" in audio.output.model_fields_set
-            if new_tts is not None:
-                if old_tts != new_tts and not explicit_voice:
-                    voice = new_tts.voice
-                if voice not in [new_tts.voice, *new_tts.voices]:
-                    raise ValueError("The selected TTS model does not support this voice.")
-            if (
-                new_tts is None
-                and "output_modalities" in event.session.model_fields_set
-                and "audio" in (event.session.output_modalities or [])
-            ):
-                raise ValueError("Audio output requires a selected TTS model.")
+            if old_tts != new_tts and not explicit_voice:
+                voice = new_tts.voice
+            if voice not in [new_tts.voice, *new_tts.voices]:
+                raise ValueError("The selected TTS model does not support this voice.")
             candidate.apply_routing_defaults()
             assert candidate.session.audio is not None and candidate.session.audio.output is not None
-            if new_tts is not None:
-                candidate.session.audio.output.voice = voice
-                if old_tts is None and "output_modalities" not in event.session.model_fields_set:
-                    candidate.session.output_modalities = ["audio"]
+            candidate.session.audio.output.voice = voice
             if not cfg.chat.prepare_route_change():
                 raise ValueError(
                     "Resolve pending tools or wait for generation/compaction cleanup before changing models."
@@ -129,14 +119,10 @@ class SessionHandler(RealtimeBaseHandler):
     def _validate_routed_settings(previous: RuntimeConfig, candidate: RuntimeConfig) -> None:
         assert previous.routing is not None and candidate.routing is not None
         old, new = previous.routing.routes.llm, candidate.routing.routes.llm
-        if new is None:
-            return
         caps = new.capabilities
         if caps.context_window is None or caps.continuation != "full_context":
             raise ValueError("The selected LLM must declare its context window and support full retained context.")
-        if (old is not None and new.protocol != old.protocol) or caps.context_window < max(
-            previous.llm_context_window_floor, (old.capabilities.context_window or 0) if old is not None else 0
-        ):
+        if new.protocol != old.protocol or caps.context_window < (old.capabilities.context_window or 0):
             raise ValueError("The destination must use the same protocol and an equal or larger context window.")
         if candidate.session.tools and not caps.tools:
             raise ValueError("The selected LLM does not support the session's tools.")

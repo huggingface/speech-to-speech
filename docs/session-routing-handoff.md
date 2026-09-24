@@ -12,6 +12,7 @@ The internal WebSocket handshake supplies `X-Speech-Session-Routing`:
 {
   "id": "allocator-session-id",
   "pipeline": "qwen-gemma-qwen",
+  "updates_enabled": true,
   "routes": {
     "stt": {"model": "qwen-asr", "provider": "hf", "protocol": "transcriptions"},
     "llm": {"model": "gemma", "provider": "hf", "protocol": "chat_completions"},
@@ -24,9 +25,9 @@ The configuration requires remote OpenAI-compatible STT and TTS handlers and a
 consistent Chat Completions or Responses LLM adapter across the CPU pool.
 In this mode, building CPU pipeline units initializes the remote clients without
 running inference against their bootstrap models. Gateway pools own readiness
-and model warmup; a failed optional model must not prevent the session service
+and model warmup; an unavailable bootstrap model must not prevent the session service
 from starting. Without this opt-in, the adapters retain their startup warmups.
-Malformed, disabled, oversized, or mismatched handoffs fail before claiming a
+Malformed, oversized, or mismatched handoffs fail before claiming a
 pipeline. URLs, credentials, catalogs, capacity policies and workers remain
 deployment-owned. All routes on a CPU worker must accept that worker's configured
 audio format, sample rate and request options. For example, OpenAI speech uses
@@ -44,11 +45,11 @@ guarantee.
 the additional `updates_enabled` handshake capability, admitted models remain
 fixed and ordinary session settings retain their existing behavior.
 
-## Optional model selection through session.update
+## Changing models through session.update
 
-A trusted proxy may supply `"updates_enabled": true` in the handshake. In this
-mode each route may be `null`, including all three for an initially empty session.
-The deployment proxy supports the following public extension:
+A trusted proxy may supply `"updates_enabled": true` in the handshake. All
+three stages remain selected throughout the session. The deployment proxy
+supports the following public extension:
 
 ```json
 {
@@ -57,24 +58,19 @@ The deployment proxy supports the following public extension:
   "session": {
     "type": "realtime",
     "models": {
-      "stt": {"model": "qwen-asr", "provider": "hf"},
-      "llm": "gemma-route",
-      "tts": null
+      "stt": {"model": "asr-alternative", "provider": "hf"},
+      "llm": "gemma-alternative",
+      "tts": {"model": "speech-alternative", "provider": "hf"}
     }
   }
 }
 ```
 
-Omitted stages keep their selections. A `null` value disables a stage; it does
-not unload process-wide weights. `session.model` remains an LLM shorthand.
+Omitted stages keep their selections. A `null` stage is rejected.
+`session.model` remains an LLM shorthand.
 `session.created` and `session.updated` include the effective `models` map and
-the effective LLM `model`. Disabling TTS produces text-only responses; adding it
-again enables audio unless the update explicitly requests text. With STT disabled,
-text input remains available, and a declared audio-input LLM can receive VAD
-audio directly through the existing Chat Completions audio path. The Responses
-adapter's audio path uses Chat Completions internally, so it is not advertised
-as a native Responses audio route. With the LLM disabled, STT can transcribe but
-`response.create` fails clearly. Disabled stages never use bootstrap defaults.
+the effective LLM `model`. The selected routes replace the bootstrap model
+defaults for subsequent STT, LLM and TTS requests.
 
 The allocator resolves/authorizes choices and reserves added pool capacity. The
 proxy strips client-supplied `_session_routing` fields and attaches this private
@@ -89,17 +85,17 @@ envelope to the standard update before forwarding to the private listener:
       "pipeline": "deployment-accounting-key",
       "updates_enabled": true,
       "routes": {
-        "stt": null,
-        "tts": null,
+        "stt": {"model": "asr-alternative", "provider": "hf", "protocol": "transcriptions"},
+        "tts": {"model": "speech-alternative", "provider": "hf", "protocol": "speech", "voice": "alloy"},
         "llm": {
-          "model": "audio-llm-route",
+          "model": "gemma-alternative",
           "provider": "hf",
           "protocol": "chat_completions",
           "capabilities": {
             "context_window": 32768,
             "tools": true,
             "images": false,
-            "audio_input": true,
+            "audio_input": false,
             "continuation": "full_context"
           }
         }
@@ -129,8 +125,6 @@ model/provider plus the original allocator affinity ID.
 The initial compatibility boundary is deliberately limited: the same LLM adapter
 protocol, full-context continuation, an equal or larger declared context window,
 and capabilities for configured tools and retained images/audio/tool history.
-The context-window floor survives LLM removal and resets with the session;
-disabling and re-adding the stage cannot bypass it while retaining Chat.
 Unsupported voice choices fail during a routed update. No tokenizer conversion,
 backend-local continuation migration, in-flight generation migration or arbitrary
 local model loading is implemented.

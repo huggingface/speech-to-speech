@@ -205,7 +205,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             if (
                 not isinstance(part, AssistantTextPart)
                 or not part.text.strip()
-                or not response_wants_audio(lm_output.response, lm_output.runtime_config)
+                or not response_wants_audio(lm_output.response)
             ):
                 continue
             logger.debug("Forwarding to TTS: %s", transcript_for_log(part.text))

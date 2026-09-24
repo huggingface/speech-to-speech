@@ -419,11 +419,6 @@ async def _dispatch_client_event(
         return
 
     if isinstance(event, InputAudioBufferAppendEvent):
-        if not service._state(session_id).runtime_config.accepts_audio_input:
-            await send_correlated(
-                [service.make_error("No compatible audio input model selected.", "invalid_request_error")]
-            )
-            return
         if transport_kind == "webrtc":
             await send_correlated(
                 [
@@ -470,7 +465,7 @@ async def _dispatch_client_event(
                 if not isinstance(routing_update_id, str) or not 1 <= len(routing_update_id) <= 64:
                     raise ValueError("Invalid session routing update.")
                 proposed = SessionRouting.model_validate(routing_update["routing"])
-                if proposed.routes.llm is not None and proposed.routes.llm.protocol != _unit_llm_protocol(unit):
+                if proposed.routes.llm.protocol != _unit_llm_protocol(unit):
                     raise ValueError("The selected LLM protocol does not match this CPU adapter.")
                 await _drain_for_routing_update(unit, session_id)
             except (ValueError, KeyError, TypeError) as exc:
@@ -637,7 +632,7 @@ def create_app(
                 if not session_routing_enabled or len(raw_routing) > 4096:
                     raise ValueError("Session routing is disabled or the handoff is too large")
                 routing = SessionRouting.model_validate_json(raw_routing)
-                if routing.routes.llm is not None and routing.routes.llm.protocol != routing_protocol:
+                if routing.routes.llm.protocol != routing_protocol:
                     raise ValueError("Admitted LLM protocol does not match the CPU adapter")
             except ValueError:
                 await send_ws_event(

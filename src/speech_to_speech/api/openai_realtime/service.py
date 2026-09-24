@@ -677,7 +677,7 @@ class RealtimeService:
             st.speculative_user_speech_stopped_at_s = event.speech_stopped_at_s
 
         queue = self.text_prompt_queue
-        if queue and transcript and (cfg.routing is None or cfg.routing.routes.llm is not None):
+        if queue and transcript:
             request = GenerateResponseRequest(
                 runtime_config=cfg,
                 language_code=event.language_code,

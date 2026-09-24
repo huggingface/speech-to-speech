@@ -280,16 +280,6 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         )
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
-        cfg = vad_audio.runtime_config
-        if cfg is not None and cfg.routing is not None and cfg.routing.routes.stt is None:
-            if (
-                self._request_is_current(_TranscriptionRequest(vad_audio, self._session_generation))
-                and cfg.accepts_audio_input
-                and vad_audio.mode != "progressive"
-            ):
-                yield vad_audio
-            return
-
         mode: Literal["progressive", "final"] = "progressive" if vad_audio.mode == "progressive" else "final"
         failed_requests: list[_TranscriptionRequest] = []
         failure_message = "transcription worker could not start"
@@ -513,8 +503,6 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
     ) -> HttpTranscriptionOperation:
         routing = runtime_config.routing if runtime_config is not None else None
         route = routing.routes.stt if routing is not None else None
-        if routing is not None and route is None:
-            raise ValueError("No STT model selected")
         return HttpTranscriptionOperation(
             endpoint_url=self.endpoint_url,
             api_key=self.api_key,

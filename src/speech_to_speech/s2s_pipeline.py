@@ -417,7 +417,6 @@ def _build_handlers(
             setup_kwargs={
                 "text_output_queue": text_output_queue,
                 "should_listen": should_listen,
-                "sample_rate": vad_handler_kwargs.sample_rate,
             },
         )
         speech_input_handlers.append(transcription_notifier)

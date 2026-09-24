@@ -16,8 +16,14 @@ def route(model="first", *, context=32768, tools=True, images=True, audio=True):
             "pipeline": model,
             "updates_enabled": True,
             "routes": {
-                "stt": None,
-                "tts": None,
+                "stt": {"model": "asr-default", "provider": "hf", "protocol": "transcriptions"},
+                "tts": {
+                    "model": "tts-default",
+                    "provider": "hf",
+                    "protocol": "speech",
+                    "voice": "aiden",
+                    "voices": ["aiden", "alloy"],
+                },
                 "llm": {
                     "model": model,
                     "provider": "hf",
@@ -55,6 +61,16 @@ def speech_route(model):
 
 def event(**fields):
     return SessionUpdateEvent(type="session.update", session=RealtimeSessionCreateRequest(type="realtime", **fields))
+
+
+@pytest.mark.parametrize("stage", ["stt", "llm", "tts"])
+def test_routes_require_all_three_stages(stage):
+    from pydantic import ValidationError
+
+    payload = route().model_dump()
+    payload["routes"][stage] = None
+    with pytest.raises(ValidationError):
+        SessionRouting.model_validate(payload)
 
 
 def test_switch_preserves_identity_and_context_and_reports_effective_selection():
@@ -109,33 +125,6 @@ def test_smaller_context_and_unresolved_tools_are_rejected_without_changes():
     assert state.runtime_config is before
 
 
-@pytest.mark.parametrize("context, accepted", [(8192, False), (32768, True), (65536, True)])
-def test_llm_removal_preserves_context_floor_until_session_ends(context, accepted):
-    service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event())
-    sid = service.register(routing=route())
-    state = service._state(sid)
-    chat = state.runtime_config.chat
-    chat.add_item(make_user_message("Keep this conversation while the LLM is disabled."))
-    disabled = route().model_copy(update={"routes": route().routes.model_copy(update={"llm": None})})
-    assert service.handle_session_update(sid, event(models={"llm": None}), routing=disabled) is None
-    before = state.runtime_config
-    error = service.handle_session_update(
-        sid, event(model="second", instructions="new instructions"), routing=route("second", context=context)
-    )
-    assert (error is None) == accepted
-    assert state.runtime_config.chat is chat
-    assert "Keep this conversation" in str(chat.to_transformers_chat())
-    if not accepted:
-        assert state.runtime_config is before
-        assert state.runtime_config.routing.routes.llm is None
-        assert state.runtime_config.session.instructions != "new instructions"
-
-    # The constraint belongs to this conversation, never to a reused CPU slot.
-    service.unregister(sid)
-    new_sid = service.register(routing=disabled)
-    assert service.handle_session_update(new_sid, event(model="small"), routing=route("small", context=8192)) is None
-
-
 def test_public_models_cannot_change_or_fake_the_trusted_selection():
     service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event())
     sid = service.register(routing=route())
@@ -144,7 +133,7 @@ def test_public_models_cannot_change_or_fake_the_trusted_selection():
     assert service._state(sid).runtime_config is before
 
 
-def test_removed_stages_can_be_added_again_and_bad_voice_updates_are_atomic():
+def test_bad_voice_update_is_atomic():
     from speech_to_speech.api.openai_realtime.session_routing import SpeechRoute
 
     service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event())
@@ -154,22 +143,26 @@ def test_removed_stages_can_be_added_again_and_bad_voice_updates_are_atomic():
             "routes": route().routes.model_copy(
                 update={
                     "tts": SpeechRoute(
-                        model="tts", provider="hf", protocol="speech", voice="aiden", voices=["aiden", "alloy"]
+                        model="tts-alternative",
+                        provider="hf",
+                        protocol="speech",
+                        voice="alloy",
+                        voices=["aiden", "alloy"],
                     )
                 }
             )
         }
     )
-    assert service.handle_session_update(sid, event(models={"tts": "tts"}), routing=with_tts) is None
-    assert service.build_session_updated(sid).session.output_modalities == ["audio"]
     before = service._state(sid).runtime_config
     error = service.handle_session_update(
-        sid, event(instructions="must not apply", audio={"output": {"voice": "missing"}}), routing=with_tts
+        sid,
+        event(models={"tts": "tts-alternative"}, instructions="must not apply", audio={"output": {"voice": "missing"}}),
+        routing=with_tts,
     )
     assert error is not None
     assert service._state(sid).runtime_config is before
-    assert service.handle_session_update(sid, event(models={"tts": None}), routing=route()) is None
-    assert service.build_session_updated(sid).session.output_modalities == ["text"]
+    assert service.handle_session_update(sid, event(models={"tts": "tts-alternative"}), routing=with_tts) is None
+    assert service.build_session_updated(sid).session.audio.output.voice == "alloy"
 
 
 def test_media_and_completed_tool_history_require_destination_capabilities():
@@ -281,54 +274,6 @@ def send_switch(ws, selected, *, update_id="update", **session):
     return ws.receive_json()
 
 
-def test_websocket_switch_drains_handlers_and_next_request_uses_retained_context(running_unit):
-    import json
-
-    from starlette.testclient import TestClient
-
-    from speech_to_speech.api.openai_realtime.websocket_router import create_app
-
-    unit, stop, create = running_unit
-    empty = route().model_copy(update={"routes": route().routes.model_copy(update={"llm": None})})
-    with TestClient(create_app([unit], stop, session_routing_enabled=True)) as client:
-        with client.websocket_connect(
-            "/v1/realtime", headers={"X-Speech-Session-Routing": empty.model_dump_json()}
-        ) as ws:
-            created = ws.receive_json()
-            sid = created["session"]["id"]
-            for index, model in enumerate(("first", "second")):
-                updated = send_switch(ws, route(model), model=model)
-                assert updated["type"] == "session.updated", updated
-                assert updated["_session_routing"] == "update"
-                assert updated["session"]["id"] == sid
-                ws.send_json(
-                    {
-                        "type": "conversation.item.create",
-                        "item": {
-                            "type": "message",
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "input_text",
-                                    "text": "Remember the blue bicycle." if index == 0 else "Which color?",
-                                }
-                            ],
-                        },
-                    }
-                )
-                assert ws.receive_json()["type"] == "conversation.item.created"
-                ws.send_json({"type": "response.create"})
-                received = []
-                while not received or received[-1]["type"] != "response.done":
-                    received.append(ws.receive_json())
-                assert received[-1]["response"]["status"] == "completed"
-                assert any(event["type"] == "response.output_text.delta" for event in received)
-                assert not any(event["type"] == "response.output_audio.delta" for event in received)
-                assert create.call_args.kwargs["model"] == model
-                assert "blue bicycle" in json.dumps(create.call_args.kwargs["messages"])
-                assert create.call_args.kwargs["extra_headers"]["X-Speech-Session-Id"] == "allocated-session"
-
-
 @pytest.mark.parametrize("changed_stages", [("stt",), ("llm",), ("tts",), ("stt", "llm", "tts")])
 def test_websocket_switch_routes_next_spoken_turn_through_selected_models(running_unit, monkeypatch, changed_stages):
     import numpy as np
@@ -368,22 +313,29 @@ def test_websocket_switch_routes_next_spoken_turn_through_selected_models(runnin
         with client.websocket_connect(
             "/v1/realtime", headers={"X-Speech-Session-Routing": initial.model_dump_json()}
         ) as ws:
-            sid = ws.receive_json()["session"]["id"]
+            created = ws.receive_json()
+            sid = created["session"]["id"]
+            assert created["session"]["models"] == initial.models()
             for turn in (0, 1):
                 if turn:
-                    updated = send_switch(
-                        ws,
-                        selected,
-                        models={
-                            stage: {
-                                "model": getattr(selected.routes, stage).model,
-                                "provider": getattr(selected.routes, stage).provider,
-                            }
-                            for stage in changed_stages
-                        },
-                    )
+                    if changed_stages == ("llm",):
+                        updated = send_switch(ws, selected, model="second")
+                    else:
+                        updated = send_switch(
+                            ws,
+                            selected,
+                            models={
+                                stage: {
+                                    "model": getattr(selected.routes, stage).model,
+                                    "provider": getattr(selected.routes, stage).provider,
+                                }
+                                for stage in changed_stages
+                            },
+                        )
                     assert updated["type"] == "session.updated", updated
                     assert updated["session"]["id"] == sid
+                    assert updated["session"]["models"] == selected.models()
+                    assert updated["session"]["model"] == selected.routes.llm.model
                 cfg = unit.service._state(sid).runtime_config
                 unit.input_queue.put(VADAudio(audio=np.zeros(160, dtype=np.float32), runtime_config=cfg))
                 events = []
@@ -462,11 +414,63 @@ def test_cancelled_generation_must_drain_before_switching(running_unit):
         release.set()
 
 
+def test_cancelled_speech_synthesis_must_drain_before_switching(running_unit, monkeypatch):
+    from time import monotonic, sleep
+
+    import numpy as np
+    from starlette.testclient import TestClient
+
+    from speech_to_speech.api.openai_realtime.websocket_router import create_app
+    from speech_to_speech.pipeline.messages import VADAudio
+    from speech_to_speech.STT.openai_compatible_handler import HttpTranscriptionOperation, HttpTranscriptionResult
+    from speech_to_speech.TTS.openai_compatible_handler import HttpSpeechOperation
+
+    unit, stop, _ = running_unit
+    entered, release = Event(), Event()
+    destination = speech_route("second")
+    monkeypatch.setattr(
+        HttpTranscriptionOperation, "run", lambda operation, cancel_check: HttpTranscriptionResult(text="Hello")
+    )
+
+    def blocked_speech(operation, cancel_check):
+        entered.set()
+        assert release.wait(5)
+        return iter([np.zeros(2400, dtype="<i2").tobytes()])
+
+    monkeypatch.setattr(HttpSpeechOperation, "iter_bytes", blocked_speech)
+    try:
+        with TestClient(create_app([unit], stop, session_routing_enabled=True)) as client:
+            with client.websocket_connect(
+                "/v1/realtime", headers={"X-Speech-Session-Routing": speech_route("first").model_dump_json()}
+            ) as ws:
+                sid = ws.receive_json()["session"]["id"]
+                before = unit.service._state(sid).runtime_config
+                unit.input_queue.put(VADAudio(audio=np.zeros(160, dtype=np.float32), runtime_config=before))
+                assert entered.wait(1)
+                assert ws.receive_json()["type"] == "conversation.item.input_audio_transcription.completed"
+                ws.send_json({"type": "response.cancel"})
+                rejected = send_switch(ws, destination, models=destination.models())
+                assert rejected["type"] == "error", rejected
+                assert rejected["error"]["event_id"] == "client-update"
+                assert "Pipeline work is still draining" in rejected["error"]["message"]
+                assert unit.service._state(sid).runtime_config is before
+
+                release.set()
+                deadline = monotonic() + 2
+                while unit.handlers[-1]._active_operation is not None and monotonic() < deadline:
+                    sleep(0.01)
+                assert unit.handlers[-1]._active_operation is None
+                updated = send_switch(ws, destination, models=destination.models())
+                assert updated["type"] == "session.updated", updated
+                assert updated["session"]["models"] == destination.models()
+    finally:
+        release.set()
+
+
 def test_background_final_stt_must_drain_before_switching(running_unit, monkeypatch):
     import numpy as np
     from starlette.testclient import TestClient
 
-    from speech_to_speech.api.openai_realtime.session_routing import TranscriptionRoute
     from speech_to_speech.api.openai_realtime.websocket_router import create_app
     from speech_to_speech.pipeline.messages import VADAudio
     from speech_to_speech.STT.openai_compatible_handler import HttpTranscriptionResult
@@ -484,13 +488,7 @@ def test_background_final_stt_must_drain_before_switching(running_unit, monkeypa
             release.set()
 
     monkeypatch.setattr(unit.handlers[0], "_make_operation", lambda *args, **kwargs: BlockingTranscription())
-    initial = route().model_copy(
-        update={
-            "routes": route().routes.model_copy(
-                update={"stt": TranscriptionRoute(model="asr", provider="hf", protocol="transcriptions")}
-            )
-        }
-    )
+    initial = route()
     try:
         with TestClient(create_app([unit], stop, session_routing_enabled=True)) as client:
             with client.websocket_connect(

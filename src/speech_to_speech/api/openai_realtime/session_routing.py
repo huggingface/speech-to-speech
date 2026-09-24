@@ -2,7 +2,7 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 Identity = Annotated[str, Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9._/@:-]*$")]
 
@@ -42,9 +42,9 @@ class SpeechRoute(Route):
 class SessionRoutes(BaseModel):
     model_config = Route.model_config
 
-    stt: TranscriptionRoute | None
-    llm: LanguageRoute | None
-    tts: SpeechRoute | None
+    stt: TranscriptionRoute
+    llm: LanguageRoute
+    tts: SpeechRoute
 
 
 class SessionRouting(BaseModel):
@@ -55,21 +55,12 @@ class SessionRouting(BaseModel):
     routes: SessionRoutes
     updates_enabled: bool = False
 
-    @model_validator(mode="after")
-    def require_legacy_stages(self) -> "SessionRouting":
-        if not self.updates_enabled and any(getattr(self.routes, stage) is None for stage in ("stt", "llm", "tts")):
-            raise ValueError("partial routes require session updates to be enabled")
-        return self
-
-    def models(self) -> dict[str, dict[str, str] | None]:
+    def models(self) -> dict[str, dict[str, str]]:
         return {
-            stage: {"model": route.model, "provider": route.provider} if route is not None else None
-            for stage in ("stt", "llm", "tts")
-            for route in (getattr(self.routes, stage),)
+            stage: {"model": route.model, "provider": route.provider}
+            for stage, route in (("stt", self.routes.stt), ("llm", self.routes.llm), ("tts", self.routes.tts))
         }
 
     def headers(self, stage: Literal["stt", "llm", "tts"]) -> dict[str, str]:
         route = getattr(self.routes, stage)
-        if route is None:
-            raise ValueError(f"No {stage.upper()} model selected")
         return {"X-Speech-Provider": route.provider, "X-Speech-Session-Id": self.id}

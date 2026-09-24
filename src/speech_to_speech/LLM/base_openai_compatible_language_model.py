@@ -790,8 +790,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     provider_request_started = True
 
                     routing = turn.runtime_config.routing
-                    if routing is not None and routing.routes.llm is None:
-                        raise ValueError("No LLM model selected")
                     route_kwargs = (
                         {"model": routing.routes.llm.model, "extra_headers": routing.headers("llm")}
                         if routing is not None
@@ -998,7 +996,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         req_tool_choice = (
             response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
         )
-        wants_audio = response_wants_audio(response, runtime_config)
+        wants_audio = response_wants_audio(response)
         self._apply_config(active_chat, instructions, wants_audio, language_name=lang_name)
 
         audio_b64 = self._audio_to_wav_base64(request.audio, request.audio_sample_rate)
@@ -1123,7 +1121,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         req_tool_choice = (
             response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
         )
-        wants_audio = response_wants_audio(response, runtime_config)
+        wants_audio = response_wants_audio(response)
         self._apply_config(active_chat, instructions, wants_audio, language_name=lang_name)
 
         optional_kwargs = self._build_optional_kwargs(req_tools, req_tool_choice)
