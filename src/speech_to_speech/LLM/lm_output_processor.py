@@ -102,7 +102,20 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             Response events, :class:`TTSInput`, or :class:`EndOfResponse`
         """
         if isinstance(lm_output, TokenUsage):
-            usage_response_key = self._start_response(lm_output.response_key)
+            usage_response_key: str | None
+            if self._turn_output_allowed(lm_output.turn_id, lm_output.turn_revision):
+                usage_response_key = self._start_response(lm_output.response_key)
+            else:
+                # A superseded turn still consumed provider tokens (the LLM
+                # error/rollback path emits usage regardless of staleness so the
+                # billing is not lost). Forward it under its own response key,
+                # but do not let _start_response overwrite the live response key.
+                logger.debug(
+                    "Forwarding stale token usage for turn=%s rev=%s without touching the live response key",
+                    lm_output.turn_id,
+                    lm_output.turn_revision,
+                )
+                usage_response_key = lm_output.response_key
             usage_event = TokenUsageEvent(
                 input_tokens=lm_output.input_tokens or 0,
                 output_tokens=lm_output.output_tokens or 0,

@@ -278,6 +278,46 @@ def test_token_usage_stays_on_ordered_response_path():
     )
 
 
+def test_stale_token_usage_is_accounted_without_hijacking_live_response_key():
+    # turn_1 was reopened at revision 1, so revision 0 is stale.
+    _, processor = _tracked_processor(revision=1)
+
+    # A live chunk establishes the current response key.
+    list(
+        processor.process(
+            LLMResponseChunk(
+                parts=[AssistantTextPart(text="live")],
+                response_key="live_response",
+                turn_id="turn_1",
+                turn_revision=1,
+            )
+        )
+    )
+    assert processor._response_key == "live_response"
+
+    # Usage for the superseded revision is still forwarded for accounting (the
+    # provider billed those tokens), but under its own key -- it must not hijack
+    # the live response key via _start_response.
+    outputs = list(
+        processor.process(
+            TokenUsage(
+                input_tokens=5,
+                output_tokens=3,
+                response_key="stale_response",
+                turn_id="turn_1",
+                turn_revision=0,
+            )
+        )
+    )
+
+    assert len(outputs) == 1
+    event = outputs[0]
+    assert isinstance(event, TokenUsageEvent)
+    assert event.response_key == "stale_response"
+    assert (event.input_tokens, event.output_tokens) == (5, 3)
+    assert processor._response_key == "live_response"
+
+
 @pytest.mark.parametrize(
     ("modalities", "text", "expect_tts"),
     [
