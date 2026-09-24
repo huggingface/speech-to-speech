@@ -306,6 +306,16 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             block_regex = build_block_regex()
             enter_code = ENTER_CODE
             end_code = END_CODE
+        elif function_tools:
+            # tool_choice="none": tools exist but this response must not call them.
+            # Models that saw earlier tool calls may still emit one; keep detecting
+            # tool blocks so they are stripped from speech, but expose no tools so
+            # nothing gets executed.
+            full_instructions = build_system_prompt(instructions or "", language_name=language_name)
+            block_regex = build_block_regex()
+            enter_code = ENTER_CODE
+            end_code = END_CODE
+            function_tools = []
         else:
             full_instructions = build_system_prompt(instructions or "", language_name=language_name)
             block_regex = None

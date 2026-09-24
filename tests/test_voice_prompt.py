@@ -591,3 +591,23 @@ def test_native_block_markers_are_ignored_without_tools():
 
     assert tools == []
     assert "tool_call" in " ".join(c.text for c in chunks if c.text) + remaining
+
+
+def test_tool_blocks_are_stripped_but_not_run_when_tool_choice_is_none():
+    """With tool_choice="none" the markers stay active but no tool is exposed."""
+    handler = object.__new__(LanguageModelHandler)
+    handler.stream_batch_sentences = 1
+    ctx = StreamContext(
+        function_tools=[],
+        block_regex=build_block_regex(),
+        enter_code=ENTER_CODE,
+        end_code=END_CODE,
+        sentence_batch=[],
+    )
+    text = 'Done. <tool_call>\n{"name": "step_forward", "arguments": {"steps": 1}}\n</tool_call>'
+
+    chunks, tools, remaining = handler._process_printable_text(text, None, [], ctx)
+
+    assert tools == []
+    spoken = " ".join(c.text for c in chunks if c.text) + remaining
+    assert "tool_call" not in spoken and "step_forward" not in spoken
