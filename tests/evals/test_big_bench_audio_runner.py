@@ -4,11 +4,12 @@ import asyncio
 import json
 import sys
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from speech_to_speech.evals.big_bench_audio import runner as bba
-from speech_to_speech.evals.big_bench_audio.dataset import EvalItem
+from speech_to_speech.evals.big_bench_audio.dataset import EvalItem, Subset
 from speech_to_speech.evals.big_bench_audio.runner import (
     RunnerConfig,
     build_session_update,
@@ -256,6 +257,26 @@ async def test_run_subset_does_not_retry_a_split_turn(monkeypatch, tmp_path):
     await run_subset(Subset(name="t", items=(ITEM,)), cfg)
 
     assert attempts == [7]
+
+
+@pytest.mark.parametrize("stage", ["resolve_audio", "load_pcm16_mono"])
+async def test_run_subset_retries_transient_audio_failures(monkeypatch, tmp_path, stage):
+    cfg = config(retries=1)
+    pcm = pcm_for(cfg)
+    path = tmp_path / "question.mp3"
+    resolve = Mock(return_value=path)
+    decode = Mock(return_value=pcm)
+    failing = resolve if stage == "resolve_audio" else decode
+    failing.side_effect = [OSError("temporary audio failure"), failing.return_value]
+    result = bba.ItemResult(id=ITEM.id, category=ITEM.category, official_answer=ITEM.official_answer)
+    run = AsyncMock(return_value=result)
+    monkeypatch.setattr(bba, "resolve_audio", resolve)
+    monkeypatch.setattr(bba, "load_pcm16_mono", decode)
+    monkeypatch.setattr(bba, "run_item", run)
+
+    assert await run_subset(Subset(name="test", items=(ITEM,)), cfg) == [result]
+    assert failing.call_count == 2
+    run.assert_awaited_once_with(cfg, ITEM, pcm)
 
 
 @pytest.mark.parametrize("chunks", [1, 3])

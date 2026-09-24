@@ -336,7 +336,7 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--silence-ms", type=int, default=900, help="server_vad silence_duration_ms for the run.")
     parser.add_argument("--trailing-silence-ms", type=int, default=2000, help="Silence appended after each question.")
     parser.add_argument("--response-timeout", type=float, default=180.0, help="Per-item wait for a finished response.")
-    parser.add_argument("--retries", type=int, default=1, help="Retries per item on connection or timeout errors.")
+    parser.add_argument("--retries", type=int, default=1, help="Retries per item on audio loading or engine errors.")
 
     parser.add_argument("--judge-model", default=None, help="Grade replies with this OpenAI-compatible model.")
     parser.add_argument("--judge-base-url", default=None, help="Base URL for the judge model.")

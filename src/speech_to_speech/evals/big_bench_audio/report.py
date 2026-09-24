@@ -39,15 +39,17 @@ class ItemResult:
     turn_s: Optional[float] = None
     audio_out_bytes: int = 0
     error: Optional[str] = None
+    judge_completed: bool = False
 
     @property
     def final_extracted(self) -> Optional[str]:
         """Judge verdict when a judge ran, rule-based extraction otherwise."""
-        return self.judge_extracted if self.judge_extracted is not None else self.extracted
+        # Older reports have a judge token but no explicit completion flag.
+        return self.judge_extracted if self.judge_completed or self.judge_extracted is not None else self.extracted
 
     @property
     def final_correct(self) -> Optional[bool]:
-        return self.judge_correct if self.judge_extracted is not None else self.correct
+        return self.judge_correct if self.judge_completed or self.judge_extracted is not None else self.correct
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

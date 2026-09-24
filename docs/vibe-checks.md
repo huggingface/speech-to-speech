@@ -21,7 +21,8 @@ python scripts/prepare_eval_space.py --space-name s2s-big-bench-audio-dev
 ```
 
 The script uploads only tracked source and container files, records the Git
-revision, and prints your launch command. Wait for the Space build to finish.
+revision, and removes stale files within the paths it manages while preserving
+unrelated Space files. It prints your launch command. Wait for the Space build to finish.
 The Space stays on CPU and only runs a small HTTP server; GPU inference happens
 in Jobs. This follows the [HF Docker Space image workflow](https://huggingface.co/docs/hub/jobs-images).
 
@@ -172,12 +173,17 @@ is required for a successful turn.
 The prompt requests `Final answer: X`. A rule-based extractor compares X with the
 official answer, with a fallback scan of unstructured replies. Inspect replies
 when extraction is ambiguous. An optional `--judge-model` extracts an answer
-using a second model; reports keep both verdicts.
+using a second model; reports keep both verdicts. A completed judge verdict takes
+precedence, including `UNPARSED`, which counts as unparsed even if the rule-based
+extractor guessed an answer. A judge outage leaves the rule-based result in use.
 
 Errors (including missing audio, failed/cancelled responses, timeouts, and split
 turns) count against accuracy and make the process exit 1 **after** writing the
 report. Incorrect reasoning remains a measured result rather than an engine
 failure. `--fail-on-regression` additionally exits 1 for a large accuracy drop.
+Audio download and decoding failures use the per-item `--retries` budget; if
+they persist, the runner records an item error and continues, preserving the
+other results in the report.
 
 The runner waits for `session.updated` before sending audio, raises the session
 VAD silence threshold to 900 ms, and appends two seconds of silence to finish the
@@ -250,5 +256,6 @@ Novita Jobs were canceled before this comparison to change the provider choices.
 The [comparison, individual reports, and logs](https://huggingface.co/datasets/Steveeeeeeen/s2s-big-bench-audio-results/blob/main/comparisons/20260924-models.md)
 remain private to the development account; the summary here is available to
 reviewers without access to that account. GPU validation applies to the source
-revision recorded above; subsequent documentation and test changes are checked
-locally and in CI.
+revision recorded above. Subsequent fixes to Space synchronization, audio-loading
+failures, and judge verdicts are covered by local regression tests and CI; the
+GPU comparison has not been rerun for those fixes.

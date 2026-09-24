@@ -166,6 +166,16 @@ def test_item_results_survive_a_json_round_trip():
     assert restored.ttfb_s == 1.25
 
 
+def test_older_reports_without_judge_completion_flag_keep_their_verdict():
+    raw = make_item(correct=True).to_dict()
+    raw.pop("judge_completed")
+    assert ItemResult.from_dict(raw).final_correct is True
+    raw.update(judge_extracted="no", judge_correct=False)
+    restored = ItemResult.from_dict(raw)
+    assert restored.final_extracted == "no"
+    assert restored.final_correct is False
+
+
 def test_failed_turn_with_correct_transcript_does_not_pass():
     result = make_item(correct=True, error="split_turn (2 responses)")
     totals = aggregate([result])["totals"]

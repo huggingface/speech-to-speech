@@ -57,7 +57,22 @@ def main() -> None:
         if not api.repo_info(repo, repo_type="space").private:
             raise RuntimeError(f"Refusing to upload development source to public Space {repo}")
         api.upload_folder(
-            repo_id=repo, repo_type="space", folder_path=folder, commit_message=f"Build S2S evaluation {revision[:12]}"
+            repo_id=repo,
+            repo_type="space",
+            folder_path=folder,
+            # Synchronize only paths managed by this uploader. Files uploaded in
+            # this commit are automatically excluded from the deletion list.
+            delete_patterns=[
+                "src/*",
+                "docker/*",
+                "Dockerfile",
+                "pyproject.toml",
+                "README.md",
+                "LICENSE",
+                "MANIFEST.in",
+                "source-revision.txt",
+            ],
+            commit_message=f"Build S2S evaluation {revision[:12]}",
         )
     print(f"https://huggingface.co/spaces/{repo}")
     print(

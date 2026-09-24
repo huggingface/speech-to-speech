@@ -90,9 +90,12 @@ async def judge_results(results: list[ItemResult], config: JudgeConfig) -> None:
 
         raw = (completion.choices[0].message.content or "") if completion.choices else ""
         extracted = _normalize_reply(result.category, raw)
-        if extracted is None:
+        if extracted is None and raw.strip().strip(".").strip().upper() != "UNPARSED":
             return
+        result.judge_completed = True
         result.judge_extracted = extracted
-        result.judge_correct = extracted == normalize_official(result.category, result.official_answer)
+        result.judge_correct = (
+            extracted == normalize_official(result.category, result.official_answer) if extracted is not None else None
+        )
 
     await asyncio.gather(*(judge_one(result) for result in results))

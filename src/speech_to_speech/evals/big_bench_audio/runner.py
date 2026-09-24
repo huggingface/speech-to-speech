@@ -337,15 +337,24 @@ async def run_subset(
     results: list[ItemResult] = []
     total = len(subset)
     for index, item in enumerate(subset.items, start=1):
-        pcm = load_pcm16_mono(resolve_audio(item, subset))
-
-        result = await run_item(config, item, pcm)
-        for attempt in range(config.retries):
-            if not result.error or result.error.startswith("split_turn"):
+        pcm = None
+        for attempt in range(config.retries + 1):
+            try:
+                if pcm is None:
+                    pcm = load_pcm16_mono(resolve_audio(item, subset))
+            except Exception as exc:  # noqa: BLE001 — retain other items when an asset fails
+                result = ItemResult(
+                    id=item.id,
+                    category=item.category,
+                    official_answer=item.official_answer,
+                    error=f"audio_load_failed: {type(exc).__name__}: {exc}",
+                )
+            else:
+                result = await run_item(config, item, pcm)
+            if not result.error or result.error.startswith("split_turn") or attempt == config.retries:
                 break
             logger.warning("item %s failed (%s); retry %s", item.id, result.error, attempt + 1)
             await asyncio.sleep(config.settle_s)
-            result = await run_item(config, item, pcm)
 
         results.append(result)
         if progress is not None:
