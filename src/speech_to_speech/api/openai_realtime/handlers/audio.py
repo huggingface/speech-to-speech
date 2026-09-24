@@ -5,6 +5,7 @@ import logging
 from typing import TYPE_CHECKING, Literal
 
 from openai.types.realtime import (
+    ConversationItemInputAudioTranscriptionFailedEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferSpeechStartedEvent,
     InputAudioBufferSpeechStoppedEvent,
@@ -183,6 +184,13 @@ class AudioHandler(RealtimeBaseHandler):
             return "discard"
         if started_turn_id is not None and pending.turn_id != started_turn_id:
             return "publish"
+        if isinstance(pending.transcription, ConversationItemInputAudioTranscriptionFailedEvent):
+            # A failed item cannot reopen once its failure reaches the client.
+            # Commit after the same reopen gate used for accepted output.
+            committed = turns.try_commit_if_latest_after_reopen_grace(pending.turn_id, pending.turn_revision)
+            if committed is None:
+                return "hold"
+            return "publish" if committed else "discard"
         if turns.is_committed(pending.turn_id, pending.turn_revision):
             return "publish"
         return "hold"

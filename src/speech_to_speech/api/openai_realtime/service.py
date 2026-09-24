@@ -709,6 +709,12 @@ class RealtimeService:
         owns_current_input = failed_events[0].item_id == current_input_item_id
         if owns_current_input and self.should_listen is not None:
             self.should_listen.set()
+        if event.turn_id is not None and event.turn_id == st.speculative_user_turn_id:
+            if st.speculative_user_item_id is not None:
+                st.runtime_config.chat.remove_user_message(st.speculative_user_item_id)
+                st.speculative_user_item_id = None
+            st.response_usage.audio_duration_s -= st.speculative_audio_duration_s
+            st.speculative_audio_duration_s = 0.0
         self.audio.hold_input_terminal(
             conn_id,
             failed_events[0].item_id,

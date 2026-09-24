@@ -12,6 +12,7 @@ the LLM is given.
 """
 
 from queue import Queue
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -23,6 +24,7 @@ from speech_to_speech.pipeline.events import (
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TranscriptionCompletedEvent,
+    TranscriptionFailedEvent,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
@@ -294,3 +296,86 @@ def test_held_input_state_is_released_once_published(session):
     assert state.input_items == {}
     assert state.input_item_by_turn_revision == {}
     assert state.current_input_item_id is None
+
+
+def test_failed_turn_closes_without_another_utterance(session, should_listen):
+    started = session.start_turn("turn_1")
+    session.stop_speech("turn_1", 0, duration_s=1.0, audio_end_ms=1000)
+    should_listen.clear()
+
+    events = session.dispatch(TranscriptionFailedEvent(message="STT failed", turn_id="turn_1", turn_revision=0))
+
+    assert [event.type for event in events] == [
+        "input_audio_buffer.speech_stopped",
+        "conversation.item.input_audio_transcription.failed",
+    ]
+    assert _item_ids(events) == {started[0].item_id}
+    assert should_listen.is_set()
+    assert session.text_prompt_queue.empty()
+    assert session.tracker.begin_reopen_candidate("turn_1", 0) is None
+    state = session.service._state(session.conn_id)
+    assert state.pending_input_terminals == state.input_items == state.input_item_by_turn_revision == {}
+    assert state.current_input_item_id is None
+
+    next_started = session.start_turn("turn_2", audio_start_ms=1100)
+    assert next_started[0].item_id != started[0].item_id
+    assert_openai_schema(session.events)
+    assert_input_lifecycle_contract(session.events)
+
+
+def test_failure_waits_only_for_reopen_grace(session, monkeypatch):
+    now = 100.0
+    monkeypatch.setattr("speech_to_speech.pipeline.speculative_turns.time", SimpleNamespace(monotonic=lambda: now))
+    session.start_turn("turn_1")
+    session.stop_speech("turn_1", 0, duration_s=1.0, audio_end_ms=1000)
+    session.tracker.start_reopen_grace("turn_1", 0, grace_s=0.8)
+
+    assert session.dispatch(TranscriptionFailedEvent(message="STT failed", turn_id="turn_1", turn_revision=0)) == []
+    assert not session.tracker.is_committed("turn_1", 0)
+    now += 0.9
+    events = session.service.audio.resolve_input_terminals(session.conn_id)
+    assert [event.type for event in events] == [
+        "input_audio_buffer.speech_stopped",
+        "conversation.item.input_audio_transcription.failed",
+    ]
+    assert session.service.audio.resolve_input_terminals(session.conn_id) == []
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_failure_respects_pending_reopen(session, resume):
+    session.start_turn("turn_1")
+    session.stop_speech("turn_1", 0, duration_s=1.0, audio_end_ms=1000)
+    candidate = session.tracker.begin_reopen_candidate("turn_1", 0)
+    assert candidate == 1
+
+    assert session.dispatch(TranscriptionFailedEvent(message="STT failed", turn_id="turn_1", turn_revision=0)) == []
+    if resume:
+        session.resume_turn("turn_1", 0, audio_start_ms=1200)
+        session.stop_speech("turn_1", 1, duration_s=2.0, audio_end_ms=2000)
+        session.final("turn_1", 1, "Try again")
+        session.answer("turn_1", 1)
+        assert session.client_history().failed_items == []
+        assert session.client_history().user_turns == session.chat_user_turns() == ["Try again"]
+    else:
+        session.tracker.cancel_reopen_candidate("turn_1", candidate)
+        session.events.extend(session.service.audio.resolve_input_terminals(session.conn_id))
+        assert len(session.client_history().failed_items) == 1
+        assert session.tracker.begin_reopen_candidate("turn_1", 0) is None
+    assert_openai_schema(session.events)
+    assert_input_lifecycle_contract(session.events)
+
+
+def test_failed_revision_removes_superseded_chat_text(session):
+    session.start_turn("turn_1")
+    session.stop_speech("turn_1", 0, duration_s=1.0, audio_end_ms=1000)
+    session.final("turn_1", 0, "An unfinished request")
+    session.resume_turn("turn_1", 0, audio_start_ms=1200)
+    session.stop_speech("turn_1", 1, duration_s=2.0, audio_end_ms=2000)
+
+    session.dispatch(TranscriptionFailedEvent(message="STT failed", turn_id="turn_1", turn_revision=1))
+
+    assert session.answer("turn_1", 0, "An outdated answer") == []
+    assert session.client_history().user_turns == session.chat_user_turns() == []
+    assert len(session.client_history().failed_items) == 1
+    assert session.service._state(session.conn_id).response_usage.audio_duration_s == 0
+    assert_input_lifecycle_contract(session.events)
