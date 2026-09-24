@@ -25,18 +25,24 @@ revision, and prints your launch command. Wait for the Space build to finish.
 The Space stays on CPU and only runs a small HTTP server; GPU inference happens
 in Jobs. This follows the [HF Docker Space image workflow](https://huggingface.co/docs/hub/jobs-images).
 
-For this development setup:
+Set your personal namespace and the image/results repositories:
 
 ```bash
-hf jobs run --namespace Steveeeeeeen --flavor l4x1 --timeout 45m --secrets HF_TOKEN \
+HF_NAMESPACE="your-hf-username"
+EVAL_IMAGE="hf.co/spaces/${HF_NAMESPACE}/s2s-big-bench-audio-dev"
+EVAL_RESULTS="${HF_NAMESPACE}/s2s-big-bench-audio-results"
+
+hf jobs run --detach --namespace "$HF_NAMESPACE" --flavor a10g-large --timeout 45m --secrets HF_TOKEN \
     -e S2S_LIMIT=4 \
-    -e S2S_PUSH_TO_HUB=Steveeeeeeen/s2s-big-bench-audio-results \
-    hf.co/spaces/Steveeeeeeen/s2s-big-bench-audio-dev vibe-check
+    -e S2S_PUSH_TO_HUB="$EVAL_RESULTS" \
+    "$EVAL_IMAGE" vibe-check
 ```
 
 Remove `S2S_LIMIT` and use `--timeout 90m` for all 40 questions. Hardware and
 Inference Providers are billed to the personal account. Only launch the jobs
 you need; no recurring jobs or automatic GPU CI are configured.
+`S2S_LIMIT` only truncates the selected manifest: setting it to 1000 does not
+expand the bundled 40-question subset.
 
 The default stack is Parakeet TDT, `Qwen/Qwen3.5-9B:together` through HF
 Inference Providers (Chat Completions), and Qwen3-TTS with its default GGML backend.
@@ -58,7 +64,7 @@ leave time for model downloads, initialization, and all questions.
 | `S2S_COMPARE` | unset | Baseline file or `owner/repo:reports/file.json` |
 | `S2S_LLM_MODEL` | `Qwen/Qwen3.5-9B:together` | Hosted model |
 | `S2S_LLM_BASE_URL` | `https://router.huggingface.co/v1` | LLM endpoint |
-| `S2S_SERVE_ARGS` | default stack above | Replace server arguments (shell-style quoting, no expansion) |
+| `S2S_SERVE_ARGS` | default stack above | Replace all server arguments, including the model/endpoint shortcuts (shell-style quoting, no expansion) |
 | `S2S_EVAL_ARGS` | unset | Extra evaluation arguments, e.g. `--silence-ms 1200` |
 | `S2S_REPORT_DIR` | `/output` | Local report/log directory |
 
@@ -68,6 +74,68 @@ Optional build arguments: `EXTRAS="kokoro supertonic"` installs extra backends;
 `PREFETCH=1` warms the STT, VAD, and audio caches; GGML TTS weights download at runtime. Prefetch is a download
 optimization, not a model-revision pin. The Space upload script creates the
 `source-revision.txt` required by the Dockerfile.
+
+## Model and prompt configurations
+
+The STT and TTS run on the Job GPU. With a hosted LLM, its inference runs at the
+selected provider. Changing the model, endpoint, prompt, or existing engine flags
+does not require rebuilding the image. Installing a new optional backend does.
+
+For the following 40-question examples, define a launcher using the variables
+above. Each invocation submits one paid Job; run only the configurations you need.
+
+```bash
+run_eval() {
+    hf jobs run --detach --namespace "$HF_NAMESPACE" --flavor a10g-large --timeout 90m \
+        --secrets HF_TOKEN -e S2S_LIMIT=40 -e S2S_PUSH_TO_HUB="$EVAL_RESULTS" \
+        "$@" "$EVAL_IMAGE" vibe-check
+}
+
+# These keep the default Parakeet STT, Qwen3-TTS GGML, and LLM request settings.
+run_eval -e S2S_LLM_MODEL="deepseek-ai/DeepSeek-V4.1-Flash:baseten"
+run_eval -e S2S_LLM_MODEL="zai-org/GLM-5.3-Flash:baseten"
+```
+
+Provider-specific request parameters matter. The engine's default Chat Completions
+configuration sends `chat_template_kwargs.enable_thinking=false`. Cerebras
+rejects that parameter; explicitly selecting `reasoning_effort=none` replaces it.
+`S2S_SERVE_ARGS` replaces the entire default argument list, so include STT, TTS,
+the model, and the endpoint:
+
+```bash
+EVAL_SERVER_ARGS="--stt parakeet-tdt --tts qwen3 --qwen3_tts_backend ggml --llm_backend chat-completions"
+
+run_eval -e S2S_SERVE_ARGS="$EVAL_SERVER_ARGS --model_name Qwen/Qwen3.8-27B:cerebras --responses_api_base_url https://router.huggingface.co/v1 --responses_api_reasoning_effort none"
+```
+
+To use OpenAI, have `OPENAI_API_KEY` exported in the launching shell, then pass
+its name as a Job secret. `HF_TOKEN` is still used to download assets and upload
+results; an explicit `OPENAI_API_KEY` takes precedence for LLM authentication.
+Never put a credential in `S2S_SERVE_ARGS` or the command line.
+
+```bash
+run_eval --secrets OPENAI_API_KEY \
+    -e S2S_SERVE_ARGS="$EVAL_SERVER_ARGS --model_name gpt-6-luna --responses_api_base_url https://api.openai.com/v1 --responses_api_reasoning_effort none"
+```
+
+These are the configurations exercised in the development runs below, not an
+exhaustive list of models. Hosted availability and provider behavior can change.
+For latency comparisons, record explicit reasoning settings and keep them matched
+where providers support the same controls. The default flag is only a request to
+disable thinking; it does not verify the provider's internal behavior.
+
+Override the evaluation system prompt through `S2S_EVAL_ARGS`:
+
+```bash
+run_eval -e S2S_EVAL_ARGS="--instructions 'Answer the spoken question briefly. End with Final answer: X, where X is Yes, No, valid, invalid, or a whole number.'"
+```
+
+This replaces the prompt in every question's fresh session and records it as
+`target.instructions` in the report. Keep the `Final answer: X` convention for
+reliable automatic extraction. `--instructions-file /path/to/prompt.txt` also
+works when the file is available inside the Job container. Both argument
+environment variables use shell-style quoting parsed by `shlex.split`; the Job
+does not execute shell expressions or expand variables inside their values.
 
 ## Local use
 
@@ -132,7 +200,9 @@ python -m pytest tests/evals -q
 ```
 
 Unit tests use synthetic protocol events and do not download models or start
-paid jobs. The real GPU smoke run is a separate integration check.
+paid jobs. Job-entrypoint tests exercise environment overrides, quoted prompts,
+provider authentication, failure exit codes, and redaction before log uploads.
+The real GPU smoke run is a separate integration check.
 
 ## Development validation (2026-09-22)
 
@@ -149,3 +219,36 @@ under Transformers 5.17.0 and faster-qwen3-tts 0.4.0; it is not a validated
 configuration for this image. Its failed Job and engine log are retained in the
 same account. No engine source workaround was introduced for that dependency
 incompatibility.
+
+## Four-model development comparison (2026-09-24)
+
+All four configurations completed the same 40 questions on A10G-large Jobs with
+Parakeet TDT, Qwen3-TTS GGML, and the default evaluation prompt. All 160 responses
+produced audio and were parsed, with zero item-level runtime errors. The image
+recorded source revision `123f73e30df19493716032f84a9150ece2f8f1fc`, Python 3.12.3,
+Torch 2.11.0, Transformers 5.17.0, nano-parakeet 0.2.1, and faster-qwen3-tts 0.4.0.
+
+| Model / provider | Correct | First audio p50 | First audio p95 | Turn p50 | Run duration |
+|---|---:|---:|---:|---:|---:|
+| Qwen3.8-27B / Cerebras | 36/40 | 1.72 s | 2.84 s | 7.12 s | 22.3 min |
+| DeepSeek-V4.1-Flash / Baseten | 36/40 | 1.86 s | 2.85 s | 5.54 s | 20.0 min |
+| GLM-5.3-Flash / Baseten | 38/40 | 2.02 s | 5.39 s | 5.66 s | 22.6 min |
+| GPT-6 Luna / OpenAI | 32/40 | 2.08 s | 2.85 s | 4.60 s | 19.3 min |
+
+First audio and turn latency start at the end of the input recording; turn latency
+ends at `response.done` and depends on response length. GLM had one 136.96-second
+delay before audio, which is not apparent from its p95 alone. These single-run
+results validate the harness and illustrate its reports; they do not establish a
+model ranking or measure the full dataset.
+
+Qwen/Cerebras and GPT-6 Luna used explicit `reasoning_effort=none`.
+DeepSeek/Baseten and GLM/Baseten used the default chat-template flag described
+above. Cerebras's first startup failed because it rejected that default flag;
+the replacement Job used the explicit setting and completed. Three earlier
+Novita Jobs were canceled before this comparison to change the provider choices.
+
+The [comparison, individual reports, and logs](https://huggingface.co/datasets/Steveeeeeeen/s2s-big-bench-audio-results/blob/main/comparisons/20260924-models.md)
+remain private to the development account; the summary here is available to
+reviewers without access to that account. GPU validation applies to the source
+revision recorded above; subsequent documentation and test changes are checked
+locally and in CI.
