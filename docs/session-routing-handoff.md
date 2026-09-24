@@ -138,6 +138,10 @@ local model loading is implemented.
 This extends [#547](https://github.com/huggingface/speech-to-speech/issues/547).
 OpenAI's hosted Realtime API does not allow model changes through `session.update`
 ([official reference](https://developers.openai.com/api/reference/resources/realtime/client-events#session.update)).
+The hosted API also permits a voice change only before the session has produced
+audio. This opt-in routing extension can select a TTS route with a different
+default voice after earlier audio, so clients must not assume hosted Realtime
+voice-change behavior on these connections.
 The optional `models` field may require a client's raw-event/extra-fields support;
 the LLM-only `model` spelling uses the existing event shape. Clients that do not
 enable/request the extension keep existing supported WebSocket/WebRTC flows.

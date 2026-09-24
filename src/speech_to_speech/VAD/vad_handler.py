@@ -936,7 +936,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
     def has_pending_session_work(self) -> bool:
         return (
-            self._speech_started_emitted
+            self.iterator.triggered
+            or self._speech_started_emitted
             or self._pending_short_segment is not None
             or self._pending_reopen_candidate is not None
         )

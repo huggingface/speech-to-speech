@@ -29,6 +29,30 @@ def route(model="first", *, context=32768, tools=True, images=True, audio=True):
     )
 
 
+def speech_route(model):
+    from speech_to_speech.api.openai_realtime.session_routing import SpeechRoute, TranscriptionRoute
+
+    selected = route(model)
+    provider = f"{model}-provider"
+    return selected.model_copy(
+        update={
+            "routes": selected.routes.model_copy(
+                update={
+                    "stt": TranscriptionRoute(model=f"asr-{model}", provider=provider, protocol="transcriptions"),
+                    "llm": selected.routes.llm.model_copy(update={"provider": provider}),
+                    "tts": SpeechRoute(
+                        model=f"tts-{model}",
+                        provider=provider,
+                        protocol="speech",
+                        voice="aiden" if model == "first" else "alloy",
+                        voices=["aiden", "alloy"],
+                    ),
+                }
+            )
+        }
+    )
+
+
 def event(**fields):
     return SessionUpdateEvent(type="session.update", session=RealtimeSessionCreateRequest(type="realtime", **fields))
 
@@ -303,6 +327,93 @@ def test_websocket_switch_drains_handlers_and_next_request_uses_retained_context
                 assert create.call_args.kwargs["model"] == model
                 assert "blue bicycle" in json.dumps(create.call_args.kwargs["messages"])
                 assert create.call_args.kwargs["extra_headers"]["X-Speech-Session-Id"] == "allocated-session"
+
+
+@pytest.mark.parametrize("changed_stages", [("stt",), ("llm",), ("tts",), ("stt", "llm", "tts")])
+def test_websocket_switch_routes_next_spoken_turn_through_selected_models(running_unit, monkeypatch, changed_stages):
+    import numpy as np
+    from starlette.testclient import TestClient
+
+    from speech_to_speech.api.openai_realtime.websocket_router import create_app
+    from speech_to_speech.pipeline.messages import VADAudio
+    from speech_to_speech.STT.openai_compatible_handler import HttpTranscriptionOperation, HttpTranscriptionResult
+    from speech_to_speech.TTS.openai_compatible_handler import HttpSpeechOperation
+
+    unit, stop, create = running_unit
+    transcriptions, speech_requests = [], []
+
+    def transcribe(operation, cancel_check):
+        transcriptions.append(operation)
+        return HttpTranscriptionResult(
+            text="Remember the blue bicycle." if len(transcriptions) == 1 else "Which color?"
+        )
+
+    def speak(operation, cancel_check):
+        speech_requests.append(operation)
+        return iter([np.zeros(2400, dtype="<i2").tobytes()])
+
+    monkeypatch.setattr(HttpTranscriptionOperation, "run", transcribe)
+    monkeypatch.setattr(HttpSpeechOperation, "iter_bytes", speak)
+
+    initial = speech_route("first")
+    destination = speech_route("second")
+    selected = initial.model_copy(
+        update={
+            "routes": initial.routes.model_copy(
+                update={stage: getattr(destination.routes, stage) for stage in changed_stages}
+            )
+        }
+    )
+    with TestClient(create_app([unit], stop, session_routing_enabled=True)) as client:
+        with client.websocket_connect(
+            "/v1/realtime", headers={"X-Speech-Session-Routing": initial.model_dump_json()}
+        ) as ws:
+            sid = ws.receive_json()["session"]["id"]
+            for turn in (0, 1):
+                if turn:
+                    updated = send_switch(
+                        ws,
+                        selected,
+                        models={
+                            stage: {
+                                "model": getattr(selected.routes, stage).model,
+                                "provider": getattr(selected.routes, stage).provider,
+                            }
+                            for stage in changed_stages
+                        },
+                    )
+                    assert updated["type"] == "session.updated", updated
+                    assert updated["session"]["id"] == sid
+                cfg = unit.service._state(sid).runtime_config
+                unit.input_queue.put(VADAudio(audio=np.zeros(160, dtype=np.float32), runtime_config=cfg))
+                events = []
+                while not events or events[-1]["type"] != "response.done":
+                    events.append(ws.receive_json())
+                assert events[-1]["response"]["status"] == "completed"
+                assert any(event["type"] == "conversation.item.input_audio_transcription.completed" for event in events)
+                assert any(event["type"] == "response.output_audio.delta" for event in events)
+                assert len(transcriptions) == len(speech_requests) == turn + 1
+                expected = {
+                    stage: "second" if turn and stage in changed_stages else "first" for stage in ("stt", "llm", "tts")
+                }
+                assert transcriptions[-1].model == f"asr-{expected['stt']}"
+                assert transcriptions[-1].extra_headers == {
+                    "X-Speech-Provider": f"{expected['stt']}-provider",
+                    "X-Speech-Session-Id": "allocated-session",
+                }
+                assert create.call_args.kwargs["model"] == expected["llm"]
+                assert create.call_args.kwargs["extra_headers"] == {
+                    "X-Speech-Provider": f"{expected['llm']}-provider",
+                    "X-Speech-Session-Id": "allocated-session",
+                }
+                assert speech_requests[-1].payload["model"] == f"tts-{expected['tts']}"
+                assert speech_requests[-1].payload["voice"] == ("aiden" if expected["tts"] == "first" else "alloy")
+                assert speech_requests[-1].extra_headers == {
+                    "X-Speech-Provider": f"{expected['tts']}-provider",
+                    "X-Speech-Session-Id": "allocated-session",
+                }
+                if turn:
+                    assert "blue bicycle" in str(create.call_args.kwargs["messages"])
 
 
 def test_cancelled_generation_must_drain_before_switching(running_unit):
