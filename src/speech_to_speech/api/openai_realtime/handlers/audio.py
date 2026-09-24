@@ -317,7 +317,7 @@ class AudioHandler(RealtimeBaseHandler):
             else:
                 client_out_rate = PIPELINE_SAMPLE_RATE
         if client_out_rate != PIPELINE_SAMPLE_RATE:
-            resampler_key = (resp_id, client_out_rate)
+            resampler_key = (resp_id, assistant_item_id, client_out_rate)
             if st.output_audio_resampler_key != resampler_key:
                 st.output_audio_resampler = StreamingPcm16Resampler(PIPELINE_SAMPLE_RATE, client_out_rate)
                 st.output_audio_resampler_key = resampler_key

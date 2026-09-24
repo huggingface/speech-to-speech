@@ -2220,17 +2220,18 @@ class TestEncodeAudioChunk:
                 for event in service.encode_audio_chunk(conn_id, chunk.tobytes())
                 if isinstance(event, ResponseAudioDeltaEvent)
             )
+        deltas.extend(
+            event.delta for event in service.finish_response(conn_id) if isinstance(event, ResponseAudioDeltaEvent)
+        )
         chunked = b"".join(base64.b64decode(delta) for delta in deltas)
 
-        service.finish_response(conn_id)
-        single_delta = next(
-            event.delta
-            for event in service.encode_audio_chunk(conn_id, samples.tobytes())
-            if isinstance(event, ResponseAudioDeltaEvent)
+        single_events = service.encode_audio_chunk(conn_id, samples.tobytes()) + service.finish_response(conn_id)
+        single = b"".join(
+            base64.b64decode(event.delta) for event in single_events if isinstance(event, ResponseAudioDeltaEvent)
         )
-        single = base64.b64decode(single_delta)
 
         assert chunked == single
+        assert len(chunked) == 4096 * 3
 
     def test_output_resampler_is_released_when_response_finishes(self, service, conn_id):
         service.handle_session_update(

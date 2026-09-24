@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import logging
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -7,6 +8,7 @@ from openai.types.realtime import (
     ConversationItem,
     RealtimeConversationItemFunctionCall,
     RealtimeResponse,
+    ResponseAudioDeltaEvent,
     ResponseAudioDoneEvent,
     ResponseAudioTranscriptDeltaEvent,
     ResponseAudioTranscriptDoneEvent,
@@ -824,6 +826,8 @@ class ResponseHandler(RealtimeBaseHandler):
         self,
         conn_id: str,
         response_key: str | None = None,
+        *,
+        flush: bool = True,
     ) -> list[ServerEvent]:
         """Close one synthesized assistant audio item exactly once."""
         st = self._state(conn_id)
@@ -837,11 +841,29 @@ class ResponseHandler(RealtimeBaseHandler):
             return []
         item_id = st.pending_assistant_item_id
         output_index = st.pending_assistant_output_index
+        resp_id, _ = self._ensure_response(conn_id, response_key)
+        events: list[ServerEvent] = []
+        if st.output_audio_resampler is not None:
+            if flush and not st.response_failed:
+                tail = st.output_audio_resampler.flush()
+                if tail:
+                    events.append(
+                        ResponseAudioDeltaEvent(
+                            type="response.output_audio.delta",
+                            event_id=self._next_event_id(),
+                            content_index=0,
+                            delta=base64.b64encode(tail).decode("ascii"),
+                            item_id=item_id,
+                            output_index=output_index,
+                            response_id=resp_id,
+                        )
+                    )
+            st.output_audio_resampler = None
+            st.output_audio_resampler_key = None
         st.audio_output_started = False
         st.pending_assistant_item_id = None
         st.pending_assistant_output_index = None
-        resp_id, _ = self._ensure_response(conn_id, response_key)
-        return [
+        events.append(
             ResponseAudioDoneEvent(
                 type="response.output_audio.done",
                 event_id=self._next_event_id(),
@@ -850,7 +872,8 @@ class ResponseHandler(RealtimeBaseHandler):
                 output_index=output_index,
                 response_id=resp_id,
             )
-        ]
+        )
+        return events
 
     def finish_response(
         self,
@@ -879,7 +902,7 @@ class ResponseHandler(RealtimeBaseHandler):
             resp_id, _ = self._ensure_response(conn_id)
             wants_audio = response_wants_audio(st.current_response_params)
             if wants_audio and st.pending_text_outputs:
-                events.extend(self.finish_audio_output(conn_id, response_key))
+                events.extend(self.finish_audio_output(conn_id, response_key, flush=status == "completed"))
             item_status: Literal["completed", "incomplete"] = "completed" if status == "completed" else "incomplete"
             for pending in st.pending_text_outputs:
                 events.extend(self._finish_message_output(conn_id, pending, item_status, wants_audio, response_key))

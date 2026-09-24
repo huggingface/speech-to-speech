@@ -49,6 +49,17 @@ class StreamingPcm16Resampler:
         self._input_samples += incoming.size
         upsampled = np.zeros(incoming.size * self._up, dtype=np.float64)
         upsampled[:: self._up] = incoming
+        return self._filter(upsampled)
+
+    def flush(self) -> bytes:
+        """Finish the stream with zero padding, preserving its intended duration."""
+        if self._up == self._down or not self._input_samples:
+            return b""
+        # Supply the lookahead withheld by delay compensation. _filter caps
+        # output at the duration of real input, excluding this padding.
+        return self._filter(np.zeros(self._delay + self._down, dtype=np.float64))
+
+    def _filter(self, upsampled: np.ndarray) -> bytes:
         filtered, self._filter_state = lfilter(
             self._taps,
             np.ones(1, dtype=np.float64),
@@ -62,11 +73,7 @@ class StreamingPcm16Resampler:
         phase = (minimum_index - self._delay) % self._down
         first_index = minimum_index if phase == 0 else minimum_index + self._down - phase
         local_start = first_index - global_start
-        output = (
-            filtered[local_start :: self._down]
-            if local_start < filtered.size
-            else np.empty(0, dtype=np.float64)
-        )
+        output = filtered[local_start :: self._down] if local_start < filtered.size else np.empty(0, dtype=np.float64)
 
         target_total = (self._input_samples * self.to_rate + self.from_rate - 1) // self.from_rate
         remaining = max(0, target_total - self._output_samples)
