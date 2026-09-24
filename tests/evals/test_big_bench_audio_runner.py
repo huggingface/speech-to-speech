@@ -3,13 +3,17 @@
 import asyncio
 import json
 import sys
+from queue import Queue
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.evals.big_bench_audio import runner as bba
 from speech_to_speech.evals.big_bench_audio.dataset import EvalItem, Subset
+from speech_to_speech.evals.big_bench_audio.report import aggregate
 from speech_to_speech.evals.big_bench_audio.runner import (
     RunnerConfig,
     build_session_update,
@@ -17,6 +21,7 @@ from speech_to_speech.evals.big_bench_audio.runner import (
     run_item,
     run_subset,
 )
+from speech_to_speech.pipeline.events import AssistantOutputEvent, SpeechStartedEvent, SpeechStoppedEvent
 
 ITEM = EvalItem(id=7, category="web_of_lies", official_answer="Yes", file_name="data/question_7.mp3")
 
@@ -165,6 +170,69 @@ async def test_a_question_split_into_several_turns_is_flagged(monkeypatch):
 
     assert result.error is not None and result.error.startswith("split_turn")
     assert result.reply == "Final answer: Yes"  # the last turn heard the whole question
+
+
+@pytest.mark.parametrize("reopened", [False, True])
+async def test_speech_items_detect_a_split_before_the_next_response(monkeypatch, reopened):
+    service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event())
+    sid = service.register()
+    try:
+        events = service.dispatch_pipeline_event(sid, SpeechStartedEvent(turn_id="first", turn_revision=0))
+        events += service.dispatch_pipeline_event(sid, SpeechStoppedEvent(turn_id="first", turn_revision=0))
+        events += service.dispatch_pipeline_event(sid, AssistantOutputEvent(text="Final answer: Yes"))
+        events += service.encode_audio_chunk(sid, b"\x01\x00" * 320)
+        events += service.finish_response(sid)
+        events += service.dispatch_pipeline_event(
+            sid,
+            SpeechStartedEvent(
+                turn_id="first" if reopened else "second",
+                turn_revision=1,
+                reopened=reopened,
+            ),
+        )
+        # STT/LLM has not produced another response yet. Use actual service
+        # serialization, including distinct item IDs and same-item reopening.
+        wire = [event.model_dump(exclude_none=True) for event in events]
+        item_ids = {event["item_id"] for event in wire if event["type"] == "input_audio_buffer.speech_started"}
+        assert len(item_ids) == (1 if reopened else 2)
+        socket = install(monkeypatch, FakeSocket(wire, respond_after=4))
+
+        result = await run_item(config(), ITEM, pcm_for(config()))
+
+        assert result.reply == "Final answer: Yes"
+        assert result.error == (None if reopened else "split_turn (2 input items)")
+        assert aggregate([result])["totals"]["correct"] == int(reopened)
+        assert socket.closed
+    finally:
+        service.unregister(sid)
+
+
+@pytest.mark.parametrize("completed", [False, True])
+async def test_response_deadline_holds_even_when_events_keep_arriving(monkeypatch, completed):
+    cfg = config(response_timeout_s=0.1, grace_s=0.5)
+    events = transcript_events("Final answer: Yes")
+    if not completed:
+        events = events[:-1]  # A streaming response with no response.done yet.
+
+    class BusySocket(FakeSocket):
+        async def recv(self):
+            if not self.outbox.empty():
+                return await super().recv()
+            await asyncio.sleep(0.005)
+            return json.dumps(
+                {"type": "rate_limits.updated"}
+                if completed
+                else {
+                    "type": "response.output_audio.delta",
+                    "delta": "AAAA",
+                }
+            )
+
+    socket = install(monkeypatch, BusySocket(events, respond_after=4))
+    result = await asyncio.wait_for(run_item(cfg, ITEM, pcm_for(cfg)), timeout=1.0)
+
+    assert result.error == (None if completed else "response_timeout")
+    assert socket.closed
 
 
 async def test_a_server_that_never_answers_times_out(monkeypatch):

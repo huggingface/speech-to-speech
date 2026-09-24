@@ -17,9 +17,6 @@ from speech_to_speech.evals.big_bench_audio.dataset import Subset
 
 REPORT_SCHEMA = "big-bench-audio-vibe/1"
 
-# Below this, a per-category delta is noise; say so instead of implying a trend.
-_MIN_CATEGORY_N = 10
-
 
 @dataclass
 class ItemResult:
@@ -192,13 +189,6 @@ def render_report(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _proportion_stderr(p_a: float, n_a: int, p_b: float, n_b: int) -> float:
-    """Standard error of the difference between two independent proportions."""
-    if n_a == 0 or n_b == 0:
-        return float("inf")
-    return math.sqrt(p_a * (1 - p_a) / n_a + p_b * (1 - p_b) / n_b)
-
-
 @dataclass
 class ComparisonRow:
     """One scope (overall, or a category) compared across two runs."""
@@ -209,9 +199,6 @@ class ComparisonRow:
     baseline_n: int
     candidate_n: int
     delta: Optional[float] = None
-    stderr: Optional[float] = None
-    significant: bool = False
-    underpowered: bool = True
 
 
 @dataclass
@@ -237,14 +224,11 @@ def _row(scope: str, base: dict[str, Any], cand: dict[str, Any]) -> ComparisonRo
     if base_acc is None or cand_acc is None:
         return row
     row.delta = cand_acc - base_acc
-    row.stderr = _proportion_stderr(base_acc, row.baseline_n, cand_acc, row.candidate_n)
-    row.underpowered = min(row.baseline_n, row.candidate_n) < _MIN_CATEGORY_N
-    row.significant = not row.underpowered and math.isfinite(row.stderr) and abs(row.delta) > 1.96 * row.stderr
     return row
 
 
 def compare_reports(baseline: dict[str, Any], candidate: dict[str, Any]) -> Comparison:
-    """Diff two run reports, flagging whether each change clears sampling noise."""
+    """Show observed score and latency differences, warning about mismatched runs."""
     comparison = Comparison(
         baseline_label=baseline.get("label") or "baseline",
         candidate_label=candidate.get("label") or "candidate",
@@ -285,26 +269,17 @@ def render_comparison(comparison: Comparison) -> str:
     lines = [
         f"Big Bench Audio vibe check -- {comparison.baseline_label} -> {comparison.candidate_label}",
         "",
-        f"  {'category':<18} {'base':>6} {'cand':>6} {'delta':>8}  note",
+        f"  {'category':<18} {'base':>6} {'cand':>6} {'delta':>8}  n (base/cand)",
         f"  {'-' * 18} {'-' * 6} {'-' * 6} {'-' * 8}  {'-' * 24}",
     ]
     for row in comparison.rows:
-        if row.delta is None:
-            note = "no overlap"
-            delta = "   n/a"
-        else:
-            delta = f"{row.delta * 100:+6.1f}pp"
-            if row.underpowered:
-                note = f"too few items (n={min(row.baseline_n, row.candidate_n)})"
-            elif row.significant:
-                note = "beyond sampling noise"
-            else:
-                note = "within sampling noise"
+        delta = "   n/a" if row.delta is None else f"{row.delta * 100:+6.1f}pp"
         separator = f"  {'-' * 18} {'-' * 6} {'-' * 6} {'-' * 8}  {'-' * 24}"
         if row.scope == "OVERALL":
             lines.append(separator)
         lines.append(
-            f"  {row.scope:<18} {_pct(row.baseline_accuracy)} {_pct(row.candidate_accuracy)} {delta:>8}  {note}"
+            f"  {row.scope:<18} {_pct(row.baseline_accuracy)} {_pct(row.candidate_accuracy)} {delta:>8}"
+            f"  {row.baseline_n}/{row.candidate_n}"
         )
 
     ttfb = comparison.latency_delta.get("ttfb_p50_s")

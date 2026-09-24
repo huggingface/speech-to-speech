@@ -268,10 +268,6 @@ async def _run(args: argparse.Namespace, server_args: list[str]) -> int:
         comparison = compare_reports(baseline, report)
         print()
         print(render_comparison(comparison))
-        if args.fail_on_regression:
-            overall = next((row for row in comparison.rows if row.scope == "OVERALL"), None)
-            if overall is not None and overall.significant and (overall.delta or 0) < 0:
-                return 1
     return 1 if any(item.error for item in results) else 0
 
 
@@ -281,10 +277,6 @@ def _compare(args: argparse.Namespace) -> int:
     candidate = load_report(args.candidate, token=token)
     comparison = compare_reports(baseline, candidate)
     print(render_comparison(comparison))
-    if args.fail_on_regression:
-        overall = next((row for row in comparison.rows if row.scope == "OVERALL"), None)
-        if overall is not None and overall.significant and (overall.delta or 0) < 0:
-            return 1
     return 0
 
 
@@ -321,11 +313,6 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         "--compare",
         default=None,
         help="Baseline report to diff against: a local path, or '<repo_id>:<path-in-repo>'.",
-    )
-    parser.add_argument(
-        "--fail-on-regression",
-        action="store_true",
-        help="Exit 1 when overall accuracy drops beyond sampling noise.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print the subset composition and exit.")
 
@@ -365,7 +352,6 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser = subparsers.add_parser("compare", help="Diff two reports.")
     compare_parser.add_argument("baseline", help="Local path, or '<repo_id>:<path-in-repo>'.")
     compare_parser.add_argument("candidate", help="Local path, or '<repo_id>:<path-in-repo>'.")
-    compare_parser.add_argument("--fail-on-regression", action="store_true")
 
     show_parser = subparsers.add_parser("show", help="Re-render a saved report.")
     show_parser.add_argument("report", help="Local path, or '<repo_id>:<path-in-repo>'.")

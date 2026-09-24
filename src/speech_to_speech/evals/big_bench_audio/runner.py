@@ -7,8 +7,8 @@ what keeps question *n* out of question *n+1*'s context.
 The recordings run 13-31 seconds and the narration pauses mid-sentence, so the
 default 64 ms VAD hangover would chop one question into several turns. The runner
 raises ``turn_detection.silence_duration_ms`` for the session, and when a split
-happens anyway it grades the last response of the item and flags it, rather than
-silently scoring an answer to half a question.
+happens anyway it flags the item and keeps the available reply for diagnosis,
+rather than silently accepting an answer to half a question.
 """
 
 from __future__ import annotations
@@ -178,6 +178,7 @@ async def _consume(ws: Any, config: RunnerConfig, capture: _TurnCapture, audio_s
     """Read server events into *capture* until the turn settles, times out, or errors."""
     current: Optional[_ResponseCapture] = None
     deadline: Optional[float] = None
+    input_items: set[str] = set()
 
     def ensure_current() -> _ResponseCapture:
         nonlocal current
@@ -195,10 +196,13 @@ async def _consume(ws: Any, config: RunnerConfig, capture: _TurnCapture, audio_s
             # Still streaming: poll so the response deadline starts promptly once
             # the last chunk goes out, instead of after a long blocking recv.
             timeout = _PRE_SEND_POLL_S
-        elif settled:
-            timeout = config.grace_s
         else:
-            timeout = max(0.1, deadline - time.monotonic())
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if not settled:
+                    capture.error = "response_timeout"
+                return
+            timeout = min(config.grace_s, remaining) if settled else remaining
 
         try:
             raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
@@ -216,7 +220,16 @@ async def _consume(ws: Any, config: RunnerConfig, capture: _TurnCapture, audio_s
         event = json.loads(raw)
         kind = event.get("type", "")
 
-        if kind == "conversation.item.input_audio_transcription.completed":
+        if kind == "input_audio_buffer.speech_started":
+            item_id = event.get("item_id")
+            if item_id:
+                input_items.add(item_id)
+            if len(input_items) > 1:
+                # A second input item proves a split, even if its response is
+                # still waiting on STT/LLM. Reopening the same item is allowed.
+                capture.error = f"split_turn ({len(input_items)} input items)"
+                return
+        elif kind == "conversation.item.input_audio_transcription.completed":
             capture.input_transcript = " ".join(
                 part for part in (capture.input_transcript, event.get("transcript", "")) if part
             ).strip()
@@ -313,8 +326,8 @@ async def run_item(config: RunnerConfig, item: EvalItem, pcm: bytes) -> ItemResu
             if last.done_at is not None and last.done_at >= capture.audio_end_at:
                 result.turn_s = last.done_at - capture.audio_end_at
         if len(capture.responses) > 1:
-            # The recording was chopped into several turns; the last one saw the
-            # whole question, but its context is polluted by the earlier answers.
+            # Multiple responses also indicate a split, even when the server
+            # did not announce distinct input items.
             result.error = result.error or f"split_turn ({len(capture.responses)} responses)"
 
     verdict = grade(item.category, item.official_answer, result.reply)

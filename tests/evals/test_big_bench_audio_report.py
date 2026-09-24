@@ -1,4 +1,6 @@
-"""Scores aggregate the way the report claims, and comparisons call out noise."""
+"""Scores aggregate the way the report claims; comparisons show observed differences."""
+
+import pytest
 
 from speech_to_speech.evals.big_bench_audio.dataset import EvalItem, Subset
 from speech_to_speech.evals.big_bench_audio.report import (
@@ -110,29 +112,17 @@ def _report(label, correct, total, *, subset=None, latency=None):
     return report
 
 
-def test_small_deltas_are_reported_as_sampling_noise():
-    comparison = compare_reports(_report("main", 20, 40), _report("pr", 22, 40))
+@pytest.mark.parametrize("before, after, total, delta", [(20, 22, 40, 0.05), (38, 14, 40, -0.6), (4, 0, 4, -1.0)])
+def test_comparisons_show_observed_deltas_and_sample_sizes(before, after, total, delta):
+    comparison = compare_reports(_report("main", before, total), _report("pr", after, total))
     overall = comparison.rows[-1]
 
     assert overall.scope == "OVERALL"
-    assert round(overall.delta, 3) == 0.05
-    assert overall.significant is False
-    assert "within sampling noise" in render_comparison(comparison)
-
-
-def test_a_large_drop_clears_the_noise_threshold():
-    comparison = compare_reports(_report("main", 38, 40), _report("pr", 14, 40))
-    overall = comparison.rows[-1]
-
-    assert overall.delta < 0
-    assert overall.significant is True
-
-
-def test_tiny_categories_are_flagged_as_underpowered():
-    comparison = compare_reports(_report("main", 4, 4), _report("pr", 0, 4))
-
-    assert comparison.rows[-1].underpowered is True
-    assert "too few items" in render_comparison(comparison)
+    assert overall.delta == pytest.approx(delta)
+    assert overall.baseline_n == overall.candidate_n == total
+    rendered = render_comparison(comparison)
+    assert f"{delta * 100:+.1f}pp" in rendered
+    assert f"{total}/{total}" in rendered
 
 
 def test_comparing_different_question_sets_warns_loudly():

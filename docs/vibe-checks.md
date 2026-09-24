@@ -71,9 +71,8 @@ leave time for model downloads, initialization, and all questions.
 
 `Dockerfile.eval` installs the engine from the uploaded source. Dependencies are
 resolved at build time and runtime package versions are recorded in reports.
-Optional build arguments: `EXTRAS="kokoro supertonic"` installs extra backends;
-`PREFETCH=1` warms the STT, VAD, and audio caches; GGML TTS weights download at runtime. Prefetch is a download
-optimization, not a model-revision pin. The Space upload script creates the
+The build argument `EXTRAS="kokoro supertonic"` installs extra backends.
+Model weights and evaluation audio download at runtime. The Space upload script creates the
 `source-revision.txt` required by the Dockerfile.
 
 ## Model and prompt configurations
@@ -180,22 +179,27 @@ extractor guessed an answer. A judge outage leaves the rule-based result in use.
 Errors (including missing audio, failed/cancelled responses, timeouts, and split
 turns) count against accuracy and make the process exit 1 **after** writing the
 report. Incorrect reasoning remains a measured result rather than an engine
-failure. `--fail-on-regression` additionally exits 1 for a large accuracy drop.
+failure. Report comparisons show observed differences without an automatic
+accuracy-regression gate.
 Audio download and decoding failures use the per-item `--retries` budget; if
 they persist, the runner records an item error and continues, preserving the
 other results in the report.
 
 The runner waits for `session.updated` before sending audio, raises the session
 VAD silence threshold to 900 ms, and appends two seconds of silence to finish the
-turn. If pauses split a recording into multiple responses, the last transcript
-is retained for diagnosis but the item is an error. Increase `--silence-ms` and
+turn. A second distinct speech-input item marks the question as a split even if
+its response has not arrived yet; reopening the same input item is allowed.
+Multiple responses also mark a split. The last received transcript is retained
+for diagnosis but the item is an error. Increase `--silence-ms` and
 `--trailing-silence-ms` together if needed. `--speed 1` uses real-time pacing;
 faster playback changes queueing and invalidates realistic latency comparisons.
+`--response-timeout` bounds the wait after all input audio and trailing silence
+have been sent, even while output events continue arriving. A response completed
+within that budget remains valid during the final observation window.
 
 Forty questions is a regression sample, not a leaderboard benchmark. Comparisons
-use an approximate independent-proportions uncertainty check; the actual samples
-are paired, so interpret it only as a coarse diagnostic. Fewer than ten questions
-are marked underpowered and cannot trigger significance. Comparisons warn about
+show accuracy changes in percentage points, sample sizes, and latency changes;
+they do not establish statistical significance. Comparisons warn about
 different question sets, dataset revisions, or judge usage. Use matched settings
 and examine individual failures before claiming a quality improvement.
 
@@ -257,5 +261,5 @@ The [comparison, individual reports, and logs](https://huggingface.co/datasets/S
 remain private to the development account; the summary here is available to
 reviewers without access to that account. GPU validation applies to the source
 revision recorded above. Subsequent fixes to Space synchronization, audio-loading
-failures, and judge verdicts are covered by local regression tests and CI; the
+failures, judge verdicts, split detection, and response deadlines are covered by local regression tests and CI; the
 GPU comparison has not been rerun for those fixes.

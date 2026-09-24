@@ -19,10 +19,6 @@ COPY source-revision.txt /opt/source-revision.txt
 RUN set -eu; flags=""; for extra in $EXTRAS; do flags="$flags --extra $extra"; done; \
     uv sync --python /usr/bin/python3 --no-dev $flags
 RUN python -c "import nltk; [nltk.download(p, download_dir='/opt/nltk_data', raise_on_error=True) for p in ('punkt_tab', 'averaged_perceptron_tagger_eng')]"
-# Optional cache warming. Hub model defaults are mutable; this does not pin them.
-ARG PREFETCH=0
-ARG SUBSET=vibe
-RUN if [ "$PREFETCH" = "1" ]; then python docker/prefetch_eval_assets.py "$SUBSET"; fi
 RUN install -m 0755 docker/big-bench-audio-entrypoint.sh /usr/local/bin/vibe-check \
     && mkdir -p /home/user /output /opt/hf-cache /opt/torch-cache /usr/src/app/src/speech_to_speech/tmp \
     && chown -R 1000:0 /home/user /output /opt/hf-cache /opt/torch-cache /opt/nltk_data /usr/src/app/src/speech_to_speech/tmp
