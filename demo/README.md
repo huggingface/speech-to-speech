@@ -272,8 +272,9 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
   later chunks stream immediately without rebuffering. Completed short responses
   and valid incomplete responses release their remaining audio; interruption,
   cancellation, failure, and disconnect discard pending audio. Each new response
-  gets a fresh startup gate without cutting off already released audio. Cancelling
-  a response still below its threshold discards only its private startup buffer.
+  gets a fresh startup gate without cutting off already released audio. A failed
+  or cancelled response discards only its private startup buffer; already released
+  audio drains unless an interruption or disconnect clears the shared queue.
   In [issue #557](https://github.com/huggingface/speech-to-speech/issues/557),
   1200 ms resolved glitches in the reporter's local TTS setup. This is a tuning
   example, not a universal optimum: larger values add startup latency, and no
@@ -304,6 +305,8 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
   before playback starts), retaining identities even after audio/response done.
   This overrides the SDK's receipt-time interruption clock. Server VAD cancels
   the in-flight response; explicit interruptions use the SDK cancellation hook.
+  The local server currently accepts truncation events without changing its
+  conversation history; these client counts do not establish server-side truncation.
   See the [Realtime interruption guidance](https://developers.openai.com/api/docs/guides/realtime-conversations#handling-interruptions).
 
 ## Credits

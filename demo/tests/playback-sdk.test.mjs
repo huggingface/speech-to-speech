@@ -172,3 +172,33 @@ test("cancellation before the speech event retains the render position", async (
   assert.equal(f.truncations().length, 1);
   assert.equal(f.truncations()[0].audio_end_ms, 50);
 });
+
+for (const bufferMs of [0, 100]) {
+  for (const status of ["failed", "cancelled"]) {
+    test(`released ${status} response preserves earlier playback (${bufferMs} ms buffer)`, async (t) => {
+      const f = await fixture(bufferMs);
+      t.after(() => f.client.close());
+      f.start("a");
+      f.audio(24000, "a", "item-a", 0);
+      f.audioDone("a", "item-a", 0);
+      f.done("a");
+      f.output.render(4800); // A has rendered 100 ms, with 900 ms still queued.
+
+      f.start("b");
+      f.audio(2400, "b", "item-b", 0); // B crosses the gate behind A.
+      f.done("b", status);
+      f.audio(2400, "b", "item-b", 0); // Late audio must remain ignored.
+      f.acknowledge();
+      assert.deepEqual(f.truncations(), [], "terminal status is not a user interruption");
+      assert.ok(f.output.render(43200).every((v) => v > 0), "A's entire tail must survive");
+
+      // A real interruption still clears B, retaining its identity after done.
+      f.interrupt();
+      f.acknowledge();
+      assert.deepEqual(f.truncations(), [{
+        type: "conversation.item.truncate", item_id: "item-b", content_index: 0, audio_end_ms: 0,
+      }]);
+      assert.ok(f.output.render(128).slice(64).every((v) => v === 0));
+    });
+  }
+}

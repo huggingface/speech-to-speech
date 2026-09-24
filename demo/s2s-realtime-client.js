@@ -477,12 +477,11 @@ export class S2sRealtimeClient extends EventTarget {
     if (!responseId || responseId !== this._playbackResponseId) return;
     if (status === "completed" || status === "incomplete") {
       this._releasePlayback();
-      this._resetPlaybackBuffer();
-    } else if (this._playbackStarted) {
-      this._interruptPlayback();
-    } else {
-      this._resetPlaybackBuffer();
     }
+    // A terminal status discards only this response's startup reserve.
+    // Released audio may share the worklet queue with an earlier response;
+    // only an actual interruption should clear that queue and truncate items.
+    this._resetPlaybackBuffer();
   }
 
   _interruptPlayback() {
