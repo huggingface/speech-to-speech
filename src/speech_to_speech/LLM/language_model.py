@@ -43,7 +43,12 @@ from speech_to_speech.LLM.chat import (
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
 from speech_to_speech.LLM.text_prompt import build_text_system_prompt
-from speech_to_speech.LLM.tool_call.function_call import extract_function_calls_from_text
+from speech_to_speech.LLM.tool_call.function_call import (
+    JSON_TOOL_CALL_END,
+    JSON_TOOL_CALL_ENTER,
+    extract_function_calls_from_text,
+    parse_json_tool_call_block,
+)
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
 from speech_to_speech.LLM.utils import (
@@ -348,8 +353,18 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 cancel_generation=ctx.cancel_generation,
             )
 
-        while ctx.enter_code and ctx.enter_code in printable_text:
-            idx = printable_text.index(ctx.enter_code)
+        # Tool-call blocks we recognise: the prompted ``<code>name(...)</code>``
+        # form, plus the ``<tool_call>{json}</tool_call>`` form many models fall
+        # back to. Only active when tools are in play.
+        markers: list[tuple[str, str, str]] = []
+        if ctx.enter_code and ctx.end_code:
+            markers = [(ctx.enter_code, ctx.end_code, "code"), (JSON_TOOL_CALL_ENTER, JSON_TOOL_CALL_END, "json")]
+
+        while True:
+            found = [(printable_text.index(m[0]), m) for m in markers if m[0] in printable_text]
+            if not found:
+                break
+            idx, (enter, end, kind) = min(found, key=lambda f: f[0])
             before = printable_text[:idx]
             code_and_after = printable_text[idx:]
             if text_only and before:
@@ -360,14 +375,17 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if ctx.sentence_batch:
                 chunks.append(text_chunk(" ".join(ctx.sentence_batch)))
                 ctx.sentence_batch = []
-            if not ctx.block_regex or not ctx.end_code or ctx.end_code not in code_and_after:
+            if end not in code_and_after or (kind == "code" and not ctx.block_regex):
                 # Preserve the incomplete block until more streamed text arrives.
                 return chunks, tools, code_and_after
 
-            block_end = code_and_after.index(ctx.end_code) + len(ctx.end_code)
+            block_end = code_and_after.index(end) + len(end)
             complete_block = code_and_after[:block_end]
             printable_text = code_and_after[block_end:]
-            _, func_calls = extract_function_calls_from_text(complete_block, ctx.block_regex)
+            if kind == "code":
+                _, func_calls = extract_function_calls_from_text(complete_block, ctx.block_regex)
+            else:
+                func_calls = parse_json_tool_call_block(complete_block)
             parsed_tools: list[ResponseFunctionToolCall] = []
             for fc in func_calls:
                 try:
@@ -396,13 +414,14 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             # the longest suffix that could become ``<code>`` in the next token.
             # This keeps text-only output verbatim without exposing tool syntax.
             pending_marker = ""
-            if ctx.enter_code:
-                max_prefix_length = min(len(ctx.enter_code) - 1, len(printable_text))
-                for prefix_length in range(max_prefix_length, 0, -1):
-                    if printable_text.endswith(ctx.enter_code[:prefix_length]):
+            for enter, _end, _kind in markers:
+                max_prefix_length = min(len(enter) - 1, len(printable_text))
+                for prefix_length in range(max_prefix_length, len(pending_marker), -1):
+                    if printable_text.endswith(enter[:prefix_length]):
                         pending_marker = printable_text[-prefix_length:]
-                        printable_text = printable_text[:-prefix_length]
                         break
+            if pending_marker:
+                printable_text = printable_text[: -len(pending_marker)]
             if printable_text:
                 chunks.append(text_chunk(printable_text))
             return chunks, tools, pending_marker

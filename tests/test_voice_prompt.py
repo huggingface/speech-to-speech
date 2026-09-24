@@ -541,3 +541,53 @@ def test_cancelled_local_tool_turn_rolls_back_fast_output():
     assert chat.buffer == [user]
     assert not chat.has_pending_tool_calls()
     assert chat._provisional_generations == {}
+
+
+def test_local_tool_parser_accepts_native_json_tool_call_blocks():
+    """Models that fall back to <tool_call>{json}</tool_call> still produce tool calls."""
+    handler = object.__new__(LanguageModelHandler)
+    ctx = _stream_context("step_forward")
+    ctx.function_tools = [
+        FunctionTool(
+            type="function",
+            name="step_forward",
+            description="Step forward.",
+            parameters={"type": "object", "properties": {"steps": {"type": "number"}}},
+        )
+    ]
+    text = 'Sure. <tool_call>\n{"name": "step_forward", "arguments": {"steps": 1}}\n</tool_call>'
+
+    chunks, tools, remaining = handler._process_printable_text(text, None, [], ctx)
+
+    assert [t.name for t in tools] == ["step_forward"]
+    assert json.loads(tools[0].arguments) == {"steps": 1}
+    spoken = " ".join(c.text for c in chunks if c.text)
+    assert "tool_call" not in spoken and "{" not in spoken
+    assert remaining == ""
+
+
+def test_local_tool_parser_holds_partial_native_block_until_closed():
+    handler = object.__new__(LanguageModelHandler)
+    ctx = _stream_context("dance")
+    first = 'Okay. <tool_call>{"name": "dance",'
+
+    chunks, tools, remaining = handler._process_printable_text(first, None, [], ctx)
+
+    assert tools == []
+    assert remaining.startswith("<tool_call>")
+    chunks, tools, remaining = handler._process_printable_text(
+        remaining + ' "arguments": {}}</tool_call>', None, tools, ctx
+    )
+    assert [t.name for t in tools] == ["dance"]
+
+
+def test_native_block_markers_are_ignored_without_tools():
+    handler = object.__new__(LanguageModelHandler)
+    handler.stream_batch_sentences = 1
+    ctx = StreamContext(sentence_batch=[])
+    text = "I would write <tool_call> here. And more."
+
+    chunks, tools, remaining = handler._process_printable_text(text, None, [], ctx)
+
+    assert tools == []
+    assert "tool_call" in " ".join(c.text for c in chunks if c.text) + remaining
