@@ -171,6 +171,7 @@ def test_paused_utterance_is_one_committed_item(session):
     assert len(stops) == 1
     assert stops[0].audio_end_ms == 3000
     assert len(completions) == 1
+    assert len([event for event in session.input_events if event.type == "input_audio_buffer.speech_started"]) == 3
     assert len(_item_ids(session.input_events)) == 1
     # The user item precedes the assistant output that committed it.
     assert [event.type for event in committed[:2]] == [
