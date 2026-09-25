@@ -165,6 +165,73 @@ def test_bad_voice_update_is_atomic():
     assert service.build_session_updated(sid).session.audio.output.voice == "alloy"
 
 
+def test_stt_switch_does_not_require_unchanged_llm_capabilities():
+    from speech_to_speech.api.openai_realtime.session_routing import TranscriptionRoute
+
+    initial_data = route().model_dump()
+    initial_data["routes"]["llm"].pop("capabilities")
+    initial = SessionRouting.model_validate(initial_data)
+    destination = initial.model_copy(
+        update={
+            "routes": initial.routes.model_copy(
+                update={"stt": TranscriptionRoute(model="asr-second", provider="other", protocol="transcriptions")}
+            )
+        }
+    )
+    service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event())
+    sid = service.register(routing=initial)
+    before = service._state(sid).runtime_config
+    before.chat.add_item(make_user_message("Remember the blue bicycle."))
+
+    assert service.handle_session_update(sid, event(models={"stt": "asr-second"}), routing=destination) is None
+    after = service._state(sid).runtime_config
+    assert after.chat is before.chat
+    assert after.routing.routes.llm == initial.routes.llm
+    assert service.build_session_updated(sid).session.model_dump()["models"]["stt"] == {
+        "model": "asr-second",
+        "provider": "other",
+    }
+
+
+def test_managed_voice_update_fails_before_changing_any_session_setting():
+    from speech_to_speech.api.openai_realtime.session_routing import TranscriptionRoute
+
+    service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event())
+    sid = service.register(routing=route())
+    cfg = service._state(sid).runtime_config
+    before = cfg.session.model_dump()
+
+    error = service.handle_session_update(
+        sid, event(audio={"output": {"voice": "missing"}}, instructions="must not apply")
+    )
+    assert error is not None
+    assert "does not support this voice" in error.error.message
+    assert cfg.session.model_dump() == before
+
+    assert service.handle_session_update(sid, event(audio={"output": {"voice": "alloy"}})) is None
+    assert cfg.session.audio.output.voice == "alloy"
+    assert service.handle_session_update(sid, event(audio={"output": {"voice": "aiden"}})) is None
+    assert cfg.session.audio.output.voice == "aiden"
+
+    selected = route()
+    selected = selected.model_copy(
+        update={
+            "routes": selected.routes.model_copy(
+                update={"stt": TranscriptionRoute(model="asr-second", provider="hf", protocol="transcriptions")}
+            )
+        }
+    )
+    assert service.handle_session_update(sid, event(models={"stt": "asr-second"}), routing=selected) is None
+
+    plain = service.register()
+    assert service.handle_session_update(plain, event(audio={"output": {"voice": "missing"}})) is None
+    assert service._state(plain).runtime_config.session.audio.output.voice == "missing"
+
+    fixed_route = service.register(routing=route().model_copy(update={"updates_enabled": False}))
+    assert service.handle_session_update(fixed_route, event(audio={"output": {"voice": "missing"}})) is None
+    assert service._state(fixed_route).runtime_config.session.audio.output.voice == "missing"
+
+
 def test_media_and_completed_tool_history_require_destination_capabilities():
     from openai.types.realtime import RealtimeConversationItemFunctionCall, RealtimeConversationItemFunctionCallOutput
 

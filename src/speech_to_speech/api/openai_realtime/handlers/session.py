@@ -58,6 +58,19 @@ class SessionHandler(RealtimeBaseHandler):
                 message="The admitted model cannot be changed within this session.",
                 _type="invalid_request_error",
             )
+        if (
+            cfg.routing is not None
+            and cfg.routing.updates_enabled
+            and s.audio is not None
+            and s.audio.output is not None
+        ):
+            output = s.audio.output
+            if "voice" in output.model_fields_set:
+                tts = cfg.routing.routes.tts
+                if output.voice not in [tts.voice, *tts.voices]:
+                    return self.make_error(
+                        "The selected TTS model does not support this voice.", "invalid_request_error"
+                    )
         current = cfg.session
         if current is None:
             cfg.session = s
@@ -119,6 +132,8 @@ class SessionHandler(RealtimeBaseHandler):
     def _validate_routed_settings(previous: RuntimeConfig, candidate: RuntimeConfig) -> None:
         assert previous.routing is not None and candidate.routing is not None
         old, new = previous.routing.routes.llm, candidate.routing.routes.llm
+        if new == old:
+            return
         caps = new.capabilities
         if caps.context_window is None or caps.continuation != "full_context":
             raise ValueError("The selected LLM must declare its context window and support full retained context.")

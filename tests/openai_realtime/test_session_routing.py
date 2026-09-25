@@ -191,6 +191,29 @@ def test_valid_handoff_sets_effective_session_before_created_event():
             assert cfg.routing == routing()
 
 
+def test_managed_voice_update_returns_correlated_error_without_changing_voice():
+    pipeline = unit()
+    managed = routing().model_copy(update={"updates_enabled": True})
+    with TestClient(create_app([pipeline], Event(), session_routing_enabled=True)) as client:
+        with client.websocket_connect(
+            "/v1/realtime", headers={"X-Speech-Session-Routing": managed.model_dump_json()}
+        ) as ws:
+            created = ws.receive_json()
+            ws.send_json(
+                {
+                    "type": "session.update",
+                    "event_id": "unsupported-voice",
+                    "session": {"type": "realtime", "audio": {"output": {"voice": "missing"}}},
+                }
+            )
+            rejected = ws.receive_json()
+            assert rejected["type"] == "error"
+            assert rejected["error"]["event_id"] == "unsupported-voice"
+            assert "does not support this voice" in rejected["error"]["message"]
+            cfg = pipeline.service._state(created["session"]["id"]).runtime_config
+            assert cfg.session.audio.output.voice == "alloy"
+
+
 def test_routing_rejects_local_handlers_at_startup():
     pipeline = unit()
     pipeline.handlers = []
