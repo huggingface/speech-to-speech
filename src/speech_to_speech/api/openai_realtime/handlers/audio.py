@@ -7,12 +7,15 @@ from typing import TYPE_CHECKING, Literal
 from openai.types.realtime import (
     ConversationItemInputAudioTranscriptionFailedEvent,
     InputAudioBufferAppendEvent,
+    InputAudioBufferCommittedEvent,
     InputAudioBufferSpeechStartedEvent,
     InputAudioBufferSpeechStoppedEvent,
+    RealtimeConversationItemUserMessage,
     RealtimeErrorEvent,
     ResponseAudioDeltaEvent,
     ResponseCreatedEvent,
 )
+from openai.types.realtime.realtime_conversation_item_user_message import Content
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
 from speech_to_speech.api.openai_realtime.input_state import (
@@ -212,6 +215,27 @@ class AudioHandler(RealtimeBaseHandler):
         if pending.speech_stopped is not None:
             events.append(pending.speech_stopped)
             pending.speech_stopped = None
+            events.append(
+                InputAudioBufferCommittedEvent(
+                    type="input_audio_buffer.committed",
+                    event_id=self._next_event_id(),
+                    item_id=item_id,
+                    previous_item_id=st.last_item_id,
+                )
+            )
+            events.append(
+                self._service.conversation._ack_item(
+                    conn_id,
+                    RealtimeConversationItemUserMessage(
+                        id=item_id,
+                        object="realtime.item",
+                        type="message",
+                        role="user",
+                        status="completed",
+                        content=[Content(type="input_audio")],
+                    ),
+                )
+            )
         if pending.transcription is not None:
             events.append(pending.transcription)
             pending.transcription = None
@@ -323,7 +347,11 @@ class AudioHandler(RealtimeBaseHandler):
             st.response_usage.turns += 1
         st.speculative_turn_id = event.turn_id
         st.speculative_turn_revision = event.turn_revision
-        st.last_item_id = input_item_id
+        # A reopened revision is still the same externally open speech item.
+        # Keep cancellation and revision bookkeeping above, but do not reset
+        # a generic client's audio onset with another speech_started event.
+        if previous_input_item is not None:
+            return events
         events.append(
             InputAudioBufferSpeechStartedEvent(
                 type="input_audio_buffer.speech_started",

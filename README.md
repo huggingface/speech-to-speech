@@ -712,9 +712,9 @@ reopened as a newer revision, the accumulated audio is re-emitted, and work from
 discarded before it reaches the user.
 
 The server holds `input_audio_buffer.speech_stopped` and the final transcription while a turn can still
-reopen. A resumed turn can send another `speech_started` for the same item; live transcription deltas also
-continue. Once the turn commits, the client receives one stop and one final transcript for that item, so
-its user-turn history matches the model's.
+reopen. Resumed speech keeps the same open item and live transcription deltas
+continue. Once the turn commits, the client receives one stop, an input-buffer commitment, the created
+user item, and one final transcript, so its user-turn history matches the model's.
 If transcription fails, the server sends the stop and failure after the reopen grace ends.
 
 The base package includes the quantized CPU runtime and enables Smart Turn by default:
@@ -759,8 +759,6 @@ For local development:
 uv sync
 pytest
 ruff check
-ruff format --check src tests
-mypy src
 ```
 
 ## Star History

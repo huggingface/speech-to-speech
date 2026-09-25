@@ -15,6 +15,7 @@ from queue import Queue
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import pytest
 
 from speech_to_speech.api.openai_realtime.service import RealtimeService
@@ -37,6 +38,8 @@ from .realtime_contract import (
 _INPUT_EVENTS = (
     "input_audio_buffer.speech_started",
     "input_audio_buffer.speech_stopped",
+    "input_audio_buffer.committed",
+    "conversation.item.created",
     "conversation.item.input_audio_transcription.delta",
     "conversation.item.input_audio_transcription.completed",
     "conversation.item.input_audio_transcription.failed",
@@ -136,7 +139,7 @@ def session(runtime_config, should_listen):
 
 
 def _item_ids(events: list[Any]) -> set[str]:
-    return {event.item_id for event in events}
+    return {getattr(event, "item_id", None) or event.item.id for event in events}
 
 
 def test_paused_utterance_is_one_committed_item(session):
@@ -173,11 +176,13 @@ def test_paused_utterance_is_one_committed_item(session):
     assert len(stops) == 1
     assert stops[0].audio_end_ms == 3000
     assert len(completions) == 1
-    assert len([event for event in session.input_events if event.type == "input_audio_buffer.speech_started"]) == 3
+    assert len([event for event in session.input_events if event.type == "input_audio_buffer.speech_started"]) == 1
     assert len(_item_ids(session.input_events)) == 1
     # The user item precedes the assistant output that committed it.
-    assert [event.type for event in committed[:2]] == [
+    assert [event.type for event in committed[:4]] == [
         "input_audio_buffer.speech_stopped",
+        "input_audio_buffer.committed",
+        "conversation.item.created",
         "conversation.item.input_audio_transcription.completed",
     ]
 
@@ -259,12 +264,14 @@ def test_unanswered_turn_is_published_when_the_next_turn_starts(session):
 
     published = session.start_turn("turn_2", audio_start_ms=9000)
 
-    assert [event.type for event in published[:2]] == [
+    assert [event.type for event in published[:4]] == [
         "input_audio_buffer.speech_stopped",
+        "input_audio_buffer.committed",
+        "conversation.item.created",
         "conversation.item.input_audio_transcription.completed",
     ]
-    assert published[2].type == "input_audio_buffer.speech_started"
-    assert published[0].item_id == published[1].item_id != published[2].item_id
+    assert published[4].type == "input_audio_buffer.speech_started"
+    assert published[0].item_id == published[1].item_id != published[4].item_id
 
     session.hypothesis("turn_2", 0, "Never mind")
     session.stop_speech("turn_2", 0, duration_s=1.0, audio_end_ms=10000)
@@ -307,6 +314,8 @@ def test_failed_turn_closes_without_another_utterance(session, should_listen):
 
     assert [event.type for event in events] == [
         "input_audio_buffer.speech_stopped",
+        "input_audio_buffer.committed",
+        "conversation.item.created",
         "conversation.item.input_audio_transcription.failed",
     ]
     assert _item_ids(events) == {started[0].item_id}
@@ -336,6 +345,8 @@ def test_failure_waits_only_for_reopen_grace(session, monkeypatch):
     events = session.service.audio.resolve_input_terminals(session.conn_id)
     assert [event.type for event in events] == [
         "input_audio_buffer.speech_stopped",
+        "input_audio_buffer.committed",
+        "conversation.item.created",
         "conversation.item.input_audio_transcription.failed",
     ]
     assert session.service.audio.resolve_input_terminals(session.conn_id) == []
@@ -356,6 +367,8 @@ def test_empty_transcript_closes_after_reopen_grace(session, monkeypatch):
 
     assert [event.type for event in events] == [
         "input_audio_buffer.speech_stopped",
+        "input_audio_buffer.committed",
+        "conversation.item.created",
         "conversation.item.input_audio_transcription.completed",
     ]
     assert _item_ids(events) == {started[0].item_id}
@@ -415,3 +428,59 @@ def test_failed_revision_removes_superseded_chat_text(session):
     assert len(session.client_history().failed_items) == 1
     assert session.service._state(session.conn_id).response_usage.audio_duration_s == 0
     assert_input_lifecycle_contract(session.events)
+
+
+def test_late_transcript_does_not_recreate_a_committed_item(session):
+    first = session.start_turn("turn_1")[0].item_id
+    session.stop_speech("turn_1", 0, duration_s=1.0, audio_end_ms=1000)
+    # The next turn settles the old audio before its transcription arrives.
+    published = session.start_turn("turn_2", audio_start_ms=9000)
+    assert [event.type for event in published[:3]] == [
+        "input_audio_buffer.speech_stopped",
+        "input_audio_buffer.committed",
+        "conversation.item.created",
+    ]
+    assert published[1].previous_item_id is None
+    assert published[2].previous_item_id is None
+    session.final("turn_1", 0, "First")
+    session.answer("turn_1", 0)
+    session.stop_speech("turn_2", 0, duration_s=1.5, audio_end_ms=10500)
+    session.final("turn_2", 0, "Second")
+    previous = session.service._state(session.conn_id).last_item_id
+    committed = session.answer("turn_2", 0)
+    assert committed[1].previous_item_id == previous
+    assert committed[2].previous_item_id == previous
+    assert (
+        len([event for event in session.events if event.type == "conversation.item.created" and event.item.id == first])
+        == 1
+    )
+    assert session.client_history().user_turns == session.chat_user_turns() == ["First", "Second"]
+    assert_input_lifecycle_contract(session.events)
+    assert_openai_schema(session.events)
+
+
+def test_direct_audio_commits_a_user_item_without_transcription(session):
+    from speech_to_speech.pipeline.events import AudioInputCompletedEvent
+
+    started = session.start_turn("turn_1")[0]
+    session.stop_speech("turn_1", 0, duration_s=1.0, audio_end_ms=1000)
+    session.dispatch(
+        AudioInputCompletedEvent(
+            audio=np.zeros(16000, dtype=np.float32),
+            audio_sample_rate=16000,
+            audio_duration_s=1.0,
+            turn_id="turn_1",
+            turn_revision=0,
+        )
+    )
+    committed = session.answer("turn_1", 0)
+    assert [event.type for event in committed[:3]] == [
+        "input_audio_buffer.speech_stopped",
+        "input_audio_buffer.committed",
+        "conversation.item.created",
+    ]
+    assert committed[2].item.id == started.item_id
+    assert not session.client_history().completed_items
+    assert session.service._state(session.conn_id).input_items == {}
+    assert_input_lifecycle_contract(session.events)
+    assert_openai_schema(session.events)

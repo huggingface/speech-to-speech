@@ -2922,7 +2922,7 @@ class TestDispatchPipelineEvent:
             conn_id,
             SpeechStoppedEvent(),
         )
-        assert len(events) == 1
+        assert len(events) == 3
         evt = events[0]
         assert isinstance(evt, InputAudioBufferSpeechStoppedEvent)
         assert evt.audio_end_ms == 0
@@ -2953,7 +2953,7 @@ class TestDispatchPipelineEvent:
             conn_id,
             SpeechStoppedEvent(),
         )
-        assert len(events) == 1
+        assert len(events) == 3
         assert isinstance(events[0], InputAudioBufferSpeechStoppedEvent)
         assert service._state(conn_id).input_audio_duration_s == 0.0
 
@@ -4352,7 +4352,7 @@ class TestDispatchPipelineEvent:
         )
 
         item_id = first_started[0].item_id
-        assert second_started[0].item_id == item_id
+        assert second_started == []
         assert first_reopened_partial == []
         assert second_partial[0].item_id == item_id
         assert second_partial[0].delta == "hello"
@@ -4362,12 +4362,16 @@ class TestDispatchPipelineEvent:
             conn_id,
             AssistantOutputEvent(text="hi", turn_id="turn_1", turn_revision=1),
         )
-        assert [event.type for event in committed[:2]] == [
+        assert [event.type for event in committed[:4]] == [
             "input_audio_buffer.speech_stopped",
+            "input_audio_buffer.committed",
+            "conversation.item.created",
             "conversation.item.input_audio_transcription.completed",
         ]
         assert committed[0].item_id == item_id
         assert committed[1].item_id == item_id
+        assert committed[2].item.id == item_id
+        assert committed[3].item_id == item_id
         state = service._state(conn_id)
         assert item_id not in state.input_items
         assert state.current_input_item_id is None
@@ -4644,9 +4648,11 @@ class TestIdAndStateManagement:
         st = service._state(conn_id)
         assert st.last_item_id is None
 
-        # 1) speech_started sets last_item_id via dispatch_pipeline_event
+        # 1) Only committed input updates the published conversation predecessor
         events = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
         input_id = events[0].item_id
+        assert st.last_item_id is None
+        service.dispatch_pipeline_event(conn_id, SpeechStoppedEvent())
         assert st.last_item_id == input_id
 
         # 2) assistant_text sets last_item_id via dispatch_pipeline_event

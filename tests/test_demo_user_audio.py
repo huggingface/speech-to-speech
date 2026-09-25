@@ -90,39 +90,6 @@ if (wav.getInt16(44 + 2400 * 2, true) !== 200) throw new Error("reopened segment
     )
 
 
-def test_resumed_speech_keeps_the_item_onset():
-    """One item that pauses and resumes stops once and replays in full.
-
-    The backend holds a speculative stop candidate until the turn commits, so
-    the client sees several starts on one item and a single stop.
-    """
-    _run_node(
-        """
-const { SentAudioRecorder } = await import("./demo/ws/user-audio-recorder.js");
-const recorder = new SentAudioRecorder({ sampleRate: 24000 });
-const frame = (value, samples) => {
-  const pcm = new Int16Array(samples);
-  pcm.fill(value);
-  return pcm.buffer;
-};
-
-recorder.append(frame(100, 2400));
-recorder.speechStarted({ itemId: "item_one", audioStartMs: 0 });
-recorder.append(frame(200, 2400));
-recorder.speechStarted({ itemId: "item_one", audioStartMs: 100 });
-const recording = recorder.speechStopped({ itemId: "item_one", audioEndMs: 200 });
-
-if (!recording) throw new Error("expected a recording");
-if (recording.durationMs !== 200) {
-  throw new Error(`resumed speech lost its onset: ${recording.durationMs}`);
-}
-const wav = new DataView(await recording.audio.arrayBuffer());
-if (wav.getInt16(44, true) !== 100) throw new Error("onset segment missing");
-if (wav.getInt16(44 + 2400 * 2, true) !== 200) throw new Error("resumed segment missing");
-"""
-    )
-
-
 def test_websocket_client_emits_audio_only_user_turn():
     _run_node(
         """

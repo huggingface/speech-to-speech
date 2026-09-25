@@ -685,9 +685,13 @@ class TestSendLoop:
                 text_output_queue.put(TranscriptionFailedEvent(message="STT failed", turn_id="turn_1", turn_revision=0))
 
                 stopped = ws.receive_json()
+                committed = ws.receive_json()
+                created = ws.receive_json()
                 failed = ws.receive_json()
-                assert [stopped["type"], failed["type"]] == [
+                assert [stopped["type"], committed["type"], created["type"], failed["type"]] == [
                     "input_audio_buffer.speech_stopped",
+                    "input_audio_buffer.committed",
+                    "conversation.item.created",
                     "conversation.item.input_audio_transcription.failed",
                 ]
                 assert started["item_id"] == stopped["item_id"] == failed["item_id"]
