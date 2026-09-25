@@ -910,6 +910,13 @@ def create_app(
                 except Empty:
                     pass
 
+                # A failed transcription can become final when its reopen grace
+                # expires, even if no later turn or assistant output arrives.
+                if transport is not None and session_id and session is not None and session.released_at is None:
+                    settled_input = unit.service.audio.resolve_input_terminals(session_id)
+                    if settled_input:
+                        await transport.send_events(settled_input)
+
                 try:
                     if session is not None and session.pending_output_item is not None:
                         audio_chunk = session.pending_output_item
