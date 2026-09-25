@@ -20,6 +20,8 @@ from threading import Lock, RLock, current_thread, get_ident
 from time import perf_counter
 from typing import Literal
 
+from speech_to_speech.pipeline.turn_latency import active_turn_latency_tracker
+
 logger = logging.getLogger(__name__)
 
 # Global reentrant lock for MLX model access
@@ -101,6 +103,9 @@ def acquire_mlx_lock(timeout: float | None = None, handler_name: str = "Unknown"
     start = perf_counter()
     acquired = _mlx_lock.acquire(timeout=timeout) if timeout else _mlx_lock.acquire(blocking=True)
     wait_s = perf_counter() - start
+    tracker = active_turn_latency_tracker()
+    if tracker is not None:
+        tracker.record_mlx_lock_wait(wait_s)
 
     if acquired:
         depth = _record_lock_acquired(handler_name)

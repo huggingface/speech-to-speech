@@ -54,7 +54,7 @@ from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
 
 if TYPE_CHECKING:
-    from speech_to_speech.api.openai_realtime.service import ServerEvent, _ResponseStatus, _StatusReason
+    from speech_to_speech.api.openai_realtime.service import ConnState, ServerEvent, _ResponseStatus, _StatusReason
 
 logger = logging.getLogger(__name__)
 
@@ -85,13 +85,25 @@ class ResponseHandler(RealtimeBaseHandler):
         st.clear_pending_response(effective_response_key)
         return st.current_response_id, self._current_item_id(conn_id)
 
+    def _log_turn_latency(self, st: ConnState, status: _ResponseStatus, response_key: str | None) -> None:
+        assert status != "in_progress", "Latency is only finalized for terminal responses"
+        tracker = self._service.turn_latency_store.pop(response_key, session_id=st.session_id)
+        if tracker is None or tracker.turn_id is None:
+            return
+        tracker.status = status
+        line = tracker.format_log_line()
+        if line:
+            logger.info("%s response_key=%s", line, response_key)
+
     def _end_response(self, conn_id: str, status: _ResponseStatus = "completed") -> None:
         st = self._state(conn_id)
+        completed_response_key = st.current_response_key
         if status == "cancelled":
             st.response_usage.responses_cancelled += 1
         else:
             st.response_usage.responses_completed += 1
         self._service.total_usage += st.response_usage
+        self._log_turn_latency(st, status, completed_response_key)
         logger.info(
             "Response done (status=%s) — this response: input_tokens=%d, output_tokens=%d, audio=%.2fs"
             " | cumulative: input_tokens=%d, output_tokens=%d, audio=%.2fs",
@@ -104,7 +116,6 @@ class ResponseHandler(RealtimeBaseHandler):
             self._service.total_usage.audio_duration_s,
         )
         st.response_usage.reset()
-        completed_response_key = st.current_response_key
         completed_with_tools = bool(st.pending_function_calls)
         if (
             status == "completed"
@@ -195,6 +206,12 @@ class ResponseHandler(RealtimeBaseHandler):
             turn_revision=st.speculative_user_turn_revision,
             speech_stopped_at_s=st.speculative_user_speech_stopped_at_s,
             prefetch_transaction=ResponsePrefetchTransaction(),
+        )
+        self._service.bind_response_latency_tracker(
+            conn_id,
+            request.response_key,
+            turn_id=request.turn_id,
+            turn_revision=request.turn_revision,
         )
         st.tool_followup_prefetch_request = request
         st.tool_followup_prefetch_origin_response_key = origin_response_key
@@ -788,6 +805,13 @@ class ResponseHandler(RealtimeBaseHandler):
             turn_revision=None if out_of_band else st.speculative_user_turn_revision,
             speech_stopped_at_s=None if out_of_band else st.speculative_user_speech_stopped_at_s,
         )
+        if not out_of_band:
+            self._service.bind_response_latency_tracker(
+                conn_id,
+                request.response_key,
+                turn_id=request.turn_id,
+                turn_revision=request.turn_revision,
+            )
         st.in_response = True
         st.clear_pending_response(request.response_key)
         st.current_response_params = event.response

@@ -74,6 +74,7 @@ from speech_to_speech.pipeline.messages import GenerateResponseRequest
 from speech_to_speech.pipeline.queue_types import TextPromptItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
+from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
@@ -302,12 +303,14 @@ class RealtimeService:
         should_listen: ThreadingEvent | None = None,
         chat_size: int = 10,
         speculative_turns: SpeculativeTurnTracker | None = None,
+        turn_latency_store: TurnLatencyStore | None = None,
         default_instructions: str | None = None,
     ) -> None:
         self.text_prompt_queue = text_prompt_queue
         self.should_listen = should_listen
         self._chat_size = chat_size
         self.speculative_turns = speculative_turns
+        self.turn_latency_store = turn_latency_store or TurnLatencyStore()
         self._default_instructions = default_instructions
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
@@ -359,6 +362,7 @@ class RealtimeService:
                 st.response_usage.input_tokens += input_tokens
                 st.response_usage.output_tokens += output_tokens
             self.total_usage += st.response_usage
+            self.turn_latency_store.clear_session(conn_id)
             logger.info(
                 "Session %s unregistered — cumulative: input_tokens=%d, output_tokens=%d, audio=%.2fs",
                 conn_id,
@@ -369,6 +373,21 @@ class RealtimeService:
 
     def _state(self, conn_id: str) -> ConnState:
         return self._conns[conn_id]
+
+    def bind_response_latency_tracker(
+        self,
+        conn_id: str,
+        response_key: str,
+        *,
+        turn_id: str | None = None,
+        turn_revision: int | None = None,
+    ) -> None:
+        self.turn_latency_store.get_or_create_response(
+            response_key,
+            turn_id=turn_id,
+            turn_revision=turn_revision,
+            session_id=conn_id,
+        )
 
     @property
     def connection_ids(self) -> list[str]:
@@ -483,12 +502,13 @@ class RealtimeService:
         st.response_pending = bool(st.pending_response_keys)
 
     def close_response_key(self, conn_id: str, response_key: str | None) -> None:
-        """Tombstone a response key without losing its pending provider usage."""
+        """Close a response, preserving usage and discarding unfinished timings."""
         st = self._state(conn_id)
         if response_key is not None:
             input_tokens, output_tokens = st.pending_token_usage.pop(response_key, (0, 0))
             self.total_usage.input_tokens += input_tokens
             self.total_usage.output_tokens += output_tokens
+            self.turn_latency_store.discard_response(response_key, session_id=conn_id)
         st.close_response_key(response_key)
 
     def handle_conversation_item_create(self, conn_id: str, event: ConversationItemCreateEvent) -> list[ServerEvent]:
@@ -559,6 +579,8 @@ class RealtimeService:
         if is_stale is None:
             return None
         if is_stale:
+            if isinstance(event, TranscriptionCompletedEvent):
+                self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
             logger.info(
                 "Ignoring stale %s for turn=%s rev=%s",
                 event.type,
@@ -635,6 +657,7 @@ class RealtimeService:
         st = self._state(conn_id)
         completed_events = self.conversation.on_transcription_completed(conn_id, event)
         if not completed_events:
+            self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
             return []
         input_duration_s = cast(UsageTranscriptTextUsageDuration, completed_events[0].usage).seconds
         self.response.discard_tool_followup_prefetch(conn_id)
@@ -680,8 +703,16 @@ class RealtimeService:
                 turn_revision=event.turn_revision,
                 speech_stopped_at_s=event.speech_stopped_at_s,
             )
+            self.bind_response_latency_tracker(
+                conn_id,
+                request.response_key,
+                turn_id=event.turn_id,
+                turn_revision=event.turn_revision,
+            )
             st.mark_response_pending(request.response_key)
             queue.put(request)
+        else:
+            self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
 
         return [*completed_events]
 
@@ -725,6 +756,12 @@ class RealtimeService:
                 turn_id=event.turn_id,
                 turn_revision=event.turn_revision,
                 speech_stopped_at_s=event.speech_stopped_at_s,
+            )
+            self.bind_response_latency_tracker(
+                conn_id,
+                request.response_key,
+                turn_id=event.turn_id,
+                turn_revision=event.turn_revision,
             )
             st.mark_response_pending(request.response_key)
             queue.put(request)

@@ -20,6 +20,8 @@ import speech_to_speech.api.openai_realtime.websocket_router as router_module
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
+from speech_to_speech.LLM.language_model import LanguageModelHandler
+from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
@@ -32,6 +34,7 @@ from speech_to_speech.pipeline.events import (
     ResponseGenerationDoneEvent,
     SpeechStartedEvent,
     TokenUsageEvent,
+    TranscriptionCompletedEvent,
     TranscriptionFailedEvent,
 )
 from speech_to_speech.pipeline.messages import (
@@ -43,6 +46,8 @@ from speech_to_speech.pipeline.messages import (
     GenerateResponseRequest,
     ResponsePrefetchTransaction,
 )
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 
 from .realtime_contract import (
     assert_response_lifecycle_contract,
@@ -514,6 +519,8 @@ class TestClientEventDispatch:
                 state = service._state(conn_id)
                 assert state.response_pending is True
                 assert not service.text_prompt_queue.empty()
+                pending_key = next(iter(state.pending_response_keys))
+                assert pending_key in service.turn_latency_store._trackers
 
                 ws.send_json({"type": "response.cancel"})
                 time.sleep(0.1)
@@ -522,6 +529,8 @@ class TestClientEventDispatch:
                 assert service.text_prompt_queue.empty()
                 assert state.response_pending is False
                 assert state.pending_response_keys == set()
+                assert service.turn_latency_store._trackers == {}
+                assert service.turn_latency_store.active_session_count == 0
 
                 ws.send_json({"type": "response.create"})
                 assert ws.receive_json()["type"] == "response.created"
@@ -695,6 +704,7 @@ class TestSendLoop:
                 state = service._state(conn_id)
                 assert service.text_prompt_queue.qsize() == 1
                 pending_key = next(iter(state.pending_response_keys))
+                assert pending_key in service.turn_latency_store._trackers
 
                 text_output_queue.put(SpeechStartedEvent())
                 msg = ws.receive_json()
@@ -707,6 +717,8 @@ class TestSendLoop:
                 assert state.response_pending is False
                 assert state.in_response is False
                 assert pending_key in state.closed_response_keys
+                assert service.turn_latency_store._trackers == {}
+                assert service.turn_latency_store.active_session_count == 0
                 assert not response_playing.is_set()
 
                 output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=stale_generation))
@@ -764,6 +776,56 @@ class TestSendLoop:
                 assert state.in_response is False
                 assert state.response_pending is False
                 assert state.pending_response_keys == set()
+
+    def test_stale_pending_terminal_discards_only_its_latency_tracker(self, setup):
+        app, service, _, output_queue, *_ = setup
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = next(iter(service._conns))
+                requests = []
+                for revision in (0, 1):
+                    service.dispatch_pipeline_event(
+                        conn_id,
+                        SpeechStartedEvent(
+                            turn_id="turn_1", turn_revision=revision, interrupt_response=False, reopened=revision == 1
+                        ),
+                    )
+                    service.turn_latency_store.get_or_create_for_turn("turn_1", revision).record_stt(0.12)
+                    service.dispatch_pipeline_event(
+                        conn_id,
+                        TranscriptionCompletedEvent(transcript="Hello", turn_id="turn_1", turn_revision=revision),
+                    )
+                    requests.append(service.text_prompt_queue.get_nowait())
+                stale, current = requests
+
+                # The stale LLM request produces a cleanup-only terminal which
+                # passes through the output processor and TTS to the router.
+                handler = object.__new__(LanguageModelHandler)
+                handler.cancel_scope = None
+                handler.speculative_turns = tracker
+                processor = object.__new__(LMOutputProcessor)
+                processor.setup(speculative_turns=tracker)
+                tts = object.__new__(Qwen3TTSHandler)
+                tts.speculative_turns = tracker
+                for chunk in handler.process(stale):
+                    for terminal in processor.process(chunk):
+                        assert terminal.cleanup_only
+                        for output in tts.process(terminal):
+                            output_queue.put(tts.output_for_queue(output, terminal))
+
+                state = service._state(conn_id)
+                deadline = time.monotonic() + 2.0
+                while stale.response_key not in state.closed_response_keys and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+                assert stale.response_key in state.closed_response_keys
+                assert stale.response_key not in state.pending_response_keys
+                assert service.turn_latency_store.get_response(stale.response_key) is None
+                assert current.response_key in state.pending_response_keys
+                assert service.turn_latency_store.get_response(current.response_key).stt_s == 0.12
 
     def test_stale_cleanup_preserves_pending_token_usage_globally(self, setup):
         app, service, _, output_queue, *_ = setup
