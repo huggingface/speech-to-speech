@@ -313,6 +313,7 @@ def test_streaming_stt_backend_is_attached_to_vad_without_changing_notifier_path
         speculative_turns=SpeculativeTurnTracker(),
         cancel_scope=CancelScope(),
         pipeline_index=0,
+        response_playing=Event(),
     )
 
     assert handlers[0].streaming_stt_sink is streaming_handler
@@ -365,6 +366,7 @@ def test_new_stt_backend_gets_transcription_notifier_by_default(monkeypatch):
         speculative_turns=SpeculativeTurnTracker(),
         cancel_scope=CancelScope(),
         pipeline_index=0,
+        response_playing=Event(),
     )
 
     assert stt_contexts[0].queue_out is stt_output_queue

@@ -38,8 +38,8 @@ class _PendingShortSegment:
 
 
 # Fragments with less active speech than this are treated as noise and never
-# held for stitching, so sub-threshold bursts cannot sum past min_speech_ms
-# and fire a false barge-in.
+# held for stitching, so sub-threshold bursts cannot sum past the speech-start
+# threshold and fire a false barge-in.
 _SHORT_SEGMENT_MIN_FRAGMENT_MS = 100
 
 
@@ -66,7 +66,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         thresh: float = 0.6,
         sample_rate: int = 16000,
         min_silence_ms: int = 64,
-        min_speech_ms: int = 384,
+        min_speech_ms: int = 192,
+        barge_in_ms: int = 384,
         min_speech_continuation_ms: int = 192,
         max_speech_ms: float = float("inf"),
         speech_pad_ms: int = 30,
@@ -86,11 +87,14 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         vad: str = "silero",
         vad_firered_model_dir: str | None = None,
         vad_firered_use_gpu: bool = False,
+        response_playing: Event | None = None,
     ) -> None:
         self.should_listen = should_listen
+        self.response_playing = response_playing if response_playing is not None else Event()
         self.sample_rate = sample_rate
         self.min_silence_ms = min_silence_ms
         self.min_speech_ms = min_speech_ms
+        self.barge_in_ms = barge_in_ms
         self.min_speech_continuation_ms = self._resolve_min_speech_continuation_ms(
             self.min_speech_ms,
             min_speech_continuation_ms,
@@ -270,9 +274,11 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         )
 
     def _active_speech_min_ms(self, start_ms: int) -> float:
-        """Duration hysteresis for speech that continues a reopenable turn."""
+        """Active speech needed to start: less to continue a reopenable turn, more to cut the assistant."""
         if self._pending_reopen_candidate is not None or self._should_reopen_current_turn(start_ms):
             return self.min_speech_continuation_ms
+        if self.response_playing.is_set():
+            return self.barge_in_ms
         return self.min_speech_ms
 
     def _should_reopen_current_turn(self, audio_start_ms: int) -> bool:
