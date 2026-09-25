@@ -1,7 +1,9 @@
 """Response latency through remote STT, LLM, and TTS handlers."""
 
+import io
 import json
 import logging
+import wave
 from queue import Queue
 from threading import Event
 from types import SimpleNamespace
@@ -158,3 +160,39 @@ def test_remote_tts_tracks_provider_audio_before_block_assembly_and_preserves_fi
     clock[0] = 30.0
     assert list(handler.process(first))
     assert service.turn_latency_store.get_response(request.response_key) is None
+
+
+def test_wav_tts_records_first_provider_audio_before_later_chunks(service, conn_id, caplog, monkeypatch):
+    service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
+    service.dispatch_pipeline_event(
+        conn_id, TranscriptionCompletedEvent(transcript="hello", turn_id="turn_1", turn_revision=0)
+    )
+    request = service.text_prompt_queue.get_nowait()
+    handler = _openai_tts_handler(monkeypatch)
+    handler.turn_latency_store = service.turn_latency_store
+    handler.response_format = "wav"
+    clock = [10.0]
+    monkeypatch.setattr(tts_module, "perf_counter", lambda: clock[0])
+
+    wav_bytes = io.BytesIO()
+    with wave.open(wav_bytes, "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(24000)
+        writer.writeframes(np.arange(2048, dtype="<i2").tobytes())
+    encoded = wav_bytes.getvalue()
+
+    def source(cancel_check):
+        clock[0] = 10.1
+        yield encoded[:244]  # WAV header and the first 100 audio frames.
+        clock[0] = 10.8
+        yield encoded[244:]
+
+    handler._make_operation = lambda **kwargs: SimpleNamespace(iter_bytes=source, cancel=lambda: None)
+    tts_input = TTSInput(
+        text="Hello", turn_id="turn_1", turn_revision=0, response_key=request.response_key, speech_stopped_at_s=9.0
+    )
+    assert list(handler.process(tts_input))
+    line = _finish(service, conn_id, request.response_key, caplog)
+    assert "tts_ttfa=0.10s" in line
+    assert "e2e=1.80s" in line

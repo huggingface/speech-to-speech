@@ -683,6 +683,14 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             def sample_chunks() -> Iterator[np.ndarray]:
                 byte_remainder = b""
                 frame_size = channels * sample_width
+                # Read one frame first so TTFA does not wait for the larger
+                # block-oriented reads below after provider audio has arrived.
+                first_frame = wav_reader.readframes(1)
+                if first_frame:
+                    usable = len(first_frame) - (len(first_frame) % frame_size)
+                    byte_remainder = first_frame[usable:]
+                    if usable:
+                        yield self._decode_wav_frames(first_frame[:usable], channels, sample_width)
                 while encoded := wav_reader.readframes(source_frames_per_read):
                     encoded = byte_remainder + encoded
                     usable = len(encoded) - (len(encoded) % frame_size)
