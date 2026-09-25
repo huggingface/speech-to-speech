@@ -216,6 +216,8 @@ class ConnState(BaseModel):
     current_output_index: int | None = None
     current_output_kind: Literal["text", "tool_call"] | None = None
     audio_output_started: bool = False
+    output_audio_resampler: Any = None
+    output_audio_resampler_key: tuple[str, str, int] | None = None
     # Each entry contains one message's identity, text parts, and lifecycle
     # flags. Kept as plain internal data to avoid coupling connection state to
     # protocol event models.
