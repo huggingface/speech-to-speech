@@ -339,6 +339,11 @@ The compose file starts a llama.cpp server with Gemma 4 and the Realtime server,
 
 ## Realtime API
 
+The server logs per-response STT, LLM, first TTS audio, and speech-to-audio
+durations for supported backends, including vLLM-backed STT and TTS. See the
+[response latency guide](./docs/response-latency.md) for the coverage matrix
+and measurement boundaries.
+
 Realtime mode supports the OpenAI Realtime protocol over WebSocket and WebRTC, with live transcription and low-latency turn-taking. WebSocket clients connect at `/v1/realtime`:
 
 ```python
@@ -710,6 +715,12 @@ and STT/LLM work may begin speculatively. Complete turns start processing immedi
 gated by `--smart_turn_max_wait_ms` (2 seconds by default). If speech resumes during either delay, the existing turn is
 reopened as a newer revision, the accumulated audio is re-emitted, and work from the previous revision is
 discarded before it reaches the user.
+
+The server holds `input_audio_buffer.speech_stopped` and the final transcription while a turn can still
+reopen. Resumed speech keeps the same open item and live transcription deltas
+continue. Once the turn commits, the client receives one stop, an input-buffer commitment, the created
+user item, and one final transcript, so its user-turn history matches the model's.
+If transcription fails, the server sends the stop and failure after the reopen grace ends.
 
 The base package includes the quantized CPU runtime and enables Smart Turn by default:
 

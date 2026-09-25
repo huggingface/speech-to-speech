@@ -45,6 +45,7 @@
  * @property {(call: {name: string, arguments: string, callId: string}) => Promise<{output: string, image?: string}>} [executeTool]
  */
 
+import { readTurnLatency } from "./turn-latency.js";
 import { extractResponseTranscript, trimTrailingSlash } from "./ws/codec.js";
 import { OrbVisualiser, VIS_FFT_SIZE } from "./ws/orb-visualizer.js";
 import { SentAudioRecorder } from "./ws/user-audio-recorder.js";
@@ -678,6 +679,7 @@ export class S2sRealtimeClient extends EventTarget {
           responseId,
           status: event.response?.status ?? "completed",
           audible: this._audibleResponses.has(responseId),
+          latency: readTurnLatency(event.response),
           transcript,
         } }));
         this._audibleResponses.delete(responseId);
