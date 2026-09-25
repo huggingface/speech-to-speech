@@ -118,6 +118,7 @@ def test_omnivoice_cli_config_is_normalized_for_the_handler():
         "ref_audio": "voice.wav",
         "ref_text": "Reference transcript.",
         "voice_clone_prompt": None,
+        "ref_voices_dir": None,
         "instruct": None,
         "language": None,
         "num_steps": 16,

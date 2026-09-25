@@ -34,6 +34,14 @@ class OmniVoiceTTSHandlerArguments:
             "help": "Saved OmniVoice VoiceClonePrompt path. Replaces --omnivoice_ref_audio and --omnivoice_ref_text."
         },
     )
+    omnivoice_ref_voices_dir: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Directory of per-language references named <language>.wav with a matching <language>.txt "
+            "transcript (e.g. fr.wav + fr.txt). Each utterance clones the reference for its language (exact code, "
+            "then base language) and falls back to the default voice."
+        },
+    )
     omnivoice_instruct: Optional[str] = field(
         default=None,
         metadata={"help": "Voice-design instruction. Leave unset for auto voice or voice cloning."},

@@ -224,6 +224,14 @@ The reference is encoded once during handler setup and the resulting voice-clone
 --omnivoice_voice_clone_prompt /voices/saved-prompt.pt
 ```
 
+OmniVoice reproduces the reference speaker's accent, so one reference makes every language sound like the reference language. To give each language its own reference, add a directory of `<language>.wav` files with matching `<language>.txt` transcripts:
+
+```bash
+--omnivoice_ref_voices_dir /voices/langs   # fr.wav + fr.txt, es.wav + es.txt, ...
+```
+
+Every reference is encoded once during setup. Each utterance uses the reference for its language code (exact code such as `es-419`, then the base language `es`), and falls back to the default voice above when none matches. Each reference adds a prepared prompt in memory and to startup time.
+
 Voice design omits the cloning flags and supplies an instruction:
 
 ```bash
