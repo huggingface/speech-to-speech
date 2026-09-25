@@ -23,7 +23,7 @@ from speech_to_speech.api.openai_realtime.input_state import (
     InputTranscriptionTerminal,
     PendingInputTerminal,
 )
-from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler, resample
+from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler
 from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
 
 if TYPE_CHECKING:
@@ -271,7 +271,13 @@ class AudioHandler(RealtimeBaseHandler):
         one place regardless of how audio arrives.
         """
         st = self._state(conn_id)
-        pcm_bytes = resample(pcm_bytes, src_rate, PIPELINE_SAMPLE_RATE)
+        if src_rate != PIPELINE_SAMPLE_RATE:
+            # The filter state carries over between appends, so chunk boundaries
+            # leave no trace in the audio the VAD and the STT receive.
+            if st.input_audio_resampler_rate != src_rate:
+                st.input_audio_resampler = StreamingPcm16Resampler(src_rate, PIPELINE_SAMPLE_RATE)
+                st.input_audio_resampler_rate = src_rate
+            pcm_bytes = st.input_audio_resampler.push(pcm_bytes)
 
         pcm_bytes = st.audio_remainder + pcm_bytes
 

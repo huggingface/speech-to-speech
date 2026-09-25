@@ -142,6 +142,23 @@ class TestAppendPcm:
         unit.service.append_pcm(conn_id, b"\x01\x00" * 512, PIPELINE_SAMPLE_RATE)
         assert unit.service.handle_audio_commit(conn_id) is None
 
+    def test_24khz_resampling_is_continuous_across_calls(self):
+        unit = _make_unit()
+        samples = np.round(np.sin(np.arange(4800) * 2 * np.pi * 997 / 24000) * 12000).astype("<i2")
+
+        chunked_id = unit.service.register()
+        chunked = b"".join(
+            b"".join(unit.service.append_pcm(chunked_id, chunk.tobytes(), 24000))
+            for chunk in np.array_split(samples, 10)
+        )
+        chunked += unit.service._state(chunked_id).audio_remainder
+
+        single_id = unit.service.register()
+        single = b"".join(unit.service.append_pcm(single_id, samples.tobytes(), 24000))
+        single += unit.service._state(single_id).audio_remainder
+
+        assert chunked == single
+
 
 # ---------------------------------------------------------------------------
 # PcmResampler
