@@ -5,7 +5,7 @@ includes its turn, revision, response key, terminal status, and available stage
 durations:
 
 ```text
-Turn turn_3 rev=0 latency: stt=0.18s llm=1.24s tts_ttfa=0.12s e2e=1.61s mlx_lock_wait=0.00s status=completed response_key=...
+Turn turn_3 rev=0 latency: stt=0.18s llm_ttft=0.11s llm=1.24s tts_ttfa=0.12s e2e=1.61s mlx_lock_wait=0.00s status=completed response_key=...
 ```
 
 The same record is available with `speech-to-speech local` and
@@ -19,7 +19,7 @@ reserved `response.metadata["speech_to_speech.turn_latency"]` key. Realtime
 metadata values are strings, so the value is compact JSON with this schema:
 
 ```json
-{"e2e_s":1.613482,"llm_s":1.241907,"mlx_lock_wait_s":0.0,"response_key":"...","status":"completed","stt_s":0.181284,"tts_ttfa_s":0.121775,"turn_id":"turn_3","turn_revision":0,"version":1}
+{"e2e_s":1.613482,"llm_s":1.241907,"llm_ttft_s":0.108531,"mlx_lock_wait_s":0.0,"response_key":"...","status":"completed","stt_s":0.181284,"tts_ttfa_s":0.121775,"turn_id":"turn_3","turn_revision":0,"version":1}
 ```
 
 Durations are raw seconds and are not rounded to the two decimal places used in
@@ -35,6 +35,7 @@ are added only to terminal responses.
 | --- | --- | --- |
 | `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime` | `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper`, `parakeet-unified`, `paraformer`, `qwen3-asr` |
 | `llm` | `transformers`, `mlx-lm`, `responses-api`, `chat-completions` | None of the built-in LLM backends |
+| `llm_ttft` | streaming `responses-api`, streaming `chat-completions` | `transformers`, `mlx-lm`, and non-streaming remote requests |
 | `tts_ttfa`, `e2e` | `qwen3`, `openai` | `chatTTS`, `facebookMMS`, `omnivoice`, `pocket`, `kokoro`, `supertonic` |
 
 `--stt none` deliberately has no STT measurement. Any field is also `n/a`
@@ -47,9 +48,12 @@ the existing MLX lock and remains zero for other backends.
   starts when the final request worker begins and ends before its result is
   published. For Realtime STT, it starts when the final VAD commit is queued
   and ends when the provider's final transcript is received.
-- `llm` covers generation, from serialization and provider request through
-  consumption of the provider output. It is recorded even when the request
-  fails after starting. It is not time to first token.
+- `llm_ttft` starts before serialization and ends at the first non-whitespace
+  provider `TextDelta`. Protocol-only stream events do not complete it. This is
+  distinct from the first sentence batch released to TTS. `llm` covers full
+  generation, from serialization and provider request through consumption of
+  the provider output. It is recorded even when the request fails after
+  starting.
 - `tts_ttfa` starts when synthesis of the first text segment begins and ends
   when the first provider audio samples arrive. For HTTP TTS, WAV headers are
   excluded, and resampling and output block assembly happen afterward.
