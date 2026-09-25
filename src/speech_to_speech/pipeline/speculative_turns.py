@@ -260,6 +260,11 @@ class SpeculativeTurnTracker:
                 self._closed_current = committed
             self._condition.notify_all()
 
+    def is_current_turn(self, turn_id: str | None) -> bool:
+        """Return whether *turn_id* is the conversation's current turn at any revision."""
+        with self._condition:
+            return self._current is not None and self._current.turn_id == turn_id
+
     def is_committed(self, turn_id: str | None, revision: int | None = None) -> bool:
         if turn_id is None:
             return False
