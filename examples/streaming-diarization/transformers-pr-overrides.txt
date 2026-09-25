@@ -1,0 +1,2 @@
+# Until a Transformers release includes PR #49056. Use the merged commit with the model's main branch.
+transformers @ git+https://github.com/huggingface/transformers.git@8f080cb5aa480f794283c6e8618f917cc9a6506d

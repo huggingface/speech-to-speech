@@ -676,6 +676,8 @@ class RealtimeService:
 
         cfg = st.runtime_config
         transcript = event.transcript
+        if event.speaker_attribution is not None:
+            transcript = event.speaker_attribution.for_llm(transcript)
         if transcript:
             if same_speculative_turn and st.speculative_user_item_id:
                 replaced = cfg.chat.replace_user_message_text(st.speculative_user_item_id, transcript)

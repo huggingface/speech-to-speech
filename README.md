@@ -245,6 +245,12 @@ This installs the package in editable mode. With the environment activated, use 
 | TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | built-in |
 | TTS | OpenAI-compatible `/v1/audio/speech` endpoint | local or remote HTTP server | built-in |
 
+Optional [streaming speaker diarization](./examples/streaming-diarization/README.md)
+adds speaker labels to transcribed turns. Enable it with `--diarization` after
+installing the supporting Transformers build; the linked guide has the current
+model revision and setup while the merged [Transformers PR #49056](https://github.com/huggingface/transformers/pull/49056)
+is awaiting a package release.
+
 Select implementations with `--stt`, `--llm_backend`, and `--tts`. The CLI constructs configuration only for the selected backends; known options for inactive backends remain accepted for compatibility but are ignored with a warning. JSON configuration may likewise include extra inactive-backend keys, which are ignored. Run `speech-to-speech serve -h` for the defaults, or pass selectors before `-h` to see another combination's backend-specific flags (for example, `speech-to-speech serve --stt mlx-audio-whisper -h`).
 
 For client-only TTS serving with vLLM-Omni or another compatible server, see

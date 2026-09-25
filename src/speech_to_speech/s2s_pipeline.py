@@ -87,6 +87,7 @@ def _mac_preset_defaults(llm_backend: str) -> dict[str, Any]:
         "llm_backend": "mlx-lm",
         "tts": "qwen3",
         "stt_device": "mps",
+        "diarization_device": "mps",
         "paraformer_stt_device": "mps",
         "facebook_mms_device": "mps",
         "qwen3_tts_device": "mps",
@@ -199,7 +200,7 @@ def parse_arguments(
         _tts_name = pipeline_json.get("tts") or module_defaults.tts
     else:
         _pre = argparse.ArgumentParser(prog=f"speech-to-speech {command}", add_help=False)
-        _pre.add_argument("--mac-optimal-settings", action="store_true")
+        _pre.add_argument("--mac-optimal-settings", "--mac_optimal_settings", action="store_true")
         _pre.add_argument("--stt", choices=tuple(STT_BACKENDS))
         _pre.add_argument("--llm_backend", "--llm-backend", choices=tuple(LLM_BACKENDS))
         _pre.add_argument("--tts", choices=tuple(TTS_BACKENDS))
@@ -242,8 +243,6 @@ def parse_arguments(
         ]
     )
     parser = HfArgumentParser(tuple(argument_classes), prog=f"speech-to-speech {command}")  # type: ignore[arg-type]
-    mac_action = parser._option_string_actions.pop("--mac_optimal_settings")
-    mac_action.option_strings = [option for option in mac_action.option_strings if option != "--mac_optimal_settings"]
     if _mac_preset_enabled:
         parser.set_defaults(**_mac_preset_defaults(_llm_name))
 
@@ -265,6 +264,8 @@ def parse_arguments(
         )
 
     module_kwargs = by_type[ModuleArguments]
+    if module_kwargs.diarization and module_kwargs.diarization_model_name is None:
+        module_kwargs.diarization_model_name = "nvidia/Nemotron-3-Diarization"
     module_kwargs.stt = _stt_name
     module_kwargs.llm_backend = _llm_name
     module_kwargs.tts = _tts_name
@@ -323,6 +324,10 @@ def check_mac_settings(module_kwargs: ModuleArguments) -> None:
 
 
 def prepare_module_args(module_kwargs: ModuleArguments, llm_backend: BackendSelection) -> None:
+    if module_kwargs.diarization_model_name and module_kwargs.stt == "none":
+        raise ValueError("Speaker-aware conversation requires an STT backend; --stt none does not produce transcripts.")
+    if module_kwargs.diarization_model_name and not 0 < module_kwargs.diarization_threshold < 1:
+        raise ValueError("--diarization_threshold must be between 0 and 1.")
     if module_kwargs.tts is None:
         module_kwargs.tts = "qwen3"
     if module_kwargs.stt == "none" and not llm_backend.spec.capabilities.supports_audio_input:
@@ -390,6 +395,30 @@ def _build_handlers(
             "speculative_turns": speculative_turns,
         },
     )
+
+    side_handlers: list[Any] = []
+    if module_kwargs.diarization_model_name:
+        from speech_to_speech.diarization import StreamingDiarizer
+        from speech_to_speech.diarization.worker import DiarizationWorker
+
+        diarizer = StreamingDiarizer.from_pretrained(
+            module_kwargs.diarization_model_name,
+            revision=module_kwargs.diarization_revision,
+            device=module_kwargs.device or module_kwargs.diarization_device,
+            dtype=module_kwargs.diarization_dtype,
+            streaming_mode=module_kwargs.diarization_streaming_mode,
+            threshold=module_kwargs.diarization_threshold,
+        )
+        if diarizer.sample_rate != vad_handler_kwargs.sample_rate:
+            raise ValueError("Diarization and VAD must use the same audio sample rate.")
+        diarizer.warmup()
+        logger.info(
+            "Diarization ready: device=%s mode=%s; speaker labels will accompany completed transcriptions",
+            module_kwargs.device or module_kwargs.diarization_device,
+            module_kwargs.diarization_streaming_mode,
+        )
+        vad.diarization_worker = DiarizationWorker(diarizer, stop_event)
+        side_handlers.append(vad.diarization_worker)
 
     needs_notifier = not stt_backend.spec.capabilities.bypasses_transcription_notifier
     stt_queue_out: Queue[Any] = stt_output_queue if needs_notifier else text_prompt_queue
@@ -459,7 +488,7 @@ def _build_handlers(
         tts_context,
     )
 
-    return [vad, *speech_input_handlers, lm, lm_processor, tts]
+    return [vad, *side_handlers, *speech_input_handlers, lm, lm_processor, tts]
 
 
 def _build_pipeline_unit(
