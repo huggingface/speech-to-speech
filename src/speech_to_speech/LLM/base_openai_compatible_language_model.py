@@ -173,14 +173,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
         compact_history: bool = False,
-        audio_max_tokens: int = 256,
-        audio_temperature: float = 0.0,
-        audio_content_type: Literal["input_audio", "audio_url"] = "input_audio",
-        audio_history_turns: int = 1,
+        vision_resolver: Any = None,
         **_kwargs: Any,
     ) -> None:
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
+        self.vision_resolver = vision_resolver
         self.model_name = model_name
         self.stream = stream
         self.stream_batch_sentences = max(1, stream_batch_sentences)
@@ -1065,16 +1063,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return
 
         original_chat = runtime_config.chat
-        history_anchor_id = original_chat.history_anchor_id()
-        if not is_out_of_band(response) and original_chat.has_pending_tool_calls():
-            yield EndOfResponse(
-                turn_id=turn_id,
-                turn_revision=turn_revision,
-                cancel_generation=gen,
-                response_key=request.response_key,
-                error="Cannot generate a response while function call outputs are pending.",
-            )
-            return
+        if getattr(self, "vision_resolver", None) is not None:
+            original_chat.resolve_images(self.vision_resolver, cancel_scope=self.cancel_scope)
         if is_out_of_band(response):
             try:
                 active_chat = build_active_chat(original_chat, response)
@@ -1100,7 +1090,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         ) or ""
         req_tools = (
             response.tools if response is not None and response.tools is not None else runtime_config.session.tools
-        )
+      )
         req_tool_choice = (
             response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
         )
