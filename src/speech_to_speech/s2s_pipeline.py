@@ -51,6 +51,7 @@ from speech_to_speech.pipeline.transcript_logging import (
     set_log_transcripts,
     warn_if_log_transcripts_enabled,
 )
+from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.utils.thread_manager import ThreadManager
 from speech_to_speech.VAD.vad_handler import VADHandler
@@ -489,6 +490,7 @@ def _build_pipeline_unit(
     response_playing = Event()
     cancel_scope = CancelScope()
     speculative_turns = SpeculativeTurnTracker()
+    turn_latency_store = TurnLatencyStore()
     recv_audio_chunks_queue: Queue[AudioInItem] = Queue()
     send_audio_chunks_queue: Queue[AudioOutItem] = Queue()
     spoken_prompt_queue: Queue[VADOutItem] = Queue()
@@ -506,6 +508,7 @@ def _build_pipeline_unit(
         should_listen=should_listen,
         chat_size=chat_size,
         speculative_turns=speculative_turns,
+        turn_latency_store=turn_latency_store,
         default_instructions=default_instructions,
     )
 
@@ -535,6 +538,7 @@ def _build_pipeline_unit(
     )
     for h in handlers:
         h.pipeline_index = index
+        h.turn_latency_store = turn_latency_store
 
     return PipelineUnit(
         index=index,

@@ -20,6 +20,10 @@ def _run_node(script: str) -> None:
     )
 
 
+def test_websocket_playback_buffer():
+    _run_node('await import("./demo/tests/playback.test.mjs");')
+
+
 def test_adapter_uses_stock_sdk_transport_for_each_mode():
     _run_node(
         """
@@ -159,9 +163,9 @@ const good = await setupAudio({
   kind: "capture-config",
   inputRate: 48000,
   outputRate: 24000,
-  version: "audio-24k-v1",
+  version: "audio-24k-v2",
 });
-if (good.modules.length !== 2 || good.modules.some((url) => !url.endsWith("?v=audio-24k-v1"))) {
+if (good.modules.length !== 2 || good.modules.some((url) => !url.endsWith("?v=audio-24k-v2"))) {
   throw new Error(`audio worklets were not versioned: ${JSON.stringify(good.modules)}`);
 }
 const capture = good.nodes.find((node) => node.name === "mic-capture");
