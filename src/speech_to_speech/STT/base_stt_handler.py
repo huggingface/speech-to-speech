@@ -218,6 +218,19 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
         while len(completed) > self._MAX_COMPLETED_FINAL_REVISIONS:
             completed.popitem(last=False)
 
+    @staticmethod
+    def canonical_language(language: Any) -> Any:
+        """Canonicalize the ``auto`` sentinel so every backend spells it the same way.
+
+        Handlers compare against the literal ``"auto"``, so ``--language AUTO`` otherwise
+        reaches the model as a language name: transformers Whisper rejects it with
+        ``ValueError: Unsupported language: auto``. Only the sentinel is normalized; real
+        codes are passed through untouched for the model to validate.
+        """
+        if isinstance(language, str) and language.strip().lower() == "auto":
+            return "auto"
+        return language
+
     def reset_session_language(self) -> None:
         """Drop the language detected for the finished conversation.
 
