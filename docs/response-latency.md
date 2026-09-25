@@ -1,0 +1,45 @@
+# Response latency logs
+
+The server writes one INFO record when a Realtime response finishes. The record
+includes its turn, revision, response key, terminal status, and available stage
+durations:
+
+```text
+Turn turn_3 rev=0 latency: stt=0.18s llm=1.24s tts_ttfa=0.12s e2e=1.61s mlx_lock_wait=0.00s status=completed response_key=...
+```
+
+The same record is available with `speech-to-speech local` and
+`speech-to-speech serve`. It is a server log, not a Realtime protocol event.
+`response_key` distinguishes a tool call from its spoken follow-up; both can
+belong to the same turn and revision. A follow-up does not repeat the original
+STT duration.
+
+| Stage | Backends with a measured field | Backends with `n/a` pending coverage |
+| --- | --- | --- |
+| `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime` | `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper`, `parakeet-unified`, `paraformer`, `qwen3-asr` |
+| `llm` | `transformers`, `mlx-lm`, `responses-api`, `chat-completions` | None of the built-in LLM backends |
+| `tts_ttfa`, `e2e` | `qwen3`, `openai` | `chatTTS`, `facebookMMS`, `omnivoice`, `pocket`, `kokoro`, `supertonic` |
+
+`--stt none` deliberately has no STT measurement. Any field is also `n/a`
+when its stage did not run, produced no audio, or its measurement was unavailable.
+An abandoned response has no terminal record. `mlx_lock_wait` only measures
+the existing MLX lock and remains zero for other backends.
+
+- `stt` covers final transcription processing only. Repeated progressive HTTP
+  transcriptions and Realtime partial deltas are excluded. For HTTP STT, it
+  starts when the final request worker begins and ends before its result is
+  published. For Realtime STT, it starts when the final VAD commit is queued
+  and ends when the provider's final transcript is received.
+- `llm` covers generation, from serialization and provider request through
+  consumption of the provider output. It is recorded even when the request
+  fails after starting. It is not time to first token.
+- `tts_ttfa` starts when synthesis of the first text segment begins and ends
+  when the first provider audio samples arrive. For HTTP TTS, WAV headers are
+  excluded, and resampling and output block assembly happen afterward.
+- `e2e` runs from the speech-stop timestamp to the first audio block yielded
+  by TTS. It does not include client buffering or playback. Later text
+  segments cannot replace the first-audio measurements.
+
+Remote timings are measured by this server. They include network transfer and
+provider waits within the operation, so they are not provider-only inference
+times. Stages can overlap; these fields are not an additive breakdown.

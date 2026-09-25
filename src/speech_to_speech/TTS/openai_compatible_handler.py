@@ -499,6 +499,15 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         first_audio = True
         started_at_s = perf_counter()
         operation: HttpSpeechOperation | None = None
+
+        def record_first_provider_audio() -> None:
+            if cancel_check():
+                return
+            store = getattr(self, "turn_latency_store", None)
+            tracker = store.get_response(tts_input.response_key) if store else None
+            if tracker is not None:
+                tracker.record_tts_ttfa(perf_counter() - started_at_s)
+
         try:
             voice = self._resolve_voice(tts_input.runtime_config, tts_input.response)
             operation = self._make_operation(text=text, voice=voice)
@@ -506,9 +515,9 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 self._active_operation = operation
             source_chunks = operation.iter_bytes(cancel_check)
             decoded_chunks = (
-                self._decode_pcm_stream(source_chunks)
+                self._decode_pcm_stream(source_chunks, on_first_source_audio=record_first_provider_audio)
                 if self.response_format == "pcm"
-                else self._decode_wav_stream(source_chunks)
+                else self._decode_wav_stream(source_chunks, on_first_source_audio=record_first_provider_audio)
             )
             for chunk in decoded_chunks:
                 if cancel_check():
@@ -631,7 +640,9 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             return {"id": voice_id}
         raise ValueError("Realtime voice overrides must be a voice name or custom voice ID")
 
-    def _decode_pcm_stream(self, encoded_chunks: Iterator[bytes]) -> Iterator[np.ndarray]:
+    def _decode_pcm_stream(
+        self, encoded_chunks: Iterator[bytes], *, on_first_source_audio: Callable[[], None] | None = None
+    ) -> Iterator[np.ndarray]:
         byte_remainder = b""
 
         def sample_chunks() -> Iterator[np.ndarray]:
@@ -647,9 +658,11 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 # discard it with a warning instead of failing the whole response.
                 logger.warning("Speech endpoint returned an incomplete PCM16 sample")
 
-        yield from self._resample_to_blocks(sample_chunks(), self.sample_rate)
+        yield from self._resample_to_blocks(sample_chunks(), self.sample_rate, on_first_source_audio)
 
-    def _decode_wav_stream(self, encoded_chunks: Iterator[bytes]) -> Iterator[np.ndarray]:
+    def _decode_wav_stream(
+        self, encoded_chunks: Iterator[bytes], *, on_first_source_audio: Callable[[], None] | None = None
+    ) -> Iterator[np.ndarray]:
         stream = _StreamingByteReader(encoded_chunks)
         try:
             wav_reader = wave.open(cast(Any, stream), "rb")
@@ -679,7 +692,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 if byte_remainder:
                     logger.warning("Speech endpoint returned an incomplete WAV audio frame")
 
-            yield from self._resample_to_blocks(sample_chunks(), sample_rate)
+            yield from self._resample_to_blocks(sample_chunks(), sample_rate, on_first_source_audio)
         except wave.Error as exc:
             raise SpeechRequestError("speech endpoint returned an invalid WAV stream") from exc
         finally:
@@ -705,10 +718,14 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self,
         sample_chunks: Iterator[np.ndarray],
         source_rate: int,
+        on_first_source_audio: Callable[[], None] | None = None,
     ) -> Iterator[np.ndarray]:
         resampler = _StreamingFIRResampler(source_rate, PIPELINE_SAMPLE_RATE)
         sample_remainder = np.empty(0, dtype=np.int16)
         for samples in sample_chunks:
+            if on_first_source_audio is not None and samples.size:
+                on_first_source_audio()
+                on_first_source_audio = None
             converted = resampler.push(samples)
             sample_remainder = np.concatenate((sample_remainder, converted))
             while sample_remainder.size >= self.blocksize:
@@ -726,9 +743,14 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def _log_first_audio_latency(self, tts_input: TTSInput, request_started_at_s: float) -> None:
         logger.info("OpenAI-compatible TTS time to first audio: %.3fs", perf_counter() - request_started_at_s)
         if tts_input.speech_stopped_at_s is not None:
+            latency_s = max(0.0, perf_counter() - tts_input.speech_stopped_at_s)
+            store = getattr(self, "turn_latency_store", None)
+            tracker = store.get_response(tts_input.response_key) if store else None
+            if tracker is not None:
+                tracker.record_e2e(latency_s)
             logger.info(
                 "Last speech detected to first speech out: %.3fs (turn=%s rev=%s)",
-                max(0.0, perf_counter() - tts_input.speech_stopped_at_s),
+                latency_s,
                 tts_input.turn_id,
                 tts_input.turn_revision,
             )
