@@ -8,6 +8,7 @@ from threading import Lock
 from typing import Literal
 
 TurnLatencyStatus = Literal["completed", "cancelled", "failed", "incomplete"]
+TURN_LATENCY_METADATA_KEY = "speech_to_speech.turn_latency"
 
 _active_tracker: ContextVar[TurnLatencyTracker | None] = ContextVar(
     "active_turn_latency_tracker",
@@ -63,6 +64,26 @@ class TurnLatencyTracker:
     def record_mlx_lock_wait(self, seconds: float) -> None:
         if seconds > 0.0:
             self.mlx_lock_wait_s += max(0.0, seconds)
+
+    def metadata_payload(
+        self,
+        *,
+        response_key: str,
+        status: TurnLatencyStatus,
+    ) -> dict[str, float | int | str | None]:
+        """Return the unrounded terminal measurement carried by ``response.done``."""
+        return {
+            "version": 1,
+            "turn_id": self.turn_id,
+            "turn_revision": 0 if self.turn_revision is None else self.turn_revision,
+            "response_key": response_key,
+            "stt_s": self.stt_s,
+            "llm_s": self.llm_s,
+            "tts_ttfa_s": self.tts_ttfa_s,
+            "e2e_s": self.e2e_s,
+            "mlx_lock_wait_s": self.mlx_lock_wait_s,
+            "status": status,
+        }
 
     def absorb_pending(self, pending: TurnLatencyTracker) -> None:
         if pending.stt_s is not None:
