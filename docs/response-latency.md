@@ -9,7 +9,7 @@ Turn turn_3 rev=0 latency: stt=0.18s llm=1.24s tts_ttfa=0.12s e2e=1.61s mlx_lock
 ```
 
 The same record is available with `speech-to-speech local` and
-`speech-to-speech serve`. It is a server log, not a Realtime protocol event.
+`speech-to-speech serve`.
 `response_key` distinguishes a tool call from its spoken follow-up; both can
 belong to the same turn and revision. A follow-up does not repeat the original
 STT duration.
@@ -24,10 +24,12 @@ metadata values are strings, so the value is compact JSON with this schema:
 
 Durations are raw seconds and are not rounded to the two decimal places used in
 the human-readable log. Unavailable measurements are JSON `null`. Existing
-client metadata is preserved, except that the reserved latency key is always
-replaced by the server measurement. `response.created` continues to carry only
-the client-supplied metadata; the latency key appears only on terminal responses
-with an attributed turn.
+client metadata is preserved, except that terminal responses remove any
+client-supplied reserved latency key before adding the server measurement.
+The measurement is omitted when no attributed turn exists or when all 16
+Realtime metadata slots are occupied by other client keys. `response.created`
+continues to carry the client-supplied metadata unchanged; server measurements
+are added only to terminal responses.
 
 | Stage | Backends with a measured field | Backends with `n/a` pending coverage |
 | --- | --- | --- |

@@ -2336,6 +2336,50 @@ class TestFinishAudioResponse:
             "status": status,
         }
 
+    @pytest.mark.parametrize("client_count,reserved", [(15, False), (16, False), (15, True)])
+    def test_terminal_latency_respects_metadata_capacity(self, service, conn_id, client_count, reserved):
+        metadata = {f"client-{index}": "value" for index in range(client_count)}
+        if reserved:
+            metadata[TURN_LATENCY_METADATA_KEY] = "client-value-must-not-win"
+        service._state(conn_id).speculative_user_turn_id = "turn_1"
+        created = service.handle_response_create(
+            conn_id, ResponseCreateEvent(type="response.create", response={"metadata": metadata})
+        )
+        assert created.response.metadata == metadata
+
+        events = service.finish_response(conn_id)
+        done = next(event for event in events if isinstance(event, ResponseDoneEvent))
+        wire_metadata = json.loads(done.model_dump_json())["response"]["metadata"]
+        assert len(wire_metadata) == 16
+        assert {key: value for key, value in wire_metadata.items() if key != TURN_LATENCY_METADATA_KEY} == {
+            f"client-{index}": "value" for index in range(client_count)
+        }
+        if client_count < 16:
+            assert json.loads(wire_metadata[TURN_LATENCY_METADATA_KEY])["turn_id"] == "turn_1"
+        else:
+            assert TURN_LATENCY_METADATA_KEY not in wire_metadata
+        assert created.response.metadata == metadata
+        assert service.turn_latency_store._trackers == {}
+
+    @pytest.mark.parametrize("status", ["completed", "cancelled", "failed", "incomplete"])
+    @pytest.mark.parametrize("conversation", ["auto", "none"])
+    @pytest.mark.parametrize("client_metadata", [{}, {"client-key": "client-value"}])
+    def test_unattributed_terminal_drops_client_latency_metadata(
+        self, service, conn_id, status, conversation, client_metadata
+    ):
+        metadata = {**client_metadata, TURN_LATENCY_METADATA_KEY: '{"version":1,"e2e_s":999}'}
+        created = service.handle_response_create(
+            conn_id,
+            ResponseCreateEvent(type="response.create", response={"metadata": metadata, "conversation": conversation}),
+        )
+        assert created.response.metadata == metadata
+
+        events = service.finish_response(conn_id, status=status)
+        done = next(event for event in events if isinstance(event, ResponseDoneEvent))
+        assert json.loads(done.model_dump_json())["response"]["metadata"] == (client_metadata or None)
+        assert created.response.metadata == metadata
+        assert service.turn_latency_store._trackers == {}
+
     def test_finish_resets_state(self, service, conn_id):
         from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 

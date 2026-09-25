@@ -465,7 +465,10 @@ class ResponseHandler(RealtimeBaseHandler):
 
         rp = st.current_response_params
         metadata = dict(rp.metadata) if rp and rp.metadata else {}
-        if status != "in_progress" and st.current_response_key is not None:
+        if status != "in_progress":
+            # Terminal latency metadata is server-owned, even when no measurement exists.
+            metadata.pop(TURN_LATENCY_METADATA_KEY, None)
+        if status != "in_progress" and st.current_response_key is not None and len(metadata) < 16:
             tracker = self._service.turn_latency_store.get_response(st.current_response_key)
             if tracker is not None and tracker.turn_id is not None:
                 metadata[TURN_LATENCY_METADATA_KEY] = json.dumps(
