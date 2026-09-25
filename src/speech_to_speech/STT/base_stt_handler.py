@@ -71,6 +71,11 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             return False
 
         if not self._is_latest_turn_item(output, wait_for_pending_reopen=True, wait_for_stability=False):
+            if isinstance(output, Transcription):
+                # Rejected output never reaches the service's final-STT cleanup.
+                store = getattr(self, "turn_latency_store", None)
+                if store is not None:
+                    store.discard_pending_turn(output.turn_id, output.turn_revision)
             self._log_stale_turn_item(output, "output")
             return False
         return True

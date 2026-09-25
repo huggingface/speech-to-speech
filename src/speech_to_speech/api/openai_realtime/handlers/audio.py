@@ -20,7 +20,7 @@ from speech_to_speech.api.openai_realtime.input_state import (
     InputTranscriptionTerminal,
     PendingInputTerminal,
 )
-from speech_to_speech.api.openai_realtime.utils import resample
+from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler, resample
 from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
 
 if TYPE_CHECKING:
@@ -440,7 +440,17 @@ class AudioHandler(RealtimeBaseHandler):
                 client_out_rate = getattr(audio_cfg.output.format, "rate", None) or PIPELINE_SAMPLE_RATE
             else:
                 client_out_rate = PIPELINE_SAMPLE_RATE
-        audio = resample(audio, PIPELINE_SAMPLE_RATE, client_out_rate)
+        if client_out_rate != PIPELINE_SAMPLE_RATE:
+            resampler_key = (resp_id, assistant_item_id, client_out_rate)
+            if st.output_audio_resampler_key != resampler_key:
+                st.output_audio_resampler = StreamingPcm16Resampler(PIPELINE_SAMPLE_RATE, client_out_rate)
+                st.output_audio_resampler_key = resampler_key
+            audio = st.output_audio_resampler.push(audio)
+        else:
+            st.output_audio_resampler = None
+            st.output_audio_resampler_key = None
+        if not audio:
+            return events
         b64 = base64.b64encode(audio).decode("ascii")
         events.append(
             ResponseAudioDeltaEvent(

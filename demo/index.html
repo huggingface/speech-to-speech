@@ -291,6 +291,15 @@
               </small>
             </label>
 
+            <label class="field" id="playback-buffer-field">
+              <span>Playback startup buffer (ms)</span>
+              <input id="playback-buffer-ms" type="number" min="0" step="any" aria-describedby="playback-buffer-hint" />
+              <small id="playback-buffer-hint">
+                WebSocket only. 0 starts immediately; larger values delay playback to absorb delivery gaps.
+                Applies on the next conversation.
+              </small>
+            </label>
+
             <!-- WS-only: the gate runs in the WebSocket capture worklet; the
                  WebRTC mic path sends the raw track, so this hides there. -->
             <div class="field" id="gate-field">
@@ -404,6 +413,6 @@
     </dialog>
 
     <script src="vendor/openai-realtime-agents.umd.js"></script>
-    <script type="module" src="main.js?v=audio-24k-v1"></script>
+    <script type="module" src="main.js?v=audio-24k-v2"></script>
   </body>
 </html>
