@@ -59,6 +59,12 @@ class StreamingPcm16Resampler:
         # output at the duration of real input, excluding this padding.
         return self._filter(np.zeros(self._delay + self._down, dtype=np.float64))
 
+    @property
+    def pending_output_samples(self) -> int:
+        """Output samples withheld until the input stream is finished."""
+        target = (self._input_samples * self.to_rate + self.from_rate - 1) // self.from_rate
+        return max(0, target - self._output_samples)
+
     def _filter(self, upsampled: np.ndarray) -> bytes:
         filtered, self._filter_state = lfilter(
             self._taps,

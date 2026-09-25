@@ -1010,12 +1010,14 @@ class TestDeferConversationItemsDuringResponse:
 class TestHandleAudioCommit:
     def test_commit_after_audio(self, service, conn_id):
         service._state(conn_id).audio_buffer_has_data = True
-        err = service.handle_audio_commit(conn_id)
+        chunks, err = service.handle_audio_commit(conn_id)
+        assert chunks == []
         assert err is None
         assert service._state(conn_id).audio_buffer_has_data is False
 
     def test_commit_empty_buffer(self, service, conn_id):
-        err = service.handle_audio_commit(conn_id)
+        chunks, err = service.handle_audio_commit(conn_id)
+        assert chunks == []
         assert isinstance(err, RealtimeErrorEvent)
         assert err.error.type == "input_audio_buffer_commit_empty"
 

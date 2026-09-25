@@ -296,17 +296,31 @@ class AudioHandler(RealtimeBaseHandler):
             st.audio_buffer_has_data = True
         return chunks
 
-    def handle_audio_commit(self, conn_id: str) -> RealtimeErrorEvent | None:
-        """Commit the audio buffer. Returns an error if no audio was appended."""
+    def handle_audio_commit(self, conn_id: str) -> tuple[list[bytes], RealtimeErrorEvent | None]:
+        """Finish resampling before committing the buffered input audio."""
         st = self._state(conn_id)
-        if not st.audio_buffer_has_data:
-            return self.make_error(
+        resampler = st.input_audio_resampler
+        pending_samples = resampler.pending_output_samples if resampler is not None else 0
+        if (
+            not st.audio_buffer_has_data
+            and len(st.audio_remainder) + pending_samples * BYTES_PER_SAMPLE < CHUNK_SIZE_BYTES
+        ):
+            return [], self.make_error(
                 message="Input audio buffer is empty, nothing to commit.",
                 _type="input_audio_buffer_commit_empty",
             )
+
+        chunks = self.append_pcm(conn_id, resampler.flush(), PIPELINE_SAMPLE_RATE) if resampler is not None else []
+        if not st.audio_buffer_has_data:
+            return chunks, self.make_error(
+                message="Input audio buffer is empty, nothing to commit.",
+                _type="input_audio_buffer_commit_empty",
+            )
+        st.input_audio_resampler = None
+        st.input_audio_resampler_rate = None
         st.audio_buffer_has_data = False
         logger.debug("Audio buffer committed")
-        return None
+        return chunks, None
 
     # ── Pipeline event handlers ────────────────────
 

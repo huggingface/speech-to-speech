@@ -431,7 +431,10 @@ async def _dispatch_client_event(
             unit.input_queue.put((chunk, rt_cfg))
 
     elif isinstance(event, InputAudioBufferCommitEvent):
-        err = service.handle_audio_commit(session_id)
+        chunks, err = service.handle_audio_commit(session_id)
+        rt_cfg = service._state(session_id).runtime_config
+        for chunk in chunks:
+            unit.input_queue.put((chunk, rt_cfg))
         if err:
             await send_correlated([err])
 
