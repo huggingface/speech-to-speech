@@ -47,6 +47,13 @@ class TurnLatencyTracker:
     llm_s: float | None = None
     tts_ttfa_s: float | None = None
     e2e_s: float | None = None
+    vad_decision_s: float | None = None
+    smart_turn_analysis_s: float | None = None
+    smart_turn_status: Literal["disabled", "complete", "incomplete", "failed"] | None = None
+    smart_turn_grace_s: float | None = None
+    smart_turn_processing_delay_s: float | None = None
+    smart_turn_wait_s: float | None = None
+    _smart_wait_intervals: list[tuple[float, float]] | None = None
     mlx_lock_wait_s: float = 0.0
     status: TurnLatencyStatus = "completed"
 
@@ -72,13 +79,33 @@ class TurnLatencyTracker:
         if seconds > 0.0:
             self.mlx_lock_wait_s += max(0.0, seconds)
 
+    def record_smart_wait(self, started_at_s: float, ended_at_s: float) -> None:
+        """Count the union of actual gate waits, since workers can wait together."""
+        if self.smart_turn_status not in ("complete", "incomplete", "failed") or ended_at_s <= started_at_s:
+            return
+        intervals = self._smart_wait_intervals or []
+        intervals.append((started_at_s, ended_at_s))
+        intervals.sort()
+        merged: list[tuple[float, float]] = []
+        for start, end in intervals:
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        self._smart_wait_intervals = merged
+        self.smart_turn_wait_s = sum(end - start for start, end in merged)
+
     def metadata_payload(
         self,
         *,
         response_key: str,
         status: TurnLatencyStatus,
     ) -> dict[str, float | int | str | None]:
-        """Return the unrounded terminal measurement carried by ``response.done``."""
+        """Return terminal measurements; new fields use nanosecond precision."""
+
+        def compact(seconds: float | None) -> float | None:
+            return None if seconds is None else round(seconds, 9)
+
         return {
             "version": 1,
             "turn_id": self.turn_id,
@@ -89,6 +116,12 @@ class TurnLatencyTracker:
             "llm_s": self.llm_s,
             "tts_ttfa_s": self.tts_ttfa_s,
             "e2e_s": self.e2e_s,
+            "vad_decision_s": compact(self.vad_decision_s),
+            "smart_analysis_s": compact(self.smart_turn_analysis_s),
+            "smart_status": self.smart_turn_status,
+            "smart_grace_s": compact(self.smart_turn_grace_s),
+            "smart_delay_s": compact(self.smart_turn_processing_delay_s),
+            "smart_wait_s": compact(self.smart_turn_wait_s),
             "mlx_lock_wait_s": self.mlx_lock_wait_s,
             "status": status,
         }
@@ -97,6 +130,13 @@ class TurnLatencyTracker:
         if pending.stt_s is not None:
             self.stt_s = pending.stt_s
         self.mlx_lock_wait_s += pending.mlx_lock_wait_s
+        self.vad_decision_s = pending.vad_decision_s
+        self.smart_turn_analysis_s = pending.smart_turn_analysis_s
+        self.smart_turn_status = pending.smart_turn_status
+        self.smart_turn_grace_s = pending.smart_turn_grace_s
+        self.smart_turn_processing_delay_s = pending.smart_turn_processing_delay_s
+        self.smart_turn_wait_s = pending.smart_turn_wait_s
+        self._smart_wait_intervals = pending._smart_wait_intervals
 
     @staticmethod
     def _fmt(seconds: float | None) -> str:
@@ -113,6 +153,10 @@ class TurnLatencyTracker:
             f"stt={self._fmt(self.stt_s)} llm_ttft={self._fmt(self.llm_ttft_s)} "
             f"llm={self._fmt(self.llm_s)} "
             f"tts_ttfa={self._fmt(self.tts_ttfa_s)} e2e={self._fmt(self.e2e_s)} "
+            f"vad_decision={self._fmt(self.vad_decision_s)} "
+            f"smart_turn_analysis={self._fmt(self.smart_turn_analysis_s)} "
+            f"smart_turn_wait={self._fmt(self.smart_turn_wait_s)} "
+            f"smart_turn_status={self.smart_turn_status or 'n/a'} "
             f"mlx_lock_wait={self.mlx_lock_wait_s:.2f}s status={self.status}"
         )
 
@@ -138,6 +182,7 @@ class TurnLatencyStore:
         self._lock = Lock()
         self._trackers: dict[str, TurnLatencyTracker] = {}
         self._pending_turn: dict[tuple[str, int], TurnLatencyTracker] = {}
+        self._turn_responses: dict[tuple[str, int], str] = {}
         self._session_keys: dict[str, set[str]] = defaultdict(set)
 
     @property
@@ -196,6 +241,7 @@ class TurnLatencyStore:
                 if session_id is not None:
                     self._session_keys[session_id].add(response_key)
                 if turn_id is not None:
+                    self._turn_responses.setdefault(self._turn_key(turn_id, turn_revision), response_key)
                     pending = self._pending_turn.pop(self._turn_key(turn_id, turn_revision), None)
                     if pending is not None:
                         tracker.absorb_pending(pending)
@@ -206,6 +252,18 @@ class TurnLatencyStore:
                 tracker.turn_id = turn_id
                 tracker.turn_revision = turn_revision
             return tracker
+
+    def record_smart_wait(
+        self, turn_id: str | None, turn_revision: int | None, started_at_s: float, ended_at_s: float
+    ) -> None:
+        if turn_id is None:
+            return
+        with self._lock:
+            key = self._turn_key(turn_id, turn_revision)
+            response_key = self._turn_responses.get(key)
+            tracker = self._trackers.get(response_key) if response_key is not None else self._pending_turn.get(key)
+            if tracker is not None:
+                tracker.record_smart_wait(started_at_s, ended_at_s)
 
     def get_response(self, response_key: str | None) -> TurnLatencyTracker | None:
         """Look up an existing response without reviving cancelled measurements."""
@@ -219,6 +277,10 @@ class TurnLatencyStore:
             return None
         with self._lock:
             tracker = self._trackers.pop(response_key, None)
+            if tracker is not None and tracker.turn_id is not None:
+                key = self._turn_key(tracker.turn_id, tracker.turn_revision)
+                if self._turn_responses.get(key) == response_key:
+                    self._turn_responses.pop(key, None)
             if session_id is not None:
                 self._detach_response_from_session(session_id, response_key)
             return tracker
@@ -229,6 +291,10 @@ class TurnLatencyStore:
     def clear_session(self, session_id: str) -> None:
         with self._lock:
             for response_key in self._session_keys.pop(session_id, set()):
-                self._trackers.pop(response_key, None)
+                tracker = self._trackers.pop(response_key, None)
+                if tracker is not None and tracker.turn_id is not None:
+                    key = self._turn_key(tracker.turn_id, tracker.turn_revision)
+                    if self._turn_responses.get(key) == response_key:
+                        self._turn_responses.pop(key, None)
             if not self._session_keys:
                 self._pending_turn.clear()

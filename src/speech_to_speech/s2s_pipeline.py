@@ -491,6 +491,7 @@ def _build_pipeline_unit(
     cancel_scope = CancelScope()
     speculative_turns = SpeculativeTurnTracker()
     turn_latency_store = TurnLatencyStore()
+    speculative_turns.wait_observer = turn_latency_store.record_smart_wait
     recv_audio_chunks_queue: Queue[AudioInItem] = Queue()
     send_audio_chunks_queue: Queue[AudioOutItem] = Queue()
     spoken_prompt_queue: Queue[VADOutItem] = Queue()

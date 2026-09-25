@@ -27,7 +27,8 @@ protocol implementation.
 ## Response timings
 
 Open Conversation and expand **Server timings** beneath a response to inspect
-transcription, full response generation, first voice audio, speech-end-to-first-audio,
+transcription, full response generation, first voice audio, VAD-handoff-to-first-audio,
+VAD decision time, Smart Turn analysis and actual gate wait,
 and MLX lock-wait measurements. First-audio time is visible in the collapsed summary.
 Tool-only responses receive their own timing entry; follow-ups do not repeat STT.
 

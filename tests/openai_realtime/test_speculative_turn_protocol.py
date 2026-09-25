@@ -308,6 +308,7 @@ def test_held_input_state_is_released_once_published(session):
 def test_failed_turn_closes_without_another_utterance(session, should_listen):
     started = session.start_turn("turn_1")
     session.stop_speech("turn_1", 0, duration_s=1.0, audio_end_ms=1000)
+    session.service.turn_latency_store.get_or_create_for_turn("turn_1", 0).vad_decision_s = 0.4
     should_listen.clear()
 
     events = session.dispatch(TranscriptionFailedEvent(message="STT failed", turn_id="turn_1", turn_revision=0))
@@ -321,6 +322,7 @@ def test_failed_turn_closes_without_another_utterance(session, should_listen):
     assert _item_ids(events) == {started[0].item_id}
     assert should_listen.is_set()
     assert session.text_prompt_queue.empty()
+    assert ("turn_1", 0) not in session.service.turn_latency_store._pending_turn
     assert session.tracker.begin_reopen_candidate("turn_1", 0) is None
     state = session.service._state(session.conn_id)
     assert state.pending_input_terminals == state.input_items == state.input_item_by_turn_revision == {}
@@ -330,6 +332,19 @@ def test_failed_turn_closes_without_another_utterance(session, should_listen):
     assert next_started[0].item_id != started[0].item_id
     assert_openai_schema(session.events)
     assert_input_lifecycle_contract(session.events)
+
+
+def test_stale_failed_transcription_discards_pending_vad_measurement(session):
+    session.start_turn("turn_1")
+    session.stop_speech("turn_1", 0, duration_s=1.0, audio_end_ms=1000)
+    session.resume_turn("turn_1", 0, audio_start_ms=1200)
+    store = session.service.turn_latency_store
+    store.get_or_create_for_turn("turn_1", 0).vad_decision_s = 0.4
+    newer = store.get_or_create_for_turn("turn_1", 1)
+    newer.vad_decision_s = 0.3
+
+    assert session.dispatch(TranscriptionFailedEvent(message="STT failed", turn_id="turn_1", turn_revision=0)) == []
+    assert store._pending_turn == {("turn_1", 1): newer}
 
 
 def test_failure_waits_only_for_reopen_grace(session, monkeypatch):

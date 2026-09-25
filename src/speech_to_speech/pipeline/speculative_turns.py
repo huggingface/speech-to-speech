@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from threading import Condition
 
@@ -34,6 +35,7 @@ class SpeculativeTurnTracker:
         self._committed_revision: dict[str, int] = {}
         self._pending_reopen: dict[str, _PendingReopen] = {}
         self._reopen_grace: dict[str, _ReopenGrace] = {}
+        self.wait_observer: Callable[[str, int, float, float], None] | None = None
 
     def observe(self, turn_id: str | None, revision: int | None) -> None:
         if turn_id is None or revision is None:
@@ -365,7 +367,10 @@ class SpeculativeTurnTracker:
             if remaining <= 0:
                 return
             logger.debug("Waiting for speculative reopen grace turn=%s rev=%s", turn_id, revision)
+            wait_started_at_s = time.perf_counter()
             self._condition.wait(remaining)
+            if self.wait_observer is not None:
+                self.wait_observer(turn_id, revision, wait_started_at_s, time.perf_counter())
 
     def _wait_for_pending_reopen_locked(self, turn_id: str, revision: int, timeout_s: float) -> None:
         deadline = time.monotonic() + timeout_s

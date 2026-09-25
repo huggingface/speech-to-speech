@@ -10,6 +10,7 @@ import torch
 from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
 from speech_to_speech.pipeline.messages import VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.VAD.smart_turn import SmartTurnResult
 from speech_to_speech.VAD.vad_handler import VADHandler
 from speech_to_speech.VAD.vad_iterator import VADIterator
@@ -1202,6 +1203,23 @@ def test_vad_drops_superseded_progressive_audio_from_output_queue():
     assert dropped == 2
     queued_items = list(handler.queue_out.queue)
     assert queued_items == [final_audio, other_turn_progressive]
+
+
+def test_vad_drops_pending_timing_with_superseded_final_audio():
+    handler = object.__new__(VADHandler)
+    handler.queue_out = Queue()
+    handler.speculative_turns = SpeculativeTurnTracker()
+    handler.speculative_turns.observe("turn_1", 1)
+    handler.turn_latency_store = TurnLatencyStore()
+    old = handler.turn_latency_store.get_or_create_for_turn("turn_1", 0)
+    old.vad_decision_s = 0.3
+    current = handler.turn_latency_store.get_or_create_for_turn("turn_1", 1)
+    current.vad_decision_s = 0.4
+    handler.queue_out.put(_vad_audio(revision=0, mode="final"))
+
+    assert handler._drop_superseded_vad_audio(_vad_audio(revision=1, mode="final")) == 1
+    assert ("turn_1", 0) not in handler.turn_latency_store._pending_turn
+    assert handler.turn_latency_store._pending_turn[("turn_1", 1)] is current
 
 
 def test_vad_drops_stale_progressive_revisions_from_output_queue():

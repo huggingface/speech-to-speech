@@ -34,11 +34,23 @@ class AudioInputNotifier(BaseHandler[VADAudio, LLMIn]):
         if item.turn_id is None or item.turn_revision is None:
             return True
         remaining_delay_s = max(0.0, item.processing_delay_s - (perf_counter() - item.created_at_s))
-        return self.speculative_turns.is_latest_after_stability_window(
+        wait_started_at_s = perf_counter()
+        is_latest = self.speculative_turns.is_latest_after_stability_window(
             item.turn_id,
             item.turn_revision,
             remaining_delay_s,
         )
+        store = getattr(self, "turn_latency_store", None)
+        if store is not None and remaining_delay_s > 0:
+            store.record_smart_wait(
+                item.turn_id,
+                item.turn_revision,
+                wait_started_at_s,
+                min(perf_counter(), wait_started_at_s + remaining_delay_s),
+            )
+        if not is_latest and store is not None:
+            store.discard_pending_turn(item.turn_id, item.turn_revision)
+        return is_latest
 
     def process(self, vad_audio: VADAudio) -> Iterator[LLMIn]:
         audio_duration_s = len(vad_audio.audio) / self.sample_rate if self.sample_rate else 0.0

@@ -471,7 +471,7 @@ class ResponseHandler(RealtimeBaseHandler):
         if status != "in_progress" and st.current_response_key is not None and len(metadata) < 16:
             tracker = self._service.turn_latency_store.get_response(st.current_response_key)
             if tracker is not None and tracker.turn_id is not None:
-                metadata[TURN_LATENCY_METADATA_KEY] = json.dumps(
+                latency_value = json.dumps(
                     tracker.metadata_payload(
                         response_key=st.current_response_key,
                         status=status,
@@ -479,6 +479,8 @@ class ResponseHandler(RealtimeBaseHandler):
                     separators=(",", ":"),
                     sort_keys=True,
                 )
+                if len(latency_value) <= 512:
+                    metadata[TURN_LATENCY_METADATA_KEY] = latency_value
 
         voice: str | None = None
         if rp and rp.audio and rp.audio.output and rp.audio.output.voice:

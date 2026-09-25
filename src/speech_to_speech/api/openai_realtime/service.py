@@ -319,6 +319,8 @@ class RealtimeService:
         self._chat_size = chat_size
         self.speculative_turns = speculative_turns
         self.turn_latency_store = turn_latency_store or TurnLatencyStore()
+        if speculative_turns is not None:
+            speculative_turns.wait_observer = self.turn_latency_store.record_smart_wait
         self._default_instructions = default_instructions
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
@@ -587,7 +589,7 @@ class RealtimeService:
         if is_stale is None:
             return None
         if is_stale:
-            if isinstance(event, TranscriptionCompletedEvent):
+            if isinstance(event, (TranscriptionCompletedEvent, TranscriptionFailedEvent)):
                 self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
             logger.info(
                 "Ignoring stale %s for turn=%s rev=%s",
@@ -736,6 +738,7 @@ class RealtimeService:
 
     def _on_transcription_failed(self, conn_id: str, event: TranscriptionFailedEvent) -> list[ServerEvent]:
         """Surface a final STT failure without creating conversation or LLM work."""
+        self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
         st = self._state(conn_id)
         current_input_item_id = st.current_input_item_id
         failed_events = self.conversation.on_transcription_failed(conn_id, event)

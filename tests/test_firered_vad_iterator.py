@@ -51,7 +51,7 @@ def test_firered_iterator_returns_on_firered_speech_end() -> None:
     streamer = _FakeFireRedStream(
         [
             _frame(is_speech_start=True),
-            _frame(is_speech_end=True),
+            _frame(is_speech_end=True, is_speech=False),
         ]
     )
     iterator = FireRedVadIterator(
@@ -71,6 +71,7 @@ def test_firered_iterator_returns_on_firered_speech_end() -> None:
 
     assert spoken_utterance is not None
     assert iterator.triggered is False
+    assert iterator.last_speech_end_sample == 400
     assert torch.equal(spoken_utterance[0], first_chunk)
     assert torch.equal(spoken_utterance[1], second_chunk)
 

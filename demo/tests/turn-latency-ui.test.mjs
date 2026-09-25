@@ -9,6 +9,8 @@ const root = path.resolve(import.meta.dirname, "..");
 const timing = {
   version: 1, turn_id: "turn_1", turn_revision: 0, response_key: "key-1", status: "completed",
   stt_s: 0.18, llm_s: 1.24, tts_ttfa_s: 0.12, e2e_s: 1.61, mlx_lock_wait_s: 0,
+  vad_decision_s: 0.32, smart_analysis_s: 0.03, smart_grace_s: 2,
+  smart_delay_s: 0.6, smart_wait_s: 0, smart_status: "incomplete",
 };
 
 test("history shows per-response server timings on desktop and phone", async (t) => {
@@ -56,6 +58,8 @@ test("history shows per-response server timings on desktop and phone", async (t)
     await page.keyboard.press("Enter");
     assert.equal(await page.locator(".hist-timings").first().getAttribute("open"), "");
     assert.match(await page.locator(".hist-timings dl").innerText(), /0.00 s/);
+    assert.match(await page.locator(".hist-timings dl").innerText(), /VAD handoff to first audio/);
+    assert.match(await page.locator(".hist-timings dl").innerText(), /Smart Turn actual wait/);
     assert.match(await page.locator(".hist-timings").innerText(), /excluding browser playback/);
     await page.waitForFunction(() => {
       const box = document.querySelector(".hist-timings summary").getBoundingClientRect();
