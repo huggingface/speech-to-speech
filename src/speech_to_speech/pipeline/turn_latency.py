@@ -33,14 +33,17 @@ def bind_active_turn_latency_tracker(tracker: TurnLatencyTracker | None):
 class TurnLatencyTracker:
     """Server timings, not an additive breakdown or client playback latency.
 
-    ``llm_s`` covers generation, including lock waits. ``tts_ttfa_s`` ends at
-    the first model audio chunk before trimming and block assembly; ``e2e_s``
-    ends at the first yielded TTS audio. Tool follow-ups use separate trackers.
+    ``llm_ttft_s`` ends at the first non-whitespace provider text delta and
+    ``llm_s`` covers full generation, including lock waits. ``tts_ttfa_s`` ends
+    at the first model audio chunk before trimming and block assembly;
+    ``e2e_s`` ends at the first yielded TTS audio. Tool follow-ups use separate
+    trackers.
     """
 
     turn_id: str | None = None
     turn_revision: int | None = None
     stt_s: float | None = None
+    llm_ttft_s: float | None = None
     llm_s: float | None = None
     tts_ttfa_s: float | None = None
     e2e_s: float | None = None
@@ -52,6 +55,10 @@ class TurnLatencyTracker:
 
     def record_llm(self, seconds: float) -> None:
         self.llm_s = max(0.0, seconds)
+
+    def record_llm_ttft(self, seconds: float) -> None:
+        if self.llm_ttft_s is None:
+            self.llm_ttft_s = max(0.0, seconds)
 
     def record_tts_ttfa(self, seconds: float) -> None:
         if self.tts_ttfa_s is None:
@@ -78,6 +85,7 @@ class TurnLatencyTracker:
             "turn_revision": 0 if self.turn_revision is None else self.turn_revision,
             "response_key": response_key,
             "stt_s": self.stt_s,
+            "llm_ttft_s": self.llm_ttft_s,
             "llm_s": self.llm_s,
             "tts_ttfa_s": self.tts_ttfa_s,
             "e2e_s": self.e2e_s,
@@ -102,7 +110,8 @@ class TurnLatencyTracker:
         revision = 0 if self.turn_revision is None else self.turn_revision
         return (
             f"Turn {self.turn_id} rev={revision} latency: "
-            f"stt={self._fmt(self.stt_s)} llm={self._fmt(self.llm_s)} "
+            f"stt={self._fmt(self.stt_s)} llm_ttft={self._fmt(self.llm_ttft_s)} "
+            f"llm={self._fmt(self.llm_s)} "
             f"tts_ttfa={self._fmt(self.tts_ttfa_s)} e2e={self._fmt(self.e2e_s)} "
             f"mlx_lock_wait={self.mlx_lock_wait_s:.2f}s status={self.status}"
         )

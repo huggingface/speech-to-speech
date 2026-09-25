@@ -15,6 +15,7 @@ def test_turn_latency_tracker_format_log_line() -> None:
         turn_id="turn_1",
         turn_revision=0,
         stt_s=0.14,
+        llm_ttft_s=0.11,
         llm_s=1.28,
         tts_ttfa_s=0.16,
         e2e_s=1.61,
@@ -23,13 +24,15 @@ def test_turn_latency_tracker_format_log_line() -> None:
     )
     assert (
         tracker.format_log_line()
-        == "Turn turn_1 rev=0 latency: stt=0.14s llm=1.28s tts_ttfa=0.16s e2e=1.61s mlx_lock_wait=0.00s status=completed"
+        == "Turn turn_1 rev=0 latency: stt=0.14s llm_ttft=0.11s llm=1.28s tts_ttfa=0.16s e2e=1.61s mlx_lock_wait=0.00s status=completed"
     )
 
 
 def test_turn_latency_tracker_record() -> None:
     tracker = TurnLatencyTracker(turn_id="turn_2", turn_revision=1)
     tracker.record_stt(0.5)
+    tracker.record_llm_ttft(0.3)
+    tracker.record_llm_ttft(1.0)
     tracker.record_llm(2.0)
     tracker.record_tts_ttfa(0.2)
     tracker.record_e2e(3.0)
@@ -41,6 +44,7 @@ def test_turn_latency_tracker_record() -> None:
     assert line is not None
     assert "turn_2 rev=1" in line
     assert "stt=0.50s" in line
+    assert "llm_ttft=0.30s" in line
     assert "llm=2.00s" in line
     assert "tts_ttfa=0.20s" in line
     assert "e2e=3.00s" in line

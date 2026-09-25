@@ -295,7 +295,7 @@ def test_failed_generation_records_duration_before_terminal_output(
                     terminals.extend(service.finish_response(conn_id, response_key=output.response_key))
                     lines = _latency_lines(caplog)
                     assert len(lines) == 1
-                    assert "llm=0.25s" in lines[0]
+                    assert "llm_ttft=n/a llm=0.25s" in lines[0]
                     assert "status=failed" in lines[0]
 
     done = [event for event in terminals if event.type == "response.done"]
@@ -308,6 +308,7 @@ def test_failed_generation_records_duration_before_terminal_output(
 def test_terminal_response_emits_one_latency_record(service, conn_id, caplog, status):
     request = _queue_turn(service, conn_id)
     tracker = service.turn_latency_store.get_or_create_response(request.response_key)
+    tracker.record_llm_ttft(0.19)
     tracker.record_llm(1.28)
     tracker.record_tts_ttfa(0.16)
     tracker.record_e2e(1.61)
@@ -319,7 +320,7 @@ def test_terminal_response_emits_one_latency_record(service, conn_id, caplog, st
         service.finish_response(conn_id, status=status, response_key=request.response_key)
 
     assert _latency_lines(caplog) == [
-        "Turn turn_1 rev=0 latency: stt=0.12s llm=1.28s tts_ttfa=0.16s e2e=1.61s "
+        "Turn turn_1 rev=0 latency: stt=0.12s llm_ttft=0.19s llm=1.28s tts_ttfa=0.16s e2e=1.61s "
         f"mlx_lock_wait=0.03s status={status} response_key={request.response_key}"
     ]
     done = [event for event in events if event.type == "response.done"]
@@ -375,7 +376,7 @@ def test_unregister_clears_unfinished_measurements_before_session_reuse(service,
             service.finish_response(new_conn_id, response_key=fresh.response_key)
         lines = _latency_lines(caplog)
         assert len(lines) == 1
-        assert "stt=0.12s llm=n/a tts_ttfa=n/a e2e=n/a" in lines[0]
+        assert "stt=0.12s llm_ttft=n/a llm=n/a tts_ttfa=n/a e2e=n/a" in lines[0]
         assert f"response_key={fresh.response_key}" in lines[0]
     finally:
         service.unregister(new_conn_id)

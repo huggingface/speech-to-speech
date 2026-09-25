@@ -2314,6 +2314,7 @@ class TestFinishAudioResponse:
             session_id=conn_id,
         )
         tracker.record_stt(0.181284123)
+        tracker.record_llm_ttft(0.108531234)
         tracker.record_llm(1.241907456)
         tracker.record_tts_ttfa(0.121775789)
         tracker.record_e2e(1.613482987)
@@ -2329,6 +2330,7 @@ class TestFinishAudioResponse:
             "turn_revision": 2,
             "response_key": response_key,
             "stt_s": 0.181284123,
+            "llm_ttft_s": 0.108531234,
             "llm_s": 1.241907456,
             "tts_ttfa_s": 0.121775789,
             "e2e_s": 1.613482987,

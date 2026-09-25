@@ -114,21 +114,32 @@ def test_remote_llm_records_generation_through_terminal_response(
     monkeypatch.setattr(llm_module, "perf_counter", lambda: clock[0])
 
     def provider_request(api_input, optional_kwargs):
-        clock[0] = 10.25
         if failure:
+            clock[0] = 10.25
             raise RuntimeError("provider failed")
+        clock[0] = 10.10
         return object()
 
     handler._request = provider_request
-    handler._iter_events = lambda response: iter([llm_module.TextDelta(text="hello")])
+
+    def provider_events(response):
+        clock[0] = 10.15
+        yield llm_module.TextDelta(text="")
+        clock[0] = 10.18
+        yield llm_module.TextDelta(text="hello")
+        clock[0] = 10.25
+
+    handler._iter_events = provider_events
     outputs = list(handler.process(request))
     assert any(isinstance(output, EndOfResponse) and bool(output.error) == failure for output in outputs)
     line, metadata = _finish(
         service, conn_id, request.response_key, caplog, status="failed" if failure else "completed"
     )
+    assert f"llm_ttft={'n/a' if failure else '0.18s'}" in line
     assert "llm=0.25s" in line
     assert f"status={'failed' if failure else 'completed'}" in line
     assert metadata["llm_s"] == pytest.approx(0.25)
+    assert metadata["llm_ttft_s"] == (None if failure else pytest.approx(0.18))
     assert metadata["status"] == ("failed" if failure else "completed")
 
 
