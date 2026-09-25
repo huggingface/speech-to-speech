@@ -1,0 +1,250 @@
+{
+  "schema": "big-bench-audio-subset/1",
+  "name": "vibe",
+  "description": "40 items, balanced across the four categories and across the official answers within each. Round-robin ordered so --limit stays balanced.",
+  "dataset": "ArtificialAnalysis/big_bench_audio",
+  "revision": "af7bb9c25b015792583ca4da3ee27ec62cb79fe6",
+  "seed": 0,
+  "items": [
+    {
+      "id": 233,
+      "category": "formal_fallacies",
+      "official_answer": "invalid",
+      "file_name": "data/question_233.mp3"
+    },
+    {
+      "id": 250,
+      "category": "navigate",
+      "official_answer": "No",
+      "file_name": "data/question_250.mp3"
+    },
+    {
+      "id": 692,
+      "category": "object_counting",
+      "official_answer": "2",
+      "file_name": "data/question_692.mp3"
+    },
+    {
+      "id": 911,
+      "category": "web_of_lies",
+      "official_answer": "No",
+      "file_name": "data/question_911.mp3"
+    },
+    {
+      "id": 214,
+      "category": "formal_fallacies",
+      "official_answer": "valid",
+      "file_name": "data/question_214.mp3"
+    },
+    {
+      "id": 331,
+      "category": "navigate",
+      "official_answer": "Yes",
+      "file_name": "data/question_331.mp3"
+    },
+    {
+      "id": 687,
+      "category": "object_counting",
+      "official_answer": "3",
+      "file_name": "data/question_687.mp3"
+    },
+    {
+      "id": 839,
+      "category": "web_of_lies",
+      "official_answer": "Yes",
+      "file_name": "data/question_839.mp3"
+    },
+    {
+      "id": 97,
+      "category": "formal_fallacies",
+      "official_answer": "invalid",
+      "file_name": "data/question_97.mp3"
+    },
+    {
+      "id": 341,
+      "category": "navigate",
+      "official_answer": "No",
+      "file_name": "data/question_341.mp3"
+    },
+    {
+      "id": 725,
+      "category": "object_counting",
+      "official_answer": "4",
+      "file_name": "data/question_725.mp3"
+    },
+    {
+      "id": 922,
+      "category": "web_of_lies",
+      "official_answer": "No",
+      "file_name": "data/question_922.mp3"
+    },
+    {
+      "id": 236,
+      "category": "formal_fallacies",
+      "official_answer": "valid",
+      "file_name": "data/question_236.mp3"
+    },
+    {
+      "id": 368,
+      "category": "navigate",
+      "official_answer": "Yes",
+      "file_name": "data/question_368.mp3"
+    },
+    {
+      "id": 661,
+      "category": "object_counting",
+      "official_answer": "5",
+      "file_name": "data/question_661.mp3"
+    },
+    {
+      "id": 844,
+      "category": "web_of_lies",
+      "official_answer": "Yes",
+      "file_name": "data/question_844.mp3"
+    },
+    {
+      "id": 211,
+      "category": "formal_fallacies",
+      "official_answer": "invalid",
+      "file_name": "data/question_211.mp3"
+    },
+    {
+      "id": 398,
+      "category": "navigate",
+      "official_answer": "No",
+      "file_name": "data/question_398.mp3"
+    },
+    {
+      "id": 584,
+      "category": "object_counting",
+      "official_answer": "6",
+      "file_name": "data/question_584.mp3"
+    },
+    {
+      "id": 848,
+      "category": "web_of_lies",
+      "official_answer": "No",
+      "file_name": "data/question_848.mp3"
+    },
+    {
+      "id": 169,
+      "category": "formal_fallacies",
+      "official_answer": "valid",
+      "file_name": "data/question_169.mp3"
+    },
+    {
+      "id": 285,
+      "category": "navigate",
+      "official_answer": "Yes",
+      "file_name": "data/question_285.mp3"
+    },
+    {
+      "id": 577,
+      "category": "object_counting",
+      "official_answer": "7",
+      "file_name": "data/question_577.mp3"
+    },
+    {
+      "id": 895,
+      "category": "web_of_lies",
+      "official_answer": "Yes",
+      "file_name": "data/question_895.mp3"
+    },
+    {
+      "id": 242,
+      "category": "formal_fallacies",
+      "official_answer": "invalid",
+      "file_name": "data/question_242.mp3"
+    },
+    {
+      "id": 324,
+      "category": "navigate",
+      "official_answer": "No",
+      "file_name": "data/question_324.mp3"
+    },
+    {
+      "id": 595,
+      "category": "object_counting",
+      "official_answer": "8",
+      "file_name": "data/question_595.mp3"
+    },
+    {
+      "id": 764,
+      "category": "web_of_lies",
+      "official_answer": "No",
+      "file_name": "data/question_764.mp3"
+    },
+    {
+      "id": 47,
+      "category": "formal_fallacies",
+      "official_answer": "valid",
+      "file_name": "data/question_47.mp3"
+    },
+    {
+      "id": 284,
+      "category": "navigate",
+      "official_answer": "Yes",
+      "file_name": "data/question_284.mp3"
+    },
+    {
+      "id": 715,
+      "category": "object_counting",
+      "official_answer": "9",
+      "file_name": "data/question_715.mp3"
+    },
+    {
+      "id": 866,
+      "category": "web_of_lies",
+      "official_answer": "Yes",
+      "file_name": "data/question_866.mp3"
+    },
+    {
+      "id": 101,
+      "category": "formal_fallacies",
+      "official_answer": "invalid",
+      "file_name": "data/question_101.mp3"
+    },
+    {
+      "id": 359,
+      "category": "navigate",
+      "official_answer": "No",
+      "file_name": "data/question_359.mp3"
+    },
+    {
+      "id": 509,
+      "category": "object_counting",
+      "official_answer": "10",
+      "file_name": "data/question_509.mp3"
+    },
+    {
+      "id": 821,
+      "category": "web_of_lies",
+      "official_answer": "No",
+      "file_name": "data/question_821.mp3"
+    },
+    {
+      "id": 152,
+      "category": "formal_fallacies",
+      "official_answer": "valid",
+      "file_name": "data/question_152.mp3"
+    },
+    {
+      "id": 420,
+      "category": "navigate",
+      "official_answer": "Yes",
+      "file_name": "data/question_420.mp3"
+    },
+    {
+      "id": 514,
+      "category": "object_counting",
+      "official_answer": "11",
+      "file_name": "data/question_514.mp3"
+    },
+    {
+      "id": 786,
+      "category": "web_of_lies",
+      "official_answer": "Yes",
+      "file_name": "data/question_786.mp3"
+    }
+  ]
+}
