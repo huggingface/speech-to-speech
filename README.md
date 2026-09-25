@@ -339,6 +339,11 @@ The compose file starts a llama.cpp server with Gemma 4 and the Realtime server,
 
 ## Realtime API
 
+The server logs per-response STT, LLM, first TTS audio, and speech-to-audio
+durations for supported backends, including vLLM-backed STT and TTS. See the
+[response latency guide](./docs/response-latency.md) for the coverage matrix
+and measurement boundaries.
+
 Realtime mode supports the OpenAI Realtime protocol over WebSocket and WebRTC, with live transcription and low-latency turn-taking. WebSocket clients connect at `/v1/realtime`:
 
 ```python

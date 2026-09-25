@@ -212,6 +212,7 @@ class _TranscriptionRequest:
     session_generation: int
     operation: HttpTranscriptionOperation | None = None
     cancelled: bool = False
+    elapsed_s: float | None = None
 
 
 class OpenAICompatibleSTTHandler(BaseSTTHandler):
@@ -392,8 +393,9 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
                 turn_revision=source.turn_revision,
                 speech_stopped_at_s=source.created_at_s,
             )
+        elapsed = perf_counter() - started_at_s
+        request.elapsed_s = elapsed
         if self._publish_output(request, output):
-            elapsed = perf_counter() - started_at_s
             self._times.append(elapsed)
             logger.info(
                 "OpenAI-compatible STT request completed turn=%s rev=%s mode=%s in %.3fs",
@@ -439,6 +441,11 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             if not self._request_is_current(request):
                 return False
             self.before_emit_output(output)
+            if isinstance(output, Transcription) and request.elapsed_s is not None:
+                store = getattr(self, "turn_latency_store", None)
+                tracker = store.get_or_create_for_turn(output.turn_id, output.turn_revision) if store else None
+                if tracker is not None:
+                    tracker.record_stt(request.elapsed_s)
             self.queue_out.put(output)
             return True
 
