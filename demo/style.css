@@ -2719,3 +2719,36 @@ body.cam-on .footer {
   .footer { display: none; }
   .circle { width: clamp(120px, min(50vw, 46vh), 240px); }
 }
+
+/* Response measurements stay in history, away from the live voice surface. */
+.hist-timings {
+  margin-top: 6px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.hist-timings summary {
+  min-height: 44px;
+  padding: 12px 0;
+  box-sizing: border-box;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.hist-timings summary:focus-visible {
+  outline: 2px solid var(--text-dim);
+  outline-offset: 3px;
+  border-radius: var(--radius-sm);
+}
+.hist-timings dl {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 16px;
+  margin: 8px 0;
+}
+.hist-timings dt { overflow-wrap: anywhere; }
+.hist-timings dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.hist-timings p { margin: 8px 0; line-height: 1.5; }
+.hist-timings .timing-status { color: var(--text); }

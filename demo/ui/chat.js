@@ -595,7 +595,7 @@ export class ChatView {
 
   /**
    * A response closed (completed or cancelled).
-   * @param {{ responseId: string; status: string; audible?: boolean; transcript?: string }} detail
+   * @param {{ responseId: string; status: string; audible?: boolean; transcript?: string; latency?: import("../turn-latency.js").TurnLatency | null }} detail
    */
   onResponseFinished(detail) {
     const { responseId, status, audible, transcript } = detail;
@@ -605,12 +605,17 @@ export class ChatView {
     // auto-dismiss on its own timer regardless.
     if (!responseId) return;
     const entry = this._asstByResp.get(responseId);
+    let hist = entry?.hist ?? null;
+    if (detail.latency) {
+      hist ??= this._appendHistMsg("assistant", transcript || "", false);
+      this._appendTimings(hist, detail.latency);
+      this._markUnread();
+    }
 
     if (status === "cancelled") {
       // Keep every transcript that was received — mark it interrupted rather
       // than erasing it. If the `*.transcript.done` never fired, build the row
       // from the text carried in response.done.
-      let hist = entry?.hist ?? null;
       if (!hist && transcript) {
         hist = this._appendHistMsg("assistant", transcript, false);
       } else if (hist && transcript) {
@@ -626,6 +631,46 @@ export class ChatView {
     // the history row persists as the conversation log. Crucially we do NOT
     // touch user state here — that lifecycle is fully independent.
     this._asstByResp.delete(responseId);
+  }
+
+  /** @param {HTMLElement} hist @param {import("../turn-latency.js").TurnLatency} timing */
+  _appendTimings(hist, timing) {
+    /** @param {number|null} seconds */
+    const format = (seconds) => seconds === null ? "Unavailable" : `${seconds.toFixed(2)} s`;
+    const details = document.createElement("details");
+    details.className = "hist-timings";
+    const summary = document.createElement("summary");
+    summary.textContent = timing.e2e_s === null
+      ? "Server timings"
+      : `Server timings · First audio ${format(timing.e2e_s)}`;
+    details.appendChild(summary);
+    const status = document.createElement("p");
+    status.className = "timing-status";
+    status.textContent = ({ completed: "Completed", cancelled: "Interrupted", failed: "Failed", incomplete: "Incomplete" })[timing.status];
+    details.appendChild(status);
+    const list = document.createElement("dl");
+    /** @type {[string, number|null][]} */
+    const stages = [
+      ["Speech end to first audio", timing.e2e_s],
+      ["Transcription", timing.stt_s],
+      ["Response generation", timing.llm_s],
+      ["Voice synthesis to first audio", timing.tts_ttfa_s],
+      ["MLX lock wait", timing.mlx_lock_wait_s],
+    ];
+    for (const [label, value] of stages) {
+      const term = document.createElement("dt");
+      term.textContent = label;
+      const description = document.createElement("dd");
+      description.textContent = format(value);
+      list.append(term, description);
+    }
+    details.appendChild(list);
+    const note = document.createElement("p");
+    note.textContent = "Measured on the server, excluding browser playback. Generation covers the full response. Stages overlap; these times do not add up. Unavailable stages may not have run.";
+    details.appendChild(note);
+    hist.querySelector(".hist-timings")?.remove();
+    hist.appendChild(details);
+    this._scrollToBottom();
   }
 
   /** The model called a tool — show an ephemeral "running" bubble.

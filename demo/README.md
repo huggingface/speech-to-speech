@@ -24,6 +24,23 @@ Both choices run one `RealtimeSession` adapter over the pinned official
 queue, audio, visualization, device, camera, and metering behavior out of the
 protocol implementation.
 
+## Response timings
+
+Open Conversation and expand **Server timings** beneath a response to inspect
+transcription, full response generation, first voice audio, speech-end-to-first-audio,
+and MLX lock-wait measurements. First-audio time is visible in the collapsed summary.
+Tool-only responses receive their own timing entry; follow-ups do not repeat STT.
+
+These are server measurements, excluding browser buffering and playback. Stages
+can overlap and must not be summed. Missing stages display **Unavailable**. Older
+servers, absent metadata, and unsupported or malformed records leave the transcript
+unchanged. Server timings become available when the response finishes, including
+interrupted, failed, and incomplete responses.
+
+Validation: `npm run test:agents:adapter` checks parsing and adapter behavior;
+`npm run test:ui` checks the history display at desktop and phone widths (requires
+`npx playwright install chromium`).
+
 ## Quick start (local)
 
 1. **Start the speech-to-speech backend** (from the repo root;
