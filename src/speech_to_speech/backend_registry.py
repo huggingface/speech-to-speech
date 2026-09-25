@@ -22,6 +22,9 @@ from speech_to_speech.arguments_classes.language_model_arguments import Language
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
     MLXAudioWhisperSTTHandlerArguments,
 )
+from speech_to_speech.arguments_classes.nemotron_streaming_stt_arguments import (
+    NemotronStreamingSTTHandlerArguments,
+)
 from speech_to_speech.arguments_classes.omnivoice_tts_arguments import OmniVoiceTTSHandlerArguments
 from speech_to_speech.arguments_classes.openai_realtime_stt_arguments import OpenAIRealtimeSTTHandlerArguments
 from speech_to_speech.arguments_classes.openai_stt_arguments import OpenAICompatibleSTTHandlerArguments
@@ -405,6 +408,18 @@ STT_BACKENDS = build_backend_registry(
                 attach_speculative_turns=True,
             ),
             config_prefix="parakeet_unified",
+            required_extra="nemo",
+        ),
+        BackendSpec(
+            "nemotron-streaming",
+            "stt",
+            NemotronStreamingSTTHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.STT.nemo_asr_handler",
+                "NemoASRSTTHandler",
+                attach_speculative_turns=True,
+            ),
+            config_prefix="nemotron_streaming",
             required_extra="nemo",
         ),
         BackendSpec(

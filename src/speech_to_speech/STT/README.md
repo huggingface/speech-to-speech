@@ -10,6 +10,7 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - `faster-whisper` → `STT/faster_whisper_handler.py`
 - `parakeet-tdt` → `STT/parakeet_tdt_handler.py`
 - `parakeet-unified` → `STT/nemo_asr_handler.py`
+- `nemotron-streaming` → `STT/nemo_asr_handler.py`
 - `paraformer` → `STT/paraformer_handler.py`
 - `qwen3-asr` → `STT/qwen3_asr_handler.py`
 - `openai` → `STT/openai_compatible_handler.py`
@@ -115,6 +116,17 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - Device flag: `--parakeet_unified_device` (default `auto`)
 - The pipeline transcribes each VAD utterance with NeMo `ASRModel.transcribe` (offline API)
 
+### 10) Nemotron Streaming (`--stt nemotron-streaming`)
+
+- Handler: `NemoASRSTTHandler`
+- Install: `pip install "speech-to-speech[nemo]"`
+- Model flag: `--nemotron_streaming_model_name`
+- Default model: `nvidia/nemotron-speech-streaming-en-0.6b`
+- Override: `nvidia/nemotron-3.5-asr-streaming-0.6b` for multilingual
+- Language flag: `--nemotron_streaming_language` (default `en`). Fallback if the model does not emit a tag. The English-only checkpoint always reports this value. Nemotron 3.5 detects language per utterance (`target_lang=auto`), strips `<xx-XX>` from the text, and reports the detected code on the final transcription.
+- Device flag: `--nemotron_streaming_device` (default `auto`)
+- The pipeline transcribes each VAD utterance with NeMo `ASRModel.transcribe` (offline API)
+
 ## Language Abbreviations (ISO-style codes seen in STT handlers)
 
 | Code | Language |
@@ -218,5 +230,22 @@ speech-to-speech serve --stt qwen3-asr \
 pip install "speech-to-speech[nemo]"
 speech-to-speech serve --stt parakeet-unified
 ```
+
+The pipeline transcribes VAD utterances with NeMo `ASRModel.transcribe` (offline API).
+
+### Nemotron Streaming
+
+```bash
+pip install "speech-to-speech[nemo]"
+speech-to-speech serve --stt nemotron-streaming
+# Mixed-language sessions with the multilingual checkpoint:
+speech-to-speech serve --stt nemotron-streaming \
+  --nemotron_streaming_model_name nvidia/nemotron-3.5-asr-streaming-0.6b
+```
+
+The English-only checkpoint reports `--nemotron_streaming_language` on every
+final transcription. Nemotron 3.5 detects the language of each utterance,
+strips the `<xx-XX>` tag from the text, and reports that code for
+`--enable_lang_prompt` and language-sensitive TTS.
 
 The pipeline transcribes VAD utterances with NeMo `ASRModel.transcribe` (offline API).

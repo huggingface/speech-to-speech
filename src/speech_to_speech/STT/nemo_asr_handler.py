@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Iterator
 
 import numpy as np
@@ -18,6 +19,7 @@ console = Console()
 SAMPLE_RATE = 16000
 
 SUPPORTED_LANGUAGES = ["en"]
+_NEMOTRON_LANG_TAG = re.compile(r"\s*<([A-Za-z]{2})(?:-[A-Za-z]{2})?>\s*$")
 
 
 def resolve_device(device: str) -> str:
@@ -46,6 +48,17 @@ def _reported_language_code(start_language: str) -> str:
     return requested
 
 
+def _is_nemotron_multilingual(model_name: str) -> bool:
+    return "nemotron-3.5" in model_name.lower()
+
+
+def _split_lang_tag(text: str) -> tuple[str, str | None]:
+    match = _NEMOTRON_LANG_TAG.search(text)
+    if match is None:
+        return text.strip(), None
+    return text[: match.start()].strip(), match.group(1).lower()
+
+
 def _warn_reported_language(start_language: str) -> None:
     requested = (start_language or "").strip() or "en"
     if requested.lower() == "auto":
@@ -66,6 +79,8 @@ def _warn_reported_language(start_language: str) -> None:
 class NemoASRSTTHandler(BaseSTTHandler):
     """Speech to text with a NeMo ASR checkpoint through ASRModel.transcribe."""
 
+    _detects_utterance_language = False
+
     def setup(
         self,
         model_name: str,
@@ -76,10 +91,12 @@ class NemoASRSTTHandler(BaseSTTHandler):
         logger.info("Loading NeMo ASR STT model: %s", model_name)
         self.device = resolve_device(device)
         self.start_language = (language or "").strip() or "en"
-        _warn_reported_language(self.start_language)
+        self.model_name = model_name
+        self._detects_utterance_language = _is_nemotron_multilingual(model_name)
+        if not self._detects_utterance_language:
+            _warn_reported_language(self.start_language)
         self.language = _reported_language_code(self.start_language)
         self.last_language = self.language
-        self.model_name = model_name
         self.gen_kwargs = dict(gen_kwargs or {})
 
         from nemo.collections.asr.models import ASRModel
@@ -97,7 +114,16 @@ class NemoASRSTTHandler(BaseSTTHandler):
             logger.warning("%s: warmup failed", self.__class__.__name__, exc_info=True)
 
     def _transcribe(self, audio: np.ndarray) -> str:
-        results = self.model.transcribe([audio])
+        if self._detects_utterance_language:
+            set_prompt = getattr(self.model, "set_inference_prompt", None)
+            if callable(set_prompt):
+                set_prompt("auto")
+            try:
+                results = self.model.transcribe([audio], target_lang="auto")
+            except TypeError:
+                results = self.model.transcribe([audio])
+        else:
+            results = self.model.transcribe([audio])
         if not results:
             return ""
         return _extract_text(results[0]).strip()
@@ -105,6 +131,12 @@ class NemoASRSTTHandler(BaseSTTHandler):
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         audio = np.asarray(vad_audio.audio, dtype=np.float32)
         text = self._transcribe(audio)
+        language_code = self.language
+        if self._detects_utterance_language:
+            text, detected = _split_lang_tag(text)
+            if detected is not None:
+                language_code = detected
+                self.last_language = detected
         if vad_audio.mode == "progressive":
             yield PartialTranscription(
                 text=text,
@@ -115,7 +147,7 @@ class NemoASRSTTHandler(BaseSTTHandler):
         console.print(f"[yellow]USER: {text}")
         yield Transcription(
             text=text,
-            language_code=self.language,
+            language_code=language_code,
             turn_id=vad_audio.turn_id,
             turn_revision=vad_audio.turn_revision,
             speech_stopped_at_s=vad_audio.created_at_s,
