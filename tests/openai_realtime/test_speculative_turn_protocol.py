@@ -341,6 +341,42 @@ def test_failure_waits_only_for_reopen_grace(session, monkeypatch):
     assert session.service.audio.resolve_input_terminals(session.conn_id) == []
 
 
+def test_empty_transcript_closes_after_reopen_grace(session, monkeypatch):
+    now = 100.0
+    monkeypatch.setattr("speech_to_speech.pipeline.speculative_turns.time", SimpleNamespace(monotonic=lambda: now))
+    started = session.start_turn("turn_1")
+    session.stop_speech("turn_1", 0, duration_s=0.3, audio_end_ms=300)
+    session.tracker.start_reopen_grace("turn_1", 0, grace_s=0.8)
+
+    # No response is queued for an empty transcript, so no output will commit it.
+    assert session.final("turn_1", 0, "") == []
+    assert session.text_prompt_queue.empty()
+    now += 0.9
+    events = session.service.audio.resolve_input_terminals(session.conn_id)
+
+    assert [event.type for event in events] == [
+        "input_audio_buffer.speech_stopped",
+        "conversation.item.input_audio_transcription.completed",
+    ]
+    assert _item_ids(events) == {started[0].item_id}
+    state = session.service._state(session.conn_id)
+    assert state.pending_input_terminals == state.input_items == {}
+
+
+def test_turn_cancelled_before_output_is_published(session):
+    session.start_turn("turn_1")
+    session.stop_speech("turn_1", 0, duration_s=1.0, audio_end_ms=1000)
+    assert session.final("turn_1", 0, "Hello") == []
+
+    session.service.handle_response_cancel(session.conn_id)
+    session.events.extend(session.service.audio.resolve_input_terminals(session.conn_id))
+
+    assert session.client_history().user_turns == session.chat_user_turns() == ["Hello"]
+    assert session.tracker.begin_reopen_candidate("turn_1", 0) is None
+    assert_openai_schema(session.events)
+    assert_input_lifecycle_contract(session.events)
+
+
 @pytest.mark.parametrize("resume", [False, True])
 def test_failure_respects_pending_reopen(session, resume):
     session.start_turn("turn_1")

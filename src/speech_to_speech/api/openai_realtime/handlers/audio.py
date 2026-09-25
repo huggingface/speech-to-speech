@@ -155,7 +155,7 @@ class AudioHandler(RealtimeBaseHandler):
         st = self._state(conn_id)
         events: list[ServerEvent] = []
         for item_id, pending in list(st.pending_input_terminals.items()):
-            disposition = self._input_terminal_disposition(pending, started_turn_id)
+            disposition = self._input_terminal_disposition(conn_id, pending, started_turn_id)
             if disposition == "hold":
                 continue
             if disposition == "publish":
@@ -172,6 +172,7 @@ class AudioHandler(RealtimeBaseHandler):
 
     def _input_terminal_disposition(
         self,
+        conn_id: str,
         pending: PendingInputTerminal,
         started_turn_id: str | None,
     ) -> Literal["publish", "hold", "discard"]:
@@ -184,9 +185,13 @@ class AudioHandler(RealtimeBaseHandler):
             return "discard"
         if started_turn_id is not None and pending.turn_id != started_turn_id:
             return "publish"
-        if isinstance(pending.transcription, ConversationItemInputAudioTranscriptionFailedEvent):
-            # A failed item cannot reopen once its failure reaches the client.
-            # Commit after the same reopen gate used for accepted output.
+        st = self._state(conn_id)
+        unanswered = pending.input_closed and not (st.in_response or st.response_pending)
+        if unanswered or isinstance(pending.transcription, ConversationItemInputAudioTranscriptionFailedEvent):
+            # No output will commit this turn: its transcription failed, was
+            # empty, or its response ended without output. The item cannot
+            # reopen once published, so commit after the same reopen gate
+            # used for accepted output.
             committed = turns.try_commit_if_latest_after_reopen_grace(pending.turn_id, pending.turn_revision)
             if committed is None:
                 return "hold"
