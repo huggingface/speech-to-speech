@@ -372,6 +372,7 @@ def _build_handlers(
     speculative_turns: SpeculativeTurnTracker,
     cancel_scope: CancelScope,
     pipeline_index: int,
+    response_playing: Event,
 ) -> list[Any]:
     """Build a handler chain: VAD → STT/AudioInput → LM → TTS."""
     from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
@@ -388,6 +389,7 @@ def _build_handlers(
             },
             "text_output_queue": text_output_queue,
             "speculative_turns": speculative_turns,
+            "response_playing": response_playing,
         },
     )
 
@@ -535,6 +537,7 @@ def _build_pipeline_unit(
         speculative_turns=speculative_turns,
         cancel_scope=cancel_scope,
         pipeline_index=index,
+        response_playing=response_playing,
     )
     for h in handlers:
         h.pipeline_index = index

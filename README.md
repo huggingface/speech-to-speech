@@ -698,8 +698,9 @@ same flag, as `--log-transcripts` or `--log_transcripts`.
 See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments.py). Notable options:
 
 - `--thresh`: threshold value to trigger voice activity detection.
-- `--min_speech_ms`: minimum duration of detected voice activity to be considered speech.
-- `--min_speech_continuation_ms`: sustain-bar hysteresis threshold for speech that continues a reopenable soft-ended, uncommitted turn within the reopen window. The default and recommended pairing is `--min_speech_ms 384 --min_speech_continuation_ms 192`.
+- `--min_speech_ms`: active speech that opens a new turn while the assistant is silent, 192 ms by default so a short word reaches the transcription.
+- `--barge_in_ms`: active speech that opens a turn while the assistant speaks and interrupts it, 384 ms by default.
+- `--min_speech_continuation_ms`: sustain-bar hysteresis threshold for speech that continues a reopenable soft-ended, uncommitted turn within the reopen window. It defaults to 192 ms.
 - `--min_silence_ms`: minimum length of silence intervals for segmenting speech. Default is 64 ms.
 - `--short_segment_merge_ms`: optional merge window for stitching adjacent VAD segments that are each shorter than `--min_speech_ms`.
 - `--speculative_reopen_ms`: delay response commitment for 800 ms after a soft-ended turn so immediately resumed speech can reopen it.
