@@ -70,6 +70,12 @@ def test_server_defaults_to_loopback():
     assert RealtimeServerArguments().host == "127.0.0.1"
 
 
+def test_parse_talk_arguments_keeps_retry_timeout_field_name():
+    config = parse_talk_arguments(["--connection-retry-timeout", "12.5"])
+
+    assert config.connection_retry_timeout_s == 12.5
+
+
 def test_vad_firered_flag_is_accepted():
     args = parse_arguments(["--vad", "firered", "--vad_firered_model_dir", "/tmp/firered-stream-vad"])
 
