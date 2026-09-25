@@ -101,6 +101,9 @@ pocket = [
 supertonic = [
     "supertonic>=1.3.1",
 ]
+telnyx = [
+    "websocket-client>=1.7.0",
+]
 webrtc = [
     "aiortc>=1.9.0",
 ]
