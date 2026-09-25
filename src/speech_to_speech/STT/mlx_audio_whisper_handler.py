@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from time import perf_counter
 from typing import Any, Iterator, Optional
 
 import numpy as np
@@ -129,6 +130,7 @@ class MLXAudioWhisperSTTHandler(BaseSTTHandler):
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("inferring mlx-audio whisper...")
+        started_at_s = perf_counter()
 
         assert isinstance(vad_audio.audio, np.ndarray), "Audio must be a numpy array"
         audio_input = vad_audio.audio.astype(np.float32)
@@ -173,6 +175,7 @@ class MLXAudioWhisperSTTHandler(BaseSTTHandler):
             )
             return
 
+        self._record_final_stt(vad_audio, perf_counter() - started_at_s)
         yield Transcription(
             text=pred_text,
             language_code=language_code,

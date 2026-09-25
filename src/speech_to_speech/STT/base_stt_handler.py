@@ -65,6 +65,13 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             return False
         return True
 
+    def _record_final_stt(self, item: VADAudio, seconds: float) -> None:
+        """Hold final transcription time until the turn's response absorbs it."""
+        store = getattr(self, "turn_latency_store", None)
+        tracker = store.get_or_create_for_turn(item.turn_id, item.turn_revision) if store else None
+        if tracker is not None:
+            tracker.record_stt(seconds)
+
     def should_emit_output(self, output: STTOut) -> bool:
         if isinstance(output, PartialTranscription) and self._is_completed_final_revision(output):
             self._log_stale_turn_item(output, "output-after-final")

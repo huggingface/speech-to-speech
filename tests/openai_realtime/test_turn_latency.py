@@ -1,6 +1,7 @@
 """Latency records emitted by the actual response lifecycle."""
 
 import logging
+import sys
 from contextlib import nullcontext
 from queue import Queue
 from threading import Event, Thread
@@ -37,6 +38,7 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
+from tests.test_whisper_progressive_transcription import BUILDERS as WHISPER_BUILDERS
 
 LATENCY_LOGGER = "speech_to_speech.api.openai_realtime.handlers.response"
 
@@ -479,3 +481,73 @@ def test_tool_followup_logs_distinct_responses_in_same_turn(service, conn_id, ca
     assert "status=completed" in lines[0]
     assert f"status={followup_status}" in lines[1]
     assert service.turn_latency_store._trackers == {}
+
+
+def _time_whisper_by_audio_length(handler, monkeypatch):
+    """Advance the handler's clock by 0.1s per second of audio it transcribes."""
+    clock = [10.0]
+    monkeypatch.setattr(sys.modules[type(handler).__module__], "perf_counter", lambda: clock[0])
+    for name in ("generate", "transcribe"):
+        infer = getattr(handler.model, name, None)
+        if infer is not None:
+
+            def timed(audio, *args, _infer=infer, **kwargs):
+                clock[0] += 0.1 * len(audio) / 16000
+                return _infer(audio, *args, **kwargs)
+
+            setattr(handler.model, name, timed)
+
+
+@pytest.fixture
+def whisper_builders():
+    """Forget optional backends the builders stub, so later tests still skip."""
+    optional = ("lightning_whisper_mlx", "speech_to_speech.STT.lightning_whisper_mlx_handler")
+    missing = [name for name in optional if name not in sys.modules]
+    yield WHISPER_BUILDERS
+    for name in missing:
+        sys.modules.pop(name, None)
+
+
+@pytest.mark.parametrize("backend", sorted(WHISPER_BUILDERS))
+def test_whisper_final_stt_reaches_response_log_without_progressive_time(
+    service, conn_id, monkeypatch, caplog, whisper_builders, backend
+):
+    handler = whisper_builders[backend](monkeypatch)
+    handler.turn_latency_store = service.turn_latency_store
+    _time_whisper_by_audio_length(handler, monkeypatch)
+    notifier = object.__new__(TranscriptionNotifier)
+    notifier.setup(text_output_queue=Queue(), should_listen=Event())
+    service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
+
+    for mode, seconds in [("progressive", 1), ("progressive", 2)]:
+        audio = VADAudio(
+            audio=np.zeros(16000 * seconds, dtype=np.float32), mode=mode, turn_id="turn_1", turn_revision=0
+        )
+        list(handler.process(audio))
+    assert service.turn_latency_store._pending_turn == {}
+
+    final = VADAudio(audio=np.zeros(16000 * 3, dtype=np.float32), mode="final", turn_id="turn_1", turn_revision=0)
+    for transcription in handler.process(final):
+        list(notifier.process(transcription))
+    service.dispatch_pipeline_event(conn_id, notifier.text_output_queue.get_nowait())
+    request = service.text_prompt_queue.get_nowait()
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=request.response_key))
+    with caplog.at_level(logging.INFO, logger=LATENCY_LOGGER):
+        service.finish_response(conn_id, response_key=request.response_key)
+
+    lines = _latency_lines(caplog)
+    assert len(lines) == 1
+    assert lines[0].startswith("Turn turn_1 rev=0 latency: stt=0.30s llm=n/a ")
+    assert lines[0].endswith(f"response_key={request.response_key}")
+    assert service.turn_latency_store._pending_turn == {}
+    assert service.turn_latency_store._trackers == {}
+
+
+def test_faster_whisper_silent_final_leaves_no_pending_stt(service, monkeypatch):
+    handler = WHISPER_BUILDERS["faster-whisper"](monkeypatch)
+    handler.turn_latency_store = service.turn_latency_store
+    handler.model.transcribe = lambda audio, **kwargs: ([], SimpleNamespace(language="en"))
+    final = VADAudio(audio=np.zeros(16000, dtype=np.float32), mode="final", turn_id="turn_1", turn_revision=0)
+
+    assert list(handler.process(final)) == []
+    assert service.turn_latency_store._pending_turn == {}
