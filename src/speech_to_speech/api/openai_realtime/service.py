@@ -198,6 +198,8 @@ class ConnState(BaseModel):
     closed_response_keys: dict[str, None] = Field(default_factory=dict)
     audio_buffer_has_data: bool = False
     audio_remainder: bytes = b""
+    input_audio_resampler: Any = None
+    input_audio_resampler_rate: int | None = None
     current_response_id: Optional[str] = None
     current_response_key: Optional[str] = None
     response_failed: bool = False
@@ -445,7 +447,7 @@ class RealtimeService:
     def append_pcm(self, conn_id: str, pcm_bytes: bytes, src_rate: int) -> list[bytes]:
         return self.audio.append_pcm(conn_id, pcm_bytes, src_rate)
 
-    def handle_audio_commit(self, conn_id: str) -> RealtimeErrorEvent | None:
+    def handle_audio_commit(self, conn_id: str) -> tuple[list[bytes], RealtimeErrorEvent | None]:
         return self.audio.handle_audio_commit(conn_id)
 
     def begin_audio_response(
