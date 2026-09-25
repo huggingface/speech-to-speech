@@ -74,6 +74,7 @@ from speech_to_speech.pipeline.messages import (
     ResponsePrefetchTransaction,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.turn_latency import TURN_LATENCY_METADATA_KEY
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -2296,6 +2297,44 @@ class TestFinishAudioResponse:
         done = events[-1]
         assert done.response.status == "cancelled"
         assert done.response.status_details.reason == "turn_detected"
+
+    @pytest.mark.parametrize("status", ["completed", "cancelled", "failed", "incomplete"])
+    def test_terminal_response_includes_raw_turn_latency_metadata(self, service, conn_id, status):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        response_key = "response-key"
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            metadata={"client-key": "client-value", TURN_LATENCY_METADATA_KEY: "client-value-must-not-win"},
+        )
+        service.response._ensure_response(conn_id, response_key)
+        tracker = service.turn_latency_store.get_or_create_response(
+            response_key,
+            turn_id="turn_3",
+            turn_revision=2,
+            session_id=conn_id,
+        )
+        tracker.record_stt(0.181284123)
+        tracker.record_llm(1.241907456)
+        tracker.record_tts_ttfa(0.121775789)
+        tracker.record_e2e(1.613482987)
+        tracker.record_mlx_lock_wait(0.003456789)
+
+        events = service.finish_response(conn_id, status=status, response_key=response_key)
+
+        done = next(event for event in events if isinstance(event, ResponseDoneEvent))
+        assert done.response.metadata["client-key"] == "client-value"
+        assert json.loads(done.response.metadata[TURN_LATENCY_METADATA_KEY]) == {
+            "version": 1,
+            "turn_id": "turn_3",
+            "turn_revision": 2,
+            "response_key": response_key,
+            "stt_s": 0.181284123,
+            "llm_s": 1.241907456,
+            "tts_ttfa_s": 0.121775789,
+            "e2e_s": 1.613482987,
+            "mlx_lock_wait_s": 0.003456789,
+            "status": status,
+        }
 
     def test_finish_resets_state(self, service, conn_id):
         from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams

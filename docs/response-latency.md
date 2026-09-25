@@ -14,6 +14,21 @@ The same record is available with `speech-to-speech local` and
 belong to the same turn and revision. A follow-up does not repeat the original
 STT duration.
 
+The terminal `response.done` event also carries the unrounded record in the
+reserved `response.metadata["speech_to_speech.turn_latency"]` key. Realtime
+metadata values are strings, so the value is compact JSON with this schema:
+
+```json
+{"e2e_s":1.613482,"llm_s":1.241907,"mlx_lock_wait_s":0.0,"response_key":"...","status":"completed","stt_s":0.181284,"tts_ttfa_s":0.121775,"turn_id":"turn_3","turn_revision":0,"version":1}
+```
+
+Durations are raw seconds and are not rounded to the two decimal places used in
+the human-readable log. Unavailable measurements are JSON `null`. Existing
+client metadata is preserved, except that the reserved latency key is always
+replaced by the server measurement. `response.created` continues to carry only
+the client-supplied metadata; the latency key appears only on terminal responses
+with an attributed turn.
+
 | Stage | Backends with a measured field | Backends with `n/a` pending coverage |
 | --- | --- | --- |
 | `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime` | `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper`, `parakeet-unified`, `paraformer`, `qwen3-asr` |

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -53,6 +54,7 @@ from speech_to_speech.pipeline.messages import (
     ResponsePrefetchTransaction,
 )
 from speech_to_speech.pipeline.transcript_logging import log_exception
+from speech_to_speech.pipeline.turn_latency import TURN_LATENCY_METADATA_KEY
 from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
 
 if TYPE_CHECKING:
@@ -462,7 +464,18 @@ class ResponseHandler(RealtimeBaseHandler):
             status_details = RealtimeResponseStatus(type=status, reason=reason, error=error)  # type: ignore[arg-type]
 
         rp = st.current_response_params
-        metadata = rp.metadata if rp and rp.metadata else None
+        metadata = dict(rp.metadata) if rp and rp.metadata else {}
+        if status != "in_progress" and st.current_response_key is not None:
+            tracker = self._service.turn_latency_store.get_response(st.current_response_key)
+            if tracker is not None and tracker.turn_id is not None:
+                metadata[TURN_LATENCY_METADATA_KEY] = json.dumps(
+                    tracker.metadata_payload(
+                        response_key=st.current_response_key,
+                        status=status,
+                    ),
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
 
         voice: str | None = None
         if rp and rp.audio and rp.audio.output and rp.audio.output.voice:
@@ -488,7 +501,7 @@ class ResponseHandler(RealtimeBaseHandler):
             status_details=status_details,
             audio=Audio(output=AudioOutput(voice=voice)),  # type: ignore[arg-type]
             conversation_id=conversation_id,
-            metadata=metadata,
+            metadata=metadata or None,
             output_modalities=output_modalities,
             output=self._build_output_items(conn_id, status),
             usage=RealtimeResponseUsage(
