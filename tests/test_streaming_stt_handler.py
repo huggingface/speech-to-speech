@@ -1299,7 +1299,7 @@ def test_unconsumed_stale_commit_times_out_and_releases_later_turns(handler_type
         handler.start_turn("turn_1", 1)
         handler.append_audio(reopened_chunk)
         handler.commit_boundary("turn_1", 1)
-        tracker.observe("turn_2", 0)
+        assert tracker.start_turn() == ("turn_2", 0)
         handler.start_turn("turn_2", 0)
         handler.append_audio(b"\x03\x00" * 512)
         handler.commit_boundary("turn_2", 0)
@@ -1538,7 +1538,7 @@ def test_connection_failure_discards_reopened_revisions_of_the_same_turn(handler
     )
     assert len(factory.instances) == 1
 
-    tracker.observe("turn_2", 0)
+    assert tracker.start_turn() == ("turn_2", 0)
     handler.start_turn("turn_2", 0)
     handler.append_audio(b"\x03\x00" * 512)
     recovered = list(
