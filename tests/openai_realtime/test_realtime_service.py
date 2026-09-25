@@ -3679,6 +3679,57 @@ class TestDispatchPipelineEvent:
         assert tracker.is_latest("turn_2", 0)
         service.unregister(conn_id)
 
+    def test_tool_followup_stays_valid_after_tool_call_response_ends(self, runtime_config, should_listen):
+        tracker = SpeculativeTurnTracker()
+        prompts: Queue = Queue()
+        service = RealtimeService(text_prompt_queue=prompts, should_listen=should_listen, speculative_turns=tracker)
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+        turn_id, revision = tracker.start_turn()
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="Weather?", turn_id=turn_id, turn_revision=revision),
+        )
+        request = prompts.get_nowait()
+        call = RealtimeConversationItemFunctionCall(
+            type="function_call", id="fc_1", call_id="call_1", name="lookup", arguments="{}"
+        )
+        runtime_config.chat.add_provisional_generation_items(request.response_key, [call])
+        service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(
+                response_key=request.response_key,
+                turn_id=turn_id,
+                turn_revision=revision,
+                parts=[
+                    AssistantToolCallPart(
+                        tool={
+                            "type": "function_call",
+                            **call.model_dump(include={"id", "call_id", "name", "arguments"}),
+                        }
+                    )
+                ],
+            ),
+        )
+        service.dispatch_pipeline_event(
+            conn_id, ResponseGenerationDoneEvent(response_key=request.response_key, call_ids=[call.call_id])
+        )
+        service.finish_response(conn_id, response_key=request.response_key)
+
+        service.handle_conversation_item_create(
+            conn_id,
+            ConversationItemCreateEvent(
+                type="conversation.item.create",
+                item={"type": "function_call_output", "call_id": call.call_id, "output": "sunny"},
+            ),
+        )
+        followup = prompts.get_nowait()
+
+        assert (followup.turn_id, followup.turn_revision) == (turn_id, revision)
+        assert tracker.is_latest(followup.turn_id, followup.turn_revision)
+        assert tracker.begin_reopen_candidate(turn_id, revision) is None
+        service.unregister(conn_id)
+
     def test_assistant_text_waits_for_pending_reopen_and_emits_cancelled_reopen(
         self,
         runtime_config,

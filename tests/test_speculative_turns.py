@@ -124,16 +124,24 @@ def test_closed_committed_turn_becomes_stale_after_conversation_advances():
     assert not tracker.is_committed("turn_1", 0)
 
 
-def test_closing_current_turn_prevents_late_output_and_reopen():
+def test_closed_current_turn_accepts_followups_but_cannot_reopen():
     tracker = SpeculativeTurnTracker()
     tracker.start_turn()
     tracker.commit("turn_1", 0)
 
     tracker.close("turn_1", 0)
 
+    # A tool follow-up or client response.create still answers this turn.
+    assert tracker.is_latest("turn_1", 0)
+    assert tracker.is_committed("turn_1", 0)
+    assert tracker.begin_reopen_candidate("turn_1", 0) is None
+    assert tracker.commit_if_latest_after_pending_reopen("turn_1", 0)
+
+    tracker.close("turn_1", 0)
+    tracker.start_turn()
+
     assert not tracker.is_latest("turn_1", 0)
     assert not tracker.is_committed("turn_1", 0)
-    assert tracker.begin_reopen_candidate("turn_1", 0) is None
 
 
 def test_pending_reopen_cannot_resurrect_superseded_turn():

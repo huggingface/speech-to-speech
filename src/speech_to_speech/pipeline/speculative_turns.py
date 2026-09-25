@@ -243,7 +243,12 @@ class SpeculativeTurnTracker:
             self._commit_locked(turn_id, revision)
 
     def close(self, turn_id: str | None, revision: int | None) -> None:
-        """Release committed state after a response reaches its terminal event."""
+        """Release committed state after a response reaches its terminal event.
+
+        A closed turn that is still current stays answered: tool follow-ups
+        and client-requested responses for it remain valid, and it cannot
+        reopen. The next turn makes it stale.
+        """
         if turn_id is None or revision is None:
             return
         with self._condition:
@@ -259,9 +264,10 @@ class SpeculativeTurnTracker:
         if turn_id is None:
             return False
         with self._condition:
+            answered = self._committed | ({self._closed_current} if self._closed_current is not None else set())
             return any(
                 reference.turn_id == turn_id and (revision is None or reference.revision == revision)
-                for reference in self._committed
+                for reference in answered
             )
 
     def begin_reopen_candidate(self, turn_id: str | None, revision: int | None) -> int | None:
@@ -347,7 +353,7 @@ class SpeculativeTurnTracker:
             return True
         if self._current is None:
             return True
-        if not self._is_current_locked(turn_id, revision) or self._is_closed_current_locked(turn_id, revision):
+        if not self._is_current_locked(turn_id, revision):
             return False
         self._committed.add(self._current)
         if self._grace_matches_locked(turn_id, revision):
@@ -362,11 +368,10 @@ class SpeculativeTurnTracker:
     def _is_relevant_locked(self, turn_id: str, revision: int) -> bool:
         if self._current is None:
             return True
-        current = self._is_current_locked(turn_id, revision) and not self._is_closed_current_locked(
-            turn_id,
-            revision,
+        return (
+            self._is_current_locked(turn_id, revision)
+            or self._committed_reference_locked(turn_id, revision) is not None
         )
-        return current or self._committed_reference_locked(turn_id, revision) is not None
 
     def _blocks_reopen_locked(self, turn_id: str, revision: int) -> bool:
         """Return whether accepted or finished output makes reopening unsafe."""
