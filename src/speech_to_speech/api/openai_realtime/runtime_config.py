@@ -75,6 +75,18 @@ class RuntimeConfig(BaseModel):
             return True
         return val if val is not None else True
 
+    @property
+    def input_audio_transcription_snapshots_enabled(self) -> bool:
+        """Whether the client has opted in to replaceable speculative transcript snapshots.
+
+        Reads 'extensions' from the session config. Defaults to 'False'.
+        """
+        extensions = getattr(self.session, "extensions", None)
+        return (
+            isinstance(extensions, (list, tuple, set))
+            and "speech_to_speech.input_audio_transcription.snapshot" in extensions
+        )
+
     def apply_session_update(self, update: RealtimeSessionCreateRequest) -> None:
         """Merge non-None, explicitly-set fields from 'update' into the
         current 'session', preserving any fields not present in the update."""

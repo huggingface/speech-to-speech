@@ -53,7 +53,11 @@ from speech_to_speech.api.openai_realtime.handlers import (
     ResponseHandler,
     SessionHandler,
 )
-from speech_to_speech.api.openai_realtime.input_state import InputItemState, PendingInputTerminal
+from speech_to_speech.api.openai_realtime.input_state import (
+    InputItemState,
+    PendingInputTerminal,
+    SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
+)
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.pipeline.events import (
@@ -121,6 +125,7 @@ ServerEvent = Union[
     ConversationItemInputAudioTranscriptionDeltaEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
+    SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
     ResponseCreatedEvent,
     ResponseDoneEvent,
     ResponseAudioDeltaEvent,

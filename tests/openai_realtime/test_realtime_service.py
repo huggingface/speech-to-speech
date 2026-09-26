@@ -52,6 +52,7 @@ from openai.types.realtime.conversation_item import (
 from speech_to_speech.api.openai_realtime.service import (
     CHUNK_SIZE_BYTES,
     RealtimeService,
+    SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
 )
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -307,6 +308,21 @@ class TestHandleSessionUpdate:
         service.handle_session_update(conn_id, evt)
         assert runtime_config.session.audio.output.voice == "nova"
         assert runtime_config.session.audio.input.turn_detection.type == "server_vad"
+
+    def test_session_update_extensions_from_documented_payload(self, service, conn_id, runtime_config):
+        raw = {
+            "type": "session.update",
+            "session": {
+                "type": "realtime",
+                "extensions": ["speech_to_speech.input_audio_transcription.snapshot"],
+            },
+        }
+        parsed = service.parse_client_event(raw)
+        assert parsed is not None
+        assert isinstance(parsed, SessionUpdateEvent)
+        err = service.handle_session_update(conn_id, parsed)
+        assert err is None
+        assert runtime_config.input_audio_transcription_snapshots_enabled is True
 
     def test_session_update_merges_partial_updates(self, service, conn_id, runtime_config):
         """Partial updates preserve previously-set fields."""
@@ -3962,6 +3978,156 @@ class TestDispatchPipelineEvent:
         assert committed[0].delta == "The"
         assert revised == []
         assert recovered[0].delta == " swift"
+
+    def test_partial_transcription_opted_in_snapshots_emits_snapshots_and_deltas(self, service, conn_id):
+        service.handle_session_update(
+            conn_id,
+            SessionUpdateEvent.model_validate(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "extensions": ["speech_to_speech.input_audio_transcription.snapshot"],
+                    },
+                }
+            ),
+        )
+        started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+        item_id = started[0].item_id
+
+        first = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello brave"),
+        )
+        second = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello brave new"),
+        )
+        third = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello brave new world"),
+        )
+
+        assert len(first) == 1
+        assert isinstance(first[0], SpeechToSpeechInputAudioTranscriptionSnapshotEvent)
+        assert first[0].item_id == item_id
+        assert first[0].content_index == 0
+        assert first[0].transcript == "hello brave"
+
+        assert len(second) == 2
+        assert isinstance(second[0], SpeechToSpeechInputAudioTranscriptionSnapshotEvent)
+        assert second[0].transcript == "hello brave new"
+        assert isinstance(second[1], ConversationItemInputAudioTranscriptionDeltaEvent)
+        assert second[1].delta == "hello"
+
+        assert len(third) == 2
+        assert isinstance(third[0], SpeechToSpeechInputAudioTranscriptionSnapshotEvent)
+        assert third[0].transcript == "hello brave new world"
+        assert isinstance(third[1], ConversationItemInputAudioTranscriptionDeltaEvent)
+        assert third[1].delta == " brave"
+
+    def test_partial_transcription_opted_in_snapshots_emits_snapshot_when_delta_withheld(self, service, conn_id):
+        service.handle_session_update(
+            conn_id,
+            SessionUpdateEvent.model_validate(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "extensions": ["speech_to_speech.input_audio_transcription.snapshot"],
+                    },
+                }
+            ),
+        )
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+
+        first = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="Nothing company."),
+        )
+        revised = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="Oh, nothing confused me."),
+        )
+        extended = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="Oh, nothing confused me. I was"),
+        )
+
+        assert len(first) == 1
+        assert isinstance(first[0], SpeechToSpeechInputAudioTranscriptionSnapshotEvent)
+        assert first[0].transcript == "Nothing company."
+
+        assert len(revised) == 1
+        assert isinstance(revised[0], SpeechToSpeechInputAudioTranscriptionSnapshotEvent)
+        assert revised[0].transcript == "Oh, nothing confused me."
+
+        assert len(extended) == 2
+        assert isinstance(extended[0], SpeechToSpeechInputAudioTranscriptionSnapshotEvent)
+        assert extended[0].transcript == "Oh, nothing confused me. I was"
+        assert isinstance(extended[1], ConversationItemInputAudioTranscriptionDeltaEvent)
+        assert extended[1].delta == "Oh nothing confused"
+
+    def test_partial_transcription_opted_in_duplicate_does_not_emit_duplicate_snapshot(self, service, conn_id):
+        service.handle_session_update(
+            conn_id,
+            SessionUpdateEvent.model_validate(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "extensions": ["speech_to_speech.input_audio_transcription.snapshot"],
+                    },
+                }
+            ),
+        )
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+
+        first = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello brave"),
+        )
+        duplicate = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello brave"),
+        )
+
+        assert len(first) == 1
+        assert isinstance(first[0], SpeechToSpeechInputAudioTranscriptionSnapshotEvent)
+        assert duplicate == []
+
+    def test_overlapping_items_route_snapshots_by_item_id(self, service, conn_id):
+        service.handle_session_update(
+            conn_id,
+            SessionUpdateEvent.model_validate(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "extensions": ["speech_to_speech.input_audio_transcription.snapshot"],
+                    },
+                }
+            ),
+        )
+        first_started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1"))
+        item1_id = first_started[0].item_id
+
+        second_started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_2"))
+        item2_id = second_started[0].item_id
+
+        p1 = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello item 1", turn_id="turn_1"),
+        )
+        p2 = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="world item 2", turn_id="turn_2"),
+        )
+
+        assert p1[0].item_id == item1_id
+        assert p1[0].transcript == "hello item 1"
+        assert p2[0].item_id == item2_id
+        assert p2[0].transcript == "world item 2"
 
     def test_new_input_item_resets_partial_transcription_delta(self, service, conn_id):
         first_started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1"))
