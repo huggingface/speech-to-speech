@@ -2336,6 +2336,12 @@ class TestFinishAudioResponse:
             "llm_s": 1.241907456,
             "tts_ttfa_s": 0.121775789,
             "e2e_s": 1.613482987,
+            "vad_decision_s": None,
+            "smart_analysis_s": None,
+            "smart_status": None,
+            "smart_grace_s": None,
+            "smart_delay_s": None,
+            "smart_wait_s": None,
             "mlx_lock_wait_s": 0.003456789,
             "status": status,
         }
@@ -2364,6 +2370,43 @@ class TestFinishAudioResponse:
             assert TURN_LATENCY_METADATA_KEY not in wire_metadata
         assert created.response.metadata == metadata
         assert service.turn_latency_store._trackers == {}
+
+    def test_expanded_latency_value_fits_realtime_limit_and_preserves_client_metadata(self, service, conn_id):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        response_key = "1234567890abcdef" * 2
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(metadata={"client": "kept"})
+        service.response._ensure_response(conn_id, response_key)
+        tracker = service.turn_latency_store.get_or_create_response(
+            response_key, turn_id="turn_123456", turn_revision=12, session_id=conn_id
+        )
+        tracker.stt_s = tracker.llm_ttft_s = tracker.llm_s = 0.12345678901234567
+        tracker.tts_ttfa_s = tracker.e2e_s = tracker.mlx_lock_wait_s = 0.12345678901234567
+        tracker.vad_decision_s = tracker.smart_turn_analysis_s = tracker.smart_turn_wait_s = 0.12345678901234567
+        tracker.smart_turn_status = "incomplete"
+        tracker.smart_turn_grace_s = 2.0
+        tracker.smart_turn_processing_delay_s = 0.6
+
+        done = service.finish_response(conn_id, response_key=response_key)[-1]
+        metadata = done.response.metadata
+        assert metadata["client"] == "kept"
+        assert len(metadata[TURN_LATENCY_METADATA_KEY]) <= 512
+        payload = json.loads(metadata[TURN_LATENCY_METADATA_KEY])
+        assert payload["smart_wait_s"] == pytest.approx(0.12345678901234567, abs=1e-9)
+        assert payload["vad_decision_s"] == pytest.approx(0.12345678901234567, abs=1e-9)
+
+    def test_oversized_latency_value_does_not_replace_client_metadata(self, service, conn_id):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        response_key = "response-key"
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(metadata={"client": "kept"})
+        service.response._ensure_response(conn_id, response_key)
+        service.turn_latency_store.get_or_create_response(
+            response_key, turn_id="turn_" + "1" * 512, turn_revision=0, session_id=conn_id
+        )
+
+        done = service.finish_response(conn_id, response_key=response_key)[-1]
+        assert done.response.metadata == {"client": "kept"}
 
     @pytest.mark.parametrize("status", ["completed", "cancelled", "failed", "incomplete"])
     @pytest.mark.parametrize("conversation", ["auto", "none"])

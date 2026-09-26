@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from threading import Lock
+from types import SimpleNamespace
 
+import speech_to_speech.pipeline.speculative_turns as speculative_module
 import speech_to_speech.utils.mlx_lock as mlx_lock
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.turn_latency import (
     TurnLatencyStore,
     TurnLatencyTracker,
@@ -24,7 +27,7 @@ def test_turn_latency_tracker_format_log_line() -> None:
     )
     assert (
         tracker.format_log_line()
-        == "Turn turn_1 rev=0 latency: stt=0.14s llm_ttft=0.11s llm=1.28s tts_ttfa=0.16s e2e=1.61s mlx_lock_wait=0.00s status=completed"
+        == "Turn turn_1 rev=0 latency: stt=0.14s llm_ttft=0.11s llm=1.28s tts_ttfa=0.16s e2e=1.61s vad_decision=n/a smart_turn_analysis=n/a smart_turn_wait=n/a smart_turn_status=n/a mlx_lock_wait=0.00s status=completed"
     )
 
 
@@ -86,6 +89,65 @@ def test_turn_latency_store_pending_turn_merges_into_response() -> None:
     assert tracker.stt_s == 0.12
     assert tracker.mlx_lock_wait_s == 0.03
     assert store.get_or_create_for_turn("turn_3", 0) is not pending
+
+
+def test_smart_wait_uses_union_of_actual_intervals_and_stops_with_original_response() -> None:
+    store = TurnLatencyStore()
+    pending = store.get_or_create_for_turn("turn_3", 0)
+    pending.smart_turn_status = "incomplete"
+    pending.smart_turn_wait_s = 0.0
+    store.record_smart_wait("turn_3", 0, 1.0, 2.0)
+    response = store.get_or_create_response("first", turn_id="turn_3", turn_revision=0, session_id="session")
+    store.record_smart_wait("turn_3", 0, 1.5, 3.0)
+    assert response.smart_turn_wait_s == 2.0
+
+    store.pop("first", session_id="session")
+    followup = store.get_or_create_response("followup", turn_id="turn_3", turn_revision=0, session_id="session")
+    store.record_smart_wait("turn_3", 0, 3.0, 4.0)
+    assert followup.smart_turn_status is None
+    assert followup.smart_turn_wait_s is None
+
+
+def test_configured_grace_is_not_reported_as_wait_without_a_gate(monkeypatch) -> None:
+    clock = [0.0]
+
+    class ControlledCondition:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def notify_all(self):
+            pass
+
+        def wait(self, duration):
+            clock[0] += duration
+
+    monkeypatch.setattr(
+        speculative_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock[0], perf_counter=lambda: clock[0]),
+    )
+    store = TurnLatencyStore()
+    pending = store.get_or_create_for_turn("turn_1", 0)
+    pending.smart_turn_status = "complete"
+    pending.smart_turn_grace_s = 2.0
+    pending.smart_turn_wait_s = 0.0
+    turns = SpeculativeTurnTracker()
+    turns._condition = ControlledCondition()
+    turns.wait_observer = store.record_smart_wait
+    turns.observe("turn_1", 0)
+    turns.start_reopen_grace("turn_1", 0, 2.0)
+
+    clock[0] = 3.0
+    assert turns.is_latest_after_reopen_grace("turn_1", 0)
+    assert pending.smart_turn_wait_s == 0.0
+
+    clock[0] = 4.0
+    turns.start_reopen_grace("turn_1", 0, 2.0)
+    assert turns.is_latest_after_reopen_grace("turn_1", 0)
+    assert pending.smart_turn_wait_s == 2.0
 
 
 def test_turn_latency_store_pop_and_clear_session() -> None:

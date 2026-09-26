@@ -635,8 +635,8 @@ export class ChatView {
 
   /** @param {HTMLElement} hist @param {import("../turn-latency.js").TurnLatency} timing */
   _appendTimings(hist, timing) {
-    /** @param {number|null} seconds */
-    const format = (seconds) => seconds === null ? "Unavailable" : `${seconds.toFixed(2)} s`;
+    /** @param {number|null|undefined} seconds */
+    const format = (seconds) => seconds == null ? "Unavailable" : `${seconds.toFixed(2)} s`;
     const details = document.createElement("details");
     details.className = "hist-timings";
     const summary = document.createElement("summary");
@@ -649,9 +649,15 @@ export class ChatView {
     status.textContent = ({ completed: "Completed", cancelled: "Interrupted", failed: "Failed", incomplete: "Incomplete" })[timing.status];
     details.appendChild(status);
     const list = document.createElement("dl");
-    /** @type {[string, number|null][]} */
+    /** @type {[string, number|null|undefined|string][]} */
     const stages = [
-      ["Speech end to first audio", timing.e2e_s],
+      ["VAD handoff to first audio", timing.e2e_s],
+      ["VAD end decision", timing.vad_decision_s],
+      ["Smart Turn decision", timing.smart_status],
+      ["Smart Turn analysis", timing.smart_analysis_s],
+      ["Smart Turn actual wait", timing.smart_wait_s],
+      ["Smart Turn grace configured", timing.smart_grace_s],
+      ["Smart Turn processing delay configured", timing.smart_delay_s],
       ["Transcription", timing.stt_s],
       ["Response generation", timing.llm_s],
       ["Voice synthesis to first audio", timing.tts_ttfa_s],
@@ -661,12 +667,12 @@ export class ChatView {
       const term = document.createElement("dt");
       term.textContent = label;
       const description = document.createElement("dd");
-      description.textContent = format(value);
+      description.textContent = typeof value === "string" ? value : format(value);
       list.append(term, description);
     }
     details.appendChild(list);
     const note = document.createElement("p");
-    note.textContent = "Measured on the server, excluding browser playback. Generation covers the full response. Stages overlap; these times do not add up. Unavailable stages may not have run.";
+    note.textContent = "Measured on the server, excluding browser playback. First audio starts at the VAD handoff, after VAD and Smart Turn analysis. Generation covers the full response. Stages overlap; these times do not add up. Unavailable stages may not have run.";
     details.appendChild(note);
     hist.querySelector(".hist-timings")?.remove();
     hist.appendChild(details);
