@@ -37,7 +37,7 @@ from openai.types.responses.response_input_param import (
 )
 from openai.types.responses.response_input_text_param import ResponseInputTextParam
 from openai.types.responses.response_output_text_param import ResponseOutputTextParam
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from speech_to_speech.utils.utils import _generate_id
 
@@ -77,6 +77,43 @@ SupportedItem = Union[
     RealtimeConversationItemFunctionCall,
     RealtimeConversationItemFunctionCallOutput,
 ]
+
+
+class ReasoningRecord(BaseModel):
+    """Opaque Responses reasoning payload attached to the host it preceded."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str
+    payload: dict[str, Any]
+
+    @model_validator(mode="after")
+    def _payload_matches_id(self) -> ReasoningRecord:
+        if self.payload.get("type") != "reasoning":
+            raise ValueError("ReasoningRecord.payload must have type='reasoning'")
+        if self.payload.get("id") != self.id:
+            raise ValueError("ReasoningRecord.id must equal payload['id']")
+        return self
+
+
+class HostedFunctionCall(RealtimeConversationItemFunctionCall):
+    """Realtime function_call plus the reasoning items that immediately preceded it."""
+
+    leading_reasoning: tuple[ReasoningRecord, ...] = ()
+
+
+class HostedAssistantMessage(RealtimeConversationItemAssistantMessage):
+    """Realtime assistant message plus the reasoning items that immediately preceded it."""
+
+    leading_reasoning: tuple[ReasoningRecord, ...] = ()
+
+
+def leading_reasoning_of(item: object) -> tuple[ReasoningRecord, ...]:
+    return getattr(item, "leading_reasoning", ())
+
+
+def _leading_reasoning_params(item: object) -> list[ResponseInputItemParam]:
+    return [deepcopy(record.payload) for record in leading_reasoning_of(item)]
 
 
 CompactFn = Callable[[ResponseInputParam], CompactionResult]
@@ -678,6 +715,7 @@ class Chat:
                         content.append(ResponseInputTextParam(text=AUDIO_INPUT_HISTORY_PLACEHOLDER, type="input_text"))
                         audio_placeholder_added = True
                 if content:
+                    result.extend(_leading_reasoning_params(item))
                     result.append(ResponseMessage(content=content, role="user", type="message"))
             elif isinstance(item, RealtimeConversationItemAssistantMessage):
                 assistant_content: list[ResponseOutputTextParam] = []
@@ -687,6 +725,7 @@ class Chat:
                             ResponseOutputTextParam(text=assistant_part.text, type="output_text", annotations=[])
                         )
                 if assistant_content:
+                    result.extend(_leading_reasoning_params(item))
                     result.append(
                         ResponseOutputMessageParam(
                             id=item.id,
@@ -711,6 +750,7 @@ class Chat:
                     function_call["id"] = item.id
                 if item.status is not None:
                     function_call["status"] = item.status
+                result.extend(_leading_reasoning_params(item))
                 result.append(function_call)
             elif isinstance(item, RealtimeConversationItemFunctionCallOutput):
                 function_call_output = FunctionCallOutput(
@@ -722,6 +762,7 @@ class Chat:
                     function_call_output["id"] = item.id
                 if item.status is not None:
                     function_call_output["status"] = item.status
+                result.extend(_leading_reasoning_params(item))
                 result.append(function_call_output)
         return result
 
@@ -981,6 +1022,7 @@ class Chat:
                 msg["content"] = [
                     c for c in content if not (isinstance(c, dict) and c.get("type") in {"input_image", "input_audio"})
                 ]
+        snapshot = [raw for raw in snapshot if not (isinstance(raw, dict) and raw.get("type") == "reasoning")]
         return snapshot, marker_ids, n_turns
 
     def _maybe_trigger_compaction(self, compactor: CompactFn) -> None:
@@ -1163,6 +1205,30 @@ TransformersChatMessage = Union[
 # ---------------------------------------------------------------------------
 # Factory helpers -- hide verbose constructors behind simple calls
 # ---------------------------------------------------------------------------
+
+
+def hosted_function_call(item: Any, leading_reasoning: tuple[ReasoningRecord, ...] = ()) -> HostedFunctionCall:
+    return HostedFunctionCall(
+        type="function_call",
+        name=item.name,
+        arguments=item.arguments,
+        call_id=item.call_id,
+        id=item.id,
+        status=getattr(item, "status", None),
+        leading_reasoning=leading_reasoning,
+    )
+
+
+def hosted_assistant_message(
+    content: list[AssistantContent],
+    leading_reasoning: tuple[ReasoningRecord, ...] = (),
+) -> HostedAssistantMessage:
+    return HostedAssistantMessage(
+        type="message",
+        role="assistant",
+        content=content,
+        leading_reasoning=leading_reasoning,
+    )
 
 
 def make_user_message(text: str) -> RealtimeConversationItemUserMessage:

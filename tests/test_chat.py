@@ -34,7 +34,10 @@ from speech_to_speech.LLM.chat import (
     Chat,
     ChatItemError,
     CompactionResult,
+    HostedFunctionCall,
+    ReasoningRecord,
     build_active_chat,
+    leading_reasoning_of,
     make_assistant_message,
     make_system_message,
     make_user_audio_message,
@@ -67,6 +70,42 @@ def _fc(call_id: str = "call_1", name: str = "my_func", arguments: str = "{}") -
         call_id=call_id,
         name=name,
         arguments=arguments,
+    )
+
+
+def _reasoning_record(
+    rid: str = "rs_1",
+    *,
+    summary_text: str = "plan",
+    encrypted_content: str = "gAAAA",
+) -> ReasoningRecord:
+    return ReasoningRecord(
+        id=rid,
+        payload={
+            "id": rid,
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": summary_text}],
+            "encrypted_content": encrypted_content,
+        },
+    )
+
+
+def _hosted_fc(
+    *,
+    call_id: str = "call_original",
+    item_id: str = "fc_orig",
+    name: str = "camera",
+    arguments: str = "{}",
+    reasoning: ReasoningRecord | None = None,
+) -> HostedFunctionCall:
+    record = reasoning if reasoning is not None else _reasoning_record()
+    return HostedFunctionCall(
+        type="function_call",
+        id=item_id,
+        call_id=call_id,
+        name=name,
+        arguments=arguments,
+        leading_reasoning=(record,),
     )
 
 
@@ -1670,3 +1709,127 @@ class TestTurnOrdering:
         chat.add_provisional_generation_items("response-a", [_assistant("second")], after_item_id=anchor)
 
         assert _texts(chat) == ["A", "first", "second", "B"]
+
+
+# ===================================================================
+# Hosted reasoning (opaque payload on function_call / assistant hosts)
+# ===================================================================
+
+
+def _serialized_types(chat: Chat) -> list[str]:
+    return [item["type"] for item in chat.to_responses_api_chat()]
+
+
+class TestHostedReasoning:
+    def test_unpaired_ordered_hosted_fc_omits_reasoning_until_output(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("what's on camera?"))
+        chat.add_ordered_function_call(_hosted_fc())
+
+        unpaired = chat.to_responses_api_chat()
+        assert _serialized_types(chat) == ["message"]
+        assert all(item.get("type") != "reasoning" for item in unpaired)
+
+        chat.add_item(_fco("call_original", "a cat"))
+        serialized = chat.to_responses_api_chat()
+        assert [item["type"] for item in serialized] == [
+            "message",
+            "reasoning",
+            "function_call",
+            "function_call_output",
+        ]
+        reasoning = serialized[1]
+        assert reasoning["id"] == "rs_1"
+        assert reasoning["type"] == "reasoning"
+        assert reasoning["encrypted_content"] == "gAAAA"
+        assert reasoning["summary"] == [{"type": "summary_text", "text": "plan"}]
+        function_call = serialized[2]
+        assert function_call["id"] == "fc_orig"
+        assert function_call["call_id"] == "call_original"
+
+    def test_unpaired_ordered_skip_does_not_leak_reasoning_before_later_user(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("A"))
+        chat.add_item(_assistant("before"))
+        chat.add_ordered_function_call(_hosted_fc())
+        chat.add_item(_user("B"))
+
+        serialized = chat.to_responses_api_chat()
+        assert all(item.get("type") != "reasoning" for item in serialized)
+        assert [(item["role"], item["content"][0]["text"]) for item in serialized] == [
+            ("user", "A"),
+            ("assistant", "before"),
+            ("user", "B"),
+        ]
+
+    def test_eviction_reinjects_hosted_reasoning_with_unmutated_payload(self):
+        chat = Chat(size=1)
+        chat.add_item(_user("u1"))
+        chat.add_ordered_function_call(_hosted_fc())
+        chat.add_item(_user("u2"))
+        chat.trim_if_needed()
+
+        assert not chat._has_call_id_in_buffer("call_original")
+        pending = chat._pending_tool_calls["call_original"]
+        assert isinstance(pending, HostedFunctionCall)
+        assert leading_reasoning_of(pending)[0].payload["encrypted_content"] == "gAAAA"
+
+        chat.add_item(_fco("call_original", "a cat"))
+        serialized = chat.to_responses_api_chat()
+        types = [item["type"] for item in serialized]
+        idx = types.index("reasoning")
+        assert types[idx : idx + 3] == ["reasoning", "function_call", "function_call_output"]
+        assert serialized[idx]["id"] == "rs_1"
+        assert serialized[idx]["encrypted_content"] == "gAAAA"
+        assert serialized[idx]["summary"] == [{"type": "summary_text", "text": "plan"}]
+        assert serialized[idx + 1]["id"] == "fc_orig"
+        assert serialized[idx + 1]["call_id"] == "call_original"
+        reinjected = next(
+            item
+            for item in chat.buffer
+            if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id == "call_original"
+        )
+        assert leading_reasoning_of(reinjected)[0].payload["encrypted_content"] == "gAAAA"
+
+    def test_deepcopy_copy_isolates_leading_reasoning_payloads(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("u"))
+        chat.add_ordered_function_call(_hosted_fc())
+        clone = chat.copy(deep=True)
+
+        original = leading_reasoning_of(chat._pending_tool_calls["call_original"])[0]
+        copied = leading_reasoning_of(clone._pending_tool_calls["call_original"])[0]
+        assert copied.payload == original.payload
+        copied.payload["encrypted_content"] = "mutated"
+        copied.payload["summary"][0]["text"] = "changed"
+        assert original.payload["encrypted_content"] == "gAAAA"
+        assert original.payload["summary"] == [{"type": "summary_text", "text": "plan"}]
+
+    def test_compaction_keep_fc_for_late_fco_keeps_hosted_reasoning_and_strips_snapshot(self):
+        chat = Chat(size=2)
+        captured: list = []
+        compactor = _make_stub_compactor(captured=captured)
+        chat.add_item(_user("u0"))
+        chat.add_ordered_function_call(_hosted_fc())
+        chat.add_item(_assistant("a0"))
+        chat.add_item(_user("u1"))
+        chat.add_item(_assistant("a1"))
+        chat.add_item(_user("u2"))
+        chat.add_item(_assistant("a2"))
+        chat.add_item(_user("u3"))
+        live_before = next(item for item in chat.buffer if isinstance(item, RealtimeConversationItemFunctionCall))
+        assert leading_reasoning_of(live_before)[0].id == "rs_1"
+
+        chat.add_item(_fco("call_original", "late"))
+        chat.trim_if_needed(compactor)
+        _wait_thread(chat)
+
+        assert len(captured) == 1
+        assert all(item.get("type") != "reasoning" for item in captured[0])
+        kept = next(item for item in chat.buffer if isinstance(item, RealtimeConversationItemFunctionCall))
+        assert leading_reasoning_of(kept)[0].payload["id"] == "rs_1"
+        assert leading_reasoning_of(kept)[0].payload["encrypted_content"] == "gAAAA"
+        types = _serialized_types(chat)
+        call_index = types.index("function_call")
+        assert types[call_index - 1] == "reasoning"
+        assert types[call_index + 1] == "function_call_output"

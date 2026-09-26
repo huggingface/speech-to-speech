@@ -6,12 +6,8 @@ from collections.abc import Iterator
 from typing import Any
 
 from openai import Stream
-from openai.types.realtime.realtime_conversation_item_assistant_message import (
-    Content as AssistantContent,
-)
 from openai.types.responses import (
     ResponseCompletedEvent,
-    ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
     ResponseTextDeltaEvent,
@@ -35,7 +31,7 @@ from speech_to_speech.LLM.chat_completions_language_model import (
     _request_chat_completions,
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn
-from speech_to_speech.utils.utils import _generate_id
+from speech_to_speech.LLM.responses_items import AssembledAssistant, AssembledToolCall, ResponsesSegmentAssembler
 
 logger = logging.getLogger(__name__)
 
@@ -160,55 +156,53 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         return optional_kwargs
 
     def _request(self, api_input: Any, optional_kwargs: dict[str, Any]) -> Any:
-        return self.client.responses.create(
-            model=self.model_name,
-            input=api_input,
-            stream=self.stream,
-            extra_body=self._extra_body,
-            timeout=self.request_timeout,
+        kwargs = {
+            "model": self.model_name,
+            "input": api_input,
+            "stream": self.stream,
+            "extra_body": self._extra_body,
+            "timeout": self.request_timeout,
             **optional_kwargs,
-        )
+        }
+        kwargs["include"] = ["reasoning.encrypted_content"]
+        return self.client.responses.create(**kwargs)
 
-    @staticmethod
-    def _assistant_content(content: Any) -> list[AssistantContent]:
-        return [
-            AssistantContent(type="output_text", text=c.text if c.type == "output_text" else c.refusal) for c in content
-        ]
+    def _provider_events_from_assembled(self, assembled: Any) -> Iterator[ProviderEvent]:
+        if isinstance(assembled, AssembledToolCall):
+            yield ToolCall(item=assembled.item, leading_reasoning=assembled.leading_reasoning)
+        elif isinstance(assembled, AssembledAssistant):
+            yield AssistantMessage(content=assembled.content, leading_reasoning=assembled.leading_reasoning)
 
     def _iter_stream_events(self, api_response: Stream) -> Iterator[ProviderEvent]:
+        assembler = ResponsesSegmentAssembler()
         for raw_event in api_response:
             if isinstance(raw_event, ResponseTextDeltaEvent):
                 yield TextDelta(text=raw_event.delta)
             elif isinstance(raw_event, ResponseOutputItemDoneEvent):
-                item = raw_event.item
-                if isinstance(item, ResponseFunctionToolCall):
-                    item.call_id = _generate_id("call")
-                    item.id = _generate_id("fc")
-                    yield ToolCall(item=item)
-                elif isinstance(item, ResponseOutputMessage):
-                    yield AssistantMessage(content=self._assistant_content(item.content))
+                for assembled in assembler.feed_item(raw_event.item):
+                    yield from self._provider_events_from_assembled(assembled)
             elif isinstance(raw_event, ResponseCompletedEvent):
                 usage = getattr(raw_event.response, "usage", None)
                 if usage:
                     yield Usage(input_tokens=usage.input_tokens or 0, output_tokens=usage.output_tokens or 0)
+        for assembled in assembler.finish():
+            yield from self._provider_events_from_assembled(assembled)
 
     def _iter_response_events(self, api_response: Any) -> Iterator[ProviderEvent]:
+        assembler = ResponsesSegmentAssembler()
         usage = api_response.usage
         if usage:
             yield Usage(input_tokens=usage.input_tokens or 0, output_tokens=usage.output_tokens or 0)
         for message in api_response.output:
-            if isinstance(message, ResponseFunctionToolCall):
-                message.call_id = _generate_id("call")
-                message.id = _generate_id("fc")
-                yield ToolCall(item=message)
-            elif isinstance(message, ResponseOutputMessage):
-                yield AssistantMessage(content=self._assistant_content(message.content))
+            for assembled in assembler.feed_item(message):
+                yield from self._provider_events_from_assembled(assembled)
+            if isinstance(message, ResponseOutputMessage):
                 # Text-only keeps every character; the base applies remove_unspeechable
                 # for audio. Only output_text parts are spoken (refusals are stored).
                 raw = "".join(c.text for c in message.content if c.type == "output_text")
                 yield TextDelta(text=raw)
-            else:
-                logger.warning(f"Not supported message type: {message.type}")
+        for assembled in assembler.finish():
+            yield from self._provider_events_from_assembled(assembled)
 
     def on_session_end(self) -> None:
         logger.debug("OpenAI API language model session state reset")
