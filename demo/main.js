@@ -1488,7 +1488,7 @@ async function doStart(audioContext = null) {
   });
 
   c.addEventListener("response-finished", (e) => {
-    const detail = /** @type {CustomEvent<{ responseId: string; status: string; audible?: boolean; transcript?: string }>} */ (e).detail;
+    const detail = /** @type {CustomEvent<{ responseId: string; status: string; audible?: boolean; transcript?: string; latency?: import("./turn-latency.js").TurnLatency | null }>} */ (e).detail;
     chat.onResponseFinished(detail);
   });
   c.addEventListener("error", (e) => {

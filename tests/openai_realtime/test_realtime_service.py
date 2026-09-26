@@ -1010,12 +1010,14 @@ class TestDeferConversationItemsDuringResponse:
 class TestHandleAudioCommit:
     def test_commit_after_audio(self, service, conn_id):
         service._state(conn_id).audio_buffer_has_data = True
-        err = service.handle_audio_commit(conn_id)
+        chunks, err = service.handle_audio_commit(conn_id)
+        assert chunks == []
         assert err is None
         assert service._state(conn_id).audio_buffer_has_data is False
 
     def test_commit_empty_buffer(self, service, conn_id):
-        err = service.handle_audio_commit(conn_id)
+        chunks, err = service.handle_audio_commit(conn_id)
+        assert chunks == []
         assert isinstance(err, RealtimeErrorEvent)
         assert err.error.type == "input_audio_buffer_commit_empty"
 
@@ -2314,6 +2316,7 @@ class TestFinishAudioResponse:
             session_id=conn_id,
         )
         tracker.record_stt(0.181284123)
+        tracker.record_llm_ttft(0.108531234)
         tracker.record_llm(1.241907456)
         tracker.record_tts_ttfa(0.121775789)
         tracker.record_e2e(1.613482987)
@@ -2329,6 +2332,7 @@ class TestFinishAudioResponse:
             "turn_revision": 2,
             "response_key": response_key,
             "stt_s": 0.181284123,
+            "llm_ttft_s": 0.108531234,
             "llm_s": 1.241907456,
             "tts_ttfa_s": 0.121775789,
             "e2e_s": 1.613482987,
@@ -3005,7 +3009,7 @@ class TestDispatchPipelineEvent:
             conn_id,
             SpeechStoppedEvent(),
         )
-        assert len(events) == 1
+        assert len(events) == 3
         evt = events[0]
         assert isinstance(evt, InputAudioBufferSpeechStoppedEvent)
         assert evt.audio_end_ms == 0
@@ -3036,7 +3040,7 @@ class TestDispatchPipelineEvent:
             conn_id,
             SpeechStoppedEvent(),
         )
-        assert len(events) == 1
+        assert len(events) == 3
         assert isinstance(events[0], InputAudioBufferSpeechStoppedEvent)
         assert service._state(conn_id).input_audio_duration_s == 0.0
 
@@ -4435,11 +4439,26 @@ class TestDispatchPipelineEvent:
         )
 
         item_id = first_started[0].item_id
-        assert second_started[0].item_id == item_id
+        assert second_started == []
         assert first_reopened_partial == []
         assert second_partial[0].item_id == item_id
         assert second_partial[0].delta == "hello"
-        assert completed[0].item_id == item_id
+        # The turn is still speculative, so its user item is not published yet.
+        assert completed == []
+        committed = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(text="hi", turn_id="turn_1", turn_revision=1),
+        )
+        assert [event.type for event in committed[:4]] == [
+            "input_audio_buffer.speech_stopped",
+            "input_audio_buffer.committed",
+            "conversation.item.created",
+            "conversation.item.input_audio_transcription.completed",
+        ]
+        assert committed[0].item_id == item_id
+        assert committed[1].item_id == item_id
+        assert committed[2].item.id == item_id
+        assert committed[3].item_id == item_id
         state = service._state(conn_id)
         assert item_id not in state.input_items
         assert state.current_input_item_id is None
@@ -4716,9 +4735,11 @@ class TestIdAndStateManagement:
         st = service._state(conn_id)
         assert st.last_item_id is None
 
-        # 1) speech_started sets last_item_id via dispatch_pipeline_event
+        # 1) Only committed input updates the published conversation predecessor
         events = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
         input_id = events[0].item_id
+        assert st.last_item_id is None
+        service.dispatch_pipeline_event(conn_id, SpeechStoppedEvent())
         assert st.last_item_id == input_id
 
         # 2) assistant_text sets last_item_id via dispatch_pipeline_event

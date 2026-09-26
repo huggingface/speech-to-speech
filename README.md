@@ -716,6 +716,12 @@ gated by `--smart_turn_max_wait_ms` (2 seconds by default). If speech resumes du
 reopened as a newer revision, the accumulated audio is re-emitted, and work from the previous revision is
 discarded before it reaches the user.
 
+The server holds `input_audio_buffer.speech_stopped` and the final transcription while a turn can still
+reopen. Resumed speech keeps the same open item and live transcription deltas
+continue. Once the turn commits, the client receives one stop, an input-buffer commitment, the created
+user item, and one final transcript, so its user-turn history matches the model's.
+If transcription fails, the server sends the stop and failure after the reopen grace ends.
+
 The base package includes the quantized CPU runtime and enables Smart Turn by default:
 
 ```bash
