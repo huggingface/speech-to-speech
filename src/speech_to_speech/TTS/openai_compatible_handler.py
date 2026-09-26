@@ -729,7 +729,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         on_first_source_audio: Callable[[], None] | None = None,
     ) -> Iterator[np.ndarray]:
         resampler = _StreamingFIRResampler(source_rate, PIPELINE_SAMPLE_RATE)
-        sample_remainder = np.empty(0, dtype=np.int16)
+        sample_remainder: np.ndarray = np.empty(0, dtype=np.int16)
         for samples in sample_chunks:
             if on_first_source_audio is not None and samples.size:
                 on_first_source_audio()
