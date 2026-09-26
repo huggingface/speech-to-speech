@@ -1255,3 +1255,34 @@ def test_vad_progressive_processing_pause_is_capped():
     handler.realtime_processing_pause = 0.5
 
     assert handler._progressive_processing_pause(30_000) == 2.0
+
+
+@pytest.mark.parametrize("speech_pad_ms", [0, 30, 500])
+@pytest.mark.parametrize("silent_hops", [0, 1, 3, 20])
+def test_firered_preserves_candidate_audio_through_handler(speech_pad_ms, silent_hops):
+    from speech_to_speech.VAD.firered_vad_iterator import FireRedVadIterator
+    from tests.test_firered_vad_iterator import _FakeFireRedStream, _frame
+
+    frames = (
+        [_frame(is_speech=False, smoothed_prob=0.0) for _ in range(silent_hops)]
+        + [_frame(is_speech=True) for _ in range(7)]
+        + [_frame(is_speech=True, is_speech_start=True)]
+        + [_frame(is_speech=True) for _ in range(35)]
+        + [_frame(is_speech=False, smoothed_prob=0.0, is_speech_end=True)]
+    )
+    iterator = FireRedVadIterator(_FakeFireRedStream(frames), speech_pad_ms=speech_pad_ms)
+    handler = _vad_handler_for_iterator(iterator)
+    sink = _RecordingStreamingSTT()
+    handler.streaming_stt_sink = sink
+    pcm = np.arange(32 * 512, dtype=np.int16)
+    outputs = [out for chunk in pcm.reshape(-1, 512) for out in handler.process(chunk.tobytes())]
+
+    assert len(outputs) == 1
+    assert iterator.last_utterance_active_speech_samples == 43 * 160
+    # The start-confirmation window ends 400 samples after its hop begins.
+    trigger_chunk_start = ((silent_hops + 7) * 160 + 399) // 512 * 512
+    expected_start = min(silent_hops * 160, max(0, trigger_chunk_start - speech_pad_ms * 16))
+    audio = outputs[0].audio
+    streamed = np.frombuffer(b"".join(sink.audio), dtype=np.int16)
+    np.testing.assert_array_equal(streamed, pcm[expected_start : expected_start + len(audio)])
+    np.testing.assert_array_equal(audio, pcm[expected_start : expected_start + len(audio)].astype(np.float32) / 32768)

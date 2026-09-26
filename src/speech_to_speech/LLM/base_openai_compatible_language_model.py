@@ -11,6 +11,7 @@ from collections.abc import Callable, Generator, Iterator
 from queue import Empty, Full, Queue
 from threading import BoundedSemaphore, Lock, Thread, current_thread
 from threading import Event as ThreadingEvent
+from time import perf_counter
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
@@ -753,6 +754,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         transaction_rolled_back = False
         provider_request_started = False
         consumed_image_ids: set[str] = set()
+        store = getattr(self, "turn_latency_store", None)
+        tracker = store.get_response(turn.response_key) if store else None
 
         def rollback_transaction() -> None:
             nonlocal transaction_rolled_back
@@ -769,6 +772,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             transaction_rolled_back = True
 
         try:
+            generation_started_at_s = perf_counter()
             try:
                 api_input = (serialize_fn or self._serialize)(active_chat)
                 # Images the model actually sees this turn; only these are stripped on
@@ -796,10 +800,23 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         api_response = make_request()
                         events = (event_iterator_fn or self._iter_events)(api_response)
                 if events is not None:
+
+                    def measured_events() -> Iterator[ProviderEvent]:
+                        for event in events:
+                            if (
+                                self.stream
+                                and tracker is not None
+                                and isinstance(event, TextDelta)
+                                and event.text.strip()
+                            ):
+                                tracker.record_llm_ttft(perf_counter() - generation_started_at_s)
+                            yield event
+
+                    observed_events = measured_events()
                     if self.stream:
-                        generation_completed = yield from self._consume_streaming(events, state, turn)
+                        generation_completed = yield from self._consume_streaming(observed_events, state, turn)
                     else:
-                        generation_completed = yield from self._consume_nonstreaming(events, state, turn)
+                        generation_completed = yield from self._consume_nonstreaming(observed_events, state, turn)
             except httpx.ReadTimeout:
                 logger.warning(
                     "OpenAI API read timed out after %.1fs; ending the current response",
@@ -814,6 +831,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 log_exception(logger, "LLM generation failed; ending the current response", exc)
                 if error_message is None:
                     error_message = f"Language model generation failed: {exc}"
+            finally:
+                # Store elapsed provider work before an error terminal can finish
+                # the response on the service thread.
+                if tracker is not None and provider_request_started:
+                    tracker.record_llm(perf_counter() - generation_started_at_s)
 
             if (
                 provider_request_started

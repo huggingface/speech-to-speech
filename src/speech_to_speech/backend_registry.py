@@ -30,6 +30,9 @@ from speech_to_speech.arguments_classes.paraformer_stt_arguments import Paraform
 from speech_to_speech.arguments_classes.parakeet_tdt_arguments import (
     ParakeetTDTSTTHandlerArguments,
 )
+from speech_to_speech.arguments_classes.parakeet_unified_stt_arguments import (
+    ParakeetUnifiedSTTHandlerArguments,
+)
 from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_asr_stt_arguments import Qwen3ASRSTTHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
@@ -391,6 +394,18 @@ STT_BACKENDS = build_backend_registry(
             ParakeetTDTSTTHandlerArguments,
             _create_parakeet,
             config_prefix="parakeet_tdt",
+        ),
+        BackendSpec(
+            "parakeet-unified",
+            "stt",
+            ParakeetUnifiedSTTHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.STT.nemo_asr_handler",
+                "NemoASRSTTHandler",
+                attach_speculative_turns=True,
+            ),
+            config_prefix="parakeet_unified",
+            required_extra="nemo",
         ),
         BackendSpec(
             "paraformer",

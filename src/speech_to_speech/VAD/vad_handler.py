@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from queue import Queue
 from threading import Event
-from typing import Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import numpy as np
 import torch
@@ -20,6 +20,9 @@ from speech_to_speech.pipeline.queue_types import TextEventItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.utils import int2float
 from speech_to_speech.VAD.vad_iterator import VADIterator
+
+if TYPE_CHECKING:
+    from speech_to_speech.VAD.firered_vad_iterator import FireRedVadIterator
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +83,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         smart_turn_max_wait_ms: int = 2000,
         smart_turn_incomplete_delay_ms: int = 600,
         smart_turn_cpu_count: int = 1,
+        vad: str = "silero",
+        vad_firered_model_dir: str | None = None,
+        vad_firered_use_gpu: bool = False,
     ) -> None:
         self.should_listen = should_listen
         self.sample_rate = sample_rate
@@ -119,19 +125,44 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             unanswered_reopen_ms,
             self.smart_turn_max_wait_ms if smart_turn else 0,
         )
-        self.model, _ = torch.hub.load(
-            "snakers4/silero-vad:master",
-            "silero_vad",
-            trust_repo=True,
-            skip_validation=True,
-        )
-        self.iterator = VADIterator(
-            self.model,
-            threshold=thresh,
-            sampling_rate=sample_rate,
-            min_silence_duration_ms=min_silence_ms,
-            speech_pad_ms=speech_pad_ms,
-        )
+        self.vad = vad
+        self.model = None
+        self.iterator: VADIterator | FireRedVadIterator
+        if vad == "firered":
+            from speech_to_speech.VAD.firered_vad_iterator import FireRedVadIterator, load_firered_streamer
+
+            if not vad_firered_model_dir:
+                raise ValueError("--vad firered requires --vad_firered_model_dir")
+            streamer = load_firered_streamer(
+                vad_firered_model_dir,
+                use_gpu=vad_firered_use_gpu,
+                speech_threshold=thresh,
+                min_silence_duration_ms=min_silence_ms,
+                speech_pad_ms=speech_pad_ms,
+            )
+            self.iterator = FireRedVadIterator(
+                streamer,
+                threshold=thresh,
+                sampling_rate=sample_rate,
+                min_silence_duration_ms=min_silence_ms,
+                speech_pad_ms=speech_pad_ms,
+            )
+        elif vad == "silero":
+            self.model, _ = torch.hub.load(
+                "snakers4/silero-vad:master",
+                "silero_vad",
+                trust_repo=True,
+                skip_validation=True,
+            )
+            self.iterator = VADIterator(
+                self.model,
+                threshold=thresh,
+                sampling_rate=sample_rate,
+                min_silence_duration_ms=min_silence_ms,
+                speech_pad_ms=speech_pad_ms,
+            )
+        else:
+            raise ValueError(f"Unknown VAD backend {vad!r}. Choose silero or firered.")
         self.audio_enhancement = audio_enhancement
         if audio_enhancement:
             if not HAS_DF:
@@ -371,14 +402,15 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         sink = getattr(self, "streaming_stt_sink", None)
         if sink is None:
             return
+        pad_bytes = getattr(self.iterator, "pre_speech_samples", self.iterator.speech_pad_samples) * 2
         if not speech_active:
-            # Retain only VAD's configured pre-speech padding, without sending
-            # idle microphone audio to the provider.
+            # Retain padding and any speech awaiting detector confirmation,
+            # without sending idle microphone audio to the provider.
             self._streaming_pre_speech.extend(audio_chunk)
-            pad_bytes = self.iterator.speech_pad_samples * 2
             del self._streaming_pre_speech[: max(0, len(self._streaming_pre_speech) - pad_bytes)]
             return
         if self._streaming_pre_speech:
+            del self._streaming_pre_speech[: max(0, len(self._streaming_pre_speech) - pad_bytes)]
             audio_chunk = bytes(self._streaming_pre_speech) + audio_chunk
             self._streaming_pre_speech.clear()
         try:

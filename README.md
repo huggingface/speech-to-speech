@@ -195,6 +195,8 @@ pip install "speech-to-speech[omnivoice]"       # OmniVoice TTS (CUDA, Intel XPU
 pip install "speech-to-speech[faster-whisper]"  # Faster Whisper STT
 pip install "speech-to-speech[whisper-mlx]"     # Lightning Whisper MLX STT on macOS
 pip install "speech-to-speech[paraformer]"      # Paraformer STT through FunASR
+pip install "speech-to-speech[fireredvad]"      # FireRed streaming VAD
+pip install "speech-to-speech[nemo]"            # Parakeet Unified STT through NeMo
 pip install "speech-to-speech[mlx-lm]"          # mlx-vlm support for vision models on macOS
 ```
 
@@ -220,7 +222,9 @@ This installs the package in editable mode. With the environment activated, use 
 | Component | Backend | Platforms | Install |
 |---|---|---|---|
 | VAD | [Silero VAD v5](https://github.com/snakers4/silero-vad) | all | built-in |
+| VAD | [FireRed Stream-VAD](https://huggingface.co/FireRedTeam/FireRedVAD) | CUDA / CPU | `fireredvad` |
 | STT | [Parakeet TDT](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (default) | CUDA / CPU through nano-parakeet, Apple Silicon through MLX | built-in |
+| STT | [Parakeet Unified](https://huggingface.co/nvidia/parakeet-unified-en-0.6b) | CUDA / CPU | `nemo` |
 | STT | [Whisper](https://huggingface.co/docs/transformers/en/model_doc/whisper) through Transformers | CUDA / CPU | built-in |
 | STT | [Faster Whisper](https://github.com/SYSTRAN/faster-whisper) | CUDA / CPU | `faster-whisper` |
 | STT | [Lightning Whisper MLX](https://github.com/mustafaaljadery/lightning-whisper-mlx) | Apple Silicon | `whisper-mlx` |
@@ -334,6 +338,11 @@ docker compose up
 The compose file starts a llama.cpp server with Gemma 4 and the Realtime server, exposing ports `8080` and `8765`.
 
 ## Realtime API
+
+The server logs per-response STT, LLM, first TTS audio, and speech-to-audio
+durations for supported backends, including vLLM-backed STT and TTS. See the
+[response latency guide](./docs/response-latency.md) for the coverage matrix
+and measurement boundaries.
 
 Realtime mode supports the OpenAI Realtime protocol over WebSocket and WebRTC, with live transcription and low-latency turn-taking. WebSocket clients connect at `/v1/realtime`:
 
@@ -594,6 +603,10 @@ Language coverage depends on the STT and TTS backends you pick, not on the pipel
 | TTS | Kokoro | Multiple language/voice mappings, depending on backend availability |
 | TTS | ChatTTS | English and Chinese |
 | TTS | MMS TTS | Broad multilingual coverage through MMS checkpoints |
+| TTS | OmniVoice | 600+ languages; voice cloning, design, and automatic voice selection |
+| TTS | Supertonic | 32 languages |
+| TTS | Pocket TTS | English, French, German, Portuguese, Italian, Spanish |
+| TTS | OpenAI-compatible `/v1/audio/speech` endpoint | Depends on the connected TTS server/model |
 
 Make sure the STT, LLM, and TTS you pair all cover your target language(s). Two usage patterns:
 
@@ -702,6 +715,12 @@ and STT/LLM work may begin speculatively. Complete turns start processing immedi
 gated by `--smart_turn_max_wait_ms` (2 seconds by default). If speech resumes during either delay, the existing turn is
 reopened as a newer revision, the accumulated audio is re-emitted, and work from the previous revision is
 discarded before it reaches the user.
+
+The server holds `input_audio_buffer.speech_stopped` and the final transcription while a turn can still
+reopen. Resumed speech keeps the same open item and live transcription deltas
+continue. Once the turn commits, the client receives one stop, an input-buffer commitment, the created
+user item, and one final transcript, so its user-turn history matches the model's.
+If transcription fails, the server sends the stop and failure after the reopen grace ends.
 
 The base package includes the quantized CPU runtime and enables Smart Turn by default:
 

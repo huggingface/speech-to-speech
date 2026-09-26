@@ -21,6 +21,11 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
     speculative_turns: SpeculativeTurnTracker | None = None
     final_revision_settle_s: float = 0.0
 
+    # `start_language` is the user's configuration; `last_language` is per-conversation
+    # detection state. Declared here so the session reset covers every backend.
+    start_language: Any = None
+    last_language: Any = None
+
     def should_process_input(self, item: STTIn) -> bool:
         mode = getattr(item, "mode", None)
         turn_id = getattr(item, "turn_id", None)
@@ -66,6 +71,11 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             return False
 
         if not self._is_latest_turn_item(output, wait_for_pending_reopen=True, wait_for_stability=False):
+            if isinstance(output, Transcription):
+                # Rejected output never reaches the service's final-STT cleanup.
+                store = getattr(self, "turn_latency_store", None)
+                if store is not None:
+                    store.discard_pending_turn(output.turn_id, output.turn_revision)
             self._log_stale_turn_item(output, "output")
             return False
         return True
@@ -208,6 +218,16 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
         while len(completed) > self._MAX_COMPLETED_FINAL_REVISIONS:
             completed.popitem(last=False)
 
+    def reset_session_language(self) -> None:
+        """Drop the language detected for the finished conversation.
+
+        Units are reused across clients, so a leftover detection belongs to the previous
+        one. Restores what ``setup`` established: the configured language, or ``None`` for
+        ``auto``, which is a request to detect rather than a language code.
+        """
+        self.last_language = None if self.start_language == "auto" else self.start_language
+
     def on_session_end(self) -> None:
         if hasattr(self, "_completed_final_revision_keys"):
             self._completed_final_revision_keys.clear()
+        self.reset_session_language()

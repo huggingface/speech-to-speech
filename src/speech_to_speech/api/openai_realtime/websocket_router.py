@@ -431,7 +431,10 @@ async def _dispatch_client_event(
             unit.input_queue.put((chunk, rt_cfg))
 
     elif isinstance(event, InputAudioBufferCommitEvent):
-        err = service.handle_audio_commit(session_id)
+        chunks, err = service.handle_audio_commit(session_id)
+        rt_cfg = service._state(session_id).runtime_config
+        for chunk in chunks:
+            unit.input_queue.put((chunk, rt_cfg))
         if err:
             await send_correlated([err])
 
@@ -909,6 +912,13 @@ def create_app(
                                 )
                 except Empty:
                     pass
+
+                # A failed transcription can become final when its reopen grace
+                # expires, even if no later turn or assistant output arrives.
+                if transport is not None and session_id and session is not None and session.released_at is None:
+                    settled_input = unit.service.audio.resolve_input_terminals(session_id)
+                    if settled_input:
+                        await transport.send_events(settled_input)
 
                 try:
                     if session is not None and session.pending_output_item is not None:

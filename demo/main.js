@@ -17,7 +17,7 @@
  * @typedef {S2sRealtimeClient} RealtimeClient
  */
 
-import { S2sRealtimeClient } from "./s2s-realtime-client.js?v=audio-24k-v1";
+import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=audio-24k-v2";
 import { $, truncateError, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js";
 import { Account } from "./ui/account.js";
@@ -34,6 +34,7 @@ const STORAGE_KEYS = {
   tools: "s2s.ws.tools",
   searchKey: "s2s.ws.searchKey",
   noiseGate: "s2s.ws.noiseGate",
+  playbackBufferMs: "s2s.ws.playbackBufferMs",
   // "ws" | "webrtc". Not under the historical "s2s.ws." prefix — it selects
   // between the transports rather than configuring the WS one.
   transport: "s2s.transport",
@@ -112,6 +113,7 @@ function loadSettings() {
     voice: localStorage.getItem(STORAGE_KEYS.voice) || DEFAULT_VOICE,
     instructions: localStorage.getItem(STORAGE_KEYS.instructions) || DEFAULT_INSTRUCTIONS,
     noiseGate: loadGateThreshold(),
+    playbackBufferMs: normalizePlaybackBufferMs(localStorage.getItem(STORAGE_KEYS.playbackBufferMs)),
     // Default WebSocket: the proven path stays the first-run experience.
     transport: localStorage.getItem(STORAGE_KEYS.transport) === "webrtc" ? "webrtc" : "ws",
     audioInputId: localStorage.getItem(STORAGE_KEYS.audioInputId) || "",
@@ -138,6 +140,7 @@ function saveSettings(s) {
   localStorage.setItem(STORAGE_KEYS.voice, s.voice);
   localStorage.setItem(STORAGE_KEYS.instructions, s.instructions);
   localStorage.setItem(STORAGE_KEYS.noiseGate, String(s.noiseGate));
+  localStorage.setItem(STORAGE_KEYS.playbackBufferMs, String(s.playbackBufferMs));
   localStorage.setItem(STORAGE_KEYS.transport, s.transport);
   localStorage.setItem(STORAGE_KEYS.audioInputId, s.audioInputId || "");
   localStorage.setItem(STORAGE_KEYS.audioOutputId, s.audioOutputId || "");
@@ -261,6 +264,10 @@ const inputTransport = $("#transport");
 const transportHint = $("#transport-hint");
 /** @type {HTMLElement} */
 const gateField = $("#gate-field");
+/** @type {HTMLElement} */
+const playbackBufferField = $("#playback-buffer-field");
+/** @type {HTMLInputElement} */
+const inputPlaybackBuffer = $("#playback-buffer-ms");
 /** @type {HTMLSelectElement} */
 const inputVoice = $("#voice");
 /** @type {HTMLSelectElement} */
@@ -456,6 +463,7 @@ function setCaption(text, kind = "") {
 function openSettings() {
   syncConnectionUi();
   inputVoice.value = settings.voice;
+  inputPlaybackBuffer.value = String(settings.playbackBufferMs);
   inputInstructions.value = settings.instructions;
   syncGateUi();
   updateRestartAvailability();
@@ -988,6 +996,7 @@ function readSettingsFromForm() {
     voice: inputVoice.value || DEFAULT_VOICE,
     instructions: inputInstructions.value.trim() || DEFAULT_INSTRUCTIONS,
     noiseGate: readGateThreshold(),
+    playbackBufferMs: normalizePlaybackBufferMs(inputPlaybackBuffer.value),
     transport: /** @type {"ws" | "webrtc"} */ (
       transportSelectable()
         ? (inputTransport.value === "webrtc" ? "webrtc" : "ws")
@@ -1031,6 +1040,7 @@ function syncTransportUi() {
     ? "How audio travels to the server. Applies on the next conversation."
     : "WebRTC needs a server URL pinned by the deployment (SPEECH_TO_SPEECH_URL).";
   gateField.hidden = effectiveTransport() === "webrtc";
+  playbackBufferField.hidden = effectiveTransport() === "webrtc";
 }
 
 /** Adapt the connection field to the mode learned from /api/config. */
@@ -1430,6 +1440,7 @@ async function doStart(audioContext = null) {
         transport: "websocket",
         ...target,
         noiseGate: gateParams(settings.noiseGate),
+        playbackBufferMs: settings.playbackBufferMs,
         ...common,
       });
   client = c;
@@ -1477,7 +1488,7 @@ async function doStart(audioContext = null) {
   });
 
   c.addEventListener("response-finished", (e) => {
-    const detail = /** @type {CustomEvent<{ responseId: string; status: string; audible?: boolean; transcript?: string }>} */ (e).detail;
+    const detail = /** @type {CustomEvent<{ responseId: string; status: string; audible?: boolean; transcript?: string; latency?: import("./turn-latency.js").TurnLatency | null }>} */ (e).detail;
     chat.onResponseFinished(detail);
   });
   c.addEventListener("error", (e) => {
