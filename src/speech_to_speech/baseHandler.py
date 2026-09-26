@@ -10,7 +10,7 @@ from typing import Any, Generic, Iterator, TypeVar, cast
 
 import numpy as np
 
-from speech_to_speech.pipeline.control import PipelineControlMessage, is_control_message, SESSION_END
+from speech_to_speech.pipeline.control import ControlKind, PipelineControlMessage, is_control_message, SESSION_END
 from speech_to_speech.pipeline.events import PipelineEvent, TokenUsageEvent
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import PIPELINE_END, AudioOutput, EndOfResponse, TTSInput
@@ -128,6 +128,9 @@ class BaseHandler(Generic[InT, OutT]):
                 break
 
             if isinstance(item, PipelineControlMessage):
+                if item.kind == ControlKind.ROUTING_BARRIER:
+                    self.queue_out.put(item)
+                    continue
                 logger.warning("%s: unexpected control message kind: %s", self.__class__.__name__, item.kind)
                 continue
 
@@ -180,6 +183,15 @@ class BaseHandler(Generic[InT, OutT]):
 
     def cleanup(self) -> None:
         pass
+
+    def has_pending_session_work(self) -> bool:
+        """Report work retained outside the serial queue after a routing barrier.
+
+        Called while new session input is paused. Handlers with background work
+        or buffered input must override this and synchronize with their workers.
+        Purely serial handlers are idle once the barrier has passed.
+        """
+        return False
 
     def on_session_end(self) -> None:
         pass

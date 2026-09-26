@@ -168,14 +168,12 @@ def _request_chat_completions(
     optional_kwargs: dict[str, Any],
 ) -> Any:
     """Issue a Chat Completions request with consistent streaming usage accounting."""
-    create_kwargs = dict(optional_kwargs)
+    create_kwargs = {"model": model_name, "extra_body": extra_body, **optional_kwargs}
     if stream:
         create_kwargs["stream_options"] = {"include_usage": True}
     return client.chat.completions.create(
-        model=model_name,
         messages=messages,
         stream=stream,
-        extra_body=extra_body,
         timeout=timeout,
         **create_kwargs,
     )
@@ -300,22 +298,22 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         end = time.time()
         logger.info(f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s")
 
-    def _build_compaction_generate_fn(self) -> CompactGenerateFn:
+    def _build_compaction_generate_fn(self, request_overrides: dict[str, Any] | None = None) -> CompactGenerateFn:
         """Return a generate fn that calls Chat Completions for compaction."""
         client = self.client
         model_name = self.model_name
         timeout = self.request_timeout
         extra_body = self._extra_body
+        request_kwargs = {"model": model_name, "extra_body": extra_body, **(request_overrides or {})}
 
         def generate(system: str, user: str) -> str:
             response = client.chat.completions.create(
-                model=model_name,
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                extra_body=extra_body,
                 timeout=timeout,
+                **request_kwargs,
             )
             return response.choices[0].message.content or ""
 

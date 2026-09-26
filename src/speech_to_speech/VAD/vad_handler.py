@@ -934,6 +934,14 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             enhanced = enhance(self.enhanced_model, self.df_state, torch.from_numpy(array))
         return enhanced.numpy().squeeze()
 
+    def has_pending_session_work(self) -> bool:
+        return (
+            self.iterator.triggered
+            or self._speech_started_emitted
+            or self._pending_short_segment is not None
+            or self._pending_reopen_candidate is not None
+        )
+
     def on_session_end(self):
         streaming_stt_sink = getattr(self, "streaming_stt_sink", None)
         if streaming_stt_sink is not None:

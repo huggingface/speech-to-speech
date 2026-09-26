@@ -55,6 +55,7 @@ from speech_to_speech.api.openai_realtime.handlers import (
 )
 from speech_to_speech.api.openai_realtime.input_state import InputItemState, PendingInputTerminal
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.api.openai_realtime.session_routing import SessionRouting
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -344,12 +345,13 @@ class RealtimeService:
 
     # ── Connection lifecycle ─────────────────────
 
-    def register(self) -> str:
+    def register(self, *, routing: SessionRouting | None = None) -> str:
         """Register a new connection and return its session_id."""
         if self.speculative_turns:
             self.speculative_turns.reset()
         state = ConnState(
             runtime_config=RuntimeConfig(
+                routing=routing,
                 chat=Chat(self._chat_size),
                 session=RealtimeSessionCreateRequest(
                     type="realtime",
@@ -357,6 +359,7 @@ class RealtimeService:
                 ),
             )
         )
+        state.runtime_config.apply_routing_defaults()
         self._conns[state.session_id] = state
         self.total_usage.connections += 1
         return state.session_id
@@ -433,8 +436,10 @@ class RealtimeService:
     def build_session_updated(self, conn_id: str) -> SessionUpdatedEvent:
         return self.session.build_session_updated(conn_id)
 
-    def handle_session_update(self, conn_id: str, event: SessionUpdateEvent) -> Optional[RealtimeErrorEvent]:
-        error = self.session.handle_session_update(conn_id, event)
+    def handle_session_update(
+        self, conn_id: str, event: SessionUpdateEvent, *, routing: SessionRouting | None = None
+    ) -> Optional[RealtimeErrorEvent]:
+        error = self.session.handle_session_update(conn_id, event, routing=routing)
         if error is None:
             # A prefetch captured the previous session configuration.
             self.response.discard_tool_followup_prefetch(conn_id)

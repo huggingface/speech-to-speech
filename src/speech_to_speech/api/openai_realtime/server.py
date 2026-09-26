@@ -27,6 +27,7 @@ class RealtimeServer:
         host: str = "0.0.0.0",
         port: int = 8765,
         llm_proxy_config: LLMProxyConfig | None = None,
+        session_routing_enabled: bool = False,
     ) -> None:
         if not pool:
             raise ValueError("RealtimeServer requires at least one PipelineUnit in the pool")
@@ -35,10 +36,16 @@ class RealtimeServer:
         self.host = host
         self.port = port
         self.llm_proxy_config = llm_proxy_config
+        self.session_routing_enabled = session_routing_enabled
 
     def run(self) -> None:
         """Start the FastAPI/uvicorn server (called from a ThreadManager thread)."""
-        app = create_app(pool=self.pool, stop_event=self.stop_event, llm_proxy_config=self.llm_proxy_config)
+        app = create_app(
+            pool=self.pool,
+            stop_event=self.stop_event,
+            llm_proxy_config=self.llm_proxy_config,
+            session_routing_enabled=self.session_routing_enabled,
+        )
 
         logger.info(
             f"OpenAI Realtime API starting on ws://{self.host}:{self.port}/v1/realtime (pool size {len(self.pool)})"
