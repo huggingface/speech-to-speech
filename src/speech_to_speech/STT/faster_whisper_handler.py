@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from time import perf_counter
 from typing import Any, Iterator
 
 from faster_whisper import WhisperModel
@@ -106,6 +107,7 @@ class FasterWhisperSTTHandler(BaseSTTHandler):
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("infering faster whisper...")
+        started_at_s = perf_counter()
 
         segments, info = self.model.transcribe(vad_audio.audio, **self.gen_kwargs)
         output_text = []
@@ -128,6 +130,7 @@ class FasterWhisperSTTHandler(BaseSTTHandler):
                 )
                 return
 
+            self._record_final_stt(vad_audio, perf_counter() - started_at_s)
             yield Transcription(
                 text=pred_text,
                 language_code=self._resolve_language(info),

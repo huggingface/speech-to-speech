@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from time import perf_counter
 from typing import Any, Iterator, Optional
 
 import numpy as np
@@ -69,6 +70,7 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("infering whisper...")
+        started_at_s = perf_counter()
 
         audio = vad_audio.audio
         if self.start_language != "auto":
@@ -104,6 +106,7 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
             )
             return
 
+        self._record_final_stt(vad_audio, perf_counter() - started_at_s)
         yield Transcription(
             text=pred_text,
             language_code=language_code,

@@ -33,7 +33,7 @@ are added only to terminal responses.
 
 | Stage | Backends with a measured field | Backends with `n/a` pending coverage |
 | --- | --- | --- |
-| `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime` | `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper`, `parakeet-unified`, `paraformer`, `qwen3-asr` |
+| `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime`, `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper` | `parakeet-unified`, `paraformer`, `qwen3-asr` |
 | `llm` | `transformers`, `mlx-lm`, `responses-api`, `chat-completions` | None of the built-in LLM backends |
 | `llm_ttft` | streaming `responses-api`, streaming `chat-completions` | `transformers`, `mlx-lm`, and non-streaming remote requests |
 | `tts_ttfa`, `e2e` | `qwen3`, `openai` | `chatTTS`, `facebookMMS`, `omnivoice`, `pocket`, `kokoro`, `supertonic` |
@@ -47,7 +47,9 @@ the existing MLX lock and remains zero for other backends.
   transcriptions and Realtime partial deltas are excluded. For HTTP STT, it
   starts when the final request worker begins and ends before its result is
   published. For Realtime STT, it starts when the final VAD commit is queued
-  and ends when the provider's final transcript is received.
+  and ends when the provider's final transcript is received. For local STT
+  models, it starts when the handler begins the final transcription and ends
+  before its transcript is yielded.
 - `llm_ttft` starts before serialization and ends at the first non-whitespace
   provider `TextDelta`. Protocol-only stream events do not complete it. This is
   distinct from the first sentence batch released to TTS. `llm` covers full
