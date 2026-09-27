@@ -324,7 +324,9 @@ def test_llm_output_language_flag_warms_detector_and_routes_detected_code(monkey
     processor.setup(detect_llm_output_language=True)
 
     assert processor._language_detector is detector
-    outputs = list(processor.process(LLMResponseChunk(text="Bonjour, je peux vous aider aujourd'hui.", language_code="en")))
+    outputs = list(
+        processor.process(LLMResponseChunk(text="Bonjour, je peux vous aider aujourd'hui.", language_code="en"))
+    )
 
     assert seen == ["Bonjour, je peux vous aider aujourd'hui."]
     assert next(item for item in outputs if isinstance(item, TTSInput)).language_code == "fr"
@@ -359,7 +361,9 @@ def test_llm_output_language_disabled_keeps_input_language_without_warming(monke
     processor = LMOutputProcessor.__new__(LMOutputProcessor)
     processor.setup()
 
-    outputs = list(processor.process(LLMResponseChunk(text="Bonjour, je peux vous aider aujourd'hui.", language_code="en")))
+    outputs = list(
+        processor.process(LLMResponseChunk(text="Bonjour, je peux vous aider aujourd'hui.", language_code="en"))
+    )
 
     assert next(item for item in outputs if isinstance(item, TTSInput)).language_code == "en"
 
@@ -373,7 +377,9 @@ def test_llm_output_language_detection_failure_preserves_tts_input(monkeypatch):
     processor = LMOutputProcessor.__new__(LMOutputProcessor)
     processor.setup(detect_llm_output_language=True)
 
-    outputs = list(processor.process(LLMResponseChunk(text="Bonjour, je peux vous aider aujourd'hui.", language_code="en")))
+    outputs = list(
+        processor.process(LLMResponseChunk(text="Bonjour, je peux vous aider aujourd'hui.", language_code="en"))
+    )
 
     assert next(item for item in outputs if isinstance(item, TTSInput)).language_code is None
 
