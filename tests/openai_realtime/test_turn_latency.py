@@ -1,5 +1,6 @@
 """Latency records emitted by the actual response lifecycle."""
 
+import json
 import logging
 from contextlib import nullcontext
 from queue import Queue
@@ -8,6 +9,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 from openai.types.realtime import ConversationItemCreateEvent, ResponseCreateEvent
 from openai.types.realtime.conversation_item import RealtimeConversationItemFunctionCall
 
@@ -34,9 +36,17 @@ from speech_to_speech.pipeline.messages import (
     VADAudio,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.turn_latency import TURN_LATENCY_METADATA_KEY
 from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
+from speech_to_speech.VAD.smart_turn import SmartTurnResult
+from tests.test_speculative_turns import (
+    _audio_bytes,
+    _StaticSmartTurnAnalyzer,
+    _StaticVADIterator,
+    _vad_handler_for_iterator,
+)
 
 LATENCY_LOGGER = "speech_to_speech.api.openai_realtime.handlers.response"
 
@@ -72,14 +82,96 @@ def final_stt_event(service):
     notifier = object.__new__(TranscriptionNotifier)
     notifier.setup(text_output_queue=Queue(), should_listen=Event())
 
-    def transcribe(turn_id, revision, text):
+    def transcribe(turn_id, revision, text, source_audio=None):
         handler._process_mlx_final = lambda audio: (text, "en")
-        audio = VADAudio(audio=np.zeros(1600, dtype=np.float32), mode="final", turn_id=turn_id, turn_revision=revision)
+        audio = source_audio or VADAudio(
+            audio=np.zeros(1600, dtype=np.float32), mode="final", turn_id=turn_id, turn_revision=revision
+        )
         for transcription in handler.process(audio):
             list(notifier.process(transcription))
         return notifier.text_output_queue.get_nowait()
 
     return transcribe
+
+
+@pytest.mark.parametrize("decision", ["complete", "incomplete", "disabled", "failed"])
+def test_vad_decision_reaches_terminal_response_metadata(service, conn_id, final_stt_event, monkeypatch, decision):
+    import speech_to_speech.VAD.vad_handler as vad_module
+
+    iterator = _StaticVADIterator(
+        triggered=False,
+        vad_output=[torch.zeros(512) for _ in range(31)],
+        last_utterance_active_speech_samples=12 * 512,
+    )
+    iterator.last_speech_end_sample = 0
+    vad = _vad_handler_for_iterator(iterator)
+    vad.turn_latency_store = service.turn_latency_store
+    if decision in ("complete", "incomplete"):
+        vad.smart_turn_analyzer = _StaticSmartTurnAnalyzer(
+            SmartTurnResult(complete=decision == "complete", probability=0.9, inference_ms=30.0)
+        )
+    elif decision == "failed":
+
+        class FailingAnalyzer:
+            def predict(self, audio, *, sample_rate):
+                raise RuntimeError("controlled inference failure")
+
+        vad.smart_turn_analyzer = FailingAnalyzer()
+
+    clock = iter([10.0, 10.04, 10.04, 10.07])
+    monkeypatch.setattr(vad_module, "time", SimpleNamespace(time=lambda: 100.0, perf_counter=lambda: next(clock)))
+    outputs = list(vad.process(_audio_bytes()))
+    assert len(outputs) == 1
+    source_audio = outputs[0]
+    while not vad.text_output_queue.empty():
+        service.dispatch_pipeline_event(conn_id, vad.text_output_queue.get_nowait())
+    service.dispatch_pipeline_event(conn_id, final_stt_event("turn_1", 0, "Hello", source_audio))
+    request = service.text_prompt_queue.get_nowait()
+    assert request.speech_stopped_at_s == source_audio.created_at_s
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=request.response_key))
+    done = service.finish_response(conn_id, response_key=request.response_key)[-1]
+    payload = json.loads(done.response.metadata[TURN_LATENCY_METADATA_KEY])
+
+    assert payload["turn_id"] == "turn_1"
+    assert payload["turn_revision"] == 0
+    assert payload["response_key"] == request.response_key
+    assert payload["vad_decision_s"] == pytest.approx(0.072)
+    assert payload["smart_status"] == decision
+    assert payload["smart_analysis_s"] == (None if decision == "disabled" else pytest.approx(0.03))
+    assert payload["smart_wait_s"] == (None if decision == "disabled" else 0.0)
+    assert payload["smart_grace_s"] == (None if decision == "disabled" else (2.0 if decision == "incomplete" else 0.8))
+    assert payload["smart_delay_s"] == (0.6 if decision == "incomplete" else (None if decision == "disabled" else 0.0))
+    assert len(done.response.metadata[TURN_LATENCY_METADATA_KEY]) <= 512
+
+
+def test_new_timing_fields_fit_realtime_metadata_with_precise_measurements(service, conn_id):
+    request = _queue_turn(service, conn_id)
+    tracker = service.turn_latency_store.get_response(request.response_key)
+    precise = 0.12345678912345678
+    for field in (
+        "stt_s",
+        "llm_ttft_s",
+        "llm_s",
+        "tts_ttfa_s",
+        "e2e_s",
+        "vad_decision_s",
+        "smart_turn_analysis_s",
+        "smart_turn_grace_s",
+        "smart_turn_processing_delay_s",
+        "smart_turn_wait_s",
+        "mlx_lock_wait_s",
+    ):
+        setattr(tracker, field, precise)
+    tracker.smart_turn_status = "complete"
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=request.response_key))
+    done = service.finish_response(conn_id, response_key=request.response_key)[-1]
+
+    raw = done.response.metadata[TURN_LATENCY_METADATA_KEY]
+    assert len(raw) <= 512
+    payload = json.loads(raw)
+    assert payload["vad_decision_s"] == pytest.approx(precise, abs=1e-9)
+    assert payload["smart_wait_s"] == pytest.approx(precise, abs=1e-9)
+    assert payload["e2e_s"] == precise
 
 
 def test_empty_final_stt_discards_only_its_pending_measurement(service, conn_id, final_stt_event):
@@ -321,6 +413,7 @@ def test_terminal_response_emits_one_latency_record(service, conn_id, caplog, st
 
     assert _latency_lines(caplog) == [
         "Turn turn_1 rev=0 latency: stt=0.12s llm_ttft=0.19s llm=1.28s tts_ttfa=0.16s e2e=1.61s "
+        f"vad_decision=n/a smart_turn_analysis=n/a smart_turn_wait=n/a smart_turn_status=n/a "
         f"mlx_lock_wait=0.03s status={status} response_key={request.response_key}"
     ]
     done = [event for event in events if event.type == "response.done"]
@@ -335,10 +428,18 @@ def test_non_interrupting_speech_keeps_original_response_attribution(
     service, conn_id, caplog, new_turn, revision, reopened
 ):
     original = _queue_turn(service, conn_id)
+    original_tracker = service.turn_latency_store.get_response(original.response_key)
+    original_tracker.vad_decision_s = 0.2
+    original_tracker.smart_turn_status = "complete"
+    original_tracker.smart_turn_wait_s = 0.1
     service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=original.response_key))
     newer = _queue_turn(
         service, conn_id, turn_id=new_turn, revision=revision, interrupt=False, reopened=reopened, stt_s=0.34
     )
+    newer_tracker = service.turn_latency_store.get_response(newer.response_key)
+    newer_tracker.vad_decision_s = 0.4
+    newer_tracker.smart_turn_status = "incomplete"
+    newer_tracker.smart_turn_wait_s = 0.3
     assert service._state(conn_id).current_response_key == original.response_key
 
     with caplog.at_level(logging.INFO, logger=LATENCY_LOGGER):
@@ -351,8 +452,10 @@ def test_non_interrupting_speech_keeps_original_response_attribution(
     assert len(lines) == 2
     assert "Turn turn_1 rev=0 latency: stt=0.12s" in lines[0]
     assert f"response_key={original.response_key}" in lines[0]
+    assert "vad_decision=0.20s smart_turn_analysis=n/a smart_turn_wait=0.10s smart_turn_status=complete" in lines[0]
     assert f"Turn {new_turn} rev={revision} latency: stt=0.34s" in lines[1]
     assert f"response_key={newer.response_key}" in lines[1]
+    assert "vad_decision=0.40s smart_turn_analysis=n/a smart_turn_wait=0.30s smart_turn_status=incomplete" in lines[1]
 
 
 def test_unregister_clears_unfinished_measurements_before_session_reuse(service, conn_id, caplog):
@@ -361,6 +464,8 @@ def test_unregister_clears_unfinished_measurements_before_session_reuse(service,
     old.record_llm(9.0)
     old.record_tts_ttfa(8.0)
     old.record_e2e(7.0)
+    old.vad_decision_s = 6.0
+    old.smart_turn_status = "incomplete"
     service.turn_latency_store.get_or_create_for_turn("turn_2", 0).record_stt(6.0)
 
     service.unregister(conn_id)
@@ -377,6 +482,7 @@ def test_unregister_clears_unfinished_measurements_before_session_reuse(service,
         lines = _latency_lines(caplog)
         assert len(lines) == 1
         assert "stt=0.12s llm_ttft=n/a llm=n/a tts_ttfa=n/a e2e=n/a" in lines[0]
+        assert "vad_decision=n/a smart_turn_analysis=n/a smart_turn_wait=n/a smart_turn_status=n/a" in lines[0]
         assert f"response_key={fresh.response_key}" in lines[0]
     finally:
         service.unregister(new_conn_id)
@@ -435,6 +541,10 @@ def test_multiple_qwen_segments_keep_first_audio_timings_in_terminal_log(service
 @pytest.mark.parametrize("followup_status", ["completed", "cancelled"])
 def test_tool_followup_logs_distinct_responses_in_same_turn(service, conn_id, caplog, followup_status):
     request = _queue_turn(service, conn_id)
+    original_tracker = service.turn_latency_store.get_response(request.response_key)
+    original_tracker.vad_decision_s = 0.2
+    original_tracker.smart_turn_status = "complete"
+    original_tracker.smart_turn_wait_s = 0.1
     call = RealtimeConversationItemFunctionCall(
         type="function_call", id="fc_lookup", call_id="call_lookup", name="lookup", arguments="{}"
     )
@@ -477,6 +587,10 @@ def test_tool_followup_logs_distinct_responses_in_same_turn(service, conn_id, ca
     assert f"response_key={followup.response_key}" in lines[1]
     assert "stt=0.12s" in lines[0]
     assert "stt=n/a" in lines[1]
+    assert "vad_decision=0.20s" in lines[0]
+    assert "smart_turn_status=complete" in lines[0]
+    assert "vad_decision=n/a" in lines[1]
+    assert "smart_turn_status=n/a" in lines[1]
     assert "status=completed" in lines[0]
     assert f"status={followup_status}" in lines[1]
     assert service.turn_latency_store._trackers == {}
