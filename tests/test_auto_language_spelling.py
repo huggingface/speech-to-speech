@@ -49,6 +49,48 @@ def _load(module_name: str, class_name: str):
         return getattr(importlib.import_module(module_name), class_name)
 
 
+def _setup_handler(module_name: str, class_name: str, language: str):
+    """Run a handler's real setup while replacing model loading and warmup."""
+    cls = _load(module_name, class_name)
+    handler = object.__new__(cls)
+
+    if class_name == "WhisperSTTHandler":
+        model = mock.Mock()
+        model.to.return_value = model
+        globals_patch = {
+            "AutoProcessor": types.SimpleNamespace(from_pretrained=mock.Mock(return_value=object())),
+            "AutoModelForSpeechSeq2Seq": types.SimpleNamespace(from_pretrained=mock.Mock(return_value=model)),
+        }
+        with mock.patch.dict(cls.setup.__globals__, globals_patch), mock.patch.object(cls, "warmup"):
+            handler.setup(device="cpu", torch_dtype="float32", language=language, gen_kwargs={})
+        return handler
+
+    if class_name == "LightningWhisperSTTHandler":
+        globals_patch = {"LightningWhisperMLX": mock.Mock(return_value=object())}
+        with mock.patch.dict(cls.setup.__globals__, globals_patch), mock.patch.object(cls, "warmup"):
+            handler.setup(language=language)
+        return handler
+
+    if class_name == "MLXAudioWhisperSTTHandler":
+        package = types.ModuleType("mlx_audio")
+        package.__path__ = []
+        stt_package = types.ModuleType("mlx_audio.stt")
+        stt_package.__path__ = []
+        generate = types.ModuleType("mlx_audio.stt.generate")
+        model = types.SimpleNamespace(_processor=object())
+        generate.load_model = mock.Mock(return_value=model)
+        modules = {
+            "mlx_audio": package,
+            "mlx_audio.stt": stt_package,
+            "mlx_audio.stt.generate": generate,
+        }
+        with mock.patch.dict(sys.modules, modules), mock.patch.object(cls, "warmup"):
+            handler.setup(language=language, gen_kwargs={})
+        return handler
+
+    raise AssertionError(f"Unhandled test handler: {class_name}")
+
+
 # --- the canonicalizer --------------------------------------------------------------------
 
 
@@ -77,57 +119,38 @@ def test_a_code_merely_containing_auto_is_not_the_sentinel():
     assert BaseSTTHandler.canonical_language("auto-detect") == "auto-detect"
 
 
-# --- handlers treat every spelling as detection -------------------------------------------
+# --- production setup treats every spelling as detection ----------------------------------
 
 
 @pytest.mark.parametrize("spelling", AUTO_SPELLINGS)
 @pytest.mark.parametrize(("module_name", "class_name"), _HANDLERS)
-def test_setup_records_the_sentinel_canonically(module_name, class_name, spelling, monkeypatch):
-    """`start_language` drives every downstream `== "auto"` comparison."""
-    cls = _load(module_name, class_name)
-    handler = object.__new__(cls)
-    handler.start_language = cls.canonical_language(spelling)
+def test_setup_treats_every_auto_spelling_as_detection(module_name, class_name, spelling):
+    handler = _setup_handler(module_name, class_name, spelling)
 
     assert handler.start_language == "auto"
-
-
-@pytest.mark.parametrize("spelling", AUTO_SPELLINGS)
-@pytest.mark.parametrize(("module_name", "class_name"), _HANDLERS)
-def test_session_reset_clears_every_auto_spelling(module_name, class_name, spelling):
-    """#556 restores `start_language` unless it is the sentinel; a stray spelling would be
-    restored as if it were a language code."""
-    cls = _load(module_name, class_name)
-    handler = object.__new__(cls)
-    handler.start_language = cls.canonical_language(spelling)
     handler.last_language = "de"
 
     handler.on_session_end()
 
     assert handler.last_language is None
+    if class_name == "WhisperSTTHandler":
+        assert "language" not in handler.gen_kwargs
+        assert handler._forced_language() is None
+    elif class_name == "MLXAudioWhisperSTTHandler":
+        assert handler._forced_language() is None
 
 
-@pytest.mark.parametrize("spelling", ["AUTO", " auto "])
-def test_whisper_does_not_force_a_bogus_language(spelling):
-    """The crash path: a non-canonical sentinel reached `generate(language=...)`."""
-    cls = _load("speech_to_speech.STT.whisper_stt_handler", "WhisperSTTHandler")
-    handler = object.__new__(cls)
-    language = cls.canonical_language(spelling)
-    handler.start_language = language
-    handler.last_language = language if language != "auto" else None
-    handler.gen_kwargs = {}
-    if handler.last_language is not None:
-        handler.gen_kwargs["language"] = handler.last_language
+@pytest.mark.parametrize(("module_name", "class_name"), _HANDLERS)
+def test_setup_preserves_a_real_language(module_name, class_name):
+    handler = _setup_handler(module_name, class_name, "de")
 
-    assert "language" not in handler.gen_kwargs
-    assert handler._forced_language() is None
+    assert handler.start_language == "de"
+    handler.last_language = "fr"
+    handler.on_session_end()
+    assert handler.last_language == "de"
 
-
-def test_whisper_still_forces_a_real_language():
-    cls = _load("speech_to_speech.STT.whisper_stt_handler", "WhisperSTTHandler")
-    handler = object.__new__(cls)
-    language = cls.canonical_language("de")
-    handler.start_language = language
-    handler.last_language = language
-    handler.gen_kwargs = {"language": language}
-
-    assert handler._forced_language() == "de"
+    if class_name == "WhisperSTTHandler":
+        assert handler.gen_kwargs["language"] == "de"
+        assert handler._forced_language() == "de"
+    elif class_name == "MLXAudioWhisperSTTHandler":
+        assert handler._forced_language() == "de"
