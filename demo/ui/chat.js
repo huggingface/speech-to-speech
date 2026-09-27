@@ -642,7 +642,7 @@ export class ChatView {
     const summary = document.createElement("summary");
     summary.textContent = timing.e2e_s === null
       ? "Server timings"
-      : `Server timings · First audio ${format(timing.e2e_s)}`;
+      : `Server timings · ${timing.version === 2 ? "E2E" : "First audio"} ${format(timing.e2e_s)}`;
     details.appendChild(summary);
     const status = document.createElement("p");
     status.className = "timing-status";
@@ -651,17 +651,13 @@ export class ChatView {
     const list = document.createElement("dl");
     /** @type {[string, number|null|undefined|string][]} */
     const stages = [
-      ["VAD handoff to first audio", timing.e2e_s],
+      [timing.version === 2 ? "E2E time" : "VAD handoff to first audio", timing.e2e_s],
       ["VAD end decision", timing.vad_decision_s],
       ["Smart Turn decision", timing.smart_status],
-      ["Smart Turn analysis", timing.smart_analysis_s],
-      ["Smart Turn actual wait", timing.smart_wait_s],
-      ["Smart Turn grace configured", timing.smart_grace_s],
-      ["Smart Turn processing delay configured", timing.smart_delay_s],
       ["Transcription", timing.stt_s],
       ["Response generation", timing.llm_s],
       ["Voice synthesis to first audio", timing.tts_ttfa_s],
-      ["MLX lock wait", timing.mlx_lock_wait_s],
+      ["Hold time before response", timing.version === 2 ? timing.hold_s : timing.smart_wait_s],
     ];
     for (const [label, value] of stages) {
       const term = document.createElement("dt");
@@ -672,7 +668,9 @@ export class ChatView {
     }
     details.appendChild(list);
     const note = document.createElement("p");
-    note.textContent = "Measured on the server, excluding browser playback. First audio starts at the VAD handoff, after VAD and Smart Turn analysis. Generation covers the full response. Stages overlap; these times do not add up. Unavailable stages may not have run.";
+    note.textContent = timing.version === 2
+      ? "E2E: estimated speech end to first generated audio, excluding browser playback. Stages overlap and do not add up."
+      : "First audio: VAD handoff to generated audio, excluding browser playback. Stages overlap and do not add up.";
     details.appendChild(note);
     hist.querySelector(".hist-timings")?.remove();
     hist.appendChild(details);
