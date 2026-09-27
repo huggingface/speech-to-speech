@@ -49,6 +49,7 @@ class MLXAudioWhisperSTTHandler(BaseSTTHandler):
         from transformers import WhisperProcessor
 
         self.model_name = model_name
+        language = self.canonical_language(language)
         self.start_language = language
         # "auto" is a request to detect, not a language code, so it must never leak into
         # last_language -- it would fail every SUPPORTED_LANGUAGES check downstream.

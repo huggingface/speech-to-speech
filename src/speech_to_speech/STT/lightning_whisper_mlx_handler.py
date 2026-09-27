@@ -51,6 +51,7 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
             model_name = model_name.split("/")[-1]
         self.device = device
         self.model = LightningWhisperMLX(model=model_name, batch_size=6, quant=None)
+        language = self.canonical_language(language)
         self.start_language = language
         self.last_language = language
 
