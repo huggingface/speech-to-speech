@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from collections import defaultdict
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -36,7 +37,9 @@ class TurnLatencyTracker:
     ``llm_ttft_s`` ends at the first non-whitespace provider text delta and
     ``llm_s`` covers full generation, including lock waits. ``tts_ttfa_s`` ends
     at the first model audio chunk before trimming and block assembly;
-    ``e2e_s`` ends at the first yielded TTS audio. Tool follow-ups use separate
+    ``e2e_s`` runs from estimated speech end to first yielded TTS audio.
+    TTFT remains an internal measurement, omitted from the simplified record.
+    Tool follow-ups use separate
     trackers.
     """
 
@@ -107,22 +110,17 @@ class TurnLatencyTracker:
             return None if seconds is None else round(seconds, 9)
 
         return {
-            "version": 1,
+            "version": 2,
             "turn_id": self.turn_id,
             "turn_revision": 0 if self.turn_revision is None else self.turn_revision,
             "response_key": response_key,
             "stt_s": self.stt_s,
-            "llm_ttft_s": self.llm_ttft_s,
             "llm_s": self.llm_s,
             "tts_ttfa_s": self.tts_ttfa_s,
             "e2e_s": self.e2e_s,
             "vad_decision_s": compact(self.vad_decision_s),
-            "smart_analysis_s": compact(self.smart_turn_analysis_s),
             "smart_status": self.smart_turn_status,
-            "smart_grace_s": compact(self.smart_turn_grace_s),
-            "smart_delay_s": compact(self.smart_turn_processing_delay_s),
-            "smart_wait_s": compact(self.smart_turn_wait_s),
-            "mlx_lock_wait_s": self.mlx_lock_wait_s,
+            "hold_s": compact(self.smart_turn_wait_s),
             "status": status,
         }
 
@@ -148,16 +146,16 @@ class TurnLatencyTracker:
         if self.turn_id is None:
             return None
         revision = 0 if self.turn_revision is None else self.turn_revision
+        mlx_wait = f" mlx_lock_wait={self.mlx_lock_wait_s:.2f}s" if sys.platform == "darwin" else ""
         return (
             f"Turn {self.turn_id} rev={revision} latency: "
-            f"stt={self._fmt(self.stt_s)} llm_ttft={self._fmt(self.llm_ttft_s)} "
+            f"stt={self._fmt(self.stt_s)} "
             f"llm={self._fmt(self.llm_s)} "
             f"tts_ttfa={self._fmt(self.tts_ttfa_s)} e2e={self._fmt(self.e2e_s)} "
             f"vad_decision={self._fmt(self.vad_decision_s)} "
-            f"smart_turn_analysis={self._fmt(self.smart_turn_analysis_s)} "
-            f"smart_turn_wait={self._fmt(self.smart_turn_wait_s)} "
+            f"hold={self._fmt(self.smart_turn_wait_s)} "
             f"smart_turn_status={self.smart_turn_status or 'n/a'} "
-            f"mlx_lock_wait={self.mlx_lock_wait_s:.2f}s status={self.status}"
+            f"status={self.status}{mlx_wait}"
         )
 
 
