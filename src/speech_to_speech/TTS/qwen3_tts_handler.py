@@ -840,12 +840,17 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         runtime_config = tts_input.runtime_config
         response = tts_input.response
 
-        coalesced_text, _language_code = self._coalesce_pending_tts_input(tts_input)
+        coalesced_text, language_code = self._coalesce_pending_tts_input(tts_input)
 
         text = coalesced_text or "Hello."
 
         model_type = self._model_type()
         self._apply_session_voice_override(model_type, runtime_config, response)
+
+        selected = tts_input.selected_language
+        request_language = None
+        if selected is not None:
+            request_language = self._normalize_language(language_code if selected == "auto" else selected)
 
         console.print(f"[green]ASSISTANT: {text}")
 
@@ -854,11 +859,23 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         try:
             with bind_active_turn_latency_tracker(tracker):
                 if self._has_voice_clone_reference():
-                    audio_iter = self._process_voice_clone(text)
+                    audio_iter = (
+                        self._process_voice_clone(text, request_language)
+                        if request_language is not None
+                        else self._process_voice_clone(text)
+                    )
                 elif model_type == "custom_voice":
-                    audio_iter = self._process_custom_voice(text)
+                    audio_iter = (
+                        self._process_custom_voice(text, request_language)
+                        if request_language is not None
+                        else self._process_custom_voice(text)
+                    )
                 elif model_type == "voice_design":
-                    audio_iter = self._process_voice_design(text)
+                    audio_iter = (
+                        self._process_voice_design(text, request_language)
+                        if request_language is not None
+                        else self._process_voice_design(text)
+                    )
                 else:
                     raise ValueError(
                         "Qwen3-TTS Base model requires a voice-clone reference. "
@@ -919,7 +936,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 label=label,
             )
 
-    def _process_voice_clone(self, text: str) -> Iterator[bytes | np.ndarray]:
+    def _process_voice_clone(self, text: str, language: str | None = None) -> Iterator[bytes | np.ndarray]:
+        language = language or self.language
         utterance_max_new_tokens = self._estimate_max_new_tokens(text)
         if self.backend == "mlx":
             if self.xvec_only:
@@ -934,14 +952,14 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 text=text,
                 ref_audio=self._prepare_mlx_ref_audio(self.ref_audio),
                 ref_text=self.ref_text,
-                lang_code=self.language,
+                lang_code=language,
             )
             return
 
         yield from self._stream(
             self.model.generate_voice_clone_streaming(
                 text=text,
-                language=self.language,
+                language=language,
                 ref_audio=self.ref_audio,
                 ref_spk=getattr(self, "ref_spk", None),
                 ref_rvq=getattr(self, "ref_rvq", None),
@@ -955,7 +973,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             label="voice_clone_parity" if self.parity_mode else "voice_clone",
         )
 
-    def _process_custom_voice(self, text: str) -> Iterator[bytes | np.ndarray]:
+    def _process_custom_voice(self, text: str, language: str | None = None) -> Iterator[bytes | np.ndarray]:
+        language = language or self.language
         utterance_max_new_tokens = self._estimate_max_new_tokens(text)
         speaker = self._resolve_speaker()
         if not speaker:
@@ -971,7 +990,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 max_tokens=utterance_max_new_tokens,
                 text=text,
                 speaker=speaker,
-                language=self.language,
+                language=language,
                 instruct=self.instruct,
             )
             return
@@ -980,7 +999,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             self.model.generate_custom_voice_streaming(
                 text=text,
                 speaker=speaker,
-                language=self.language,
+                language=language,
                 instruct=self.instruct,
                 chunk_size=self.streaming_chunk_size,
                 max_new_tokens=utterance_max_new_tokens,
@@ -989,7 +1008,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             label="custom_voice",
         )
 
-    def _process_voice_design(self, text: str) -> Iterator[bytes | np.ndarray]:
+    def _process_voice_design(self, text: str, language: str | None = None) -> Iterator[bytes | np.ndarray]:
+        language = language or self.language
         utterance_max_new_tokens = self._estimate_max_new_tokens(text)
         if self.backend == "mlx":
             yield from self._stream_mlx_generation(
@@ -998,7 +1018,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 max_tokens=utterance_max_new_tokens,
                 text=text,
                 instruct=self.instruct,
-                language=self.language,
+                language=language,
             )
             return
 
@@ -1006,7 +1026,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             self.model.generate_voice_design_streaming(
                 text=text,
                 instruct=self.instruct,
-                language=self.language,
+                language=language,
                 chunk_size=self.streaming_chunk_size,
                 max_new_tokens=utterance_max_new_tokens,
                 non_streaming_mode=self.non_streaming_mode,

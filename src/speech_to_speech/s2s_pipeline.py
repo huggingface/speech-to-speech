@@ -8,7 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from queue import Queue
-from sys import platform
+from sys import modules, platform
 from threading import Event
 from types import FrameType
 from typing import Any, Literal, Optional, Sequence
@@ -462,6 +462,18 @@ def _build_handlers(
     return [vad, *speech_input_handlers, lm, lm_processor, tts]
 
 
+def _stt_session_languages(selection: BackendSelection, handler: Any) -> set[str] | None:
+    if selection.name == "faster-whisper":
+        model_name = str(selection.config.get("model_name", "tiny.en"))
+        # The default English-only checkpoint ignores non-English hints.
+        return {"en"} if model_name.rsplit("/", 1)[-1].endswith(".en") else None
+    if selection.name == "qwen3-asr":
+        return set(modules[type(handler).__module__].SUPPORTED_LANGUAGES)
+    if selection.name in {"parakeet-tdt", "parakeet-unified", "paraformer", "openai-realtime", "vllm-realtime"}:
+        return set()
+    return None
+
+
 def _build_pipeline_unit(
     *,
     index: int,
@@ -540,6 +552,22 @@ def _build_pipeline_unit(
     for h in handlers:
         h.pipeline_index = index
         h.turn_latency_store = turn_latency_store
+
+    # Validate only against language sets already known to the active backends.
+    # Whisper's short SUPPORTED_LANGUAGES list is a fallback list, not model coverage.
+    service.stt_supported_languages = _stt_session_languages(stt_selection, handlers[1])
+
+    tts_module = modules[type(handlers[-1]).__module__]
+    if tts_selection.name == "kokoro":
+        service.tts_supported_languages = {"en", "ja", "zh", "fr", "es", "it", "pt", "hi"}
+    elif tts_selection.name == "facebookMMS":
+        service.tts_supported_languages = set(tts_module.WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE)
+    elif tts_selection.name == "supertonic":
+        service.tts_supported_languages = set(tts_module.SUPERTONIC_LANGUAGE_CODES)
+    elif tts_selection.name == "qwen3":
+        service.tts_supported_languages = {code for code in tts_module.QWEN3_LANGUAGE_ALIASES if len(code) == 2}
+    elif tts_selection.name in {"chatTTS", "pocket"}:
+        service.tts_supported_languages = set()
 
     return PipelineUnit(
         index=index,

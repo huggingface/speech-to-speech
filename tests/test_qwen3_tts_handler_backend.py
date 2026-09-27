@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from openai.types.realtime import RealtimeSessionCreateRequest
 
 import speech_to_speech.TTS.qwen3_tts_handler as qwen3_tts_module
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
@@ -526,6 +527,37 @@ def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     end_outputs = list(handler.process(EndOfResponse()))
 
     assert end_outputs == [AUDIO_RESPONSE_DONE]
+
+
+def test_process_passes_selected_language_without_changing_setup_default(monkeypatch):
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.should_listen = Event()
+    handler.cancel_scope = None
+    handler.ref_audio = "TTS/ref_audio.wav"
+    handler.speaker = None
+    handler.instruct = None
+    handler.language = "english"
+    handler.backend = "mlx"
+    handler.queue_in = Queue()
+    handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
+    handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
+    requested = []
+    handler._process_voice_clone = lambda text, language: (
+        requested.append(language),
+        iter([np.zeros(512, dtype=np.int16)]),
+    )[1]
+    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(
+            type="realtime",
+            audio={"input": {"transcription": {"language": "es"}}},
+        )
+    )
+
+    assert list(handler.process(TTSInput(text="Hola.", runtime_config=config)))
+
+    assert requested == ["spanish"]
+    assert handler.language == "english"
 
 
 def test_stale_keyed_terminal_becomes_cleanup_after_lm_tts_handoff():

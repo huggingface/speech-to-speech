@@ -204,6 +204,7 @@ class TTSInput(PipelineMessage):
     tag: Literal["tts_input"] = "tts_input"
     text: str
     language_code: Optional[str] = None
+    session_language: str | None = Field(default=None, exclude=True)
     runtime_config: RuntimeConfig | None = None
     response: RealtimeResponseCreateParams | None = None
     turn_id: str | None = None
@@ -212,6 +213,12 @@ class TTSInput(PipelineMessage):
     cancel_generation: int | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
     prefetch_transaction: Any = Field(default=None, exclude=True, repr=False)
+
+    @property
+    def selected_language(self) -> str | None:
+        if "session_language" in self.model_fields_set:
+            return self.session_language
+        return self.runtime_config.language_for_turn(self.turn_id) if self.runtime_config is not None else None
 
 
 class AudioOutput(PipelineMessage):
@@ -354,6 +361,11 @@ class GenerateResponseRequest(PipelineMessage):
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
     prefetch_transaction: ResponsePrefetchTransaction | None = Field(default=None, exclude=True, repr=False)
+
+    @model_validator(mode="after")
+    def _snapshot_session_language(self) -> GenerateResponseRequest:
+        self.runtime_config.snapshot_response_language(self.response_key, self.turn_id)
+        return self
 
 
 # ── Binary sentinels (audio/output queue) ─────────────────────────────

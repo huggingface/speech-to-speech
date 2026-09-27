@@ -264,6 +264,18 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         language_code = tts_input.language_code
         text = tts_input.text
 
+        if (
+            language_code is None
+            and runtime_config is not None
+            and tts_input.selected_language == "auto"
+            and (self.lang_code != self._initial_lang_code or self.voice != self._initial_voice)
+        ):
+            if self.backend == "mlx":
+                with MLXLockContext(handler_name="KokoroTTS", timeout=10.0):
+                    self.on_session_end()
+            else:
+                self.on_session_end()
+
         voice: Optional[str] = None
         if response and response.audio and response.audio.output and response.audio.output.voice:
             voice = str(response.audio.output.voice)

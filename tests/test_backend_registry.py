@@ -68,6 +68,16 @@ def test_builtin_registry_lookup_and_cli_choices_share_one_catalog():
     assert STT_BACKENDS["vllm-realtime"].capabilities.streams_audio_chunks
     assert not STT_BACKENDS["openai"].capabilities.streams_audio_chunks
     assert LLM_BACKENDS["responses-api"].kind == "llm"
+
+
+@pytest.mark.parametrize(
+    ("model_name", "expected"),
+    [("tiny.en", {"en"}), ("acme/custom.en", {"en"}), ("large-v3", None)],
+)
+def test_session_language_validation_does_not_treat_english_only_whisper_as_multilingual(model_name, expected):
+    selection = BackendSelection(STT_BACKENDS["faster-whisper"], {"model_name": model_name})
+
+    assert s2s_pipeline._stt_session_languages(selection, object()) == expected
     assert TTS_BACKENDS["qwen3"].kind == "tts"
     assert TTS_BACKENDS["openai"].kind == "tts"
     assert TTS_BACKENDS["supertonic"].required_extra == "supertonic"

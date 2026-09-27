@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from queue import Queue
 from uuid import uuid4
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -58,6 +59,13 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         self._response_key: str | None = None
         self._tool_call_ids: list[str] = []
         self._output_sequence = 0
+        self._tts_response_language: str | None = None
+        self._tts_selected_language: str | None = None
+        self._tts_language_resolved = False
+        self._detected_assistant_language: str | None = None
+        self._tts_runtime_config: RuntimeConfig | None = None
+        self._tts_auto_language = False
+        self._assistant_language_probe = ""
 
     def _start_response(self, response_key: str | None) -> str:
         key = response_key or self._response_key or uuid4().hex
@@ -68,6 +76,23 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         self._response_key = None
         self._tool_call_ids = []
         self._output_sequence = 0
+        self._tts_response_language = None
+        self._tts_selected_language = None
+        self._tts_language_resolved = False
+        self._detected_assistant_language = None
+        self._tts_runtime_config = None
+        self._tts_auto_language = False
+        self._assistant_language_probe = ""
+
+    def _observe_assistant_language(self, text: str) -> None:
+        if self._detected_assistant_language is not None:
+            return
+        from speech_to_speech.STT.parakeet_tdt_handler import detect_language_from_text
+
+        # A few short streamed parts can make one detectable sentence. Keep only
+        # a bounded window; the current response's TTS choice remains unchanged.
+        self._assistant_language_probe = (self._assistant_language_probe + " " + text).strip()[-256:]
+        self._detected_assistant_language = detect_language_from_text(self._assistant_language_probe)
 
     def _notify_generation_done(
         self,
@@ -138,6 +163,8 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                     )
                 return
             self._notify_generation_done(lm_output, response_key, succeeded=lm_output.error is None)
+            if lm_output.error is None and self._detected_assistant_language and self._tts_runtime_config is not None:
+                self._tts_runtime_config.last_assistant_language = self._detected_assistant_language
             if lm_output.error:
                 yield ResponseFailedEvent(
                     message=lm_output.error,
@@ -209,9 +236,28 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             ):
                 continue
             logger.debug("Forwarding to TTS: %s", transcript_for_log(part.text))
+            if not self._tts_language_resolved:
+                config = lm_output.runtime_config
+                selected = config.language_for_response(response_key, lm_output.turn_id) if config is not None else None
+                self._tts_selected_language = selected
+                if selected == "auto":
+                    self._tts_auto_language = True
+                    self._observe_assistant_language(part.text)
+                    self._tts_runtime_config = config
+                    self._tts_response_language = self._detected_assistant_language or (
+                        config.last_assistant_language if config is not None else None
+                    )
+                elif selected is not None:
+                    self._tts_response_language = selected
+                else:
+                    self._tts_response_language = lm_output.language_code
+                self._tts_language_resolved = True
+            elif self._tts_auto_language and self._detected_assistant_language is None:
+                self._observe_assistant_language(part.text)
             yield TTSInput(
                 text=part.text,
-                language_code=lm_output.language_code,
+                language_code=self._tts_response_language,
+                session_language=self._tts_selected_language,
                 runtime_config=lm_output.runtime_config,
                 response=lm_output.response,
                 turn_id=lm_output.turn_id,

@@ -133,7 +133,12 @@ class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
             "num_step": self.num_steps,
             "speed": self.speed,
         }
-        language = self.language or tts_input.language_code
+        selected = tts_input.selected_language
+        language = (
+            (tts_input.language_code if selected == "auto" else selected)
+            if selected is not None
+            else self.language or tts_input.language_code
+        )
         if language:
             generation_kwargs["language"] = language
         if self.voice_clone_prompt is not None:

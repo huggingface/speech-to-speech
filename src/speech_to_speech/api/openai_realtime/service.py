@@ -324,6 +324,9 @@ class RealtimeService:
         if speculative_turns is not None:
             speculative_turns.wait_observer = self.turn_latency_store.record_smart_wait
         self._default_instructions = default_instructions
+        # None means the active backend does not declare a complete language set.
+        self.stt_supported_languages: set[str] | None = None
+        self.tts_supported_languages: set[str] | None = None
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
 
@@ -517,6 +520,7 @@ class RealtimeService:
         """Close a response, preserving usage and discarding unfinished timings."""
         st = self._state(conn_id)
         if response_key is not None:
+            st.runtime_config.response_languages.pop(response_key, None)
             input_tokens, output_tokens = st.pending_token_usage.pop(response_key, (0, 0))
             self.total_usage.input_tokens += input_tokens
             self.total_usage.output_tokens += output_tokens

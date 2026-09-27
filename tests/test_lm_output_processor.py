@@ -2,6 +2,7 @@ from queue import Queue
 from threading import Event, Thread
 
 import pytest
+from openai.types.realtime import RealtimeSessionCreateRequest
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses import ResponseFunctionToolCall
 from pydantic import ValidationError
@@ -45,6 +46,110 @@ def _tracked_processor(revision: int = 0) -> tuple[SpeculativeTurnTracker, LMOut
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", revision)
     return tracker, _processor(tracker)
+
+
+def _session_with_language(language: str) -> RuntimeConfig:
+    return RuntimeConfig(
+        session=RealtimeSessionCreateRequest(
+            type="realtime",
+            audio={"input": {"transcription": {"language": language}}},
+        )
+    )
+
+
+def _spoken_tts_input(processor: LMOutputProcessor, config: RuntimeConfig, text: str) -> TTSInput:
+    outputs = list(
+        processor.process(
+            LLMResponseChunk(
+                text=text,
+                language_code="es",
+                runtime_config=config,
+                turn_id="turn_1",
+                turn_revision=0,
+            )
+        )
+    )
+    return next(item for item in outputs if isinstance(item, TTSInput))
+
+
+def test_auto_tts_language_uses_assistant_text_instead_of_stt_language():
+    _, processor = _tracked_processor()
+    config = _session_with_language("auto")
+
+    tts_input = _spoken_tts_input(processor, config, "I can help you find the train station in London.")
+
+    assert tts_input.language_code == "en"
+
+
+def test_short_auto_reply_uses_prior_assistant_language_only_in_same_session():
+    _, processor = _tracked_processor()
+    config = _session_with_language("auto")
+
+    first = _spoken_tts_input(processor, config, "Sure.")
+    list(processor.process(EndOfResponse(turn_id="turn_1", turn_revision=0)))
+    longer = _spoken_tts_input(processor, config, "I can help you find the train station in London.")
+    list(processor.process(EndOfResponse(turn_id="turn_1", turn_revision=0)))
+    later = _spoken_tts_input(processor, config, "Sure.")
+
+    assert first.language_code is None
+    assert longer.language_code == "en"
+    assert later.language_code == "en"
+
+    list(processor.process(EndOfResponse(turn_id="turn_1", turn_revision=0)))
+    new_session = _session_with_language("auto")
+    assert _spoken_tts_input(processor, new_session, "Sure.").language_code is None
+
+
+def test_failed_auto_response_does_not_become_short_reply_fallback():
+    _, processor = _tracked_processor()
+    config = _session_with_language("auto")
+
+    assert (
+        _spoken_tts_input(processor, config, "I can help you find the train station in London.").language_code == "en"
+    )
+    list(processor.process(EndOfResponse(turn_id="turn_1", turn_revision=0, error="generation failed")))
+
+    assert config.last_assistant_language is None
+    assert _spoken_tts_input(processor, config, "Sure.").language_code is None
+
+
+def test_later_assistant_part_can_seed_future_auto_fallback_without_changing_current_voice():
+    _, processor = _tracked_processor()
+    config = _session_with_language("auto")
+
+    first = _spoken_tts_input(processor, config, "Sure.")
+    later = _spoken_tts_input(processor, config, "I can help you find the train station in London.")
+    assert first.language_code is None
+    assert later.language_code is None
+
+    list(processor.process(EndOfResponse(turn_id="turn_1", turn_revision=0)))
+
+    assert config.last_assistant_language == "en"
+    assert _spoken_tts_input(processor, config, "Okay.").language_code == "en"
+
+
+def test_short_streamed_parts_combine_for_future_auto_fallback():
+    _, processor = _tracked_processor()
+    config = _session_with_language("auto")
+
+    first = _spoken_tts_input(processor, config, "I can help you")
+    second = _spoken_tts_input(processor, config, "find the station.")
+    assert first.language_code is None
+    assert second.language_code is None
+
+    list(processor.process(EndOfResponse(turn_id="turn_1", turn_revision=0)))
+
+    assert config.last_assistant_language == "en"
+    assert _spoken_tts_input(processor, config, "Sure.").language_code == "en"
+
+
+def test_explicit_tts_language_overrides_assistant_detection():
+    _, processor = _tracked_processor()
+    config = _session_with_language("es")
+
+    tts_input = _spoken_tts_input(processor, config, "I can help you find the train station in London.")
+
+    assert tts_input.language_code == "es"
 
 
 @pytest.mark.parametrize("model_cls", [LLMResponseChunk, AssistantOutputEvent])

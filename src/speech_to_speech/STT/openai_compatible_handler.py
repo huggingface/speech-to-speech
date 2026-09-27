@@ -368,7 +368,15 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         try:
             if not self._request_is_current(request):
                 return
-            operation = self._make_operation(source.audio)
+            selected = source.runtime_config.language_for_turn(source.turn_id) if source.runtime_config else None
+            if selected is None:
+                operation = self._make_operation(source.audio)
+            else:
+                operation = self._make_operation(
+                    source.audio,
+                    language=None if selected == "auto" else selected,
+                    use_setup_language=False,
+                )
             with self._request_lock:
                 request.operation = operation
                 if not self._request_is_current(request):
@@ -489,16 +497,26 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             if worker is not None and worker is not current_thread():
                 worker.join(timeout=2)
 
-    def _make_operation(self, audio: np.ndarray) -> HttpTranscriptionOperation:
+    def _make_operation(
+        self,
+        audio: np.ndarray,
+        *,
+        language: str | None = None,
+        use_setup_language: bool = True,
+    ) -> HttpTranscriptionOperation:
+        extra_fields = self.gen_kwargs.copy()
+        if not use_setup_language:
+            extra_fields.pop("language", None)
+            extra_fields.pop("languages[]", None)
         return HttpTranscriptionOperation(
             endpoint_url=self.endpoint_url,
             api_key=self.api_key,
             model=self.model,
             wav_bytes=self._encode_wav(audio),
-            language=self.language,
+            language=self.language if use_setup_language else language,
             response_format=self.response_format,
             timeout_s=self.timeout,
-            extra_fields=self.gen_kwargs,
+            extra_fields=extra_fields,
         )
 
     @staticmethod

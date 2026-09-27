@@ -89,6 +89,19 @@ if LINGUA_AVAILABLE:
     _lingua_detector = _build_lingua_detector()
 
 
+def detect_language_from_text(text: str) -> Optional[str]:
+    if not LINGUA_AVAILABLE:
+        logger.warning("lingua-py not available, cannot detect language from text")
+        return None
+    if not text or len(text.strip()) < 20:
+        return None
+    detected = _lingua_detector.detect_language_of(text)
+    if detected is None:
+        return None
+    code = detected.iso_code_639_1.name.lower()
+    return {v: k for k, v in _LINGUA_CODE_MAP.items()}.get(code, code)
+
+
 class ParakeetTDTSTTHandler(BaseSTTHandler):
     """
     Handles Speech-to-Text using NVIDIA Parakeet TDT model.
@@ -392,21 +405,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         Returns:
             Detected language code or None if detection fails
         """
-        if not LINGUA_AVAILABLE:
-            logger.warning("lingua-py not available, cannot detect language from text")
-            return None
-
-        # Skip very short utterances where language ID is still too noisy.
-        if not text or len(text.strip()) < 20:
-            return None
-
-        detected = _lingua_detector.detect_language_of(text)
-        if detected is None:
-            return None
-
-        code = detected.iso_code_639_1.name.lower()
-        # Map back lingua-specific codes to our supported codes
-        return {v: k for k, v in _LINGUA_CODE_MAP.items()}.get(code, code)
+        return detect_language_from_text(text)
 
     @contextmanager
     def _compute_lock_context(self, handler_name: str, timeout: float) -> Iterator[bool]:

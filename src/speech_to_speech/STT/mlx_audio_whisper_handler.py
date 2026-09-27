@@ -108,22 +108,23 @@ class MLXAudioWhisperSTTHandler(BaseSTTHandler):
             return self.start_language
         return None
 
-    def _resolve_language(self, result: Any) -> str:
+    def _resolve_language(self, result: Any, forced: str | None, *, update_last: bool, use_last_fallback: bool) -> str:
         """Pick the language code to report, updating the sticky fallback on success."""
-        forced = self._forced_language()
         if forced is not None:
             # generate() ran with this language, so it is authoritative.
-            self.last_language = forced
+            if update_last:
+                self.last_language = forced
             return forced
 
         detected = getattr(result, "language", None)
         if isinstance(detected, str) and detected:
             if detected in SUPPORTED_LANGUAGES:
-                self.last_language = detected
+                if update_last:
+                    self.last_language = detected
                 return detected
             logger.warning("Detected unsupported language: %s", detected)
 
-        last_language = self.last_language
+        last_language = self.last_language if use_last_fallback else None
         if last_language is not None and last_language in SUPPORTED_LANGUAGES:
             return last_language
         return DEFAULT_LANGUAGE
@@ -138,7 +139,8 @@ class MLXAudioWhisperSTTHandler(BaseSTTHandler):
         gen_kwargs = {}
 
         # Add language if specified
-        forced_language = self._forced_language()
+        selected = vad_audio.runtime_config.language_for_turn(vad_audio.turn_id) if vad_audio.runtime_config else None
+        forced_language = self._forced_language() if selected is None else None if selected == "auto" else selected
         if forced_language is not None:
             gen_kwargs["language"] = forced_language
 
@@ -152,18 +154,23 @@ class MLXAudioWhisperSTTHandler(BaseSTTHandler):
 
             # Extract text from result
             pred_text = result.text.strip() if hasattr(result, "text") else str(result).strip()
-            language_code = self._resolve_language(result)
+            language_code = self._resolve_language(
+                result,
+                forced_language,
+                update_last=selected is None or selected == "auto",
+                use_last_fallback=selected != "auto",
+            )
 
         except Exception as e:
             logger.error(f"MLX Audio Whisper inference failed: {e}")
             pred_text = ""
-            language_code = self.last_language if self.last_language else DEFAULT_LANGUAGE
+            language_code = forced_language or (self.last_language if selected != "auto" else None) or DEFAULT_LANGUAGE
 
         logger.debug("finished mlx-audio whisper inference")
         console.print(f"[yellow]USER: {pred_text}")
         logger.debug(f"Language Code: {language_code}")
 
-        if self.start_language == "auto":
+        if selected == "auto" or (selected is None and self.start_language == "auto"):
             language_code += "-auto"
 
         if vad_audio.mode == "progressive":

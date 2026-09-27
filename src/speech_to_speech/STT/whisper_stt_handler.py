@@ -227,9 +227,14 @@ class WhisperSTTHandler(BaseSTTHandler):
         logger.debug("infering whisper...")
 
         input_features = self.prepare_model_inputs(vad_audio.audio)
-        forced_language = self._forced_language()
+        selected = vad_audio.runtime_config.language_for_turn(vad_audio.turn_id) if vad_audio.runtime_config else None
+        forced_language = self._forced_language() if selected is None else None if selected == "auto" else selected
 
         gen_kwargs: dict[str, Any] = dict(self.gen_kwargs)
+        if selected is not None:
+            gen_kwargs.pop("language", None)
+            if forced_language is not None:
+                gen_kwargs["language"] = forced_language
         language_code = forced_language
         if forced_language is None:
             # Auto-detect mode: ask Whisper which language this is, then force it so the
@@ -246,13 +251,14 @@ class WhisperSTTHandler(BaseSTTHandler):
         if language_code is None:
             # detect_language() was unavailable. Fall back to a prefix token if this version
             # emits one, then to the last known language, and only then to the default.
-            language_code = self._language_from_prefix(pred_ids) or self.last_language or DEFAULT_LANGUAGE
+            fallback = None if selected == "auto" else self.last_language
+            language_code = self._language_from_prefix(pred_ids) or fallback or DEFAULT_LANGUAGE
 
         # Report whatever language was actually transcribed, even if it is outside
         # SUPPORTED_LANGUAGES -- discarding a correct transcription because its language is
         # not on a downstream allowlist is the bug this handler had. Only remember supported
         # languages, so an unsupported one never becomes the sticky fallback.
-        if language_code in SUPPORTED_LANGUAGES:
+        if language_code in SUPPORTED_LANGUAGES and (selected is None or selected == "auto"):
             self.last_language = language_code
         else:
             logger.warning("Whisper detected unsupported language: %s", language_code)
@@ -263,7 +269,7 @@ class WhisperSTTHandler(BaseSTTHandler):
         console.print(f"[yellow]USER: {pred_text}")
         logger.debug(f"Language Code Whisper: {language_code}")
 
-        if self.start_language == "auto":
+        if selected == "auto" or (selected is None and self.start_language == "auto"):
             language_code += "-auto"
 
         if vad_audio.mode == "progressive":

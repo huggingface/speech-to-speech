@@ -694,6 +694,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             active_speech_min_ms = self._active_speech_min_ms(effective_start_ms)
             if effective_active_speech_duration_ms >= active_speech_min_ms:
                 turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start(effective_start_ms)
+                if runtime_config is not None:
+                    runtime_config.snapshot_turn_language(turn_id)
                 self._speech_started_emitted = True
                 self._log_speech_starts += 1
                 logger.info(
@@ -855,6 +857,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     )
                 if not self._speech_started_emitted:
                     turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start(start_ms)
+                    if runtime_config is not None:
+                        runtime_config.snapshot_turn_language(turn_id)
                     if self.text_output_queue:
                         self.text_output_queue.put(
                             SpeechStartedEvent(

@@ -170,6 +170,51 @@ class TestConnectionLifecycle:
         assert evt.session is not None
         assert evt.session.instructions == "Be concise"
 
+    def test_session_language_update_and_auto_reset_are_reported(self, service, conn_id, runtime_config):
+        for requested, expected in (("es", "es"), ("Auto", "auto")):
+            update = SessionUpdateEvent.model_validate(
+                {
+                    "type": "session.update",
+                    "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": requested}}}},
+                }
+            )
+            assert service.handle_session_update(conn_id, update) is None
+            updated = service.build_session_updated(conn_id)
+            assert updated.session.audio.input.transcription.language == expected
+            assert runtime_config.selected_language == expected
+
+    def test_unsupported_session_language_is_rejected_without_changing_effective_config(
+        self, service, conn_id, runtime_config
+    ):
+        service.stt_supported_languages = {"en", "es"}
+        service.tts_supported_languages = {"en"}
+        update = SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": "es"}}}},
+            }
+        )
+
+        error = service.handle_session_update(conn_id, update)
+
+        assert isinstance(error, RealtimeErrorEvent)
+        assert "TTS" in error.error.message
+        assert runtime_config.selected_language is None
+
+    def test_accepted_session_language_is_sent_without_surrounding_space(self, service, conn_id, runtime_config):
+        service.stt_supported_languages = {"es"}
+        service.tts_supported_languages = {"es"}
+        update = SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": " es "}}}},
+            }
+        )
+
+        assert service.handle_session_update(conn_id, update) is None
+        assert runtime_config.selected_language == "es"
+        assert service.build_session_updated(conn_id).session.audio.input.transcription.language == "es"
+
 
 # ===================================================================
 # Client event parsing

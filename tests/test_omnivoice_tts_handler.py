@@ -9,7 +9,9 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+from openai.types.realtime import RealtimeSessionCreateRequest
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -175,6 +177,20 @@ def test_process_resamples_clips_and_pads_16khz_blocks(monkeypatch: pytest.Monke
     assert len(chunks) == 1
     assert chunks[0].dtype == np.int16
     np.testing.assert_array_equal(chunks[0], np.array([32767, -32768, 16384, 0], dtype=np.int16))
+
+
+def test_session_language_overrides_setup_only_for_selected_request() -> None:
+    model = FakeModel()
+    handler = make_handler(model, language="en")
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "es"}}})
+    )
+
+    list(handler.process(TTSInput(text="Hola.", language_code="es", runtime_config=config)))
+    list(handler.process(TTSInput(text="Hello.")))
+
+    assert [call["language"] for call in model.generate_calls] == ["es", "en"]
+    assert handler.language == "en"
 
 
 def test_process_drops_audio_when_cancelled_during_blocking_generation() -> None:
