@@ -52,12 +52,19 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         self,
         speculative_turns: SpeculativeTurnTracker | None = None,
         text_output_queue: Queue[PipelineEvent] | None = None,
+        detect_llm_output_language: bool = False,
     ) -> None:
         self.speculative_turns = speculative_turns
         self.text_output_queue = text_output_queue
+        self._language_detector = None
+        if detect_llm_output_language:
+            from speech_to_speech.pipeline.language_detection import warm_language_detector
+
+            self._language_detector = warm_language_detector()
         self._response_key: str | None = None
         self._tool_call_ids: list[str] = []
         self._output_sequence = 0
+        self._last_output_language: str | None = None
 
     def _start_response(self, response_key: str | None) -> str:
         key = response_key or self._response_key or uuid4().hex
@@ -68,6 +75,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         self._response_key = None
         self._tool_call_ids = []
         self._output_sequence = 0
+        self._last_output_language = None
 
     def _notify_generation_done(
         self,
@@ -209,9 +217,21 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             ):
                 continue
             logger.debug("Forwarding to TTS: %s", transcript_for_log(part.text))
+            language_code = lm_output.language_code
+            if self._language_detector is not None:
+                from speech_to_speech.pipeline.language_detection import detect_language_from_text
+
+                try:
+                    detected = detect_language_from_text(part.text, detector=self._language_detector)
+                except Exception:
+                    logger.exception("Assistant language detection failed; using prior assistant language")
+                    detected = None
+                if detected:
+                    self._last_output_language = detected
+                language_code = self._last_output_language
             yield TTSInput(
                 text=part.text,
-                language_code=lm_output.language_code,
+                language_code=language_code,
                 runtime_config=lm_output.runtime_config,
                 response=lm_output.response,
                 turn_id=lm_output.turn_id,

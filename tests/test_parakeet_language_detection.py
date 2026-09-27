@@ -1,11 +1,12 @@
 import pytest
 
+from speech_to_speech.pipeline import language_detection
 from speech_to_speech.STT import parakeet_tdt_handler
 from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
 
 
 def test_build_lingua_detector_preloads_language_models(monkeypatch):
-    if not parakeet_tdt_handler.LINGUA_AVAILABLE:
+    if not language_detection.LINGUA_AVAILABLE:
         pytest.skip("lingua-language-detector is not installed")
 
     calls = []
@@ -26,10 +27,14 @@ def test_build_lingua_detector_preloads_language_models(monkeypatch):
             calls.append(("languages", languages))
             return Builder()
 
-    monkeypatch.setattr(parakeet_tdt_handler, "LanguageDetectorBuilder", BuilderFactory)
+    monkeypatch.setattr(language_detection, "LanguageDetectorBuilder", BuilderFactory)
 
-    assert parakeet_tdt_handler._build_lingua_detector() is detector
-    assert calls == [("languages", tuple(parakeet_tdt_handler._lingua_languages)), "preload", "build"]
+    assert language_detection._build_lingua_detector() is detector
+    assert calls[0][0] == "languages"
+    assert {lang.iso_code_639_1.name.lower() for lang in calls[0][1]} == set(
+        language_detection.DETECTABLE_LANGUAGE_CODES
+    )
+    assert calls[1:] == ["preload", "build"]
 
 
 def test_detect_language_from_short_text_returns_none_without_querying_detector(monkeypatch):
@@ -40,7 +45,8 @@ def test_detect_language_from_short_text_returns_none_without_querying_detector(
             raise AssertionError("short text should not invoke lingua")
 
     monkeypatch.setattr(parakeet_tdt_handler, "LINGUA_AVAILABLE", True)
-    monkeypatch.setattr(parakeet_tdt_handler, "_lingua_detector", ExplodingDetector(), raising=False)
+    monkeypatch.setattr(language_detection, "LINGUA_AVAILABLE", True)
+    monkeypatch.setattr(language_detection, "warm_language_detector", lambda: ExplodingDetector())
 
     assert handler._detect_language_from_text("Okay.") is None
 
@@ -75,3 +81,14 @@ def test_detect_language_from_long_norwegian_text_maps_nb_to_no():
     )
 
     assert handler._detect_language_from_text(text) == "no"
+
+
+@pytest.mark.parametrize(
+    ("text", "code"),
+    [("你好世界", "zh"), ("こんにちは", "ja"), ("안녕하세요", "ko")],
+)
+def test_assistant_detector_accepts_short_cjk_text(text, code):
+    if not language_detection.LINGUA_AVAILABLE:
+        pytest.skip("lingua-language-detector is not installed")
+
+    assert language_detection.detect_language_from_text(text) == code

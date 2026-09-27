@@ -11,6 +11,14 @@ _PROXY_LLM_BACKENDS = ", ".join(name for name, spec in LLM_BACKENDS.items() if s
 
 @dataclass
 class ModuleArguments:
+    detect_llm_output_language: bool = field(
+        default=False,
+        metadata={
+            "help": "Detect the language of each assistant text chunk before TTS and pass that code to the TTS "
+            "backend. Sends no code for an initial chunk that is too short to classify. "
+            "The detector is warmed at startup. Off by default."
+        },
+    )
     device: Optional[str] = field(
         default=None,
         metadata={"help": "If specified, overrides the device for all handlers."},

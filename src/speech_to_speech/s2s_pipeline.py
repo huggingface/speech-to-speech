@@ -450,6 +450,7 @@ def _build_handlers(
         setup_kwargs={
             "speculative_turns": speculative_turns,
             "text_output_queue": text_output_queue,
+            "detect_llm_output_language": module_kwargs.detect_llm_output_language,
         },
     )
 
