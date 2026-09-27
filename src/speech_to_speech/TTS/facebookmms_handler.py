@@ -62,6 +62,10 @@ WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE = {
     "cy": "cym",  # Welsh
 }
 
+# Every entry names a distinct MMS checkpoint, so unlike Kokoro's routing table the map is
+# itself the capability list.
+SUPPORTED_LANGUAGES = frozenset(WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE)
+
 
 class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def setup(

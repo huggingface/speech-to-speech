@@ -234,6 +234,9 @@ def test_startup_wires_the_gate_and_warns_before_processing(monkeypatch):
             log_transcripts=True,
             num_pipelines=1,
             enable_live_transcription=False,
+            # Real ModuleArguments fields, read by the startup language-capability report.
+            stt="parakeet-tdt",
+            tts="qwen3",
         )
     )
     manager = SimpleNamespace(

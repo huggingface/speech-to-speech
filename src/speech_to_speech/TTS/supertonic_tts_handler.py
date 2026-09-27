@@ -56,6 +56,9 @@ SUPERTONIC_LANGUAGE_CODES = frozenset(
     }
 )
 
+# Shared name for the capability registry.
+SUPPORTED_LANGUAGES = SUPERTONIC_LANGUAGE_CODES
+
 
 class SupertonicTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def setup(

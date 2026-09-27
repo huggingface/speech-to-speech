@@ -64,6 +64,11 @@ class BackendCapabilities:
     supports_audio_input: bool = False
     supports_llm_proxy: bool = False
     streams_audio_chunks: bool = False
+    # (module, attribute) naming the backend's own SUPPORTED_LANGUAGES, read lazily so the
+    # registry stays import-free. `None` means the backend does not declare its languages --
+    # unknown, which must not be reported as supported. Referencing the handler's own
+    # constant keeps one source of truth instead of a copy that can drift.
+    languages_source: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -352,6 +357,9 @@ STT_BACKENDS = build_backend_registry(
                 attach_speculative_turns=True,
             ),
             config_prefix="stt",
+            capabilities=BackendCapabilities(
+                languages_source=("speech_to_speech.STT.whisper_stt_handler", "SUPPORTED_LANGUAGES")
+            ),
         ),
         BackendSpec(
             "whisper-mlx",
@@ -364,6 +372,9 @@ STT_BACKENDS = build_backend_registry(
             ),
             config_prefix="stt",
             required_extra="whisper-mlx",
+            capabilities=BackendCapabilities(
+                languages_source=("speech_to_speech.STT.lightning_whisper_mlx_handler", "SUPPORTED_LANGUAGES")
+            ),
         ),
         BackendSpec(
             "mlx-audio-whisper",
@@ -375,6 +386,9 @@ STT_BACKENDS = build_backend_registry(
                 attach_speculative_turns=True,
             ),
             config_prefix="mlx_audio_whisper",
+            capabilities=BackendCapabilities(
+                languages_source=("speech_to_speech.STT.mlx_audio_whisper_handler", "SUPPORTED_LANGUAGES")
+            ),
         ),
         BackendSpec(
             "faster-whisper",
@@ -387,6 +401,9 @@ STT_BACKENDS = build_backend_registry(
             ),
             config_prefix="faster_whisper_stt",
             required_extra="faster-whisper",
+            capabilities=BackendCapabilities(
+                languages_source=("speech_to_speech.STT.faster_whisper_handler", "SUPPORTED_LANGUAGES")
+            ),
         ),
         BackendSpec(
             "parakeet-tdt",
@@ -394,6 +411,9 @@ STT_BACKENDS = build_backend_registry(
             ParakeetTDTSTTHandlerArguments,
             _create_parakeet,
             config_prefix="parakeet_tdt",
+            capabilities=BackendCapabilities(
+                languages_source=("speech_to_speech.STT.parakeet_tdt_handler", "SUPPORTED_LANGUAGES")
+            ),
         ),
         BackendSpec(
             "parakeet-unified",
@@ -406,6 +426,9 @@ STT_BACKENDS = build_backend_registry(
             ),
             config_prefix="parakeet_unified",
             required_extra="nemo",
+            capabilities=BackendCapabilities(
+                languages_source=("speech_to_speech.STT.nemo_asr_handler", "SUPPORTED_LANGUAGES")
+            ),
         ),
         BackendSpec(
             "paraformer",
@@ -429,6 +452,9 @@ STT_BACKENDS = build_backend_registry(
                 attach_speculative_turns=True,
             ),
             config_prefix="qwen3_asr",
+            capabilities=BackendCapabilities(
+                languages_source=("speech_to_speech.STT.qwen3_asr_handler", "SUPPORTED_LANGUAGES")
+            ),
         ),
         BackendSpec(
             "openai",
@@ -532,6 +558,9 @@ TTS_BACKENDS = build_backend_registry(
                 context_kwargs=True,
             ),
             normalize_config=_normalize_facebook_mms_config,
+            capabilities=BackendCapabilities(
+                languages_source=("speech_to_speech.TTS.facebookmms_handler", "SUPPORTED_LANGUAGES")
+            ),
         ),
         BackendSpec(
             "omnivoice",
@@ -571,6 +600,9 @@ TTS_BACKENDS = build_backend_registry(
             ),
             config_prefix="kokoro",
             required_extra="kokoro",
+            capabilities=BackendCapabilities(
+                languages_source=("speech_to_speech.TTS.kokoro_handler", "SUPPORTED_LANGUAGES")
+            ),
         ),
         BackendSpec(
             "qwen3",
@@ -603,6 +635,9 @@ TTS_BACKENDS = build_backend_registry(
             ),
             config_prefix="supertonic_tts",
             required_extra="supertonic",
+            capabilities=BackendCapabilities(
+                languages_source=("speech_to_speech.TTS.supertonic_tts_handler", "SUPPORTED_LANGUAGES")
+            ),
         ),
     ],
 )

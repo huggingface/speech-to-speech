@@ -36,6 +36,7 @@ from speech_to_speech.backend_registry import (
     create_backend_handler,
 )
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.language_support import log_usable_languages
 from speech_to_speech.pipeline.queue_types import (
     AudioInItem,
     AudioOutItem,
@@ -648,6 +649,8 @@ def run_pipeline_command(command: Literal["serve", "local"], argv: Sequence[str]
         raise ValueError(f"--num_pipelines must be >= 1, got {args.module_kwargs.num_pipelines}")
 
     prepare_all_args(args)
+    # After prepare_all_args, since that is where the STT/TTS backend names are resolved.
+    log_usable_languages(args.module_kwargs.stt, args.module_kwargs.tts)
     # On Apple Silicon, all MLX inference serializes through a global lock (utils/mlx_lock.py).
     # The progressive STT path uses a short timeout and drops work under contention, producing
     # a flood of warnings without affecting final transcripts. With a pool, pre-emptively turn

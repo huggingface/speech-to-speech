@@ -46,6 +46,15 @@ WHISPER_LANGUAGE_TO_KOKORO_LANG = {
     "uk": "b",  # Ukrainian -> British English
 }
 
+# Languages Kokoro can actually voice, as opposed to route. WHISPER_LANGUAGE_TO_KOKORO_LANG
+# is a routing table with an English fallback baked in -- "de", "nl", "pl", "ru" and "uk" all
+# map to a British English voice -- so it overstates capability and cannot be used to answer
+# "can this backend speak X?". Kokoro codes "a" and "b" are American and British English;
+# every other code is a distinct language with its own voice.
+SUPPORTED_LANGUAGES = frozenset(
+    {code for code, kokoro in WHISPER_LANGUAGE_TO_KOKORO_LANG.items() if kokoro not in ("a", "b")} | {"en"}
+)
+
 # Default voices for each Kokoro language code
 # These are native voices that sound natural for each language
 # Voice naming: first letter = language, second letter = gender (f=female, m=male)
