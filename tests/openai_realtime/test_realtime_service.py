@@ -53,6 +53,7 @@ from speech_to_speech.api.openai_realtime.service import (
     CHUNK_SIZE_BYTES,
     RealtimeService,
 )
+from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -71,7 +72,9 @@ from speech_to_speech.pipeline.messages import (
     AssistantTextPart,
     AssistantToolCallPart,
     GenerateResponseRequest,
+    LLMResponseChunk,
     ResponsePrefetchTransaction,
+    TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.turn_latency import TURN_LATENCY_METADATA_KEY
@@ -1851,6 +1854,88 @@ class TestHandleResponseCreate:
         assert followup_req.turn_id == "turn_1"
         assert followup_req.turn_revision == 2
         assert followup_req.speech_stopped_at_s == 123.0
+
+    @pytest.mark.parametrize(
+        ("new_input", "expected_language"),
+        [("none", "es"), ("conversation_item", "de"), ("response_input", "de")],
+    )
+    def test_response_create_uses_new_text_language_without_losing_speech_timing(
+        self, service, conn_id, runtime_config, text_prompt_queue, new_input, expected_language
+    ):
+        def select_language(language):
+            return service.handle_session_update(
+                conn_id,
+                SessionUpdateEvent.model_validate(
+                    {
+                        "type": "session.update",
+                        "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": language}}}},
+                    }
+                ),
+            )
+
+        assert select_language("es") is None
+        runtime_config.snapshot_turn_language("turn_1")
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(
+                transcript="Hola.",
+                language_code="es",
+                turn_id="turn_1",
+                turn_revision=2,
+                speech_stopped_at_s=123.0,
+            ),
+        )
+        spoken_request = text_prompt_queue.get_nowait()
+        service.response._ensure_response(conn_id, spoken_request.response_key)
+        service.response._end_response(conn_id)
+
+        assert select_language("de") is None
+        assert service.build_session_updated(conn_id).session.audio.input.transcription.language == "de"
+        if new_input == "conversation_item":
+            created = service.handle_conversation_item_create(
+                conn_id,
+                ConversationItemCreateEvent.model_validate(
+                    {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "id": "msg_new_text",
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "Please continue."}],
+                        },
+                    }
+                ),
+            )
+            assert len(created) == 1 and isinstance(created[0], ConversationItemCreatedEvent)
+
+        create_event = ResponseCreateEvent(
+            type="response.create",
+            response={"input": [self._user_input("Please continue.")]} if new_input == "response_input" else None,
+        )
+        response = service.handle_response_create(conn_id, create_event)
+        assert isinstance(response, ResponseCreatedEvent)
+        request = text_prompt_queue.get_nowait()
+        assert request.turn_id == "turn_1"
+        assert request.turn_revision == 2
+        assert request.speech_stopped_at_s == 123.0
+
+        processor = LMOutputProcessor.__new__(LMOutputProcessor)
+        processor.setup()
+        outputs = list(
+            processor.process(
+                LLMResponseChunk(
+                    text="Here is the answer.",
+                    language_code="es",
+                    runtime_config=request.runtime_config,
+                    turn_id=request.turn_id,
+                    turn_revision=request.turn_revision,
+                    response_key=request.response_key,
+                )
+            )
+        )
+        tts_input = next(item for item in outputs if isinstance(item, TTSInput))
+        assert tts_input.session_language == expected_language
+        assert tts_input.language_code == expected_language
 
     def test_response_create_rejects_complex_tool_choice(self, service, conn_id, runtime_config):
         evt = ResponseCreateEvent(

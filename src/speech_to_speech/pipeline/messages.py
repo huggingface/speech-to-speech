@@ -362,11 +362,15 @@ class GenerateResponseRequest(PipelineMessage):
     turn_id: str | None = None
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
+    # Keep turn_id for timing even when new client input takes the session language.
+    use_turn_language: bool = Field(default=True, exclude=True)
     prefetch_transaction: ResponsePrefetchTransaction | None = Field(default=None, exclude=True, repr=False)
 
     @model_validator(mode="after")
     def _snapshot_session_language(self) -> GenerateResponseRequest:
-        self.runtime_config.snapshot_response_language(self.response_key, self.turn_id)
+        self.runtime_config.snapshot_response_language(
+            self.response_key, self.turn_id if self.use_turn_language else None
+        )
         return self
 
 

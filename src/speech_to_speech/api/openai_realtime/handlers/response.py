@@ -211,6 +211,7 @@ class ResponseHandler(RealtimeBaseHandler):
             turn_id=st.speculative_user_turn_id,
             turn_revision=st.speculative_user_turn_revision,
             speech_stopped_at_s=st.speculative_user_speech_stopped_at_s,
+            use_turn_language=not st.client_user_input_since_speech,
             prefetch_transaction=ResponsePrefetchTransaction(),
         )
         self._service.bind_response_latency_tracker(
@@ -826,6 +827,7 @@ class ResponseHandler(RealtimeBaseHandler):
             turn_id=None if out_of_band else st.speculative_user_turn_id,
             turn_revision=None if out_of_band else st.speculative_user_turn_revision,
             speech_stopped_at_s=None if out_of_band else st.speculative_user_speech_stopped_at_s,
+            use_turn_language=not st.client_user_input_since_speech,
         )
         if not out_of_band:
             self._service.bind_response_latency_tracker(
