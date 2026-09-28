@@ -27,13 +27,10 @@ from speech_to_speech.pipeline.turn_latency import bind_active_turn_latency_trac
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.STT.smart_progressive_streaming import PartialTranscription as ProgressiveStreamPartial
 from speech_to_speech.utils.mlx_lock import MLXLockContext
-
-try:
-    from lingua import Language, LanguageDetectorBuilder
-
-    LINGUA_AVAILABLE = True
-except ImportError:
-    LINGUA_AVAILABLE = False
+from speech_to_speech.utils.text_language_detection import (
+    build_language_detector,
+    detect_language_from_text,
+)
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -67,43 +64,12 @@ SUPPORTED_LANGUAGES = [
     "lt",
 ]
 
-# Lingua uses "nb" (Bokmål) for Norwegian instead of "no"
-_LINGUA_CODE_MAP = {"no": "nb"}
 
-if LINGUA_AVAILABLE:
-    _lingua_iso_to_code = {
-        lang.iso_code_639_1.name.lower(): lang for lang in Language.all() if lang.iso_code_639_1 is not None
-    }
-    _lingua_languages = [
-        _lingua_iso_to_code[_LINGUA_CODE_MAP.get(code, code)]
-        for code in SUPPORTED_LANGUAGES
-        if _LINGUA_CODE_MAP.get(code, code) in _lingua_iso_to_code
-    ]
-
-    def _build_lingua_detector():
-        # Preloading can take multiple seconds on some hardware, including the
-        # deployed server. Pay that cost at startup instead of on the first user
-        # request, where it would look like slow STT.
-        return LanguageDetectorBuilder.from_languages(*_lingua_languages).with_preloaded_language_models().build()
-
-    _lingua_detector = _build_lingua_detector()
-    # The assistant can answer outside Parakeet's recognition languages.
-    _assistant_lingua_detector = LanguageDetectorBuilder.from_all_languages().build()
+def _build_lingua_detector() -> Any:
+    return build_language_detector(SUPPORTED_LANGUAGES, preload=True)
 
 
-def detect_language_from_text(text: str, *, all_languages: bool = False) -> Optional[str]:
-    if not LINGUA_AVAILABLE:
-        logger.warning("lingua-py not available, cannot detect language from text")
-        return None
-    # Skip very short utterances where language ID is still too noisy.
-    if not text or len(text.strip()) < 20:
-        return None
-    detector = _assistant_lingua_detector if all_languages else _lingua_detector
-    detected = detector.detect_language_of(text)
-    if detected is None:
-        return None
-    code = detected.iso_code_639_1.name.lower()
-    return {v: k for k, v in _LINGUA_CODE_MAP.items()}.get(code, code)
+_lingua_detector = _build_lingua_detector()
 
 
 class ParakeetTDTSTTHandler(BaseSTTHandler):
@@ -428,7 +394,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         Returns:
             Detected language code or None if detection fails
         """
-        return detect_language_from_text(text)
+        return detect_language_from_text(text, _lingua_detector)
 
     @contextmanager
     def _compute_lock_context(self, handler_name: str, timeout: float) -> Iterator[bool]:

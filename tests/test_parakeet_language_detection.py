@@ -2,10 +2,11 @@ import pytest
 
 from speech_to_speech.STT import parakeet_tdt_handler
 from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
+from speech_to_speech.utils import text_language_detection
 
 
 def test_build_lingua_detector_preloads_language_models(monkeypatch):
-    if not parakeet_tdt_handler.LINGUA_AVAILABLE:
+    if not text_language_detection.LINGUA_AVAILABLE:
         pytest.skip("lingua-language-detector is not installed")
 
     calls = []
@@ -26,10 +27,12 @@ def test_build_lingua_detector_preloads_language_models(monkeypatch):
             calls.append(("languages", languages))
             return Builder()
 
-    monkeypatch.setattr(parakeet_tdt_handler, "LanguageDetectorBuilder", BuilderFactory)
+    monkeypatch.setattr(text_language_detection, "LanguageDetectorBuilder", BuilderFactory)
 
     assert parakeet_tdt_handler._build_lingua_detector() is detector
-    assert calls == [("languages", tuple(parakeet_tdt_handler._lingua_languages)), "preload", "build"]
+    assert calls[0][0] == "languages"
+    assert len(calls[0][1]) == len(parakeet_tdt_handler.SUPPORTED_LANGUAGES)
+    assert calls[1:] == ["preload", "build"]
 
 
 def test_detect_language_from_short_text_returns_none_without_querying_detector(monkeypatch):
@@ -39,7 +42,6 @@ def test_detect_language_from_short_text_returns_none_without_querying_detector(
         def detect_language_of(self, text):
             raise AssertionError("short text should not invoke lingua")
 
-    monkeypatch.setattr(parakeet_tdt_handler, "LINGUA_AVAILABLE", True)
     monkeypatch.setattr(parakeet_tdt_handler, "_lingua_detector", ExplodingDetector(), raising=False)
 
     assert handler._detect_language_from_text("Okay.") is None
@@ -54,7 +56,7 @@ def test_detect_language_from_short_text_returns_none_without_querying_detector(
     ],
 )
 def test_detect_language_from_short_english_text_uses_lingua_successfully(text):
-    if not parakeet_tdt_handler.LINGUA_AVAILABLE:
+    if not text_language_detection.LINGUA_AVAILABLE:
         pytest.skip("lingua-language-detector is not installed")
 
     handler = object.__new__(ParakeetTDTSTTHandler)
@@ -64,7 +66,7 @@ def test_detect_language_from_short_english_text_uses_lingua_successfully(text):
 
 
 def test_detect_language_from_long_norwegian_text_maps_nb_to_no():
-    if not parakeet_tdt_handler.LINGUA_AVAILABLE:
+    if not text_language_detection.LINGUA_AVAILABLE:
         pytest.skip("lingua-language-detector is not installed")
 
     handler = object.__new__(ParakeetTDTSTTHandler)

@@ -35,6 +35,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import transcript_for_log
+from speech_to_speech.utils.text_language_detection import all_language_detector, detect_language_from_text
 from speech_to_speech.utils.utils import response_wants_audio
 
 logger = logging.getLogger(__name__)
@@ -87,13 +88,12 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
     def _observe_assistant_language(self, text: str) -> None:
         if self._detected_assistant_language is not None:
             return
-        from speech_to_speech.STT.parakeet_tdt_handler import detect_language_from_text
-
         # A few short streamed parts can make one detectable sentence. Keep only
         # a bounded window; the current response's TTS choice remains unchanged.
         self._assistant_language_probe = (self._assistant_language_probe + " " + text).strip()[-256:]
+        # The assistant can answer outside Parakeet's recognition languages.
         self._detected_assistant_language = detect_language_from_text(
-            self._assistant_language_probe, all_languages=True
+            self._assistant_language_probe, all_language_detector()
         )
 
     def _notify_generation_done(
