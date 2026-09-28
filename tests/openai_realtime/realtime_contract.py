@@ -231,3 +231,102 @@ def assert_response_lifecycle_contract(
                 f"{(closed.call_id, closed.name, closed.arguments)} became "
                 f"{(item.call_id, item.name, item.arguments)}"
             )
+
+
+class RealtimeClientHistory:
+    """The user-turn history a generic Realtime client builds from events.
+
+    It knows only standard event identity: items are keyed by ``item_id``,
+    transcription deltas append to one item, and
+    ``conversation.item.input_audio_transcription.completed`` carries that
+    item's final transcript. It has no notion of a speculative revision, so
+    every user item the server publishes here is permanent.
+    """
+
+    def __init__(self) -> None:
+        self.speech_started: list[str] = []
+        self.speech_stopped: list[str] = []
+        self.deltas: dict[str, str] = {}
+        self.transcripts: dict[str, str] = {}
+        self.created_items: list[str] = []
+        self.completed_items: list[str] = []
+        self.failed_items: list[str] = []
+
+    def apply(self, events: list[Any]) -> "RealtimeClientHistory":
+        for event in events:
+            etype = event.type
+            if etype == "conversation.item.created" and getattr(event.item, "role", None) == "user":
+                self.created_items.append(event.item.id)
+            elif etype == "input_audio_buffer.speech_started":
+                self.speech_started.append(event.item_id)
+            elif etype == "input_audio_buffer.speech_stopped":
+                self.speech_stopped.append(event.item_id)
+            elif etype == "conversation.item.input_audio_transcription.delta":
+                self.deltas[event.item_id] = self.deltas.get(event.item_id, "") + event.delta
+            elif etype == "conversation.item.input_audio_transcription.completed":
+                self.transcripts[event.item_id] = event.transcript
+                self.completed_items.append(event.item_id)
+            elif etype == "conversation.item.input_audio_transcription.failed":
+                self.failed_items.append(event.item_id)
+        return self
+
+    @property
+    def user_turns(self) -> list[str]:
+        """Committed user transcripts, in conversation item order."""
+        return [self.transcripts[item_id] for item_id in self.created_items if item_id in self.transcripts]
+
+
+def assert_input_lifecycle_contract(events: list[Any]) -> None:
+    """Check the documented lifecycle of one input audio item.
+
+    The rules, each phrased as the client-visible promise it protects:
+
+    * an item starts once, preserving its original audio onset;
+    * speech stops on an item only after that item started;
+    * a stop commits and creates the user item exactly once;
+    * an item stops once, because ``speech_stopped`` announces the user
+      message item created from that stopped buffer;
+    * an item's transcription terminal arrives once and after its stop;
+    * nothing streams into an item's transcript after that terminal.
+    """
+    started: set[str] = set()
+    stopped: set[str] = set()
+    terminal: set[str] = set()
+    committed: dict[str, str | None] = {}
+    created: set[str] = set()
+
+    for event in events:
+        etype = event.type
+        item_id = getattr(event, "item_id", None)
+        if etype == "input_audio_buffer.speech_started":
+            assert item_id not in started, f"item {item_id} started more than once"
+            started.add(item_id)
+        elif etype == "input_audio_buffer.speech_stopped":
+            assert item_id in started, f"speech stopped on item {item_id} that never started"
+            assert item_id not in stopped, f"item {item_id} stopped more than once"
+            stopped.add(item_id)
+        elif etype == "input_audio_buffer.committed":
+            assert item_id in stopped, f"item {item_id} committed before its stop"
+            assert item_id not in committed, f"item {item_id} committed more than once"
+            committed[item_id] = event.previous_item_id
+        elif etype == "conversation.item.created" and event.item.id in started:
+            item_id = event.item.id
+            assert item_id in committed, f"item {item_id} created before commitment"
+            assert item_id not in created, f"item {item_id} created more than once"
+            assert event.previous_item_id == committed[item_id]
+            assert event.previous_item_id != item_id
+            assert getattr(event.item, "role", None) == "user"
+            assert event.item.content[0].type == "input_audio"
+            created.add(item_id)
+        elif etype == "conversation.item.input_audio_transcription.delta":
+            assert item_id not in terminal, f"transcript delta on item {item_id} after its terminal"
+        elif etype in (
+            "conversation.item.input_audio_transcription.completed",
+            "conversation.item.input_audio_transcription.failed",
+        ):
+            assert item_id not in terminal, f"item {item_id} terminalized more than once"
+            if item_id in started:
+                assert item_id in created, f"item {item_id} transcribed before it was created"
+            terminal.add(item_id)
+
+    assert stopped == set(committed) == created, "stopped input items must be committed and created"

@@ -57,6 +57,8 @@ class VADAudio(PipelineMessage):
     turn_revision: int | None = None
     processing_delay_s: float = 0.0
     created_at_s: float = Field(default_factory=perf_counter)
+    # Estimated voiced-audio end on the server monotonic clock, separate from gate age.
+    speech_end_at_s: float | None = None
 
 
 # ── STT → TranscriptionNotifier → LLM ────────────────────────────────

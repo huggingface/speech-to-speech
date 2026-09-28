@@ -26,6 +26,7 @@ from openai.types.realtime.realtime_conversation_item_user_message import (
 )
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
+from speech_to_speech.api.openai_realtime.input_state import InputItemState
 from speech_to_speech.LLM.chat import ChatItemError, add_supported_item
 from speech_to_speech.pipeline.events import (
     PartialTranscriptionEvent,
@@ -299,26 +300,17 @@ class ConversationHandler(RealtimeBaseHandler):
             )
         ]
 
-    def terminalize_input_item(
-        self,
-        conn_id: str,
-        item_id: str,
-    ) -> tuple[str, float] | None:
-        """Release one input item's active transcript and routing state."""
-        st = self._state(conn_id)
-        input_item = st.input_items.pop(item_id, None)
+    def _closing_input_item(self, conn_id: str, item_id: str) -> InputItemState | None:
+        """Return the item a terminal closes, or ``None`` once it was released.
+
+        Its transcript and routing state survive until
+        :meth:`AudioHandler.resolve_input_terminals` publishes the terminal,
+        because speech that resumes first keeps revising the same item.
+        """
+        input_item = self._state(conn_id).input_items.get(item_id)
         if input_item is None:
             logger.debug("Ignoring input terminal for released item=%s", item_id)
-            return None
-        duration_s = input_item.audio_duration_s
-        st.input_item_by_turn_revision = {
-            turn: tracked_item_id
-            for turn, tracked_item_id in st.input_item_by_turn_revision.items()
-            if tracked_item_id != item_id
-        }
-        if st.current_input_item_id == item_id:
-            st.current_input_item_id = None
-        return item_id, duration_s
+        return input_item
 
     def _completion_input_item_id(
         self,
@@ -349,10 +341,10 @@ class ConversationHandler(RealtimeBaseHandler):
             item_id = self._service.response._current_item_id(conn_id)
             duration_s = st.input_audio_duration_s
         else:
-            terminal = self.terminalize_input_item(conn_id, item_id)
-            if terminal is None:
+            input_item = self._closing_input_item(conn_id, item_id)
+            if input_item is None:
                 return []
-            item_id, duration_s = terminal
+            duration_s = input_item.audio_duration_s
         st.response_usage.audio_duration_s += duration_s
         return [
             ConversationItemInputAudioTranscriptionCompletedEvent(
@@ -386,7 +378,7 @@ class ConversationHandler(RealtimeBaseHandler):
                 event.turn_revision,
             )
             return []
-        if self.terminalize_input_item(conn_id, item_id) is None:
+        if self._closing_input_item(conn_id, item_id) is None:
             return []
         return [
             ConversationItemInputAudioTranscriptionFailedEvent(
