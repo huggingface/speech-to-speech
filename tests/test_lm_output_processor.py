@@ -78,7 +78,7 @@ def test_auto_tts_language_uses_assistant_text_instead_of_stt_language():
 
     tts_input = _spoken_tts_input(processor, config, "I can help you find the train station in London.")
 
-    assert tts_input.language_code == "en"
+    assert tts_input.tts_language_code == "en"
 
 
 def test_short_auto_reply_uses_prior_assistant_language_only_in_same_session():
@@ -86,18 +86,18 @@ def test_short_auto_reply_uses_prior_assistant_language_only_in_same_session():
     config = _session_with_language("auto")
 
     first = _spoken_tts_input(processor, config, "Sure.")
+    assert first.tts_language_code is None
     list(processor.process(EndOfResponse(turn_id="turn_1", turn_revision=0)))
     longer = _spoken_tts_input(processor, config, "I can help you find the train station in London.")
+    assert longer.tts_language_code == "en"
     list(processor.process(EndOfResponse(turn_id="turn_1", turn_revision=0)))
     later = _spoken_tts_input(processor, config, "Sure.")
 
-    assert first.language_code is None
-    assert longer.language_code == "en"
-    assert later.language_code == "en"
+    assert later.tts_language_code == "en"
 
     list(processor.process(EndOfResponse(turn_id="turn_1", turn_revision=0)))
     new_session = _session_with_language("auto")
-    assert _spoken_tts_input(processor, new_session, "Sure.").language_code is None
+    assert _spoken_tts_input(processor, new_session, "Sure.").tts_language_code is None
 
 
 def test_failed_auto_response_does_not_become_short_reply_fallback():
@@ -105,27 +105,28 @@ def test_failed_auto_response_does_not_become_short_reply_fallback():
     config = _session_with_language("auto")
 
     assert (
-        _spoken_tts_input(processor, config, "I can help you find the train station in London.").language_code == "en"
+        _spoken_tts_input(processor, config, "I can help you find the train station in London.").tts_language_code
+        == "en"
     )
     list(processor.process(EndOfResponse(turn_id="turn_1", turn_revision=0, error="generation failed")))
 
     assert config.last_assistant_language is None
-    assert _spoken_tts_input(processor, config, "Sure.").language_code is None
+    assert _spoken_tts_input(processor, config, "Sure.").tts_language_code is None
 
 
-def test_later_assistant_part_can_seed_future_auto_fallback_without_changing_current_voice():
+def test_later_assistant_part_seeds_future_auto_fallback_without_changing_current_voice():
     _, processor = _tracked_processor()
     config = _session_with_language("auto")
 
     first = _spoken_tts_input(processor, config, "Sure.")
+    assert first.tts_language_code is None
     later = _spoken_tts_input(processor, config, "I can help you find the train station in London.")
-    assert first.language_code is None
-    assert later.language_code is None
+    assert later.tts_language_code is None
 
     list(processor.process(EndOfResponse(turn_id="turn_1", turn_revision=0)))
 
     assert config.last_assistant_language == "en"
-    assert _spoken_tts_input(processor, config, "Okay.").language_code == "en"
+    assert _spoken_tts_input(processor, config, "Okay.").tts_language_code == "en"
 
 
 def test_short_streamed_parts_combine_for_future_auto_fallback():
@@ -133,14 +134,14 @@ def test_short_streamed_parts_combine_for_future_auto_fallback():
     config = _session_with_language("auto")
 
     first = _spoken_tts_input(processor, config, "I can help you")
+    assert first.tts_language_code is None
     second = _spoken_tts_input(processor, config, "find the station.")
-    assert first.language_code is None
-    assert second.language_code is None
+    assert second.tts_language_code is None
 
     list(processor.process(EndOfResponse(turn_id="turn_1", turn_revision=0)))
 
     assert config.last_assistant_language == "en"
-    assert _spoken_tts_input(processor, config, "Sure.").language_code == "en"
+    assert _spoken_tts_input(processor, config, "Sure.").tts_language_code == "en"
 
 
 def test_explicit_tts_language_overrides_assistant_detection():
@@ -149,7 +150,7 @@ def test_explicit_tts_language_overrides_assistant_detection():
 
     tts_input = _spoken_tts_input(processor, config, "I can help you find the train station in London.")
 
-    assert tts_input.language_code == "es"
+    assert tts_input.tts_language_code == "es"
 
 
 @pytest.mark.parametrize("model_cls", [LLMResponseChunk, AssistantOutputEvent])

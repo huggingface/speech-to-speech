@@ -166,7 +166,7 @@ class SupertonicTTSHandler(BaseHandler[TTSIn, TTSOut]):
         if not text.strip():
             return
 
-        lang = self._resolve_language(tts_input.language_code)
+        lang = self._resolve_language(tts_input.tts_language_code)
 
         console.print(f"[green]ASSISTANT: {text}")
 

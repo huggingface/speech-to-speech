@@ -261,7 +261,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         runtime_config = tts_input.runtime_config
         response = tts_input.response
-        language_code = tts_input.language_code
+        language_code = tts_input.tts_language_code
         text = tts_input.text
 
         if (

@@ -757,10 +757,10 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
     def _coalesce_pending_tts_input(self, current_input: TTSInput) -> tuple[str, Optional[str]]:
         """Combine already-queued text chunks before the next TTS synthesis call."""
         if not hasattr(self.queue_in, "mutex") or not hasattr(self.queue_in, "queue"):
-            return current_input.text, current_input.language_code
+            return current_input.text, current_input.tts_language_code
 
         text = current_input.text
-        language_code = current_input.language_code
+        language_code = current_input.tts_language_code
 
         parts = [text.strip()] if text and text.strip() else []
         text_events: list[AssistantOutputEvent] = []
@@ -795,8 +795,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                     break
                 if (
                     language_code is not None
-                    and next_item.language_code is not None
-                    and next_item.language_code != language_code
+                    and next_item.tts_language_code is not None
+                    and next_item.tts_language_code != language_code
                 ):
                     break
 
@@ -804,7 +804,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 if next_item.text.strip():
                     parts.append(next_item.text.strip())
                 if language_code is None:
-                    language_code = next_item.language_code
+                    language_code = next_item.tts_language_code
 
         # These events preceded the inputs absorbed above. Forward them before
         # synthesis so protocol ordering remains text -> audio while Qwen still

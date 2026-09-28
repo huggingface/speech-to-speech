@@ -352,14 +352,13 @@ def test_explicit_auto_removes_setup_language_from_stt_request(monkeypatch):
     assert handler.language == "en"
 
 
-def test_mid_turn_session_update_applies_to_next_stt_turn(monkeypatch):
+def test_mid_turn_session_update_applies_to_pending_stt_request(monkeypatch):
     handler = _handler(monkeypatch, language="en")
     config = RuntimeConfig(
         session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "es"}}})
     )
-    config.snapshot_turn_language("turn-1")
     config.session.audio.input.transcription.language = "de"
-    _FakeOperation.results = [HttpTranscriptionResult(text="hola", language="es")]
+    _FakeOperation.results = [HttpTranscriptionResult(text="hallo", language="de")]
     first = _audio()
     first.runtime_config = config
 
@@ -367,8 +366,7 @@ def test_mid_turn_session_update_applies_to_next_stt_turn(monkeypatch):
     assert handler._final_thread is not None
     handler._final_thread.join(timeout=1)
 
-    assert _FakeOperation.instances[-1].kwargs["language"] == "es"
-    assert config.language_for_turn("turn-2") == "de"
+    assert _FakeOperation.instances[-1].kwargs["language"] == "de"
 
 
 def test_open_sessions_and_reused_worker_keep_selections_isolated(monkeypatch):

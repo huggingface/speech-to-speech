@@ -155,7 +155,7 @@ class Qwen3ASRSTTHandler(BaseSTTHandler):
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         progressive = vad_audio.mode == "progressive"
-        selected = vad_audio.runtime_config.language_for_turn(vad_audio.turn_id) if vad_audio.runtime_config else None
+        selected = vad_audio.runtime_config.selected_language if vad_audio.runtime_config else None
         request_language = self.forced_language if selected is None else None if selected == "auto" else selected
         if request_language is None and progressive and selected != "auto":
             request_language = self.last_language

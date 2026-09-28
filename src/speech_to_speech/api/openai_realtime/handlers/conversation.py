@@ -242,8 +242,6 @@ class ConversationHandler(RealtimeBaseHandler):
         """
         st = self._state(conn_id)
         add_supported_item(st.runtime_config.chat, item)
-        if isinstance(item, RealtimeConversationItemUserMessage):
-            st.client_user_input_since_speech = True
 
     # ── Pipeline event handlers ────────────────────
 

@@ -206,7 +206,8 @@ class TTSInput(PipelineMessage):
     tag: Literal["tts_input"] = "tts_input"
     text: str
     language_code: Optional[str] = None
-    session_language: str | None = Field(default=None, exclude=True)
+    # Detected assistant language, or the earlier same-session fallback for Auto.
+    assistant_language_code: str | None = Field(default=None, exclude=True)
     runtime_config: RuntimeConfig | None = None
     response: RealtimeResponseCreateParams | None = None
     turn_id: str | None = None
@@ -218,9 +219,15 @@ class TTSInput(PipelineMessage):
 
     @property
     def selected_language(self) -> str | None:
-        if "session_language" in self.model_fields_set:
-            return self.session_language
-        return self.runtime_config.language_for_turn(self.turn_id) if self.runtime_config is not None else None
+        return self.runtime_config.selected_language if self.runtime_config is not None else None
+
+    @property
+    def tts_language_code(self) -> str | None:
+        """Resolve the current selection when a backend starts synthesis."""
+        selected = self.selected_language
+        if selected == "auto":
+            return self.assistant_language_code
+        return selected if selected is not None else self.language_code
 
 
 class AudioOutput(PipelineMessage):
@@ -362,16 +369,7 @@ class GenerateResponseRequest(PipelineMessage):
     turn_id: str | None = None
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
-    # Keep turn_id for timing even when new client input takes the session language.
-    use_turn_language: bool = Field(default=True, exclude=True)
     prefetch_transaction: ResponsePrefetchTransaction | None = Field(default=None, exclude=True, repr=False)
-
-    @model_validator(mode="after")
-    def _snapshot_session_language(self) -> GenerateResponseRequest:
-        self.runtime_config.snapshot_response_language(
-            self.response_key, self.turn_id if self.use_turn_language else None
-        )
-        return self
 
 
 # ── Binary sentinels (audio/output queue) ─────────────────────────────

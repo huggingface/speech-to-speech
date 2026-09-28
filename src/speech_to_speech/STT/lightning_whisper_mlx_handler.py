@@ -72,7 +72,7 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
         logger.debug("infering whisper...")
 
         audio = vad_audio.audio
-        selected = vad_audio.runtime_config.language_for_turn(vad_audio.turn_id) if vad_audio.runtime_config else None
+        selected = vad_audio.runtime_config.selected_language if vad_audio.runtime_config else None
         request_language = self.start_language if selected is None else selected
         if request_language != "auto":
             with MLXLockContext(handler_name=self.__class__.__name__):

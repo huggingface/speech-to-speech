@@ -368,7 +368,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         try:
             if not self._request_is_current(request):
                 return
-            selected = source.runtime_config.language_for_turn(source.turn_id) if source.runtime_config else None
+            selected = source.runtime_config.selected_language if source.runtime_config else None
             if selected is None:
                 operation = self._make_operation(source.audio)
             else:

@@ -1856,11 +1856,11 @@ class TestHandleResponseCreate:
         assert followup_req.speech_stopped_at_s == 123.0
 
     @pytest.mark.parametrize(
-        ("new_input", "expected_language"),
-        [("none", "es"), ("conversation_item", "de"), ("response_input", "de")],
+        "new_input",
+        ["none", "conversation_item", "response_input"],
     )
-    def test_response_create_uses_new_text_language_without_losing_speech_timing(
-        self, service, conn_id, runtime_config, text_prompt_queue, new_input, expected_language
+    def test_response_create_uses_current_language_without_losing_speech_timing(
+        self, service, conn_id, runtime_config, text_prompt_queue, new_input
     ):
         def select_language(language):
             return service.handle_session_update(
@@ -1874,7 +1874,6 @@ class TestHandleResponseCreate:
             )
 
         assert select_language("es") is None
-        runtime_config.snapshot_turn_language("turn_1")
         service.dispatch_pipeline_event(
             conn_id,
             TranscriptionCompletedEvent(
@@ -1934,8 +1933,8 @@ class TestHandleResponseCreate:
             )
         )
         tts_input = next(item for item in outputs if isinstance(item, TTSInput))
-        assert tts_input.session_language == expected_language
-        assert tts_input.language_code == expected_language
+        assert tts_input.selected_language == "de"
+        assert tts_input.tts_language_code == "de"
 
     def test_response_create_rejects_complex_tool_choice(self, service, conn_id, runtime_config):
         evt = ResponseCreateEvent(

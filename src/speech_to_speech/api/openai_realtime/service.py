@@ -250,8 +250,6 @@ class ConnState(BaseModel):
     speculative_user_speech_stopped_at_s: Optional[float] = None
     speculative_user_item_id: Optional[str] = None
     speculative_audio_duration_s: float = 0.0
-    # A text item can supersede the speech turn retained for latency bookkeeping.
-    client_user_input_since_speech: bool = False
     # Client conversation.item.create items that arrived while a response was
     # generating. Applying them mid-generation races the LLM handler's chat
     # write-back (cross-thread), so they are buffered here and flushed in order
@@ -523,7 +521,6 @@ class RealtimeService:
         """Close a response, preserving usage and discarding unfinished timings."""
         st = self._state(conn_id)
         if response_key is not None:
-            st.runtime_config.response_languages.pop(response_key, None)
             input_tokens, output_tokens = st.pending_token_usage.pop(response_key, (0, 0))
             self.total_usage.input_tokens += input_tokens
             self.total_usage.output_tokens += output_tokens
@@ -692,7 +689,6 @@ class RealtimeService:
             st.speculative_audio_duration_s = input_duration_s
 
         cfg = st.runtime_config
-        st.client_user_input_since_speech = False
         transcript = event.transcript
         if transcript:
             if same_speculative_turn and st.speculative_user_item_id:
@@ -786,7 +782,6 @@ class RealtimeService:
             st.speculative_audio_duration_s = 0.0
 
         st.input_audio_duration_s = event.audio_duration_s
-        st.client_user_input_since_speech = False
         st.response_usage.audio_duration_s += event.audio_duration_s
         if event.turn_id is not None:
             st.speculative_audio_duration_s = event.audio_duration_s

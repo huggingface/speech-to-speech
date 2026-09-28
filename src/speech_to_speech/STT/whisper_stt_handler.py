@@ -227,7 +227,7 @@ class WhisperSTTHandler(BaseSTTHandler):
         logger.debug("infering whisper...")
 
         input_features = self.prepare_model_inputs(vad_audio.audio)
-        selected = vad_audio.runtime_config.language_for_turn(vad_audio.turn_id) if vad_audio.runtime_config else None
+        selected = vad_audio.runtime_config.selected_language if vad_audio.runtime_config else None
         forced_language = self._forced_language() if selected is None else None if selected == "auto" else selected
 
         gen_kwargs: dict[str, Any] = dict(self.gen_kwargs)

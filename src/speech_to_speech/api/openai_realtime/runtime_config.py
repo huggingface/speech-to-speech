@@ -42,8 +42,6 @@ class RuntimeConfig(BaseModel):
         default_factory=lambda: RealtimeSessionCreateRequest(type="realtime"),
         validate_default=True,
     )
-    turn_languages: dict[str, str | None] = Field(default_factory=dict, exclude=True)
-    response_languages: dict[str, str | None] = Field(default_factory=dict, exclude=True)
     last_assistant_language: str | None = Field(default=None, exclude=True)
 
     @field_validator("session", mode="after")
@@ -92,22 +90,3 @@ class RuntimeConfig(BaseModel):
         if isinstance(language, str) and language.strip().lower() == "auto":
             return "auto"
         return language
-
-    def language_for_turn(self, turn_id: str | None) -> str | None:
-        if turn_id is not None and turn_id in self.turn_languages:
-            return self.turn_languages[turn_id]
-        return self.selected_language
-
-    def snapshot_turn_language(self, turn_id: str | None) -> None:
-        if turn_id is None or turn_id in self.turn_languages:
-            return
-        self.turn_languages[turn_id] = self.selected_language
-
-    def snapshot_response_language(self, response_key: str, turn_id: str | None) -> None:
-        if response_key not in self.response_languages:
-            self.response_languages[response_key] = self.language_for_turn(turn_id)
-
-    def language_for_response(self, response_key: str, turn_id: str | None) -> str | None:
-        if response_key in self.response_languages:
-            return self.response_languages[response_key]
-        return self.language_for_turn(turn_id)

@@ -228,16 +228,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         is_progressive = vad_audio.mode == "progressive"
         audio_input = vad_audio.audio
         runtime_config = vad_audio.runtime_config
-        selected_language = None
-        if runtime_config is not None:
-            language_for_turn = getattr(runtime_config, "language_for_turn", None)
-            if language_for_turn is not None:
-                selected_language = language_for_turn(vad_audio.turn_id)
-            else:
-                audio_config = runtime_config.session.audio
-                input_config = audio_config.input if audio_config is not None else None
-                transcription = input_config.transcription if input_config is not None else None
-                selected_language = transcription.language if transcription is not None else None
+        selected_language = runtime_config.selected_language if runtime_config is not None else None
         auto_requested = isinstance(selected_language, str) and selected_language.strip().lower() == "auto"
 
         # Ensure audio is float32 numpy array

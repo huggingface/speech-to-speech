@@ -139,7 +139,7 @@ class MLXAudioWhisperSTTHandler(BaseSTTHandler):
         gen_kwargs = {}
 
         # Add language if specified
-        selected = vad_audio.runtime_config.language_for_turn(vad_audio.turn_id) if vad_audio.runtime_config else None
+        selected = vad_audio.runtime_config.selected_language if vad_audio.runtime_config else None
         forced_language = self._forced_language() if selected is None else None if selected == "auto" else selected
         if forced_language is not None:
             gen_kwargs["language"] = forced_language

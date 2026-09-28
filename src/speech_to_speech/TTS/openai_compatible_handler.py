@@ -515,7 +515,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             if selected is None:
                 operation = self._make_operation(text=text, voice=voice)
             else:
-                language = tts_input.language_code if selected == "auto" else selected
+                language = tts_input.tts_language_code
                 if language is None and selected == "auto" and "qwen3-tts" in self.model.lower():
                     language = "auto"
                 if language is not None and "qwen3-tts" in self.model.lower():
