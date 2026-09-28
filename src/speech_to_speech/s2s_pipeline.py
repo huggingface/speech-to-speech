@@ -464,9 +464,8 @@ def _build_handlers(
 
 def _stt_session_languages(selection: BackendSelection, handler: Any) -> set[str] | None:
     if selection.name == "faster-whisper":
-        model_name = str(selection.config.get("model_name", "tiny.en"))
-        # The default English-only checkpoint ignores non-English hints.
-        return {"en"} if model_name.rsplit("/", 1)[-1].endswith(".en") else None
+        supported = getattr(getattr(handler, "model", None), "supported_languages", None)
+        return set(supported) if supported is not None else None
     if selection.name == "qwen3-asr":
         return set(modules[type(handler).__module__].SUPPORTED_LANGUAGES)
     if selection.name in {"parakeet-tdt", "parakeet-unified", "paraformer", "openai-realtime", "vllm-realtime"}:
@@ -554,7 +553,7 @@ def _build_pipeline_unit(
         h.turn_latency_store = turn_latency_store
 
     # Validate only against language sets already known to the active backends.
-    # Whisper's short SUPPORTED_LANGUAGES list is a fallback list, not model coverage.
+    # Faster Whisper reports the loaded checkpoint's actual language set.
     service.stt_supported_languages = _stt_session_languages(stt_selection, handlers[1])
     setup_language = stt_selection.config.get("language")
     service.stt_auto_reset_supported = not (

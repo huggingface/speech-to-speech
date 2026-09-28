@@ -73,13 +73,17 @@ def test_builtin_registry_lookup_and_cli_choices_share_one_catalog():
 
 
 @pytest.mark.parametrize(
-    ("model_name", "expected"),
-    [("tiny.en", {"en"}), ("acme/custom.en", {"en"}), ("large-v3", None)],
+    ("model_name", "supported_languages", "expected"),
+    [
+        ("/models/english-checkpoint", ["en"], {"en"}),
+        ("/models/multilingual.en", ["en", "es"], {"en", "es"}),
+    ],
 )
-def test_session_language_validation_does_not_treat_english_only_whisper_as_multilingual(model_name, expected):
+def test_session_language_validation_uses_loaded_faster_whisper_capabilities(model_name, supported_languages, expected):
     selection = BackendSelection(STT_BACKENDS["faster-whisper"], {"model_name": model_name})
+    handler = SimpleNamespace(model=SimpleNamespace(supported_languages=supported_languages))
 
-    assert s2s_pipeline._stt_session_languages(selection, object()) == expected
+    assert s2s_pipeline._stt_session_languages(selection, handler) == expected
     assert TTS_BACKENDS["qwen3"].kind == "tts"
     assert TTS_BACKENDS["openai"].kind == "tts"
     assert TTS_BACKENDS["supertonic"].required_extra == "supertonic"
@@ -89,6 +93,52 @@ def test_session_language_validation_does_not_treat_english_only_whisper_as_mult
     assert not LLM_BACKENDS["transformers"].capabilities.supports_audio_input
     assert STT_BACKENDS["none"].capabilities.bypasses_transcription_notifier
     assert not STT_BACKENDS["whisper"].capabilities.bypasses_transcription_notifier
+
+
+@pytest.mark.parametrize(
+    ("model_name", "supported_languages", "accepted"),
+    [
+        ("/models/english-checkpoint", ["en"], False),
+        ("/models/multilingual.en", ["en", "es"], True),
+    ],
+)
+def test_faster_whisper_loaded_languages_control_session_update(monkeypatch, model_name, supported_languages, accepted):
+    args = parse_arguments(
+        ["--stt", "faster-whisper", "--tts", "openai", "--faster_whisper_stt_model_name", model_name]
+    )
+    stt_handler = SimpleNamespace(model=SimpleNamespace(supported_languages=supported_languages))
+    monkeypatch.setattr(
+        s2s_pipeline,
+        "_build_handlers",
+        lambda **_kwargs: [SimpleNamespace(), stt_handler, SimpleNamespace(), SimpleNamespace(), SimpleNamespace()],
+    )
+    unit = s2s_pipeline._build_pipeline_unit(
+        index=0,
+        stop_event=Event(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=args.vad_handler_kwargs,
+        stt_backend=args.stt_backend,
+        llm_backend=args.llm_backend,
+        tts_backend=args.tts_backend,
+    )
+    unit.service.tts_supported_languages = {"en", "es"}
+    conn_id = unit.service.register()
+    update = SessionUpdateEvent.model_validate(
+        {
+            "type": "session.update",
+            "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": "es"}}}},
+        }
+    )
+
+    result = unit.service.handle_session_update(conn_id, update)
+
+    if accepted:
+        assert result is None
+        assert unit.service.build_session_updated(conn_id).session.audio.input.transcription.language == "es"
+    else:
+        assert isinstance(result, RealtimeErrorEvent)
+        assert "STT" in result.error.message
+        assert unit.service._state(conn_id).runtime_config.selected_language is None
 
 
 @pytest.mark.parametrize(("setup_language", "rejected"), [("en", True), (None, False)])
