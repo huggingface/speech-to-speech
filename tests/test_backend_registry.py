@@ -3,8 +3,10 @@ from copy import deepcopy
 from dataclasses import dataclass, fields
 from queue import Queue
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
+from openai.types.realtime import RealtimeErrorEvent, SessionUpdateEvent
 
 import speech_to_speech.s2s_pipeline as s2s_pipeline
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
@@ -87,6 +89,43 @@ def test_session_language_validation_does_not_treat_english_only_whisper_as_mult
     assert not LLM_BACKENDS["transformers"].capabilities.supports_audio_input
     assert STT_BACKENDS["none"].capabilities.bypasses_transcription_notifier
     assert not STT_BACKENDS["whisper"].capabilities.bypasses_transcription_notifier
+
+
+@pytest.mark.parametrize(("setup_language", "rejected"), [("en", True), (None, False)])
+def test_openai_realtime_stt_auto_reset_is_rejected_only_when_setup_hint_cannot_be_cleared(
+    monkeypatch, setup_language, rejected
+):
+    cli = ["--stt", "openai-realtime", "--tts", "openai"]
+    if setup_language is not None:
+        cli.extend(["--openai_realtime_stt_language", setup_language])
+    args = parse_arguments(cli)
+    monkeypatch.setattr(s2s_pipeline, "_build_handlers", lambda **_kwargs: [SimpleNamespace() for _ in range(5)])
+    unit = s2s_pipeline._build_pipeline_unit(
+        index=0,
+        stop_event=Event(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=args.vad_handler_kwargs,
+        stt_backend=args.stt_backend,
+        llm_backend=args.llm_backend,
+        tts_backend=args.tts_backend,
+    )
+    conn_id = unit.service.register()
+    update = SessionUpdateEvent.model_validate(
+        {
+            "type": "session.update",
+            "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": "Auto"}}}},
+        }
+    )
+
+    error = unit.service.handle_session_update(conn_id, update)
+
+    if rejected:
+        assert isinstance(error, RealtimeErrorEvent)
+        assert "Auto" in error.error.message and "STT" in error.error.message
+        assert unit.service._state(conn_id).runtime_config.selected_language is None
+    else:
+        assert error is None
+        assert unit.service.build_session_updated(conn_id).session.audio.input.transcription.language == "auto"
 
 
 def test_omnivoice_tts_backend_is_registered_as_optional():

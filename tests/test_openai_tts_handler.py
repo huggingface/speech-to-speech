@@ -225,6 +225,35 @@ def test_explicit_auto_replaces_setup_language_for_short_first_reply(monkeypatch
     assert handler.language == "English"
 
 
+@pytest.mark.parametrize(
+    ("answer", "expected_language"),
+    [
+        ("我可以帮助您找到最近的火车站，并说明如何购买前往市中心的车票。", "Chinese"),
+        ("私は最寄りの駅を探して、市内への切符を購入する方法を説明することができます。", "Japanese"),
+        ("가장 가까운 기차역을 찾고 시내로 가는 표를 구매하는 방법을 안내해 드릴 수 있습니다.", "Korean"),
+    ],
+)
+def test_auto_tts_detects_asian_language_after_english_at_request_boundary(monkeypatch, answer, expected_language):
+    handler = _openai_tts_handler(monkeypatch)
+    handler.model = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup()
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "auto"}}})
+    )
+
+    for text in ("I can help you find the nearest train station in the city.", answer):
+        outputs = list(processor.process(LLMResponseChunk(text=text, language_code="en", runtime_config=config)))
+        tts_input = next(item for item in outputs if isinstance(item, TTSInput))
+        list(handler.process(tts_input))
+        list(processor.process(EndOfResponse()))
+
+    assert [operation.payload["language"] for operation in _FakeSpeechOperation.instances] == [
+        "English",
+        expected_language,
+    ]
+
+
 def test_mid_response_update_keeps_tts_batches_on_the_turn_language(monkeypatch):
     handler = _openai_tts_handler(monkeypatch)
     handler.model = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"

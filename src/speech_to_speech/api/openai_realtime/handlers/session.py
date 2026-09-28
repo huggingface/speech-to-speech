@@ -43,6 +43,11 @@ class SessionHandler(RealtimeBaseHandler):
         if transcription is not None and isinstance(transcription.language, str):
             language = transcription.language.strip()
             if language.lower() == "auto":
+                if not self._service.stt_auto_reset_supported:
+                    return self.make_error(
+                        message="Auto cannot reset the active STT backend's configured language hint.",
+                        _type="invalid_request_error",
+                    )
                 transcription.language = "auto"
             else:
                 if not language:

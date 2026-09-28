@@ -92,7 +92,9 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         # A few short streamed parts can make one detectable sentence. Keep only
         # a bounded window; the current response's TTS choice remains unchanged.
         self._assistant_language_probe = (self._assistant_language_probe + " " + text).strip()[-256:]
-        self._detected_assistant_language = detect_language_from_text(self._assistant_language_probe)
+        self._detected_assistant_language = detect_language_from_text(
+            self._assistant_language_probe, all_languages=True
+        )
 
     def _notify_generation_done(
         self,

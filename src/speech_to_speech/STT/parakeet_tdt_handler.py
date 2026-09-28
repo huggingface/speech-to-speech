@@ -87,15 +87,18 @@ if LINGUA_AVAILABLE:
         return LanguageDetectorBuilder.from_languages(*_lingua_languages).with_preloaded_language_models().build()
 
     _lingua_detector = _build_lingua_detector()
+    # The assistant can answer outside Parakeet's recognition languages.
+    _assistant_lingua_detector = LanguageDetectorBuilder.from_all_languages().build()
 
 
-def detect_language_from_text(text: str) -> Optional[str]:
+def detect_language_from_text(text: str, *, all_languages: bool = False) -> Optional[str]:
     if not LINGUA_AVAILABLE:
         logger.warning("lingua-py not available, cannot detect language from text")
         return None
     if not text or len(text.strip()) < 20:
         return None
-    detected = _lingua_detector.detect_language_of(text)
+    detector = _assistant_lingua_detector if all_languages else _lingua_detector
+    detected = detector.detect_language_of(text)
     if detected is None:
         return None
     code = detected.iso_code_639_1.name.lower()

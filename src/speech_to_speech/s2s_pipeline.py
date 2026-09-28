@@ -556,6 +556,10 @@ def _build_pipeline_unit(
     # Validate only against language sets already known to the active backends.
     # Whisper's short SUPPORTED_LANGUAGES list is a fallback list, not model coverage.
     service.stt_supported_languages = _stt_session_languages(stt_selection, handlers[1])
+    setup_language = stt_selection.config.get("language")
+    service.stt_auto_reset_supported = not (
+        stt_selection.name == "openai-realtime" and isinstance(setup_language, str) and bool(setup_language.strip())
+    )
 
     tts_module = modules[type(handlers[-1]).__module__]
     if tts_selection.name == "kokoro":

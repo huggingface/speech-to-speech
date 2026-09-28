@@ -327,6 +327,7 @@ class RealtimeService:
         # None means the active backend does not declare a complete language set.
         self.stt_supported_languages: set[str] | None = None
         self.tts_supported_languages: set[str] | None = None
+        self.stt_auto_reset_supported: bool = True
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
 
