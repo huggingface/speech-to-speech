@@ -244,6 +244,18 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         process_start_s = perf_counter()
         is_progressive = vad_audio.mode == "progressive"
         audio_input = vad_audio.audio
+        runtime_config = vad_audio.runtime_config
+        selected_language = None
+        if runtime_config is not None:
+            language_for_turn = getattr(runtime_config, "language_for_turn", None)
+            if language_for_turn is not None:
+                selected_language = language_for_turn(vad_audio.turn_id)
+            else:
+                audio_config = runtime_config.session.audio
+                input_config = audio_config.input if audio_config is not None else None
+                transcription = input_config.transcription if input_config is not None else None
+                selected_language = transcription.language if transcription is not None else None
+        auto_requested = isinstance(selected_language, str) and selected_language.strip().lower() == "auto"
 
         # Ensure audio is float32 numpy array
         if not isinstance(audio_input, np.ndarray):
@@ -330,16 +342,23 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                         inference_s = perf_counter() - inference_start_s
                         lock_scope_s = perf_counter() - lock_scope_start_s
 
-                # Validate and update language
+                # Parakeet's decoder is automatic. A session Auto reset must
+                # report the detected language, not the setup-time label.
+                if auto_requested:
+                    try:
+                        language_code = self._detect_language_from_text(pred_text) if pred_text else None
+                    except Exception:
+                        logger.exception("Parakeet language detection failed; leaving language unset")
+                        language_code = None
                 if language_code and language_code in SUPPORTED_LANGUAGES:
                     self.last_language = language_code
                 else:
-                    language_code = self.last_language
+                    language_code = None if auto_requested else self.last_language
 
             except Exception as e:
                 logger.error(f"Parakeet TDT inference failed: {e}")
                 pred_text = ""
-                language_code = self.last_language
+                language_code = None if auto_requested else self.last_language
 
             total_s = perf_counter() - process_start_s
             if tracker is not None:
