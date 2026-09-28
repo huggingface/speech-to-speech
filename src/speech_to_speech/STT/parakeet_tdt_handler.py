@@ -95,6 +95,7 @@ def detect_language_from_text(text: str, *, all_languages: bool = False) -> Opti
     if not LINGUA_AVAILABLE:
         logger.warning("lingua-py not available, cannot detect language from text")
         return None
+    # Skip very short utterances where language ID is still too noisy.
     if not text or len(text.strip()) < 20:
         return None
     detector = _assistant_lingua_detector if all_languages else _lingua_detector
