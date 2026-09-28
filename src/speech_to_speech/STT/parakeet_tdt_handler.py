@@ -345,7 +345,11 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                 # Parakeet's decoder is automatic. A session Auto reset must
                 # report the detected language, not the setup-time label.
                 if auto_requested:
-                    language_code = self._detect_language_from_text(pred_text) if pred_text else None
+                    try:
+                        language_code = self._detect_language_from_text(pred_text) if pred_text else None
+                    except Exception:
+                        logger.exception("Parakeet language detection failed; leaving language unset")
+                        language_code = None
                 if language_code and language_code in SUPPORTED_LANGUAGES:
                     self.last_language = language_code
                 else:
