@@ -314,9 +314,12 @@ def test_llm_output_language_flag_warms_detector_and_routes_detected_code(monkey
     seen = []
 
     class Detector:
-        def detect_language_of(self, text):
+        def compute_language_confidence_values(self, text):
             seen.append(text)
-            return SimpleNamespace(iso_code_639_1=SimpleNamespace(name="FR"))
+            return [
+                SimpleNamespace(language=SimpleNamespace(iso_code_639_1=SimpleNamespace(name="FR")), value=0.9),
+                SimpleNamespace(language=SimpleNamespace(iso_code_639_1=SimpleNamespace(name="EN")), value=0.1),
+            ]
 
     detector = Detector()
     monkeypatch.setattr(language_detection, "warm_language_detector", lambda: detector)
@@ -334,8 +337,11 @@ def test_llm_output_language_flag_warms_detector_and_routes_detected_code(monkey
 
 def test_llm_output_language_falls_back_on_short_text_and_resets_per_response(monkeypatch):
     class Detector:
-        def detect_language_of(self, text):
-            return SimpleNamespace(iso_code_639_1=SimpleNamespace(name="FR"))
+        def compute_language_confidence_values(self, text):
+            return [
+                SimpleNamespace(language=SimpleNamespace(iso_code_639_1=SimpleNamespace(name="FR")), value=0.9),
+                SimpleNamespace(language=SimpleNamespace(iso_code_639_1=SimpleNamespace(name="EN")), value=0.1),
+            ]
 
     monkeypatch.setattr(language_detection, "warm_language_detector", Detector)
     processor = LMOutputProcessor.__new__(LMOutputProcessor)
@@ -368,9 +374,20 @@ def test_llm_output_language_disabled_keeps_input_language_without_warming(monke
     assert next(item for item in outputs if isinstance(item, TTSInput)).language_code == "en"
 
 
+def test_ambiguous_assistant_chunk_does_not_force_a_tts_language():
+    if not language_detection.LINGUA_AVAILABLE:
+        pytest.skip("lingua-language-detector is not installed")
+
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup(detect_llm_output_language=True)
+    outputs = list(processor.process(LLMResponseChunk(text="100 times 100000 is 10,000,000.", language_code="en")))
+
+    assert next(item for item in outputs if isinstance(item, TTSInput)).language_code is None
+
+
 def test_llm_output_language_detection_failure_preserves_tts_input(monkeypatch):
     class FailingDetector:
-        def detect_language_of(self, text):
+        def compute_language_confidence_values(self, text):
             raise RuntimeError("detector failed")
 
     monkeypatch.setattr(language_detection, "warm_language_detector", FailingDetector)

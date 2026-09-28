@@ -1052,18 +1052,20 @@ def test_process_voice_clone_scales_max_tokens_for_mlx_backend(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("configured_language", "transcript_language", "expected"),
+    ("configured_language", "incoming_language", "detect_assistant_language", "expected"),
     [
-        ("auto", "en", "english"),
-        ("auto", "de", "german"),
-        ("auto", None, "auto"),
-        ("auto", "es", "spanish"),
-        ("auto", "xx", "auto"),
-        ("french", "en", "french"),
+        ("auto", "en", False, "auto"),
+        ("auto", "de", False, "auto"),
+        ("auto", "en", True, "english"),
+        ("auto", "de", True, "german"),
+        ("auto", None, True, "auto"),
+        ("auto", "es", True, "spanish"),
+        ("auto", "xx", True, "auto"),
+        ("french", "en", True, "french"),
     ],
 )
-def test_process_custom_voice_uses_transcript_language_when_auto(
-    monkeypatch, configured_language, transcript_language, expected
+def test_process_custom_voice_uses_assistant_language_only_when_enabled(
+    monkeypatch, configured_language, incoming_language, detect_assistant_language, expected
 ):
     captured = {}
 
@@ -1086,6 +1088,7 @@ def test_process_custom_voice_uses_transcript_language_when_auto(
     handler.speaker = "Ryan"
     handler.instruct = None
     handler.language = configured_language
+    handler.detect_llm_output_language = detect_assistant_language
     handler.streaming_chunk_size = 4
     handler.max_new_tokens = 1536
     handler.blocksize = 512
@@ -1103,7 +1106,7 @@ def test_process_custom_voice_uses_transcript_language_when_auto(
     monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
     monkeypatch.setattr(qwen3_tts_module, "MLXLockContext", _FakeMLXLockContext)
 
-    assert len(list(handler.process(TTSInput(text="Hello there.", language_code=transcript_language)))) == 1
+    assert len(list(handler.process(TTSInput(text="Hello there.", language_code=incoming_language)))) == 1
     assert captured["language"] == expected
     assert handler.language == configured_language
     assert not hasattr(handler, "_active_language")

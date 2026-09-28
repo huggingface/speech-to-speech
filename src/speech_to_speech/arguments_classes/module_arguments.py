@@ -15,7 +15,7 @@ class ModuleArguments:
         default=False,
         metadata={
             "help": "Detect the language of each assistant text chunk before TTS and pass that code to the TTS "
-            "backend. Sends no code for an initial chunk that is too short to classify. "
+            "backend. Sends no code for an initial chunk that is too short or ambiguous to classify. "
             "The detector is warmed at startup. Off by default."
         },
     )

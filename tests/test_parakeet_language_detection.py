@@ -92,3 +92,23 @@ def test_assistant_detector_accepts_short_cjk_text(text, code):
         pytest.skip("lingua-language-detector is not installed")
 
     assert language_detection.detect_language_from_text(text) == code
+
+
+def test_assistant_detector_declines_ambiguous_numeric_chunk():
+    if not language_detection.LINGUA_AVAILABLE:
+        pytest.skip("lingua-language-detector is not installed")
+
+    assert (
+        language_detection.detect_language_from_text(
+            "100 times 100000 is 10,000,000.",
+            minimum_confidence_gap=language_detection.MIN_ASSISTANT_CONFIDENCE_GAP,
+        )
+        is None
+    )
+    assert (
+        language_detection.detect_language_from_text(
+            "Bonjour, je peux vous aider aujourd'hui.",
+            minimum_confidence_gap=language_detection.MIN_ASSISTANT_CONFIDENCE_GAP,
+        )
+        == "fr"
+    )

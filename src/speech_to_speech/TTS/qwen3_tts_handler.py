@@ -134,6 +134,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         gen_kwargs: dict[str, Any] | None = None,
         cancel_scope: CancelScope | None = None,
         speculative_turns: SpeculativeTurnTracker | None = None,
+        detect_llm_output_language: bool = False,
     ) -> None:
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
@@ -144,6 +145,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.ref_rvq = self._normalize_optional_path(ref_rvq)
         self.ref_text = ref_text
         self.language = self._normalize_language(language)
+        self.detect_llm_output_language = detect_llm_output_language
         self.speaker = speaker
         self.instruct = instruct
         self.xvec_only = xvec_only
@@ -402,7 +404,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         return QWEN3_LANGUAGE_ALIASES.get(normalized, normalized)
 
     def _language_for_utterance(self, language_code: str | None) -> str:
-        if self.language != "auto" or not language_code:
+        if self.language != "auto" or not getattr(self, "detect_llm_output_language", False) or not language_code:
             return self.language
         detected = self._normalize_language(language_code)
         return detected if detected in QWEN3_LANGUAGE_ALIASES.values() else "auto"

@@ -435,6 +435,7 @@ def _build_handlers(
             sample_rate=vad_handler_kwargs.sample_rate,
             enable_live_transcription=module_kwargs.enable_live_transcription,
             live_transcription_update_interval=module_kwargs.live_transcription_update_interval,
+            detect_llm_output_language=module_kwargs.detect_llm_output_language,
         )
 
     lm_context = handler_context(text_prompt_queue, lm_response_queue)

@@ -219,10 +219,17 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             logger.debug("Forwarding to TTS: %s", transcript_for_log(part.text))
             language_code = lm_output.language_code
             if self._language_detector is not None:
-                from speech_to_speech.pipeline.language_detection import detect_language_from_text
+                from speech_to_speech.pipeline.language_detection import (
+                    MIN_ASSISTANT_CONFIDENCE_GAP,
+                    detect_language_from_text,
+                )
 
                 try:
-                    detected = detect_language_from_text(part.text, detector=self._language_detector)
+                    detected = detect_language_from_text(
+                        part.text,
+                        detector=self._language_detector,
+                        minimum_confidence_gap=MIN_ASSISTANT_CONFIDENCE_GAP,
+                    )
                 except Exception:
                     logger.exception("Assistant language detection failed; using prior assistant language")
                     detected = None

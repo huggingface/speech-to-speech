@@ -46,6 +46,7 @@ DETECTABLE_LANGUAGE_CODES = (
 )
 MIN_DETECTION_CHARS = 20
 MIN_CJK_DETECTION_CHARS = 4
+MIN_ASSISTANT_CONFIDENCE_GAP = 0.1
 _WARMUP_TEXTS = (
     "This sentence warms the language detector before the first response.",
     "Hello, I can help you find the information you need today.",
@@ -93,7 +94,7 @@ def warm_language_detector():
     return _detector
 
 
-def detect_language_from_text(text: str, *, detector=None) -> str | None:
+def detect_language_from_text(text: str, *, detector=None, minimum_confidence_gap: float = 0.0) -> str | None:
     """Return a pipeline language code when there is enough text to classify."""
     stripped = text.strip()
     if not stripped or not LINGUA_AVAILABLE:
@@ -106,7 +107,15 @@ def detect_language_from_text(text: str, *, detector=None) -> str | None:
     if len(stripped) < minimum:
         return None
     active_detector = detector if detector is not None else warm_language_detector()
-    detected = active_detector.detect_language_of(text)
+    if minimum_confidence_gap:
+        confidences = active_detector.compute_language_confidence_values(text)
+        if not confidences or (
+            len(confidences) > 1 and confidences[0].value - confidences[1].value < minimum_confidence_gap
+        ):
+            return None
+        detected = confidences[0].language
+    else:
+        detected = active_detector.detect_language_of(text)
     if detected is None or detected.iso_code_639_1 is None:
         return None
     code = detected.iso_code_639_1.name.lower()
