@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from threading import Lock
 from types import SimpleNamespace
 
@@ -27,7 +28,8 @@ def test_turn_latency_tracker_format_log_line() -> None:
     )
     assert (
         tracker.format_log_line()
-        == "Turn turn_1 rev=0 latency: stt=0.14s llm_ttft=0.11s llm=1.28s tts_ttfa=0.16s e2e=1.61s vad_decision=n/a smart_turn_analysis=n/a smart_turn_wait=n/a smart_turn_status=n/a mlx_lock_wait=0.00s status=completed"
+        == "Turn turn_1 rev=0 latency: stt=0.14s llm=1.28s tts_ttfa=0.16s e2e=1.61s vad_decision=n/a hold=n/a smart_turn_status=n/a status=completed"
+        + (" mlx_lock_wait=0.00s" if sys.platform == "darwin" else "")
     )
 
 
@@ -47,11 +49,12 @@ def test_turn_latency_tracker_record() -> None:
     assert line is not None
     assert "turn_2 rev=1" in line
     assert "stt=0.50s" in line
-    assert "llm_ttft=0.30s" in line
+    assert tracker.llm_ttft_s == 0.3
+    assert "llm_ttft=" not in line
     assert "llm=2.00s" in line
     assert "tts_ttfa=0.20s" in line
     assert "e2e=3.00s" in line
-    assert "mlx_lock_wait=0.15s" in line
+    assert ("mlx_lock_wait=0.15s" in line) == (sys.platform == "darwin")
     assert "status=cancelled" in line
 
     assert TurnLatencyTracker().format_log_line() is None
@@ -198,3 +201,26 @@ def test_clear_session_keeps_pending_while_other_sessions_active() -> None:
 
     store.clear_session("sess_2")
     assert store.get_or_create_for_turn("turn_9", 0).stt_s is None
+
+
+def test_log_platform_and_export_fields(monkeypatch):
+    import speech_to_speech.pipeline.turn_latency as latency
+
+    tracker = TurnLatencyTracker(turn_id="turn_1", mlx_lock_wait_s=0.25)
+    for platform in ("darwin", "linux", "win32"):
+        monkeypatch.setattr(latency.sys, "platform", platform)
+        assert ("mlx_lock_wait=" in tracker.format_log_line()) == (platform == "darwin")
+    assert set(tracker.metadata_payload(response_key="r", status="completed")) == {
+        "version",
+        "turn_id",
+        "turn_revision",
+        "response_key",
+        "status",
+        "e2e_s",
+        "vad_decision_s",
+        "smart_status",
+        "stt_s",
+        "llm_s",
+        "tts_ttfa_s",
+        "hold_s",
+    }

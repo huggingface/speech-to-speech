@@ -884,15 +884,15 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 reopen_grace_ms, processing_delay_ms = self._smart_turn_timing_ms(analysis_audio)
                 store = getattr(self, "turn_latency_store", None)
                 tracker = store.get_or_create_for_turn(turn_id, turn_revision) if store is not None else None
-                if tracker is not None:
-                    speech_end_sample = getattr(self.iterator, "last_speech_end_sample", None)
-                    if speech_end_sample is not None and received_at_s is not None and decision_at_s is not None:
-                        # Anchor the sample position to when the VAD worker starts
-                        # processing this chunk. Upstream queue time is excluded.
-                        speech_end_at_s = (
-                            received_at_s - max(0, self._total_samples - speech_end_sample) / self.sample_rate
-                        )
+                speech_end_at_s = None
+                speech_end_sample = getattr(self.iterator, "last_speech_end_sample", None)
+                if speech_end_sample is not None and received_at_s is not None and decision_at_s is not None:
+                    # Estimate speech end from the final chunk's sample-to-clock anchor.
+                    # This excludes upstream queue/network delay, not VAD or Smart Turn work.
+                    speech_end_at_s = received_at_s - max(0, self._total_samples - speech_end_sample) / self.sample_rate
+                    if tracker is not None:
                         tracker.vad_decision_s = max(0.0, decision_at_s - speech_end_at_s)
+                if tracker is not None:
                     tracker.smart_turn_status = self._last_smart_turn_status
                     tracker.smart_turn_analysis_s = self._last_smart_turn_analysis_s
                     if tracker.smart_turn_status != "disabled":
@@ -934,6 +934,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     turn_id=turn_id,
                     turn_revision=turn_revision,
                     processing_delay_s=processing_delay_ms / 1000.0,
+                    speech_end_at_s=speech_end_at_s,
                 )
                 self.last_process_time = 0.0
                 self._speech_started_emitted = False

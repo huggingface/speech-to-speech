@@ -131,7 +131,8 @@ def _vad_audio(mode: str = "final", seconds: float = 2.0, revision: int = 1) -> 
         mode=mode,
         turn_id="turn_1",
         turn_revision=revision,
-        created_at_s=123.0,
+        created_at_s=124.0,
+        speech_end_at_s=123.0,
     )
 
 

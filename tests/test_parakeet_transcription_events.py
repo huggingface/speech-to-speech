@@ -4,8 +4,11 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
+from openai.types.realtime.session_update_event import SessionUpdateEvent
 from rich.text import Text
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, VADAudio
 from speech_to_speech.STT import parakeet_tdt_handler
 from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
@@ -139,6 +142,86 @@ def test_process_yields_final_transcript(monkeypatch):
     assert isinstance(result[0], Transcription)
     assert result[0].text == "I am here."
     assert result[0].language_code == "en"
+
+
+@pytest.mark.parametrize("backend", ["nano_parakeet", "mlx"])
+@pytest.mark.parametrize(
+    ("selected_language", "detected_language", "expected_language"),
+    [(None, "en", "fr"), ("auto", "en", "en"), ("auto", None, None)],
+)
+def test_session_auto_reset_does_not_report_setup_language(
+    monkeypatch, backend, selected_language, detected_language, expected_language
+):
+    handler = object.__new__(ParakeetTDTSTTHandler)
+    handler.enable_live_transcription = False
+    handler.backend = backend
+    handler.start_language = "fr"
+    handler.last_language = "fr"
+
+    @contextmanager
+    def fake_lock(*args, **kwargs):
+        yield True
+
+    handler._compute_lock_context = fake_lock
+    handler._process_nano_parakeet = lambda audio: ("This is a complete English sentence.", "fr")
+    handler._process_mlx_final = lambda audio: ("This is a complete English sentence.", "fr")
+    handler._detect_language_from_text = lambda text: detected_language
+    monkeypatch.setattr(parakeet_tdt_handler.console, "print", lambda *args, **kwargs: None)
+
+    runtime_config = RuntimeConfig()
+    if selected_language is not None:
+        update = SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": selected_language}}}},
+            }
+        )
+        runtime_config.apply_session_update(update.session)
+
+    result = list(
+        handler.process(VADAudio(audio=np.zeros(16000, dtype=np.float32), runtime_config=runtime_config, mode="final"))
+    )
+
+    assert result[0].language_code == expected_language
+    assert handler.last_language == (expected_language or "fr")
+
+
+def test_session_auto_reset_keeps_transcript_when_language_detection_fails(monkeypatch):
+    handler = object.__new__(ParakeetTDTSTTHandler)
+    handler.enable_live_transcription = False
+    handler.backend = "nano_parakeet"
+    handler.start_language = "fr"
+    handler.last_language = "fr"
+
+    @contextmanager
+    def fake_lock(*args, **kwargs):
+        yield True
+
+    handler._compute_lock_context = fake_lock
+    handler._process_nano_parakeet = lambda audio: ("This is a complete English sentence.", "fr")
+
+    def failed_detection(text):
+        raise RuntimeError("language detector unavailable")
+
+    handler._detect_language_from_text = failed_detection
+    monkeypatch.setattr(parakeet_tdt_handler.console, "print", lambda *args, **kwargs: None)
+
+    runtime_config = RuntimeConfig()
+    update = SessionUpdateEvent.model_validate(
+        {
+            "type": "session.update",
+            "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": "auto"}}}},
+        }
+    )
+    runtime_config.apply_session_update(update.session)
+
+    result = list(
+        handler.process(VADAudio(audio=np.zeros(16000, dtype=np.float32), runtime_config=runtime_config, mode="final"))
+    )
+
+    assert result[0].text == "This is a complete English sentence."
+    assert result[0].language_code is None
+    assert handler.last_language == "fr"
 
 
 def test_parakeet_timing_logs_only_final_transcriptions():

@@ -2372,22 +2372,17 @@ class TestFinishAudioResponse:
         done = next(event for event in events if isinstance(event, ResponseDoneEvent))
         assert done.response.metadata["client-key"] == "client-value"
         assert json.loads(done.response.metadata[TURN_LATENCY_METADATA_KEY]) == {
-            "version": 1,
+            "version": 2,
             "turn_id": "turn_3",
             "turn_revision": 2,
             "response_key": response_key,
             "stt_s": 0.181284123,
-            "llm_ttft_s": 0.108531234,
             "llm_s": 1.241907456,
             "tts_ttfa_s": 0.121775789,
             "e2e_s": 1.613482987,
             "vad_decision_s": None,
-            "smart_analysis_s": None,
             "smart_status": None,
-            "smart_grace_s": None,
-            "smart_delay_s": None,
-            "smart_wait_s": None,
-            "mlx_lock_wait_s": 0.003456789,
+            "hold_s": None,
             "status": status,
         }
 
@@ -2437,7 +2432,7 @@ class TestFinishAudioResponse:
         assert metadata["client"] == "kept"
         assert len(metadata[TURN_LATENCY_METADATA_KEY]) <= 512
         payload = json.loads(metadata[TURN_LATENCY_METADATA_KEY])
-        assert payload["smart_wait_s"] == pytest.approx(0.12345678901234567, abs=1e-9)
+        assert payload["hold_s"] == pytest.approx(0.12345678901234567, abs=1e-9)
         assert payload["vad_decision_s"] == pytest.approx(0.12345678901234567, abs=1e-9)
 
     def test_oversized_latency_value_does_not_replace_client_metadata(self, service, conn_id):

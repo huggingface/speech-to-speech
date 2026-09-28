@@ -135,11 +135,11 @@ def test_remote_llm_records_generation_through_terminal_response(
     line, metadata = _finish(
         service, conn_id, request.response_key, caplog, status="failed" if failure else "completed"
     )
-    assert f"llm_ttft={'n/a' if failure else '0.18s'}" in line
+    assert "llm_ttft=" not in line
     assert "llm=0.25s" in line
     assert f"status={'failed' if failure else 'completed'}" in line
     assert metadata["llm_s"] == pytest.approx(0.25)
-    assert metadata["llm_ttft_s"] == (None if failure else pytest.approx(0.18))
+    assert "llm_ttft_s" not in metadata
     assert metadata["status"] == ("failed" if failure else "completed")
 
 
