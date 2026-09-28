@@ -363,7 +363,7 @@ def test_worker_start_failure_does_not_block_pipeline_end(handler_factory, monke
         assert failure.message == "transcription worker could not start"
         assert failure.turn_id == source.turn_id
         assert failure.turn_revision == source.turn_revision
-        assert failure.speech_stopped_at_s == source.created_at_s
+        assert failure.speech_stopped_at_s == source.speech_end_at_s
     assert handler.queue_out.get_nowait() == PIPELINE_END
     assert handler.queue_out.empty()
     assert not handler._pending_finals
@@ -552,7 +552,7 @@ def test_pending_final_limit_rejects_overflow_and_preserves_accepted_order(handl
     assert [failure.turn_id for failure in failures] == [source.turn_id for source in sources[8:]]
     assert all(failure.message == "transcription queue is full" for failure in failures)
     assert all(failure.turn_revision == 2 for failure in failures)
-    assert [failure.speech_stopped_at_s for failure in failures] == [source.created_at_s for source in sources[8:]]
+    assert [failure.speech_stopped_at_s for failure in failures] == [source.speech_end_at_s for source in sources[8:]]
     assert handler.queue_out.empty()
 
     # Saturation is local to this pipeline, even with identical endpoint credentials.

@@ -27,8 +27,10 @@ protocol implementation.
 ## Response timings
 
 Open Conversation and expand **Server timings** beneath a response to inspect
-transcription, full response generation, first voice audio, speech-end-to-first-audio,
-and MLX lock-wait measurements. First-audio time is visible in the collapsed summary.
+E2E (estimated speech end to first generated audio), VAD end decision, Smart Turn
+decision, transcription, response generation, voice synthesis to first audio,
+and hold time before response. E2E is visible in the collapsed summary.
+MLX lock wait is available only in macOS terminal logs.
 Tool-only responses receive their own timing entry; follow-ups do not repeat STT.
 
 These are server measurements, excluding browser buffering and playback. Stages

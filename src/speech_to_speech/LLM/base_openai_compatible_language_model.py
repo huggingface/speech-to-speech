@@ -800,10 +800,23 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         api_response = make_request()
                         events = (event_iterator_fn or self._iter_events)(api_response)
                 if events is not None:
+
+                    def measured_events() -> Iterator[ProviderEvent]:
+                        for event in events:
+                            if (
+                                self.stream
+                                and tracker is not None
+                                and isinstance(event, TextDelta)
+                                and event.text.strip()
+                            ):
+                                tracker.record_llm_ttft(perf_counter() - generation_started_at_s)
+                            yield event
+
+                    observed_events = measured_events()
                     if self.stream:
-                        generation_completed = yield from self._consume_streaming(events, state, turn)
+                        generation_completed = yield from self._consume_streaming(observed_events, state, turn)
                     else:
-                        generation_completed = yield from self._consume_nonstreaming(events, state, turn)
+                        generation_completed = yield from self._consume_nonstreaming(observed_events, state, turn)
             except httpx.ReadTimeout:
                 logger.warning(
                     "OpenAI API read timed out after %.1fs; ending the current response",

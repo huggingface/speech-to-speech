@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from threading import Condition
 
@@ -42,6 +43,7 @@ class SpeculativeTurnTracker:
         self._closed_current: _TurnReference | None = None
         self._pending_reopen: _PendingReopen | None = None
         self._reopen_grace: _ReopenGrace | None = None
+        self.wait_observer: Callable[[str, int, float, float], None] | None = None
 
     def start_turn(self) -> tuple[str, int]:
         """Advance the conversation cursor and return the new turn metadata."""
@@ -429,7 +431,10 @@ class SpeculativeTurnTracker:
             if remaining <= 0:
                 return
             logger.debug("Waiting for speculative reopen grace turn=%s rev=%s", turn_id, revision)
+            wait_started_at_s = time.perf_counter()
             self._condition.wait(remaining)
+            if self.wait_observer is not None:
+                self.wait_observer(turn_id, revision, wait_started_at_s, time.perf_counter())
 
     def _wait_for_pending_reopen_locked(self, turn_id: str, revision: int, timeout_s: float) -> None:
         deadline = time.monotonic() + timeout_s

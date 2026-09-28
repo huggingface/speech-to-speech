@@ -7,8 +7,10 @@ import { chromium } from "@playwright/test";
 
 const root = path.resolve(import.meta.dirname, "..");
 const timing = {
-  version: 1, turn_id: "turn_1", turn_revision: 0, response_key: "key-1", status: "completed",
-  stt_s: 0.18, llm_s: 1.24, tts_ttfa_s: 0.12, e2e_s: 1.61, mlx_lock_wait_s: 0,
+  version: 2, turn_id: "turn_1", turn_revision: 0, response_key: "key-1", status: "completed",
+  stt_s: 0.18, llm_s: 1.24, tts_ttfa_s: 0.12, e2e_s: 1.61,
+  vad_decision_s: 0.32,
+  hold_s: 0, smart_status: "incomplete",
 };
 
 test("history shows per-response server timings on desktop and phone", async (t) => {
@@ -51,11 +53,16 @@ test("history shows per-response server timings on desktop and phone", async (t)
     await page.evaluate(() => document.querySelector(".chat-panel-inner").getAnimations().forEach((animation) => animation.finish()));
     assert.equal(await page.locator(".hist-msg.assistant").count(), 1);
     const summary = page.locator(".hist-timings summary").first();
-    assert.match(await summary.textContent(), /First audio 1.61 s/);
+    assert.match(await summary.textContent(), /E2E 1.61 s/);
     await summary.focus();
     await page.keyboard.press("Enter");
     assert.equal(await page.locator(".hist-timings").first().getAttribute("open"), "");
     assert.match(await page.locator(".hist-timings dl").innerText(), /0.00 s/);
+    assert.deepEqual(await page.locator(".hist-timings dt").allTextContents(), [
+      "E2E time", "VAD end decision", "Smart Turn decision", "Transcription",
+      "Response generation", "Voice synthesis to first audio", "Hold time before response",
+    ]);
+    assert.match(await page.locator(".hist-timings dl").innerText(), /Hold time before response/);
     assert.match(await page.locator(".hist-timings").innerText(), /excluding browser playback/);
     await page.waitForFunction(() => {
       const box = document.querySelector(".hist-timings summary").getBoundingClientRect();

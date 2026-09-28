@@ -9,6 +9,7 @@ import numpy as np
 
 from speech_to_speech.pipeline.messages import PIPELINE_END, PartialTranscription, Transcription, VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 
 
@@ -175,6 +176,18 @@ def test_stt_handler_uses_per_endpoint_processing_delay():
     assert not thread.is_alive()
     assert handler.processed == []
     assert queue_out.get_nowait() == PIPELINE_END
+
+
+def test_stale_final_input_discards_pending_vad_measurement():
+    revisions = SpeculativeTurnTracker()
+    revisions.observe("turn_1", 1)
+    handler = _handler(revisions, Queue(), Queue())
+    store = TurnLatencyStore()
+    handler.turn_latency_store = store
+    store.get_or_create_for_turn("turn_1", 0).vad_decision_s = 0.3
+
+    assert not handler.should_process_input(_vad_audio(revision=0, mode="final"))
+    assert store._pending_turn == {}
 
 
 def test_stt_handler_drops_output_that_became_stale_during_processing():
