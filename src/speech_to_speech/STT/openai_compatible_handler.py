@@ -391,7 +391,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
                 language_code=result.language,
                 turn_id=source.turn_id,
                 turn_revision=source.turn_revision,
-                speech_stopped_at_s=source.created_at_s,
+                speech_stopped_at_s=source.speech_end_at_s,
             )
         elapsed = perf_counter() - started_at_s
         request.elapsed_s = elapsed
@@ -429,7 +429,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
                 message=message,
                 turn_id=source.turn_id,
                 turn_revision=source.turn_revision,
-                speech_stopped_at_s=source.created_at_s,
+                speech_stopped_at_s=source.speech_end_at_s,
             ),
         )
 
