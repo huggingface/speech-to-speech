@@ -40,6 +40,8 @@ from speech_to_speech.arguments_classes.responses_api_language_model_arguments i
     ResponsesApiLanguageModelHandlerArguments,
 )
 from speech_to_speech.arguments_classes.supertonic_tts_arguments import SupertonicTTSHandlerArguments
+from speech_to_speech.arguments_classes.telnyx_stt_arguments import TelnyxSTTHandlerArguments
+from speech_to_speech.arguments_classes.telnyx_tts_arguments import TelnyxTTSHandlerArguments
 from speech_to_speech.arguments_classes.vllm_realtime_stt_arguments import VLLMRealtimeSTTHandlerArguments
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
 from speech_to_speech.pipeline.cancel_scope import CancelScope
@@ -291,6 +293,23 @@ def _create_openai_tts(context: HandlerContext, config: Mapping[str, Any]) -> An
     )
 
 
+def _create_telnyx_stt(context: HandlerContext, config: Mapping[str, Any]) -> Any:
+    handler_class = _load_handler("speech_to_speech.STT.telnyx_stt_handler", "TelnyxSTTHandler")
+    setup_kwargs = {
+        **config,
+        "enable_live_transcription": context.enable_live_transcription,
+        "live_transcription_update_interval": context.live_transcription_update_interval,
+    }
+    handler = handler_class(
+        context.stop_event,
+        queue_in=context.queue_in,
+        queue_out=context.queue_out,
+        setup_kwargs=setup_kwargs,
+    )
+    handler.speculative_turns = context.speculative_turns
+    return handler
+
+
 def _create_streaming_stt(class_name: str) -> HandlerFactory:
     def create(context: HandlerContext, config: Mapping[str, Any]) -> Any:
         handler_class = _load_handler("speech_to_speech.STT.streaming_handler", class_name)
@@ -457,6 +476,14 @@ STT_BACKENDS = build_backend_registry(
             config_prefix="vllm_realtime_stt",
             capabilities=BackendCapabilities(streams_audio_chunks=True),
         ),
+        BackendSpec(
+            "telnyx",
+            "stt",
+            TelnyxSTTHandlerArguments,
+            _create_telnyx_stt,
+            config_prefix="telnyx_stt",
+            required_extra="telnyx",
+        ),
     ],
 )
 
@@ -603,6 +630,19 @@ TTS_BACKENDS = build_backend_registry(
             ),
             config_prefix="supertonic_tts",
             required_extra="supertonic",
+        ),
+        BackendSpec(
+            "telnyx",
+            "tts",
+            TelnyxTTSHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.TTS.telnyx_tts_handler",
+                "TelnyxTTSHandler",
+                setup_should_listen=True,
+                context_kwargs=True,
+            ),
+            config_prefix="telnyx_tts",
+            required_extra="telnyx",
         ),
     ],
 )

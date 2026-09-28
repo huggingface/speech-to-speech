@@ -12,6 +12,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 - `qwen3` → `qwen3_tts_handler.py`
 - `openai` → `openai_compatible_handler.py`
 - `supertonic` → `supertonic_tts_handler.py`
+- `telnyx` → `telnyx_tts_handler.py`
 
 Deprecated TTS implementations, including MeloTTS, live in [`../../../archive/TTS`](../../../archive/TTS) and are no longer wired into `s2s_pipeline.py`.
 
@@ -266,6 +267,62 @@ Install the optional dependency with:
 
 ```bash
 pip install "speech-to-speech[supertonic]"
+```
+
+### 9) Telnyx (`--tts telnyx`)
+
+Primary args prefix: `--telnyx_tts_*`
+
+```bash
+python s2s_pipeline.py \
+  --tts telnyx \
+  --telnyx_tts_voice Telnyx.NaturalHD.astra \
+  --telnyx_tts_sample_rate 16000 \
+  --telnyx_tts_blocksize 512
+```
+
+- Handler: `TelnyxTTSHandler`
+- Managed WebSocket TTS backed by Telnyx's unified speech API
+- One WebSocket per synthesis request (the LLM output processor emits sentence batches, so this is one connection per sentence batch, not per response)
+- Telnyx returns one continuous MP3 bitstream split across many small frames; individual frames are not independently decodable, so the handler pipes the stream through a long-lived `ffmpeg` process and emits PCM as it arrives
+- Auth: `--telnyx_tts_api_key` or `$TELNYX_API_KEY` env var
+- Voice flag: `--telnyx_tts_voice` (default `Telnyx.NaturalHD.astra`)
+- Sample rate flag: `--telnyx_tts_sample_rate` (default `16000`)
+- Blocksize flag: `--telnyx_tts_blocksize` (default `512`)
+
+Supported voice providers (one endpoint, swap with `--telnyx_tts_voice`):
+
+| Provider | Example voice IDs |
+|---|---|
+| Telnyx NaturalHD | `Telnyx.NaturalHD.astra`, `Telnyx.NaturalHD.orion`, ... |
+| AWS Polly | `AWS.Polly.*` |
+| Azure | `Azure.*` |
+| ElevenLabs | `ElevenLabs.*` |
+| MiniMax | `MiniMax.*` |
+| ResembleAI | `ResembleAI.*` |
+| Inworld | `Inworld.*` |
+| Rime | `Rime.*` |
+
+System dependency: `ffmpeg`, used to decode the MP3 stream. Install with `brew install ffmpeg` (macOS) or `apt install ffmpeg` (Debian/Ubuntu).
+
+Install:
+
+```bash
+pip install "speech-to-speech[telnyx]"
+export TELNYX_API_KEY=...
+```
+
+Usage:
+
+```bash
+# Default Telnyx NaturalHD voice
+python s2s_pipeline.py --tts telnyx
+
+# ElevenLabs voice through Telnyx's unified API
+python s2s_pipeline.py --tts telnyx --telnyx_tts_voice "ElevenLabs.<voice_id>"
+
+# Mixed: managed Telnyx STT + managed Telnyx TTS
+python s2s_pipeline.py --stt telnyx --tts telnyx
 ```
 
 ## Setup
