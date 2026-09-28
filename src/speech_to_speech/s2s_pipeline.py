@@ -466,6 +466,10 @@ def _stt_session_languages(selection: BackendSelection, handler: Any) -> set[str
     if selection.name == "faster-whisper":
         supported = getattr(getattr(handler, "model", None), "supported_languages", None)
         return set(supported) if supported is not None else None
+    if selection.name == "whisper":
+        generation_config = getattr(getattr(handler, "model", None), "generation_config", None)
+        # Transformers rejects any language argument for an English-only checkpoint.
+        return set() if getattr(generation_config, "is_multilingual", None) is False else None
     if selection.name == "qwen3-asr":
         return set(modules[type(handler).__module__].SUPPORTED_LANGUAGES)
     if selection.name in {"parakeet-tdt", "parakeet-unified", "paraformer", "openai-realtime", "vllm-realtime"}:

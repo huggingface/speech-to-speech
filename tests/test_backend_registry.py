@@ -141,6 +141,51 @@ def test_faster_whisper_loaded_languages_control_session_update(monkeypatch, mod
         assert unit.service._state(conn_id).runtime_config.selected_language is None
 
 
+@pytest.mark.parametrize(
+    ("is_multilingual", "language", "accepted"),
+    [(False, "en", False), (False, "es", False), (True, "es", True), (None, "es", True)],
+)
+def test_transformers_whisper_session_language_uses_loaded_generation_config(
+    monkeypatch, is_multilingual, language, accepted
+):
+    args = parse_arguments(["--stt", "whisper", "--tts", "openai"])
+    stt_handler = SimpleNamespace(
+        model=SimpleNamespace(generation_config=SimpleNamespace(is_multilingual=is_multilingual))
+    )
+    monkeypatch.setattr(
+        s2s_pipeline,
+        "_build_handlers",
+        lambda **_kwargs: [SimpleNamespace(), stt_handler, SimpleNamespace(), SimpleNamespace(), SimpleNamespace()],
+    )
+    unit = s2s_pipeline._build_pipeline_unit(
+        index=0,
+        stop_event=Event(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=args.vad_handler_kwargs,
+        stt_backend=args.stt_backend,
+        llm_backend=args.llm_backend,
+        tts_backend=args.tts_backend,
+    )
+    unit.service.tts_supported_languages = {"en", "es"}
+    conn_id = unit.service.register()
+    update = SessionUpdateEvent.model_validate(
+        {
+            "type": "session.update",
+            "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": language}}}},
+        }
+    )
+
+    result = unit.service.handle_session_update(conn_id, update)
+
+    if accepted:
+        assert result is None
+        assert unit.service.build_session_updated(conn_id).session.audio.input.transcription.language == language
+    else:
+        assert isinstance(result, RealtimeErrorEvent)
+        assert "STT" in result.error.message
+        assert unit.service._state(conn_id).runtime_config.selected_language is None
+
+
 @pytest.mark.parametrize(("setup_language", "rejected"), [("en", True), (None, False)])
 def test_openai_realtime_stt_auto_reset_is_rejected_only_when_setup_hint_cannot_be_cleared(
     monkeypatch, setup_language, rejected
