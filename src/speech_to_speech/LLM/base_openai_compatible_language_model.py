@@ -178,6 +178,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         audio_temperature: float = 0.0,
         audio_content_type: Literal["input_audio", "audio_url"] = "input_audio",
         audio_history_turns: int = 1,
+        warmup_enabled: bool = True,
         **_kwargs: Any,
     ) -> None:
         self.cancel_scope = cancel_scope
@@ -214,7 +215,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self._prefetch_workers_lock = Lock()
         self._prefetch_workers: set[Thread] = set()
         self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
-        self.warmup()
+        if warmup_enabled:
+            self.warmup()
+
+    def has_pending_session_work(self) -> bool:
+        with self._prefetch_workers_lock:
+            return bool(self._prefetch_workers)
 
     @staticmethod
     def _is_official_openai(base_url: Optional[str]) -> bool:
@@ -273,7 +279,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         ...
 
     @abstractmethod
-    def _build_compaction_generate_fn(self) -> CompactGenerateFn:
+    def _build_compaction_generate_fn(self, request_overrides: dict[str, Any] | None = None) -> CompactGenerateFn:
         """Return a ``(system, user) -> text`` fn used to compact long histories."""
         ...
 
@@ -787,8 +793,16 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 else:
                     provider_request_started = True
 
+                    routing = turn.runtime_config.routing
+                    route_kwargs = (
+                        {"model": routing.routes.llm.model, "extra_headers": routing.headers("llm")}
+                        if routing is not None
+                        else {}
+                    )
+                    request_kwargs = {**optional_kwargs, **route_kwargs}
+
                     def make_request() -> Any:
-                        return (request_fn or self._request)(api_input, optional_kwargs)
+                        return (request_fn or self._request)(api_input, request_kwargs)
 
                     if turn.prefetch_transaction is not None:
                         events = self._iter_prefetch_events_interruptibly(
@@ -893,7 +907,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                                     original_chat.strip_images(consumed_image_ids)
                                     if history_commit_fn is not None:
                                         history_commit_fn()
-                                    original_chat.trim_if_needed(self.compactor)
+                                    compactor = self.compactor
+                                    if compactor is not None and route_kwargs:
+                                        compactor = build_compactor(self._build_compaction_generate_fn(route_kwargs))
+                                    original_chat.trim_if_needed(compactor)
                                 except Exception:
                                     original_chat.restore_history_cleanup(snapshot)
                                     raise

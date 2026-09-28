@@ -81,16 +81,16 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         end = time.time()
         logger.info(f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s")
 
-    def _build_compaction_generate_fn(self) -> CompactGenerateFn:
+    def _build_compaction_generate_fn(self, request_overrides: dict[str, Any] | None = None) -> CompactGenerateFn:
         """Return a generate fn that calls the Responses API for compaction."""
         client = self.client
         model_name = self.model_name
         timeout = self.request_timeout
         reasoning_kwargs = self._reasoning_kwargs()
+        request_kwargs = {"model": model_name, **reasoning_kwargs, **(request_overrides or {})}
 
         def generate(system: str, user: str) -> str:
             response = client.responses.create(
-                model=model_name,
                 input=[
                     {
                         "type": "message",
@@ -104,7 +104,7 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
                     },
                 ],
                 timeout=timeout,
-                **reasoning_kwargs,
+                **request_kwargs,
             )
             return response.output_text
 
@@ -161,12 +161,10 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
 
     def _request(self, api_input: Any, optional_kwargs: dict[str, Any]) -> Any:
         return self.client.responses.create(
-            model=self.model_name,
             input=api_input,
             stream=self.stream,
-            extra_body=self._extra_body,
             timeout=self.request_timeout,
-            **optional_kwargs,
+            **{"model": self.model_name, "extra_body": self._extra_body, **optional_kwargs},
         )
 
     @staticmethod

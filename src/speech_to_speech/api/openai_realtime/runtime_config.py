@@ -4,6 +4,7 @@ from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfi
 from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from speech_to_speech.api.openai_realtime.session_routing import SessionRouting
 from speech_to_speech.LLM.chat import Chat
 
 
@@ -38,6 +39,7 @@ class RuntimeConfig(BaseModel):
     model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True)
 
     chat: Chat = Field(default_factory=lambda: Chat(10))
+    routing: SessionRouting | None = Field(default=None, frozen=True)
     session: RealtimeSessionCreateRequest = Field(
         default_factory=lambda: RealtimeSessionCreateRequest(type="realtime"),
         validate_default=True,
@@ -74,6 +76,16 @@ class RuntimeConfig(BaseModel):
         else:
             return True
         return val if val is not None else True
+
+    def apply_routing_defaults(self) -> None:
+        if self.routing is None:
+            return
+        routes = self.routing.routes
+        self.session.model = routes.llm.model
+        assert self.session.audio is not None and self.session.audio.output is not None
+        self.session.audio.output.voice = routes.tts.voice
+        if self.routing.updates_enabled:
+            self.session = self.session.model_copy(update={"models": self.routing.models()})
 
     def apply_session_update(self, update: RealtimeSessionCreateRequest) -> None:
         """Merge non-None, explicitly-set fields from 'update' into the

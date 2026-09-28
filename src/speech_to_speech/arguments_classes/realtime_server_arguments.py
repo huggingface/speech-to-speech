@@ -3,6 +3,12 @@ from dataclasses import dataclass, field
 
 @dataclass
 class RealtimeServerArguments:
+    session_routing_enabled: bool = field(
+        default=False,
+        metadata={
+            "help": "Accept initial model/provider routes from X-Speech-Session-Routing. Enable only behind a trusted admission proxy on a private listener."
+        },
+    )
     host: str = field(
         default="127.0.0.1",
         metadata={

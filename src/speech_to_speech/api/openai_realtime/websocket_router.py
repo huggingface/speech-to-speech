@@ -31,7 +31,7 @@ from speech_to_speech.api.openai_realtime.transports import (
     WebSocketTransport,
     send_ws_event,
 )
-from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
+from speech_to_speech.pipeline.control import SESSION_END, ControlKind, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -399,12 +399,16 @@ async def _dispatch_client_event(
     """
     service = unit.service
     client_event_id = raw.get("event_id")
+    routing_update = raw.get("_session_routing")
+    routing_update_id = routing_update.get("update_id") if isinstance(routing_update, dict) else None
 
     async def send_correlated(events: list[Any]) -> None:
         if isinstance(client_event_id, str):
             for outgoing in events:
                 if getattr(outgoing, "type", None) == "error":
                     outgoing.error.event_id = client_event_id
+        if isinstance(routing_update_id, str):
+            events = [event.model_copy(update={"_session_routing": routing_update_id}) for event in events]
         await transport.send_events(events)
 
     event = service.parse_client_event(raw)
@@ -453,7 +457,24 @@ async def _dispatch_client_event(
         transport.discard_pending_audio()
 
     elif isinstance(event, SessionUpdateEvent):
-        err = service.handle_session_update(session_id, event)
+        proposed = None
+        if routing_update is not None:
+            from speech_to_speech.api.openai_realtime.session_routing import SessionRouting
+
+            cfg = service._state(session_id).runtime_config
+            try:
+                if cfg.routing is None or not cfg.routing.updates_enabled or transport_kind != "websocket":
+                    raise ValueError("Session model updates are not enabled on this connection.")
+                if not isinstance(routing_update_id, str) or not 1 <= len(routing_update_id) <= 64:
+                    raise ValueError("Invalid session routing update.")
+                proposed = SessionRouting.model_validate(routing_update["routing"])
+                if proposed.routes.llm.protocol != _unit_llm_protocol(unit):
+                    raise ValueError("The selected LLM protocol does not match this CPU adapter.")
+                await _drain_for_routing_update(unit, session_id)
+            except (ValueError, KeyError, TypeError) as exc:
+                await send_correlated([service.make_error(str(exc), "invalid_request_error")])
+                return
+        err = service.handle_session_update(session_id, event, routing=proposed)
         if err:
             await send_correlated([err])
         else:
@@ -498,11 +519,70 @@ async def _dispatch_client_event(
         unit.response_playing.clear()
 
 
+def _unit_llm_protocol(unit: PipelineUnit) -> str:
+    from speech_to_speech.LLM.chat_completions_language_model import ChatCompletionsApiModelHandler
+    from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
+
+    for handler in unit.handlers:
+        if isinstance(handler, ChatCompletionsApiModelHandler):
+            return "chat_completions"
+        if isinstance(handler, ResponsesApiModelHandler):
+            return "responses"
+    raise ValueError("Session routing requires a remote LLM adapter.")
+
+
+async def _drain_for_routing_update(unit: PipelineUnit, session_id: str) -> None:
+    def require_idle():
+        state = unit.service._state(session_id)
+        if (
+            state.in_response
+            or state.response_pending
+            or state.input_items
+            or state.runtime_config.chat.has_pending_tool_calls()
+        ):
+            raise ValueError("Finish or cancel the pending turn and wait for cleanup before changing models.")
+
+    require_idle()
+    reached = ThreadingEvent()
+    unit.input_queue.put(PipelineControlMessage(ControlKind.ROUTING_BARRIER, session_id=session_id, reached=reached))
+    if not await asyncio.to_thread(reached.wait, 0.25):
+        raise ValueError("Pipeline work is still draining; retry the model update after cleanup.")
+    require_idle()
+    if not unit.text_output_queue.empty() or not unit.text_prompt_queue.empty():
+        raise ValueError("Pipeline events are still pending; retry the model update after cleanup.")
+    if any(handler.has_pending_session_work() for handler in unit.handlers):
+        raise ValueError("Session work is still pending; finish the turn and wait for cleanup before changing models.")
+
+
 def create_app(
     pool: list[PipelineUnit],
     stop_event: ThreadingEvent,
     llm_proxy_config: LLMProxyConfig | None = None,
+    session_routing_enabled: bool = False,
 ) -> FastAPI:
+    from speech_to_speech.api.openai_realtime.session_routing import SessionRouting
+
+    routing_protocol = None
+    if session_routing_enabled:
+        from speech_to_speech.LLM.chat_completions_language_model import ChatCompletionsApiModelHandler
+        from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
+        from speech_to_speech.STT.openai_compatible_handler import OpenAICompatibleSTTHandler
+        from speech_to_speech.TTS.openai_compatible_handler import OpenAICompatibleTTSHandler
+
+        for unit in pool:
+            if not any(isinstance(h, OpenAICompatibleSTTHandler) for h in unit.handlers) or not any(
+                isinstance(h, OpenAICompatibleTTSHandler) for h in unit.handlers
+            ):
+                raise ValueError("Session routing requires remote OpenAI-compatible STT and TTS handlers")
+            protocols = [
+                "chat_completions" if isinstance(h, ChatCompletionsApiModelHandler) else "responses"
+                for h in unit.handlers
+                if isinstance(h, (ChatCompletionsApiModelHandler, ResponsesApiModelHandler))
+            ]
+            if len(protocols) != 1 or routing_protocol not in (None, protocols[0]):
+                raise ValueError("Session routing requires one consistent remote LLM protocol across the pool")
+            routing_protocol = protocols[0]
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # One send loop per pipeline unit; each polls its own queues and forwards
@@ -548,6 +628,25 @@ def create_app(
         }
         await ws.accept(subprotocol="realtime" if "realtime" in offered_subprotocols else None)
 
+        routing = None
+        raw_routing = ws.headers.get("X-Speech-Session-Routing")
+        if raw_routing is not None:
+            try:
+                if not session_routing_enabled or len(raw_routing) > 4096:
+                    raise ValueError("Session routing is disabled or the handoff is too large")
+                routing = SessionRouting.model_validate_json(raw_routing)
+                if routing.routes.llm.protocol != routing_protocol:
+                    raise ValueError("Admitted LLM protocol does not match the CPU adapter")
+            except ValueError:
+                await send_ws_event(
+                    ws,
+                    build_error_event(
+                        "Invalid or unsupported session routing handoff.", error_type="invalid_request_error"
+                    ),
+                )
+                await ws.close(code=1008, reason="Invalid session routing")
+                return
+
         transport = WebSocketTransport(ws)
         unit = _claim_unit(transport)
         if unit is None:
@@ -570,7 +669,7 @@ def create_app(
         # releases the unit, even if session setup fails.
         session_id = ""
         try:
-            session_id = unit.service.register()
+            session_id = unit.service.register(routing=routing) if routing is not None else unit.service.register()
             unit.session.session_id = session_id
             logger.info(f"Client connected to pipeline {unit.index} (session {session_id})")
 
@@ -1032,6 +1131,9 @@ def create_app(
                         continue
 
                     if is_control_message(audio_chunk):
+                        if audio_chunk.kind == ControlKind.ROUTING_BARRIER and audio_chunk.reached is not None:
+                            if session is not None and audio_chunk.session_id == session.session_id:
+                                audio_chunk.reached.set()
                         continue
 
                     if _should_discard_audio(unit, audio_chunk):

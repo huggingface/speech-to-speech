@@ -18,6 +18,7 @@ import anyio
 import httpx
 import numpy as np
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import (
@@ -63,6 +64,7 @@ class HttpTranscriptionOperation:
     response_format: str
     timeout_s: float
     extra_fields: dict[str, Any] | None = None
+    extra_headers: dict[str, str] | None = None
     _cancelled: Event = field(default_factory=Event, init=False, repr=False)
     _transport_lock: Any = field(default_factory=Lock, init=False, repr=False)
     _cancel_reason: str = field(default="superseded", init=False, repr=False)
@@ -145,7 +147,7 @@ class HttpTranscriptionOperation:
         raise TranscriptionRequestCancelled(self._cancel_reason)
 
     async def _request_async(self) -> HttpTranscriptionResult:
-        headers = {}
+        headers = dict(self.extra_headers or {})
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         data: dict[str, Any] = {
@@ -232,6 +234,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         speculative_turns: SpeculativeTurnTracker | None = None,
         final_revision_settle_s: float = 0.0,
         gen_kwargs: dict[str, Any] | None = None,
+        warmup_enabled: bool = True,
     ) -> None:
         if response_format not in {"json", "text"}:
             raise ValueError("OpenAI-compatible STT response_format must be 'json' or 'text'")
@@ -263,7 +266,8 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         self._workers_running: set[str] = set()
         self._progressive_thread: Thread | None = None
         self._final_thread: Thread | None = None
-        self.warmup()
+        if warmup_enabled:
+            self.warmup()
 
     def warmup(self) -> None:
         """Validate the configured transcription endpoint before accepting sessions."""
@@ -368,7 +372,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         try:
             if not self._request_is_current(request):
                 return
-            operation = self._make_operation(source.audio)
+            operation = self._make_operation(source.audio, runtime_config=source.runtime_config)
             with self._request_lock:
                 request.operation = operation
                 if not self._request_is_current(request):
@@ -467,6 +471,18 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         if request.operation is not None:
             request.operation.cancel(reason)
 
+    def has_pending_session_work(self) -> bool:
+        with self._request_lock:
+            return bool(
+                self._pending_finals
+                or self._pending_progressive is not None
+                or self._active
+                or any(
+                    worker is not None and worker.is_alive()
+                    for worker in (self._final_thread, self._progressive_thread)
+                )
+            )
+
     def on_session_end(self) -> None:
         with self._request_lock:
             self._session_generation += 1
@@ -489,16 +505,21 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             if worker is not None and worker is not current_thread():
                 worker.join(timeout=2)
 
-    def _make_operation(self, audio: np.ndarray) -> HttpTranscriptionOperation:
+    def _make_operation(
+        self, audio: np.ndarray, *, runtime_config: RuntimeConfig | None = None
+    ) -> HttpTranscriptionOperation:
+        routing = runtime_config.routing if runtime_config is not None else None
+        route = routing.routes.stt if routing is not None else None
         return HttpTranscriptionOperation(
             endpoint_url=self.endpoint_url,
             api_key=self.api_key,
-            model=self.model,
+            model=route.model if route is not None else self.model,
             wav_bytes=self._encode_wav(audio),
             language=self.language,
             response_format=self.response_format,
             timeout_s=self.timeout,
             extra_fields=self.gen_kwargs,
+            extra_headers=routing.headers("stt") if routing else None,
         )
 
     @staticmethod

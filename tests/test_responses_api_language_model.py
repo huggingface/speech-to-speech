@@ -394,6 +394,7 @@ def test_repeated_prefetch_invalidation_bounds_provider_connect_workers():
     request_worker.join(timeout=1.0)
     assert not request_worker.is_alive()
 
+    assert handler.has_pending_session_work()  # Discard does not finish provider cleanup.
     with handler._prefetch_workers_lock:
         provider_worker = next(iter(handler._prefetch_workers))
 
@@ -429,6 +430,7 @@ def test_repeated_prefetch_invalidation_bounds_provider_connect_workers():
     release_request.set()
     assert response_closed.wait(timeout=1.0)
     provider_worker.join(timeout=1.0)
+    assert not handler.has_pending_session_work()
     with handler._prefetch_workers_lock:
         assert not handler._prefetch_workers
 
