@@ -99,8 +99,6 @@ def test_sensevoice_cli_config_is_normalized_for_the_handler():
         [
             "--stt",
             "sense-voice",
-            "--sense_voice_stt_model_name",
-            "iic/SenseVoiceSmall",
             "--sense_voice_stt_device",
             "cpu",
             "--sense_voice_stt_language",
@@ -110,7 +108,7 @@ def test_sensevoice_cli_config_is_normalized_for_the_handler():
 
     assert args.stt_backend.name == "sense-voice"
     assert args.stt_backend.config == {
-        "model_name": "iic/SenseVoiceSmall",
+        "model_name": "FunAudioLLM/SenseVoiceSmall",
         "device": "cpu",
         "language": "yue",
         "gen_kwargs": {},

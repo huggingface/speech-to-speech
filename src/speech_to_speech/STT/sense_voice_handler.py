@@ -20,7 +20,7 @@ class SenseVoiceSTTHandler(BaseSTTHandler):
 
     def setup(
         self,
-        model_name: str = "iic/SenseVoiceSmall",
+        model_name: str = "FunAudioLLM/SenseVoiceSmall",
         device: str = "cuda",
         language: str = "auto",
         gen_kwargs: dict[str, Any] | None = None,
@@ -38,7 +38,7 @@ class SenseVoiceSTTHandler(BaseSTTHandler):
         self.language = language
         self.gen_kwargs = dict(gen_kwargs or {})
         self._postprocess = rich_transcription_postprocess
-        self.model = AutoModel(model=model_name, device=device, disable_update=True)
+        self.model = AutoModel(model=model_name, hub="hf", device=device, disable_update=True)
         self.warmup()
 
     def _generate(self, audio: np.ndarray) -> str:

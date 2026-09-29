@@ -39,7 +39,7 @@ def test_setup_passes_explicit_generation_configuration(monkeypatch):
     handler = object.__new__(SenseVoiceSTTHandler)
     handler.setup(device="cpu", language="yue", gen_kwargs={"foo": "bar"})
 
-    auto_model.assert_called_once_with(model="iic/SenseVoiceSmall", device="cpu", disable_update=True)
+    auto_model.assert_called_once_with(model="FunAudioLLM/SenseVoiceSmall", hub="hf", device="cpu", disable_update=True)
     model.generate.assert_called_once()
     assert model.generate.call_args.kwargs["language"] == "yue"
     assert model.generate.call_args.kwargs["foo"] == "bar"

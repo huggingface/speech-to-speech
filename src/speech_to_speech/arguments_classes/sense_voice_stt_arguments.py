@@ -4,10 +4,10 @@ from dataclasses import dataclass, field
 @dataclass
 class SenseVoiceSTTHandlerArguments:
     sense_voice_stt_model_name: str = field(
-        default="iic/SenseVoiceSmall",
+        default="FunAudioLLM/SenseVoiceSmall",
         metadata={
-            "help": "The pretrained SenseVoice model to use. Default is 'iic/SenseVoiceSmall'. "
-            "See https://github.com/FunAudioLLM/SenseVoice"
+            "help": "The Hugging Face model ID or local path for SenseVoice. "
+            "Default is 'FunAudioLLM/SenseVoiceSmall'. See https://huggingface.co/FunAudioLLM/SenseVoiceSmall"
         },
     )
     sense_voice_stt_device: str = field(

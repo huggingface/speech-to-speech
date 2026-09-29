@@ -97,7 +97,6 @@ paraformer = [
 ]
 sensevoice = [
     "funasr>=1.1.6",
-    "modelscope>=1.17.1",
 ]
 pocket = [
     "pocket-tts>=2.0.0",
