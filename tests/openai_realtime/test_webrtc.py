@@ -16,6 +16,7 @@ The whole module is skipped when the ``webrtc`` extra (aiortc) isn't installed.
 """
 
 import asyncio
+import base64
 import json
 import time
 from queue import Empty, Queue
@@ -23,6 +24,7 @@ from threading import Event as ThreadingEvent
 
 import numpy as np
 import pytest
+from scipy.signal import resample_poly
 
 aiortc = pytest.importorskip("aiortc")
 av = pytest.importorskip("av")
@@ -137,10 +139,43 @@ class TestAppendPcm:
         unit = _make_unit()
         conn_id = unit.service.register()
 
-        assert unit.service.handle_audio_commit(conn_id) is not None  # empty buffer errors
+        assert unit.service.handle_audio_commit(conn_id)[1] is not None  # empty buffer errors
 
         unit.service.append_pcm(conn_id, b"\x01\x00" * 512, PIPELINE_SAMPLE_RATE)
-        assert unit.service.handle_audio_commit(conn_id) is None
+        assert unit.service.handle_audio_commit(conn_id) == ([], None)
+
+    def test_24khz_resampling_is_continuous_across_calls(self):
+        unit = _make_unit()
+        samples = np.round(np.sin(np.arange(4800) * 2 * np.pi * 997 / 24000) * 12000).astype("<i2")
+
+        chunked_id = unit.service.register()
+        chunked = b"".join(
+            b"".join(unit.service.append_pcm(chunked_id, chunk.tobytes(), 24000))
+            for chunk in np.array_split(samples, 10)
+        )
+        chunked += unit.service._state(chunked_id).audio_remainder
+
+        single_id = unit.service.register()
+        single = b"".join(unit.service.append_pcm(single_id, samples.tobytes(), 24000))
+        single += unit.service._state(single_id).audio_remainder
+
+        assert chunked == single
+
+    def test_failed_short_commit_preserves_filter_state_for_more_audio(self):
+        unit = _make_unit()
+        conn_id = unit.service.register()
+        first_half = b"\x01\x00" * 384
+
+        assert unit.service.append_pcm(conn_id, first_half, 24000) == []
+        assert unit.service.handle_audio_commit(conn_id)[1] is not None
+        assert unit.service._state(conn_id).input_audio_resampler is not None
+
+        assert unit.service.append_pcm(conn_id, first_half, 24000) == []
+        chunks, error = unit.service.handle_audio_commit(conn_id)
+        assert error is None
+        assert [len(chunk) for chunk in chunks] == [CHUNK_SIZE_BYTES]
+        assert unit.service._state(conn_id).audio_remainder == b""
+        assert unit.service._state(conn_id).input_audio_resampler is None
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +276,50 @@ class TestPipelineAudioTrack:
 
 
 class TestWebRTCDispatch:
+    @pytest.mark.parametrize("sample_count", [768, 7680])
+    async def test_websocket_commit_forwards_resampler_tail(self, sample_count):
+        unit = _make_unit()
+        conn_id = unit.service.register()
+        transport = _FakeTransport()
+        samples = np.round(np.sin(np.arange(sample_count) * 2 * np.pi * 997 / 24000) * 12000).astype("<i2")
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000}}}},
+            },
+            transport,
+            transport_kind="websocket",
+        )
+
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(samples.tobytes()).decode("ascii"),
+            },
+            transport,
+            transport_kind="websocket",
+        )
+        assert unit.input_queue.qsize() == sample_count * 2 // 3 // 512 - 1
+
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {"type": "input_audio_buffer.commit"},
+            transport,
+            transport_kind="websocket",
+        )
+        assert unit.input_queue.qsize() == sample_count * 2 // 3 // 512
+        assert all(event["type"] != "error" for event in transport.sent)
+        assert unit.service._state(conn_id).audio_remainder == b""
+        assert unit.service._state(conn_id).input_audio_resampler is None
+        received = b"".join(unit.input_queue.get_nowait()[0] for _ in range(sample_count * 2 // 3 // 512))
+        reference = np.clip(np.round(resample_poly(samples.astype(np.float64), 2, 3)), -32768, 32767).astype("<i2")
+        assert received == reference.tobytes()
+
     async def test_append_rejected_over_webrtc(self):
         unit = _make_unit()
         conn_id = unit.service.register()
@@ -256,6 +335,7 @@ class TestWebRTCDispatch:
 
         assert len(transport.sent) == 1
         assert transport.sent[0]["type"] == "error"
+        assert transport.sent[0]["error"]["type"] == "invalid_event_for_transport"
         assert transport.sent[0]["error"]["type"] == "invalid_event_for_transport"
         assert unit.input_queue.qsize() == 0
 
@@ -318,7 +398,34 @@ class TestWebRTCDispatch:
 
         assert len(transport.sent) == 1
         assert transport.sent[0]["type"] == "error"
-        assert transport.sent[0]["error"]["type"] == "invalid_event_for_transport"
+
+    async def test_response_cancel_closes_message_lifecycle(self):
+        unit = _make_unit()
+        conn_id = unit.service.register()
+        transport = _FakeTransport()
+        await transport.send_events(unit.service.dispatch_pipeline_event(conn_id, AssistantOutputEvent(text="partial")))
+
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {"type": "response.cancel"},
+            transport,
+            transport_kind="webrtc",
+        )
+
+        assert [event["type"] for event in transport.sent] == [
+            "response.created",
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_audio_transcript.delta",
+            "response.output_audio_transcript.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.done",
+        ]
+        assert transport.sent[-2]["item"]["status"] == "incomplete"
+        assert transport.sent[-1]["response"]["status"] == "cancelled"
+        assert transport.sent[-2]["item"] == transport.sent[-1]["response"]["output"][0]
 
     async def test_response_cancel_discards_transport_audio(self):
         unit = _make_unit()
@@ -678,6 +785,28 @@ class TestWebRTCLoopback:
                 event for event in inbox.events if event["type"] == "response.output_audio_transcript.delta"
             ]
             audio_done = [event for event in inbox.events if event["type"] == "response.output_audio.done"]
+            response_events = [event for event in inbox.events if event["type"].startswith("response.")]
+            assert [event["type"] for event in response_events] == [
+                "response.created",
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_audio_transcript.delta",
+                "response.output_audio.done",
+                "response.output_audio_transcript.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                "response.output_item.added",
+                "response.function_call_arguments.done",
+                "response.output_item.done",
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_audio_transcript.delta",
+                "response.output_audio.done",
+                "response.output_audio_transcript.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                "response.done",
+            ]
             assert [event["output_index"] for event in transcript_deltas] == [0, 2]
             assert [event["output_index"] for event in audio_done] == [0, 2]
             assert [item["type"] for item in done["response"]["output"]] == [

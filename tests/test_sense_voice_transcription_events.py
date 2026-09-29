@@ -46,7 +46,8 @@ def test_setup_passes_explicit_generation_configuration(monkeypatch):
 
 
 @pytest.mark.parametrize(("mode", "output_type"), [("progressive", PartialTranscription), ("final", Transcription)])
-def test_sensevoice_emits_pipeline_transcription_events(monkeypatch, mode, output_type):
+@pytest.mark.parametrize("speech_end_at_s", [2.5, None])
+def test_sensevoice_emits_pipeline_transcription_events(monkeypatch, mode, output_type, speech_end_at_s):
     monkeypatch.setattr(sense_voice_handler.console, "print", lambda *args, **kwargs: None)
     result = list(
         _handler().process(
@@ -56,6 +57,7 @@ def test_sensevoice_emits_pipeline_transcription_events(monkeypatch, mode, outpu
                 turn_id="turn",
                 turn_revision=3,
                 created_at_s=4.5,
+                speech_end_at_s=speech_end_at_s,
             )
         )
     )
@@ -66,4 +68,4 @@ def test_sensevoice_emits_pipeline_transcription_events(monkeypatch, mode, outpu
     assert result[0].turn_id == "turn"
     assert result[0].turn_revision == 3
     if mode == "final":
-        assert result[0].speech_stopped_at_s == 4.5
+        assert result[0].speech_stopped_at_s == speech_end_at_s

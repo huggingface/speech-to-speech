@@ -21,6 +21,11 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
     speculative_turns: SpeculativeTurnTracker | None = None
     final_revision_settle_s: float = 0.0
 
+    # `start_language` is the user's configuration; `last_language` is per-conversation
+    # detection state. Declared here so the session reset covers every backend.
+    start_language: Any = None
+    last_language: Any = None
+
     def should_process_input(self, item: STTIn) -> bool:
         mode = getattr(item, "mode", None)
         turn_id = getattr(item, "turn_id", None)
@@ -55,6 +60,10 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             )
 
         if not is_latest:
+            if mode == "final":
+                store = getattr(self, "turn_latency_store", None)
+                if store is not None:
+                    store.discard_pending_turn(turn_id, turn_revision)
             queued_drops = self._drop_stale_queued_inputs()
             self._log_stale_turn_item(item, "input", queued_drops=queued_drops)
             return False
@@ -66,6 +75,11 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             return False
 
         if not self._is_latest_turn_item(output, wait_for_pending_reopen=True, wait_for_stability=False):
+            if isinstance(output, Transcription):
+                # Rejected output never reaches the service's final-STT cleanup.
+                store = getattr(self, "turn_latency_store", None)
+                if store is not None:
+                    store.discard_pending_turn(output.turn_id, output.turn_revision)
             self._log_stale_turn_item(output, "output")
             return False
         return True
@@ -90,11 +104,17 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
 
         if wait_for_stability:
             item_delay_s = max(0.0, getattr(item, "processing_delay_s", 0.0) - self._item_age_s(item))
+            wait_started_at_s = perf_counter()
             is_latest = self.speculative_turns.is_latest_after_stability_window(
                 turn_id,
                 turn_revision,
                 max(self.final_revision_settle_s, item_delay_s),
             )
+            store = getattr(self, "turn_latency_store", None)
+            if store is not None and item_delay_s > 0:
+                store.record_smart_wait(
+                    turn_id, turn_revision, wait_started_at_s, min(perf_counter(), wait_started_at_s + item_delay_s)
+                )
         elif wait_for_pending_reopen:
             is_latest = self.speculative_turns.is_latest_after_pending_reopen(turn_id, turn_revision)
         else:
@@ -106,6 +126,7 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             return 0
 
         dropped = 0
+        dropped_finals: list[tuple[str | None, int | None]] = []
         with self.queue_in.mutex:
             kept: list[Any] = []
             while self.queue_in.queue:
@@ -120,11 +141,17 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
                     )
                 ):
                     dropped += 1
+                    if queued_item.mode == "final":
+                        dropped_finals.append((queued_item.turn_id, queued_item.turn_revision))
                 else:
                     kept.append(queued_item)
             self.queue_in.queue.extend(kept)
             if dropped:
                 self.queue_in.not_full.notify_all()
+        store = getattr(self, "turn_latency_store", None)
+        if store is not None:
+            for turn_id, revision in dropped_finals:
+                store.discard_pending_turn(turn_id, revision)
         return dropped
 
     def _log_stale_turn_item(self, item: object, stage: str, *, queued_drops: int = 0) -> None:
@@ -208,6 +235,29 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
         while len(completed) > self._MAX_COMPLETED_FINAL_REVISIONS:
             completed.popitem(last=False)
 
+    @staticmethod
+    def canonical_language(language: Any) -> Any:
+        """Canonicalize the ``auto`` sentinel so every backend spells it the same way.
+
+        Handlers compare against the literal ``"auto"``, so ``--language AUTO`` otherwise
+        reaches the model as a language name: transformers Whisper rejects it with
+        ``ValueError: Unsupported language: auto``. Only the sentinel is normalized; real
+        codes are passed through untouched for the model to validate.
+        """
+        if isinstance(language, str) and language.strip().lower() == "auto":
+            return "auto"
+        return language
+
+    def reset_session_language(self) -> None:
+        """Drop the language detected for the finished conversation.
+
+        Units are reused across clients, so a leftover detection belongs to the previous
+        one. Restores what ``setup`` established: the configured language, or ``None`` for
+        ``auto``, which is a request to detect rather than a language code.
+        """
+        self.last_language = None if self.start_language == "auto" else self.start_language
+
     def on_session_end(self) -> None:
         if hasattr(self, "_completed_final_revision_keys"):
             self._completed_final_revision_keys.clear()
+        self.reset_session_language()

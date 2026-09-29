@@ -3,6 +3,22 @@ from dataclasses import dataclass, field
 
 @dataclass
 class VADHandlerArguments:
+    vad: str = field(
+        default="silero",
+        metadata={
+            "choices": ("silero", "firered"),
+            "help": "Voice activity detector. Default is silero. firered requires the optional "
+            "fireredvad extra and --vad_firered_model_dir pointing at Stream-VAD weights.",
+        },
+    )
+    vad_firered_model_dir: str | None = field(
+        default=None,
+        metadata={"help": "Directory of FireRed Stream-VAD weights (contains cmvn.ark). Required when --vad firered."},
+    )
+    vad_firered_use_gpu: bool = field(
+        default=False,
+        metadata={"help": "Run FireRedVAD on GPU. Default is False."},
+    )
     thresh: float = field(
         default=0.6,
         metadata={

@@ -51,6 +51,7 @@ from speech_to_speech.pipeline.transcript_logging import (
     set_log_transcripts,
     warn_if_log_transcripts_enabled,
 )
+from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.utils.thread_manager import ThreadManager
 from speech_to_speech.VAD.vad_handler import VADHandler
@@ -405,7 +406,10 @@ def _build_handlers(
         enable_live_transcription=module_kwargs.enable_live_transcription,
         live_transcription_update_interval=module_kwargs.live_transcription_update_interval,
     )
-    speech_input_handlers = [create_backend_handler(stt_backend, stt_context)]
+    stt_handler = create_backend_handler(stt_backend, stt_context)
+    if stt_backend.spec.capabilities.streams_audio_chunks:
+        vad.streaming_stt_sink = stt_handler
+    speech_input_handlers = [stt_handler]
     if needs_notifier:
         transcription_notifier = TranscriptionNotifier(
             stop_event,
@@ -486,6 +490,8 @@ def _build_pipeline_unit(
     response_playing = Event()
     cancel_scope = CancelScope()
     speculative_turns = SpeculativeTurnTracker()
+    turn_latency_store = TurnLatencyStore()
+    speculative_turns.wait_observer = turn_latency_store.record_smart_wait
     recv_audio_chunks_queue: Queue[AudioInItem] = Queue()
     send_audio_chunks_queue: Queue[AudioOutItem] = Queue()
     spoken_prompt_queue: Queue[VADOutItem] = Queue()
@@ -503,10 +509,11 @@ def _build_pipeline_unit(
         should_listen=should_listen,
         chat_size=chat_size,
         speculative_turns=speculative_turns,
+        turn_latency_store=turn_latency_store,
         default_instructions=default_instructions,
     )
 
-    if module_kwargs.enable_live_transcription:
+    if module_kwargs.enable_live_transcription and not stt_selection.spec.capabilities.streams_audio_chunks:
         vad_kw.enable_realtime_transcription = True
         vad_kw.realtime_processing_pause = module_kwargs.live_transcription_update_interval
 
@@ -532,6 +539,7 @@ def _build_pipeline_unit(
     )
     for h in handlers:
         h.pipeline_index = index
+        h.turn_latency_store = turn_latency_store
 
     return PipelineUnit(
         index=index,

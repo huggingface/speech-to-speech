@@ -48,6 +48,7 @@ _STT_HANDLER_MODULES = [
     "speech_to_speech.STT.lightning_whisper_mlx_handler",
     "speech_to_speech.STT.faster_whisper_handler",
     "speech_to_speech.STT.qwen3_asr_handler",
+    "speech_to_speech.STT.nemo_asr_handler",
 ]
 
 # These have no optional top-level dependency, so a skip here means something is wrong
@@ -59,6 +60,7 @@ _ALWAYS_IMPORTABLE = {
     "speech_to_speech.STT.qwen3_asr_handler",
     # Importable via the stub above, so a skip here would mean the stub stopped working.
     "speech_to_speech.STT.faster_whisper_handler",
+    "speech_to_speech.STT.nemo_asr_handler",
 }
 
 

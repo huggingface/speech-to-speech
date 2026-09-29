@@ -95,7 +95,8 @@ def _vad_audio(mode: str = "final", seconds: float = 2.0, revision: int = 1) -> 
         mode=mode,
         turn_id="turn_1",
         turn_revision=revision,
-        created_at_s=123.0,
+        created_at_s=124.0,
+        speech_end_at_s=123.0,
     )
 
 
@@ -222,6 +223,23 @@ def test_progressive_before_any_final_uses_auto_detection() -> None:
     list(handler.process(_vad_audio("progressive")))
 
     assert handler.processor.requests[0]["language"] is None
+
+
+@pytest.mark.parametrize("language", ["auto", "AUTO", " auto ", "", " "])
+def test_session_reset_restores_auto_detection_for_next_client(language: str) -> None:
+    processor = _FakeProcessor(language="German")
+    handler = _handler(language=language, processor=processor)
+
+    list(handler.process(_vad_audio("final")))
+    list(handler.process(_vad_audio("progressive")))
+    handler.on_session_end()
+
+    processor.language = "French"
+    list(handler.process(_vad_audio("progressive")))
+    result = list(handler.process(_vad_audio("final")))
+
+    assert [request["language"] for request in processor.requests] == [None, "de", None, None]
+    assert result[0].language_code == "fr-auto"
 
 
 def test_forced_language_is_passed_on_every_request_and_reported() -> None:

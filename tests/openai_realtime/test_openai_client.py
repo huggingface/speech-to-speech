@@ -177,6 +177,8 @@ TRANSCRIPT_DONE = "response.output_audio_transcript.done"
 FUNCTION_CALL_DONE = "response.function_call_arguments.done"
 OUTPUT_ITEM_ADDED = "response.output_item.added"
 OUTPUT_ITEM_DONE = "response.output_item.done"
+CONTENT_PART_ADDED = "response.content_part.added"
+CONTENT_PART_DONE = "response.content_part.done"
 ERROR = "error"
 
 
@@ -280,6 +282,14 @@ class TestSDKVoiceTurn:
             assert event.type == SPEECH_STOPPED
             assert event.audio_end_ms == 0
             assert event.item_id == item_id
+            committed = await _recv(conn)
+            created = await _recv(conn)
+            assert committed.type == "input_audio_buffer.committed"
+            assert created.type == "conversation.item.created"
+            assert committed.item_id == created.item.id == item_id
+            assert committed.previous_item_id is None
+            assert created.previous_item_id is None
+            assert created.item.content[0].type == "input_audio"
 
             server_env.text_output_queue.put(TranscriptionCompletedEvent(transcript="hello"))
             event = await _recv(conn)
@@ -295,6 +305,10 @@ class TestSDKVoiceTurn:
             assert event.response.object == "realtime.response"
             conversation_id = event.response.conversation_id
 
+            event = await _recv(conn)
+            assert event.type == OUTPUT_ITEM_ADDED
+            event = await _recv(conn)
+            assert event.type == CONTENT_PART_ADDED
             event = await _recv(conn)
             assert event.type == AUDIO_DELTA
             decoded = base64.b64decode(event.delta)
@@ -313,6 +327,10 @@ class TestSDKVoiceTurn:
             assert event.type == TRANSCRIPT_DONE
             assert event.transcript == "Hi there!"
 
+            event = await _recv(conn)
+            assert event.type == CONTENT_PART_DONE
+            event = await _recv(conn)
+            assert event.type == OUTPUT_ITEM_DONE
             event = await _recv(conn)
             assert event.type == RESPONSE_DONE
             assert event.response.status == "completed"
@@ -714,13 +732,21 @@ class TestPackagedAudioClient:
             await asyncio.wait_for(follow_up_created.wait(), timeout=2.0)
             assert await asyncio.to_thread(tts_started[1].wait, 1.0)
             await asyncio.wait_for(second_tool_started.wait(), timeout=1.0)
-            await wait_until(lambda: sum(event.type == OUTPUT_ITEM_DONE for event in received_events) == 2)
+            await wait_until(
+                lambda: (
+                    sum(
+                        event.type == OUTPUT_ITEM_DONE and getattr(event.item, "type", None) == "function_call"
+                        for event in received_events
+                    )
+                    == 2
+                )
+            )
 
             event_types = [event.type for event in received_events]
             assert event_types.index(FUNCTION_CALL_DONE) < event_types.index(AUDIO_DONE)
             assert event_types.index(AUDIO_DONE) < event_types.index(RESPONSE_DONE)
-            assert event_types.count(OUTPUT_ITEM_ADDED) == 2
-            assert event_types.count(OUTPUT_ITEM_DONE) == 2
+            assert event_types.count(OUTPUT_ITEM_ADDED) == 4
+            assert event_types.count(OUTPUT_ITEM_DONE) >= 2
             assert event_types.count(FUNCTION_CALL_DONE) == 2
             assert event_types.count(RESPONSE_CREATED) == 2
             assert calls == [("lookup", {"index": 7}), ("lookup", {"index": 8})]
@@ -754,12 +780,14 @@ class TestSDKBargeIn:
             server_env.output_queue.put(_pcm_bytes(256))
             event = await _recv(conn)
             assert event.type == RESPONSE_CREATED
-            await _recv(conn)  # audio delta
+            assert (await _recv(conn)).type == OUTPUT_ITEM_ADDED
+            assert (await _recv(conn)).type == CONTENT_PART_ADDED
+            assert (await _recv(conn)).type == AUDIO_DELTA
 
             server_env.text_output_queue.put(SpeechStartedEvent())
 
             events = []
-            for _ in range(3):
+            for _ in range(5):
                 events.append(await _recv(conn))
 
             types = [e.type for e in events]
@@ -781,13 +809,15 @@ class TestSDKBargeIn:
             server_env.output_queue.put(_pcm_bytes(256))
             event = await _recv(conn)
             assert event.type == RESPONSE_CREATED
-            await _recv(conn)  # audio delta
+            assert (await _recv(conn)).type == OUTPUT_ITEM_ADDED
+            assert (await _recv(conn)).type == CONTENT_PART_ADDED
+            assert (await _recv(conn)).type == AUDIO_DELTA
 
             server_env.text_output_queue.put(SpeechStartedEvent())
             server_env.text_output_queue.put(AssistantOutputEvent(text="stale response text"))
 
             events = []
-            for _ in range(3):
+            for _ in range(5):
                 events.append(await _recv(conn))
 
             types = [e.type for e in events]
@@ -822,6 +852,8 @@ class TestSDKPhantomSpeech:
             server_env.text_output_queue.put(SpeechStoppedEvent())
             event = await _recv(conn)
             assert event.type == SPEECH_STOPPED
+            assert (await _recv(conn)).type == "input_audio_buffer.committed"
+            assert (await _recv(conn)).type == "conversation.item.created"
 
             server_env.text_output_queue.put(SpeechStartedEvent())
             event = await _recv(conn)
@@ -830,15 +862,23 @@ class TestSDKPhantomSpeech:
             server_env.text_output_queue.put(SpeechStoppedEvent(duration_s=2.0))
             event = await _recv(conn)
             assert event.type == SPEECH_STOPPED
+            assert (await _recv(conn)).type == "input_audio_buffer.committed"
+            assert (await _recv(conn)).type == "conversation.item.created"
 
             server_env.output_queue.put(_pcm_bytes(256))
             event = await _recv(conn)
             assert event.type == RESPONSE_CREATED
-            await _recv(conn)  # audio delta
+            assert (await _recv(conn)).type == OUTPUT_ITEM_ADDED
+            assert (await _recv(conn)).type == CONTENT_PART_ADDED
+            assert (await _recv(conn)).type == AUDIO_DELTA
 
             server_env.output_queue.put(AUDIO_RESPONSE_DONE)
             event = await _recv(conn)
             assert event.type == AUDIO_DONE
+            event = await _recv(conn)
+            assert event.type == CONTENT_PART_DONE
+            event = await _recv(conn)
+            assert event.type == OUTPUT_ITEM_DONE
             event = await _recv(conn)
             assert event.type == RESPONSE_DONE
             assert event.response.status == "completed"
@@ -858,12 +898,14 @@ class TestSDKInterruptionState:
 
             server_env.output_queue.put(_pcm_bytes(256))
             await _recv(conn)  # response.created
-            await _recv(conn)  # audio delta
+            assert (await _recv(conn)).type == OUTPUT_ITEM_ADDED
+            assert (await _recv(conn)).type == CONTENT_PART_ADDED
+            assert (await _recv(conn)).type == AUDIO_DELTA
             assert server_env.response_playing.is_set()
 
             server_env.text_output_queue.put(SpeechStartedEvent())
             events = []
-            for _ in range(3):
+            for _ in range(5):
                 events.append(await _recv(conn))
 
             types = [e.type for e in events]
@@ -907,8 +949,22 @@ class TestSDKToolCalling:
             assert event.type == RESPONSE_CREATED
 
             event = await _recv(conn)
+            assert event.type == OUTPUT_ITEM_ADDED
+            assert event.item.type == "message"
+            event = await _recv(conn)
+            assert event.type == CONTENT_PART_ADDED
+            event = await _recv(conn)
             assert event.type == TRANSCRIPT_DELTA
             assert event.delta == "Checking weather"
+
+            # The ordered tool call closes the message item before its own item begins.
+            event = await _recv(conn)
+            assert event.type == TRANSCRIPT_DONE
+            event = await _recv(conn)
+            assert event.type == CONTENT_PART_DONE
+            event = await _recv(conn)
+            assert event.type == OUTPUT_ITEM_DONE
+            assert event.item.type == "message"
 
             event = await _recv(conn)
             assert event.type == OUTPUT_ITEM_ADDED
@@ -924,9 +980,6 @@ class TestSDKToolCalling:
             assert event.type == OUTPUT_ITEM_DONE
             assert event.item.call_id == "call_xyz"
             assert event.item.status == "completed"
-
-            event = await _recv(conn)
-            assert event.type == TRANSCRIPT_DONE
 
             event = await _recv(conn)
             assert event.type == RESPONSE_DONE
@@ -1064,7 +1117,9 @@ class TestSDKErrorHandling:
 
             server_env.output_queue.put(_pcm_bytes(256))
             await _recv(conn)  # response.created
-            await _recv(conn)  # audio delta
+            assert (await _recv(conn)).type == OUTPUT_ITEM_ADDED
+            assert (await _recv(conn)).type == CONTENT_PART_ADDED
+            assert (await _recv(conn)).type == AUDIO_DELTA
 
             await conn.send({"type": "response.create", "event_id": "client_create_1"})
             event = await _recv(conn)
@@ -1089,13 +1144,20 @@ class TestSDKResponseCancel:
 
             server_env.output_queue.put(_pcm_bytes(256))
             await _recv(conn)  # response.created
-            await _recv(conn)  # audio delta
+            assert (await _recv(conn)).type == OUTPUT_ITEM_ADDED
+            assert (await _recv(conn)).type == CONTENT_PART_ADDED
+            assert (await _recv(conn)).type == AUDIO_DELTA
 
             await conn.send({"type": "response.cancel"})
 
             event = await _recv(conn)
             assert event.type == AUDIO_DONE
 
+            event = await _recv(conn)
+            assert event.type == CONTENT_PART_DONE
+            event = await _recv(conn)
+            assert event.type == OUTPUT_ITEM_DONE
+            assert event.item.status == "incomplete"
             event = await _recv(conn)
             assert event.type == RESPONSE_DONE
             assert event.response.status == "cancelled"
@@ -1120,7 +1182,9 @@ class TestSDKMultiTurn:
             await _recv(conn)
 
             server_env.text_output_queue.put(SpeechStoppedEvent())
-            await _recv(conn)
+            assert (await _recv(conn)).type == SPEECH_STOPPED
+            assert (await _recv(conn)).type == "input_audio_buffer.committed"
+            assert (await _recv(conn)).type == "conversation.item.created"
 
             server_env.text_output_queue.put(TranscriptionCompletedEvent(transcript="hi"))
             await _recv(conn)
@@ -1128,12 +1192,14 @@ class TestSDKMultiTurn:
             server_env.output_queue.put(_pcm_bytes(128))
             t1_created = await _recv(conn)
             assert t1_created.type == RESPONSE_CREATED
-            await _recv(conn)  # audio delta
+            assert (await _recv(conn)).type == OUTPUT_ITEM_ADDED
+            assert (await _recv(conn)).type == CONTENT_PART_ADDED
+            assert (await _recv(conn)).type == AUDIO_DELTA
 
             # Barge-in
             server_env.text_output_queue.put(SpeechStartedEvent())
             events = []
-            for _ in range(3):
+            for _ in range(5):
                 events.append(await _recv(conn))
 
             t1_done = next(e for e in events if e.type == RESPONSE_DONE)
@@ -1144,7 +1210,9 @@ class TestSDKMultiTurn:
 
             # Turn 2
             server_env.text_output_queue.put(SpeechStoppedEvent())
-            await _recv(conn)
+            assert (await _recv(conn)).type == SPEECH_STOPPED
+            assert (await _recv(conn)).type == "input_audio_buffer.committed"
+            assert (await _recv(conn)).type == "conversation.item.created"
 
             server_env.text_output_queue.put(TranscriptionCompletedEvent(transcript="bye"))
             await _recv(conn)
@@ -1152,10 +1220,14 @@ class TestSDKMultiTurn:
             server_env.output_queue.put(_pcm_bytes(128))
             t2_created = await _recv(conn)
             assert t2_created.type == RESPONSE_CREATED
-            await _recv(conn)  # audio delta
+            assert (await _recv(conn)).type == OUTPUT_ITEM_ADDED
+            assert (await _recv(conn)).type == CONTENT_PART_ADDED
+            assert (await _recv(conn)).type == AUDIO_DELTA
 
             server_env.output_queue.put(PIPELINE_END)
             await _recv(conn)  # audio done
+            assert (await _recv(conn)).type == CONTENT_PART_DONE
+            assert (await _recv(conn)).type == OUTPUT_ITEM_DONE
             t2_done = await _recv(conn)
             assert t2_done.type == RESPONSE_DONE
 
