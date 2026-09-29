@@ -13,7 +13,7 @@ _PROXY_LLM_BACKENDS = ", ".join(name for name, spec in LLM_BACKENDS.items() if s
 class ModuleArguments:
     diarization: bool = field(
         default=False,
-        metadata={"help": "Enable speaker-aware conversation with the preview diarization model."},
+        metadata={"help": "Enable speaker-aware conversation with Nemotron 3 Diarization."},
     )
     diarization_model_name: Optional[str] = field(
         default=None,
@@ -30,6 +30,14 @@ class ModuleArguments:
     )
     diarization_threshold: float = field(
         default=0.5, metadata={"help": "Speaker activity probability cutoff, between 0 and 1."}
+    )
+    detect_llm_output_language: bool = field(
+        default=False,
+        metadata={
+            "help": "Detect the language of each assistant text chunk before TTS and pass that code to the TTS "
+            "backend. Sends no code for an initial chunk that is too short or ambiguous to classify. "
+            "The detector is warmed at startup. Off by default."
+        },
     )
     device: Optional[str] = field(
         default=None,

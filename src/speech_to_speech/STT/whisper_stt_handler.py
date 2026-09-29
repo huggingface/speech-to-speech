@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from time import perf_counter
 from typing import Any, Iterator, Optional
 
 import numpy as np
@@ -63,6 +64,7 @@ class WhisperSTTHandler(BaseSTTHandler):
         self.torch_dtype = getattr(torch, torch_dtype)
         self.compile_mode = compile_mode
         self.gen_kwargs = gen_kwargs
+        language = self.canonical_language(language)
         self.start_language = language
         self.last_language = language if language != "auto" else None
         if self.last_language is not None:
@@ -224,11 +226,17 @@ class WhisperSTTHandler(BaseSTTHandler):
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("infering whisper...")
+        started_at_s = perf_counter()
 
         input_features = self.prepare_model_inputs(vad_audio.audio)
-        forced_language = self._forced_language()
+        selected = vad_audio.runtime_config.selected_language if vad_audio.runtime_config else None
+        forced_language = self._forced_language() if selected is None else None if selected == "auto" else selected
 
         gen_kwargs: dict[str, Any] = dict(self.gen_kwargs)
+        if selected is not None:
+            gen_kwargs.pop("language", None)
+            if forced_language is not None:
+                gen_kwargs["language"] = forced_language
         language_code = forced_language
         if forced_language is None:
             # Auto-detect mode: ask Whisper which language this is, then force it so the
@@ -245,13 +253,14 @@ class WhisperSTTHandler(BaseSTTHandler):
         if language_code is None:
             # detect_language() was unavailable. Fall back to a prefix token if this version
             # emits one, then to the last known language, and only then to the default.
-            language_code = self._language_from_prefix(pred_ids) or self.last_language or DEFAULT_LANGUAGE
+            fallback = None if selected == "auto" else self.last_language
+            language_code = self._language_from_prefix(pred_ids) or fallback or DEFAULT_LANGUAGE
 
         # Report whatever language was actually transcribed, even if it is outside
         # SUPPORTED_LANGUAGES -- discarding a correct transcription because its language is
         # not on a downstream allowlist is the bug this handler had. Only remember supported
         # languages, so an unsupported one never becomes the sticky fallback.
-        if language_code in SUPPORTED_LANGUAGES:
+        if language_code in SUPPORTED_LANGUAGES and (selected is None or selected == "auto"):
             self.last_language = language_code
         else:
             logger.warning("Whisper detected unsupported language: %s", language_code)
@@ -262,7 +271,7 @@ class WhisperSTTHandler(BaseSTTHandler):
         console.print(f"[yellow]USER: {pred_text}")
         logger.debug(f"Language Code Whisper: {language_code}")
 
-        if self.start_language == "auto":
+        if selected == "auto" or (selected is None and self.start_language == "auto"):
             language_code += "-auto"
 
         if vad_audio.mode == "progressive":
@@ -273,10 +282,11 @@ class WhisperSTTHandler(BaseSTTHandler):
             )
             return
 
+        self._record_final_stt(vad_audio, perf_counter() - started_at_s)
         yield Transcription(
             text=pred_text,
             language_code=language_code,
             turn_id=vad_audio.turn_id,
             turn_revision=vad_audio.turn_revision,
-            speech_stopped_at_s=vad_audio.created_at_s,
+            speech_stopped_at_s=vad_audio.speech_end_at_s,
         )

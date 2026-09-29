@@ -8,7 +8,9 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+from openai.types.realtime import RealtimeSessionCreateRequest
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.backend_registry import HandlerContext, create_backend_handler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, VADAudio
@@ -89,13 +91,48 @@ def _handler(
     return handler
 
 
+def test_session_language_overrides_setup_without_mutating_handler():
+    processor = _FakeProcessor(language="Spanish", text="hola")
+    handler = _handler(language="en", processor=processor)
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(
+            type="realtime",
+            audio={"input": {"transcription": {"language": "es"}}},
+        )
+    )
+
+    outputs = list(handler.process(VADAudio(audio=np.zeros(160, dtype=np.float32), runtime_config=config)))
+
+    assert processor.requests[-1]["language"] == "es"
+    assert outputs[0].language_code == "es"
+    assert handler.forced_language == "en"
+
+
+def test_session_auto_resets_setup_language_for_qwen3_asr():
+    processor = _FakeProcessor(language="Spanish", text="hola")
+    handler = _handler(language="en", processor=processor)
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(
+            type="realtime",
+            audio={"input": {"transcription": {"language": "auto"}}},
+        )
+    )
+
+    outputs = list(handler.process(VADAudio(audio=np.zeros(160, dtype=np.float32), runtime_config=config)))
+
+    assert processor.requests[-1]["language"] is None
+    assert outputs[0].language_code == "es-auto"
+    assert handler.forced_language == "en"
+
+
 def _vad_audio(mode: str = "final", seconds: float = 2.0, revision: int = 1) -> VADAudio:
     return VADAudio(
         audio=np.zeros(int(16000 * seconds), dtype=np.float32),
         mode=mode,
         turn_id="turn_1",
         turn_revision=revision,
-        created_at_s=123.0,
+        created_at_s=124.0,
+        speech_end_at_s=123.0,
     )
 
 

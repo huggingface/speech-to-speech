@@ -53,6 +53,7 @@ from speech_to_speech.api.openai_realtime.service import (
     CHUNK_SIZE_BYTES,
     RealtimeService,
 )
+from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -71,9 +72,12 @@ from speech_to_speech.pipeline.messages import (
     AssistantTextPart,
     AssistantToolCallPart,
     GenerateResponseRequest,
+    LLMResponseChunk,
     ResponsePrefetchTransaction,
+    TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.turn_latency import TURN_LATENCY_METADATA_KEY
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -168,6 +172,67 @@ class TestConnectionLifecycle:
         assert evt.event_id.startswith("event_")
         assert evt.session is not None
         assert evt.session.instructions == "Be concise"
+
+    def test_session_language_update_and_auto_reset_are_reported(self, service, conn_id, runtime_config):
+        for requested, expected in (("es", "es"), ("Auto", "auto")):
+            update = SessionUpdateEvent.model_validate(
+                {
+                    "type": "session.update",
+                    "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": requested}}}},
+                }
+            )
+            assert service.handle_session_update(conn_id, update) is None
+            updated = service.build_session_updated(conn_id)
+            assert updated.session.audio.input.transcription.language == expected
+            assert runtime_config.selected_language == expected
+
+    def test_unsupported_session_language_is_rejected_without_changing_effective_config(
+        self, service, conn_id, runtime_config
+    ):
+        service.stt_supported_languages = {"en", "es"}
+        service.tts_supported_languages = {"en"}
+        update = SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": "es"}}}},
+            }
+        )
+
+        error = service.handle_session_update(conn_id, update)
+
+        assert isinstance(error, RealtimeErrorEvent)
+        assert "TTS" in error.error.message
+        assert runtime_config.selected_language is None
+
+    def test_parakeet_route_rejects_named_session_language(self, service, conn_id, runtime_config):
+        # Parakeet advertises no steerable STT languages to the session handler.
+        service.stt_supported_languages = set()
+        update = SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": "es"}}}},
+            }
+        )
+
+        error = service.handle_session_update(conn_id, update)
+
+        assert isinstance(error, RealtimeErrorEvent)
+        assert "STT" in error.error.message
+        assert runtime_config.selected_language is None
+
+    def test_accepted_session_language_is_sent_without_surrounding_space(self, service, conn_id, runtime_config):
+        service.stt_supported_languages = {"es"}
+        service.tts_supported_languages = {"es"}
+        update = SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": " es "}}}},
+            }
+        )
+
+        assert service.handle_session_update(conn_id, update) is None
+        assert runtime_config.selected_language == "es"
+        assert service.build_session_updated(conn_id).session.audio.input.transcription.language == "es"
 
 
 # ===================================================================
@@ -1009,12 +1074,14 @@ class TestDeferConversationItemsDuringResponse:
 class TestHandleAudioCommit:
     def test_commit_after_audio(self, service, conn_id):
         service._state(conn_id).audio_buffer_has_data = True
-        err = service.handle_audio_commit(conn_id)
+        chunks, err = service.handle_audio_commit(conn_id)
+        assert chunks == []
         assert err is None
         assert service._state(conn_id).audio_buffer_has_data is False
 
     def test_commit_empty_buffer(self, service, conn_id):
-        err = service.handle_audio_commit(conn_id)
+        chunks, err = service.handle_audio_commit(conn_id)
+        assert chunks == []
         assert isinstance(err, RealtimeErrorEvent)
         assert err.error.type == "input_audio_buffer_commit_empty"
 
@@ -1804,6 +1871,87 @@ class TestHandleResponseCreate:
         assert followup_req.turn_revision == 2
         assert followup_req.speech_stopped_at_s == 123.0
 
+    @pytest.mark.parametrize(
+        "new_input",
+        ["none", "conversation_item", "response_input"],
+    )
+    def test_response_create_uses_current_language_without_losing_speech_timing(
+        self, service, conn_id, runtime_config, text_prompt_queue, new_input
+    ):
+        def select_language(language):
+            return service.handle_session_update(
+                conn_id,
+                SessionUpdateEvent.model_validate(
+                    {
+                        "type": "session.update",
+                        "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": language}}}},
+                    }
+                ),
+            )
+
+        assert select_language("es") is None
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(
+                transcript="Hola.",
+                language_code="es",
+                turn_id="turn_1",
+                turn_revision=2,
+                speech_stopped_at_s=123.0,
+            ),
+        )
+        spoken_request = text_prompt_queue.get_nowait()
+        service.response._ensure_response(conn_id, spoken_request.response_key)
+        service.response._end_response(conn_id)
+
+        assert select_language("de") is None
+        assert service.build_session_updated(conn_id).session.audio.input.transcription.language == "de"
+        if new_input == "conversation_item":
+            created = service.handle_conversation_item_create(
+                conn_id,
+                ConversationItemCreateEvent.model_validate(
+                    {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "id": "msg_new_text",
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "Please continue."}],
+                        },
+                    }
+                ),
+            )
+            assert len(created) == 1 and isinstance(created[0], ConversationItemCreatedEvent)
+
+        create_event = ResponseCreateEvent(
+            type="response.create",
+            response={"input": [self._user_input("Please continue.")]} if new_input == "response_input" else None,
+        )
+        response = service.handle_response_create(conn_id, create_event)
+        assert isinstance(response, ResponseCreatedEvent)
+        request = text_prompt_queue.get_nowait()
+        assert request.turn_id == "turn_1"
+        assert request.turn_revision == 2
+        assert request.speech_stopped_at_s == 123.0
+
+        processor = LMOutputProcessor.__new__(LMOutputProcessor)
+        processor.setup()
+        outputs = list(
+            processor.process(
+                LLMResponseChunk(
+                    text="Here is the answer.",
+                    language_code="es",
+                    runtime_config=request.runtime_config,
+                    turn_id=request.turn_id,
+                    turn_revision=request.turn_revision,
+                    response_key=request.response_key,
+                )
+            )
+        )
+        tts_input = next(item for item in outputs if isinstance(item, TTSInput))
+        assert tts_input.selected_language == "de"
+        assert tts_input.tts_language_code == "de"
+
     def test_response_create_rejects_complex_tool_choice(self, service, conn_id, runtime_config):
         evt = ResponseCreateEvent(
             type="response.create",
@@ -2200,6 +2348,59 @@ class TestEncodeAudioChunk:
         assert isinstance(events[0], ResponseAudioDeltaEvent)
         assert events[0].content_index == 0
 
+    def test_24khz_output_resampling_is_continuous_across_chunks(self, service, conn_id):
+        service.handle_session_update(
+            conn_id,
+            SessionUpdateEvent(
+                type="session.update",
+                session={
+                    "type": "realtime",
+                    "audio": {"output": {"format": {"type": "audio/pcm", "rate": 24000}}},
+                },
+            ),
+        )
+        samples = np.round(np.sin(np.arange(4096) * 2 * np.pi * 997 / 16000) * 12000).astype("<i2")
+
+        deltas = []
+        for chunk in np.array_split(samples, 8):
+            deltas.extend(
+                event.delta
+                for event in service.encode_audio_chunk(conn_id, chunk.tobytes())
+                if isinstance(event, ResponseAudioDeltaEvent)
+            )
+        deltas.extend(
+            event.delta for event in service.finish_response(conn_id) if isinstance(event, ResponseAudioDeltaEvent)
+        )
+        chunked = b"".join(base64.b64decode(delta) for delta in deltas)
+
+        single_events = service.encode_audio_chunk(conn_id, samples.tobytes()) + service.finish_response(conn_id)
+        single = b"".join(
+            base64.b64decode(event.delta) for event in single_events if isinstance(event, ResponseAudioDeltaEvent)
+        )
+
+        assert chunked == single
+        assert len(chunked) == 4096 * 3
+
+    def test_output_resampler_is_released_when_response_finishes(self, service, conn_id):
+        service.handle_session_update(
+            conn_id,
+            SessionUpdateEvent(
+                type="session.update",
+                session={
+                    "type": "realtime",
+                    "audio": {"output": {"format": {"type": "audio/pcm", "rate": 24000}}},
+                },
+            ),
+        )
+        service.encode_audio_chunk(conn_id, _pcm_bytes(512))
+        state = service._state(conn_id)
+        assert state.output_audio_resampler is not None
+
+        service.finish_response(conn_id)
+
+        assert state.output_audio_resampler is None
+        assert state.output_audio_resampler_key is None
+
     def test_response_created_includes_metadata(self, service, conn_id):
         from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
@@ -2243,6 +2444,128 @@ class TestFinishAudioResponse:
         done = events[-1]
         assert done.response.status == "cancelled"
         assert done.response.status_details.reason == "turn_detected"
+
+    @pytest.mark.parametrize("status", ["completed", "cancelled", "failed", "incomplete"])
+    def test_terminal_response_includes_raw_turn_latency_metadata(self, service, conn_id, status):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        response_key = "response-key"
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(
+            metadata={"client-key": "client-value", TURN_LATENCY_METADATA_KEY: "client-value-must-not-win"},
+        )
+        service.response._ensure_response(conn_id, response_key)
+        tracker = service.turn_latency_store.get_or_create_response(
+            response_key,
+            turn_id="turn_3",
+            turn_revision=2,
+            session_id=conn_id,
+        )
+        tracker.record_stt(0.181284123)
+        tracker.record_llm_ttft(0.108531234)
+        tracker.record_llm(1.241907456)
+        tracker.record_tts_ttfa(0.121775789)
+        tracker.record_e2e(1.613482987)
+        tracker.record_mlx_lock_wait(0.003456789)
+
+        events = service.finish_response(conn_id, status=status, response_key=response_key)
+
+        done = next(event for event in events if isinstance(event, ResponseDoneEvent))
+        assert done.response.metadata["client-key"] == "client-value"
+        assert json.loads(done.response.metadata[TURN_LATENCY_METADATA_KEY]) == {
+            "version": 2,
+            "turn_id": "turn_3",
+            "turn_revision": 2,
+            "response_key": response_key,
+            "stt_s": 0.181284123,
+            "llm_s": 1.241907456,
+            "tts_ttfa_s": 0.121775789,
+            "e2e_s": 1.613482987,
+            "vad_decision_s": None,
+            "smart_status": None,
+            "hold_s": None,
+            "status": status,
+        }
+
+    @pytest.mark.parametrize("client_count,reserved", [(15, False), (16, False), (15, True)])
+    def test_terminal_latency_respects_metadata_capacity(self, service, conn_id, client_count, reserved):
+        metadata = {f"client-{index}": "value" for index in range(client_count)}
+        if reserved:
+            metadata[TURN_LATENCY_METADATA_KEY] = "client-value-must-not-win"
+        service._state(conn_id).speculative_user_turn_id = "turn_1"
+        created = service.handle_response_create(
+            conn_id, ResponseCreateEvent(type="response.create", response={"metadata": metadata})
+        )
+        assert created.response.metadata == metadata
+
+        events = service.finish_response(conn_id)
+        done = next(event for event in events if isinstance(event, ResponseDoneEvent))
+        wire_metadata = json.loads(done.model_dump_json())["response"]["metadata"]
+        assert len(wire_metadata) == 16
+        assert {key: value for key, value in wire_metadata.items() if key != TURN_LATENCY_METADATA_KEY} == {
+            f"client-{index}": "value" for index in range(client_count)
+        }
+        if client_count < 16:
+            assert json.loads(wire_metadata[TURN_LATENCY_METADATA_KEY])["turn_id"] == "turn_1"
+        else:
+            assert TURN_LATENCY_METADATA_KEY not in wire_metadata
+        assert created.response.metadata == metadata
+        assert service.turn_latency_store._trackers == {}
+
+    def test_expanded_latency_value_fits_realtime_limit_and_preserves_client_metadata(self, service, conn_id):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        response_key = "1234567890abcdef" * 2
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(metadata={"client": "kept"})
+        service.response._ensure_response(conn_id, response_key)
+        tracker = service.turn_latency_store.get_or_create_response(
+            response_key, turn_id="turn_123456", turn_revision=12, session_id=conn_id
+        )
+        tracker.stt_s = tracker.llm_ttft_s = tracker.llm_s = 0.12345678901234567
+        tracker.tts_ttfa_s = tracker.e2e_s = tracker.mlx_lock_wait_s = 0.12345678901234567
+        tracker.vad_decision_s = tracker.smart_turn_analysis_s = tracker.smart_turn_wait_s = 0.12345678901234567
+        tracker.smart_turn_status = "incomplete"
+        tracker.smart_turn_grace_s = 2.0
+        tracker.smart_turn_processing_delay_s = 0.6
+
+        done = service.finish_response(conn_id, response_key=response_key)[-1]
+        metadata = done.response.metadata
+        assert metadata["client"] == "kept"
+        assert len(metadata[TURN_LATENCY_METADATA_KEY]) <= 512
+        payload = json.loads(metadata[TURN_LATENCY_METADATA_KEY])
+        assert payload["hold_s"] == pytest.approx(0.12345678901234567, abs=1e-9)
+        assert payload["vad_decision_s"] == pytest.approx(0.12345678901234567, abs=1e-9)
+
+    def test_oversized_latency_value_does_not_replace_client_metadata(self, service, conn_id):
+        from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+        response_key = "response-key"
+        service._state(conn_id).current_response_params = RealtimeResponseCreateParams(metadata={"client": "kept"})
+        service.response._ensure_response(conn_id, response_key)
+        service.turn_latency_store.get_or_create_response(
+            response_key, turn_id="turn_" + "1" * 512, turn_revision=0, session_id=conn_id
+        )
+
+        done = service.finish_response(conn_id, response_key=response_key)[-1]
+        assert done.response.metadata == {"client": "kept"}
+
+    @pytest.mark.parametrize("status", ["completed", "cancelled", "failed", "incomplete"])
+    @pytest.mark.parametrize("conversation", ["auto", "none"])
+    @pytest.mark.parametrize("client_metadata", [{}, {"client-key": "client-value"}])
+    def test_unattributed_terminal_drops_client_latency_metadata(
+        self, service, conn_id, status, conversation, client_metadata
+    ):
+        metadata = {**client_metadata, TURN_LATENCY_METADATA_KEY: '{"version":1,"e2e_s":999}'}
+        created = service.handle_response_create(
+            conn_id,
+            ResponseCreateEvent(type="response.create", response={"metadata": metadata, "conversation": conversation}),
+        )
+        assert created.response.metadata == metadata
+
+        events = service.finish_response(conn_id, status=status)
+        done = next(event for event in events if isinstance(event, ResponseDoneEvent))
+        assert json.loads(done.model_dump_json())["response"]["metadata"] == (client_metadata or None)
+        assert created.response.metadata == metadata
+        assert service.turn_latency_store._trackers == {}
 
     def test_finish_resets_state(self, service, conn_id):
         from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
@@ -2869,7 +3192,7 @@ class TestDispatchPipelineEvent:
             conn_id,
             SpeechStoppedEvent(),
         )
-        assert len(events) == 1
+        assert len(events) == 3
         evt = events[0]
         assert isinstance(evt, InputAudioBufferSpeechStoppedEvent)
         assert evt.audio_end_ms == 0
@@ -2900,7 +3223,7 @@ class TestDispatchPipelineEvent:
             conn_id,
             SpeechStoppedEvent(),
         )
-        assert len(events) == 1
+        assert len(events) == 3
         assert isinstance(events[0], InputAudioBufferSpeechStoppedEvent)
         assert service._state(conn_id).input_audio_duration_s == 0.0
 
@@ -4299,11 +4622,26 @@ class TestDispatchPipelineEvent:
         )
 
         item_id = first_started[0].item_id
-        assert second_started[0].item_id == item_id
+        assert second_started == []
         assert first_reopened_partial == []
         assert second_partial[0].item_id == item_id
         assert second_partial[0].delta == "hello"
-        assert completed[0].item_id == item_id
+        # The turn is still speculative, so its user item is not published yet.
+        assert completed == []
+        committed = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(text="hi", turn_id="turn_1", turn_revision=1),
+        )
+        assert [event.type for event in committed[:4]] == [
+            "input_audio_buffer.speech_stopped",
+            "input_audio_buffer.committed",
+            "conversation.item.created",
+            "conversation.item.input_audio_transcription.completed",
+        ]
+        assert committed[0].item_id == item_id
+        assert committed[1].item_id == item_id
+        assert committed[2].item.id == item_id
+        assert committed[3].item_id == item_id
         state = service._state(conn_id)
         assert item_id not in state.input_items
         assert state.current_input_item_id is None
@@ -4580,9 +4918,11 @@ class TestIdAndStateManagement:
         st = service._state(conn_id)
         assert st.last_item_id is None
 
-        # 1) speech_started sets last_item_id via dispatch_pipeline_event
+        # 1) Only committed input updates the published conversation predecessor
         events = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
         input_id = events[0].item_id
+        assert st.last_item_id is None
+        service.dispatch_pipeline_event(conn_id, SpeechStoppedEvent())
         assert st.last_item_id == input_id
 
         # 2) assistant_text sets last_item_id via dispatch_pipeline_event

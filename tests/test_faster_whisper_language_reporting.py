@@ -25,7 +25,9 @@ import types
 
 import numpy as np
 import pytest
+from openai.types.realtime import RealtimeSessionCreateRequest
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.utils import resolve_auto_language
 from speech_to_speech.pipeline.messages import VADAudio
 
@@ -114,6 +116,34 @@ def test_pinned_language_is_reported_when_the_model_honours_it(handler_module):
 
     assert outputs[0].language_code == "de"
     assert handler.model.calls[0]["language"] == "de"
+
+
+def test_session_selection_overrides_faster_whisper_setup(handler_module):
+    handler = make_handler(handler_module, language="en", info=FakeInfo(language="es"))
+    audio = vad_audio()
+    audio.runtime_config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "es"}}})
+    )
+
+    output = list(handler.process(audio))[0]
+
+    assert handler.model.calls[0]["language"] == "es"
+    assert output.language_code == "es"
+    assert handler.start_language == "en"
+
+
+def test_session_auto_removes_faster_whisper_setup_language(handler_module):
+    handler = make_handler(handler_module, language="en", info=FakeInfo(language="es"))
+    audio = vad_audio()
+    audio.runtime_config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "auto"}}})
+    )
+
+    output = list(handler.process(audio))[0]
+
+    assert "language" not in handler.model.calls[0]
+    assert output.language_code == "es-auto"
+    assert handler.start_language == "en"
 
 
 def test_detected_language_is_reported_with_the_auto_suffix(handler_module):

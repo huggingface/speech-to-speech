@@ -32,6 +32,7 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_profile():
     assert module_args.mac_optimal_settings is False
     assert module_args.llm_backend == "responses-api"
     assert module_args.tts == "qwen3"
+    assert module_args.detect_llm_output_language is False
     assert module_args.log_level == "info"
     assert module_args.enable_live_transcription is True
     assert module_args.live_transcription_update_interval == 0.5
@@ -64,6 +65,12 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_profile():
     assert qwen3_args.qwen3_tts_gguf_codec_path is None
     assert qwen3_args.qwen3_tts_ref_cache_dir is None
     assert qwen3_args.qwen3_tts_mlx_quantization == "6bit"
+
+
+def test_parse_arguments_enables_llm_output_language_detection():
+    args = parse_arguments(["--detect_llm_output_language"])
+
+    assert args.module_kwargs.detect_llm_output_language is True
 
 
 def test_server_defaults_to_loopback():

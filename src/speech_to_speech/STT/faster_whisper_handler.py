@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from time import perf_counter
 from typing import Any, Iterator
 
 from faster_whisper import WhisperModel
@@ -73,7 +74,7 @@ class FasterWhisperSTTHandler(BaseSTTHandler):
             return None
         return language
 
-    def _resolve_language(self, info: Any) -> Any:
+    def _resolve_language(self, info: Any, request_language: Any) -> Any:
         """The language code to report, based on what was actually transcribed.
 
         faster-whisper does not always honour the requested language: an English-only
@@ -86,28 +87,36 @@ class FasterWhisperSTTHandler(BaseSTTHandler):
         detected = getattr(info, "language", None)
         if not (isinstance(detected, str) and detected):
             # Nothing reported; the request is the best information available.
-            return self.start_language
+            return request_language
 
-        if self.start_language is None:
+        if request_language is None:
             probability = getattr(info, "language_probability", None)
             if isinstance(probability, float):
                 logger.debug("Faster Whisper detected language %s (p=%.2f)", detected, probability)
             return f"{detected}-auto"
 
-        if detected != self.start_language:
+        if detected != request_language:
             logger.warning(
                 "Faster Whisper transcribed in %s despite the requested %s; reporting %s. "
                 "An English-only checkpoint such as tiny.en always resolves to English.",
                 detected,
-                self.start_language,
+                request_language,
                 detected,
             )
         return detected
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("infering faster whisper...")
+        started_at_s = perf_counter()
 
-        segments, info = self.model.transcribe(vad_audio.audio, **self.gen_kwargs)
+        selected = vad_audio.runtime_config.selected_language if vad_audio.runtime_config else None
+        request_language = self.start_language if selected is None else None if selected == "auto" else selected
+        gen_kwargs = dict(self.gen_kwargs)
+        if selected is not None:
+            gen_kwargs.pop("language", None)
+            if request_language is not None:
+                gen_kwargs["language"] = request_language
+        segments, info = self.model.transcribe(vad_audio.audio, **gen_kwargs)
         output_text = []
 
         for segment in segments:
@@ -128,12 +137,13 @@ class FasterWhisperSTTHandler(BaseSTTHandler):
                 )
                 return
 
+            self._record_final_stt(vad_audio, perf_counter() - started_at_s)
             yield Transcription(
                 text=pred_text,
-                language_code=self._resolve_language(info),
+                language_code=self._resolve_language(info, request_language),
                 turn_id=vad_audio.turn_id,
                 turn_revision=vad_audio.turn_revision,
-                speech_stopped_at_s=vad_audio.created_at_s,
+                speech_stopped_at_s=vad_audio.speech_end_at_s,
             )
         else:
             logger.debug("no text detected. skipping...")

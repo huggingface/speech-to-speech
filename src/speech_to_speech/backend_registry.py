@@ -81,6 +81,7 @@ class HandlerContext:
     sample_rate: int
     enable_live_transcription: bool
     live_transcription_update_interval: float
+    detect_llm_output_language: bool = False
 
 
 HandlerFactory = Callable[[HandlerContext, Mapping[str, Any]], Any]
@@ -219,6 +220,7 @@ def _simple_handler_factory(
     setup_should_listen: bool = False,
     attach_speculative_turns: bool = False,
     context_kwargs: bool = False,
+    pass_assistant_language_flag: bool = False,
 ) -> HandlerFactory:
     def create(context: HandlerContext, config: Mapping[str, Any]) -> Any:
         handler_class = _load_handler(module_name, class_name)
@@ -228,6 +230,8 @@ def _simple_handler_factory(
                 cancel_scope=context.cancel_scope,
                 speculative_turns=context.speculative_turns,
             )
+        if pass_assistant_language_flag:
+            setup_kwargs["detect_llm_output_language"] = context.detect_llm_output_language
         handler = handler_class(
             context.stop_event,
             queue_in=context.queue_in,
@@ -287,6 +291,7 @@ def _create_openai_tts(context: HandlerContext, config: Mapping[str, Any]) -> An
             **config,
             "cancel_scope": context.cancel_scope,
             "speculative_turns": context.speculative_turns,
+            "detect_llm_output_language": context.detect_llm_output_language,
         },
     )
 
@@ -581,6 +586,7 @@ TTS_BACKENDS = build_backend_registry(
                 "Qwen3TTSHandler",
                 setup_should_listen=True,
                 context_kwargs=True,
+                pass_assistant_language_flag=True,
             ),
             config_prefix="qwen3_tts",
         ),

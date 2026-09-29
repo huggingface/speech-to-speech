@@ -122,7 +122,7 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
             speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
-        language_code = tts_input.language_code
+        language_code = tts_input.tts_language_code
         text = tts_input.text
         logger.debug(f"Received language code: {language_code}")
 

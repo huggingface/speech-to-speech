@@ -2,20 +2,28 @@ from __future__ import annotations
 
 import base64
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from openai.types.realtime import (
+    ConversationItemInputAudioTranscriptionFailedEvent,
     InputAudioBufferAppendEvent,
+    InputAudioBufferCommittedEvent,
     InputAudioBufferSpeechStartedEvent,
     InputAudioBufferSpeechStoppedEvent,
+    RealtimeConversationItemUserMessage,
     RealtimeErrorEvent,
     ResponseAudioDeltaEvent,
     ResponseCreatedEvent,
 )
+from openai.types.realtime.realtime_conversation_item_user_message import Content
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
-from speech_to_speech.api.openai_realtime.input_state import InputItemState
-from speech_to_speech.api.openai_realtime.utils import resample
+from speech_to_speech.api.openai_realtime.input_state import (
+    InputItemState,
+    InputTranscriptionTerminal,
+    PendingInputTerminal,
+)
+from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler
 from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
 
 if TYPE_CHECKING:
@@ -85,11 +93,11 @@ class AudioHandler(RealtimeBaseHandler):
         turn_id: str | None,
         turn_revision: int | None,
     ) -> None:
-        """Drop routing state for a direct-audio item without publishing a transcription terminal."""
+        """Close a direct-audio item without publishing a transcription terminal."""
         item_id = self._input_item_id(conn_id, turn_id, turn_revision)
         if item_id is None:
             return
-        self._release_input_item_state_by_id(conn_id, item_id)
+        self.hold_input_terminal(conn_id, item_id, turn_id, turn_revision)
 
     def _release_input_item_state_by_id(self, conn_id: str, item_id: str) -> None:
         st = self._state(conn_id)
@@ -101,6 +109,140 @@ class AudioHandler(RealtimeBaseHandler):
         st.input_items.pop(item_id, None)
         if st.current_input_item_id == item_id:
             st.current_input_item_id = None
+
+    # ── Committed input-item lifecycle ─────────────
+
+    def _pending_terminal(
+        self,
+        conn_id: str,
+        item_id: str,
+        turn_id: str | None,
+        turn_revision: int | None,
+    ) -> PendingInputTerminal:
+        """Return the held lifecycle for an item, moved to its latest revision."""
+        st = self._state(conn_id)
+        pending = st.pending_input_terminals.get(item_id)
+        if pending is None:
+            pending = PendingInputTerminal()
+            st.pending_input_terminals[item_id] = pending
+        pending.turn_id = turn_id
+        pending.turn_revision = turn_revision
+        return pending
+
+    def hold_input_terminal(
+        self,
+        conn_id: str,
+        item_id: str,
+        turn_id: str | None,
+        turn_revision: int | None,
+        terminal: InputTranscriptionTerminal | None = None,
+    ) -> None:
+        """Close one input item, holding its terminal until the turn commits."""
+        pending = self._pending_terminal(conn_id, item_id, turn_id, turn_revision)
+        if terminal is not None:
+            pending.transcription = terminal
+        pending.input_closed = True
+
+    def resolve_input_terminals(
+        self,
+        conn_id: str,
+        *,
+        started_turn_id: str | None = None,
+    ) -> list[ServerEvent]:
+        """Publish or discard held input lifecycle events for settled turns.
+
+        ``started_turn_id`` names the turn whose speech is beginning. Every
+        other turn's held events describe a user item the pipeline can no
+        longer revise, so they are published before the new turn opens.
+        """
+        st = self._state(conn_id)
+        events: list[ServerEvent] = []
+        for item_id, pending in list(st.pending_input_terminals.items()):
+            disposition = self._input_terminal_disposition(conn_id, pending, started_turn_id)
+            if disposition == "hold":
+                continue
+            if disposition == "publish":
+                events.extend(self._publish_input_terminal(conn_id, item_id, pending))
+                continue
+            logger.debug(
+                "Discarding superseded input lifecycle for item=%s turn=%s rev=%s",
+                item_id,
+                pending.turn_id,
+                pending.turn_revision,
+            )
+            st.pending_input_terminals.pop(item_id, None)
+        return events
+
+    def _input_terminal_disposition(
+        self,
+        conn_id: str,
+        pending: PendingInputTerminal,
+        started_turn_id: str | None,
+    ) -> Literal["publish", "hold", "discard"]:
+        turns = self._service.speculative_turns
+        if turns is None or pending.turn_id is None:
+            return "publish"
+        if not turns.is_latest(pending.turn_id, pending.turn_revision):
+            # A later revision replaced this one. The client never learned that
+            # the item stopped, so nothing has to be retracted.
+            return "discard"
+        if started_turn_id is not None and pending.turn_id != started_turn_id:
+            return "publish"
+        st = self._state(conn_id)
+        unanswered = pending.input_closed and not (st.in_response or st.response_pending)
+        if unanswered or isinstance(pending.transcription, ConversationItemInputAudioTranscriptionFailedEvent):
+            # No output will commit this turn: its transcription failed, was
+            # empty, or its response ended without output. The item cannot
+            # reopen once published, so commit after the same reopen gate
+            # used for accepted output.
+            committed = turns.try_commit_if_latest_after_reopen_grace(pending.turn_id, pending.turn_revision)
+            if committed is None:
+                return "hold"
+            return "publish" if committed else "discard"
+        if turns.is_committed(pending.turn_id, pending.turn_revision):
+            return "publish"
+        return "hold"
+
+    def _publish_input_terminal(
+        self,
+        conn_id: str,
+        item_id: str,
+        pending: PendingInputTerminal,
+    ) -> list[ServerEvent]:
+        """Emit one item's held events, releasing it once the input is closed."""
+        st = self._state(conn_id)
+        events: list[ServerEvent] = []
+        if pending.speech_stopped is not None:
+            events.append(pending.speech_stopped)
+            pending.speech_stopped = None
+            events.append(
+                InputAudioBufferCommittedEvent(
+                    type="input_audio_buffer.committed",
+                    event_id=self._next_event_id(),
+                    item_id=item_id,
+                    previous_item_id=st.last_item_id,
+                )
+            )
+            events.append(
+                self._service.conversation._ack_item(
+                    conn_id,
+                    RealtimeConversationItemUserMessage(
+                        id=item_id,
+                        object="realtime.item",
+                        type="message",
+                        role="user",
+                        status="completed",
+                        content=[Content(type="input_audio")],
+                    ),
+                )
+            )
+        if pending.transcription is not None:
+            events.append(pending.transcription)
+            pending.transcription = None
+        if pending.input_closed:
+            st.pending_input_terminals.pop(item_id, None)
+            self._release_input_item_state_by_id(conn_id, item_id)
+        return events
 
     def handle_audio_append(self, conn_id: str, event: InputAudioBufferAppendEvent) -> list[bytes]:
         """Decode base64 audio, resample to pipeline rate, and split into 512-sample PCM16 chunks for the VAD."""
@@ -129,7 +271,13 @@ class AudioHandler(RealtimeBaseHandler):
         one place regardless of how audio arrives.
         """
         st = self._state(conn_id)
-        pcm_bytes = resample(pcm_bytes, src_rate, PIPELINE_SAMPLE_RATE)
+        if src_rate != PIPELINE_SAMPLE_RATE:
+            # The filter state carries over between appends, so chunk boundaries
+            # leave no trace in the audio the VAD and the STT receive.
+            if st.input_audio_resampler_rate != src_rate:
+                st.input_audio_resampler = StreamingPcm16Resampler(src_rate, PIPELINE_SAMPLE_RATE)
+                st.input_audio_resampler_rate = src_rate
+            pcm_bytes = st.input_audio_resampler.push(pcm_bytes)
 
         pcm_bytes = st.audio_remainder + pcm_bytes
 
@@ -148,25 +296,42 @@ class AudioHandler(RealtimeBaseHandler):
             st.audio_buffer_has_data = True
         return chunks
 
-    def handle_audio_commit(self, conn_id: str) -> RealtimeErrorEvent | None:
-        """Commit the audio buffer. Returns an error if no audio was appended."""
+    def handle_audio_commit(self, conn_id: str) -> tuple[list[bytes], RealtimeErrorEvent | None]:
+        """Finish resampling before committing the buffered input audio."""
         st = self._state(conn_id)
-        if not st.audio_buffer_has_data:
-            return self.make_error(
+        resampler = st.input_audio_resampler
+        pending_samples = resampler.pending_output_samples if resampler is not None else 0
+        if (
+            not st.audio_buffer_has_data
+            and len(st.audio_remainder) + pending_samples * BYTES_PER_SAMPLE < CHUNK_SIZE_BYTES
+        ):
+            return [], self.make_error(
                 message="Input audio buffer is empty, nothing to commit.",
                 _type="input_audio_buffer_commit_empty",
             )
+
+        chunks = self.append_pcm(conn_id, resampler.flush(), PIPELINE_SAMPLE_RATE) if resampler is not None else []
+        if not st.audio_buffer_has_data:
+            return chunks, self.make_error(
+                message="Input audio buffer is empty, nothing to commit.",
+                _type="input_audio_buffer_commit_empty",
+            )
+        st.input_audio_resampler = None
+        st.input_audio_resampler_rate = None
         st.audio_buffer_has_data = False
         logger.debug("Audio buffer committed")
-        return None
+        return chunks, None
 
     # ── Pipeline event handlers ────────────────────
 
     def on_speech_started(self, conn_id: str, event: SpeechStartedEvent) -> list[ServerEvent]:
-        """Handle VAD speech_started: cancel active response if interrupts enabled, start new input item."""
+        """Handle VAD speech_started: publish the settled turn, cancel an active
+        response if interrupts are enabled, and start or reopen an input item."""
         response = self._service.response
-        events: list[ServerEvent] = []
         st = self._state(conn_id)
+        # A turn other than the one now starting can no longer be revised, so
+        # its user item becomes permanent before the new turn opens.
+        events: list[ServerEvent] = self.resolve_input_terminals(conn_id, started_turn_id=event.turn_id)
         interrupt_enabled = event.interrupt_response and st.runtime_config.interrupt_response_enabled
         if st.in_response and interrupt_enabled:
             events.extend(response.finish_response(conn_id, status="cancelled", reason="turn_detected"))
@@ -202,7 +367,11 @@ class AudioHandler(RealtimeBaseHandler):
             st.response_usage.turns += 1
         st.speculative_turn_id = event.turn_id
         st.speculative_turn_revision = event.turn_revision
-        st.last_item_id = input_item_id
+        # A reopened revision is still the same externally open speech item.
+        # Keep cancellation and revision bookkeeping above, but do not reset
+        # a generic client's audio onset with another speech_started event.
+        if previous_input_item is not None:
+            return events
         events.append(
             InputAudioBufferSpeechStartedEvent(
                 type="input_audio_buffer.speech_started",
@@ -214,7 +383,13 @@ class AudioHandler(RealtimeBaseHandler):
         return events
 
     def on_speech_stopped(self, conn_id: str, event: SpeechStoppedEvent) -> list[ServerEvent]:
-        """Handle VAD speech_stopped: record duration and emit stopped event."""
+        """Handle VAD speech_stopped: record duration and hold the stop candidate.
+
+        A speculative pause is not yet the end of the user's turn: speech can
+        resume and keep the same item open. The protocol event therefore waits
+        until the turn commits, so the client sees exactly one stop per item
+        and it is the one that precedes the item's transcription.
+        """
         st = self._state(conn_id)
         item_id = self._input_item_id(conn_id, event.turn_id, event.turn_revision)
         if item_id is None:
@@ -229,14 +404,14 @@ class AudioHandler(RealtimeBaseHandler):
             input_item = st.input_items.get(item_id)
             if input_item is not None:
                 input_item.audio_duration_s = event.duration_s
-        return [
-            InputAudioBufferSpeechStoppedEvent(
-                type="input_audio_buffer.speech_stopped",
-                event_id=self._next_event_id(),
-                audio_end_ms=event.audio_end_ms,
-                item_id=item_id,
-            )
-        ]
+        pending = self._pending_terminal(conn_id, item_id, event.turn_id, event.turn_revision)
+        pending.speech_stopped = InputAudioBufferSpeechStoppedEvent(
+            type="input_audio_buffer.speech_stopped",
+            event_id=self._next_event_id(),
+            audio_end_ms=event.audio_end_ms,
+            item_id=item_id,
+        )
+        return self.resolve_input_terminals(conn_id)
 
     # ── Outbound audio encoding ──────────────────
 
@@ -261,7 +436,9 @@ class AudioHandler(RealtimeBaseHandler):
         response = self._service.response
         st = self._state(conn_id)
 
-        events: list[ServerEvent] = []
+        # Accepted assistant audio commits the turn it answers, so the user
+        # item it replies to must reach the client first.
+        events: list[ServerEvent] = self.resolve_input_terminals(conn_id)
         need_created = st.current_response_id is None
         resp_id, item_id = response._ensure_response(conn_id, response_key)
         if need_created:
@@ -316,7 +493,17 @@ class AudioHandler(RealtimeBaseHandler):
                 client_out_rate = getattr(audio_cfg.output.format, "rate", None) or PIPELINE_SAMPLE_RATE
             else:
                 client_out_rate = PIPELINE_SAMPLE_RATE
-        audio = resample(audio, PIPELINE_SAMPLE_RATE, client_out_rate)
+        if client_out_rate != PIPELINE_SAMPLE_RATE:
+            resampler_key = (resp_id, assistant_item_id, client_out_rate)
+            if st.output_audio_resampler_key != resampler_key:
+                st.output_audio_resampler = StreamingPcm16Resampler(PIPELINE_SAMPLE_RATE, client_out_rate)
+                st.output_audio_resampler_key = resampler_key
+            audio = st.output_audio_resampler.push(audio)
+        else:
+            st.output_audio_resampler = None
+            st.output_audio_resampler_key = None
+        if not audio:
+            return events
         b64 = base64.b64encode(audio).decode("ascii")
         events.append(
             ResponseAudioDeltaEvent(

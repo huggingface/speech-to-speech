@@ -39,6 +39,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception
+from speech_to_speech.pipeline.turn_latency import active_turn_latency_tracker, bind_active_turn_latency_tracker
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         gen_kwargs: dict[str, Any] | None = None,
         cancel_scope: CancelScope | None = None,
         speculative_turns: SpeculativeTurnTracker | None = None,
+        detect_llm_output_language: bool = False,
     ) -> None:
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
@@ -143,6 +145,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.ref_rvq = self._normalize_optional_path(ref_rvq)
         self.ref_text = ref_text
         self.language = self._normalize_language(language)
+        self.detect_llm_output_language = detect_llm_output_language
         self.speaker = speaker
         self.instruct = instruct
         self.xvec_only = xvec_only
@@ -399,6 +402,16 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         if not normalized:
             return "auto"
         return QWEN3_LANGUAGE_ALIASES.get(normalized, normalized)
+
+    def _language_for_utterance(self, language_code: str | None, selected_language: str | None = None) -> str:
+        if selected_language not in (None, "auto"):
+            return self._normalize_language(selected_language)
+        configured = "auto" if selected_language == "auto" else self.language
+        detect = selected_language == "auto" or getattr(self, "detect_llm_output_language", False)
+        if configured != "auto" or not detect or not language_code:
+            return configured
+        detected = self._normalize_language(language_code)
+        return detected if detected in QWEN3_LANGUAGE_ALIASES.values() else "auto"
 
     def _infer_model_type_from_name(self) -> str:
         gguf_talker_path = getattr(self, "gguf_talker_path", None)
@@ -712,7 +725,11 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 continue
 
             if first_chunk:
-                logger.info(f"Qwen3-TTS TTFA: {perf_counter() - start:.2f}s ({label})")
+                ttfa_s = perf_counter() - start
+                logger.info(f"Qwen3-TTS TTFA: {ttfa_s:.2f}s ({label})")
+                tracker = active_turn_latency_tracker()
+                if tracker is not None:
+                    tracker.record_tts_ttfa(ttfa_s)
                 first_chunk = False
 
             audio_chunk = self._resample_to_pipeline_sr(audio_chunk, sr)
@@ -752,10 +769,10 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
     def _coalesce_pending_tts_input(self, current_input: TTSInput) -> tuple[str, Optional[str]]:
         """Combine already-queued text chunks before the next TTS synthesis call."""
         if not hasattr(self.queue_in, "mutex") or not hasattr(self.queue_in, "queue"):
-            return current_input.text, current_input.language_code
+            return current_input.text, current_input.tts_language_code
 
         text = current_input.text
-        language_code = current_input.language_code
+        language_code = current_input.tts_language_code
 
         parts = [text.strip()] if text and text.strip() else []
         text_events: list[AssistantOutputEvent] = []
@@ -790,8 +807,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                     break
                 if (
                     language_code is not None
-                    and next_item.language_code is not None
-                    and next_item.language_code != language_code
+                    and next_item.tts_language_code is not None
+                    and next_item.tts_language_code != language_code
                 ):
                     break
 
@@ -799,7 +816,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 if next_item.text.strip():
                     parts.append(next_item.text.strip())
                 if language_code is None:
-                    language_code = next_item.language_code
+                    language_code = next_item.tts_language_code
 
         # These events preceded the inputs absorbed above. Forward them before
         # synthesis so protocol ordering remains text -> audio while Qwen still
@@ -835,33 +852,39 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         runtime_config = tts_input.runtime_config
         response = tts_input.response
 
-        coalesced_text, _language_code = self._coalesce_pending_tts_input(tts_input)
+        coalesced_text, language_code = self._coalesce_pending_tts_input(tts_input)
 
         text = coalesced_text or "Hello."
 
         model_type = self._model_type()
         self._apply_session_voice_override(model_type, runtime_config, response)
 
+        request_language = self._language_for_utterance(language_code, tts_input.selected_language)
+
         console.print(f"[green]ASSISTANT: {text}")
 
+        logger.info("Qwen3-TTS language=%s (input_code=%s)", request_language, language_code)
+        store = getattr(self, "turn_latency_store", None)
+        tracker = store.get_response(tts_input.response_key) if store else None
         try:
-            if self._has_voice_clone_reference():
-                audio_iter = self._process_voice_clone(text)
-            elif model_type == "custom_voice":
-                audio_iter = self._process_custom_voice(text)
-            elif model_type == "voice_design":
-                audio_iter = self._process_voice_design(text)
-            else:
-                raise ValueError(
-                    "Qwen3-TTS Base model requires a voice-clone reference. "
-                    "Provide qwen3_tts_ref_audio or qwen3_tts_ref_spk, or use a CustomVoice/VoiceDesign model."
-                )
-            first_audio = True
-            for audio_chunk in audio_iter:
-                if first_audio:
-                    self._log_first_audio_latency(tts_input)
-                    first_audio = False
-                yield audio_chunk
+            with bind_active_turn_latency_tracker(tracker):
+                if self._has_voice_clone_reference():
+                    audio_iter = self._process_voice_clone(text, request_language)
+                elif model_type == "custom_voice":
+                    audio_iter = self._process_custom_voice(text, request_language)
+                elif model_type == "voice_design":
+                    audio_iter = self._process_voice_design(text, request_language)
+                else:
+                    raise ValueError(
+                        "Qwen3-TTS Base model requires a voice-clone reference. "
+                        "Provide qwen3_tts_ref_audio or qwen3_tts_ref_spk, or use a CustomVoice/VoiceDesign model."
+                    )
+                first_audio = True
+                for audio_chunk in audio_iter:
+                    if first_audio:
+                        self._log_first_audio_latency(tts_input)
+                        first_audio = False
+                    yield audio_chunk
         except Exception as exc:
             log_exception(logger, "Error during Qwen3-TTS generation", exc)
 
@@ -871,6 +894,9 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         latency_s = perf_counter() - tts_input.speech_stopped_at_s
         if latency_s < 0:
             return
+        tracker = active_turn_latency_tracker()
+        if tracker is not None:
+            tracker.record_e2e(latency_s)
         logger.info(
             "Last speech detected to first speech out: %.3fs (turn=%s rev=%s)",
             latency_s,
@@ -908,7 +934,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 label=label,
             )
 
-    def _process_voice_clone(self, text: str) -> Iterator[bytes | np.ndarray]:
+    def _process_voice_clone(self, text: str, language: str | None = None) -> Iterator[bytes | np.ndarray]:
+        language = language or self.language
         utterance_max_new_tokens = self._estimate_max_new_tokens(text)
         if self.backend == "mlx":
             if self.xvec_only:
@@ -923,14 +950,14 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 text=text,
                 ref_audio=self._prepare_mlx_ref_audio(self.ref_audio),
                 ref_text=self.ref_text,
-                lang_code=self.language,
+                lang_code=language,
             )
             return
 
         yield from self._stream(
             self.model.generate_voice_clone_streaming(
                 text=text,
-                language=self.language,
+                language=language,
                 ref_audio=self.ref_audio,
                 ref_spk=getattr(self, "ref_spk", None),
                 ref_rvq=getattr(self, "ref_rvq", None),
@@ -944,7 +971,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             label="voice_clone_parity" if self.parity_mode else "voice_clone",
         )
 
-    def _process_custom_voice(self, text: str) -> Iterator[bytes | np.ndarray]:
+    def _process_custom_voice(self, text: str, language: str | None = None) -> Iterator[bytes | np.ndarray]:
+        language = language or self.language
         utterance_max_new_tokens = self._estimate_max_new_tokens(text)
         speaker = self._resolve_speaker()
         if not speaker:
@@ -960,7 +988,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 max_tokens=utterance_max_new_tokens,
                 text=text,
                 speaker=speaker,
-                language=self.language,
+                language=language,
                 instruct=self.instruct,
             )
             return
@@ -969,7 +997,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             self.model.generate_custom_voice_streaming(
                 text=text,
                 speaker=speaker,
-                language=self.language,
+                language=language,
                 instruct=self.instruct,
                 chunk_size=self.streaming_chunk_size,
                 max_new_tokens=utterance_max_new_tokens,
@@ -978,7 +1006,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             label="custom_voice",
         )
 
-    def _process_voice_design(self, text: str) -> Iterator[bytes | np.ndarray]:
+    def _process_voice_design(self, text: str, language: str | None = None) -> Iterator[bytes | np.ndarray]:
+        language = language or self.language
         utterance_max_new_tokens = self._estimate_max_new_tokens(text)
         if self.backend == "mlx":
             yield from self._stream_mlx_generation(
@@ -987,7 +1016,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 max_tokens=utterance_max_new_tokens,
                 text=text,
                 instruct=self.instruct,
-                language=self.language,
+                language=language,
             )
             return
 
@@ -995,7 +1024,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             self.model.generate_voice_design_streaming(
                 text=text,
                 instruct=self.instruct,
-                language=self.language,
+                language=language,
                 chunk_size=self.streaming_chunk_size,
                 max_new_tokens=utterance_max_new_tokens,
                 non_streaming_mode=self.non_streaming_mode,

@@ -212,6 +212,7 @@ class _TranscriptionRequest:
     session_generation: int
     operation: HttpTranscriptionOperation | None = None
     cancelled: bool = False
+    elapsed_s: float | None = None
 
 
 class OpenAICompatibleSTTHandler(BaseSTTHandler):
@@ -367,7 +368,15 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         try:
             if not self._request_is_current(request):
                 return
-            operation = self._make_operation(source.audio)
+            selected = source.runtime_config.selected_language if source.runtime_config else None
+            if selected is None:
+                operation = self._make_operation(source.audio)
+            else:
+                operation = self._make_operation(
+                    source.audio,
+                    language=None if selected == "auto" else selected,
+                    use_setup_language=False,
+                )
             with self._request_lock:
                 request.operation = operation
                 if not self._request_is_current(request):
@@ -390,10 +399,11 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
                 language_code=result.language,
                 turn_id=source.turn_id,
                 turn_revision=source.turn_revision,
-                speech_stopped_at_s=source.created_at_s,
+                speech_stopped_at_s=source.speech_end_at_s,
             )
+        elapsed = perf_counter() - started_at_s
+        request.elapsed_s = elapsed
         if self._publish_output(request, output):
-            elapsed = perf_counter() - started_at_s
             self._times.append(elapsed)
             logger.info(
                 "OpenAI-compatible STT request completed turn=%s rev=%s mode=%s in %.3fs",
@@ -427,7 +437,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
                 message=message,
                 turn_id=source.turn_id,
                 turn_revision=source.turn_revision,
-                speech_stopped_at_s=source.created_at_s,
+                speech_stopped_at_s=source.speech_end_at_s,
             ),
         )
 
@@ -439,6 +449,11 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             if not self._request_is_current(request):
                 return False
             self.before_emit_output(output)
+            if isinstance(output, Transcription) and request.elapsed_s is not None:
+                store = getattr(self, "turn_latency_store", None)
+                tracker = store.get_or_create_for_turn(output.turn_id, output.turn_revision) if store else None
+                if tracker is not None:
+                    tracker.record_stt(request.elapsed_s)
             self.queue_out.put(self.output_for_queue(output, request.source))
             return True
 
@@ -482,16 +497,26 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             if worker is not None and worker is not current_thread():
                 worker.join(timeout=2)
 
-    def _make_operation(self, audio: np.ndarray) -> HttpTranscriptionOperation:
+    def _make_operation(
+        self,
+        audio: np.ndarray,
+        *,
+        language: str | None = None,
+        use_setup_language: bool = True,
+    ) -> HttpTranscriptionOperation:
+        extra_fields = self.gen_kwargs.copy()
+        if not use_setup_language:
+            extra_fields.pop("language", None)
+            extra_fields.pop("languages[]", None)
         return HttpTranscriptionOperation(
             endpoint_url=self.endpoint_url,
             api_key=self.api_key,
             model=self.model,
             wav_bytes=self._encode_wav(audio),
-            language=self.language,
+            language=self.language if use_setup_language else language,
             response_format=self.response_format,
             timeout_s=self.timeout,
-            extra_fields=self.gen_kwargs,
+            extra_fields=extra_fields,
         )
 
     @staticmethod
