@@ -42,7 +42,7 @@ are added only to terminal responses.
 
 | Stage | Backends with a measured field | Backends with `n/a` pending coverage |
 | --- | --- | --- |
-| `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime`, `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper` | `parakeet-unified`, `paraformer`, `qwen3-asr` |
+| `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime`, `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper`, `qwen3-asr` | `parakeet-unified`, `paraformer` |
 | `llm` | `transformers`, `mlx-lm`, `responses-api`, `chat-completions` | None of the built-in LLM backends |
 | `tts_ttfa`, `e2e` | `qwen3`, `openai` | `chatTTS`, `facebookMMS`, `omnivoice`, `pocket`, `kokoro`, `supertonic` |
 
