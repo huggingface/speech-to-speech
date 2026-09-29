@@ -376,6 +376,20 @@ def test_openai_tts_backend_constructs_through_registry(monkeypatch):
     assert isinstance(tts, OpenAICompatibleTTSHandler)
 
 
+def test_openai_tts_factory_receives_assistant_language_opt_in(monkeypatch):
+    captured = {}
+
+    class FakeHandler:
+        def __init__(self, *_args, setup_kwargs, **_kwargs):
+            captured.update(setup_kwargs)
+
+    monkeypatch.setattr("speech_to_speech.backend_registry._load_handler", lambda *_args: FakeHandler)
+    context = replace(_context(), detect_llm_output_language=True)
+    create_backend_handler(parse_arguments(["--tts", "openai"]).tts_backend, context)
+
+    assert captured["detect_llm_output_language"] is True
+
+
 def test_qwen3_tts_factory_receives_assistant_language_opt_in(monkeypatch):
     captured = {}
 

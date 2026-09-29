@@ -209,6 +209,7 @@ class TTSInput(PipelineMessage):
     language_code: Optional[str] = None
     selected_language: str | None = Field(default=None, exclude=True)
     tts_language_code: str | None = Field(default=None, exclude=True)
+    response_assistant_language_code: str | None = Field(default=None, exclude=True)
     runtime_config: RuntimeConfig | None = None
     response: RealtimeResponseCreateParams | None = None
     turn_id: str | None = None

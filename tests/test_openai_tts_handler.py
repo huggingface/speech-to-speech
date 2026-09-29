@@ -17,6 +17,7 @@ from scipy.io import wavfile
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
+from speech_to_speech.pipeline import language_detection
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END
 from speech_to_speech.pipeline.events import ResponseFailedEvent
@@ -193,6 +194,113 @@ def test_openai_tts_does_not_infer_language_from_pipeline(monkeypatch):
 
     payload = _FakeSpeechOperation.instances[0].payload
     assert "language" not in payload
+
+
+def test_openai_tts_auto_setup_stays_auto_without_assistant_detection(monkeypatch):
+    handler = _openai_tts_handler(monkeypatch)
+    handler.language = "Auto"
+
+    assert list(handler.process(TTSInput(text="Hello", language_code="en")))
+
+    assert _FakeSpeechOperation.instances[0].payload["language"] == "Auto"
+
+
+@pytest.mark.parametrize(
+    ("session_language", "setup_language", "expected_language"),
+    [
+        (None, "Auto", "English"),
+        ("auto", "Auto", "English"),
+        ("es", "Auto", "Spanish"),
+        (None, "French", "French"),
+    ],
+)
+def test_detected_assistant_language_reaches_openai_tts_payload(
+    monkeypatch, session_language, setup_language, expected_language
+):
+    monkeypatch.setattr(language_detection, "warm_language_detector", lambda: object())
+    monkeypatch.setattr(language_detection, "detect_language_from_text", lambda *args, **kwargs: "en")
+    handler = _openai_tts_handler(monkeypatch)
+    handler.language = setup_language
+    handler.detect_llm_output_language = True
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup(detect_llm_output_language=True)
+    session = RealtimeSessionCreateRequest(type="realtime")
+    if session_language is not None:
+        session = RealtimeSessionCreateRequest(
+            type="realtime", audio={"input": {"transcription": {"language": session_language}}}
+        )
+    config = RuntimeConfig(session=session)
+
+    outputs = list(
+        processor.process(
+            LLMResponseChunk(
+                text="I can help you find the nearest train station.",
+                language_code="es",  # STT language must not override the assistant's English.
+                runtime_config=config,
+            )
+        )
+    )
+    list(handler.process(next(item for item in outputs if isinstance(item, TTSInput))))
+
+    assert _FakeSpeechOperation.instances[0].payload["language"] == expected_language
+
+
+def test_omitted_language_keeps_auto_for_short_first_batch_and_prior_assistant_fallback(monkeypatch):
+    monkeypatch.setattr(language_detection, "warm_language_detector", lambda: object())
+    monkeypatch.setattr(
+        language_detection,
+        "detect_language_from_text",
+        lambda text, *args, **kwargs: "en" if "nearest train station" in text else None,
+    )
+    handler = _openai_tts_handler(monkeypatch)
+    handler.language = "Auto"
+    handler.detect_llm_output_language = True
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup(detect_llm_output_language=True)
+    config = RuntimeConfig()
+
+    def speak(text):
+        outputs = list(processor.process(LLMResponseChunk(text=text, language_code="es", runtime_config=config)))
+        tts_input = next(item for item in outputs if isinstance(item, TTSInput))
+        list(handler.process(tts_input))
+        return tts_input
+
+    first = speak("Sure.")
+    later = speak("I can help you find the nearest train station.")
+    list(processor.process(EndOfResponse()))
+    speak("Sí.")
+
+    assert first.tts_language_code is None
+    assert later.tts_language_code == "en"  # Local TTS still receives later detection.
+    assert [operation.payload["language"] for operation in _FakeSpeechOperation.instances] == [
+        "Auto",
+        "Auto",
+        "English",
+    ]
+
+
+def test_omitted_language_keeps_qwen_auto_for_unsupported_detected_language(monkeypatch):
+    monkeypatch.setattr(language_detection, "warm_language_detector", lambda: object())
+    monkeypatch.setattr(language_detection, "detect_language_from_text", lambda *args, **kwargs: "ca")
+    handler = _openai_tts_handler(monkeypatch)
+    handler.language = "Auto"
+    handler.detect_llm_output_language = True
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup(detect_llm_output_language=True)
+    config = RuntimeConfig()
+
+    outputs = list(
+        processor.process(
+            LLMResponseChunk(
+                text="Puc ajudar-te a trobar l'estació de tren més propera.",
+                language_code="es",
+                runtime_config=config,
+            )
+        )
+    )
+    list(handler.process(next(item for item in outputs if isinstance(item, TTSInput))))
+
+    assert _FakeSpeechOperation.instances[0].payload["language"] == "Auto"
 
 
 def test_first_response_uses_session_selected_language(monkeypatch):

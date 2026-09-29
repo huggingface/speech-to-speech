@@ -27,6 +27,7 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 logger = logging.getLogger(__name__)
 
 PIPELINE_SAMPLE_RATE = 16000
+QWEN3_TTS_LANGUAGE_CODES = frozenset({"zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"})
 
 
 class SpeechRequestCancelled(RuntimeError):
@@ -380,6 +381,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         blocksize: int = 512,
         cancel_scope: CancelScope | None = None,
         speculative_turns: SpeculativeTurnTracker | None = None,
+        detect_llm_output_language: bool = False,
         gen_kwargs: dict[str, Any] | None = None,
     ) -> None:
         if response_format not in {"pcm", "wav"}:
@@ -410,6 +412,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.blocksize = blocksize
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
+        self.detect_llm_output_language = detect_llm_output_language
         self.gen_kwargs = gen_kwargs or {}
         self._operation_lock = Lock()
         self._active_operation: HttpSpeechOperation | None = None
@@ -512,11 +515,27 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         try:
             voice = self._resolve_voice(tts_input.runtime_config, tts_input.response)
             selected = tts_input.selected_language
-            if selected is None:
+            use_detected_language = (
+                selected is None
+                and self.detect_llm_output_language
+                and isinstance(self.language, str)
+                and self.language.strip().lower() == "auto"
+            )
+            if selected is None and not use_detected_language:
                 operation = self._make_operation(text=text, voice=voice)
             else:
-                language = tts_input.tts_language_code
-                if language is None and selected == "auto" and "qwen3-tts" in self.model.lower():
+                language = (
+                    tts_input.response_assistant_language_code if use_detected_language else tts_input.tts_language_code
+                )
+                if (
+                    use_detected_language
+                    and "qwen3-tts" in self.model.lower()
+                    and language not in QWEN3_TTS_LANGUAGE_CODES
+                ):
+                    language = None
+                if language is None and use_detected_language:
+                    language = self.language
+                elif language is None and selected == "auto" and "qwen3-tts" in self.model.lower():
                     language = "auto"
                 if language is not None and "qwen3-tts" in self.model.lower():
                     language = WHISPER_LANGUAGE_TO_LLM_LANGUAGE.get(language, language).title()
