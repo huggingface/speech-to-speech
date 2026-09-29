@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from time import perf_counter
 from typing import Any, Iterator, Optional
 
 import numpy as np
@@ -225,6 +226,7 @@ class WhisperSTTHandler(BaseSTTHandler):
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("infering whisper...")
+        started_at_s = perf_counter()
 
         input_features = self.prepare_model_inputs(vad_audio.audio)
         selected = vad_audio.runtime_config.selected_language if vad_audio.runtime_config else None
@@ -280,6 +282,7 @@ class WhisperSTTHandler(BaseSTTHandler):
             )
             return
 
+        self._record_final_stt(vad_audio, perf_counter() - started_at_s)
         yield Transcription(
             text=pred_text,
             language_code=language_code,

@@ -42,7 +42,7 @@ are added only to terminal responses.
 
 | Stage | Backends with a measured field | Backends with `n/a` pending coverage |
 | --- | --- | --- |
-| `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime` | `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper`, `parakeet-unified`, `paraformer`, `qwen3-asr` |
+| `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime`, `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper` | `parakeet-unified`, `paraformer`, `qwen3-asr` |
 | `llm` | `transformers`, `mlx-lm`, `responses-api`, `chat-completions` | None of the built-in LLM backends |
 | `tts_ttfa`, `e2e` | `qwen3`, `openai` | `chatTTS`, `facebookMMS`, `omnivoice`, `pocket`, `kokoro`, `supertonic` |
 
@@ -56,7 +56,9 @@ the existing MLX lock and can be zero when that lock is not used.
   transcriptions and Realtime partial deltas are excluded. For HTTP STT, it
   starts when the final request worker begins and ends before its result is
   published. For Realtime STT, it starts when the final VAD commit is queued
-  and ends when the provider's final transcript is received.
+  and ends when the provider's final transcript is received. For local STT
+  models, it starts when the handler begins the final transcription and ends
+  before its transcript is yielded.
 - `llm` covers full generation, from serialization and provider request through
   consumption of provider output. It is recorded even if the request fails.
 - `tts_ttfa` starts when synthesis of the first text segment begins and ends
