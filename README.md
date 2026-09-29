@@ -608,17 +608,20 @@ Language coverage depends on the STT and TTS backends you pick, not on the pipel
 | TTS | Pocket TTS | English, French, German, Portuguese, Italian, Spanish |
 | TTS | OpenAI-compatible `/v1/audio/speech` endpoint | Depends on the connected TTS server/model |
 
-Make sure the STT, LLM, and TTS you pair all cover your target language(s). Two usage patterns:
+Make sure the STT, LLM, and TTS you pair all cover your target language(s). By default, the language code sent to TTS comes from the **user's transcription**. Qwen3-TTS keeps its configured `auto` behavior by default. Add `--detect_llm_output_language` to detect the language of each assistant text chunk instead and send that code to TTS. This helps when the assistant replies in a different language from the user. The Lingua detector is loaded and warmed when the pipeline starts, so detection does not wait for the full reply. Short text (under 20 characters for most languages, or under four CJK characters) and ambiguous text use the last detected assistant language for that response. If there is none yet, TTS receives no language code and uses its own automatic or default behavior; this avoids delaying speech to collect more text. A TTS backend must support the detected language to use it.
 
-- **Single language**: set `--language` to the target language code. The default is `en`.
-- **Language switching**: set `--language auto`. The STT detects the language of each spoken prompt and forwards it to the LLM. Optionally add `--enable_lang_prompt` to append a "Please reply to my message in ..." instruction. It defaults to `False`; large LLMs usually infer the language from context, but the explicit instruction can help smaller models.
+For **Parakeet TDT**, language detection is automatic when `--parakeet_tdt_language` is omitted or set to `auto`. It uses Lingua on the finished transcription, skips text shorter than 20 characters, and falls back to the previous detected language when it cannot decide. `--language` belongs to the Whisper backends; it does not control Parakeet. To fix Parakeet to one language, use `--parakeet_tdt_language de` (or another supported code). For Whisper and Whisper MLX, use `--language auto` to detect each turn, or a code such as `--language zh` to fix the language. Other STT backends have their own language flags; see the [STT component guide](./src/speech_to_speech/STT/README.md#language-support-by-handler).
 
-Automatic language detection:
+To encourage replies in the user's detected language, add `--enable_lang_prompt`. It appends a per-turn instruction such as "Please reply to my message in French." The flag is off by default and works independently of `--detect_llm_output_language`. Qwen3-TTS uses `--qwen3_tts_language auto` by default: it accepts a supported incoming language code and otherwise lets its model infer the language from the text. Set `--qwen3_tts_language german`, for example, to force synthesis in German.
+
+Automatic detection with Parakeet and a language instruction for the LLM:
 
 ```bash
 speech-to-speech serve \
     --stt parakeet-tdt \
-    --language auto \
+    --enable_lang_prompt \
+    --detect_llm_output_language \
+    --qwen3_tts_language auto \
     --llm_backend mlx-lm \
     --model_name "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 ```

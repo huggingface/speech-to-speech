@@ -22,18 +22,16 @@ from rich.console import Console
 from rich.text import Text
 
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
+from speech_to_speech.pipeline.language_detection import (
+    LINGUA_AVAILABLE,
+    detect_language_from_text,
+    warm_language_detector,
+)
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.pipeline.turn_latency import bind_active_turn_latency_tracker
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.STT.smart_progressive_streaming import PartialTranscription as ProgressiveStreamPartial
 from speech_to_speech.utils.mlx_lock import MLXLockContext
-
-try:
-    from lingua import Language, LanguageDetectorBuilder
-
-    LINGUA_AVAILABLE = True
-except ImportError:
-    LINGUA_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -66,27 +64,6 @@ SUPPORTED_LANGUAGES = [
     "lv",
     "lt",
 ]
-
-# Lingua uses "nb" (Bokmål) for Norwegian instead of "no"
-_LINGUA_CODE_MAP = {"no": "nb"}
-
-if LINGUA_AVAILABLE:
-    _lingua_iso_to_code = {
-        lang.iso_code_639_1.name.lower(): lang for lang in Language.all() if lang.iso_code_639_1 is not None
-    }
-    _lingua_languages = [
-        _lingua_iso_to_code[_LINGUA_CODE_MAP.get(code, code)]
-        for code in SUPPORTED_LANGUAGES
-        if _LINGUA_CODE_MAP.get(code, code) in _lingua_iso_to_code
-    ]
-
-    def _build_lingua_detector():
-        # Preloading can take multiple seconds on some hardware, including the
-        # deployed server. Pay that cost at startup instead of on the first user
-        # request, where it would look like slow STT.
-        return LanguageDetectorBuilder.from_languages(*_lingua_languages).with_preloaded_language_models().build()
-
-    _lingua_detector = _build_lingua_detector()
 
 
 class ParakeetTDTSTTHandler(BaseSTTHandler):
@@ -125,6 +102,8 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         self.gen_kwargs = gen_kwargs
         self.start_language = language
         self.last_language = language if language else "en"
+        if LINGUA_AVAILABLE and (language is None or language == "auto"):
+            warm_language_detector()
         self.enable_live_transcription = enable_live_transcription
         self.live_transcription_update_interval = live_transcription_update_interval
         self.compute_lock = Lock()
@@ -414,18 +393,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         if not LINGUA_AVAILABLE:
             logger.warning("lingua-py not available, cannot detect language from text")
             return None
-
-        # Skip very short utterances where language ID is still too noisy.
-        if not text or len(text.strip()) < 20:
-            return None
-
-        detected = _lingua_detector.detect_language_of(text)
-        if detected is None:
-            return None
-
-        code = detected.iso_code_639_1.name.lower()
-        # Map back lingua-specific codes to our supported codes
-        return {v: k for k, v in _LINGUA_CODE_MAP.items()}.get(code, code)
+        return detect_language_from_text(text)
 
     @contextmanager
     def _compute_lock_context(self, handler_name: str, timeout: float) -> Iterator[bool]:

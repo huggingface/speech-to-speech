@@ -40,7 +40,7 @@ speech-to-speech serve \
   --tts_language en
 ```
 
-This handler maps STT language codes (e.g. `en`, `fr`, `es`) to MMS model suffixes (e.g. `eng`, `fra`, `spa`) and reloads the model on language changes.
+This handler maps incoming language codes (e.g. `en`, `fr`, `es`) to MMS model suffixes (e.g. `eng`, `fra`, `spa`) and reloads the model on language changes. The code comes from STT by default, or from assistant text when `--detect_llm_output_language` is enabled.
 
 ### 3) Pocket TTS (`--tts pocket`)
 
@@ -72,7 +72,7 @@ speech-to-speech serve \
 Behavior:
 - Uses MLX backend on Apple Silicon (`mlx-community/Kokoro-82M-bf16`)
 - Uses native kokoro pipeline otherwise (`hexgrad/Kokoro-82M`)
-- Can auto-switch voice/language based on STT language code mapping
+- Can auto-switch voice/language based on the incoming language code
 
 ### 5) Qwen3-TTS (`--tts qwen3`)
 

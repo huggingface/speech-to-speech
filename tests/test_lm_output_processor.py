@@ -1,5 +1,6 @@
 from queue import Queue
 from threading import Event, Thread
+from types import SimpleNamespace
 
 import pytest
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
@@ -10,6 +11,7 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import Chat
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
+from speech_to_speech.pipeline import language_detection
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -306,6 +308,97 @@ def test_text_event_precedes_optional_tts_input(modalities, text, expect_tts):
     assert outputs[0].text == text
     assert outputs[0].cancel_generation == 7
     assert [isinstance(output, TTSInput) for output in outputs] == [False, *([True] if expect_tts else [])]
+
+
+def test_llm_output_language_flag_warms_detector_and_routes_detected_code(monkeypatch):
+    seen = []
+
+    class Detector:
+        def compute_language_confidence_values(self, text):
+            seen.append(text)
+            return [
+                SimpleNamespace(language=SimpleNamespace(iso_code_639_1=SimpleNamespace(name="FR")), value=0.9),
+                SimpleNamespace(language=SimpleNamespace(iso_code_639_1=SimpleNamespace(name="EN")), value=0.1),
+            ]
+
+    detector = Detector()
+    monkeypatch.setattr(language_detection, "warm_language_detector", lambda: detector)
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup(detect_llm_output_language=True)
+
+    assert processor._language_detector is detector
+    outputs = list(
+        processor.process(LLMResponseChunk(text="Bonjour, je peux vous aider aujourd'hui.", language_code="en"))
+    )
+
+    assert seen == ["Bonjour, je peux vous aider aujourd'hui."]
+    assert next(item for item in outputs if isinstance(item, TTSInput)).language_code == "fr"
+
+
+def test_llm_output_language_falls_back_on_short_text_and_resets_per_response(monkeypatch):
+    class Detector:
+        def compute_language_confidence_values(self, text):
+            return [
+                SimpleNamespace(language=SimpleNamespace(iso_code_639_1=SimpleNamespace(name="FR")), value=0.9),
+                SimpleNamespace(language=SimpleNamespace(iso_code_639_1=SimpleNamespace(name="EN")), value=0.1),
+            ]
+
+    monkeypatch.setattr(language_detection, "warm_language_detector", Detector)
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup(detect_llm_output_language=True)
+
+    def code(text):
+        outputs = list(processor.process(LLMResponseChunk(text=text, language_code="en")))
+        return next(item for item in outputs if isinstance(item, TTSInput)).language_code
+
+    assert code("Oui.") is None
+    assert code("Bonjour, je peux vous aider aujourd'hui.") == "fr"
+    assert code("Merci.") == "fr"
+    list(processor.process(EndOfResponse()))
+    assert code("Oui.") is None
+
+
+def test_llm_output_language_disabled_keeps_input_language_without_warming(monkeypatch):
+    monkeypatch.setattr(
+        language_detection,
+        "warm_language_detector",
+        lambda: (_ for _ in ()).throw(AssertionError("should not warm")),
+    )
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup()
+
+    outputs = list(
+        processor.process(LLMResponseChunk(text="Bonjour, je peux vous aider aujourd'hui.", language_code="en"))
+    )
+
+    assert next(item for item in outputs if isinstance(item, TTSInput)).language_code == "en"
+
+
+def test_ambiguous_assistant_chunk_does_not_force_a_tts_language():
+    if not language_detection.LINGUA_AVAILABLE:
+        pytest.skip("lingua-language-detector is not installed")
+
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup(detect_llm_output_language=True)
+    outputs = list(processor.process(LLMResponseChunk(text="100 times 100000 is 10,000,000.", language_code="en")))
+
+    assert next(item for item in outputs if isinstance(item, TTSInput)).language_code is None
+
+
+def test_llm_output_language_detection_failure_preserves_tts_input(monkeypatch):
+    class FailingDetector:
+        def compute_language_confidence_values(self, text):
+            raise RuntimeError("detector failed")
+
+    monkeypatch.setattr(language_detection, "warm_language_detector", FailingDetector)
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup(detect_llm_output_language=True)
+
+    outputs = list(
+        processor.process(LLMResponseChunk(text="Bonjour, je peux vous aider aujourd'hui.", language_code="en"))
+    )
+
+    assert next(item for item in outputs if isinstance(item, TTSInput)).language_code is None
 
 
 def test_ordered_parts_and_tts_inputs_share_one_queue():
