@@ -558,6 +558,7 @@ class RealtimeService:
                 AssistantResponseDoneEvent,
                 AssistantToolCallReadyEvent,
                 ResponseGenerationDoneEvent,
+                ResponseFailedEvent,
             ),
         ):
             return False
@@ -634,6 +635,7 @@ class RealtimeService:
                 AssistantResponseDoneEvent,
                 AssistantToolCallReadyEvent,
                 ResponseGenerationDoneEvent,
+                ResponseFailedEvent,
             ),
         ):
             return False
@@ -646,6 +648,7 @@ class RealtimeService:
                 AssistantResponseDoneEvent,
                 AssistantToolCallReadyEvent,
                 ResponseGenerationDoneEvent,
+                ResponseFailedEvent,
             ),
         ):
             is_latest: bool | None

@@ -4684,6 +4684,76 @@ class TestDispatchPipelineEvent:
 
     # -- response_failed --
 
+    @pytest.mark.parametrize("response_key", [None, "old-response"])
+    def test_new_turn_drops_uncommitted_older_failure(self, service, conn_id, response_key):
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        turn_id, revision = tracker.start_turn()
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="first question", turn_id=turn_id, turn_revision=revision),
+        )
+        assert service._state(conn_id).response_pending
+        tracker.start_turn()
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            ResponseFailedEvent(
+                message="obsolete failure", response_key=response_key, turn_id=turn_id, turn_revision=revision
+            ),
+        )
+
+        assert events == []
+        state = service._state(conn_id)
+        assert state.current_response_id is None
+        assert not state.response_failed
+        assert service.get_usage()["total_errors"] == 0
+
+    @pytest.mark.parametrize("advance_turn", [False, True])
+    def test_relevant_turn_failure_remains_visible(self, service, conn_id, advance_turn):
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        turn_id, revision = tracker.start_turn()
+        service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(text="partial", response_key="response-1", turn_id=turn_id, turn_revision=revision),
+        )
+        if advance_turn:
+            tracker.start_turn()
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            ResponseFailedEvent(
+                message="provider failed", response_key="response-1", turn_id=turn_id, turn_revision=revision
+            ),
+        )
+
+        assert any(isinstance(event, RealtimeErrorEvent) for event in events)
+        done = service.finish_response(conn_id, response_key="response-1")
+        assert done[-1].response.status == "failed"
+
+    @pytest.mark.parametrize("confirm_reopen", [False, True])
+    def test_response_failure_waits_for_reopen_decision(self, service, conn_id, confirm_reopen):
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        turn_id, revision = tracker.start_turn()
+        candidate = tracker.begin_reopen_candidate(turn_id, revision)
+        failure = ResponseFailedEvent(
+            message="provider failed", response_key="response-1", turn_id=turn_id, turn_revision=revision
+        )
+
+        assert service.should_defer_pipeline_event(failure)
+        assert service.try_dispatch_pipeline_event(conn_id, failure) is None
+        assert service._state(conn_id).current_response_id is None
+        if confirm_reopen:
+            assert tracker.confirm_reopen_candidate(turn_id, revision, candidate)
+            assert service.try_dispatch_pipeline_event(conn_id, failure) == []
+        else:
+            tracker.cancel_reopen_candidate(turn_id, candidate)
+            events = service.try_dispatch_pipeline_event(conn_id, failure)
+            assert events is not None
+            assert [event.type for event in events] == ["response.created", "error"]
+
     def test_response_failed_emits_error_and_failed_done(self, service, conn_id):
         service.response._ensure_response(conn_id)
         events = service.dispatch_pipeline_event(
