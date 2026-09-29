@@ -7,13 +7,13 @@ class Qwen3TTSHandlerArguments:
     qwen3_tts_model_name: str = field(
         default="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
         metadata={
-            "help": "The Qwen3-TTS model to use (HuggingFace Hub ID or local path). Default is 'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice'. On Apple Silicon, Qwen/* model IDs are auto-mapped to the corresponding mlx-community/* model when possible, defaulting to the 6bit MLX variant unless the model name already pins a specific suffix."
+            "help": "The Qwen3-TTS model to use (HuggingFace Hub ID or local path). Default is 'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice'. GGML downloads matching GGUF weights automatically; MLX model IDs are no longer supported."
         },
     )
     qwen3_tts_device: str = field(
         default="cuda",
         metadata={
-            "help": "Preferred device for Qwen3-TTS. Options: 'cuda', 'cpu', 'mps', 'auto'. Default is 'cuda'. On Apple Silicon the mlx-audio backend is selected automatically."
+            "help": "Device for the CUDA-only Torch backend. Default is 'cuda'. GGML selects its own device, including Metal on Apple Silicon, and ignores this option."
         },
     )
     qwen3_tts_dtype: str = field(
@@ -28,10 +28,10 @@ class Qwen3TTSHandlerArguments:
             "help": "Attention implementation. Options: 'eager', 'flash_attention_2', 'sdpa'. Use 'eager' on Jetson. Default is 'eager'."
         },
     )
-    qwen3_tts_backend: Literal["ggml", "torch"] = field(
+    qwen3_tts_backend: Literal["ggml", "torch", "mlx"] = field(
         default="ggml",
         metadata={
-            "help": "faster-qwen3-tts backend on non-macOS platforms. Options: 'ggml' or 'torch'. Default is 'ggml'. On Apple Silicon, mlx-audio is selected automatically and this option is ignored."
+            "help": "faster-qwen3-tts backend. Options: 'ggml' or 'torch'. Default is 'ggml'. GGML uses Metal on supported Apple Silicon Macs; torch requires CUDA. 'mlx' is removed and produces a migration error."
         },
     )
     qwen3_tts_ggml_quantization: str = field(
@@ -103,14 +103,12 @@ class Qwen3TTSHandlerArguments:
     qwen3_tts_non_streaming_mode: Optional[bool] = field(
         default=True,
         metadata={
-            "help": "Optional override for Qwen3-TTS text prefill behavior. Default is true, which pre-fills the full target text before decode on faster-qwen3-tts. Currently ignored on Apple Silicon because mlx-audio does not expose this yet."
+            "help": "Optional override for Qwen3-TTS text prefill behavior. Default is true, which pre-fills the full target text before decode on faster-qwen3-tts."
         },
     )
     qwen3_tts_mlx_quantization: Optional[str] = field(
-        default="6bit",
-        metadata={
-            "help": "Optional MLX quantization override on Apple Silicon. Supported values: 'bf16', '4bit', '6bit', '8bit'. Default is '6bit'."
-        },
+        default=None,
+        metadata={"help": "Removed option: use qwen3_tts_ggml_quantization with a Qwen/ model ID instead."},
     )
     qwen3_tts_language: str = field(
         default="auto",
@@ -118,9 +116,7 @@ class Qwen3TTSHandlerArguments:
     )
     qwen3_tts_streaming_chunk_size: Optional[int] = field(
         default=None,
-        metadata={
-            "help": "Codec steps per streaming chunk. If unset, the handler uses a backend-specific default: 8 on faster-qwen3-tts and 4 on mlx-audio."
-        },
+        metadata={"help": "Codec steps per streaming chunk. If unset, the handler uses 8 steps."},
     )
     qwen3_tts_max_new_tokens: int = field(
         default=1536,

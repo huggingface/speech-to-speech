@@ -64,7 +64,7 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_profile():
     assert qwen3_args.qwen3_tts_gguf_talker_path is None
     assert qwen3_args.qwen3_tts_gguf_codec_path is None
     assert qwen3_args.qwen3_tts_ref_cache_dir is None
-    assert qwen3_args.qwen3_tts_mlx_quantization == "6bit"
+    assert qwen3_args.qwen3_tts_mlx_quantization is None
 
 
 def test_parse_arguments_enables_llm_output_language_detection():

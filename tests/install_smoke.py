@@ -136,7 +136,7 @@ def _validate_package_defaults() -> None:
     assert qwen3_args.qwen3_tts_gguf_talker_path is None
     assert qwen3_args.qwen3_tts_gguf_codec_path is None
     assert qwen3_args.qwen3_tts_ref_cache_dir is None
-    assert qwen3_args.qwen3_tts_mlx_quantization == "6bit"
+    assert qwen3_args.qwen3_tts_mlx_quantization is None
     assert vad_args.thresh == 0.6
     assert vad_args.min_silence_ms == 64
     assert vad_args.min_speech_ms == 384
@@ -185,8 +185,9 @@ def _validate_default_handler_imports() -> None:
 
 
 def _validate_runtime_dependency_imports() -> None:
-    if sys.platform != "darwin":
-        importlib.import_module("faster_qwen3_tts")
+    importlib.import_module("faster_qwen3_tts")
+    if sys.platform == "darwin":
+        importlib.import_module("qwentts_cpp")
     if os.environ.get("SPEECH_TO_SPEECH_SMOKE_EXTRA") == "omnivoice":
         omnivoice = importlib.import_module("omnivoice")
         assert omnivoice.OmniVoice is not None
@@ -205,7 +206,7 @@ def _validate_darwin_dependency_pins() -> None:
         "mlx-lm": "0.31.3",
         "mlx-metal": "0.32.0",
         "sounddevice": "0.5.3",
-        "transformers": "5.14.1",
+        "transformers": "5.15.1",
     }
     mismatches = []
     for package_name, expected_version in expected_versions.items():
@@ -227,6 +228,7 @@ def main() -> None:
         "fastapi",
         "huggingface_hub",
         "librosa",
+        "faster_qwen3_tts",
         "lingua",
         "onnxruntime",
         "openai",
@@ -242,7 +244,7 @@ def main() -> None:
     if sys.platform == "darwin":
         required_modules.extend(["miniaudio", "mlx", "mlx_audio", "mlx_lm", "misaki", "soundfile", "spacy"])
     else:
-        required_modules.extend(["faster_qwen3_tts", "nano_parakeet"])
+        required_modules.extend(["nano_parakeet"])
     if os.environ.get("SPEECH_TO_SPEECH_SMOKE_EXTRA") == "omnivoice":
         required_modules.append("omnivoice")
 

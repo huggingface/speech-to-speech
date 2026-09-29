@@ -20,83 +20,8 @@ def _audible_stream_chunk():
     return np.full(512, 0.1, dtype=np.float32)
 
 
-def test_setup_uses_mlx_backend_on_darwin_and_maps_qwen_repo_ids(monkeypatch):
-    recorded = {}
-
-    def _setup_mlx(self, model_name):
-        recorded["model_name"] = model_name
-
-    def _setup_faster(self, *args, **kwargs):
-        raise AssertionError("Darwin setup should not use the faster-qwen3-tts backend")
-
-    monkeypatch.setattr(qwen3_tts_module, "platform", "darwin")
-    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
-    monkeypatch.setattr(Qwen3TTSHandler, "_setup_faster", _setup_faster)
-    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
-
-    handler = object.__new__(Qwen3TTSHandler)
-    handler.setup(
-        Event(),
-        model_name="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-        device="cuda",
-    )
-
-    assert handler.backend == "mlx"
-    assert handler.device == "mps"
-    assert handler.dtype is None
-    assert handler.streaming_chunk_size == 4
-    assert recorded["model_name"] == "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit"
-
-
-@pytest.mark.parametrize("quantization", ["4bit", "6bit", "8bit"])
-def test_setup_supports_quantized_mlx_mapping_on_darwin(monkeypatch, quantization):
-    recorded = {}
-
-    def _setup_mlx(self, model_name):
-        recorded["model_name"] = model_name
-
-    monkeypatch.setattr(qwen3_tts_module, "platform", "darwin")
-    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
-    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
-
-    handler = object.__new__(Qwen3TTSHandler)
-    handler.setup(
-        Event(),
-        model_name="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-        mlx_quantization=quantization,
-    )
-
-    assert handler.backend == "mlx"
-    assert handler.mlx_quantization == quantization
-    assert recorded["model_name"] == f"mlx-community/Qwen3-TTS-12Hz-0.6B-Base-{quantization}"
-
-
-def test_setup_preserves_explicit_mlx_model_suffix_when_quantization_unset(monkeypatch):
-    recorded = {}
-
-    def _setup_mlx(self, model_name):
-        recorded["model_name"] = model_name
-
-    monkeypatch.setattr(qwen3_tts_module, "platform", "darwin")
-    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
-    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
-
-    handler = object.__new__(Qwen3TTSHandler)
-    handler.setup(
-        Event(),
-        model_name="mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16",
-    )
-
-    assert handler.backend == "mlx"
-    assert handler.mlx_quantization is None
-    assert recorded["model_name"] == "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16"
-
-
 def test_setup_preserves_faster_backend_off_darwin(monkeypatch):
     recorded = {}
-
-    def _setup_mlx(self, *args, **kwargs):
-        raise AssertionError("Non-Darwin setup should not use the mlx backend")
 
     def _setup_faster(self, model_name, dtype, attn_implementation, backend):
         recorded["model_name"] = model_name
@@ -104,8 +29,6 @@ def test_setup_preserves_faster_backend_off_darwin(monkeypatch):
         recorded["attn_implementation"] = attn_implementation
         recorded["backend"] = backend
 
-    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
-    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
     monkeypatch.setattr(Qwen3TTSHandler, "_setup_faster", _setup_faster)
     monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
 
@@ -118,7 +41,6 @@ def test_setup_preserves_faster_backend_off_darwin(monkeypatch):
         attn_implementation="sdpa",
     )
 
-    assert handler.backend == "faster_qwen3_tts"
     assert handler.faster_backend == "ggml"
     assert handler.streaming_chunk_size == 8
     assert recorded == {
@@ -132,21 +54,15 @@ def test_setup_preserves_faster_backend_off_darwin(monkeypatch):
 def test_setup_passes_torch_backend_override_off_darwin(monkeypatch):
     recorded = {}
 
-    def _setup_mlx(self, *args, **kwargs):
-        raise AssertionError("Non-Darwin setup should not use the mlx backend")
-
     def _setup_faster(self, model_name, dtype, attn_implementation, backend):
         recorded["backend"] = backend
 
-    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
-    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
     monkeypatch.setattr(Qwen3TTSHandler, "_setup_faster", _setup_faster)
     monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
 
     handler = object.__new__(Qwen3TTSHandler)
     handler.setup(Event(), backend="torch")
 
-    assert handler.backend == "faster_qwen3_tts"
     assert handler.faster_backend == "torch"
     assert recorded["backend"] == "torch"
 
@@ -165,7 +81,6 @@ def test_setup_passes_ggml_model_and_cache_options_to_faster_backend(monkeypatch
             recorded.update(kwargs)
             return SimpleNamespace()
 
-    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
     monkeypatch.setitem(sys.modules, "faster_qwen3_tts", SimpleNamespace(FasterQwen3TTS=_FakeFasterQwen3TTS))
     monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
 
@@ -199,7 +114,6 @@ def test_setup_passes_ggml_quantization_for_hub_model(monkeypatch):
             recorded.update(kwargs)
             return SimpleNamespace()
 
-    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
     monkeypatch.setitem(sys.modules, "faster_qwen3_tts", SimpleNamespace(FasterQwen3TTS=_FakeFasterQwen3TTS))
     monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
 
@@ -212,7 +126,6 @@ def test_setup_passes_ggml_quantization_for_hub_model(monkeypatch):
 
 
 def test_setup_rejects_incomplete_local_gguf_pair(monkeypatch, tmp_path):
-    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
     monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
 
     handler = object.__new__(Qwen3TTSHandler)
@@ -222,7 +135,6 @@ def test_setup_rejects_incomplete_local_gguf_pair(monkeypatch, tmp_path):
 
 
 def test_setup_rejects_cached_ggml_references_with_torch_backend(monkeypatch):
-    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
     monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
 
     handler = object.__new__(Qwen3TTSHandler)
@@ -234,24 +146,18 @@ def test_setup_rejects_cached_ggml_references_with_torch_backend(monkeypatch):
 def test_setup_defaults_to_custom_voice_profile_off_darwin(monkeypatch):
     recorded = {}
 
-    def _setup_mlx(self, *args, **kwargs):
-        raise AssertionError("Non-Darwin setup should not use the mlx backend")
-
     def _setup_faster(self, model_name, dtype, attn_implementation, backend):
         recorded["model_name"] = model_name
         recorded["dtype"] = dtype
         recorded["attn_implementation"] = attn_implementation
         recorded["backend"] = backend
 
-    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
-    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
     monkeypatch.setattr(Qwen3TTSHandler, "_setup_faster", _setup_faster)
     monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
 
     handler = object.__new__(Qwen3TTSHandler)
     handler.setup(Event())
 
-    assert handler.backend == "faster_qwen3_tts"
     assert handler.faster_backend == "ggml"
     assert recorded["model_name"] == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     assert recorded["backend"] == "ggml"
@@ -275,14 +181,9 @@ def test_setup_defaults_to_custom_voice_profile_off_darwin(monkeypatch):
     ],
 )
 def test_setup_normalizes_qwen3_language_aliases(monkeypatch, language, expected):
-    def _setup_mlx(self, *args, **kwargs):
-        raise AssertionError("Non-Darwin setup should not use the mlx backend")
-
     def _setup_faster(self, model_name, dtype, attn_implementation, backend):
         return None
 
-    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
-    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
     monkeypatch.setattr(Qwen3TTSHandler, "_setup_faster", _setup_faster)
     monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
 
@@ -293,11 +194,11 @@ def test_setup_normalizes_qwen3_language_aliases(monkeypatch, language, expected
 
 
 def test_setup_preserves_explicit_chunk_size_on_darwin(monkeypatch):
-    def _setup_mlx(self, model_name):
+    def _setup_faster(self, **kwargs):
         return None
 
-    monkeypatch.setattr(qwen3_tts_module, "platform", "darwin")
-    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_faster", _setup_faster)
+
     monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
 
     handler = object.__new__(Qwen3TTSHandler)
@@ -307,50 +208,10 @@ def test_setup_preserves_explicit_chunk_size_on_darwin(monkeypatch):
         streaming_chunk_size=4,
     )
 
-    assert handler.backend == "mlx"
     assert handler.streaming_chunk_size == 4
 
 
-def test_setup_logs_when_non_streaming_mode_set_on_darwin(monkeypatch, caplog):
-    def _setup_mlx(self, model_name):
-        return None
-
-    monkeypatch.setattr(qwen3_tts_module, "platform", "darwin")
-    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
-    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
-
-    handler = object.__new__(Qwen3TTSHandler)
-
-    with caplog.at_level("DEBUG"):
-        handler.setup(
-            Event(),
-            model_name="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-            non_streaming_mode=True,
-        )
-
-    assert "mlx-audio does not expose non_streaming_mode yet" in caplog.text
-
-
-def test_setup_rejects_invalid_mlx_quantization(monkeypatch):
-    def _setup_mlx(self, model_name):
-        return None
-
-    monkeypatch.setattr(qwen3_tts_module, "platform", "darwin")
-    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", _setup_mlx)
-    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
-
-    handler = object.__new__(Qwen3TTSHandler)
-
-    with pytest.raises(ValueError, match="Unsupported qwen3_tts_mlx_quantization"):
-        handler.setup(
-            Event(),
-            model_name="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-            mlx_quantization="5bit",
-        )
-
-
 def test_setup_rejects_invalid_faster_backend(monkeypatch):
-    monkeypatch.setattr(qwen3_tts_module, "platform", "linux")
     monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
 
     handler = object.__new__(Qwen3TTSHandler)
@@ -364,7 +225,6 @@ def test_warmup_uses_public_faster_backend_api(faster_backend):
     calls = []
     generated = []
     handler = object.__new__(Qwen3TTSHandler)
-    handler.backend = "faster_qwen3_tts"
     handler.faster_backend = faster_backend
     handler.parity_mode = False
     handler.model = SimpleNamespace(
@@ -383,7 +243,6 @@ def test_warmup_logs_backend_neutral_failure(caplog):
         raise RuntimeError("boom")
 
     handler = object.__new__(Qwen3TTSHandler)
-    handler.backend = "faster_qwen3_tts"
     handler.faster_backend = "ggml"
     handler.parity_mode = False
     handler.model = SimpleNamespace(warmup=fail_warmup)
@@ -394,22 +253,6 @@ def test_warmup_logs_backend_neutral_failure(caplog):
 
     assert "Qwen3-TTS backend warmup failed: boom" in caplog.text
     assert "CUDA graph capture failed" not in caplog.text
-
-
-def test_mlx_helper_methods_use_model_config_and_streaming_conversion():
-    handler = object.__new__(Qwen3TTSHandler)
-    handler.backend = "mlx"
-    handler.model_name = "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16"
-    handler.speaker = None
-    handler.streaming_chunk_size = 8
-    handler.model = SimpleNamespace(
-        config=SimpleNamespace(tts_model_type="custom_voice"),
-        get_supported_speakers=lambda: ["Vivian", "Ryan"],
-    )
-
-    assert handler._model_type() == "custom_voice"
-    assert handler._resolve_speaker() == "Vivian"
-    assert handler._mlx_streaming_interval() == pytest.approx(0.64)
 
 
 def test_local_gguf_filename_takes_precedence_when_inferring_model_type():
@@ -426,38 +269,6 @@ def test_local_gguf_parent_directory_does_not_affect_model_type_inference():
     handler.gguf_talker_path = Path("/srv/database/qwen-talker-1.7b-Q4_K_M.gguf")
 
     assert handler._infer_model_type_from_name() == "custom_voice"
-
-
-def test_prepare_mlx_ref_audio_normalizes_file_and_caches_result(monkeypatch, tmp_path):
-    source = tmp_path / "source.wav"
-    source.write_bytes(b"fake")
-
-    save_calls = []
-
-    fake_sf = SimpleNamespace(
-        read=lambda path, always_2d=False, dtype=None: (
-            [[0.1, 0.2], [0.3, 0.4]],
-            44100,
-        ),
-        write=lambda path, waveform, sample_rate, format=None, subtype=None: (
-            save_calls.append((path, sample_rate, format, subtype)),
-            Path(path).write_bytes(b"RIFF"),
-        ),
-    )
-    monkeypatch.setitem(sys.modules, "soundfile", fake_sf)
-
-    handler = object.__new__(Qwen3TTSHandler)
-    handler.backend = "mlx"
-    handler.model = SimpleNamespace(sample_rate=24000)
-    handler._mlx_ref_audio_cache = {}
-    handler._mlx_temp_ref_audio_files = set()
-
-    normalized = handler._prepare_mlx_ref_audio(str(source))
-    normalized_again = handler._prepare_mlx_ref_audio(str(source))
-
-    assert normalized == normalized_again
-    assert Path(normalized).exists()
-    assert save_calls == [(normalized, 24000, "WAV", "PCM_16")]
 
 
 def test_apply_session_voice_override_warns_for_non_file_for_base_model(caplog):
@@ -511,7 +322,7 @@ def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     handler.speaker = None
     handler.instruct = None
     handler.language = "English"
-    handler.backend = "mlx"
+    handler.model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
     handler.queue_in = Queue()
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
     handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
@@ -537,7 +348,7 @@ def test_process_passes_selected_language_without_changing_setup_default(monkeyp
     handler.speaker = None
     handler.instruct = None
     handler.language = "english"
-    handler.backend = "mlx"
+    handler.model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
     handler.queue_in = Queue()
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
     handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
@@ -709,7 +520,7 @@ def test_process_commits_turn_before_generating_audio(monkeypatch, caplog):
     handler.speaker = None
     handler.instruct = None
     handler.language = "English"
-    handler.backend = "mlx"
+    handler.model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
     handler.queue_in = Queue()
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
     handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
@@ -748,7 +559,7 @@ def test_process_does_not_set_should_listen_when_generation_fails(monkeypatch):
     handler.speaker = None
     handler.instruct = None
     handler.language = "English"
-    handler.backend = "mlx"
+    handler.model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
     handler.queue_in = Queue()
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
     handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
@@ -783,7 +594,6 @@ def test_process_voice_clone_passes_non_streaming_mode_to_faster_backend(monkeyp
     handler.streaming_chunk_size = 8
     handler.max_new_tokens = 360
     handler.blocksize = 512
-    handler.backend = "faster_qwen3_tts"
     handler.queue_in = Queue()
     handler.model = SimpleNamespace(
         model=SimpleNamespace(model=SimpleNamespace(tts_model_type="base")),
@@ -817,7 +627,6 @@ def test_process_voice_clone_passes_none_non_streaming_mode_when_unset(monkeypat
     handler.streaming_chunk_size = 8
     handler.max_new_tokens = 360
     handler.blocksize = 512
-    handler.backend = "faster_qwen3_tts"
     handler.queue_in = Queue()
     handler.model = SimpleNamespace(
         model=SimpleNamespace(model=SimpleNamespace(tts_model_type="base")),
@@ -853,7 +662,6 @@ def test_process_voice_clone_uses_precomputed_ggml_references_without_audio(monk
     handler.streaming_chunk_size = 8
     handler.max_new_tokens = 360
     handler.blocksize = 512
-    handler.backend = "faster_qwen3_tts"
     handler.faster_backend = "ggml"
     handler.queue_in = Queue()
     handler.model = SimpleNamespace(
@@ -891,7 +699,6 @@ def test_process_custom_voice_passes_non_streaming_mode_to_faster_backend(monkey
     handler.streaming_chunk_size = 8
     handler.max_new_tokens = 360
     handler.blocksize = 512
-    handler.backend = "faster_qwen3_tts"
     handler.queue_in = Queue()
     handler.model = SimpleNamespace(
         model=SimpleNamespace(model=SimpleNamespace(tts_model_type="custom_voice")),
@@ -926,7 +733,6 @@ def test_process_voice_design_passes_non_streaming_mode_to_faster_backend(monkey
     handler.streaming_chunk_size = 8
     handler.max_new_tokens = 360
     handler.blocksize = 512
-    handler.backend = "faster_qwen3_tts"
     handler.queue_in = Queue()
     handler.model = SimpleNamespace(
         model=SimpleNamespace(model=SimpleNamespace(tts_model_type="voice_design")),
@@ -1012,7 +818,6 @@ def test_process_voice_clone_scales_max_new_tokens_for_faster_backend(monkeypatc
     handler.streaming_chunk_size = 8
     handler.max_new_tokens = 1536
     handler.blocksize = 512
-    handler.backend = "faster_qwen3_tts"
     handler.queue_in = Queue()
     handler.model = SimpleNamespace(
         model=SimpleNamespace(model=SimpleNamespace(tts_model_type="base")),
@@ -1030,57 +835,6 @@ def test_process_voice_clone_scales_max_new_tokens_for_faster_backend(monkeypatc
     assert len(outputs) == 1
     assert captured["max_new_tokens"] == handler._estimate_max_new_tokens(long_text)
     assert captured["max_new_tokens"] > 360
-
-
-def test_process_voice_clone_scales_max_tokens_for_mlx_backend(monkeypatch):
-    captured = {}
-
-    class _FakeMLXLockContext:
-        def __init__(self, handler_name, timeout):
-            self.handler_name = handler_name
-            self.timeout = timeout
-
-        def __enter__(self):
-            return True
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    handler = object.__new__(Qwen3TTSHandler)
-    handler.should_listen = Event()
-    handler.cancel_scope = None
-    handler.ref_audio = "TTS/ref_audio.wav"
-    handler.ref_text = "Reference text."
-    handler.speaker = None
-    handler.instruct = None
-    handler.language = "English"
-    handler.xvec_only = False
-    handler.parity_mode = False
-    handler.non_streaming_mode = None
-    handler.streaming_chunk_size = 4
-    handler.max_new_tokens = 1536
-    handler.blocksize = 512
-    handler.backend = "mlx"
-    handler.gen_kwargs = {}
-    handler.queue_in = Queue()
-    handler.model = SimpleNamespace(
-        config=SimpleNamespace(tts_model_type="base"),
-        generate=lambda **kwargs: (
-            captured.update(kwargs),
-            iter([(_audible_stream_chunk(), 16000, {})]),
-        )[1],
-    )
-    handler._prepare_mlx_ref_audio = lambda ref_audio: ref_audio
-
-    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
-    monkeypatch.setattr(qwen3_tts_module, "MLXLockContext", _FakeMLXLockContext)
-
-    long_text = " ".join(["This is a deliberately long sentence for the MLX Qwen3 TTS backend."] * 12)
-    outputs = list(handler.process(TTSInput(text=long_text)))
-
-    assert len(outputs) == 1
-    assert captured["max_tokens"] == handler._estimate_max_new_tokens(long_text)
-    assert captured["max_tokens"] > 360
 
 
 @pytest.mark.parametrize(
@@ -1104,16 +858,6 @@ def test_process_custom_voice_uses_assistant_language_only_when_enabled(
 ):
     captured = {}
 
-    class _FakeMLXLockContext:
-        def __init__(self, handler_name, timeout):
-            pass
-
-        def __enter__(self):
-            return True
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
     handler = object.__new__(Qwen3TTSHandler)
     handler.cancel_scope = None
     handler.speculative_turns = None
@@ -1127,19 +871,19 @@ def test_process_custom_voice_uses_assistant_language_only_when_enabled(
     handler.streaming_chunk_size = 4
     handler.max_new_tokens = 1536
     handler.blocksize = 512
-    handler.backend = "mlx"
-    handler.gen_kwargs = {}
     handler.queue_in = Queue()
+    handler.non_streaming_mode = True
+    handler.model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     handler.model = SimpleNamespace(
         config=SimpleNamespace(tts_model_type="custom_voice"),
-        generate_custom_voice=lambda **kwargs: (captured.update(kwargs), iter([(_audible_stream_chunk(), 16000, {})]))[
-            1
-        ],
+        generate_custom_voice_streaming=lambda **kwargs: (
+            captured.update(kwargs),
+            iter([(_audible_stream_chunk(), 16000, {})]),
+        )[1],
     )
     handler._apply_session_voice_override = lambda *args: None
 
     monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
-    monkeypatch.setattr(qwen3_tts_module, "MLXLockContext", _FakeMLXLockContext)
 
     config = (
         RuntimeConfig(

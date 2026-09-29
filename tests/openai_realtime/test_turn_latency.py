@@ -508,16 +508,13 @@ def test_multiple_qwen_segments_keep_first_audio_timings_in_terminal_log(service
     def generate_custom_voice(**kwargs):
         generated_texts.append(kwargs["text"])
         clock[0] += next(durations)
-        yield SimpleNamespace(audio=np.full(512, 0.1, dtype=np.float32), sample_rate=16000)
+        yield np.full(512, 0.1, dtype=np.float32), 16000, {}
 
-    def load_model(self, model_name):
-        self.model = SimpleNamespace(
-            config=SimpleNamespace(tts_model_type="custom_voice"), generate_custom_voice=generate_custom_voice
-        )
+    def load_model(self, **kwargs):
+        self.model = SimpleNamespace(generate_custom_voice_streaming=generate_custom_voice)
 
-    monkeypatch.setattr(qwen3_tts_module, "platform", "darwin")
     monkeypatch.setattr(qwen3_tts_module, "perf_counter", lambda: clock[0])
-    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", load_model)
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_faster", load_model)
     monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
     handler = object.__new__(Qwen3TTSHandler)
     handler.setup(Event())

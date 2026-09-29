@@ -64,7 +64,7 @@ speech-to-speech local \
     --model_name mlx-community/Qwen3-4B-Instruct-2507-4bit
 ```
 
-The Mac preset selects Parakeet TDT through MLX, the 4-bit Qwen3-4B language model through MLX LM, and the 6-bit Qwen3-TTS CustomVoice model through MLX Audio. The core model weights total approximately **7.5 GB**: [STT](https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v3/tree/main), [LLM](https://huggingface.co/mlx-community/Qwen3-4B-Instruct-2507-4bit/tree/main), and [TTS](https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit/tree/main). Allow additional disk space for dependencies and auxiliary model assets.
+The Mac preset selects Parakeet TDT through MLX, the 4-bit Qwen3-4B language model through MLX LM, and Qwen3-TTS CustomVoice through GGML/Metal with BF16 weights. Model weights download on first use; allow disk space for the models, dependencies, and auxiliary assets.
 
 For a separate local LLM server, see [Combining with llama.cpp](#combining-with-llamacpp). For a model that accepts audio directly, see the [Gemma 4 12B example](./examples/gemma4-12b-macos/README.md).
 
@@ -156,7 +156,7 @@ The default install covers the standard realtime path:
 
 - Parakeet TDT for STT
 - OpenAI-compatible API for the language model
-- Qwen3-TTS for speech output, using the GGML backend by default on non-macOS platforms and `mlx-audio` on Apple Silicon
+- Qwen3-TTS for speech output, using the GGML backend by default, including Metal on Apple Silicon
 - local audio and realtime server modes
 
 macOS and non-macOS dependencies are resolved automatically via platform markers in `pyproject.toml`.
@@ -167,19 +167,21 @@ On Linux, the Qwen3-TTS GGML backend comes from `faster-qwen3-tts[ggml]`. Its de
 
 ```bash
 # CUDA 13.x
-pip install "qwentts-cpp-python==0.3.1+cu130" \
+pip install "qwentts-cpp-python==0.4.2+cu130" \
   -f https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/tree/main/whl/cu130
 
 # CUDA 12.4
-pip install "qwentts-cpp-python==0.3.1+cu124" \
+pip install "qwentts-cpp-python==0.4.2+cu124" \
   -f https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/tree/main/whl/cu124
 
 # CPU-only fallback
-pip install "qwentts-cpp-python==0.3.1+cpu" \
+pip install "qwentts-cpp-python==0.4.2+cpu" \
   -f https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/tree/main/whl/cpu
 
 pip install speech-to-speech
 ```
+
+These examples require a matching wheel version 0.4.2 or newer. If your wheelhouse does not provide one, follow the [upstream source-build instructions](https://github.com/andimarafioti/faster-qwen3-tts/blob/main/docs/ggml-backend.md).
 
 To use the previous CUDA-graphs implementation instead of GGML, pass `--qwen3_tts_backend torch`.
 
@@ -238,7 +240,7 @@ This installs the package in editable mode. With the environment activated, use 
 | LLM | OpenAI-compatible API (`responses-api`, `chat-completions`) | hosted providers or self-hosted servers | built-in |
 | LLM | [Transformers](https://huggingface.co/models?pipeline_tag=text-generation&sort=trending) | CUDA / CPU | built-in |
 | LLM | [mlx-lm](https://github.com/ml-explore/mlx-lm) | Apple Silicon | built-in on macOS |
-| TTS | [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) (default) | GGML / CUDA on Linux, mlx-audio on macOS | built-in |
+| TTS | [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) (default) | GGML / CUDA on Linux, GGML / Metal on macOS | built-in |
 | TTS | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | CUDA / CPU, Apple Silicon | `kokoro` on non-macOS; built-in on macOS |
 | TTS | [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) | CPU / CUDA | `pocket` |
 | TTS | [ChatTTS](https://github.com/2noise/ChatTTS) | CUDA / CPU | `chattts` |
@@ -302,7 +304,7 @@ speech-to-speech serve \
     --qwen3_tts_language auto \
     --qwen3_tts_backend ggml \
     --qwen3_tts_non_streaming_mode True \
-    --qwen3_tts_mlx_quantization 6bit \
+    --qwen3_tts_ggml_quantization BF16 \
     --model_name gpt-5.6-terra \
     --chat_size 30 \
     --responses_api_stream \
@@ -313,19 +315,19 @@ The default model is `gpt-5.6-terra` through the OpenAI Responses API with reaso
 
 ### Local Mac
 
-Start with [Apple Silicon, fully local](#apple-silicon-fully-local). Its `--mac-optimal-settings` preset supplies MPS defaults for supported components, Parakeet TDT for STT, MLX LM for the LLM, and Qwen3-TTS through `mlx-audio` with the `6bit` variant.
+Start with [Apple Silicon, fully local](#apple-silicon-fully-local). Its `--mac-optimal-settings` preset supplies MPS defaults for supported components, Parakeet TDT for STT, MLX LM for the LLM, and Qwen3-TTS through GGML/Metal with BF16 weights downloaded automatically. Qwen3 GGML selects its own device; `--qwen3_tts_device` applies to the CUDA-only Torch backend.
 
 The preset supplies these as defaults only: explicit `--device`, component-device flags such as `--qwen3_tts_device`, and `--stt`, `--llm_backend`, `--model_name`, and `--tts` all win. Use it with `serve` instead of `local` when you want to expose the server without starting the microphone/speaker client.
 
-`--tts pocket`, `--tts kokoro`, and `--tts omnivoice` are also valid on macOS.
+`--tts pocket`, `--tts kokoro`, and `--tts omnivoice` are also valid on macOS. Qwen3 Metal requires native Apple Silicon Python and macOS 14+. Existing MLX Qwen3 configurations must follow the [migration guide](src/speech_to_speech/TTS/README.md#migrating-macos-qwen3-configurations).
 
-To compare the MLX quantization variants locally:
+To compare GGML quantization variants locally:
 
 ```bash
 python scripts/benchmark_tts.py \
     --handlers qwen3 \
     --iterations 3 \
-    --qwen3_mlx_quantizations bf16 4bit 6bit 8bit
+    --qwen3_ggml_quantizations BF16 Q8_0 Q4_K_M
 ```
 
 ### Docker
@@ -464,7 +466,7 @@ speech-to-speech local \
     --stt parakeet-tdt \
     --llm_backend responses-api \
     --tts qwen3 \
-    --qwen3_tts_mlx_quantization 6bit \
+    --qwen3_tts_ggml_quantization BF16 \
     --model_name "gpt-4o-mini" \
     --responses_api_api_key "$OPENAI_API_KEY" \
     --responses_api_stream \
@@ -477,7 +479,7 @@ speech-to-speech local \
     --stt parakeet-tdt \
     --llm_backend responses-api \
     --tts qwen3 \
-    --qwen3_tts_mlx_quantization 6bit \
+    --qwen3_tts_ggml_quantization BF16 \
     --model_name "Qwen/Qwen3.5-9B:together" \
     --responses_api_base_url "https://router.huggingface.co/v1" \
     --responses_api_api_key "$HF_TOKEN" \
@@ -491,7 +493,7 @@ speech-to-speech serve \
     --stt parakeet-tdt \
     --llm_backend responses-api \
     --tts qwen3 \
-    --qwen3_tts_mlx_quantization 6bit \
+    --qwen3_tts_ggml_quantization BF16 \
     --model_name "openai/gpt-oss-20b:groq" \
     --responses_api_base_url "https://router.huggingface.co/v1" \
     --responses_api_api_key "$HF_TOKEN" \
@@ -655,7 +657,7 @@ speech-to-speech serve \
 
 The handler converts OmniVoice's completed 24 kHz float output into the pipeline's 16 kHz `int16` blocks. OmniVoice does not currently expose incremental audio through `generate()`, so the first block is available only after the full utterance has been synthesized. See the [TTS component guide](./src/speech_to_speech/TTS/README.md#6-omnivoice---tts-omnivoice) for saved prompts, voice design, devices, latency, and all backend flags.
 
-The `omnivoice` extra is supported on Linux, Windows, and macOS. On non-macOS platforms, both OmniVoice and the built-in Qwen3 backend share Transformers 5 through `faster-qwen3-tts>=0.4.0`, so installing this extra keeps the default Qwen3 path available. Linux uses Qwen3's GGML extra by default; see the [CUDA note](#cuda-note-for-qwen3-tts) if its CUDA 12.8 / `manylinux_2_39` native wheel does not match your host.
+The `omnivoice` extra is supported on Linux, Windows, and macOS. On non-macOS platforms, both OmniVoice and the built-in Qwen3 backend share Transformers 5 through `faster-qwen3-tts>=0.5.3`, so installing this extra keeps the default Qwen3 path available. Linux uses Qwen3's GGML extra by default; see the [CUDA note](#cuda-note-for-qwen3-tts) if its CUDA 12.8 / `manylinux_2_39` native wheel does not match your host.
 
 > [!WARNING]
 > OmniVoice's code is Apache-2.0, but its pretrained weights are CC-BY-NC and are not licensed for commercial use. Use voice cloning only with authorization and consent; do not use it for impersonation, fraud, scams, or other illegal or unethical activity.
