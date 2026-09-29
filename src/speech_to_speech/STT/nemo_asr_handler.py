@@ -56,7 +56,11 @@ def _split_lang_tag(text: str) -> tuple[str, str | None]:
     match = _NEMOTRON_LANG_TAG.search(text)
     if match is None:
         return text.strip(), None
-    return text[: match.start()].strip(), match.group(1).lower()
+    language_code = match.group(1).lower()
+    # Nemotron uses Bokmål's "nb"; the pipeline uses Whisper's "no" for Norwegian.
+    if language_code == "nb":
+        language_code = "no"
+    return text[: match.start()].strip(), language_code
 
 
 def _warn_reported_language(start_language: str) -> None:

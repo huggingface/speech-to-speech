@@ -5,6 +5,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from speech_to_speech.LLM.utils import language_name_for_prompt
 from speech_to_speech.pipeline.messages import Transcription, VADAudio
 from speech_to_speech.s2s_pipeline import parse_arguments
 from speech_to_speech.STT import nemo_asr_handler
@@ -53,7 +54,7 @@ def test_cli_nemotron_streaming_model_name_override() -> None:
 
 
 def test_multilingual_nemotron_uses_detected_language_per_utterance(monkeypatch: pytest.MonkeyPatch) -> None:
-    outputs = ["warmup", "Bonjour. <fr-FR>", "Hello. <en-US>"]
+    outputs = ["warmup", "Bonjour. <fr-FR>", "Hello. <en-US>", "Hei. <nb-NO>"]
     prompts: list[str] = []
     transcribe_kwargs: list[dict[str, Any]] = []
 
@@ -90,6 +91,12 @@ def test_multilingual_nemotron_uses_detected_language_per_utterance(monkeypatch:
     assert english[0].text == "Hello."
     assert english[0].language_code == "en"
     assert handler.last_language == "en"
+    norwegian = list(handler.process(_vad_audio(turn_id="turn_3")))
+    assert isinstance(norwegian[0], Transcription)
+    assert norwegian[0].text == "Hei."
+    assert norwegian[0].language_code == "no"
+    assert language_name_for_prompt(norwegian[0].language_code, enable=True) == "norwegian"
+    assert handler.last_language == "no"
     assert "auto" in prompts
     assert any(kwargs.get("target_lang") == "auto" for kwargs in transcribe_kwargs)
 
