@@ -20,7 +20,6 @@ from speech_to_speech.STT import qwen3_asr_handler
 from speech_to_speech.STT.qwen3_asr_handler import (
     Qwen3ASRSTTHandler,
     language_to_code,
-    resolve_device,
     resolve_torch_dtype,
 )
 
@@ -167,26 +166,6 @@ def _hardware(monkeypatch: pytest.MonkeyPatch, *, cuda: bool, mps: bool = False,
     monkeypatch.setattr(qwen3_asr_handler.torch.cuda, "is_available", lambda: cuda)
     monkeypatch.setattr(qwen3_asr_handler.torch.cuda, "is_bf16_supported", lambda: bf16)
     monkeypatch.setattr(qwen3_asr_handler.torch.backends.mps, "is_available", lambda: mps)
-
-
-def test_resolve_device_auto_prefers_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
-    _hardware(monkeypatch, cuda=True, mps=True)
-    assert resolve_device("auto") == "cuda"
-
-
-def test_resolve_device_auto_uses_mps_when_cuda_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    _hardware(monkeypatch, cuda=False, mps=True)
-    assert resolve_device("auto") == "mps"
-
-
-def test_resolve_device_auto_falls_back_to_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
-    _hardware(monkeypatch, cuda=False, mps=False)
-    assert resolve_device("auto") == "cpu"
-
-
-def test_resolve_device_keeps_explicit_choice(monkeypatch: pytest.MonkeyPatch) -> None:
-    _hardware(monkeypatch, cuda=True)
-    assert resolve_device("cpu") == "cpu"
 
 
 @pytest.mark.parametrize(

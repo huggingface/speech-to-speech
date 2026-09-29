@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -53,6 +54,39 @@ def is_npu_available() -> bool:
             return False
     npu = getattr(torch, "npu", None)
     return npu is not None and bool(npu.is_available())
+
+
+# Device types a plain PyTorch model can run on, in ``auto`` preference order.
+TORCH_DEVICES = ("cuda", "npu", "xpu", "mps", "cpu")
+
+
+def _is_device_available(device_type: str) -> bool:
+    if device_type == "cuda":
+        return torch.cuda.is_available()
+    if device_type == "npu":
+        return is_npu_available()
+    if device_type == "xpu":
+        return hasattr(torch, "xpu") and torch.xpu.is_available()
+    if device_type == "mps":
+        return torch.backends.mps.is_available()
+    return device_type == "cpu"
+
+
+def validate_device(device: str, supported: Sequence[str], component: str) -> None:
+    """Raise unless ``device`` is ``auto`` or one of the ``supported`` device types (``cuda:1`` counts as ``cuda``)."""
+    if device != "auto" and device.split(":", 1)[0] not in supported:
+        raise ValueError(f"{component} supports device 'auto' or one of: {', '.join(supported)}; got {device!r}.")
+
+
+def resolve_device(device: str, supported: Sequence[str], component: str) -> str:
+    """Turn ``auto`` into the first available of ``supported``; keep a supported explicit choice as is."""
+    validate_device(device, supported, component)
+    if device != "auto":
+        return device
+    for device_type in supported:
+        if _is_device_available(device_type):
+            return device_type
+    raise ValueError(f"{component} found none of its supported devices available: {', '.join(supported)}.")
 
 
 def _generate_id(prefix: str) -> str:
