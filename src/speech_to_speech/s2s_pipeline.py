@@ -62,7 +62,7 @@ try:
 except (LookupError, OSError):
     nltk.download("punkt_tab")
 try:
-    nltk.data.find("tokenizers/averaged_perceptron_tagger_eng")
+    nltk.data.find("taggers/averaged_perceptron_tagger_eng")
 except (LookupError, OSError):
     nltk.download("averaged_perceptron_tagger_eng")
 
