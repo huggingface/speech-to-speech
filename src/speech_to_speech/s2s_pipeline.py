@@ -200,7 +200,7 @@ def parse_arguments(
         _tts_name = pipeline_json.get("tts") or module_defaults.tts
     else:
         _pre = argparse.ArgumentParser(prog=f"speech-to-speech {command}", add_help=False)
-        _pre.add_argument("--mac-optimal-settings", "--mac_optimal_settings", action="store_true")
+        _pre.add_argument("--mac-optimal-settings", action="store_true")
         _pre.add_argument("--stt", choices=tuple(STT_BACKENDS))
         _pre.add_argument("--llm_backend", "--llm-backend", choices=tuple(LLM_BACKENDS))
         _pre.add_argument("--tts", choices=tuple(TTS_BACKENDS))
@@ -243,6 +243,8 @@ def parse_arguments(
         ]
     )
     parser = HfArgumentParser(tuple(argument_classes), prog=f"speech-to-speech {command}")  # type: ignore[arg-type]
+    mac_action = parser._option_string_actions.pop("--mac_optimal_settings")
+    mac_action.option_strings = [option for option in mac_action.option_strings if option != "--mac_optimal_settings"]
     if _mac_preset_enabled:
         parser.set_defaults(**_mac_preset_defaults(_llm_name))
 

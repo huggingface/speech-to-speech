@@ -32,18 +32,16 @@ class SpeakerAttribution(BaseModel):
         if not transcript:
             return transcript
         speakers = sorted({interval.speaker for interval in self.intervals}) if self.available else []
-        labels = ",".join(f"speaker_{speaker}" for speaker in speakers) or "unknown"
-        complete = str(self.complete and self.available).lower()
-        header = f"[speaker={labels}, complete={complete}]"
-        # Each turn must retain its meaning when older chat history is evicted.
-        explanation = (
-            "Speaker IDs are anonymous and stable only within this session. "
-            "These labels are metadata, not spoken words; do not read them aloud. "
-            "Multiple labels indicate detected speaker activity; individual words are not attributed. "
-            "Do not assume who said each part. 'unknown' means no reliable speaker label is available. "
-            "complete=false means attribution is incomplete or unavailable; additional speakers may be missing.\n"
-        )
-        return f"{explanation}{header}\n{transcript}"
+        if not speakers:
+            return transcript
+        labels = ", ".join(f"speaker_{speaker}" for speaker in speakers)
+        qualifiers = []
+        if len(speakers) > 1:
+            qualifiers.append("words not attributed")
+        if not self.complete:
+            qualifiers.append("partial")
+        suffix = f"; {'; '.join(qualifiers)}" if qualifiers else ""
+        return f"[{labels}{suffix}] {transcript}"
 
 
 class SpeakerSession:

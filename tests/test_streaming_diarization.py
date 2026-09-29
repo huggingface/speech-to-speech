@@ -1,6 +1,3 @@
-import json
-import sys
-from threading import Event
 from types import SimpleNamespace
 
 import numpy as np
@@ -8,8 +5,6 @@ import pytest
 import torch
 
 from speech_to_speech.diarization import SpeakerSegment, StreamingDiarizer
-from speech_to_speech.diarization.alignment import align_words
-from speech_to_speech.diarization.demo import build_parser, file_blocks, main, microphone_blocks
 
 
 class Inputs(dict):
@@ -162,68 +157,6 @@ def test_probability_threshold_and_silence():
     for threshold in [0, 1, float("nan")]:
         with pytest.raises(ValueError, match="threshold"):
             StreamingDiarizer(Processor(), Model(), threshold=threshold)
-
-
-def test_alignment_preserves_overlapping_and_unknown_speakers():
-    words = [
-        {"text": text, "timestamp": times}
-        for text, times in [("one", (0, 0.5)), ("both", (0.5, 1)), ("two", (1, 2)), ("unknown", (2, 3))]
-    ]
-    segments = [SpeakerSegment(1, 0.5, 2), SpeakerSegment(0, 0, 1)]
-    assert [word.speakers for word in align_words(words, segments)] == [(0,), (0, 1), (1,), ()]
-
-
-@pytest.mark.parametrize("timestamp", [(None, 1), (0, None), (2, 1), (-1, 0), (0, float("inf"))])
-def test_alignment_requires_valid_word_timestamps(timestamp):
-    with pytest.raises(ValueError):
-        align_words([{"text": "word", "timestamp": timestamp}], [])
-
-
-def test_file_demo_preserves_partial_final_block():
-    audio = np.arange(13, dtype=np.float32)
-    np.testing.assert_array_equal(np.concatenate(list(file_blocks(audio, 20, False))), audio)
-    args = build_parser().parse_args(["--microphone", "--model", "local-checkpoint"])
-    assert args.microphone and args.model == "local-checkpoint"
-
-
-def test_file_demo_emits_complete_json_session(monkeypatch, capsys):
-    monkeypatch.setattr(StreamingDiarizer, "from_pretrained", lambda *args, **kwargs: make_diarizer())
-    monkeypatch.setattr(Processor, "streaming_latency_ms", 650, raising=False)
-    monkeypatch.setitem(sys.modules, "librosa", SimpleNamespace(load=lambda *args, **kwargs: (np.zeros(61), 20)))
-    main(["--audio", "fixture.wav", "--model", "fixture", "--json"])
-    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert records[-1]["final"] is True
-    assert records[-1]["processed_seconds"] == 3.05
-    assert records[-1]["active_speakers"] == []
-    assert sum(len(record["segments"]) for record in records) == 2
-
-
-@pytest.mark.parametrize("overflow", [False, True])
-def test_microphone_stops_and_never_silently_drops_audio(monkeypatch, overflow):
-    closed = []
-
-    class InputStream:
-        def __init__(self, *, callback, **kwargs):
-            self.callback = callback
-
-        def __enter__(self):
-            for _ in range(51 if overflow else 1):
-                self.callback(np.zeros((2, 1), dtype=np.float32), 2, None, False)
-
-        def __exit__(self, *args):
-            closed.append(True)
-
-    monkeypatch.setitem(sys.modules, "sounddevice", SimpleNamespace(InputStream=InputStream))
-    stop = Event()
-    blocks = microphone_blocks(20, None, stop)
-    if overflow:
-        with pytest.raises(RuntimeError, match="dropped"):
-            next(blocks)
-    else:
-        assert next(blocks).shape == (2,)
-        stop.set()
-        assert list(blocks) == []
-    assert closed == [True]
 
 
 def test_utterance_boundary_preserves_speaker_cache_but_restarts_audio_windows():

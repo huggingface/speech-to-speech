@@ -162,10 +162,9 @@ def test_mixed_unknown_and_partial_audio_are_explicit():
         complete=False,
     )
     text = attribution.for_llm("hello")
-    assert "individual words are not attributed" in text
-    assert "additional speakers may be missing" in text
-    assert "speaker_0" in text and "speaker_1" in text
-    assert "unknown" in SpeakerAttribution(available=False).for_llm("hello")
+    assert text == "[speaker_0, speaker_1; words not attributed; partial] hello"
+    assert SpeakerAttribution(available=False).for_llm("hello") == "hello"
+    assert SpeakerAttribution(complete=False).for_llm("hello") == "hello"
     assert attribution.for_llm("") == ""
 
 
@@ -189,7 +188,7 @@ def test_revision_replaces_speaker_metadata_with_corrected_transcript(
     messages = [m for m in runtime_config.chat.to_transformers_chat() if m["role"] == "user"]
     assert len(messages) == 1
     assert "speaker_1" in messages[0]["content"] and "speaker_0" not in messages[0]["content"]
-    assert messages[0]["content"].count("Speaker IDs are anonymous") == 1
+    assert messages[0]["content"] == "[speaker_1] text 1"
 
 
 def test_disabled_diarization_preserves_plain_transcript(service, conn_id, runtime_config):
@@ -221,7 +220,16 @@ def test_builder_loads_and_warms_separate_models_per_pipeline(monkeypatch):
     monkeypatch.setattr(s2s_pipeline, "VADHandler", lambda *args, **kwargs: SimpleNamespace())
     monkeypatch.setattr(s2s_pipeline, "create_backend_handler", lambda *args: SimpleNamespace())
     args = s2s_pipeline.parse_arguments(
-        ["--diarization_model_name", "fixture", "--diarization_revision", "preview", "--diarization_device", "mps"]
+        [
+            "--diarization_model_name",
+            "fixture",
+            "--diarization_revision",
+            "preview",
+            "--diarization_device",
+            "mps",
+            "--tts",
+            "pocket",
+        ]
     )
     units = [
         s2s_pipeline._build_pipeline_unit(
@@ -280,11 +288,11 @@ def test_unavailable_llm_metadata_hides_invalid_labels():
     )
     text = attribution.for_llm("hello")
     assert "speaker_2" not in text
-    assert text.endswith("[speaker=unknown, complete=false]\nhello")
+    assert text == "hello"
 
 
 @pytest.mark.parametrize("history_size", [1, 10])
-def test_speaker_explanation_survives_history_eviction(service, conn_id, runtime_config, history_size):
+def test_compact_speaker_tag_survives_history_eviction(service, conn_id, runtime_config, history_size):
     runtime_config.chat.size = history_size
     first_item_id = None
     for turn in range(history_size + 2):
@@ -307,8 +315,5 @@ def test_speaker_explanation_survives_history_eviction(service, conn_id, runtime
     messages = [m["content"] for m in runtime_config.chat.to_transformers_chat() if m["role"] == "user"]
     assert len(messages) == history_size
     for message in messages:
-        assert "Speaker IDs are anonymous and stable only within this session" in message
-        assert "individual words are not attributed" in message
-        assert "additional speakers may be missing" in message
-        assert "do not read them aloud" in message
-    assert messages[-1].endswith(f"[speaker=speaker_0,speaker_1, complete=false]\nhello {history_size + 1}")
+        assert message.startswith("[speaker_0, speaker_1; words not attributed; partial] ")
+    assert messages[-1] == f"[speaker_0, speaker_1; words not attributed; partial] hello {history_size + 1}"

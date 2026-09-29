@@ -141,14 +141,14 @@ def test_mac_optimal_settings_preserves_explicit_component_device():
     assert args.tts_backend.config["device"] == "cpu"
 
 
-@pytest.mark.parametrize("flag", ["--local_mac_optimal_settings"])
+@pytest.mark.parametrize("flag", ["--local_mac_optimal_settings", "--mac_optimal_settings"])
 def test_noncanonical_mac_optimal_settings_flags_are_rejected(flag):
     with pytest.raises(ValueError, match=flag):
         parse_arguments([flag])
 
 
 def test_mac_diarization_shortcut():
-    args = parse_arguments(["--mac_optimal_settings", "--diarization"], command="local")
+    args = parse_arguments(["--mac-optimal-settings", "--diarization"], command="local")
 
     assert args.module_kwargs.mac_optimal_settings is True
     assert args.module_kwargs.diarization_model_name == "nvidia/Nemotron-3-Diarization"
@@ -169,7 +169,7 @@ def test_diarization_shortcut_preserves_custom_model():
 def test_diarization_shortcut_preserves_explicit_settings():
     args = parse_arguments(
         [
-            "--mac_optimal_settings",
+            "--mac-optimal-settings",
             "--diarization",
             "--diarization_revision",
             "custom-ref",

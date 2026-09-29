@@ -223,10 +223,10 @@ The pipeline transcribes VAD utterances with NeMo `ASRModel.transcribe` (offline
 
 ## Speaker activity alongside STT
 
-For streaming speaker labels, microphone/file examples, and optional word-level
-transcript alignment, see the [streaming diarization demo](../../../examples/streaming-diarization/README.md).
+For setup and streaming speaker labels in live conversations, see the
+[speaker-aware conversation guide](../../../examples/streaming-diarization/README.md).
 In the conversation pipeline, VAD sends speech chunks to a background diarization
 worker while STT handles the finalized audio. Long idle silence is not processed.
-Enable `--diarization_model_name` in `serve` or `local` to carry speaker metadata
+Enable `--diarization` in `serve` or `local` to carry speaker metadata
 through STT into the LLM's conversation history. Mixed-speaker utterances are
 explicitly marked as ambiguous; live word-level attribution is not inferred.
