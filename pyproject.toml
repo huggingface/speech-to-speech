@@ -91,7 +91,7 @@ omnivoice = [
     "omnivoice>=0.2.1",
 ]
 paraformer = [
-    "funasr>=1.1.6",
+    "funasr>=1.2.7",
     "modelscope>=1.17.1",
     "onnxruntime<1.24; python_version < '3.11'",
 ]
