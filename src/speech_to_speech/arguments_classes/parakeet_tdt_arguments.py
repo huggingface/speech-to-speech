@@ -33,7 +33,7 @@ class ParakeetTDTSTTHandlerArguments:
     parakeet_tdt_language: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Legacy option retained for compatibility. Parakeet decoders always select the language "
+            "help": "Accepted for compatibility with existing commands. Parakeet decoders always select the language "
             "automatically; this value does not constrain transcription or replace detected language metadata."
         },
     )

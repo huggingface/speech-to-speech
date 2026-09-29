@@ -60,7 +60,7 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 ### 5) Parakeet TDT (`--stt parakeet-tdt`)
 
 - Handler: `ParakeetTDTSTTHandler`
-- Legacy language flag: `--parakeet_tdt_language` (accepted but ignored by the decoder)
+- Language option: `--parakeet_tdt_language` (accepted for compatibility; ignored by the decoder)
 - Both decoders choose the transcription language automatically. The reported language is inferred from
   the resulting text when possible; otherwise it is unknown.
 - Declared supported language list (25 European languages):
