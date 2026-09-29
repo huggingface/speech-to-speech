@@ -592,9 +592,10 @@ def test_stale_pending_final_releases_space_before_queue_limit_is_checked(handle
     assert len(handler._pending_finals) == 1
     assert handler.queue_out.empty()
     active.release.set()
-    outputs = [handler.queue_out.get(timeout=1), handler.queue_out.get(timeout=1)]
-    assert [(output.turn_id, output.turn_revision) for output in outputs] == [("active", 0), ("pending", 1)]
-    assert outputs[1].text == "latest"
+    output = handler.queue_out.get(timeout=1)
+    assert (output.turn_id, output.turn_revision) == ("pending", 1)
+    assert output.text == "latest"
+    assert handler.queue_out.empty()
 
 
 def test_session_end_fences_overflow_failure_waiting_to_publish(handler_factory, monkeypatch):

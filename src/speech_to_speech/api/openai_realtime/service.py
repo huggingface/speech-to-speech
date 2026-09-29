@@ -202,6 +202,10 @@ class ConnState(BaseModel):
     input_audio_resampler_rate: int | None = None
     current_response_id: Optional[str] = None
     current_response_key: Optional[str] = None
+    # Stable response ownership. Unlike speculative_user_turn_id/revision,
+    # these do not change when newer user speech arrives mid-response.
+    current_response_turn_id: Optional[str] = None
+    current_response_turn_revision: Optional[int] = None
     response_failed: bool = False
     response_error_type: Optional[str] = None
     current_item_id: Optional[str] = None
@@ -558,6 +562,7 @@ class RealtimeService:
                 AssistantResponseDoneEvent,
                 AssistantToolCallReadyEvent,
                 ResponseGenerationDoneEvent,
+                ResponseFailedEvent,
             ),
         ):
             return False
@@ -634,6 +639,7 @@ class RealtimeService:
                 AssistantResponseDoneEvent,
                 AssistantToolCallReadyEvent,
                 ResponseGenerationDoneEvent,
+                ResponseFailedEvent,
             ),
         ):
             return False
@@ -646,6 +652,7 @@ class RealtimeService:
                 AssistantResponseDoneEvent,
                 AssistantToolCallReadyEvent,
                 ResponseGenerationDoneEvent,
+                ResponseFailedEvent,
             ),
         ):
             is_latest: bool | None
