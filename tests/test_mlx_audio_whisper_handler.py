@@ -21,7 +21,9 @@ import types
 
 import numpy as np
 import pytest
+from openai.types.realtime import RealtimeSessionCreateRequest
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.pipeline.messages import VADAudio
 from speech_to_speech.STT.mlx_audio_whisper_handler import MLXAudioWhisperSTTHandler
 from speech_to_speech.utils import mlx_lock
@@ -80,8 +82,13 @@ def make_handler(*, start_language, result, last_language=...):
     return handler
 
 
-def vad_audio():
-    return VADAudio(audio=np.zeros(16000, dtype=np.float32), turn_id="turn_1", turn_revision=0)
+def vad_audio(runtime_config=None):
+    return VADAudio(
+        audio=np.zeros(16000, dtype=np.float32),
+        turn_id="turn_1",
+        turn_revision=0,
+        runtime_config=runtime_config,
+    )
 
 
 def run(handler):
@@ -208,6 +215,32 @@ def test_forced_language_is_authoritative_and_passed_to_generate():
 
     assert handler.model.calls == [{"language": "de"}]
     assert result.language_code == "de"
+
+
+def test_session_language_overrides_setup_without_mutating_it():
+    handler = make_handler(start_language="de", result=FakeResult("Hola.", "es"))
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "es"}}})
+    )
+
+    result = list(handler.process(vad_audio(config)))[0]
+
+    assert handler.model.calls == [{"language": "es"}]
+    assert result.language_code == "es"
+    assert handler.start_language == "de"
+
+
+def test_session_auto_clears_setup_forced_language():
+    handler = make_handler(start_language="de", result=FakeResult("Hola.", "es"))
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "auto"}}})
+    )
+
+    result = list(handler.process(vad_audio(config)))[0]
+
+    assert handler.model.calls == [{}]
+    assert result.language_code == "es-auto"
+    assert handler.start_language == "de"
 
 
 def test_missing_language_attribute_falls_back_without_warning_noise():

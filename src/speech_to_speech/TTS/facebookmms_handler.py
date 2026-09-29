@@ -162,7 +162,10 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
             speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
-        language_code = tts_input.language_code
+        language_code = tts_input.tts_language_code
+        runtime_config = tts_input.runtime_config
+        if language_code is None and runtime_config is not None and tts_input.selected_language == "auto":
+            language_code = self._initial_language
         text = tts_input.text
 
         console.print(f"[green]ASSISTANT: {text}")

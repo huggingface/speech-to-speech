@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from openai.types.realtime import RealtimeSessionCreateRequest
 
 import speech_to_speech.TTS.qwen3_tts_handler as qwen3_tts_module
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
@@ -514,7 +515,7 @@ def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     handler.queue_in = Queue()
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
     handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
-    handler._process_voice_clone = lambda text: iter([np.zeros(512, dtype=np.int16)])
+    handler._process_voice_clone = lambda text, language=None: iter([np.zeros(512, dtype=np.int16)])
 
     monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
 
@@ -526,6 +527,37 @@ def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     end_outputs = list(handler.process(EndOfResponse()))
 
     assert end_outputs == [AUDIO_RESPONSE_DONE]
+
+
+def test_process_passes_selected_language_without_changing_setup_default(monkeypatch):
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.should_listen = Event()
+    handler.cancel_scope = None
+    handler.ref_audio = "TTS/ref_audio.wav"
+    handler.speaker = None
+    handler.instruct = None
+    handler.language = "english"
+    handler.backend = "mlx"
+    handler.queue_in = Queue()
+    handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
+    handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
+    requested = []
+    handler._process_voice_clone = lambda text, language: (
+        requested.append(language),
+        iter([np.zeros(512, dtype=np.int16)]),
+    )[1]
+    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(
+            type="realtime",
+            audio={"input": {"transcription": {"language": "es"}}},
+        )
+    )
+
+    assert list(handler.process(TTSInput(text="Hola.", runtime_config=config)))
+
+    assert requested == ["spanish"]
+    assert handler.language == "english"
 
 
 def test_stale_keyed_terminal_becomes_cleanup_after_lm_tts_handoff():
@@ -682,7 +714,7 @@ def test_process_commits_turn_before_generating_audio(monkeypatch, caplog):
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
     handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
 
-    def _process_voice_clone(text):
+    def _process_voice_clone(text, language=None):
         assert tracker.is_committed("turn_1", 0)
         yield np.zeros(512, dtype=np.int16)
 
@@ -1052,20 +1084,23 @@ def test_process_voice_clone_scales_max_tokens_for_mlx_backend(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("configured_language", "incoming_language", "detect_assistant_language", "expected"),
+    ("configured_language", "incoming_language", "detect_assistant_language", "selected_language", "expected"),
     [
-        ("auto", "en", False, "auto"),
-        ("auto", "de", False, "auto"),
-        ("auto", "en", True, "english"),
-        ("auto", "de", True, "german"),
-        ("auto", None, True, "auto"),
-        ("auto", "es", True, "spanish"),
-        ("auto", "xx", True, "auto"),
-        ("french", "en", True, "french"),
+        ("auto", "en", False, None, "auto"),
+        ("auto", "de", False, None, "auto"),
+        ("auto", "en", True, None, "english"),
+        ("auto", "de", True, None, "german"),
+        ("auto", None, True, None, "auto"),
+        ("auto", "es", True, None, "spanish"),
+        ("auto", "xx", True, None, "auto"),
+        ("french", "en", True, None, "french"),
+        ("auto", "en", False, "es", "spanish"),
+        ("auto", "de", False, "auto", "german"),
+        ("auto", "ca", False, "auto", "auto"),
     ],
 )
 def test_process_custom_voice_uses_assistant_language_only_when_enabled(
-    monkeypatch, configured_language, incoming_language, detect_assistant_language, expected
+    monkeypatch, configured_language, incoming_language, detect_assistant_language, selected_language, expected
 ):
     captured = {}
 
@@ -1106,7 +1141,25 @@ def test_process_custom_voice_uses_assistant_language_only_when_enabled(
     monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
     monkeypatch.setattr(qwen3_tts_module, "MLXLockContext", _FakeMLXLockContext)
 
-    assert len(list(handler.process(TTSInput(text="Hello there.", language_code=incoming_language)))) == 1
+    config = (
+        RuntimeConfig(
+            session=RealtimeSessionCreateRequest(
+                type="realtime",
+                audio={"input": {"transcription": {"language": selected_language}}},
+            )
+        )
+        if selected_language is not None
+        else None
+    )
+    tts_input = TTSInput(
+        text="Hello there.",
+        language_code=incoming_language,
+        tts_language_code=incoming_language,
+        runtime_config=config,
+    )
+    if selected_language == "es":
+        config.session.audio.input.transcription.language = "de"
+    assert len(list(handler.process(tts_input))) == 1
     assert captured["language"] == expected
     assert handler.language == configured_language
     assert not hasattr(handler, "_active_language")

@@ -206,6 +206,8 @@ class TTSInput(PipelineMessage):
     tag: Literal["tts_input"] = "tts_input"
     text: str
     language_code: Optional[str] = None
+    selected_language: str | None = Field(default=None, exclude=True)
+    tts_language_code: str | None = Field(default=None, exclude=True)
     runtime_config: RuntimeConfig | None = None
     response: RealtimeResponseCreateParams | None = None
     turn_id: str | None = None
@@ -214,6 +216,23 @@ class TTSInput(PipelineMessage):
     cancel_generation: int | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
     prefetch_transaction: Any = Field(default=None, exclude=True, repr=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def snapshot_language(cls, values: Any) -> Any:
+        """Resolve direct TTS inputs once; the LM processor supplies response snapshots."""
+        if not isinstance(values, dict):
+            return values
+        values = values.copy()
+        if "selected_language" not in values:
+            config = values.get("runtime_config")
+            values["selected_language"] = config.selected_language if config is not None else None
+        if "tts_language_code" not in values:
+            selected = values["selected_language"]
+            values["tts_language_code"] = (
+                None if selected == "auto" else selected if selected is not None else values.get("language_code")
+            )
+        return values
 
 
 class AudioOutput(PipelineMessage):

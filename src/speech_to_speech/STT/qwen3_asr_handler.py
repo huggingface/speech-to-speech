@@ -134,20 +134,30 @@ class Qwen3ASRSTTHandler(BaseSTTHandler):
         detected = parsed.get("language") if isinstance(parsed, dict) else None
         return text, detected
 
-    def _final_language_code(self, detected: Optional[str]) -> str:
-        if self.forced_language is not None:
-            return self.forced_language
+    def _final_language_code(
+        self,
+        detected: Optional[str],
+        request_language: Optional[str] = None,
+        *,
+        explicit_auto: bool = False,
+    ) -> str:
+        if request_language is None and not explicit_auto:
+            request_language = self.forced_language
+        if request_language is not None:
+            return request_language
         code = language_to_code(detected)
         if code is not None:
             self.last_language = code
         elif detected:
             logger.warning("Qwen3-ASR detected unsupported language: %s", detected)
-        return f"{self.last_language or DEFAULT_LANGUAGE}-auto"
+        fallback = None if explicit_auto else self.last_language
+        return f"{code or fallback or DEFAULT_LANGUAGE}-auto"
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         progressive = vad_audio.mode == "progressive"
-        request_language = self.forced_language
-        if request_language is None and progressive:
+        selected = vad_audio.runtime_config.selected_language if vad_audio.runtime_config else None
+        request_language = self.forced_language if selected is None else None if selected == "auto" else selected
+        if request_language is None and progressive and selected != "auto":
             request_language = self.last_language
         audio = np.asarray(vad_audio.audio, dtype=np.float32)
 
@@ -168,7 +178,7 @@ class Qwen3ASRSTTHandler(BaseSTTHandler):
             )
             return
 
-        language_code = self._final_language_code(detected)
+        language_code = self._final_language_code(detected, request_language, explicit_auto=selected == "auto")
         console.print(f"[yellow]USER: {text}")
         logger.debug("Language Code Qwen3-ASR: %s", language_code)
         yield Transcription(

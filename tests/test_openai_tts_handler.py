@@ -10,11 +10,13 @@ from time import perf_counter
 
 import numpy as np
 import pytest
-from openai.types.realtime import RealtimeSessionCreateRequest
+from openai.types.realtime import RealtimeSessionCreateRequest, ResponseCreateEvent, SessionUpdateEvent
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from scipy.io import wavfile
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.api.openai_realtime.service import RealtimeService
+from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END
 from speech_to_speech.pipeline.events import ResponseFailedEvent
@@ -23,6 +25,7 @@ from speech_to_speech.pipeline.messages import (
     PIPELINE_END,
     AudioOutput,
     EndOfResponse,
+    LLMResponseChunk,
     TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -189,6 +192,164 @@ def test_openai_tts_does_not_infer_language_from_pipeline(monkeypatch):
 
     payload = _FakeSpeechOperation.instances[0].payload
     assert "language" not in payload
+
+
+def test_first_response_uses_session_selected_language(monkeypatch):
+    handler = _openai_tts_handler(monkeypatch)
+    handler.language = "English"
+    runtime_config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(
+            type="realtime",
+            audio={"input": {"transcription": {"language": "es"}}},
+        )
+    )
+
+    assert list(handler.process(TTSInput(text="Hola", runtime_config=runtime_config)))
+
+    assert _FakeSpeechOperation.instances[0].payload["language"] == "Spanish"
+
+
+def test_explicit_auto_replaces_setup_language_for_short_first_reply(monkeypatch):
+    handler = _openai_tts_handler(monkeypatch)
+    handler.language = "English"
+    runtime_config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(
+            type="realtime",
+            audio={"input": {"transcription": {"language": "auto"}}},
+        )
+    )
+
+    assert list(handler.process(TTSInput(text="Sure.", language_code=None, runtime_config=runtime_config)))
+
+    assert _FakeSpeechOperation.instances[0].payload["language"] == "Auto"
+    assert handler.language == "English"
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected_language"),
+    [
+        ("我可以帮助您找到最近的火车站，并说明如何购买前往市中心的车票。", "Chinese"),
+        ("私は最寄りの駅を探して、市内への切符を購入する方法を説明することができます。", "Japanese"),
+        ("가장 가까운 기차역을 찾고 시내로 가는 표를 구매하는 방법을 안내해 드릴 수 있습니다.", "Korean"),
+    ],
+)
+def test_auto_tts_detects_asian_language_after_english_at_request_boundary(monkeypatch, answer, expected_language):
+    handler = _openai_tts_handler(monkeypatch)
+    handler.model = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup()
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "auto"}}})
+    )
+
+    for text in ("I can help you find the nearest train station in the city.", answer):
+        outputs = list(processor.process(LLMResponseChunk(text=text, language_code="en", runtime_config=config)))
+        tts_input = next(item for item in outputs if isinstance(item, TTSInput))
+        list(handler.process(tts_input))
+        list(processor.process(EndOfResponse()))
+
+    assert [operation.payload["language"] for operation in _FakeSpeechOperation.instances] == [
+        "English",
+        expected_language,
+    ]
+
+
+def test_mid_response_update_applies_to_next_response(monkeypatch):
+    handler = _openai_tts_handler(monkeypatch)
+    handler.model = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup()
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "es"}}})
+    )
+
+    def speak(text: str, turn_id: str) -> None:
+        outputs = list(processor.process(LLMResponseChunk(text=text, runtime_config=config, turn_id=turn_id)))
+        list(handler.process(next(item for item in outputs if isinstance(item, TTSInput))))
+
+    speak("Hola.", "turn-1")
+    config.session.audio.input.transcription.language = "de"
+    speak("¿Cómo estás?", "turn-1")
+    list(processor.process(EndOfResponse(turn_id="turn-1")))
+    speak("Guten Tag.", "turn-2")
+
+    assert [operation.payload["language"] for operation in _FakeSpeechOperation.instances] == [
+        "Spanish",
+        "Spanish",
+        "German",
+    ]
+
+
+def test_queued_tts_input_keeps_response_selection(monkeypatch):
+    handler = _openai_tts_handler(monkeypatch)
+    handler.model = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup()
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "es"}}})
+    )
+
+    def pending_input(text: str) -> TTSInput:
+        outputs = list(processor.process(LLMResponseChunk(text=text, language_code="es", runtime_config=config)))
+        return next(item for item in outputs if isinstance(item, TTSInput))
+
+    first = pending_input("I can help you find the train station in London.")
+    config.session.audio.input.transcription.language = "auto"
+    list(handler.process(first))
+
+    second = pending_input("The station is on the next street.")
+    config.session.audio.input.transcription.language = "de"
+    list(handler.process(second))
+
+    assert [operation.payload["language"] for operation in _FakeSpeechOperation.instances] == ["Spanish", "Spanish"]
+
+
+def test_pending_response_keeps_first_batch_language(monkeypatch):
+    handler = _openai_tts_handler(monkeypatch)
+    handler.model = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup()
+    queue = Queue()
+    service = RealtimeService(text_prompt_queue=queue)
+    conn_id = service.register()
+    config = service._state(conn_id).runtime_config
+
+    def select(language: str) -> None:
+        update = SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": language}}}},
+            }
+        )
+        assert service.handle_session_update(conn_id, update) is None
+
+    def create_response() -> str:
+        service.handle_response_create(
+            conn_id, ResponseCreateEvent(type="response.create", response={"conversation": "none"})
+        )
+        return queue.get_nowait().response_key
+
+    def speak(text: str, response_key: str) -> None:
+        items = list(processor.process(LLMResponseChunk(text=text, response_key=response_key, runtime_config=config)))
+        tts_input = next(item for item in items if isinstance(item, TTSInput))
+        list(handler.process(tts_input))
+
+    select("es")
+    first_key = create_response()
+    select("de")
+    speak("Hola.", first_key)
+    select("fr")
+    speak("¿Cómo estás?", first_key)
+    list(processor.process(EndOfResponse(response_key=first_key)))
+    service.response._end_response(conn_id)
+    next_key = create_response()
+    speak("Bonjour.", next_key)
+
+    assert [operation.payload["language"] for operation in _FakeSpeechOperation.instances] == [
+        "German",
+        "German",
+        "French",
+    ]
 
 
 def test_openai_tts_streaming_resampler_is_chunk_invariant_and_anti_aliased():

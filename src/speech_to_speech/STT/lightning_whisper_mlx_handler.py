@@ -72,9 +72,11 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
         logger.debug("infering whisper...")
 
         audio = vad_audio.audio
-        if self.start_language != "auto":
+        selected = vad_audio.runtime_config.selected_language if vad_audio.runtime_config else None
+        request_language = self.start_language if selected is None else selected
+        if request_language != "auto":
             with MLXLockContext(handler_name=self.__class__.__name__):
-                transcription_dict = self.model.transcribe(audio, language=self.start_language)
+                transcription_dict = self.model.transcribe(audio, language=request_language)
         else:
             with MLXLockContext(handler_name=self.__class__.__name__):
                 transcription_dict = self.model.transcribe(audio)
@@ -94,7 +96,7 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
         console.print(f"[yellow]USER: {pred_text}")
         logger.debug(f"Language Code Whisper: {language_code}")
 
-        if self.start_language == "auto":
+        if request_language == "auto":
             language_code += "-auto"
 
         if vad_audio.mode == "progressive":

@@ -42,6 +42,7 @@ class RuntimeConfig(BaseModel):
         default_factory=lambda: RealtimeSessionCreateRequest(type="realtime"),
         validate_default=True,
     )
+    last_assistant_language: str | None = Field(default=None, exclude=True)
 
     @field_validator("session", mode="after")
     @classmethod
@@ -79,3 +80,13 @@ class RuntimeConfig(BaseModel):
         """Merge non-None, explicitly-set fields from 'update' into the
         current 'session', preserving any fields not present in the update."""
         _apply_update(self.session, update)
+
+    @property
+    def selected_language(self) -> str | None:
+        audio = self.session.audio
+        input_audio = audio.input if audio is not None else None
+        transcription = input_audio.transcription if input_audio is not None else None
+        language = transcription.language if transcription is not None else None
+        if isinstance(language, str) and language.strip().lower() == "auto":
+            return "auto"
+        return language
