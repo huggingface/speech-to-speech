@@ -25,6 +25,7 @@ from speech_to_speech.pipeline.messages import (
     PIPELINE_END,
     AudioOutput,
     EndOfResponse,
+    GenerateResponseRequest,
     LLMResponseChunk,
     TTSInput,
 )
@@ -304,7 +305,7 @@ def test_queued_tts_input_keeps_response_selection(monkeypatch):
     assert [operation.payload["language"] for operation in _FakeSpeechOperation.instances] == ["Spanish", "Spanish"]
 
 
-def test_pending_response_keeps_first_batch_language(monkeypatch):
+def test_pending_response_uses_selection_at_response_create(monkeypatch):
     handler = _openai_tts_handler(monkeypatch)
     handler.model = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     processor = LMOutputProcessor.__new__(LMOutputProcessor)
@@ -323,31 +324,43 @@ def test_pending_response_keeps_first_batch_language(monkeypatch):
         )
         assert service.handle_session_update(conn_id, update) is None
 
-    def create_response() -> str:
+    def create_response() -> GenerateResponseRequest:
         service.handle_response_create(
             conn_id, ResponseCreateEvent(type="response.create", response={"conversation": "none"})
         )
-        return queue.get_nowait().response_key
+        return queue.get_nowait()
 
-    def speak(text: str, response_key: str) -> None:
-        items = list(processor.process(LLMResponseChunk(text=text, response_key=response_key, runtime_config=config)))
+    def speak(text: str, request: GenerateResponseRequest) -> None:
+        items = list(
+            processor.process(
+                LLMResponseChunk(
+                    text=text,
+                    response_key=request.response_key,
+                    runtime_config=config,
+                    selected_language=request.selected_language,
+                )
+            )
+        )
         tts_input = next(item for item in items if isinstance(item, TTSInput))
         list(handler.process(tts_input))
 
     select("es")
-    first_key = create_response()
+    first_request = create_response()
+    assert first_request.selected_language == "es"
     select("de")
-    speak("Hola.", first_key)
+    assert first_request.selected_language == "es"
+    speak("Hola.", first_request)
     select("fr")
-    speak("¿Cómo estás?", first_key)
-    list(processor.process(EndOfResponse(response_key=first_key)))
+    speak("¿Cómo estás?", first_request)
+    list(processor.process(EndOfResponse(response_key=first_request.response_key)))
     service.response._end_response(conn_id)
-    next_key = create_response()
-    speak("Bonjour.", next_key)
+    next_request = create_response()
+    assert next_request.selected_language == "fr"
+    speak("Bonjour.", next_request)
 
     assert [operation.payload["language"] for operation in _FakeSpeechOperation.instances] == [
-        "German",
-        "German",
+        "Spanish",
+        "Spanish",
         "French",
     ]
 

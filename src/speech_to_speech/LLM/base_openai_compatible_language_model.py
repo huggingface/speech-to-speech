@@ -114,6 +114,7 @@ class _Turn(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     language_code: Optional[str]
+    selected_language: str | None
     gen: int | None
     runtime_config: Any
     response: Any
@@ -526,6 +527,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         return LLMResponseChunk(
             text=text,
             language_code=language_code if language_code is not None else turn.language_code,
+            selected_language=turn.selected_language,
             tools=tools or [],
             runtime_config=turn.runtime_config,
             response=turn.response,
@@ -848,6 +850,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 state.output_emitted = True
                 yield LLMResponseChunk(
                     text=PROVIDER_FAILURE_FALLBACK,
+                    selected_language=turn.selected_language,
                     runtime_config=turn.runtime_config,
                     response=turn.response,
                     turn_id=turn.turn_id,
@@ -1041,6 +1044,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         # the websocket router. Mitigations: request_timeout_s / ReadTimeout.
         turn = _Turn(
             language_code=language_code,
+            selected_language=request.selected_language,
             gen=gen,
             runtime_config=runtime_config,
             response=response,
@@ -1136,6 +1140,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         # the websocket router. Mitigations: request_timeout_s / ReadTimeout.
         turn = _Turn(
             language_code=language_code,
+            selected_language=request.selected_language,
             gen=gen,
             runtime_config=runtime_config,
             response=response,

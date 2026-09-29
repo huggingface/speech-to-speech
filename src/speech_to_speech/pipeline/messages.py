@@ -149,6 +149,7 @@ class LLMResponseChunk(PipelineMessage):
     parts: list[AssistantOutputPart] = Field(default_factory=list)
     text: str = ""
     language_code: Optional[str] = None
+    selected_language: str | None = Field(default=None, exclude=True)
     tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
     runtime_config: RuntimeConfig | None = None
     response: RealtimeResponseCreateParams | None = None
@@ -367,6 +368,7 @@ class GenerateResponseRequest(PipelineMessage):
     tag: Literal["generate_response"] = "generate_response"
     response_key: str = Field(default_factory=lambda: uuid4().hex, exclude=True, repr=False)
     runtime_config: RuntimeConfig
+    selected_language: str | None = Field(default=None, exclude=True)
     response: RealtimeResponseCreateParams | None = None
     audio: np.ndarray | None = None
     audio_sample_rate: int = 16000
@@ -375,6 +377,15 @@ class GenerateResponseRequest(PipelineMessage):
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
     prefetch_transaction: ResponsePrefetchTransaction | None = Field(default=None, exclude=True, repr=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def snapshot_selected_language(cls, values: Any) -> Any:
+        if not isinstance(values, dict) or "selected_language" in values:
+            return values
+        values = values.copy()
+        values["selected_language"] = values["runtime_config"].selected_language
+        return values
 
 
 # ── Binary sentinels (audio/output queue) ─────────────────────────────
