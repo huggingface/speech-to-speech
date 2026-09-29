@@ -22,15 +22,15 @@ from rich.console import Console
 from rich.text import Text
 
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
+from speech_to_speech.pipeline.language_detection import (
+    detect_language_from_text,
+    warm_language_detector,
+)
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.pipeline.turn_latency import bind_active_turn_latency_tracker
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.STT.smart_progressive_streaming import PartialTranscription as ProgressiveStreamPartial
 from speech_to_speech.utils.mlx_lock import MLXLockContext
-from speech_to_speech.utils.text_language_detection import (
-    build_language_detector,
-    detect_language_from_text,
-)
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -63,14 +63,6 @@ SUPPORTED_LANGUAGES = [
     "lv",
     "lt",
 ]
-
-
-def _build_lingua_detector() -> Any:
-    return build_language_detector(SUPPORTED_LANGUAGES, preload=True)
-
-
-_lingua_detector = _build_lingua_detector()
-
 
 class ParakeetTDTSTTHandler(BaseSTTHandler):
     """
@@ -108,6 +100,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         self.gen_kwargs = gen_kwargs
         self.start_language = language
         self.last_language = language if language else "en"
+        self._language_detector = warm_language_detector(tuple(SUPPORTED_LANGUAGES))
         self.enable_live_transcription = enable_live_transcription
         self.live_transcription_update_interval = live_transcription_update_interval
         self.compute_lock = Lock()
@@ -385,7 +378,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         Returns:
             Detected language code or None if detection fails
         """
-        return detect_language_from_text(text, _lingua_detector)
+        return detect_language_from_text(text, getattr(self, "_language_detector", None))
 
     @contextmanager
     def _compute_lock_context(self, handler_name: str, timeout: float) -> Iterator[bool]:

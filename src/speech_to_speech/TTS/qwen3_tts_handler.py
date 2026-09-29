@@ -134,6 +134,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         gen_kwargs: dict[str, Any] | None = None,
         cancel_scope: CancelScope | None = None,
         speculative_turns: SpeculativeTurnTracker | None = None,
+        detect_llm_output_language: bool = False,
     ) -> None:
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
@@ -144,6 +145,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.ref_rvq = self._normalize_optional_path(ref_rvq)
         self.ref_text = ref_text
         self.language = self._normalize_language(language)
+        self.detect_llm_output_language = detect_llm_output_language
         self.speaker = speaker
         self.instruct = instruct
         self.xvec_only = xvec_only
@@ -400,6 +402,12 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         if not normalized:
             return "auto"
         return QWEN3_LANGUAGE_ALIASES.get(normalized, normalized)
+
+    def _language_for_utterance(self, language_code: str | None) -> str:
+        if self.language != "auto" or not getattr(self, "detect_llm_output_language", False) or not language_code:
+            return self.language
+        detected = self._normalize_language(language_code)
+        return detected if detected in QWEN3_LANGUAGE_ALIASES.values() else "auto"
 
     def _infer_model_type_from_name(self) -> str:
         gguf_talker_path = getattr(self, "gguf_talker_path", None)
@@ -848,34 +856,25 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         self._apply_session_voice_override(model_type, runtime_config, response)
 
         selected = tts_input.selected_language
-        request_language = None
-        if selected is not None:
-            request_language = self._normalize_language(language_code if selected == "auto" else selected)
+        request_language = (
+            self._normalize_language(language_code if selected == "auto" else selected)
+            if selected is not None
+            else self._language_for_utterance(language_code)
+        )
 
         console.print(f"[green]ASSISTANT: {text}")
 
+        logger.info("Qwen3-TTS language=%s (input_code=%s)", request_language, language_code)
         store = getattr(self, "turn_latency_store", None)
         tracker = store.get_response(tts_input.response_key) if store else None
         try:
             with bind_active_turn_latency_tracker(tracker):
                 if self._has_voice_clone_reference():
-                    audio_iter = (
-                        self._process_voice_clone(text, request_language)
-                        if request_language is not None
-                        else self._process_voice_clone(text)
-                    )
+                    audio_iter = self._process_voice_clone(text, request_language)
                 elif model_type == "custom_voice":
-                    audio_iter = (
-                        self._process_custom_voice(text, request_language)
-                        if request_language is not None
-                        else self._process_custom_voice(text)
-                    )
+                    audio_iter = self._process_custom_voice(text, request_language)
                 elif model_type == "voice_design":
-                    audio_iter = (
-                        self._process_voice_design(text, request_language)
-                        if request_language is not None
-                        else self._process_voice_design(text)
-                    )
+                    audio_iter = self._process_voice_design(text, request_language)
                 else:
                     raise ValueError(
                         "Qwen3-TTS Base model requires a voice-clone reference. "

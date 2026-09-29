@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.pipeline import language_detection
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -35,7 +36,6 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import transcript_for_log
-from speech_to_speech.utils.text_language_detection import all_language_detector, detect_language_from_text
 from speech_to_speech.utils.utils import response_wants_audio
 
 logger = logging.getLogger(__name__)
@@ -54,9 +54,12 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         self,
         speculative_turns: SpeculativeTurnTracker | None = None,
         text_output_queue: Queue[PipelineEvent] | None = None,
+        detect_llm_output_language: bool = False,
     ) -> None:
         self.speculative_turns = speculative_turns
         self.text_output_queue = text_output_queue
+        self.detect_llm_output_language = detect_llm_output_language
+        self._language_detector = language_detection.warm_language_detector() if detect_llm_output_language else None
         self._response_key: str | None = None
         self._tool_call_ids: list[str] = []
         self._output_sequence = 0
@@ -88,9 +91,17 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         # a bounded window for this response.
         self._assistant_language_probe = (self._assistant_language_probe + " " + text).strip()[-256:]
         # The assistant can answer outside Parakeet's recognition languages.
-        self._detected_assistant_language = detect_language_from_text(
-            self._assistant_language_probe, all_language_detector()
-        )
+        if self._language_detector is None:
+            self._language_detector = language_detection.warm_language_detector()
+        try:
+            self._detected_assistant_language = language_detection.detect_language_from_text(
+                self._assistant_language_probe,
+                self._language_detector,
+                minimum_confidence_gap=language_detection.MIN_ASSISTANT_CONFIDENCE_GAP,
+                allow_short_cjk=True,
+            )
+        except Exception:
+            logger.exception("Assistant language detection failed; using prior assistant language")
 
     def _notify_generation_done(
         self,
@@ -234,8 +245,9 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             ):
                 continue
             logger.debug("Forwarding to TTS: %s", transcript_for_log(part.text))
-            self._observe_assistant_language(part.text)
             config = lm_output.runtime_config
+            if self.detect_llm_output_language or config is not None:
+                self._observe_assistant_language(part.text)
             self._tts_runtime_config = config
             selected = config.selected_language if config is not None else None
             detected_or_prior = self._detected_assistant_language or (
@@ -248,9 +260,12 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 assistant_language = self._auto_response_language
             else:
                 assistant_language = detected_or_prior
+            language_code = lm_output.language_code
+            if self.detect_llm_output_language:
+                language_code = self._detected_assistant_language
             yield TTSInput(
                 text=part.text,
-                language_code=lm_output.language_code,
+                language_code=language_code,
                 assistant_language_code=assistant_language,
                 runtime_config=lm_output.runtime_config,
                 response=lm_output.response,

@@ -515,7 +515,7 @@ def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     handler.queue_in = Queue()
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
     handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
-    handler._process_voice_clone = lambda text: iter([np.zeros(512, dtype=np.int16)])
+    handler._process_voice_clone = lambda text, language=None: iter([np.zeros(512, dtype=np.int16)])
 
     monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
 
@@ -714,7 +714,7 @@ def test_process_commits_turn_before_generating_audio(monkeypatch, caplog):
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
     handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
 
-    def _process_voice_clone(text):
+    def _process_voice_clone(text, language=None):
         assert tracker.is_committed("turn_1", 0)
         yield np.zeros(512, dtype=np.int16)
 
@@ -1081,3 +1081,87 @@ def test_process_voice_clone_scales_max_tokens_for_mlx_backend(monkeypatch):
     assert len(outputs) == 1
     assert captured["max_tokens"] == handler._estimate_max_new_tokens(long_text)
     assert captured["max_tokens"] > 360
+
+
+@pytest.mark.parametrize(
+    ("configured_language", "incoming_language", "detect_assistant_language", "selected_language", "expected"),
+    [
+        ("auto", "en", False, None, "auto"),
+        ("auto", "de", False, None, "auto"),
+        ("auto", "en", True, None, "english"),
+        ("auto", "de", True, None, "german"),
+        ("auto", None, True, None, "auto"),
+        ("auto", "es", True, None, "spanish"),
+        ("auto", "xx", True, None, "auto"),
+        ("french", "en", True, None, "french"),
+        ("auto", "en", False, "es", "spanish"),
+        ("auto", "de", False, "auto", "german"),
+    ],
+)
+def test_process_custom_voice_uses_assistant_language_only_when_enabled(
+    monkeypatch, configured_language, incoming_language, detect_assistant_language, selected_language, expected
+):
+    captured = {}
+
+    class _FakeMLXLockContext:
+        def __init__(self, handler_name, timeout):
+            pass
+
+        def __enter__(self):
+            return True
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.cancel_scope = None
+    handler.speculative_turns = None
+    handler.ref_audio = None
+    handler.ref_spk = None
+    handler.ref_rvq = None
+    handler.speaker = "Ryan"
+    handler.instruct = None
+    handler.language = configured_language
+    handler.detect_llm_output_language = detect_assistant_language
+    handler.streaming_chunk_size = 4
+    handler.max_new_tokens = 1536
+    handler.blocksize = 512
+    handler.backend = "mlx"
+    handler.gen_kwargs = {}
+    handler.queue_in = Queue()
+    handler.model = SimpleNamespace(
+        config=SimpleNamespace(tts_model_type="custom_voice"),
+        generate_custom_voice=lambda **kwargs: (captured.update(kwargs), iter([(_audible_stream_chunk(), 16000, {})]))[
+            1
+        ],
+    )
+    handler._apply_session_voice_override = lambda *args: None
+
+    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+    monkeypatch.setattr(qwen3_tts_module, "MLXLockContext", _FakeMLXLockContext)
+
+    config = (
+        RuntimeConfig(
+            session=RealtimeSessionCreateRequest(
+                type="realtime",
+                audio={"input": {"transcription": {"language": selected_language}}},
+            )
+        )
+        if selected_language is not None
+        else None
+    )
+    assert len(
+        list(
+            handler.process(
+                TTSInput(
+                    text="Hello there.",
+                    language_code=incoming_language,
+                    assistant_language_code=incoming_language,
+                    runtime_config=config,
+                )
+            )
+        )
+    ) == 1
+    assert captured["language"] == expected
+    assert handler.language == configured_language
+    assert not hasattr(handler, "_active_language")
