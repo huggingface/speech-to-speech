@@ -5,14 +5,13 @@ import re
 from typing import Any, Iterator
 
 import numpy as np
-import torch
 from rich.console import Console
 
 from speech_to_speech.LLM.utils import WHISPER_LANGUAGE_TO_LLM_LANGUAGE
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
-from speech_to_speech.utils.utils import is_npu_available
+from speech_to_speech.utils.utils import resolve_device
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -20,18 +19,8 @@ console = Console()
 SAMPLE_RATE = 16000
 
 SUPPORTED_LANGUAGES = ["en"]
+SUPPORTED_DEVICES = ("cuda", "npu", "cpu")
 _NEMOTRON_LANG_TAG = re.compile(r"\s*<([A-Za-z]{2})(?:-[A-Za-z]{2})?>\s*$")
-
-
-def resolve_device(device: str) -> str:
-    """Turn ``auto`` into CUDA, then NPU, then CPU; keep an explicit choice as is."""
-    if device != "auto":
-        return device
-    if torch.cuda.is_available():
-        return "cuda"
-    if is_npu_available():
-        return "npu"
-    return "cpu"
 
 
 def _extract_text(result: Any) -> str:
@@ -97,7 +86,7 @@ class NemoASRSTTHandler(BaseSTTHandler):
         gen_kwargs: dict | None = None,
     ) -> None:
         logger.info("Loading NeMo ASR STT model: %s", model_name)
-        self.device = resolve_device(device)
+        self.device = resolve_device(device, SUPPORTED_DEVICES, "NeMo ASR")
         self.start_language = (language or "").strip() or "en"
         self.model_name = model_name
         self._detects_utterance_language = _is_nemotron_multilingual(model_name)

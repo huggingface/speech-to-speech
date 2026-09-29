@@ -14,7 +14,7 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.utils.utils import is_npu_available
+from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -76,17 +76,7 @@ class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.speed = speed
         self.blocksize = blocksize
 
-        if device == "auto":
-            if torch.cuda.is_available():
-                device = "cuda"
-            elif is_npu_available():
-                device = "npu"
-            elif hasattr(torch, "xpu") and torch.xpu.is_available():
-                device = "xpu"
-            elif torch.backends.mps.is_available():
-                device = "mps"
-            else:
-                device = "cpu"
+        device = resolve_device(device, TORCH_DEVICES, "OmniVoice")
 
         logger.info("Loading OmniVoice model %r on %s", model_name, device)
         self.model = OmniVoice.from_pretrained(model_name, device_map=device, dtype=torch_dtype)

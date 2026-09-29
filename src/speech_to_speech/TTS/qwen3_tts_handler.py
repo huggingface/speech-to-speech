@@ -41,6 +41,7 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.pipeline.turn_latency import active_turn_latency_tracker, bind_active_turn_latency_tracker
 from speech_to_speech.utils.mlx_lock import MLXLockContext
+from speech_to_speech.utils.utils import resolve_device
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -186,7 +187,11 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 )
             self._setup_mlx(self.model_name)
         else:
-            self.device = device
+            # Only the torch backend places the model itself; qwentts.cpp (GGML) picks its own device.
+            if self.faster_backend == "torch":
+                self.device = resolve_device(device, ("cuda",), "Qwen3-TTS torch backend")
+            else:
+                self.device = device
             self.model_name = model_name
             logger.info(
                 "Loading Qwen3-TTS model: %s via faster-qwen3-tts (%s backend)",
