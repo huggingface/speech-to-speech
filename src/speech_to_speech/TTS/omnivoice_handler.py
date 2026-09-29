@@ -14,6 +14,7 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.utils.utils import is_npu_available
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -78,6 +79,8 @@ class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
         if device == "auto":
             if torch.cuda.is_available():
                 device = "cuda"
+            elif is_npu_available():
+                device = "npu"
             elif hasattr(torch, "xpu") and torch.xpu.is_available():
                 device = "xpu"
             elif torch.backends.mps.is_available():

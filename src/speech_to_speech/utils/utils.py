@@ -4,6 +4,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 import numpy as np
+import torch
 
 if TYPE_CHECKING:
     from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
@@ -37,6 +38,21 @@ def is_out_of_band(response: RealtimeResponseCreateParams | None) -> bool:
 
 def next_power_of_2(x: int) -> int:
     return 1 if x == 0 else 2 ** (x - 1).bit_length()
+
+
+def is_npu_available() -> bool:
+    """Whether an Ascend NPU is available through a ``torch_npu`` build.
+
+    ``torch.npu`` only exists once ``torch_npu`` has been imported, so the import
+    is attempted lazily here and stays invisible to CUDA/MPS/CPU-only installs.
+    """
+    if not hasattr(torch, "npu"):
+        try:
+            import torch_npu  # noqa: F401
+        except ImportError:
+            return False
+    npu = getattr(torch, "npu", None)
+    return npu is not None and bool(npu.is_available())
 
 
 def _generate_id(prefix: str) -> str:

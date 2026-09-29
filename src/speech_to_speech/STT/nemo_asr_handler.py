@@ -11,6 +11,7 @@ from speech_to_speech.LLM.utils import WHISPER_LANGUAGE_TO_LLM_LANGUAGE
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+from speech_to_speech.utils.utils import is_npu_available
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -21,10 +22,13 @@ SUPPORTED_LANGUAGES = ["en"]
 
 
 def resolve_device(device: str) -> str:
+    """Turn ``auto`` into CUDA, then NPU, then CPU; keep an explicit choice as is."""
     if device != "auto":
         return device
     if torch.cuda.is_available():
         return "cuda"
+    if is_npu_available():
+        return "npu"
     return "cpu"
 
 

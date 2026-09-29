@@ -31,6 +31,7 @@ from speech_to_speech.pipeline.turn_latency import bind_active_turn_latency_trac
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.STT.smart_progressive_streaming import PartialTranscription as ProgressiveStreamPartial
 from speech_to_speech.utils.mlx_lock import MLXLockContext
+from speech_to_speech.utils.utils import is_npu_available
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -93,7 +94,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
             model_name: Model identifier. Defaults are:
                 - MPS: "mlx-community/parakeet-tdt-0.6b-v3"
                 - CUDA/CPU: "nvidia/parakeet-tdt-0.6b-v3"
-            device: Device to use ("auto", "cuda", "mps", "cpu")
+            device: Device to use ("auto", "cuda", "npu", "mps", "cpu")
             compute_type: Compute precision ("float16", "float32")
             language: Legacy language preference (ignored by Parakeet decoders)
             gen_kwargs: Additional generation kwargs
@@ -116,7 +117,12 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
             else:
                 import torch
 
-                self.device = "cuda" if torch.cuda.is_available() else "cpu"
+                if torch.cuda.is_available():
+                    self.device = "cuda"
+                elif is_npu_available():
+                    self.device = "npu"
+                else:
+                    self.device = "cpu"
         else:
             self.device = device
 
