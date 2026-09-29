@@ -204,6 +204,22 @@ class TestConnectionLifecycle:
         assert "TTS" in error.error.message
         assert runtime_config.selected_language is None
 
+    def test_parakeet_route_rejects_named_session_language(self, service, conn_id, runtime_config):
+        # Parakeet advertises no steerable STT languages to the session handler.
+        service.stt_supported_languages = set()
+        update = SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": "es"}}}},
+            }
+        )
+
+        error = service.handle_session_update(conn_id, update)
+
+        assert isinstance(error, RealtimeErrorEvent)
+        assert "STT" in error.error.message
+        assert runtime_config.selected_language is None
+
     def test_accepted_session_language_is_sent_without_surrounding_space(self, service, conn_id, runtime_config):
         service.stt_supported_languages = {"es"}
         service.tts_supported_languages = {"es"}

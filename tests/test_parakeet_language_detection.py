@@ -39,6 +39,19 @@ def test_build_lingua_detector_preloads_language_models(monkeypatch):
     assert calls[1:] == ["preload", "build"]
 
 
+def test_configured_language_is_accepted_but_cannot_force_parakeet(monkeypatch, caplog):
+    handler = object.__new__(ParakeetTDTSTTHandler)
+    monkeypatch.setattr(parakeet_tdt_handler, "warm_language_detector", lambda candidates: None)
+    monkeypatch.setattr(handler, "_setup_nano_parakeet", lambda model_name: None)
+    monkeypatch.setattr(handler, "warmup", lambda: None)
+
+    handler.setup(device="cpu", language="es")
+
+    assert handler.start_language == "es"
+    assert handler.last_language is None
+    assert "ignoring configured language 'es'" in caplog.text
+
+
 def test_detect_language_from_short_text_returns_none_without_querying_detector(monkeypatch):
     handler = object.__new__(ParakeetTDTSTTHandler)
 

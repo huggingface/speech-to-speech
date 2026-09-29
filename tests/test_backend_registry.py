@@ -95,6 +95,12 @@ def test_session_language_validation_uses_loaded_faster_whisper_capabilities(mod
     assert not STT_BACKENDS["whisper"].capabilities.bypasses_transcription_notifier
 
 
+def test_parakeet_session_language_selection_remains_unsupported():
+    selection = BackendSelection(STT_BACKENDS["parakeet-tdt"], {})
+
+    assert s2s_pipeline._stt_session_languages(selection, SimpleNamespace()) == set()
+
+
 @pytest.mark.parametrize(
     ("model_name", "supported_languages", "accepted"),
     [

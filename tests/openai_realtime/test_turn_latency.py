@@ -85,7 +85,8 @@ def final_stt_event(service):
     notifier.setup(text_output_queue=Queue(), should_listen=Event())
 
     def transcribe(turn_id, revision, text, source_audio=None):
-        handler._process_mlx_final = lambda audio: (text, "en")
+        handler._process_mlx_final = lambda audio: text
+        handler._detect_language_from_text = lambda text: "en"
         audio = source_audio or VADAudio(
             audio=np.zeros(1600, dtype=np.float32), mode="final", turn_id=turn_id, turn_revision=revision
         )
@@ -267,10 +268,11 @@ def test_stt_worker_discards_latency_when_revision_changes_during_inference(serv
             # Reopening while the model runs makes the final output stale at
             # the worker's output gate, before the notifier/service sees it.
             speculative_turns.observe("turn_1", 1)
-            return "Superseded transcript", "en"
-        return "Current transcript", "en"
+            return "Superseded transcript"
+        return "Current transcript"
 
     handler._process_mlx_final = infer
+    handler._detect_language_from_text = lambda text: "en"
     for revision in (0, 1):
         handler.queue_in.put(
             VADAudio(audio=np.zeros(1600, dtype=np.float32), mode="final", turn_id="turn_1", turn_revision=revision)
