@@ -139,6 +139,7 @@ export class S2sRealtimeClient extends EventTarget {
     // Input transcription deltas are append-only and may overlap across turns.
     // Keep each unresolved prefix until its authoritative completion arrives.
     this._userTranscriptByItem = new Map();
+    this._userSnapshotByItem = new Map();
     this._currentUserItemId = "";
     this._userAudioRecorder = new SentAudioRecorder({ sampleRate: AUDIO_SAMPLE_RATE });
     this._debug = (() => {
@@ -251,6 +252,9 @@ export class S2sRealtimeClient extends EventTarget {
   _sessionConfig() {
     return {
       outputModalities: ["audio"],
+      providerData: {
+        extensions: ["speech_to_speech.input_audio_transcription.snapshot"],
+      },
       audio: {
         input: {
           format: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE },
@@ -585,14 +589,27 @@ export class S2sRealtimeClient extends EventTarget {
       case "response.content_part.added":
         if (event.part?.type === "audio" || event.part?.type === "output_audio") this._markAudible();
         break;
+      case "speech_to_speech.input_audio_transcription.snapshot": {
+        const transcript = typeof event.transcript === "string" ? event.transcript : "";
+        if (transcript) {
+          const itemId = typeof event.item_id === "string" ? event.item_id : "";
+          this._userSnapshotByItem.set(itemId, transcript);
+          this.dispatchEvent(new CustomEvent("transcript", { detail: {
+            role: "user", text: transcript, partial: true, itemId,
+          } }));
+        }
+        break;
+      }
       case "conversation.item.input_audio_transcription.delta": {
         const delta = typeof event.delta === "string" ? event.delta : "";
         if (delta) {
           const itemId = typeof event.item_id === "string" ? event.item_id : "";
           const text = (this._userTranscriptByItem.get(itemId) || "") + delta;
           this._userTranscriptByItem.set(itemId, text);
+          const snapshot = this._userSnapshotByItem.get(itemId);
+          const displayText = snapshot || text;
           this.dispatchEvent(new CustomEvent("transcript", { detail: {
-            role: "user", text, partial: true, itemId,
+            role: "user", text: displayText, partial: true, itemId,
           } }));
         }
         break;
@@ -600,8 +617,11 @@ export class S2sRealtimeClient extends EventTarget {
       case "conversation.item.input_audio_transcription.completed": {
         const text = typeof event.transcript === "string" ? event.transcript : "";
         const itemId = typeof event.item_id === "string" ? event.item_id : "";
-        const hadPartial = Boolean(this._userTranscriptByItem.get(itemId));
+        const hadPartial = Boolean(
+          this._userTranscriptByItem.get(itemId) || this._userSnapshotByItem.get(itemId)
+        );
         this._userTranscriptByItem.delete(itemId);
+        this._userSnapshotByItem.delete(itemId);
         const isCurrentUserItem = this._currentUserItemId
           ? Boolean(itemId) && itemId === this._currentUserItemId
           : true;
@@ -626,6 +646,7 @@ export class S2sRealtimeClient extends EventTarget {
           ? Boolean(itemId) && itemId === this._currentUserItemId
           : true;
         this._userTranscriptByItem.delete(itemId);
+        this._userSnapshotByItem.delete(itemId);
         if (itemId && itemId === this._currentUserItemId) this._currentUserItemId = "";
         if (
           isCurrentUserItem
@@ -902,6 +923,7 @@ export class S2sRealtimeClient extends EventTarget {
     if (this.options.transport === "websocket") this._clearPlayback();
     this._userAudioRecorder.reset();
     this._userTranscriptByItem.clear();
+    this._userSnapshotByItem.clear();
     this._currentUserItemId = "";
     if (this._queueWake) {
       clearTimeout(this._queueTimer);
