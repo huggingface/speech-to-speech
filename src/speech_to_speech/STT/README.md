@@ -11,6 +11,7 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - `parakeet-tdt` → `STT/parakeet_tdt_handler.py`
 - `parakeet-unified` → `STT/nemo_asr_handler.py`
 - `nemotron-streaming` → `STT/nemo_asr_handler.py`
+- `orukeet` → `STT/nemo_asr_handler.py`
 - `paraformer` → `STT/paraformer_handler.py`
 - `qwen3-asr` → `STT/qwen3_asr_handler.py`
 - `openai` → `STT/openai_compatible_handler.py`
@@ -127,6 +128,17 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - Language flag: `--nemotron_streaming_language` (default `en`). Fallback if the model does not emit a tag. The English-only checkpoint always reports this value. Nemotron 3.5 detects language per utterance (`target_lang=auto`), strips `<xx-XX>` from the text, and reports the detected code on the final transcription.
 - Device flag: `--nemotron_streaming_device` (default `auto`)
 - The pipeline transcribes each VAD utterance with NeMo `ASRModel.transcribe` (offline API)
+
+### 11) Orukeet (`--stt orukeet`)
+
+- Handler: `NemoASRSTTHandler`
+- Install: `pip install "speech-to-speech[nemo]"`
+- Model flag: `--orukeet_model_name`
+- Default model: `oruk/orukeet`
+- Checkpoint flags: `--orukeet_checkpoint_filename` (default `orukeet-v0.1.0.nemo`), `--orukeet_checkpoint_revision`
+- Language flag: `--orukeet_language` (default `auto`). Fallback until text language detection returns a code, then the last detected code.
+- Device flag: `--orukeet_device` (default `auto`)
+- The pipeline downloads the NeMo file, loads it with `ASRModel.restore_from`, and transcribes each VAD utterance with `ASRModel.transcribe` (offline API)
 
 ## Language Abbreviations (ISO-style codes seen in STT handlers)
 
@@ -249,3 +261,15 @@ strips the `<xx-XX>` tag from the text, and reports that code for
 `--enable_lang_prompt` and language-sensitive TTS.
 
 The pipeline transcribes VAD utterances with NeMo `ASRModel.transcribe` (offline API).
+
+### Orukeet
+
+```bash
+pip install "speech-to-speech[nemo]"
+speech-to-speech serve --stt orukeet
+```
+
+The pipeline downloads `orukeet-v0.1.0.nemo` from `oruk/orukeet`, loads it with
+`ASRModel.restore_from`, and transcribes VAD utterances with NeMo
+`ASRModel.transcribe` (offline API). Language codes come from text detection
+on each final transcription.
