@@ -192,7 +192,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
             from kokoro import KPipeline
 
             self.backend = "kokoro"
-            self.pipeline = KPipeline(lang_code=self.lang_code)
+            self.pipeline = KPipeline(lang_code=self.lang_code, device=self.device)
             logger.info("Native Kokoro pipeline loaded successfully")
         except ImportError as e:
             raise ImportError(
@@ -387,7 +387,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 self.voice = new_voice
                 from kokoro import KPipeline
 
-                self.pipeline = KPipeline(lang_code=self.lang_code)
+                self.pipeline = KPipeline(lang_code=self.lang_code, device=self.device)
 
         console.print(f"[green]ASSISTANT: {llm_sentence}")
 
@@ -434,5 +434,5 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         else:
             from kokoro import KPipeline
 
-            self.pipeline = KPipeline(lang_code=self.lang_code)
+            self.pipeline = KPipeline(lang_code=self.lang_code, device=self.device)
         logger.debug("Kokoro TTS session state reset")
