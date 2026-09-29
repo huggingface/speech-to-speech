@@ -23,7 +23,6 @@ from rich.text import Text
 
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.language_detection import (
-    PARAKEET_TDT_LANGUAGES,
     detect_language_from_text,
     warm_language_detector,
 )
@@ -37,7 +36,34 @@ from speech_to_speech.utils.utils import resolve_device
 logger = logging.getLogger(__name__)
 console = Console()
 
-SUPPORTED_LANGUAGES = list(PARAKEET_TDT_LANGUAGES)
+# Parakeet TDT v3 supports 25 European languages
+SUPPORTED_LANGUAGES = [
+    "en",
+    "de",
+    "fr",
+    "es",
+    "it",
+    "pt",
+    "nl",
+    "pl",
+    "ru",
+    "uk",
+    "cs",
+    "sk",
+    "hu",
+    "ro",
+    "bg",
+    "hr",
+    "sl",
+    "sr",
+    "da",
+    "no",
+    "sv",
+    "fi",
+    "et",
+    "lv",
+    "lt",
+]
 
 
 class ParakeetTDTSTTHandler(BaseSTTHandler):

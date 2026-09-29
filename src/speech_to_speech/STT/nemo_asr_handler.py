@@ -10,7 +10,6 @@ from rich.console import Console
 from speech_to_speech.LLM.utils import WHISPER_LANGUAGE_TO_LLM_LANGUAGE
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.language_detection import (
-    PARAKEET_TDT_LANGUAGES,
     detect_language_from_text,
     warm_language_detector,
 )
@@ -24,6 +23,33 @@ console = Console()
 SAMPLE_RATE = 16000
 
 SUPPORTED_LANGUAGES = ["en"]
+TEXT_DETECTION_LANGUAGES = [
+    "en",
+    "de",
+    "fr",
+    "es",
+    "it",
+    "pt",
+    "nl",
+    "pl",
+    "ru",
+    "uk",
+    "cs",
+    "sk",
+    "hu",
+    "ro",
+    "bg",
+    "hr",
+    "sl",
+    "sr",
+    "da",
+    "no",
+    "sv",
+    "fi",
+    "et",
+    "lv",
+    "lt",
+]
 SUPPORTED_DEVICES = ("cuda", "npu", "cpu")
 _NEMOTRON_LANG_TAG = re.compile(r"\s*<([A-Za-z]{2})(?:-[A-Za-z]{2})?>\s*$")
 
@@ -106,7 +132,7 @@ class NemoASRSTTHandler(BaseSTTHandler):
         self.last_language = self.language
         self.gen_kwargs = dict(gen_kwargs or {})
         if detect_language_from_text:
-            self._language_detector = warm_language_detector(PARAKEET_TDT_LANGUAGES)
+            self._language_detector = warm_language_detector(tuple(TEXT_DETECTION_LANGUAGES))
 
         from nemo.collections.asr.models import ASRModel
 
