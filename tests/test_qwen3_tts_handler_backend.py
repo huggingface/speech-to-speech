@@ -1096,6 +1096,7 @@ def test_process_voice_clone_scales_max_tokens_for_mlx_backend(monkeypatch):
         ("french", "en", True, None, "french"),
         ("auto", "en", False, "es", "spanish"),
         ("auto", "de", False, "auto", "german"),
+        ("auto", "ca", False, "auto", "auto"),
     ],
 )
 def test_process_custom_voice_uses_assistant_language_only_when_enabled(
@@ -1150,21 +1151,15 @@ def test_process_custom_voice_uses_assistant_language_only_when_enabled(
         if selected_language is not None
         else None
     )
-    assert (
-        len(
-            list(
-                handler.process(
-                    TTSInput(
-                        text="Hello there.",
-                        language_code=incoming_language,
-                        assistant_language_code=incoming_language,
-                        runtime_config=config,
-                    )
-                )
-            )
-        )
-        == 1
+    tts_input = TTSInput(
+        text="Hello there.",
+        language_code=incoming_language,
+        tts_language_code=incoming_language,
+        runtime_config=config,
     )
+    if selected_language == "es":
+        config.session.audio.input.transcription.language = "de"
+    assert len(list(handler.process(tts_input))) == 1
     assert captured["language"] == expected
     assert handler.language == configured_language
     assert not hasattr(handler, "_active_language")

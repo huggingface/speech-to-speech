@@ -240,8 +240,7 @@ class ConversationHandler(RealtimeBaseHandler):
 
         Raises :class:`ChatItemError` on validation failure or unsupported type.
         """
-        st = self._state(conn_id)
-        add_supported_item(st.runtime_config.chat, item)
+        add_supported_item(self._state(conn_id).runtime_config.chat, item)
 
     # ── Pipeline event handlers ────────────────────
 

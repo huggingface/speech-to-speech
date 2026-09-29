@@ -403,9 +403,13 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             return "auto"
         return QWEN3_LANGUAGE_ALIASES.get(normalized, normalized)
 
-    def _language_for_utterance(self, language_code: str | None) -> str:
-        if self.language != "auto" or not getattr(self, "detect_llm_output_language", False) or not language_code:
-            return self.language
+    def _language_for_utterance(self, language_code: str | None, selected_language: str | None = None) -> str:
+        if selected_language not in (None, "auto"):
+            return self._normalize_language(selected_language)
+        configured = "auto" if selected_language == "auto" else self.language
+        detect = selected_language == "auto" or getattr(self, "detect_llm_output_language", False)
+        if configured != "auto" or not detect or not language_code:
+            return configured
         detected = self._normalize_language(language_code)
         return detected if detected in QWEN3_LANGUAGE_ALIASES.values() else "auto"
 
@@ -855,12 +859,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         model_type = self._model_type()
         self._apply_session_voice_override(model_type, runtime_config, response)
 
-        selected = tts_input.selected_language
-        request_language = (
-            self._normalize_language(language_code if selected == "auto" else selected)
-            if selected is not None
-            else self._language_for_utterance(language_code)
-        )
+        request_language = self._language_for_utterance(language_code, tts_input.selected_language)
 
         console.print(f"[green]ASSISTANT: {text}")
 

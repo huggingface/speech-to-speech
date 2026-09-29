@@ -206,8 +206,8 @@ class TTSInput(PipelineMessage):
     tag: Literal["tts_input"] = "tts_input"
     text: str
     language_code: Optional[str] = None
-    # Detected assistant language, or the earlier same-session fallback for Auto.
-    assistant_language_code: str | None = Field(default=None, exclude=True)
+    selected_language: str | None = Field(default=None, exclude=True)
+    tts_language_code: str | None = Field(default=None, exclude=True)
     runtime_config: RuntimeConfig | None = None
     response: RealtimeResponseCreateParams | None = None
     turn_id: str | None = None
@@ -217,17 +217,22 @@ class TTSInput(PipelineMessage):
     response_key: str | None = Field(default=None, exclude=True, repr=False)
     prefetch_transaction: Any = Field(default=None, exclude=True, repr=False)
 
-    @property
-    def selected_language(self) -> str | None:
-        return self.runtime_config.selected_language if self.runtime_config is not None else None
-
-    @property
-    def tts_language_code(self) -> str | None:
-        """Resolve the current selection when a backend starts synthesis."""
-        selected = self.selected_language
-        if selected == "auto":
-            return self.assistant_language_code
-        return selected if selected is not None else self.language_code
+    @model_validator(mode="before")
+    @classmethod
+    def snapshot_language(cls, values: Any) -> Any:
+        """Resolve direct TTS inputs once; the LM processor supplies response snapshots."""
+        if not isinstance(values, dict):
+            return values
+        values = values.copy()
+        if "selected_language" not in values:
+            config = values.get("runtime_config")
+            values["selected_language"] = config.selected_language if config is not None else None
+        if "tts_language_code" not in values:
+            selected = values["selected_language"]
+            values["tts_language_code"] = (
+                None if selected == "auto" else selected if selected is not None else values.get("language_code")
+            )
+        return values
 
 
 class AudioOutput(PipelineMessage):
