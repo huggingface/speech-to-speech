@@ -85,3 +85,17 @@ def test_faster_whisper_progressive_partial_has_no_language_field(monkeypatch) -
     assert isinstance(outputs[0], PartialTranscription)
     assert outputs[0].text == "Hello"
     assert not hasattr(outputs[0], "language_code")
+
+
+def test_faster_whisper_times_only_the_final_branch(monkeypatch) -> None:
+    segment = SimpleNamespace(start=0.0, end=1.0, text=" Hello")
+    handler = _make_handler(monkeypatch, segments=[segment], language="en")
+    handler._times = [0.01]
+
+    final = list(handler.process(VADAudio(audio=np.zeros(1600, dtype=np.float32))))
+    partial = list(
+        handler.process(VADAudio(audio=np.zeros(1600, dtype=np.float32), mode="progressive"))
+    )
+
+    assert handler.should_log_timing(final[0])
+    assert not handler.should_log_timing(partial[0])

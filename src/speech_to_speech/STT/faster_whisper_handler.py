@@ -138,6 +138,9 @@ class FasterWhisperSTTHandler(BaseSTTHandler):
         else:
             logger.debug("no text detected. skipping...")
 
+    def should_log_timing(self, output: STTOut) -> bool:
+        return isinstance(output, Transcription) and self.last_time > self.min_time_to_debug
+
     def cleanup(self) -> None:
         logger.info("Stopping FasterWhisperSTTHandler")
         del self.model
