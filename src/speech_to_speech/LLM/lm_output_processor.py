@@ -263,7 +263,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                     else None
                 )
                 selected = self._response_selected_language
-                if selected == "auto":
+                if selected == "auto" or (selected is None and self.detect_llm_output_language):
                     self._response_tts_language = self._detected_assistant_language or (
                         config.last_assistant_language if config is not None else None
                     )
@@ -276,6 +276,9 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 language_code=language_code,
                 selected_language=selected,
                 tts_language_code=self._response_tts_language if selected is not None else language_code,
+                response_assistant_language_code=(
+                    self._response_tts_language if selected is None and self.detect_llm_output_language else None
+                ),
                 runtime_config=lm_output.runtime_config,
                 response=lm_output.response,
                 turn_id=lm_output.turn_id,
