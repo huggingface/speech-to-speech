@@ -1150,18 +1150,21 @@ def test_process_custom_voice_uses_assistant_language_only_when_enabled(
         if selected_language is not None
         else None
     )
-    assert len(
-        list(
-            handler.process(
-                TTSInput(
-                    text="Hello there.",
-                    language_code=incoming_language,
-                    assistant_language_code=incoming_language,
-                    runtime_config=config,
+    assert (
+        len(
+            list(
+                handler.process(
+                    TTSInput(
+                        text="Hello there.",
+                        language_code=incoming_language,
+                        assistant_language_code=incoming_language,
+                        runtime_config=config,
+                    )
                 )
             )
         )
-    ) == 1
+        == 1
+    )
     assert captured["language"] == expected
     assert handler.language == configured_language
     assert not hasattr(handler, "_active_language")

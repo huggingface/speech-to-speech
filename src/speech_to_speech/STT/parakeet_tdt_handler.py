@@ -64,6 +64,7 @@ SUPPORTED_LANGUAGES = [
     "lt",
 ]
 
+
 class ParakeetTDTSTTHandler(BaseSTTHandler):
     """
     Handles Speech-to-Text using NVIDIA Parakeet TDT model.
