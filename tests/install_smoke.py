@@ -132,7 +132,7 @@ def _validate_package_defaults() -> None:
     assert qwen3_args.qwen3_tts_ref_audio is None
     assert qwen3_args.qwen3_tts_ref_spk is None
     assert qwen3_args.qwen3_tts_ref_rvq is None
-    assert qwen3_args.qwen3_tts_ggml_quantization == "BF16"
+    assert qwen3_args.qwen3_tts_ggml_quantization is None
     assert qwen3_args.qwen3_tts_gguf_talker_path is None
     assert qwen3_args.qwen3_tts_gguf_codec_path is None
     assert qwen3_args.qwen3_tts_ref_cache_dir is None

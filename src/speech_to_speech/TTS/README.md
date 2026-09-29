@@ -100,7 +100,7 @@ Behavior:
 
 #### Migrating macOS Qwen3 configurations
 
-Native Apple Silicon Python on macOS 14+ installs the Metal runtime with the normal package dependencies. Intel Macs and older macOS versions are not covered by the upstream Metal wheel. Both normal defaults and `--mac-optimal-settings` use `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`, speaker `Aiden`, and BF16 GGUF weights. BF16 preserves the existing GGML default; choose `Q8_0` or `Q4_K_M` to reduce model memory. No local GGUF paths are required: the upstream resolver downloads talker and codec weights from `Serveurperso/Qwen3-TTS-GGUF` on first use.
+Native Apple Silicon Python on macOS 14+ installs the Metal runtime with the normal package dependencies. Intel Macs and older macOS versions are not covered by the upstream Metal wheel. Both normal defaults and `--mac-optimal-settings` use `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`, speaker `Aiden`, and Q8_0 GGUF weights. Q8_0 keeps the Mac setup quantized after the previous 6-bit MLX default; choose `Q4_K_M` for a smaller model. Other platforms retain BF16 by default. Explicit quantization overrides are honored. No local GGUF paths are required: the upstream resolver downloads talker and codec weights from `Serveurperso/Qwen3-TTS-GGUF` on first use.
 
 - Remove `--qwen3_tts_backend mlx` (or replace it with `ggml`).
 - Remove `--qwen3_tts_mlx_quantization`; use `--qwen3_tts_ggml_quantization` instead. MLX quantization labels do not map directly to GGUF quantizations.
@@ -171,7 +171,7 @@ speech-to-speech serve \
 
 Raw `--qwen3_tts_ref_audio` and cached `--qwen3_tts_ref_spk`/`--qwen3_tts_ref_rvq` inputs are mutually exclusive. `.rvq` input requires both `.spk` and reference text.
 
-Example for Apple Silicon using the default BF16 GGML weights:
+Example for Apple Silicon using the default Q8_0 GGML weights:
 
 ```bash
 speech-to-speech serve \
@@ -180,7 +180,7 @@ speech-to-speech serve \
   --qwen3_tts_speaker Aiden
 ```
 
-You can reduce model memory with `Q8_0` or `Q4_K_M`:
+You can reduce model memory further with `Q4_K_M`:
 
 ```bash
 speech-to-speech serve \

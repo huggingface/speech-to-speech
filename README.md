@@ -64,7 +64,7 @@ speech-to-speech local \
     --model_name mlx-community/Qwen3-4B-Instruct-2507-4bit
 ```
 
-The Mac preset selects Parakeet TDT through MLX, the 4-bit Qwen3-4B language model through MLX LM, and Qwen3-TTS CustomVoice through GGML/Metal with BF16 weights. Model weights download on first use; allow disk space for the models, dependencies, and auxiliary assets.
+The Mac preset selects Parakeet TDT through MLX, the 4-bit Qwen3-4B language model through MLX LM, and Qwen3-TTS CustomVoice through GGML/Metal with Q8_0 weights. Model weights download on first use; allow disk space for the models, dependencies, and auxiliary assets.
 
 For a separate local LLM server, see [Combining with llama.cpp](#combining-with-llamacpp). For a model that accepts audio directly, see the [Gemma 4 12B example](./examples/gemma4-12b-macos/README.md).
 
@@ -304,7 +304,6 @@ speech-to-speech serve \
     --qwen3_tts_language auto \
     --qwen3_tts_backend ggml \
     --qwen3_tts_non_streaming_mode True \
-    --qwen3_tts_ggml_quantization BF16 \
     --model_name gpt-5.6-terra \
     --chat_size 30 \
     --responses_api_stream \
@@ -315,7 +314,7 @@ The default model is `gpt-5.6-terra` through the OpenAI Responses API with reaso
 
 ### Local Mac
 
-Start with [Apple Silicon, fully local](#apple-silicon-fully-local). Its `--mac-optimal-settings` preset supplies MPS defaults for supported components, Parakeet TDT for STT, MLX LM for the LLM, and Qwen3-TTS through GGML/Metal with BF16 weights downloaded automatically. Qwen3 GGML selects its own device; `--qwen3_tts_device` applies to the CUDA-only Torch backend.
+Start with [Apple Silicon, fully local](#apple-silicon-fully-local). Its `--mac-optimal-settings` preset supplies MPS defaults for supported components, Parakeet TDT for STT, MLX LM for the LLM, and Qwen3-TTS through GGML/Metal with Q8_0 weights downloaded automatically. Qwen3 GGML selects its own device; `--qwen3_tts_device` applies to the CUDA-only Torch backend.
 
 The preset supplies these as defaults only: explicit `--device`, component-device flags such as `--qwen3_tts_device`, and `--stt`, `--llm_backend`, `--model_name`, and `--tts` all win. Use it with `serve` instead of `local` when you want to expose the server without starting the microphone/speaker client.
 
@@ -466,7 +465,6 @@ speech-to-speech local \
     --stt parakeet-tdt \
     --llm_backend responses-api \
     --tts qwen3 \
-    --qwen3_tts_ggml_quantization BF16 \
     --model_name "gpt-4o-mini" \
     --responses_api_api_key "$OPENAI_API_KEY" \
     --responses_api_stream \
@@ -479,7 +477,6 @@ speech-to-speech local \
     --stt parakeet-tdt \
     --llm_backend responses-api \
     --tts qwen3 \
-    --qwen3_tts_ggml_quantization BF16 \
     --model_name "Qwen/Qwen3.5-9B:together" \
     --responses_api_base_url "https://router.huggingface.co/v1" \
     --responses_api_api_key "$HF_TOKEN" \
@@ -493,7 +490,6 @@ speech-to-speech serve \
     --stt parakeet-tdt \
     --llm_backend responses-api \
     --tts qwen3 \
-    --qwen3_tts_ggml_quantization BF16 \
     --model_name "openai/gpt-oss-20b:groq" \
     --responses_api_base_url "https://router.huggingface.co/v1" \
     --responses_api_api_key "$HF_TOKEN" \

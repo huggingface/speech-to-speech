@@ -76,7 +76,7 @@ uv run speech-to-speech serve \
     --responses_api_api_key "" \
     --responses_api_audio_content_type input_audio \
     --responses_api_stream \
-    --qwen3_tts_ggml_quantization BF16 \
+    --qwen3_tts_ggml_quantization Q8_0 \
     --min_silence_ms 300
 ```
 
@@ -150,5 +150,5 @@ uv run speech-to-speech talk \
 - **Turns end too early**: raise `--min_silence_ms` to `500` or `700`. Higher
   values add the same amount of endpointing latency after the user stops.
 - **Memory pressure**: stop other local models. Keep `-np 1`, and use
-  `--qwen3_tts_ggml_quantization Q4_K_M` if the BF16 TTS model leaves too little
+  `--qwen3_tts_ggml_quantization Q4_K_M` if the Q8_0 TTS model leaves too little
   headroom.

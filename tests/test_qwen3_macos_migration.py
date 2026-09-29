@@ -42,6 +42,7 @@ def test_mac_defaults_load_ggml_and_stream_selected_speaker(monkeypatch, preset)
     handler.setup(Event(), **args.tts_backend.config)
     assert loads[0][0] == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     assert loads[0][1]["backend"] == "ggml"
+    assert loads[0][1]["quant"] == "Q8_0"
     assert loads[0][1]["gguf_talker_path"] is None
     assert loads[0][1]["gguf_codec_path"] is None
     assert calls[0]["speaker"] == "Aiden"
@@ -139,3 +140,29 @@ def test_torch_auto_uses_main_device_resolver(monkeypatch):
     handler = object.__new__(module.Qwen3TTSHandler)
     handler.setup(Event(), backend="torch", device="auto")
     assert handler.device == "cuda"
+
+
+@pytest.mark.parametrize(
+    "platform, backend, quantization, expected",
+    [
+        ("darwin", "ggml", None, "Q8_0"),
+        ("linux", "ggml", None, "BF16"),
+        ("win32", "ggml", None, "BF16"),
+        ("darwin", "torch", None, "BF16"),
+        ("darwin", "ggml", "BF16", "BF16"),
+        ("darwin", "ggml", "Q4_K_M", "Q4_K_M"),
+    ],
+)
+def test_quantization_defaults_preserve_platforms_and_overrides(monkeypatch, platform, backend, quantization, expected):
+    import sys
+
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(module.Qwen3TTSHandler, "_setup_faster", lambda self, **kw: None)
+    monkeypatch.setattr(module.Qwen3TTSHandler, "warmup", lambda self: None)
+    flags = ["--qwen3_tts_backend", backend]
+    if quantization is not None:
+        flags.extend(["--qwen3_tts_ggml_quantization", quantization])
+    args = parse_arguments(flags)
+    handler = object.__new__(module.Qwen3TTSHandler)
+    handler.setup(Event(), **args.tts_backend.config)
+    assert handler.ggml_quantization == expected

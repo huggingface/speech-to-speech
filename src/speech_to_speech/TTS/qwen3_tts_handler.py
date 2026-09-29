@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import sys
 import unicodedata
 from pathlib import Path
 from threading import Event
@@ -104,7 +105,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         dtype: str | torch.dtype = "auto",
         attn_implementation: str = "eager",
         backend: str = "ggml",
-        ggml_quantization: str = "BF16",
+        ggml_quantization: str | None = None,
         gguf_talker_path: str | Path | None = None,
         gguf_codec_path: str | Path | None = None,
         ref_cache_dir: str | Path | None = None,
@@ -153,7 +154,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.parity_mode = parity_mode
         self.non_streaming_mode = non_streaming_mode
         self.faster_backend = self._normalize_faster_backend(backend)
-        self.ggml_quantization = self._normalize_ggml_quantization(ggml_quantization)
+        default_quantization = "Q8_0" if sys.platform == "darwin" and self.faster_backend == "ggml" else "BF16"
+        self.ggml_quantization = self._normalize_ggml_quantization(ggml_quantization or default_quantization)
         self.gguf_talker_path = self._normalize_optional_path(gguf_talker_path)
         self.gguf_codec_path = self._normalize_optional_path(gguf_codec_path)
         self.ref_cache_dir = self._normalize_optional_path(ref_cache_dir)

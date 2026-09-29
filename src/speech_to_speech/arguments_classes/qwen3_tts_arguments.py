@@ -34,10 +34,10 @@ class Qwen3TTSHandlerArguments:
             "help": "faster-qwen3-tts backend. Options: 'ggml' or 'torch'. Default is 'ggml'. GGML uses Metal on supported Apple Silicon Macs; torch requires CUDA. 'mlx' is removed and produces a migration error."
         },
     )
-    qwen3_tts_ggml_quantization: str = field(
-        default="BF16",
+    qwen3_tts_ggml_quantization: Optional[str] = field(
+        default=None,
         metadata={
-            "help": "GGUF quantization for the faster-qwen3-tts GGML backend. Supported values: 'BF16', 'Q8_0', 'Q4_K_M', 'F32'. Default is 'BF16'."
+            "help": "GGUF quantization for the faster-qwen3-tts GGML backend. Supported values: 'BF16', 'Q8_0', 'Q4_K_M', 'F32'. Defaults to 'Q8_0' for GGML on macOS and 'BF16' elsewhere."
         },
     )
     qwen3_tts_gguf_talker_path: Optional[str] = field(
