@@ -12,6 +12,7 @@ from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+from speech_to_speech.utils.utils import validate_device
 
 console = Console()
 
@@ -59,6 +60,8 @@ class FasterWhisperSTTHandler(BaseSTTHandler):
             gen_kwargs.pop("language", None)
         self.gen_kwargs = gen_kwargs
 
+        # CTranslate2 resolves "auto" itself and only runs on CPU or CUDA.
+        validate_device(device, ("cpu", "cuda"), "Faster Whisper STT")
         os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
         self.model = WhisperModel(model_name, device=device, compute_type=compute_type)
 

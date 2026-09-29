@@ -10,6 +10,7 @@ import torch
 
 from speech_to_speech.TTS import kokoro_handler
 from speech_to_speech.TTS.kokoro_handler import KokoroTTSHandler
+from speech_to_speech.utils import utils
 
 
 def test_auto_npu_reaches_kokoro_initial_and_rebuilt_pipelines(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -25,7 +26,7 @@ def test_auto_npu_reaches_kokoro_initial_and_rebuilt_pipelines(monkeypatch: pyte
     monkeypatch.setitem(sys.modules, "kokoro", SimpleNamespace(KPipeline=FakePipeline))
     monkeypatch.setattr(kokoro_handler, "platform", "linux")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(kokoro_handler, "is_npu_available", lambda: True)
+    monkeypatch.setattr(utils, "is_npu_available", lambda: True)
     monkeypatch.setattr(KokoroTTSHandler, "warmup", lambda self: None)
     monkeypatch.setattr(kokoro_handler.console, "print", lambda *_args, **_kwargs: None)
 

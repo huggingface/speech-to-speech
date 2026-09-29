@@ -36,6 +36,7 @@ from speech_to_speech.pipeline.messages import (
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.pipeline.turn_latency import active_turn_latency_tracker, bind_active_turn_latency_tracker
+from speech_to_speech.utils.utils import resolve_device
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -162,7 +163,11 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.gen_kwargs = gen_kwargs or {}
         self.streaming_chunk_size = self._resolve_streaming_chunk_size(streaming_chunk_size)
         self._validate_ggml_options()
-        self.device = device
+        # GGML selects its own device; only Torch needs CUDA device resolution.
+        if self.faster_backend == "torch":
+            self.device = resolve_device(device, ("cuda",), "Qwen3-TTS torch backend")
+        else:
+            self.device = device
         self.model_name = model_name
         logger.info(
             "Loading Qwen3-TTS model: %s via faster-qwen3-tts (%s backend)",

@@ -13,7 +13,7 @@ class KokoroTTSHandlerArguments:
     kokoro_device: str = field(
         default="auto",
         metadata={
-            "help": "The device to run Kokoro TTS on. Options: 'auto', 'cuda', 'cpu', 'mps'. Default is 'auto' (MPS on Mac, CUDA on GPU systems)."
+            "help": "The device to run Kokoro TTS on. Options: 'auto', 'cuda', 'npu', 'mps', 'cpu'. Default is 'auto' (MPS on Mac, otherwise CUDA, then NPU, then CPU)."
         },
     )
     kokoro_voice: str = field(

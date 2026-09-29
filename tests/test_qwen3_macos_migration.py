@@ -123,3 +123,19 @@ def test_clone_preserves_packaged_relative_reference_path(monkeypatch, tmp_path)
 
     assert captured and Path(captured[0]["ref_audio"]).is_absolute()
     assert Path(captured[0]["ref_audio"]).is_file()
+
+
+@pytest.mark.parametrize("device", ["mps", "cpu"])
+def test_torch_device_validation_survives_macos_migration(device):
+    handler = object.__new__(module.Qwen3TTSHandler)
+    with pytest.raises(ValueError, match="Qwen3-TTS torch backend supports device"):
+        handler.setup(Event(), backend="torch", device=device)
+
+
+def test_torch_auto_uses_main_device_resolver(monkeypatch):
+    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(module.Qwen3TTSHandler, "_setup_faster", lambda self, **kwargs: None)
+    monkeypatch.setattr(module.Qwen3TTSHandler, "warmup", lambda self: None)
+    handler = object.__new__(module.Qwen3TTSHandler)
+    handler.setup(Event(), backend="torch", device="auto")
+    assert handler.device == "cuda"

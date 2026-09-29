@@ -13,7 +13,7 @@ class Qwen3TTSHandlerArguments:
     qwen3_tts_device: str = field(
         default="cuda",
         metadata={
-            "help": "Device for the CUDA-only Torch backend. Default is 'cuda'. GGML selects its own device, including Metal on Apple Silicon, and ignores this option."
+            "help": "Device for the CUDA-only Torch backend: 'cuda' or 'auto'. Default is 'cuda'. GGML selects its own device, including Metal on Apple Silicon, and ignores this option."
         },
     )
     qwen3_tts_dtype: str = field(

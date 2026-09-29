@@ -31,7 +31,7 @@ from speech_to_speech.pipeline.turn_latency import bind_active_turn_latency_trac
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.STT.smart_progressive_streaming import PartialTranscription as ProgressiveStreamPartial
 from speech_to_speech.utils.mlx_lock import MLXLockContext
-from speech_to_speech.utils.utils import is_npu_available
+from speech_to_speech.utils.utils import resolve_device
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -111,20 +111,10 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         self.sample_rate = 16000
 
         # Determine device
-        if device == "auto":
-            if platform == "darwin":
-                self.device = "mps"
-            else:
-                import torch
-
-                if torch.cuda.is_available():
-                    self.device = "cuda"
-                elif is_npu_available():
-                    self.device = "npu"
-                else:
-                    self.device = "cpu"
+        if device == "auto" and platform == "darwin":
+            self.device = "mps"
         else:
-            self.device = device
+            self.device = resolve_device(device, ("cuda", "npu", "mps", "cpu"), "Parakeet TDT")
 
         # Set default model based on device
         if model_name is None:

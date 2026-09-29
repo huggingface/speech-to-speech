@@ -11,7 +11,9 @@ class NemotronStreamingSTTHandlerArguments:
     )
     nemotron_streaming_device: str = field(
         default="auto",
-        metadata={"help": "The device to run on. 'auto' picks CUDA when available, otherwise CPU. Default is 'auto'."},
+        metadata={
+            "help": "The device to run on. Options: 'auto' (CUDA, then NPU, then CPU), 'cuda', 'npu', 'cpu'. Default is 'auto'."
+        },
     )
     nemotron_streaming_language: str = field(
         default="en",

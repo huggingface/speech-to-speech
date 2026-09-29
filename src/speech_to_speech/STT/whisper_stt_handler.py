@@ -13,6 +13,7 @@ from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -60,7 +61,7 @@ class WhisperSTTHandler(BaseSTTHandler):
         language: Optional[str] = None,
         gen_kwargs: dict[str, Any] = {},
     ) -> None:
-        self.device = device
+        self.device = resolve_device(device, TORCH_DEVICES, "Whisper STT")
         self.torch_dtype = getattr(torch, torch_dtype)
         self.compile_mode = compile_mode
         self.gen_kwargs = gen_kwargs
@@ -74,7 +75,7 @@ class WhisperSTTHandler(BaseSTTHandler):
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
             model_name,
             torch_dtype=self.torch_dtype,
-        ).to(device)
+        ).to(self.device)
 
         # compile
         if self.compile_mode:

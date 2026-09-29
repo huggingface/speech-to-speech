@@ -24,7 +24,7 @@ from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.mlx_lock import MLXLockContext
-from speech_to_speech.utils.utils import is_npu_available
+from speech_to_speech.utils.utils import resolve_device
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -121,20 +121,10 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.speculative_turns = speculative_turns
 
         # Determine device
-        if device == "auto":
-            if platform == "darwin":
-                self.device = "mps"
-            else:
-                import torch
-
-                if torch.cuda.is_available():
-                    self.device = "cuda"
-                elif is_npu_available():
-                    self.device = "npu"
-                else:
-                    self.device = "cpu"
+        if device == "auto" and platform == "darwin":
+            self.device = "mps"
         else:
-            self.device = device
+            self.device = resolve_device(device, ("cuda", "npu", "mps", "cpu"), "Kokoro TTS")
 
         # Set default model based on device
         if model_name is None:

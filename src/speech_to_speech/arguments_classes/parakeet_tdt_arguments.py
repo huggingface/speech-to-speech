@@ -22,8 +22,8 @@ class ParakeetTDTSTTHandlerArguments:
     parakeet_tdt_device: str = field(
         default="auto",
         metadata={
-            "help": "Device to run the model on. 'auto' will use MPS on macOS and CUDA otherwise. "
-            "Options: 'auto', 'cuda', 'mps', 'cpu'. Default is 'auto'."
+            "help": "Device to run the model on. 'auto' will use MPS on macOS, otherwise CUDA, then NPU, then CPU. "
+            "Options: 'auto', 'cuda', 'npu', 'mps', 'cpu'. Default is 'auto'."
         },
     )
     parakeet_tdt_compute_type: str = field(

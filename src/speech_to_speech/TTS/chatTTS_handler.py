@@ -15,6 +15,7 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.utils.utils import validate_device
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def setup(
         self,
         should_listen: Event,
-        device: str = "cuda",
+        device: str = "auto",
         gen_kwargs: dict[str, Any] = {},  # Unused
         stream: bool = True,
         chunk_size: int = 512,
@@ -35,9 +36,13 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.should_listen = should_listen
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
-        self.device = device
+        validate_device(device, ("cuda", "npu", "mps", "cpu"), "ChatTTS")
         self.model = ChatTTS.Chat()
-        self.model.load(compile=False)  # Doesn't work for me with True
+        # With "auto", ChatTTS picks CUDA/NPU (by free memory) or CPU; it skips MPS as slower than CPU.
+        model_device = None if device == "auto" else torch.device(device)
+        if not self.model.load(compile=False, device=model_device):  # Doesn't work for me with compile=True
+            raise RuntimeError("ChatTTS failed to load its models.")
+        self.device = str(self.model.device)
         self.chunk_size = chunk_size
         self.stream = stream
         rnd_spk_emb = self.model.sample_random_speaker()
