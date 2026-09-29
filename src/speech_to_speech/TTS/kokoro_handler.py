@@ -3,7 +3,7 @@ Kokoro TTS Handler
 
 Supports NVIDIA Kokoro TTS model for high-quality multilingual speech synthesis.
 - On Apple Silicon (MPS): Uses mlx-audio with mlx-community/Kokoro-82M-bf16
-- On CUDA/CPU: Uses native kokoro library with hexgrad/Kokoro-82M
+- On CUDA/NPU/CPU: Uses native kokoro library with hexgrad/Kokoro-82M
 
 Model supports 8 languages with multiple voices per language.
 """
@@ -24,6 +24,7 @@ from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.mlx_lock import MLXLockContext
+from speech_to_speech.utils.utils import is_npu_available
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -104,7 +105,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
             model_name: Model identifier. Defaults are:
                 - MPS: "mlx-community/Kokoro-82M-bf16"
                 - CUDA/CPU: "hexgrad/Kokoro-82M"
-            device: Device to use ("auto", "cuda", "mps", "cpu")
+            device: Device to use ("auto", "cuda", "npu", "mps", "cpu")
             voice: Voice identifier (e.g. "bm_fable")
             lang_code: Language code (e.g. "b" for British English)
             speed: Speech speed multiplier
@@ -126,7 +127,12 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
             else:
                 import torch
 
-                self.device = "cuda" if torch.cuda.is_available() else "cpu"
+                if torch.cuda.is_available():
+                    self.device = "cuda"
+                elif is_npu_available():
+                    self.device = "npu"
+                else:
+                    self.device = "cpu"
         else:
             self.device = device
 
@@ -186,7 +192,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
             from kokoro import KPipeline
 
             self.backend = "kokoro"
-            self.pipeline = KPipeline(lang_code=self.lang_code)
+            self.pipeline = KPipeline(lang_code=self.lang_code, device=self.device)
             logger.info("Native Kokoro pipeline loaded successfully")
         except ImportError as e:
             raise ImportError(
@@ -381,7 +387,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 self.voice = new_voice
                 from kokoro import KPipeline
 
-                self.pipeline = KPipeline(lang_code=self.lang_code)
+                self.pipeline = KPipeline(lang_code=self.lang_code, device=self.device)
 
         console.print(f"[green]ASSISTANT: {llm_sentence}")
 
@@ -428,5 +434,5 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         else:
             from kokoro import KPipeline
 
-            self.pipeline = KPipeline(lang_code=self.lang_code)
+            self.pipeline = KPipeline(lang_code=self.lang_code, device=self.device)
         logger.debug("Kokoro TTS session state reset")

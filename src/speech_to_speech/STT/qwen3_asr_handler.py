@@ -14,6 +14,7 @@ from transformers.models.qwen3_asr.processing_qwen3_asr import LANGUAGE_CODE_TO_
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+from speech_to_speech.utils.utils import is_npu_available
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -39,11 +40,13 @@ def language_to_code(language: Optional[str]) -> Optional[str]:
 
 
 def resolve_device(device: str) -> str:
-    """Turn ``auto`` into CUDA, then MPS, then CPU; keep an explicit choice as is."""
+    """Turn ``auto`` into CUDA, then NPU, then MPS, then CPU; keep an explicit choice as is."""
     if device != "auto":
         return device
     if torch.cuda.is_available():
         return "cuda"
+    if is_npu_available():
+        return "npu"
     if torch.backends.mps.is_available():
         return "mps"
     return "cpu"
