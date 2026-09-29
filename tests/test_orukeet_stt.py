@@ -8,10 +8,12 @@ import numpy as np
 import pytest
 
 from speech_to_speech.backend_registry import create_backend_handler
+from speech_to_speech.pipeline.language_detection import PARAKEET_TDT_LANGUAGES
 from speech_to_speech.pipeline.messages import Transcription, VADAudio
 from speech_to_speech.s2s_pipeline import parse_arguments
 from speech_to_speech.STT import nemo_asr_handler
 from speech_to_speech.STT.nemo_asr_handler import NemoASRSTTHandler
+from speech_to_speech.STT.parakeet_tdt_handler import SUPPORTED_LANGUAGES as PARAKEET_LANGUAGES
 from tests.test_nemo_asr_handler import _context, _install_fake_nemo
 
 
@@ -47,6 +49,7 @@ def test_orukeet_setup_downloads_and_restore_from(monkeypatch: pytest.MonkeyPatc
     downloads: list[tuple[Any, ...]] = []
     restored: list[str] = []
     pretrained: list[Any] = []
+    warmed: list[Any] = []
 
     def fake_download(repo_id: str, filename: str, revision: str | None = None) -> str:
         downloads.append((repo_id, filename, revision))
@@ -71,25 +74,59 @@ def test_orukeet_setup_downloads_and_restore_from(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(hf_hub_download=fake_download))
     _install_fake_nemo(monkeypatch, FakeASRModel)
-    monkeypatch.setattr(nemo_asr_handler, "warm_language_detector", lambda languages=None: object())
-
-    handler = object.__new__(NemoASRSTTHandler)
-    handler.setup(
-        model_name="oruk/orukeet",
-        device="cpu",
-        language="auto",
-        checkpoint_filename="orukeet-v0.1.0.nemo",
-        checkpoint_revision="555136b50265a132d4cea0d35560c26fc4f657ab",
-        detect_language_from_text=True,
+    monkeypatch.setattr(
+        nemo_asr_handler,
+        "warm_language_detector",
+        lambda languages=None: warmed.append(languages) or object(),
     )
+
+    args = parse_arguments(["--stt", "orukeet", "--orukeet_device", "cpu"])
+    handler = create_backend_handler(args.stt_backend, _context())
 
     assert downloads == [("oruk/orukeet", "orukeet-v0.1.0.nemo", "555136b50265a132d4cea0d35560c26fc4f657ab")]
     assert restored == ["/tmp/orukeet-v0.1.0.nemo"]
     assert pretrained == []
+    assert handler._detect_language_from_text is True
+    assert warmed == [PARAKEET_TDT_LANGUAGES]
+    assert list(PARAKEET_TDT_LANGUAGES) == PARAKEET_LANGUAGES
     assert handler.start_language == "auto"
     assert handler.language == "en"
     assert handler.last_language == "en"
     assert handler.model_name == "oruk/orukeet"
+
+
+@pytest.mark.parametrize("filename", ["", "   "])
+def test_orukeet_empty_checkpoint_filename_errors(monkeypatch: pytest.MonkeyPatch, filename: str) -> None:
+    pretrained: list[Any] = []
+
+    class FakeASRModel:
+        @classmethod
+        def from_pretrained(cls, *args: Any, **kwargs: Any) -> FakeASRModel:
+            pretrained.append((args, kwargs))
+            return cls()
+
+        @classmethod
+        def restore_from(cls, path: str) -> FakeASRModel:
+            raise AssertionError("restore_from should not run for an empty checkpoint filename")
+
+        def to(self, device: str) -> FakeASRModel:
+            return self
+
+        def transcribe(self, audio: Any) -> list[str]:
+            return ["warmup"]
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(hf_hub_download=lambda *args, **kwargs: "/tmp/orukeet-v0.1.0.nemo"),
+    )
+    _install_fake_nemo(monkeypatch, FakeASRModel)
+    monkeypatch.setattr(nemo_asr_handler, "warm_language_detector", lambda languages=None: object())
+
+    args = parse_arguments(["--stt", "orukeet", "--orukeet_device", "cpu", "--orukeet_checkpoint_filename", filename])
+    with pytest.raises(ValueError, match="checkpoint_filename is empty"):
+        create_backend_handler(args.stt_backend, _context())
+    assert pretrained == []
 
 
 def test_orukeet_missing_nemo_names_the_extra(monkeypatch: pytest.MonkeyPatch) -> None:

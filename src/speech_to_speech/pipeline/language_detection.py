@@ -17,6 +17,34 @@ except ImportError:
 logger = logging.getLogger(__name__)
 MIN_ASSISTANT_CONFIDENCE_GAP = 0.1
 _LINGUA_CODE_MAP = {"no": "nb"}
+# Parakeet TDT v3 / Orukeet: 25 European languages.
+PARAKEET_TDT_LANGUAGES = (
+    "en",
+    "de",
+    "fr",
+    "es",
+    "it",
+    "pt",
+    "nl",
+    "pl",
+    "ru",
+    "uk",
+    "cs",
+    "sk",
+    "hu",
+    "ro",
+    "bg",
+    "hr",
+    "sl",
+    "sr",
+    "da",
+    "no",
+    "sv",
+    "fi",
+    "et",
+    "lv",
+    "lt",
+)
 _WARMUP_TEXTS = (
     "This sentence warms the language detector before the first response.",
     "Bonjour, je peux vous aider à trouver la bonne réponse.",

@@ -10,6 +10,7 @@ from rich.console import Console
 from speech_to_speech.LLM.utils import WHISPER_LANGUAGE_TO_LLM_LANGUAGE
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.language_detection import (
+    PARAKEET_TDT_LANGUAGES,
     detect_language_from_text,
     warm_language_detector,
 )
@@ -23,33 +24,6 @@ console = Console()
 SAMPLE_RATE = 16000
 
 SUPPORTED_LANGUAGES = ["en"]
-TEXT_DETECTION_LANGUAGES = [
-    "en",
-    "de",
-    "fr",
-    "es",
-    "it",
-    "pt",
-    "nl",
-    "pl",
-    "ru",
-    "uk",
-    "cs",
-    "sk",
-    "hu",
-    "ro",
-    "bg",
-    "hr",
-    "sl",
-    "sr",
-    "da",
-    "no",
-    "sv",
-    "fi",
-    "et",
-    "lv",
-    "lt",
-]
 SUPPORTED_DEVICES = ("cuda", "npu", "cpu")
 _NEMOTRON_LANG_TAG = re.compile(r"\s*<([A-Za-z]{2})(?:-[A-Za-z]{2})?>\s*$")
 
@@ -132,17 +106,22 @@ class NemoASRSTTHandler(BaseSTTHandler):
         self.last_language = self.language
         self.gen_kwargs = dict(gen_kwargs or {})
         if detect_language_from_text:
-            self._language_detector = warm_language_detector(tuple(TEXT_DETECTION_LANGUAGES))
+            self._language_detector = warm_language_detector(PARAKEET_TDT_LANGUAGES)
 
         from nemo.collections.asr.models import ASRModel
 
-        if checkpoint_filename:
+        if checkpoint_filename is None:
+            self.model = ASRModel.from_pretrained(model_name=model_name)
+        else:
+            filename = checkpoint_filename.strip()
+            if not filename:
+                raise ValueError(
+                    "checkpoint_filename is empty; pass a .nemo filename or omit the argument to use from_pretrained"
+                )
             from huggingface_hub import hf_hub_download
 
-            path = hf_hub_download(model_name, checkpoint_filename, revision=checkpoint_revision)
+            path = hf_hub_download(model_name, filename, revision=checkpoint_revision)
             self.model = ASRModel.restore_from(path)
-        else:
-            self.model = ASRModel.from_pretrained(model_name=model_name)
         if hasattr(self.model, "to"):
             self.model = self.model.to(self.device)
         self.warmup()
