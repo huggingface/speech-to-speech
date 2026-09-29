@@ -33,7 +33,7 @@ class ParakeetTDTSTTHandlerArguments:
     parakeet_tdt_language: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Target language code for transcription. If not specified, the model will "
-            "auto-detect the language. Supports 25 European languages."
+            "help": "Legacy option retained for compatibility. Parakeet decoders always select the language "
+            "automatically; this value does not constrain transcription or replace detected language metadata."
         },
     )

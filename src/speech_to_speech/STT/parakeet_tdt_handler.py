@@ -95,12 +95,14 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                 - CUDA/CPU: "nvidia/parakeet-tdt-0.6b-v3"
             device: Device to use ("auto", "cuda", "mps", "cpu")
             compute_type: Compute precision ("float16", "float32")
-            language: Target language code (optional, model auto-detects)
+            language: Legacy language preference (ignored by Parakeet decoders)
             gen_kwargs: Additional generation kwargs
         """
         self.gen_kwargs = gen_kwargs
         self.start_language = language
-        self.last_language = language if language else "en"
+        self.last_language = None
+        if language and language != "auto":
+            logger.warning("Parakeet does not accept a language constraint; ignoring configured language %r", language)
         self._language_detector = warm_language_detector(tuple(SUPPORTED_LANGUAGES))
         self.enable_live_transcription = enable_live_transcription
         self.live_transcription_update_interval = live_transcription_update_interval
@@ -221,10 +223,6 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         process_start_s = perf_counter()
         is_progressive = vad_audio.mode == "progressive"
         audio_input = vad_audio.audio
-        runtime_config = vad_audio.runtime_config
-        selected_language = runtime_config.selected_language if runtime_config is not None else None
-        auto_requested = isinstance(selected_language, str) and selected_language.strip().lower() == "auto"
-
         # Ensure audio is float32 numpy array
         if not isinstance(audio_input, np.ndarray):
             audio_input = np.array(audio_input, dtype=np.float32)
@@ -300,33 +298,29 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                     if not acquired:
                         logger.error("Failed to acquire compute lock for final transcription")
                         pred_text = ""
-                        language_code = self.last_language
                     else:
                         inference_start_s = perf_counter()
                         if self.backend == "mlx":
-                            pred_text, language_code = self._process_mlx_final(audio_input)
+                            pred_text = self._process_mlx_final(audio_input)
                         else:
-                            pred_text, language_code = self._process_nano_parakeet(audio_input)
+                            pred_text = self._process_nano_parakeet(audio_input)
                         inference_s = perf_counter() - inference_start_s
                         lock_scope_s = perf_counter() - lock_scope_start_s
 
-                # Parakeet's decoder is automatic. A session Auto reset must
-                # report the detected language, not the setup-time label.
-                if auto_requested:
-                    try:
-                        language_code = self._detect_language_from_text(pred_text) if pred_text else None
-                    except Exception:
-                        logger.exception("Parakeet language detection failed; leaving language unset")
-                        language_code = None
+                try:
+                    language_code = self._detect_language_from_text(pred_text) if pred_text else None
+                except Exception:
+                    logger.exception("Parakeet language detection failed; leaving language unset")
+                    language_code = None
                 if language_code and language_code in SUPPORTED_LANGUAGES:
                     self.last_language = language_code
                 else:
-                    language_code = None if auto_requested else self.last_language
+                    language_code = None
 
             except Exception as e:
                 logger.error(f"Parakeet TDT inference failed: {e}")
                 pred_text = ""
-                language_code = None if auto_requested else self.last_language
+                language_code = None
 
             total_s = perf_counter() - process_start_s
             if tracker is not None:
@@ -500,7 +494,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
             parts.append(result.active_text.strip())
         return " ".join(part for part in parts if part).strip()
 
-    def _process_mlx_final(self, audio_input: np.ndarray) -> tuple[str, str]:
+    def _process_mlx_final(self, audio_input: np.ndarray) -> str:
         """Process final audio using MLX backend with streaming handler."""
         # If we have fixed sentences from progressive updates, only transcribe the new part
         if (
@@ -523,8 +517,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                     fixed_end_sample,
                     len(audio_input),
                 )
-                pred_text, language_code = self._process_mlx(audio_input)
-                return pred_text, language_code
+                return self._process_mlx(audio_input)
 
             # Only transcribe the part after fixed sentences
             if fixed_end_sample < len(audio_input):
@@ -550,22 +543,11 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
             self.streaming_handler.reset()
         else:
             # No progressive updates, transcribe everything
-            pred_text, language_code = self._process_mlx(audio_input)
-            return pred_text, language_code
+            return self._process_mlx(audio_input)
 
-        # Determine language
-        if self.start_language and self.start_language != "auto":
-            language_code = self.start_language
-        else:
-            detected_lang = self._detect_language_from_text(pred_text)
-            if detected_lang:
-                language_code = detected_lang
-            else:
-                language_code = self.last_language
+        return pred_text
 
-        return pred_text, language_code
-
-    def _process_mlx(self, audio_input: np.ndarray) -> tuple[str, str]:
+    def _process_mlx(self, audio_input: np.ndarray) -> str:
         """Process audio using MLX backend."""
         import mlx.core as mx
 
@@ -581,36 +563,13 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         else:
             pred_text = str(result).strip()
 
-        # Determine language:
-        # 1. Use fixed language if specified by user
-        # 2. Try to detect from transcribed text using langdetect
-        # 3. Fall back to last known language
-        if self.start_language and self.start_language != "auto":
-            language_code = self.start_language
-        else:
-            # Detect language from transcribed text
-            detected_lang = self._detect_language_from_text(pred_text)
-            if detected_lang:
-                language_code = detected_lang
-            else:
-                language_code = self.last_language
+        return pred_text
 
-        return pred_text, language_code
-
-    def _process_nano_parakeet(self, audio_input: np.ndarray) -> tuple[str, str]:
+    def _process_nano_parakeet(self, audio_input: np.ndarray) -> str:
         """Process audio using nano-parakeet backend."""
         pred_text = self.model.transcribe(audio_input).strip()
 
-        if self.start_language and self.start_language != "auto":
-            language_code = self.start_language
-        else:
-            detected_lang = self._detect_language_from_text(pred_text)
-            if detected_lang:
-                language_code = detected_lang
-            else:
-                language_code = self.last_language
-
-        return pred_text, language_code
+        return pred_text
 
     def cleanup(self) -> None:
         """Clean up model resources."""
@@ -620,7 +579,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
 
     def on_session_end(self) -> None:
         super().on_session_end()
-        self.last_language = self.start_language if self.start_language else "en"
+        self.last_language = None
         if self.enable_live_transcription:
             self.processing_final = False
             self._reset_live_transcription_state(clear_turn=True)

@@ -60,8 +60,9 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 ### 5) Parakeet TDT (`--stt parakeet-tdt`)
 
 - Handler: `ParakeetTDTSTTHandler`
-- Language flag: `--parakeet_tdt_language` (optional)
-- Supports auto language detection when language not specified
+- Legacy language flag: `--parakeet_tdt_language` (accepted but ignored by the decoder)
+- Both decoders choose the transcription language automatically. The reported language is inferred from
+  the resulting text when possible; otherwise it is unknown.
 - Declared supported language list (25 European languages):
   - `en`, `de`, `fr`, `es`, `it`, `pt`, `nl`, `pl`, `ru`, `uk`, `cs`, `sk`, `hu`, `ro`, `bg`, `hr`, `sl`, `sr`, `da`, `no`, `sv`, `fi`, `et`, `lv`, `lt`
 - Backend behavior:
@@ -185,7 +186,6 @@ speech-to-speech serve --stt faster-whisper \
 
 ```bash
 speech-to-speech serve --stt parakeet-tdt --parakeet_tdt_device auto
-speech-to-speech serve --stt parakeet-tdt --parakeet_tdt_language de
 ```
 
 With live transcription (MLX or CUDA/nano-parakeet backend):
