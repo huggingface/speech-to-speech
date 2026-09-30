@@ -142,15 +142,6 @@ class _GenState(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     output_emitted: bool = False
-    # Set when the provider request starts, so the first text event can be
-    # timed. Sentence batching means the first *yielded* chunk is a whole
-    # sentence, which lands much later than the first token.
-    generation_started_at_s: float | None = None
-    latency_tracker: Any = None
-
-    def record_first_token(self) -> None:
-        if self.latency_tracker is not None and self.generation_started_at_s is not None:
-            self.latency_tracker.record_llm_ttft(perf_counter() - self.generation_started_at_s)
 
 
 class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
@@ -647,7 +638,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     sentence_batch = []
                 yield from self._record_tool_call(state, turn, event.item)
             elif isinstance(event, TextDelta):
-                state.record_first_token()
                 if not turn.wants_audio:
                     # Text-only: forward verbatim. Keep every character (no
                     # remove_unspeechable, which strips TTS-unfriendly symbols) and
@@ -720,7 +710,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             elif isinstance(event, ToolCall):
                 yield from self._record_tool_call(state, turn, event.item)
             elif isinstance(event, TextDelta):
-                state.record_first_token()
                 # Text-only keeps every character verbatim; audio strips markdown
                 # and TTS-unfriendly symbols. Not per-delta here: each TextDelta
                 # in the non-streaming path already carries the full response.
@@ -783,20 +772,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 response_key=turn.response_key,
             )
             transaction_rolled_back = True
-
-        store = getattr(self, "turn_latency_store", None)
-        tracker = store.get_response(turn.response_key) if store else None
-        llm_start_s = perf_counter()
-        llm_recorded = False
-        state.latency_tracker = tracker
-        state.generation_started_at_s = llm_start_s
-
-        def publish_llm_latency() -> None:
-            nonlocal llm_recorded
-            if llm_recorded or tracker is None:
-                return
-            tracker.record_llm(perf_counter() - llm_start_s)
-            llm_recorded = True
 
         try:
             generation_started_at_s = perf_counter()
@@ -949,7 +924,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     cancel_generation=turn.gen,
                     response_key=turn.response_key,
                 )
-            publish_llm_latency()
             yield EndOfResponse(
                 turn_id=turn.turn_id,
                 turn_revision=turn.turn_revision,
@@ -959,10 +933,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             )
             return history_committed
         finally:
-            # Publish the elapsed work before the terminal can finish the
-            # response on another thread, and again here so an abandoned
-            # generator still reports. `publish_llm_latency` is idempotent.
-            publish_llm_latency()
             if turn.prefetch_transaction is not None and not history_committed:
                 # Publish failure to the shared transaction before the queued
                 # logical-done event can race the client's response.create.
