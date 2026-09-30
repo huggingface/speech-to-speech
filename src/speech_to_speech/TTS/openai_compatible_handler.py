@@ -533,6 +533,13 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     and language not in QWEN3_TTS_LANGUAGE_CODES
                 ):
                     language = None
+                elif (
+                    selected not in (None, "auto")
+                    and "qwen3-tts" in self.model.lower()
+                    and language not in QWEN3_TTS_LANGUAGE_CODES
+                ):
+                    # A detected language Qwen3 cannot speak keeps the session language.
+                    language = selected
                 if language is None and use_detected_language:
                     language = self.language
                 elif language is None and selected == "auto" and "qwen3-tts" in self.model.lower():

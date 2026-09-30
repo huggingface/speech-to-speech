@@ -164,6 +164,10 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
         language_code = tts_input.tts_language_code
+        selected = tts_input.selected_language
+        if selected not in (None, "auto") and language_code not in WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE:
+            # A detected language without an MMS checkpoint keeps the session language.
+            language_code = selected
         runtime_config = tts_input.runtime_config
         if language_code is None and runtime_config is not None and tts_input.selected_language == "auto":
             language_code = self._initial_language

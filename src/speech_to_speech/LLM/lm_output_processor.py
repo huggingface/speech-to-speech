@@ -268,7 +268,12 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                         config.last_assistant_language if config is not None else None
                     )
                 elif selected is not None:
-                    self._response_tts_language = selected
+                    # STT keeps the named selection. TTS follows a confident
+                    # detection of this response's first spoken text, and
+                    # otherwise the selection. TTS keeps the selection for a
+                    # detected language it cannot speak.
+                    detected = self._detected_assistant_language if self.detect_llm_output_language else None
+                    self._response_tts_language = detected or selected
                 self._response_language_resolved = True
             selected = self._response_selected_language
             yield TTSInput(
