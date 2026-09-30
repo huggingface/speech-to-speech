@@ -155,6 +155,77 @@ def test_explicit_tts_language_overrides_assistant_detection():
     assert tts_input.tts_language_code == "es"
 
 
+def _detecting_processor() -> LMOutputProcessor:
+    _, processor = _tracked_processor()
+    processor.detect_llm_output_language = True
+    return processor
+
+
+@pytest.mark.parametrize(
+    ("selected", "text", "expected"),
+    [
+        ("en", "Puedo ayudarte a encontrar la estación de tren más cercana.", "es"),
+        ("es", "I can help you find the train station in London.", "en"),
+    ],
+)
+def test_detected_assistant_language_overrides_named_selection_for_tts_only(selected, text, expected):
+    processor = _detecting_processor()
+    config = _session_with_language(selected)
+
+    tts_input = _spoken_tts_input(processor, config, text)
+
+    assert tts_input.tts_language_code == expected
+    assert tts_input.selected_language == selected
+    assert config.selected_language == selected  # STT reads this per-session selection.
+
+
+def test_short_first_batch_keeps_selection_for_the_whole_response():
+    processor = _detecting_processor()
+    config = _session_with_language("en")
+
+    first = _spoken_tts_input(processor, config, "Sí.")
+    later = _spoken_tts_input(processor, config, "Puedo ayudarte a encontrar la estación de tren más cercana.")
+    list(processor.process(EndOfResponse(turn_id="turn_1", turn_revision=0)))
+    next_response = _spoken_tts_input(processor, config, "Claro, la estación está a dos calles de aquí.")
+
+    assert [first.tts_language_code, later.tts_language_code] == ["en", "en"]
+    assert next_response.tts_language_code == "es"
+
+
+def test_confident_first_batch_keeps_detected_language_for_the_whole_response():
+    processor = _detecting_processor()
+    config = _session_with_language("en")
+
+    first = _spoken_tts_input(processor, config, "Puedo ayudarte a encontrar la estación de tren más cercana.")
+    later = _spoken_tts_input(processor, config, "I can also help you find the train station in London.")
+
+    assert [first.tts_language_code, later.tts_language_code] == ["es", "es"]
+
+
+def test_detected_language_unsupported_by_tts_keeps_selection():
+    processor = _detecting_processor()
+    processor.tts_supported_languages = {"en", "fr"}
+    config = _session_with_language("en")
+
+    tts_input = _spoken_tts_input(processor, config, "Puedo ayudarte a encontrar la estación de tren más cercana.")
+
+    assert tts_input.tts_language_code == "en"
+
+
+def test_detected_language_choices_stay_isolated_between_concurrent_sessions():
+    first_processor, second_processor = _detecting_processor(), _detecting_processor()
+    first_config, second_config = _session_with_language("en"), _session_with_language("fr")
+
+    first = _spoken_tts_input(first_processor, first_config, "Puedo ayudarte a encontrar la estación de tren.")
+    second = _spoken_tts_input(second_processor, second_config, "Sure.")
+    first_later = _spoken_tts_input(first_processor, first_config, "Sure.")
+    second_later = _spoken_tts_input(second_processor, second_config, "I can help you find the train station.")
+
+    assert [first.tts_language_code, first_later.tts_language_code] == ["es", "es"]
+    assert [second.tts_language_code, second_later.tts_language_code] == ["fr", "fr"]
+    assert [first_config.selected_language, second_config.selected_language] == ["en", "fr"]
+
+
 @pytest.mark.parametrize("model_cls", [LLMResponseChunk, AssistantOutputEvent])
 def test_ordered_parts_reject_inconsistent_legacy_text(model_cls):
     with pytest.raises(ValidationError, match="text must match the ordered parts"):

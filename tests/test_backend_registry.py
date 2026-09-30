@@ -842,3 +842,45 @@ def test_dependency_error_names_backend_and_required_extra():
 
     with pytest.raises(ImportError, match=r"optional.*tts.*speech-to-speech\[optional-extra\]"):
         create_backend_handler(selection, _context())
+
+
+@pytest.mark.parametrize(
+    ("tts", "model", "expected"),
+    [
+        ("kokoro", None, {"en", "ja", "zh", "fr", "es", "it", "pt", "hi"}),
+        (
+            "openai",
+            "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+            {"zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"},
+        ),
+        ("openai", "other-tts", None),
+    ],
+)
+def test_output_processor_receives_tts_languages_for_detected_language_override(monkeypatch, tts, model, expected):
+    from speech_to_speech.TTS.openai_compatible_handler import OpenAICompatibleTTSHandler
+
+    args = parse_arguments(["--tts", tts])
+    lm_processor = SimpleNamespace()
+    tts_handler = SimpleNamespace()
+    if model is not None:
+        tts_handler = object.__new__(OpenAICompatibleTTSHandler)
+        tts_handler.model = model
+    monkeypatch.setattr(
+        s2s_pipeline,
+        "_build_handlers",
+        lambda **_kwargs: [SimpleNamespace(), SimpleNamespace(), SimpleNamespace(), lm_processor, tts_handler],
+    )
+
+    unit = s2s_pipeline._build_pipeline_unit(
+        index=0,
+        stop_event=Event(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=args.vad_handler_kwargs,
+        stt_backend=args.stt_backend,
+        llm_backend=args.llm_backend,
+        tts_backend=args.tts_backend,
+    )
+
+    assert lm_processor.tts_supported_languages == expected
+    if tts == "openai":
+        assert unit.service.tts_supported_languages is None  # Session validation is unchanged.

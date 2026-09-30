@@ -206,19 +206,20 @@ def test_openai_tts_auto_setup_stays_auto_without_assistant_detection(monkeypatc
 
 
 @pytest.mark.parametrize(
-    ("session_language", "setup_language", "expected_language"),
+    ("session_language", "setup_language", "detected_language", "expected_language"),
     [
-        (None, "Auto", "English"),
-        ("auto", "Auto", "English"),
-        ("es", "Auto", "Spanish"),
-        (None, "French", "French"),
+        (None, "Auto", "en", "English"),
+        ("auto", "Auto", "en", "English"),
+        ("es", "Auto", "en", "English"),
+        ("en", "Auto", "es", "Spanish"),
+        (None, "French", "en", "French"),
     ],
 )
 def test_detected_assistant_language_reaches_openai_tts_payload(
-    monkeypatch, session_language, setup_language, expected_language
+    monkeypatch, session_language, setup_language, detected_language, expected_language
 ):
     monkeypatch.setattr(language_detection, "warm_language_detector", lambda: object())
-    monkeypatch.setattr(language_detection, "detect_language_from_text", lambda *args, **kwargs: "en")
+    monkeypatch.setattr(language_detection, "detect_language_from_text", lambda *args, **kwargs: detected_language)
     handler = _openai_tts_handler(monkeypatch)
     handler.language = setup_language
     handler.detect_llm_output_language = True
@@ -235,7 +236,7 @@ def test_detected_assistant_language_reaches_openai_tts_payload(
         processor.process(
             LLMResponseChunk(
                 text="I can help you find the nearest train station.",
-                language_code="es",  # STT language must not override the assistant's English.
+                language_code="fr",  # STT language must not override the assistant's language.
                 runtime_config=config,
             )
         )
@@ -243,6 +244,7 @@ def test_detected_assistant_language_reaches_openai_tts_payload(
     list(handler.process(next(item for item in outputs if isinstance(item, TTSInput))))
 
     assert _FakeSpeechOperation.instances[0].payload["language"] == expected_language
+    assert config.selected_language == session_language  # STT keeps the session selection.
 
 
 def test_omitted_language_keeps_auto_for_short_first_batch_and_prior_assistant_fallback(monkeypatch):

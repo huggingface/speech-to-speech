@@ -1094,7 +1094,7 @@ def test_process_voice_clone_scales_max_tokens_for_mlx_backend(monkeypatch):
         ("auto", "es", True, None, "spanish"),
         ("auto", "xx", True, None, "auto"),
         ("french", "en", True, None, "french"),
-        ("auto", "en", False, "es", "spanish"),
+        ("auto", "en", False, "es", "english"),
         ("auto", "de", False, "auto", "german"),
         ("auto", "ca", False, "auto", "auto"),
     ],
