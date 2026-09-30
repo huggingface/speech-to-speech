@@ -17,6 +17,9 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
     """Base STT handler with speculative-turn stale input filtering."""
 
     _MAX_COMPLETED_FINAL_REVISIONS = 2048
+    # The gate normally returns immediately. Below this the wait is noise, so it
+    # is neither logged nor added to the turn line as a permanent `0.00s` field.
+    _GATE_WAIT_REPORT_S = 0.05
 
     speculative_turns: SpeculativeTurnTracker | None = None
     final_revision_settle_s: float = 0.0
@@ -32,6 +35,7 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
         turn_revision = getattr(item, "turn_revision", None)
         if self._is_completed_final_revision(item):
             queued_drops = self._drop_stale_queued_inputs()
+            self._discard_pending_latency(item)
             self._log_stale_turn_item(item, "input-after-final", queued_drops=queued_drops)
             return False
         if mode == "progressive" and self._has_queued_final_for_revision(item):
@@ -46,7 +50,7 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             wait_for_stability=wait_for_stability,
         )
         gate_wait_s = perf_counter() - gate_start
-        if gate_wait_s >= 0.05:
+        if gate_wait_s >= self._GATE_WAIT_REPORT_S:
             logger.info(
                 "%s: STT input gate waited %.3fs for turn=%s rev=%s mode=%s latest=%s age=%.3fs queue=%s",
                 self.__class__.__name__,
@@ -59,11 +63,35 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
                 self._safe_qsize(),
             )
 
+        if is_latest and mode == "final" and gate_wait_s >= self._GATE_WAIT_REPORT_S:
+            self._record_vad_settle(item, gate_wait_s)
         if not is_latest:
             queued_drops = self._drop_stale_queued_inputs()
+            # This revision is superseded, so nothing will consume the pending
+            # slot a progressive update may have opened for it.
+            self._discard_pending_latency(item)
             self._log_stale_turn_item(item, "input", queued_drops=queued_drops)
             return False
         return True
+
+    def _record_vad_settle(self, item: object, gate_wait_s: float) -> None:
+        store = getattr(self, "turn_latency_store", None)
+        if store is None:
+            return
+        tracker = store.get_or_create_for_turn(
+            getattr(item, "turn_id", None),
+            getattr(item, "turn_revision", None),
+        )
+        if tracker is not None:
+            tracker.record_vad_settle(gate_wait_s)
+
+    def _discard_pending_latency(self, item: object) -> None:
+        store = getattr(self, "turn_latency_store", None)
+        if store is not None:
+            store.discard_pending_turn(
+                getattr(item, "turn_id", None),
+                getattr(item, "turn_revision", None),
+            )
 
     def should_emit_output(self, output: STTOut) -> bool:
         if isinstance(output, PartialTranscription) and self._is_completed_final_revision(output):

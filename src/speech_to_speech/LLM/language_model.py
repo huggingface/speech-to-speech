@@ -675,7 +675,16 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             llm_start_s = perf_counter()
             try:
                 with bind_active_turn_latency_tracker(tracker):
+                    llm_ttft_recorded = False
                     for chunk in self._generate(active_chat, language_code, gen, ctx, runtime_config, response):
+                        if (
+                            not llm_ttft_recorded
+                            and tracker is not None
+                            and isinstance(chunk, LLMResponseChunk)
+                            and chunk.text.strip()
+                        ):
+                            tracker.record_llm_ttft(perf_counter() - llm_start_s)
+                            llm_ttft_recorded = True
                         chunk.response_key = request.response_key
                         chunk.prefetch_transaction = request.prefetch_transaction
                         new_parts = [part.model_copy(deep=True) for part in chunk.parts]

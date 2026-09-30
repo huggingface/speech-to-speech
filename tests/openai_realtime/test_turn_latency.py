@@ -311,16 +311,17 @@ def test_terminal_response_emits_one_latency_record(service, conn_id, caplog, st
     tracker.record_llm(1.28)
     tracker.record_tts_ttfa(0.16)
     tracker.record_e2e(1.61)
-    tracker.record_mlx_lock_wait(0.03)
+    tracker.record_lock_wait(0.03, "Qwen3TTS")
     service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=request.response_key))
 
     with caplog.at_level(logging.INFO, logger=LATENCY_LOGGER):
         events = service.finish_response(conn_id, status=status, response_key=request.response_key)
         service.finish_response(conn_id, status=status, response_key=request.response_key)
 
+    cut = " tts=cut" if status == "cancelled" else ""
     assert _latency_lines(caplog) == [
         "Turn turn_1 rev=0 latency: stt=0.12s llm=1.28s tts_ttfa=0.16s e2e=1.61s "
-        f"mlx_lock_wait=0.03s status={status} response_key={request.response_key}"
+        f"lock_wait=0.03s[Qwen3TTS:0.03s] status={status}{cut} response_key={request.response_key}"
     ]
     done = [event for event in events if event.type == "response.done"]
     assert len(done) == 1

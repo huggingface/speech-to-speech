@@ -23,7 +23,7 @@ from rich.text import Text
 
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
-from speech_to_speech.pipeline.turn_latency import bind_active_turn_latency_tracker
+from speech_to_speech.pipeline.turn_latency import active_turn_latency_tracker, bind_active_turn_latency_tracker
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.STT.smart_progressive_streaming import PartialTranscription as ProgressiveStreamPartial
 from speech_to_speech.utils.mlx_lock import MLXLockContext
@@ -262,37 +262,42 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                 logger.debug("Skipping stale progressive update (final audio already received)")
                 return
 
-            # Try to acquire lock with short timeout - skip if busy
+            # Try to acquire lock with short timeout - skip if busy. Bind the
+            # pending turn tracker so a failed acquire is attributed; the final
+            # transcription of the same revision reuses that slot.
+            store = getattr(self, "turn_latency_store", None)
+            tracker = store.get_or_create_for_turn(vad_audio.turn_id, vad_audio.turn_revision) if store else None
             lock_scope_start_s = perf_counter()
-            with self._compute_lock_context(handler_name="ParakeetSTT-Progressive", timeout=0.01) as acquired:
-                if acquired:
-                    try:
-                        inference_start_s = perf_counter()
-                        progressive_text = self._show_progressive_transcription(audio_input)
-                        inference_s = perf_counter() - inference_start_s
-                        if inference_s >= 0.25:
-                            logger.info(
-                                "Parakeet progressive STT timing turn=%s rev=%s audio=%.3fs age=%.3fs "
-                                "lock_scope=%.3fs inference=%.3fs chars=%d",
-                                vad_audio.turn_id,
-                                vad_audio.turn_revision,
-                                audio_duration_s,
-                                item_age_s,
-                                perf_counter() - lock_scope_start_s,
-                                inference_s,
-                                len(progressive_text),
-                            )
-                        if progressive_text:
-                            yield PartialTranscription(
-                                text=progressive_text,
-                                turn_id=vad_audio.turn_id,
-                                turn_revision=vad_audio.turn_revision,
-                            )
-                            return
-                    except Exception as e:
-                        logger.debug(f"Progressive transcription failed: {e}")
-                else:
-                    logger.debug("Skipping progressive update (compute busy)")
+            with bind_active_turn_latency_tracker(tracker):
+                with self._compute_lock_context(handler_name="ParakeetSTT-Progressive", timeout=0.01) as acquired:
+                    if acquired:
+                        try:
+                            inference_start_s = perf_counter()
+                            progressive_text = self._show_progressive_transcription(audio_input)
+                            inference_s = perf_counter() - inference_start_s
+                            if inference_s >= 0.25:
+                                logger.info(
+                                    "Parakeet progressive STT timing turn=%s rev=%s audio=%.3fs age=%.3fs "
+                                    "lock_scope=%.3fs inference=%.3fs chars=%d",
+                                    vad_audio.turn_id,
+                                    vad_audio.turn_revision,
+                                    audio_duration_s,
+                                    item_age_s,
+                                    perf_counter() - lock_scope_start_s,
+                                    inference_s,
+                                    len(progressive_text),
+                                )
+                            if progressive_text:
+                                yield PartialTranscription(
+                                    text=progressive_text,
+                                    turn_id=vad_audio.turn_id,
+                                    turn_revision=vad_audio.turn_revision,
+                                )
+                                return
+                        except Exception as e:
+                            logger.debug(f"Progressive transcription failed: {e}")
+                    else:
+                        logger.debug("Skipping progressive update (compute busy)")
             return
 
         # Handle final transcription (send to LLM)
@@ -418,6 +423,9 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         lock_start_s = perf_counter()
         acquired = self.compute_lock.acquire(timeout=timeout)
         wait_s = perf_counter() - lock_start_s
+        tracker = active_turn_latency_tracker()
+        if tracker is not None:
+            tracker.record_lock_wait(wait_s, handler_name)
         hold_start_s: float | None = None
         if acquired:
             if wait_s >= 0.25:
@@ -434,6 +442,8 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                 assert hold_start_s is not None
                 self.compute_lock.release()
                 hold_s = perf_counter() - hold_start_s
+                if tracker is not None:
+                    tracker.record_lock_hold(hold_s, handler_name)
                 if hold_s >= 0.25:
                     logger.info("%s: compute lock released after holding %.2fs", handler_name, hold_s)
                 else:
