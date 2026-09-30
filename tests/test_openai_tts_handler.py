@@ -210,6 +210,9 @@ def test_openai_tts_auto_setup_stays_auto_without_assistant_detection(monkeypatc
     [
         (None, "Auto", "en", "English"),
         ("auto", "Auto", "en", "English"),
+        ("auto", "Auto", "es", "Spanish"),
+        ("auto", "Auto", "hi", "Auto"),  # Unsupported by Qwen3-TTS; keep explicit auto.
+        ("auto", "Auto", "ca", "Auto"),
         ("es", "Auto", "en", "English"),
         ("en", "Auto", "es", "Spanish"),
         ("en", "Auto", "nl", "English"),  # Qwen3-TTS cannot speak Dutch; keep the session language.
@@ -304,6 +307,36 @@ def test_omitted_language_keeps_qwen_auto_for_unsupported_detected_language(monk
     list(handler.process(next(item for item in outputs if isinstance(item, TTSInput))))
 
     assert _FakeSpeechOperation.instances[0].payload["language"] == "Auto"
+
+
+def test_explicit_auto_keeps_qwen_auto_for_unsupported_prior_assistant_language(monkeypatch):
+    monkeypatch.setattr(language_detection, "warm_language_detector", lambda: object())
+    monkeypatch.setattr(
+        language_detection,
+        "detect_language_from_text",
+        lambda text, *args, **kwargs: "hi" if "railway station" in text else None,
+    )
+    handler = _openai_tts_handler(monkeypatch)
+    handler.language = "Auto"
+    handler.detect_llm_output_language = True
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup(detect_llm_output_language=True)
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "auto"}}})
+    )
+
+    def speak(text):
+        outputs = list(processor.process(LLMResponseChunk(text=text, runtime_config=config)))
+        tts_input = next(item for item in outputs if isinstance(item, TTSInput))
+        list(handler.process(tts_input))
+        return tts_input
+
+    speak("Main aapko nearest railway station dhoondhne mein madad kar sakta hoon.")
+    list(processor.process(EndOfResponse()))
+    fallback = speak("Sure.")
+
+    assert fallback.tts_language_code == "hi"  # Inconclusive first batch reuses the prior assistant language.
+    assert [operation.payload["language"] for operation in _FakeSpeechOperation.instances] == ["Auto", "Auto"]
 
 
 def test_first_response_uses_session_selected_language(monkeypatch):
