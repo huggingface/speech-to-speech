@@ -14,6 +14,7 @@ from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import transcript_for_log
+from speech_to_speech.TTS.openai_compatible_handler import _StreamingFIRResampler
 from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
@@ -131,28 +132,10 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
         pipeline_start = perf_counter()
         first_chunk = True
 
-        # Calculate target chunk size in original sample rate
-        # We need enough samples so that after resampling we get blocksize samples
-        needs_resampling = self.model.sample_rate != self.sample_rate
-        if needs_resampling:
-            from scipy.signal import resample_poly
-
-            # Target chunk size in original sample rate (before resampling)
-            resample_ratio = self.model.sample_rate / self.sample_rate
-            target_chunk_size = int(self.blocksize * resample_ratio)
-            # Calculate up/down factors for polyphase resampling
-            # For 24kHz -> 16kHz: 16000/24000 = 2/3
-            from math import gcd
-
-            g = gcd(self.sample_rate, self.model.sample_rate)
-            self._resample_up = self.sample_rate // g
-            self._resample_down = self.model.sample_rate // g
-        else:
-            target_chunk_size = self.blocksize
-
-        # Buffer to accumulate audio until we have enough for one block
-        audio_buffer = []
-        buffer_size = 0
+        # One resampler per utterance keeps its filter history across the
+        # generated frames, so frame and block edges leave no clicks.
+        resampler = _StreamingFIRResampler(self.model.sample_rate, self.sample_rate)
+        pending = np.empty(0, dtype=np.int16)
 
         for audio_chunk in self.model.generate_audio_stream(
             self.voice_state,
@@ -167,64 +150,14 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 logger.debug(f"Time to first audio: {perf_counter() - pipeline_start:.3f}s")
                 first_chunk = False
 
-            # Convert from torch tensor to numpy and add to buffer
-            audio_np = audio_chunk.cpu().numpy()
-            audio_buffer.append(audio_np)
-            buffer_size += len(audio_np)
+            pending = np.concatenate((pending, resampler.push(audio_chunk.cpu().numpy() * 32768.0)))
+            while pending.size >= self.blocksize:
+                yield pending[: self.blocksize].copy()
+                pending = pending[self.blocksize :]
 
-            # Process buffer when we have enough samples for at least one block
-            while buffer_size >= target_chunk_size:
-                # Concatenate buffer
-                concatenated = np.concatenate(audio_buffer)
-
-                # Extract enough samples for one block
-                chunk_to_process = concatenated[:target_chunk_size]
-                remainder = concatenated[target_chunk_size:]
-
-                # Resample this chunk if needed
-                if needs_resampling:
-                    chunk_resampled = resample_poly(
-                        chunk_to_process,
-                        up=self._resample_up,
-                        down=self._resample_down,
-                    )
-                else:
-                    chunk_resampled = chunk_to_process
-
-                # Convert to int16 format expected by audio output
-                audio_int16 = (chunk_resampled * 32768).astype(np.int16)
-
-                # Ensure exact blocksize (pad or trim if resampling caused slight size differences)
-                if len(audio_int16) < self.blocksize:
-                    audio_int16 = np.pad(audio_int16, (0, self.blocksize - len(audio_int16)))
-                elif len(audio_int16) > self.blocksize:
-                    audio_int16 = audio_int16[: self.blocksize]
-
-                yield audio_int16
-
-                # Update buffer with remainder
-                audio_buffer = [remainder] if len(remainder) > 0 else []
-                buffer_size = len(remainder)
-
-        # Process any remaining audio in buffer
-        if audio_buffer and buffer_size > 0:
-            concatenated = np.concatenate(audio_buffer)
-
-            # Resample the remainder
-            if needs_resampling:
-                concatenated = resample_poly(
-                    concatenated,
-                    up=self._resample_up,
-                    down=self._resample_down,
-                )
-
-            # Convert to int16
-            audio_int16 = (concatenated * 32768).astype(np.int16)
-
-            # Yield in blocks
-            for i in range(0, len(audio_int16), self.blocksize):
-                chunk = audio_int16[i : i + self.blocksize]
-                # Pad last chunk if needed
-                if len(chunk) < self.blocksize:
-                    chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
-                yield chunk
+        pending = np.concatenate((pending, resampler.push(np.empty(0, dtype=np.float32), final=True)))
+        while pending.size >= self.blocksize:
+            yield pending[: self.blocksize].copy()
+            pending = pending[self.blocksize :]
+        if pending.size:
+            yield np.pad(pending, (0, self.blocksize - pending.size))
