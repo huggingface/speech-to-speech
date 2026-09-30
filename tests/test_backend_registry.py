@@ -1,10 +1,12 @@
 import sys
 from copy import deepcopy
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from queue import Queue
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
+from openai.types.realtime import RealtimeErrorEvent, SessionUpdateEvent
 
 import speech_to_speech.s2s_pipeline as s2s_pipeline
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
@@ -68,6 +70,20 @@ def test_builtin_registry_lookup_and_cli_choices_share_one_catalog():
     assert STT_BACKENDS["vllm-realtime"].capabilities.streams_audio_chunks
     assert not STT_BACKENDS["openai"].capabilities.streams_audio_chunks
     assert LLM_BACKENDS["responses-api"].kind == "llm"
+
+
+@pytest.mark.parametrize(
+    ("model_name", "supported_languages", "expected"),
+    [
+        ("/models/english-checkpoint", ["en"], {"en"}),
+        ("/models/multilingual.en", ["en", "es"], {"en", "es"}),
+    ],
+)
+def test_session_language_validation_uses_loaded_faster_whisper_capabilities(model_name, supported_languages, expected):
+    selection = BackendSelection(STT_BACKENDS["faster-whisper"], {"model_name": model_name})
+    handler = SimpleNamespace(model=SimpleNamespace(supported_languages=supported_languages))
+
+    assert s2s_pipeline._stt_session_languages(selection, handler) == expected
     assert TTS_BACKENDS["qwen3"].kind == "tts"
     assert TTS_BACKENDS["openai"].kind == "tts"
     assert TTS_BACKENDS["supertonic"].required_extra == "supertonic"
@@ -79,11 +95,174 @@ def test_builtin_registry_lookup_and_cli_choices_share_one_catalog():
     assert not STT_BACKENDS["whisper"].capabilities.bypasses_transcription_notifier
 
 
+def test_parakeet_session_language_selection_remains_unsupported():
+    selection = BackendSelection(STT_BACKENDS["parakeet-tdt"], {})
+
+    assert s2s_pipeline._stt_session_languages(selection, SimpleNamespace()) == set()
+
+
+@pytest.mark.parametrize(
+    ("model_name", "supported_languages", "accepted"),
+    [
+        ("/models/english-checkpoint", ["en"], False),
+        ("/models/multilingual.en", ["en", "es"], True),
+    ],
+)
+def test_faster_whisper_loaded_languages_control_session_update(monkeypatch, model_name, supported_languages, accepted):
+    args = parse_arguments(
+        ["--stt", "faster-whisper", "--tts", "openai", "--faster_whisper_stt_model_name", model_name]
+    )
+    stt_handler = SimpleNamespace(model=SimpleNamespace(supported_languages=supported_languages))
+    monkeypatch.setattr(
+        s2s_pipeline,
+        "_build_handlers",
+        lambda **_kwargs: [SimpleNamespace(), stt_handler, SimpleNamespace(), SimpleNamespace(), SimpleNamespace()],
+    )
+    unit = s2s_pipeline._build_pipeline_unit(
+        index=0,
+        stop_event=Event(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=args.vad_handler_kwargs,
+        stt_backend=args.stt_backend,
+        llm_backend=args.llm_backend,
+        tts_backend=args.tts_backend,
+    )
+    unit.service.tts_supported_languages = {"en", "es"}
+    conn_id = unit.service.register()
+    update = SessionUpdateEvent.model_validate(
+        {
+            "type": "session.update",
+            "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": "es"}}}},
+        }
+    )
+
+    result = unit.service.handle_session_update(conn_id, update)
+
+    if accepted:
+        assert result is None
+        assert unit.service.build_session_updated(conn_id).session.audio.input.transcription.language == "es"
+    else:
+        assert isinstance(result, RealtimeErrorEvent)
+        assert "STT" in result.error.message
+        assert unit.service._state(conn_id).runtime_config.selected_language is None
+
+
+@pytest.mark.parametrize(
+    ("is_multilingual", "language", "accepted"),
+    [(False, "en", False), (False, "es", False), (True, "es", True), (None, "es", True)],
+)
+def test_transformers_whisper_session_language_uses_loaded_generation_config(
+    monkeypatch, is_multilingual, language, accepted
+):
+    args = parse_arguments(["--stt", "whisper", "--tts", "openai"])
+    stt_handler = SimpleNamespace(
+        model=SimpleNamespace(generation_config=SimpleNamespace(is_multilingual=is_multilingual))
+    )
+    monkeypatch.setattr(
+        s2s_pipeline,
+        "_build_handlers",
+        lambda **_kwargs: [SimpleNamespace(), stt_handler, SimpleNamespace(), SimpleNamespace(), SimpleNamespace()],
+    )
+    unit = s2s_pipeline._build_pipeline_unit(
+        index=0,
+        stop_event=Event(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=args.vad_handler_kwargs,
+        stt_backend=args.stt_backend,
+        llm_backend=args.llm_backend,
+        tts_backend=args.tts_backend,
+    )
+    unit.service.tts_supported_languages = {"en", "es"}
+    conn_id = unit.service.register()
+    update = SessionUpdateEvent.model_validate(
+        {
+            "type": "session.update",
+            "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": language}}}},
+        }
+    )
+
+    result = unit.service.handle_session_update(conn_id, update)
+
+    if accepted:
+        assert result is None
+        assert unit.service.build_session_updated(conn_id).session.audio.input.transcription.language == language
+    else:
+        assert isinstance(result, RealtimeErrorEvent)
+        assert "STT" in result.error.message
+        assert unit.service._state(conn_id).runtime_config.selected_language is None
+
+
+@pytest.mark.parametrize(("setup_language", "rejected"), [("en", True), (None, False)])
+def test_openai_realtime_stt_auto_reset_is_rejected_only_when_setup_hint_cannot_be_cleared(
+    monkeypatch, setup_language, rejected
+):
+    cli = ["--stt", "openai-realtime", "--tts", "openai"]
+    if setup_language is not None:
+        cli.extend(["--openai_realtime_stt_language", setup_language])
+    args = parse_arguments(cli)
+    monkeypatch.setattr(s2s_pipeline, "_build_handlers", lambda **_kwargs: [SimpleNamespace() for _ in range(5)])
+    unit = s2s_pipeline._build_pipeline_unit(
+        index=0,
+        stop_event=Event(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=args.vad_handler_kwargs,
+        stt_backend=args.stt_backend,
+        llm_backend=args.llm_backend,
+        tts_backend=args.tts_backend,
+    )
+    conn_id = unit.service.register()
+    update = SessionUpdateEvent.model_validate(
+        {
+            "type": "session.update",
+            "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": "Auto"}}}},
+        }
+    )
+
+    error = unit.service.handle_session_update(conn_id, update)
+
+    if rejected:
+        assert isinstance(error, RealtimeErrorEvent)
+        assert "Auto" in error.error.message and "STT" in error.error.message
+        assert unit.service._state(conn_id).runtime_config.selected_language is None
+    else:
+        assert error is None
+        assert unit.service.build_session_updated(conn_id).session.audio.input.transcription.language == "auto"
+
+
 def test_omnivoice_tts_backend_is_registered_as_optional():
     spec = TTS_BACKENDS["omnivoice"]
 
     assert spec.kind == "tts"
     assert spec.required_extra == "omnivoice"
+
+
+def test_sensevoice_stt_backend_is_registered_with_its_optional_extra():
+    spec = STT_BACKENDS["sense-voice"]
+
+    assert spec.kind == "stt"
+    assert spec.config_prefix == "sense_voice_stt"
+    assert spec.required_extra == "sensevoice"
+
+
+def test_sensevoice_cli_config_is_normalized_for_the_handler():
+    args = parse_arguments(
+        [
+            "--stt",
+            "sense-voice",
+            "--sense_voice_stt_device",
+            "cpu",
+            "--sense_voice_stt_language",
+            "yue",
+        ]
+    )
+
+    assert args.stt_backend.name == "sense-voice"
+    assert args.stt_backend.config == {
+        "model_name": "FunAudioLLM/SenseVoiceSmall",
+        "device": "cpu",
+        "language": "yue",
+        "gen_kwargs": {},
+    }
 
 
 def test_omnivoice_cli_config_is_normalized_for_the_handler():
@@ -230,6 +409,34 @@ def test_openai_tts_backend_constructs_through_registry(monkeypatch):
     tts = create_backend_handler(args.tts_backend, _context())
 
     assert isinstance(tts, OpenAICompatibleTTSHandler)
+
+
+def test_openai_tts_factory_receives_assistant_language_opt_in(monkeypatch):
+    captured = {}
+
+    class FakeHandler:
+        def __init__(self, *_args, setup_kwargs, **_kwargs):
+            captured.update(setup_kwargs)
+
+    monkeypatch.setattr("speech_to_speech.backend_registry._load_handler", lambda *_args: FakeHandler)
+    context = replace(_context(), detect_llm_output_language=True)
+    create_backend_handler(parse_arguments(["--tts", "openai"]).tts_backend, context)
+
+    assert captured["detect_llm_output_language"] is True
+
+
+def test_qwen3_tts_factory_receives_assistant_language_opt_in(monkeypatch):
+    captured = {}
+
+    class FakeHandler:
+        def __init__(self, *_args, setup_kwargs, **_kwargs):
+            captured.update(setup_kwargs)
+
+    monkeypatch.setattr("speech_to_speech.backend_registry._load_handler", lambda *_args: FakeHandler)
+    context = replace(_context(), detect_llm_output_language=True)
+    create_backend_handler(parse_arguments(["--tts", "qwen3"]).tts_backend, context)
+
+    assert captured["detect_llm_output_language"] is True
 
 
 def test_openai_stt_backend_constructs_through_registry(monkeypatch):

@@ -3,10 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:agents:adapter": "node --test tests/agents-adapter.test.mjs",
+    "test:agents:adapter": "node --test tests/agents-adapter.test.mjs tests/playback-sdk.test.mjs tests/turn-latency.test.mjs",
     "test:agents:ws": "node --test tests/agents-websocket.test.mjs",
     "test:agents:webrtc": "node --test tests/agents-webrtc.test.mjs",
-    "test:agents": "npm run test:agents:adapter && npm run test:agents:ws && npm run test:agents:webrtc"
+    "test:agents": "npm run test:agents:adapter && npm run test:agents:ws && npm run test:agents:webrtc",
+    "test:ui": "node --test tests/turn-latency-ui.test.mjs"
   },
   "dependencies": {
     "@openai/agents": "0.14.3",

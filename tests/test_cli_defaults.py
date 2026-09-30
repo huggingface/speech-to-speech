@@ -32,6 +32,7 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_profile():
     assert module_args.mac_optimal_settings is False
     assert module_args.llm_backend == "responses-api"
     assert module_args.tts == "qwen3"
+    assert module_args.detect_llm_output_language is False
     assert module_args.log_level == "info"
     assert module_args.enable_live_transcription is True
     assert module_args.live_transcription_update_interval == 0.5
@@ -66,8 +67,20 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_profile():
     assert qwen3_args.qwen3_tts_mlx_quantization == "6bit"
 
 
+def test_parse_arguments_enables_llm_output_language_detection():
+    args = parse_arguments(["--detect_llm_output_language"])
+
+    assert args.module_kwargs.detect_llm_output_language is True
+
+
 def test_server_defaults_to_loopback():
     assert RealtimeServerArguments().host == "127.0.0.1"
+
+
+def test_parse_talk_arguments_keeps_retry_timeout_field_name():
+    config = parse_talk_arguments(["--connection-retry-timeout", "12.5"])
+
+    assert config.connection_retry_timeout_s == 12.5
 
 
 def test_vad_firered_flag_is_accepted():

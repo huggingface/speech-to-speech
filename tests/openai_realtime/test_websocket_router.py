@@ -33,6 +33,7 @@ from speech_to_speech.pipeline.events import (
     ResponseFailedEvent,
     ResponseGenerationDoneEvent,
     SpeechStartedEvent,
+    SpeechStoppedEvent,
     TokenUsageEvent,
     TranscriptionCompletedEvent,
     TranscriptionFailedEvent,
@@ -667,6 +668,34 @@ class TestSendLoop:
                 msg = ws.receive_json()
                 assert msg["type"] == "input_audio_buffer.speech_started"
                 assert msg["audio_start_ms"] == 0
+
+    def test_failed_transcription_reaches_client_after_reopen_grace(self, setup):
+        app, service, _, _, text_output_queue, *_ = setup
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                text_output_queue.put(SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
+                started = ws.receive_json()
+                assert started["type"] == "input_audio_buffer.speech_started"
+
+                tracker.start_reopen_grace("turn_1", 0, grace_s=0.05)
+                text_output_queue.put(SpeechStoppedEvent(turn_id="turn_1", turn_revision=0))
+                text_output_queue.put(TranscriptionFailedEvent(message="STT failed", turn_id="turn_1", turn_revision=0))
+
+                stopped = ws.receive_json()
+                committed = ws.receive_json()
+                created = ws.receive_json()
+                failed = ws.receive_json()
+                assert [stopped["type"], committed["type"], created["type"], failed["type"]] == [
+                    "input_audio_buffer.speech_stopped",
+                    "input_audio_buffer.committed",
+                    "conversation.item.created",
+                    "conversation.item.input_audio_transcription.failed",
+                ]
+                assert started["item_id"] == stopped["item_id"] == failed["item_id"]
+                assert tracker.is_committed("turn_1", 0)
 
     def test_barge_in_discard_clears_after_response_done(self, setup):
         """After barge-in sets discarding=True, __RESPONSE_DONE__ must clear it back to False."""

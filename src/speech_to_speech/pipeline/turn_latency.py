@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from collections import defaultdict
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -8,6 +9,7 @@ from threading import Lock
 from typing import Literal
 
 TurnLatencyStatus = Literal["completed", "cancelled", "failed", "incomplete"]
+TURN_LATENCY_METADATA_KEY = "speech_to_speech.turn_latency"
 
 _active_tracker: ContextVar[TurnLatencyTracker | None] = ContextVar(
     "active_turn_latency_tracker",
@@ -29,8 +31,8 @@ def bind_active_turn_latency_tracker(tracker: TurnLatencyTracker | None):
 
 
 @dataclass
-class ComputeLockStat:
-    """Per-handler compute-lock total, with the number of acquisitions behind it."""
+class MLXLockStat:
+    """Per-handler MLX lock total, with the number of acquisitions behind it."""
 
     total_s: float = 0.0
     count: int = 0
@@ -39,7 +41,7 @@ class ComputeLockStat:
         self.total_s += seconds
         self.count += 1
 
-    def merge(self, other: ComputeLockStat) -> None:
+    def merge(self, other: MLXLockStat) -> None:
         self.total_s += other.total_s
         self.count += other.count
 
@@ -48,12 +50,17 @@ class ComputeLockStat:
 class TurnLatencyTracker:
     """Server timings, not an additive breakdown or client playback latency.
 
-    ``vad_settle_s`` is the final STT input gate. ``llm_ttft_s`` is the first
-    text token; ``llm_s`` remains the full generation, including lock waits.
-    ``tts_ttfa_s`` ends at the first model audio chunk before trimming and
-    block assembly; ``e2e_s`` ends at the first yielded TTS audio. Compute-lock
-    waits and holds are summed per handler, so the bracketed breakdown accounts
-    for the printed total.
+    ``llm_ttft_s`` ends at the first non-whitespace provider text delta and
+    ``llm_s`` covers full generation, including lock waits. ``tts_ttfa_s`` ends
+    at the first model audio chunk before trimming and block assembly;
+    ``e2e_s`` runs from estimated speech end to first yielded TTS audio.
+    TTFT remains an internal measurement, omitted from the simplified record.
+
+    ``vad_settle_s`` is the whole final STT input gate wait, where
+    ``smart_turn_wait_s`` only covers the client-requested processing delay.
+
+    MLX lock waits and holds are summed per handler, so the bracketed breakdown
+    accounts for the printed total however often a turn takes the lock.
 
     ``tts=cut`` marks a cancelled turn that had already produced TTS audio. It
     says the cancellation arrived after audio started, not that a sentence was
@@ -65,15 +72,22 @@ class TurnLatencyTracker:
     turn_id: str | None = None
     turn_revision: int | None = None
     stt_s: float | None = None
-    vad_settle_s: float | None = None
-    llm_s: float | None = None
     llm_ttft_s: float | None = None
+    llm_s: float | None = None
     tts_ttfa_s: float | None = None
     e2e_s: float | None = None
-    lock_wait_s: float = 0.0
-    lock_hold_s: float = 0.0
-    lock_waits: dict[str, ComputeLockStat] = field(default_factory=dict)
-    lock_holds: dict[str, ComputeLockStat] = field(default_factory=dict)
+    vad_settle_s: float | None = None
+    vad_decision_s: float | None = None
+    smart_turn_analysis_s: float | None = None
+    smart_turn_status: Literal["disabled", "complete", "incomplete", "failed"] | None = None
+    smart_turn_grace_s: float | None = None
+    smart_turn_processing_delay_s: float | None = None
+    smart_turn_wait_s: float | None = None
+    _smart_wait_intervals: list[tuple[float, float]] | None = None
+    mlx_lock_wait_s: float = 0.0
+    mlx_lock_hold_s: float = 0.0
+    mlx_lock_waits: dict[str, MLXLockStat] = field(default_factory=dict)
+    mlx_lock_holds: dict[str, MLXLockStat] = field(default_factory=dict)
     status: TurnLatencyStatus = "completed"
 
     def record_stt(self, seconds: float) -> None:
@@ -97,29 +111,78 @@ class TurnLatencyTracker:
         if self.e2e_s is None:
             self.e2e_s = max(0.0, seconds)
 
-    def record_lock_wait(self, seconds: float, handler_name: str | None = None) -> None:
+    def record_mlx_lock_wait(self, seconds: float, handler_name: str | None = None) -> None:
         if seconds > 0.0:
-            self.lock_wait_s += seconds
+            self.mlx_lock_wait_s += seconds
             if handler_name:
-                self.lock_waits.setdefault(handler_name, ComputeLockStat()).add(seconds)
+                self.mlx_lock_waits.setdefault(handler_name, MLXLockStat()).add(seconds)
 
-    def record_lock_hold(self, seconds: float, handler_name: str | None = None) -> None:
+    def record_mlx_lock_hold(self, seconds: float, handler_name: str | None = None) -> None:
         if seconds > 0.0:
-            self.lock_hold_s += seconds
+            self.mlx_lock_hold_s += seconds
             if handler_name:
-                self.lock_holds.setdefault(handler_name, ComputeLockStat()).add(seconds)
+                self.mlx_lock_holds.setdefault(handler_name, MLXLockStat()).add(seconds)
+
+    def record_smart_wait(self, started_at_s: float, ended_at_s: float) -> None:
+        """Count the union of actual gate waits, since workers can wait together."""
+        if self.smart_turn_status not in ("complete", "incomplete", "failed") or ended_at_s <= started_at_s:
+            return
+        intervals = self._smart_wait_intervals or []
+        intervals.append((started_at_s, ended_at_s))
+        intervals.sort()
+        merged: list[tuple[float, float]] = []
+        for start, end in intervals:
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        self._smart_wait_intervals = merged
+        self.smart_turn_wait_s = sum(end - start for start, end in merged)
+
+    def metadata_payload(
+        self,
+        *,
+        response_key: str,
+        status: TurnLatencyStatus,
+    ) -> dict[str, float | int | str | None]:
+        """Return terminal measurements; new fields use nanosecond precision."""
+
+        def compact(seconds: float | None) -> float | None:
+            return None if seconds is None else round(seconds, 9)
+
+        return {
+            "version": 2,
+            "turn_id": self.turn_id,
+            "turn_revision": 0 if self.turn_revision is None else self.turn_revision,
+            "response_key": response_key,
+            "stt_s": self.stt_s,
+            "llm_s": self.llm_s,
+            "tts_ttfa_s": self.tts_ttfa_s,
+            "e2e_s": self.e2e_s,
+            "vad_decision_s": compact(self.vad_decision_s),
+            "smart_status": self.smart_turn_status,
+            "hold_s": compact(self.smart_turn_wait_s),
+            "status": status,
+        }
 
     def absorb_pending(self, pending: TurnLatencyTracker) -> None:
         if pending.stt_s is not None:
             self.stt_s = pending.stt_s
         if pending.vad_settle_s is not None:
             self.vad_settle_s = pending.vad_settle_s
-        self.lock_wait_s += pending.lock_wait_s
-        self.lock_hold_s += pending.lock_hold_s
-        for name, stat in pending.lock_waits.items():
-            self.lock_waits.setdefault(name, ComputeLockStat()).merge(stat)
-        for name, stat in pending.lock_holds.items():
-            self.lock_holds.setdefault(name, ComputeLockStat()).merge(stat)
+        self.mlx_lock_wait_s += pending.mlx_lock_wait_s
+        self.mlx_lock_hold_s += pending.mlx_lock_hold_s
+        for name, stat in pending.mlx_lock_waits.items():
+            self.mlx_lock_waits.setdefault(name, MLXLockStat()).merge(stat)
+        for name, stat in pending.mlx_lock_holds.items():
+            self.mlx_lock_holds.setdefault(name, MLXLockStat()).merge(stat)
+        self.vad_decision_s = pending.vad_decision_s
+        self.smart_turn_analysis_s = pending.smart_turn_analysis_s
+        self.smart_turn_status = pending.smart_turn_status
+        self.smart_turn_grace_s = pending.smart_turn_grace_s
+        self.smart_turn_processing_delay_s = pending.smart_turn_processing_delay_s
+        self.smart_turn_wait_s = pending.smart_turn_wait_s
+        self._smart_wait_intervals = pending._smart_wait_intervals
 
     @staticmethod
     def _fmt(seconds: float | None) -> str:
@@ -131,27 +194,28 @@ class TurnLatencyTracker:
         if self.turn_id is None:
             return None
         revision = 0 if self.turn_revision is None else self.turn_revision
-        fields = [
-            f"stt={self._fmt(self.stt_s)}",
-            f"llm={self._fmt(self.llm_s)}",
-            f"tts_ttfa={self._fmt(self.tts_ttfa_s)}",
-            f"e2e={self._fmt(self.e2e_s)}",
-        ]
-        if self.vad_settle_s is not None:
-            fields.insert(1, f"vad_settle={self._fmt(self.vad_settle_s)}")
-        if self.llm_ttft_s is not None:
-            llm_index = fields.index(f"llm={self._fmt(self.llm_s)}")
-            fields.insert(llm_index + 1, f"llm_ttft={self._fmt(self.llm_ttft_s)}")
-        fields.append(f"lock_wait={self._fmt_lock(self.lock_wait_s, self.lock_waits)}")
-        if self.lock_hold_s > 0.0:
-            fields.append(f"lock_hold={self._fmt_lock(self.lock_hold_s, self.lock_holds)}")
-        line = f"Turn {self.turn_id} rev={revision} latency: {' '.join(fields)} status={self.status}"
-        if self.status == "cancelled" and self.tts_ttfa_s is not None:
-            line += " tts=cut"
-        return line
+        settle = "" if self.vad_settle_s is None else f"vad_settle={self._fmt(self.vad_settle_s)} "
+        mlx_wait = ""
+        if sys.platform == "darwin":
+            mlx_wait = f" mlx_lock_wait={self._fmt_lock(self.mlx_lock_wait_s, self.mlx_lock_waits)}"
+            if self.mlx_lock_hold_s > 0.0:
+                mlx_wait += f" mlx_lock_hold={self._fmt_lock(self.mlx_lock_hold_s, self.mlx_lock_holds)}"
+        # A cancelled turn whose TTS already spoke is not a finished reply.
+        cut = " tts=cut" if self.status == "cancelled" and self.tts_ttfa_s is not None else ""
+        return (
+            f"Turn {self.turn_id} rev={revision} latency: "
+            f"stt={self._fmt(self.stt_s)} "
+            f"llm={self._fmt(self.llm_s)} "
+            f"tts_ttfa={self._fmt(self.tts_ttfa_s)} e2e={self._fmt(self.e2e_s)} "
+            f"{settle}"
+            f"vad_decision={self._fmt(self.vad_decision_s)} "
+            f"hold={self._fmt(self.smart_turn_wait_s)} "
+            f"smart_turn_status={self.smart_turn_status or 'n/a'} "
+            f"status={self.status}{mlx_wait}{cut}"
+        )
 
     @staticmethod
-    def _fmt_lock(total: float, stats: dict[str, ComputeLockStat]) -> str:
+    def _fmt_lock(total: float, stats: dict[str, MLXLockStat]) -> str:
         if not stats:
             return f"{total:.2f}s"
         named = ",".join(
@@ -181,6 +245,7 @@ class TurnLatencyStore:
         self._lock = Lock()
         self._trackers: dict[str, TurnLatencyTracker] = {}
         self._pending_turn: dict[tuple[str, int], TurnLatencyTracker] = {}
+        self._turn_responses: dict[tuple[str, int], str] = {}
         self._session_keys: dict[str, set[str]] = defaultdict(set)
 
     @property
@@ -246,6 +311,7 @@ class TurnLatencyStore:
                 if session_id is not None:
                     self._session_keys[session_id].add(response_key)
                 if turn_id is not None:
+                    self._turn_responses.setdefault(self._turn_key(turn_id, turn_revision), response_key)
                     pending = self._pending_turn.pop(self._turn_key(turn_id, turn_revision), None)
                     if pending is not None:
                         tracker.absorb_pending(pending)
@@ -256,6 +322,18 @@ class TurnLatencyStore:
                 tracker.turn_id = turn_id
                 tracker.turn_revision = turn_revision
             return tracker
+
+    def record_smart_wait(
+        self, turn_id: str | None, turn_revision: int | None, started_at_s: float, ended_at_s: float
+    ) -> None:
+        if turn_id is None:
+            return
+        with self._lock:
+            key = self._turn_key(turn_id, turn_revision)
+            response_key = self._turn_responses.get(key)
+            tracker = self._trackers.get(response_key) if response_key is not None else self._pending_turn.get(key)
+            if tracker is not None:
+                tracker.record_smart_wait(started_at_s, ended_at_s)
 
     def get_response(self, response_key: str | None) -> TurnLatencyTracker | None:
         """Look up an existing response without reviving cancelled measurements."""
@@ -269,6 +347,10 @@ class TurnLatencyStore:
             return None
         with self._lock:
             tracker = self._trackers.pop(response_key, None)
+            if tracker is not None and tracker.turn_id is not None:
+                key = self._turn_key(tracker.turn_id, tracker.turn_revision)
+                if self._turn_responses.get(key) == response_key:
+                    self._turn_responses.pop(key, None)
             if session_id is not None:
                 self._detach_response_from_session(session_id, response_key)
             return tracker
@@ -279,6 +361,10 @@ class TurnLatencyStore:
     def clear_session(self, session_id: str) -> None:
         with self._lock:
             for response_key in self._session_keys.pop(session_id, set()):
-                self._trackers.pop(response_key, None)
+                tracker = self._trackers.pop(response_key, None)
+                if tracker is not None and tracker.turn_id is not None:
+                    key = self._turn_key(tracker.turn_id, tracker.turn_revision)
+                    if self._turn_responses.get(key) == response_key:
+                        self._turn_responses.pop(key, None)
             if not self._session_keys:
                 self._pending_turn.clear()

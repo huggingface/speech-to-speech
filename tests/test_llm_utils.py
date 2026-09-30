@@ -164,6 +164,16 @@ def test_remove_markdown_strips_bold_and_italic() -> None:
     assert remove_markdown("__bold__ and _italic_ text") == "bold and italic text"
 
 
+def test_remove_markdown_strips_adjacent_single_char_emphasis_spans() -> None:
+    # Two independent single-character emphasis spans must be stripped on their
+    # own, not merged into one span that leaks the inner delimiters into TTS.
+    assert remove_markdown("You got grade *A* or *B* today") == "You got grade A or B today"
+    assert remove_markdown("*a* and *b*") == "a and b"
+    assert remove_markdown("_a_ and _b_") == "a and b"
+    assert remove_markdown("**A** and **B**") == "A and B"
+    assert remove_markdown("*a* *b* *c*") == "a b c"
+
+
 def test_remove_markdown_keeps_snake_case_identifiers() -> None:
     assert remove_markdown("function_call_output") == "function_call_output"
 

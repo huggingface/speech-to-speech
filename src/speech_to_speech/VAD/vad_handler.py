@@ -186,7 +186,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._log_speech_ends = 0
         self._log_progressive_yields = 0
         self._speech_started_emitted = False
-        self._turn_counter = 0
         self._current_turn_id: str | None = None
         self._current_turn_revision: int | None = None
         self._speculative_audio_prefix: np.ndarray | None = None
@@ -236,14 +235,11 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
     def _start_new_turn(self) -> tuple[str, int]:
         self._cancel_pending_reopen()
-        self._turn_counter += 1
-        self._current_turn_id = f"turn_{self._turn_counter}"
-        self._current_turn_revision = 0
+        self._current_turn_id, self._current_turn_revision = self.speculative_turns.start_turn()
         self._speculative_audio_prefix = None
         self._speculative_raw_audio_prefix = None
         self._last_final_wall_time = None
         self._last_final_audio_ms = None
-        self.speculative_turns.observe(self._current_turn_id, self._current_turn_revision)
         return self._current_turn_id, self._current_turn_revision
 
     def _speech_buffer_duration_ms(self) -> float:
@@ -548,6 +544,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             return 0
 
         dropped = 0
+        dropped_finals: list[tuple[str | None, int | None]] = []
         with self.queue_out.mutex:
             kept: list[Any] = []
             while self.queue_out.queue:
@@ -557,11 +554,18 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     latest,
                 ):
                     dropped += 1
+                    if queued_item.mode == "final":
+                        dropped_finals.append((queued_item.turn_id, queued_item.turn_revision))
                 else:
                     kept.append(queued_item)
             self.queue_out.queue.extend(kept)
             if dropped:
                 self.queue_out.not_full.notify_all()
+
+        store = getattr(self, "turn_latency_store", None)
+        if store is not None:
+            for turn_id, revision in dropped_finals:
+                store.discard_pending_turn(turn_id, revision)
 
         if dropped:
             logger.debug(
@@ -591,17 +595,24 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         """Return the response grace and pre-processing delay for this endpoint."""
         analyzer = getattr(self, "smart_turn_analyzer", None)
         if analyzer is None:
+            self._last_smart_turn_status = "disabled"
+            self._last_smart_turn_analysis_s = None
             return self.speculative_reopen_ms, 0
 
+        started_at_s = time.perf_counter()
         try:
             result = analyzer.predict(audio, sample_rate=self.sample_rate)
         except Exception:
+            self._last_smart_turn_status = "failed"
+            self._last_smart_turn_analysis_s = max(0.0, time.perf_counter() - started_at_s)
             # A transient classifier failure falls back to the ordinary short
             # speculative window instead of delaying the response for seconds.
             logger.exception("Smart Turn inference failed; using the default speculative reopen grace")
             return self.speculative_reopen_ms, 0
 
+        self._last_smart_turn_analysis_s = max(0.0, time.perf_counter() - started_at_s)
         if result.complete:
+            self._last_smart_turn_status = "complete"
             logger.info(
                 "Smart Turn: complete (p=%.3f, %.1fms); using %dms speculative reopen grace",
                 result.probability,
@@ -611,6 +622,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             return self.speculative_reopen_ms, 0
 
         processing_delay_ms = min(self.smart_turn_incomplete_delay_ms, self.smart_turn_max_wait_ms)
+        self._last_smart_turn_status = "incomplete"
         logger.info(
             "Smart Turn: incomplete (p=%.3f, %.1fms); using %dms speculative reopen grace "
             "and delaying processing by %dms",
@@ -637,7 +649,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         audio_float32 = int2float(audio_int16)
 
         was_triggered = self.iterator.triggered
+        received_at_s = time.perf_counter()
         vad_output = self.iterator(torch.from_numpy(audio_float32))
+        decision_at_s = time.perf_counter()
         is_triggered_now = self.iterator.triggered
 
         if getattr(self, "streaming_stt_sink", None) is not None and self._pending_short_segment is not None:
@@ -715,12 +729,14 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
         # Live transcription controls whether progressive STT work is emitted
         # before the final segment.
-        yield from self._process_realtime(vad_output, runtime_config)
+        yield from self._process_realtime(vad_output, runtime_config, received_at_s, decision_at_s)
 
     def _process_realtime(
         self,
         vad_output: list[torch.Tensor] | None,
         runtime_config: RuntimeConfig | None = None,
+        received_at_s: float | None = None,
+        decision_at_s: float | None = None,
     ) -> Iterator[VADOut]:
         """Process with real-time progressive audio release."""
         # Check if we're currently in a speech segment.
@@ -858,6 +874,23 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 )
                 analysis_audio = self._combined_raw_turn_audio(array)
                 reopen_grace_ms, processing_delay_ms = self._smart_turn_timing_ms(analysis_audio)
+                store = getattr(self, "turn_latency_store", None)
+                tracker = store.get_or_create_for_turn(turn_id, turn_revision) if store is not None else None
+                speech_end_at_s = None
+                speech_end_sample = getattr(self.iterator, "last_speech_end_sample", None)
+                if speech_end_sample is not None and received_at_s is not None and decision_at_s is not None:
+                    # Estimate speech end from the final chunk's sample-to-clock anchor.
+                    # This excludes upstream queue/network delay, not VAD or Smart Turn work.
+                    speech_end_at_s = received_at_s - max(0, self._total_samples - speech_end_sample) / self.sample_rate
+                    if tracker is not None:
+                        tracker.vad_decision_s = max(0.0, decision_at_s - speech_end_at_s)
+                if tracker is not None:
+                    tracker.smart_turn_status = self._last_smart_turn_status
+                    tracker.smart_turn_analysis_s = self._last_smart_turn_analysis_s
+                    if tracker.smart_turn_status != "disabled":
+                        tracker.smart_turn_grace_s = reopen_grace_ms / 1000.0
+                        tracker.smart_turn_processing_delay_s = processing_delay_ms / 1000.0
+                        tracker.smart_turn_wait_s = 0.0
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
                 output_array = self._combined_turn_audio(array)
@@ -893,6 +926,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     turn_id=turn_id,
                     turn_revision=turn_revision,
                     processing_delay_s=processing_delay_ms / 1000.0,
+                    speech_end_at_s=speech_end_at_s,
                 )
                 self.last_process_time = 0.0
                 self._speech_started_emitted = False
@@ -945,7 +979,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.last_process_time = 0.0
         self._total_samples = 0
         self._speech_started_emitted = False
-        self._turn_counter = 0
         self._current_turn_id = None
         self._current_turn_revision = None
         self._speculative_audio_prefix = None

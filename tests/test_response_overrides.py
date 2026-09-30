@@ -34,8 +34,8 @@ class _RecordingLocalHandler(BaseLanguageModelHandler):
     ) -> Iterator[LLMResponseChunk]:
         self.seen_chat = chat.copy(deep=True)
         self.seen_function_tools = list(ctx.function_tools)
-        return
-        yield
+        if getattr(self, "emit_text", False):
+            yield LLMResponseChunk(text="A complete answer.", runtime_config=runtime_config)
 
 
 def test_local_backend_preserves_explicitly_empty_response_overrides():
@@ -61,3 +61,25 @@ def test_local_backend_preserves_explicitly_empty_response_overrides():
 
     assert [item.type for item in handler.seen_chat.buffer] == ["message"]
     assert handler.seen_function_tools == []
+
+
+def test_local_backend_preserves_response_creation_language():
+    handler = object.__new__(_RecordingLocalHandler)
+    handler.cancel_scope = None
+    handler.speculative_turns = None
+    handler.enable_lang_prompt = False
+    handler.compactor = None
+    handler.tokenizer = SimpleNamespace(encode=lambda _text: [])
+    handler.emit_text = True
+    chat = Chat(10)
+    chat.add_item(make_user_message("Please answer."))
+    config = RuntimeConfig(
+        chat=chat,
+        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "es"}}}),
+    )
+    request = GenerateResponseRequest(runtime_config=config)
+    config.session.audio.input.transcription.language = "de"
+
+    outputs = list(handler.process(request))
+
+    assert outputs[0].selected_language == "es"

@@ -8,7 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from queue import Queue
-from sys import platform
+from sys import modules, platform
 from threading import Event
 from types import FrameType
 from typing import Any, Literal, Optional, Sequence
@@ -62,7 +62,7 @@ try:
 except (LookupError, OSError):
     nltk.download("punkt_tab")
 try:
-    nltk.data.find("tokenizers/averaged_perceptron_tagger_eng")
+    nltk.data.find("taggers/averaged_perceptron_tagger_eng")
 except (LookupError, OSError):
     nltk.download("averaged_perceptron_tagger_eng")
 
@@ -435,6 +435,7 @@ def _build_handlers(
             sample_rate=vad_handler_kwargs.sample_rate,
             enable_live_transcription=module_kwargs.enable_live_transcription,
             live_transcription_update_interval=module_kwargs.live_transcription_update_interval,
+            detect_llm_output_language=module_kwargs.detect_llm_output_language,
         )
 
     lm_context = handler_context(text_prompt_queue, lm_response_queue)
@@ -450,6 +451,7 @@ def _build_handlers(
         setup_kwargs={
             "speculative_turns": speculative_turns,
             "text_output_queue": text_output_queue,
+            "detect_llm_output_language": module_kwargs.detect_llm_output_language,
         },
     )
 
@@ -460,6 +462,21 @@ def _build_handlers(
     )
 
     return [vad, *speech_input_handlers, lm, lm_processor, tts]
+
+
+def _stt_session_languages(selection: BackendSelection, handler: Any) -> set[str] | None:
+    if selection.name == "faster-whisper":
+        supported = getattr(getattr(handler, "model", None), "supported_languages", None)
+        return set(supported) if supported is not None else None
+    if selection.name == "whisper":
+        generation_config = getattr(getattr(handler, "model", None), "generation_config", None)
+        # Transformers rejects any language argument for an English-only checkpoint.
+        return set() if getattr(generation_config, "is_multilingual", None) is False else None
+    if selection.name == "qwen3-asr":
+        return set(modules[type(handler).__module__].SUPPORTED_LANGUAGES)
+    if selection.name in {"parakeet-tdt", "parakeet-unified", "paraformer", "openai-realtime", "vllm-realtime"}:
+        return set()
+    return None
 
 
 def _build_pipeline_unit(
@@ -491,6 +508,7 @@ def _build_pipeline_unit(
     cancel_scope = CancelScope()
     speculative_turns = SpeculativeTurnTracker()
     turn_latency_store = TurnLatencyStore()
+    speculative_turns.wait_observer = turn_latency_store.record_smart_wait
     recv_audio_chunks_queue: Queue[AudioInItem] = Queue()
     send_audio_chunks_queue: Queue[AudioOutItem] = Queue()
     spoken_prompt_queue: Queue[VADOutItem] = Queue()
@@ -539,6 +557,26 @@ def _build_pipeline_unit(
     for h in handlers:
         h.pipeline_index = index
         h.turn_latency_store = turn_latency_store
+
+    # Validate only against language sets already known to the active backends.
+    # Faster Whisper reports the loaded checkpoint's actual language set.
+    service.stt_supported_languages = _stt_session_languages(stt_selection, handlers[1])
+    setup_language = stt_selection.config.get("language")
+    service.stt_auto_reset_supported = not (
+        stt_selection.name == "openai-realtime" and isinstance(setup_language, str) and bool(setup_language.strip())
+    )
+
+    tts_module = modules[type(handlers[-1]).__module__]
+    if tts_selection.name == "kokoro":
+        service.tts_supported_languages = {"en", "ja", "zh", "fr", "es", "it", "pt", "hi"}
+    elif tts_selection.name == "facebookMMS":
+        service.tts_supported_languages = set(tts_module.WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE)
+    elif tts_selection.name == "supertonic":
+        service.tts_supported_languages = set(tts_module.SUPERTONIC_LANGUAGE_CODES)
+    elif tts_selection.name == "qwen3":
+        service.tts_supported_languages = {code for code in tts_module.QWEN3_LANGUAGE_ALIASES if len(code) == 2}
+    elif tts_selection.name in {"chatTTS", "pocket"}:
+        service.tts_supported_languages = set()
 
     return PipelineUnit(
         index=index,

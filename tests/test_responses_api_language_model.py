@@ -519,11 +519,20 @@ def test_process_streams_text_from_response_events():
         )
     )
 
-    outputs = list(handler.process(_make_request("Hi")))
+    config = _make_request("Hi").runtime_config
+    from openai.types.realtime import RealtimeSessionCreateRequest
+
+    config.session = RealtimeSessionCreateRequest(
+        type="realtime", audio={"input": {"transcription": {"language": "es"}}}
+    )
+    request = GenerateResponseRequest(runtime_config=config)
+    config.session.audio.input.transcription.language = "de"
+    outputs = list(handler.process(request))
 
     assert len(outputs) == 3
     assert isinstance(outputs[0], LLMResponseChunk) and outputs[0].text == "Hello."
     assert isinstance(outputs[1], LLMResponseChunk) and outputs[1].text == "How are you?"
+    assert all(output.selected_language == "es" for output in outputs[:2])
     assert isinstance(outputs[2], EndOfResponse)
 
 
