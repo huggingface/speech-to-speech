@@ -202,16 +202,6 @@ def test_confident_first_batch_keeps_detected_language_for_the_whole_response():
     assert [first.tts_language_code, later.tts_language_code] == ["es", "es"]
 
 
-def test_detected_language_unsupported_by_tts_keeps_selection():
-    processor = _detecting_processor()
-    processor.tts_supported_languages = {"en", "fr"}
-    config = _session_with_language("en")
-
-    tts_input = _spoken_tts_input(processor, config, "Puedo ayudarte a encontrar la estación de tren más cercana.")
-
-    assert tts_input.tts_language_code == "en"
-
-
 def test_detected_language_choices_stay_isolated_between_concurrent_sessions():
     first_processor, second_processor = _detecting_processor(), _detecting_processor()
     first_config, second_config = _session_with_language("en"), _session_with_language("fr")

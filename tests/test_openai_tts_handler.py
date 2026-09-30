@@ -212,6 +212,7 @@ def test_openai_tts_auto_setup_stays_auto_without_assistant_detection(monkeypatc
         ("auto", "Auto", "en", "English"),
         ("es", "Auto", "en", "English"),
         ("en", "Auto", "es", "Spanish"),
+        ("en", "Auto", "nl", "Auto"),  # Qwen3-TTS ignores a language it cannot speak.
         (None, "French", "en", "French"),
     ],
 )

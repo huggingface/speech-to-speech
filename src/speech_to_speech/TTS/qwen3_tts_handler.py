@@ -410,7 +410,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
 
     def _language_for_utterance(self, language_code: str | None, selected_language: str | None = None) -> str:
         if selected_language not in (None, "auto"):
-            return self._normalize_language(language_code or selected_language)
+            language = self._normalize_language(language_code or selected_language)
+            return language if language in QWEN3_LANGUAGE_ALIASES.values() else "auto"
         configured = "auto" if selected_language == "auto" else self.language
         detect = selected_language == "auto" or getattr(self, "detect_llm_output_language", False)
         if configured != "auto" or not detect or not language_code:

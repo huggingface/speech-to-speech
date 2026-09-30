@@ -578,13 +578,6 @@ def _build_pipeline_unit(
     elif tts_selection.name in {"chatTTS", "pocket"}:
         service.tts_supported_languages = set()
 
-    # Assistant-language detection may override a named session selection for TTS
-    # only with a language this route can speak.
-    tts_languages = service.tts_supported_languages
-    if tts_selection.name == "openai" and "qwen3-tts" in str(getattr(handlers[-1], "model", "")).lower():
-        tts_languages = set(tts_module.QWEN3_TTS_LANGUAGE_CODES)
-    handlers[-2].tts_supported_languages = tts_languages
-
     return PipelineUnit(
         index=index,
         service=service,

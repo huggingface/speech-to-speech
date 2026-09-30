@@ -60,8 +60,6 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         self.text_output_queue = text_output_queue
         self.detect_llm_output_language = detect_llm_output_language
         self._language_detector = language_detection.warm_language_detector() if detect_llm_output_language else None
-        # Languages the active TTS route can speak; None means unknown.
-        self.tts_supported_languages: set[str] | None = None
         self._response_key: str | None = None
         self._tool_call_ids: list[str] = []
         self._output_sequence = 0
@@ -271,13 +269,10 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                     )
                 elif selected is not None:
                     # STT keeps the named selection. TTS follows a confident
-                    # detection of this response's first spoken text when the
-                    # TTS route supports it, and otherwise the selection.
+                    # detection of this response's first spoken text, and
+                    # otherwise the selection. TTS ignores codes it cannot speak.
                     detected = self._detected_assistant_language if self.detect_llm_output_language else None
-                    supported = self.tts_supported_languages
-                    self._response_tts_language = (
-                        detected if detected is not None and (supported is None or detected in supported) else selected
-                    )
+                    self._response_tts_language = detected or selected
                 self._response_language_resolved = True
             selected = self._response_selected_language
             yield TTSInput(
