@@ -528,7 +528,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     tts_input.response_assistant_language_code if use_detected_language else tts_input.tts_language_code
                 )
                 if (
-                    use_detected_language
+                    (use_detected_language or selected == "auto")
                     and "qwen3-tts" in self.model.lower()
                     and language not in QWEN3_TTS_LANGUAGE_CODES
                 ):
