@@ -527,11 +527,22 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 language = (
                     tts_input.response_assistant_language_code if use_detected_language else tts_input.tts_language_code
                 )
-                if "qwen3-tts" in self.model.lower() and language not in QWEN3_TTS_LANGUAGE_CODES:
+                if (
+                    use_detected_language
+                    and "qwen3-tts" in self.model.lower()
+                    and language not in QWEN3_TTS_LANGUAGE_CODES
+                ):
                     language = None
+                elif (
+                    selected not in (None, "auto")
+                    and "qwen3-tts" in self.model.lower()
+                    and language not in QWEN3_TTS_LANGUAGE_CODES
+                ):
+                    # A detected language Qwen3 cannot speak keeps the session language.
+                    language = selected
                 if language is None and use_detected_language:
                     language = self.language
-                elif language is None and "qwen3-tts" in self.model.lower():
+                elif language is None and selected == "auto" and "qwen3-tts" in self.model.lower():
                     language = "auto"
                 if language is not None and "qwen3-tts" in self.model.lower():
                     language = WHISPER_LANGUAGE_TO_LLM_LANGUAGE.get(language, language).title()

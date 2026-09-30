@@ -270,7 +270,8 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 elif selected is not None:
                     # STT keeps the named selection. TTS follows a confident
                     # detection of this response's first spoken text, and
-                    # otherwise the selection. TTS ignores codes it cannot speak.
+                    # otherwise the selection. TTS keeps the selection for a
+                    # detected language it cannot speak.
                     detected = self._detected_assistant_language if self.detect_llm_output_language else None
                     self._response_tts_language = detected or selected
                 self._response_language_resolved = True
