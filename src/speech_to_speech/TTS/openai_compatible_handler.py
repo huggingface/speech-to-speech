@@ -531,7 +531,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     language = None
                 if language is None and use_detected_language:
                     language = self.language
-                elif language is None and selected is not None and "qwen3-tts" in self.model.lower():
+                elif language is None and "qwen3-tts" in self.model.lower():
                     language = "auto"
                 if language is not None and "qwen3-tts" in self.model.lower():
                     language = WHISPER_LANGUAGE_TO_LLM_LANGUAGE.get(language, language).title()
