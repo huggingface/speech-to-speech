@@ -90,7 +90,28 @@ flowchart LR
 | `response.output_audio_transcript.delta` | Incremental assistant transcript suffix for the current audio output item. |
 | `response.output_audio_transcript.done` | Full assistant transcript, emitted once when the output item closes. On cancellation, it contains the accumulated partial transcript. |
 | `response.function_call_arguments.done` | Tool call with `call_id`, `name`, and JSON `arguments`. |
-| `response.done` | Response finished (`completed`, `cancelled` with reason `turn_detected` or `client_cancelled`). |
+| `response.done` | Response finished: `completed`, `cancelled`, `incomplete`, or `failed`. See terminal status details below. |
+
+### Terminal status details
+
+For the Chat Completions and Responses LLM backends, an explicit provider token
+limit or content filter ends the response with `status: "incomplete"` and
+`status_details.reason: "max_output_tokens"` or `"content_filter"`. Provider
+failures end it with `status: "failed"`; a top-level `error` event carries the
+message. This applies to streaming and non-streaming requests, including direct
+audio input. Partial output can reach the client, but the pipeline rolls back
+history for incomplete and failed responses. It does not emit unfinished tool
+arguments as executable calls.
+
+Cancellation retains `status: "cancelled"` with reason `"turn_detected"` or
+`"client_cancelled"`. A compatible provider that closes its stream without a
+terminal signal keeps the existing completion behavior and logs a warning.
+
+Run the provider status regression tests without a model server or GPU:
+
+```bash
+uv run pytest tests/test_provider_response_status.py -q
+```
 
 ### Official Agents SDK compatibility
 
