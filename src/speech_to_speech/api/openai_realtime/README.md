@@ -100,8 +100,7 @@ limit or content filter ends the response with `status: "incomplete"` and
 failures end it with `status: "failed"`; a top-level `error` event carries the
 message. This applies to streaming and non-streaming requests, including direct
 audio input. Partial output can reach the client, but the pipeline rolls back
-history for incomplete and failed responses. It does not emit unfinished tool
-arguments as executable calls.
+history for incomplete and failed responses.
 
 Cancellation retains `status: "cancelled"` with reason `"turn_detected"` or
 `"client_cancelled"`. A compatible provider that closes its stream without a

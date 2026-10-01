@@ -13,7 +13,8 @@ from openai.types.realtime.realtime_response_create_params import RealtimeRespon
 from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.events import PipelineEvent, ResponseGenerationDoneEvent
-from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk
+from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk, TTSInput
+from tests.openai_realtime.realtime_contract import assert_openai_schema, assert_response_lifecycle_contract
 from tests.test_chat_completions_backend import _make_handler as _chat_handler
 from tests.test_responses_api_language_model import _make_handler as _responses_handler
 from tests.test_responses_api_language_model import _make_request
@@ -141,12 +142,23 @@ def _run(backend, stream, signal, modality, payload=None):
             for processed in processor.process(output):
                 if isinstance(processed, PipelineEvent):
                     events.extend(service.dispatch_pipeline_event(conn, processed))
+                elif isinstance(processed, TTSInput):
+                    # Stand in for TTS with real PCM so the status tests also
+                    # cover the audio resampler and its terminal ordering.
+                    events.extend(service.encode_audio_chunk(conn, b"\x00" * 512, processed.response_key))
                 elif isinstance(processed, EndOfResponse):
                     events.extend(service.finish_response(conn, response_key=processed.response_key))
     logical_done = next(event for event in list(side_channel.queue) if isinstance(event, ResponseGenerationDoneEvent))
     service.unregister(conn)
     done = [event for event in events if event.type == "response.done"]
     assert len(done) == 1
+    assert_openai_schema(events)
+    if done[0].response.output:
+        assert_response_lifecycle_contract(events, wants_audio=modality == "audio")
+    else:
+        # The shared lifecycle checker requires at least one announced item;
+        # limits and filters can also end a response before any output exists.
+        assert not any(event.type == "response.output_item.added" for event in events)
     return done[0].response, outputs, events, request, logical_done
 
 
