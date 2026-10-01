@@ -149,6 +149,8 @@ def _run(backend, stream, signal, modality, payload=None):
                 elif isinstance(processed, EndOfResponse):
                     events.extend(service.finish_response(conn, response_key=processed.response_key))
     logical_done = next(event for event in list(side_channel.queue) if isinstance(event, ResponseGenerationDoneEvent))
+    assert not state.in_response
+    assert not state.response_pending
     service.unregister(conn)
     done = [event for event in events if event.type == "response.done"]
     assert len(done) == 1
@@ -427,3 +429,63 @@ def test_incomplete_prefetch_is_discarded_before_terminal(backend, signal):
                 assert output.status == "incomplete"
                 assert request.prefetch_transaction.discarded
     assert not any(item.get("role") == "assistant" for item in request.runtime_config.chat.to_responses_api_chat())
+
+
+@pytest.mark.parametrize("modality", ["text", "audio"])
+@pytest.mark.parametrize(
+    "backend,stream,kind",
+    [
+        ("chat", True, "empty_stop"),
+        ("chat", True, "usage_only"),
+        ("chat", True, "no_events"),
+        ("chat", False, "empty_stop"),
+        ("chat", False, "no_choices"),
+        ("responses", True, "empty_completed"),
+        ("responses", True, "no_events"),
+        ("responses", True, "created_only"),
+        ("responses", False, "empty_completed"),
+        ("responses", False, "no_status"),
+    ],
+)
+def test_successful_empty_provider_output_completes(backend, stream, kind, modality, caplog):
+    if backend == "chat":
+        if kind == "no_events":
+            payload = []
+        elif kind == "usage_only":
+            payload = [_chat_chunk(usage={"prompt_tokens": 7, "completion_tokens": 0, "total_tokens": 7})]
+        elif stream:
+            payload = [_chat_chunk(finish_reason="stop")]
+        else:
+            payload = _provider_payload("chat", False, "stop")
+            payload["choices"][0]["message"]["content"] = None
+            if kind == "no_choices":
+                payload["choices"] = []
+    else:
+        empty_response = _response("completed", output=[])
+        if kind == "no_status":
+            empty_response.pop("status")
+        if kind == "no_events":
+            payload = []
+        elif kind == "created_only":
+            empty_response["status"] = "in_progress"
+            payload = [{"type": "response.created", "sequence_number": 0, "response": empty_response}]
+        elif stream:
+            payload = [{"type": "response.completed", "sequence_number": 1, "response": empty_response}]
+        else:
+            payload = empty_response
+
+    response, outputs, events, request, logical_done = _run(backend, stream, "unused", modality, payload)
+    assert response.status == "completed"
+    assert response.output == []
+    assert response.status_details.error is None
+    assert response.status_details.reason is None
+    assert logical_done.succeeded
+    assert not any(isinstance(output, LLMResponseChunk) for output in outputs)
+    assert next(output for output in outputs if isinstance(output, EndOfResponse)).error is None
+    assert not any(event.type == "error" or event.type.startswith("response.output_") for event in events)
+    assert [event.type for event in events].count("response.created") == 1
+    assert any(item.get("role") == "user" for item in request.runtime_config.chat.to_responses_api_chat())
+    if stream and kind in ("no_events", "usage_only", "created_only"):
+        assert "ended without" in caplog.text
+    else:
+        assert "ended without" not in caplog.text
