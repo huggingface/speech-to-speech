@@ -189,6 +189,14 @@ class GlobalUsageMetrics(UsageMetrics):
         return sum(self.errors_by_type.values())
 
 
+class InputTurnAccounting(BaseModel):
+    """Chat and usage attributed to an input turn, independent of its lifecycle."""
+
+    user_item_id: str | None = None
+    audio_duration_s: float = 0.0
+    speech_stopped_at_s: float | None = None
+
+
 class ConnState(BaseModel):
     """Per-connection mutable state, including all protocol-level IDs."""
 
@@ -207,8 +215,7 @@ class ConnState(BaseModel):
     input_audio_resampler_rate: int | None = None
     current_response_id: Optional[str] = None
     current_response_key: Optional[str] = None
-    # Stable response ownership. Unlike speculative_user_turn_id/revision,
-    # these do not change when newer user speech arrives mid-response.
+    # Stable response ownership does not change when newer speech arrives.
     current_response_turn_id: Optional[str] = None
     current_response_turn_revision: Optional[int] = None
     response_failed: bool = False
@@ -252,13 +259,9 @@ class ConnState(BaseModel):
     pending_early_tool_calls: dict[int, Any] = Field(default_factory=dict)
     response_usage: UsageMetrics = Field(default_factory=UsageMetrics)
     pending_token_usage: dict[str, tuple[int, int]] = Field(default_factory=dict)
-    speculative_turn_id: Optional[str] = None
-    speculative_turn_revision: Optional[int] = None
-    speculative_user_turn_id: Optional[str] = None
-    speculative_user_turn_revision: Optional[int] = None
-    speculative_user_speech_stopped_at_s: Optional[float] = None
-    speculative_user_item_id: Optional[str] = None
-    speculative_audio_duration_s: float = 0.0
+    # The tracker owns the current turn and revision. This map holds only the
+    # chat/usage effects that a later accepted revision may replace.
+    input_turn_accounting: dict[str, InputTurnAccounting] = Field(default_factory=dict)
     # Client conversation.item.create items that arrived while a response was
     # generating. Applying them mid-generation races the LLM handler's chat
     # write-back (cross-thread), so they are buffered here and flushed in order
@@ -615,7 +618,6 @@ class RealtimeService:
             )
             return []
 
-        self._observe_turn_event(event)
         if isinstance(event, AssistantOutputEvent):
             return self.response.on_assistant_output(
                 conn_id,
@@ -670,13 +672,23 @@ class RealtimeService:
             return not is_latest
         return not self.speculative_turns.is_latest(turn_id, turn_revision)
 
-    def _observe_turn_event(self, event: PipelineEvent) -> None:
+    def current_input_turn(self, conn_id: str) -> tuple[str | None, int | None, float | None]:
+        """Read lifecycle identity from the tracker and its input timing here."""
         if self.speculative_turns is None:
-            return
-        self.speculative_turns.observe(
-            getattr(event, "turn_id", None),
-            getattr(event, "turn_revision", None),
-        )
+            return None, None, None
+        turn_id, revision = self.speculative_turns.current_turn()
+        accounting = self._state(conn_id).input_turn_accounting.get(turn_id) if turn_id is not None else None
+        return turn_id, revision, accounting.speech_stopped_at_s if accounting is not None else None
+
+    def _input_turn_accounting(self, conn_id: str, turn_id: str | None) -> InputTurnAccounting | None:
+        if turn_id is None:
+            return None
+        records = self._state(conn_id).input_turn_accounting
+        if turn_id not in records:
+            # A new input turn cannot revise the preceding turn's chat entry.
+            records.clear()
+            records[turn_id] = InputTurnAccounting()
+        return records[turn_id]
 
     # ── STT → LM bridge ────────────────────────────
 
@@ -691,36 +703,28 @@ class RealtimeService:
         self.response.discard_tool_followup_prefetch(conn_id)
         st.generation_done_tool_calls.clear()
         st.completed_tool_response_keys.clear()
-        same_speculative_turn = event.turn_id is not None and event.turn_id == st.speculative_user_turn_id
-        if same_speculative_turn:
-            st.response_usage.audio_duration_s -= st.speculative_audio_duration_s
-        else:
-            st.speculative_audio_duration_s = 0.0
-
-        if event.turn_id is not None:
-            st.speculative_audio_duration_s = input_duration_s
+        accounting = self._input_turn_accounting(conn_id, event.turn_id)
+        if accounting is not None:
+            st.response_usage.audio_duration_s -= accounting.audio_duration_s
+            accounting.audio_duration_s = input_duration_s
+            accounting.speech_stopped_at_s = event.speech_stopped_at_s
 
         cfg = st.runtime_config
         transcript = event.transcript
+        user_item_id = accounting.user_item_id if accounting is not None else None
         if transcript:
-            if same_speculative_turn and st.speculative_user_item_id:
-                replaced = cfg.chat.replace_user_message_text(st.speculative_user_item_id, transcript)
+            if accounting is not None and user_item_id:
+                replaced = cfg.chat.replace_user_message_text(user_item_id, transcript)
                 if not replaced:
                     item = cfg.chat.add_item(make_user_message(transcript))
-                    st.speculative_user_item_id = item.id
+                    accounting.user_item_id = item.id
             else:
                 item = cfg.chat.add_item(make_user_message(transcript))
-                st.speculative_user_item_id = item.id
-        elif same_speculative_turn and st.speculative_user_item_id:
-            cfg.chat.remove_user_message(st.speculative_user_item_id)
-            st.speculative_user_item_id = None
-        elif event.turn_id is not None and event.turn_id != st.speculative_user_turn_id:
-            st.speculative_user_item_id = None
-
-        if event.turn_id is not None:
-            st.speculative_user_turn_id = event.turn_id
-            st.speculative_user_turn_revision = event.turn_revision
-            st.speculative_user_speech_stopped_at_s = event.speech_stopped_at_s
+                if accounting is not None:
+                    accounting.user_item_id = item.id
+        elif accounting is not None and user_item_id:
+            cfg.chat.remove_user_message(user_item_id)
+            accounting.user_item_id = None
 
         queue = self.text_prompt_queue
         if queue and transcript:
@@ -765,12 +769,13 @@ class RealtimeService:
         owns_current_input = failed_events[0].item_id == current_input_item_id
         if owns_current_input and self.should_listen is not None:
             self.should_listen.set()
-        if event.turn_id is not None and event.turn_id == st.speculative_user_turn_id:
-            if st.speculative_user_item_id is not None:
-                st.runtime_config.chat.remove_user_message(st.speculative_user_item_id)
-                st.speculative_user_item_id = None
-            st.response_usage.audio_duration_s -= st.speculative_audio_duration_s
-            st.speculative_audio_duration_s = 0.0
+        accounting = st.input_turn_accounting.get(event.turn_id) if event.turn_id is not None else None
+        if accounting is not None:
+            if accounting.user_item_id is not None:
+                st.runtime_config.chat.remove_user_message(accounting.user_item_id)
+                accounting.user_item_id = None
+            st.response_usage.audio_duration_s -= accounting.audio_duration_s
+            accounting.audio_duration_s = 0.0
         self.audio.hold_input_terminal(
             conn_id,
             failed_events[0].item_id,
@@ -787,19 +792,14 @@ class RealtimeService:
         self.response.discard_tool_followup_prefetch(conn_id)
         st.generation_done_tool_calls.clear()
         st.completed_tool_response_keys.clear()
-        same_speculative_turn = event.turn_id is not None and event.turn_id == st.speculative_user_turn_id
-        if same_speculative_turn:
-            st.response_usage.audio_duration_s -= st.speculative_audio_duration_s
-        else:
-            st.speculative_audio_duration_s = 0.0
+        accounting = self._input_turn_accounting(conn_id, event.turn_id)
+        if accounting is not None:
+            st.response_usage.audio_duration_s -= accounting.audio_duration_s
+            accounting.audio_duration_s = event.audio_duration_s
+            accounting.speech_stopped_at_s = event.speech_stopped_at_s
 
         st.input_audio_duration_s = event.audio_duration_s
         st.response_usage.audio_duration_s += event.audio_duration_s
-        if event.turn_id is not None:
-            st.speculative_audio_duration_s = event.audio_duration_s
-            st.speculative_user_turn_id = event.turn_id
-            st.speculative_user_turn_revision = event.turn_revision
-            st.speculative_user_speech_stopped_at_s = event.speech_stopped_at_s
 
         queue = self.text_prompt_queue
         if queue:
