@@ -163,6 +163,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             )
         else:
             raise ValueError(f"Unknown VAD backend {vad!r}. Choose silero or firered.")
+        # session.update may override these; on_session_end restores the configured values.
+        self._configured_threshold = self.iterator.threshold
+        self._configured_min_silence_samples = self.iterator.min_silence_samples
         self.audio_enhancement = audio_enhancement
         if audio_enhancement:
             if not HAS_DF:
@@ -974,6 +977,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             streaming_stt_sink.cancel_session()
         self._streaming_pre_speech.clear()
         self.iterator.reset_states()
+        self.iterator.threshold = self._configured_threshold
+        self.iterator.min_silence_samples = self._configured_min_silence_samples
+        self._last_turn_detection = None
         self._pending_short_segment = None
         self.iterator.buffer = []
         self.last_process_time = 0.0
