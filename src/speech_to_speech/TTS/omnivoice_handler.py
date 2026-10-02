@@ -15,6 +15,7 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -79,15 +80,7 @@ class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.speed = speed
         self.blocksize = blocksize
 
-        if device == "auto":
-            if torch.cuda.is_available():
-                device = "cuda"
-            elif hasattr(torch, "xpu") and torch.xpu.is_available():
-                device = "xpu"
-            elif torch.backends.mps.is_available():
-                device = "mps"
-            else:
-                device = "cpu"
+        device = resolve_device(device, TORCH_DEVICES, "OmniVoice")
 
         logger.info("Loading OmniVoice model %r on %s", model_name, device)
         self.model = OmniVoice.from_pretrained(model_name, device_map=device, dtype=torch_dtype)
@@ -163,7 +156,8 @@ class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
             "num_step": self.num_steps,
             "speed": self.speed,
         }
-        language = self.language or tts_input.language_code
+        selected = tts_input.selected_language
+        language = (self.language or tts_input.language_code) if selected is None else tts_input.tts_language_code
         if language:
             generation_kwargs["language"] = language
         voice_clone_prompt = self._voice_clone_prompt_for(language)

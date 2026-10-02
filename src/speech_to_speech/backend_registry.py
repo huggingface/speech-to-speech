@@ -22,6 +22,9 @@ from speech_to_speech.arguments_classes.language_model_arguments import Language
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
     MLXAudioWhisperSTTHandlerArguments,
 )
+from speech_to_speech.arguments_classes.nemotron_streaming_stt_arguments import (
+    NemotronStreamingSTTHandlerArguments,
+)
 from speech_to_speech.arguments_classes.omnivoice_tts_arguments import OmniVoiceTTSHandlerArguments
 from speech_to_speech.arguments_classes.openai_realtime_stt_arguments import OpenAIRealtimeSTTHandlerArguments
 from speech_to_speech.arguments_classes.openai_stt_arguments import OpenAICompatibleSTTHandlerArguments
@@ -39,6 +42,7 @@ from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandl
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
     ResponsesApiLanguageModelHandlerArguments,
 )
+from speech_to_speech.arguments_classes.sense_voice_stt_arguments import SenseVoiceSTTHandlerArguments
 from speech_to_speech.arguments_classes.supertonic_tts_arguments import SupertonicTTSHandlerArguments
 from speech_to_speech.arguments_classes.vllm_realtime_stt_arguments import VLLMRealtimeSTTHandlerArguments
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
@@ -81,6 +85,7 @@ class HandlerContext:
     sample_rate: int
     enable_live_transcription: bool
     live_transcription_update_interval: float
+    detect_llm_output_language: bool = False
 
 
 HandlerFactory = Callable[[HandlerContext, Mapping[str, Any]], Any]
@@ -219,6 +224,7 @@ def _simple_handler_factory(
     setup_should_listen: bool = False,
     attach_speculative_turns: bool = False,
     context_kwargs: bool = False,
+    pass_assistant_language_flag: bool = False,
 ) -> HandlerFactory:
     def create(context: HandlerContext, config: Mapping[str, Any]) -> Any:
         handler_class = _load_handler(module_name, class_name)
@@ -228,6 +234,8 @@ def _simple_handler_factory(
                 cancel_scope=context.cancel_scope,
                 speculative_turns=context.speculative_turns,
             )
+        if pass_assistant_language_flag:
+            setup_kwargs["detect_llm_output_language"] = context.detect_llm_output_language
         handler = handler_class(
             context.stop_event,
             queue_in=context.queue_in,
@@ -287,6 +295,7 @@ def _create_openai_tts(context: HandlerContext, config: Mapping[str, Any]) -> An
             **config,
             "cancel_scope": context.cancel_scope,
             "speculative_turns": context.speculative_turns,
+            "detect_llm_output_language": context.detect_llm_output_language,
         },
     )
 
@@ -408,6 +417,18 @@ STT_BACKENDS = build_backend_registry(
             required_extra="nemo",
         ),
         BackendSpec(
+            "nemotron-streaming",
+            "stt",
+            NemotronStreamingSTTHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.STT.nemo_asr_handler",
+                "NemoASRSTTHandler",
+                attach_speculative_turns=True,
+            ),
+            config_prefix="nemotron_streaming",
+            required_extra="nemo",
+        ),
+        BackendSpec(
             "paraformer",
             "stt",
             ParaformerSTTHandlerArguments,
@@ -418,6 +439,18 @@ STT_BACKENDS = build_backend_registry(
             ),
             config_prefix="paraformer_stt",
             required_extra="paraformer",
+        ),
+        BackendSpec(
+            "sense-voice",
+            "stt",
+            SenseVoiceSTTHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.STT.sense_voice_handler",
+                "SenseVoiceSTTHandler",
+                attach_speculative_turns=True,
+            ),
+            config_prefix="sense_voice_stt",
+            required_extra="sensevoice",
         ),
         BackendSpec(
             "qwen3-asr",
@@ -581,6 +614,7 @@ TTS_BACKENDS = build_backend_registry(
                 "Qwen3TTSHandler",
                 setup_should_listen=True,
                 context_kwargs=True,
+                pass_assistant_language_flag=True,
             ),
             config_prefix="qwen3_tts",
         ),

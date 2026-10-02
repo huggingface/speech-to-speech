@@ -109,3 +109,92 @@ test("an older transcription failure does not reset the current item", () => {
   assert.equal(client._userTranscriptByItem.get("item-current"), "current partial");
   assert.deepEqual(errors, ["old transcription failed"]);
 });
+
+test("speculative transcript snapshots update display and prune on completion", () => {
+  globalThis.localStorage = { getItem() { return null; } };
+  globalThis.OpenAIAgentsRealtime = realtime;
+
+  const client = new S2sRealtimeClient({
+    transport: "websocket",
+    directUrl: "ws://unused",
+  });
+
+  const config = client._sessionConfig();
+  assert.deepEqual(config.providerData?.extensions, ["speech_to_speech.input_audio_transcription.snapshot"]);
+
+  const transcripts = [];
+  client.addEventListener("transcript", (event) => transcripts.push(event.detail));
+
+  client._onTransportEvent({
+    type: "speech_to_speech.input_audio_transcription.snapshot",
+    item_id: "item-1",
+    content_index: 0,
+    transcript: "hello brave",
+  });
+
+  assert.equal(client._userSnapshotByItem.get("item-1"), "hello brave");
+  assert.deepEqual(transcripts, [
+    { role: "user", text: "hello brave", partial: true, itemId: "item-1" },
+  ]);
+
+  client._onTransportEvent({
+    type: "conversation.item.input_audio_transcription.delta",
+    item_id: "item-1",
+    content_index: 0,
+    delta: "hello",
+  });
+
+  assert.equal(client._userTranscriptByItem.get("item-1"), "hello");
+  assert.equal(transcripts.at(-1)?.text, "hello brave");
+
+  client._onTransportEvent({
+    type: "conversation.item.input_audio_transcription.completed",
+    item_id: "item-1",
+    content_index: 0,
+    transcript: "hello brave new world",
+  });
+
+  assert.equal(client._userSnapshotByItem.has("item-1"), false);
+  assert.equal(client._userTranscriptByItem.has("item-1"), false);
+  assert.deepEqual(transcripts.at(-1), {
+    role: "user",
+    text: "hello brave new world",
+    partial: false,
+    itemId: "item-1",
+  });
+});
+
+test("the client negotiates speculative snapshot extensions on the wire", async () => {
+  globalThis.localStorage = { getItem() { return null; } };
+  globalThis.OpenAIAgentsRealtime = realtime;
+
+  const client = new S2sRealtimeClient({
+    transport: "websocket",
+    directUrl: "ws://unused",
+  });
+  const sent = [];
+  const transport = new realtime.OpenAIRealtimeWebSocket({ useInsecureApiKey: true });
+  transport.sendEvent = (event) => sent.push(event);
+  client._transport = transport;
+  client._agent = client._buildAgent();
+  client._session = new realtime.RealtimeSession(client._agent, {
+    transport,
+    model: "s2s-local",
+    config: client._sessionConfig(),
+    tracingDisabled: true,
+  });
+  transport.updateSessionConfig(await client._session.getInitialSessionConfig());
+
+  assert.ok(sent.length >= 1);
+  const initialSession = sent[0]?.session;
+  assert.deepEqual(initialSession?.extensions, [
+    "speech_to_speech.input_audio_transcription.snapshot",
+  ]);
+
+  client.updateSession({ voice: "Coral" });
+  await waitFor(() => sent.length >= 2);
+  const updatedSession = sent.at(-1)?.session;
+  assert.deepEqual(updatedSession?.extensions, [
+    "speech_to_speech.input_audio_transcription.snapshot",
+  ]);
+});

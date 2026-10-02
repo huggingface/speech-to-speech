@@ -166,7 +166,15 @@ class SupertonicTTSHandler(BaseHandler[TTSIn, TTSOut]):
         if not text.strip():
             return
 
-        lang = self._resolve_language(tts_input.language_code)
+        language_code = tts_input.tts_language_code
+        selected = tts_input.selected_language
+        if (
+            selected not in (None, "auto")
+            and self._normalize_language_code(language_code or "") not in SUPERTONIC_LANGUAGE_CODES
+        ):
+            # A detected language Supertonic cannot speak keeps the session language.
+            language_code = selected
+        lang = self._resolve_language(language_code)
 
         console.print(f"[green]ASSISTANT: {text}")
 
