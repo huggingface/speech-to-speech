@@ -50,7 +50,8 @@ DEFAULT_REF_TEXT = "I'm confused why some people have super short timelines, yet
 DEFAULT_FASTER_STREAMING_CHUNK_SIZE = 8
 DEFAULT_MLX_STREAMING_CHUNK_SIZE = 4
 DEFAULT_QWEN3_TTS_MAX_NEW_TOKENS = 1536
-MIN_QWEN3_TTS_UTTERANCE_TOKENS = 360
+# 360(28.8초)이면 EOS를 놓친 짧은 문장이 28.8초까지 늘어진다 — 추정치가 지배하도록 낮춤
+MIN_QWEN3_TTS_UTTERANCE_TOKENS = 120
 VALID_MLX_QUANTIZATION_SUFFIXES = ("bf16", "4bit", "6bit", "8bit")
 VALID_GGML_QUANTIZATIONS = ("BF16", "Q8_0", "Q4_K_M", "F32")
 VALID_FASTER_BACKENDS = ("ggml", "torch")
@@ -391,6 +392,15 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         if self.backend == "mlx":
             return DEFAULT_MLX_STREAMING_CHUNK_SIZE
         return DEFAULT_FASTER_STREAMING_CHUNK_SIZE
+
+    def _effective_language(self) -> str:
+        """설정이 auto면 이번 발화의 언어코드(예: "ko", "ko-auto")를 우선 사용한다."""
+        if self.language != "auto":
+            return self.language
+        code = getattr(self, "_utterance_language", None)
+        if not code:
+            return self.language
+        return self._normalize_language(str(code).split("-auto")[0])
 
     def _normalize_language(self, language: str | None) -> str:
         if language is None:
@@ -835,7 +845,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         runtime_config = tts_input.runtime_config
         response = tts_input.response
 
-        coalesced_text, _language_code = self._coalesce_pending_tts_input(tts_input)
+        coalesced_text, utterance_language = self._coalesce_pending_tts_input(tts_input)
+        self._utterance_language = utterance_language
 
         text = coalesced_text or "Hello."
 
@@ -960,7 +971,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 max_tokens=utterance_max_new_tokens,
                 text=text,
                 speaker=speaker,
-                language=self.language,
+                language=self._effective_language(),
                 instruct=self.instruct,
             )
             return
@@ -969,7 +980,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             self.model.generate_custom_voice_streaming(
                 text=text,
                 speaker=speaker,
-                language=self.language,
+                language=self._effective_language(),
                 instruct=self.instruct,
                 chunk_size=self.streaming_chunk_size,
                 max_new_tokens=utterance_max_new_tokens,

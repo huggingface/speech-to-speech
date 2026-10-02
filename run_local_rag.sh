@@ -17,6 +17,7 @@ exec .venv/bin/speech-to-speech local \
   --responses_api_base_url http://127.0.0.1:8100/v1 \
   --responses_api_api_key dummy \
   --model_name ajou-vis \
+  --qwen3_tts_speaker Sohee \
   --local_audio_block_mic_during_playback \
   --port 8766 \
   "$@" 2>&1 | tee -a run_local.log
