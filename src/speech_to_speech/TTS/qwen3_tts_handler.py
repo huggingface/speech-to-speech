@@ -41,6 +41,7 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.pipeline.turn_latency import active_turn_latency_tracker, bind_active_turn_latency_tracker
 from speech_to_speech.utils.mlx_lock import MLXLockContext
+from speech_to_speech.utils.utils import resolve_device
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -186,7 +187,11 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 )
             self._setup_mlx(self.model_name)
         else:
-            self.device = device
+            # Only the torch backend places the model itself; qwentts.cpp (GGML) picks its own device.
+            if self.faster_backend == "torch":
+                self.device = resolve_device(device, ("cuda",), "Qwen3-TTS torch backend")
+            else:
+                self.device = device
             self.model_name = model_name
             logger.info(
                 "Loading Qwen3-TTS model: %s via faster-qwen3-tts (%s backend)",
@@ -405,7 +410,11 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
 
     def _language_for_utterance(self, language_code: str | None, selected_language: str | None = None) -> str:
         if selected_language not in (None, "auto"):
-            return self._normalize_language(selected_language)
+            language = self._normalize_language(language_code or selected_language)
+            if language not in QWEN3_LANGUAGE_ALIASES.values():
+                # A detected language Qwen3 cannot speak keeps the session language.
+                language = self._normalize_language(selected_language)
+            return language
         configured = "auto" if selected_language == "auto" else self.language
         detect = selected_language == "auto" or getattr(self, "detect_llm_output_language", False)
         if configured != "auto" or not detect or not language_code:

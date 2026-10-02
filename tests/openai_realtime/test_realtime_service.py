@@ -52,6 +52,7 @@ from openai.types.realtime.conversation_item import (
 from speech_to_speech.api.openai_realtime.service import (
     CHUNK_SIZE_BYTES,
     RealtimeService,
+    SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
 )
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.events import (
@@ -371,6 +372,21 @@ class TestHandleSessionUpdate:
         service.handle_session_update(conn_id, evt)
         assert runtime_config.session.audio.output.voice == "nova"
         assert runtime_config.session.audio.input.turn_detection.type == "server_vad"
+
+    def test_session_update_extensions_from_documented_payload(self, service, conn_id, runtime_config):
+        raw = {
+            "type": "session.update",
+            "session": {
+                "type": "realtime",
+                "extensions": ["speech_to_speech.input_audio_transcription.snapshot"],
+            },
+        }
+        parsed = service.parse_client_event(raw)
+        assert parsed is not None
+        assert isinstance(parsed, SessionUpdateEvent)
+        err = service.handle_session_update(conn_id, parsed)
+        assert err is None
+        assert runtime_config.input_audio_transcription_snapshots_enabled is True
 
     def test_session_update_merges_partial_updates(self, service, conn_id, runtime_config):
         """Partial updates preserve previously-set fields."""
@@ -3907,6 +3923,99 @@ class TestDispatchPipelineEvent:
         assert service._state(conn_id).current_response_id is None
         service.unregister(conn_id)
 
+    def test_new_turn_drops_uncommitted_older_assistant_output(self, runtime_config, should_listen):
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+        tracker.start_turn()
+        tracker.start_turn()
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(text="stale", turn_id="turn_1", turn_revision=0),
+        )
+
+        assert events == []
+        assert service._state(conn_id).current_response_id is None
+        assert service._state(conn_id).runtime_config.chat.buffer == []
+        service.unregister(conn_id)
+
+    def test_response_terminal_releases_committed_older_turn(self, runtime_config, should_listen):
+        tracker = SpeculativeTurnTracker()
+        service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+        tracker.start_turn()
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(text="accepted", turn_id="turn_1", turn_revision=0),
+        )
+        tracker.start_turn()
+
+        assert events
+        assert tracker.is_latest("turn_1", 0)
+        assert tracker.is_latest("turn_2", 0)
+
+        service.finish_response(conn_id)
+
+        assert not tracker.is_latest("turn_1", 0)
+        assert not tracker.is_committed("turn_1", 0)
+        assert tracker.is_latest("turn_2", 0)
+        service.unregister(conn_id)
+
+    def test_tool_followup_stays_valid_after_tool_call_response_ends(self, runtime_config, should_listen):
+        tracker = SpeculativeTurnTracker()
+        prompts: Queue = Queue()
+        service = RealtimeService(text_prompt_queue=prompts, should_listen=should_listen, speculative_turns=tracker)
+        conn_id = service.register()
+        service._state(conn_id).runtime_config = runtime_config
+        turn_id, revision = tracker.start_turn()
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="Weather?", turn_id=turn_id, turn_revision=revision),
+        )
+        request = prompts.get_nowait()
+        call = RealtimeConversationItemFunctionCall(
+            type="function_call", id="fc_1", call_id="call_1", name="lookup", arguments="{}"
+        )
+        runtime_config.chat.add_provisional_generation_items(request.response_key, [call])
+        service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(
+                response_key=request.response_key,
+                turn_id=turn_id,
+                turn_revision=revision,
+                parts=[
+                    AssistantToolCallPart(
+                        tool={
+                            "type": "function_call",
+                            **call.model_dump(include={"id", "call_id", "name", "arguments"}),
+                        }
+                    )
+                ],
+            ),
+        )
+        service.dispatch_pipeline_event(
+            conn_id, ResponseGenerationDoneEvent(response_key=request.response_key, call_ids=[call.call_id])
+        )
+        service.finish_response(conn_id, response_key=request.response_key)
+
+        service.handle_conversation_item_create(
+            conn_id,
+            ConversationItemCreateEvent(
+                type="conversation.item.create",
+                item={"type": "function_call_output", "call_id": call.call_id, "output": "sunny"},
+            ),
+        )
+        followup = prompts.get_nowait()
+
+        assert (followup.turn_id, followup.turn_revision) == (turn_id, revision)
+        assert tracker.is_latest(followup.turn_id, followup.turn_revision)
+        assert tracker.begin_reopen_candidate(turn_id, revision) is None
+        service.unregister(conn_id)
+
     def test_assistant_text_waits_for_pending_reopen_and_emits_cancelled_reopen(
         self,
         runtime_config,
@@ -4145,6 +4254,156 @@ class TestDispatchPipelineEvent:
         assert committed[0].delta == "The"
         assert revised == []
         assert recovered[0].delta == " swift"
+
+    def test_partial_transcription_opted_in_snapshots_emits_snapshots_and_deltas(self, service, conn_id):
+        service.handle_session_update(
+            conn_id,
+            SessionUpdateEvent.model_validate(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "extensions": ["speech_to_speech.input_audio_transcription.snapshot"],
+                    },
+                }
+            ),
+        )
+        started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+        item_id = started[0].item_id
+
+        first = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello brave"),
+        )
+        second = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello brave new"),
+        )
+        third = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello brave new world"),
+        )
+
+        assert len(first) == 1
+        assert isinstance(first[0], SpeechToSpeechInputAudioTranscriptionSnapshotEvent)
+        assert first[0].item_id == item_id
+        assert first[0].content_index == 0
+        assert first[0].transcript == "hello brave"
+
+        assert len(second) == 2
+        assert isinstance(second[0], SpeechToSpeechInputAudioTranscriptionSnapshotEvent)
+        assert second[0].transcript == "hello brave new"
+        assert isinstance(second[1], ConversationItemInputAudioTranscriptionDeltaEvent)
+        assert second[1].delta == "hello"
+
+        assert len(third) == 2
+        assert isinstance(third[0], SpeechToSpeechInputAudioTranscriptionSnapshotEvent)
+        assert third[0].transcript == "hello brave new world"
+        assert isinstance(third[1], ConversationItemInputAudioTranscriptionDeltaEvent)
+        assert third[1].delta == " brave"
+
+    def test_partial_transcription_opted_in_snapshots_emits_snapshot_when_delta_withheld(self, service, conn_id):
+        service.handle_session_update(
+            conn_id,
+            SessionUpdateEvent.model_validate(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "extensions": ["speech_to_speech.input_audio_transcription.snapshot"],
+                    },
+                }
+            ),
+        )
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+
+        first = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="Nothing company."),
+        )
+        revised = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="Oh, nothing confused me."),
+        )
+        extended = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="Oh, nothing confused me. I was"),
+        )
+
+        assert len(first) == 1
+        assert isinstance(first[0], SpeechToSpeechInputAudioTranscriptionSnapshotEvent)
+        assert first[0].transcript == "Nothing company."
+
+        assert len(revised) == 1
+        assert isinstance(revised[0], SpeechToSpeechInputAudioTranscriptionSnapshotEvent)
+        assert revised[0].transcript == "Oh, nothing confused me."
+
+        assert len(extended) == 2
+        assert isinstance(extended[0], SpeechToSpeechInputAudioTranscriptionSnapshotEvent)
+        assert extended[0].transcript == "Oh, nothing confused me. I was"
+        assert isinstance(extended[1], ConversationItemInputAudioTranscriptionDeltaEvent)
+        assert extended[1].delta == "Oh nothing confused"
+
+    def test_partial_transcription_opted_in_duplicate_does_not_emit_duplicate_snapshot(self, service, conn_id):
+        service.handle_session_update(
+            conn_id,
+            SessionUpdateEvent.model_validate(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "extensions": ["speech_to_speech.input_audio_transcription.snapshot"],
+                    },
+                }
+            ),
+        )
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+
+        first = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello brave"),
+        )
+        duplicate = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello brave"),
+        )
+
+        assert len(first) == 1
+        assert isinstance(first[0], SpeechToSpeechInputAudioTranscriptionSnapshotEvent)
+        assert duplicate == []
+
+    def test_overlapping_items_route_snapshots_by_item_id(self, service, conn_id):
+        service.handle_session_update(
+            conn_id,
+            SessionUpdateEvent.model_validate(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "extensions": ["speech_to_speech.input_audio_transcription.snapshot"],
+                    },
+                }
+            ),
+        )
+        first_started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1"))
+        item1_id = first_started[0].item_id
+
+        second_started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_2"))
+        item2_id = second_started[0].item_id
+
+        p1 = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="hello item 1", turn_id="turn_1"),
+        )
+        p2 = service.dispatch_pipeline_event(
+            conn_id,
+            PartialTranscriptionEvent(delta="world item 2", turn_id="turn_2"),
+        )
+
+        assert p1[0].item_id == item1_id
+        assert p1[0].transcript == "hello item 1"
+        assert p2[0].item_id == item2_id
+        assert p2[0].transcript == "world item 2"
 
     def test_new_input_item_resets_partial_transcription_delta(self, service, conn_id):
         first_started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1"))
@@ -4735,6 +4994,76 @@ class TestDispatchPipelineEvent:
         service.unregister(conn_id)
 
     # -- response_failed --
+
+    @pytest.mark.parametrize("response_key", [None, "old-response"])
+    def test_new_turn_drops_uncommitted_older_failure(self, service, conn_id, response_key):
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        turn_id, revision = tracker.start_turn()
+        service.dispatch_pipeline_event(
+            conn_id,
+            TranscriptionCompletedEvent(transcript="first question", turn_id=turn_id, turn_revision=revision),
+        )
+        assert service._state(conn_id).response_pending
+        tracker.start_turn()
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            ResponseFailedEvent(
+                message="obsolete failure", response_key=response_key, turn_id=turn_id, turn_revision=revision
+            ),
+        )
+
+        assert events == []
+        state = service._state(conn_id)
+        assert state.current_response_id is None
+        assert not state.response_failed
+        assert service.get_usage()["total_errors"] == 0
+
+    @pytest.mark.parametrize("advance_turn", [False, True])
+    def test_relevant_turn_failure_remains_visible(self, service, conn_id, advance_turn):
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        turn_id, revision = tracker.start_turn()
+        service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(text="partial", response_key="response-1", turn_id=turn_id, turn_revision=revision),
+        )
+        if advance_turn:
+            tracker.start_turn()
+
+        events = service.dispatch_pipeline_event(
+            conn_id,
+            ResponseFailedEvent(
+                message="provider failed", response_key="response-1", turn_id=turn_id, turn_revision=revision
+            ),
+        )
+
+        assert any(isinstance(event, RealtimeErrorEvent) for event in events)
+        done = service.finish_response(conn_id, response_key="response-1")
+        assert done[-1].response.status == "failed"
+
+    @pytest.mark.parametrize("confirm_reopen", [False, True])
+    def test_response_failure_waits_for_reopen_decision(self, service, conn_id, confirm_reopen):
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        turn_id, revision = tracker.start_turn()
+        candidate = tracker.begin_reopen_candidate(turn_id, revision)
+        failure = ResponseFailedEvent(
+            message="provider failed", response_key="response-1", turn_id=turn_id, turn_revision=revision
+        )
+
+        assert service.should_defer_pipeline_event(failure)
+        assert service.try_dispatch_pipeline_event(conn_id, failure) is None
+        assert service._state(conn_id).current_response_id is None
+        if confirm_reopen:
+            assert tracker.confirm_reopen_candidate(turn_id, revision, candidate)
+            assert service.try_dispatch_pipeline_event(conn_id, failure) == []
+        else:
+            tracker.cancel_reopen_candidate(turn_id, candidate)
+            events = service.try_dispatch_pipeline_event(conn_id, failure)
+            assert events is not None
+            assert [event.type for event in events] == ["response.created", "error"]
 
     def test_response_failed_emits_error_and_failed_done(self, service, conn_id):
         service.response._ensure_response(conn_id)

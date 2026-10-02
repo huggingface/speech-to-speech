@@ -10,6 +10,7 @@ from rich.console import Console
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ class ParaformerSTTHandler(BaseSTTHandler):
         if len(model_name.split("/")) > 1:
             model_name = model_name.split("/")[-1]
         self.language = model_name.split("-")[1] if "-" in model_name else "zh"
-        self.device = device
+        self.device = resolve_device(device, TORCH_DEVICES, "Paraformer STT")
         try:
             from funasr import AutoModel
         except ModuleNotFoundError as exc:
@@ -41,7 +42,7 @@ class ParaformerSTTHandler(BaseSTTHandler):
                 "Paraformer STT requires the optional 'paraformer' extra. "
                 "Install it with `pip install speech-to-speech[paraformer]`."
             ) from exc
-        self.model = AutoModel(model=model_name, device=device)
+        self.model = AutoModel(model=model_name, device=self.device)
         self.warmup()
 
     def warmup(self) -> None:

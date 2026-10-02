@@ -31,6 +31,7 @@ from speech_to_speech.pipeline.turn_latency import bind_active_turn_latency_trac
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.STT.smart_progressive_streaming import PartialTranscription as ProgressiveStreamPartial
 from speech_to_speech.utils.mlx_lock import MLXLockContext
+from speech_to_speech.utils.utils import resolve_device
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -93,7 +94,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
             model_name: Model identifier. Defaults are:
                 - MPS: "mlx-community/parakeet-tdt-0.6b-v3"
                 - CUDA/CPU: "nvidia/parakeet-tdt-0.6b-v3"
-            device: Device to use ("auto", "cuda", "mps", "cpu")
+            device: Device to use ("auto", "cuda", "npu", "mps", "cpu")
             compute_type: Compute precision ("float16", "float32")
             language: Legacy language preference (ignored by Parakeet decoders)
             gen_kwargs: Additional generation kwargs
@@ -110,15 +111,10 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         self.sample_rate = 16000
 
         # Determine device
-        if device == "auto":
-            if platform == "darwin":
-                self.device = "mps"
-            else:
-                import torch
-
-                self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device == "auto" and platform == "darwin":
+            self.device = "mps"
         else:
-            self.device = device
+            self.device = resolve_device(device, ("cuda", "npu", "mps", "cpu"), "Parakeet TDT")
 
         # Set default model based on device
         if model_name is None:
@@ -408,6 +404,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
 
     def _show_progressive_transcription(self, audio_input: np.ndarray) -> str:
         """Run progressive transcription, print to console, and return the text."""
+        assert self.streaming_handler is not None, "Live transcription requires a streaming handler"
         result = self.streaming_handler.transcribe_incremental(audio_input)
         rich_text = Text()
         if result.fixed_text:

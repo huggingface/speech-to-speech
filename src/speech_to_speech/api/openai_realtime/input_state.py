@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Literal, Union
 
 from openai.types.realtime import (
     ConversationItemInputAudioTranscriptionCompletedEvent,
@@ -11,6 +11,18 @@ InputTranscriptionTerminal = Union[
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
 ]
+
+
+class SpeechToSpeechInputAudioTranscriptionSnapshotEvent(BaseModel):
+    """Cumulative, replaceable STT hypothesis snapshot emitted to opted-in clients."""
+
+    type: Literal["speech_to_speech.input_audio_transcription.snapshot"] = (
+        "speech_to_speech.input_audio_transcription.snapshot"
+    )
+    event_id: str
+    item_id: str
+    content_index: int = 0
+    transcript: str
 
 
 class InputItemState(BaseModel):

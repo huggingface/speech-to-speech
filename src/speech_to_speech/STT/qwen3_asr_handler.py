@@ -14,6 +14,7 @@ from transformers.models.qwen3_asr.processing_qwen3_asr import LANGUAGE_CODE_TO_
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -36,17 +37,6 @@ def language_to_code(language: Optional[str]) -> Optional[str]:
     if normalized in LANGUAGE_CODE_TO_NAME:
         return normalized
     return _LANGUAGE_NAME_TO_CODE.get(normalized)
-
-
-def resolve_device(device: str) -> str:
-    """Turn ``auto`` into CUDA, then MPS, then CPU; keep an explicit choice as is."""
-    if device != "auto":
-        return device
-    if torch.cuda.is_available():
-        return "cuda"
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
 
 
 def resolve_torch_dtype(torch_dtype: str, device: str) -> torch.dtype:
@@ -84,7 +74,7 @@ class Qwen3ASRSTTHandler(BaseSTTHandler):
         gen_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
         logger.info("Loading Qwen3-ASR STT model: %s", model_name)
-        self.device = resolve_device(device)
+        self.device = resolve_device(device, TORCH_DEVICES, "Qwen3-ASR")
         self.torch_dtype = resolve_torch_dtype(torch_dtype, self.device)
         self.prompt = prompt or None
         self.gen_kwargs = dict(gen_kwargs or {})

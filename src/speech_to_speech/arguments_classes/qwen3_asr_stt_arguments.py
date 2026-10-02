@@ -16,7 +16,9 @@ class Qwen3ASRSTTHandlerArguments:
     )
     qwen3_asr_device: str = field(
         default="auto",
-        metadata={"help": "The device to run on. 'auto' picks CUDA, then MPS, then CPU. Default is 'auto'."},
+        metadata={
+            "help": "The device to run on. Options: 'auto' (first available of CUDA, NPU, XPU, MPS, CPU), 'cuda', 'npu', 'xpu', 'mps', 'cpu'. Default is 'auto'."
+        },
     )
     qwen3_asr_torch_dtype: str = field(
         default="auto",
