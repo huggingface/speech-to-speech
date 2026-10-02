@@ -454,7 +454,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
                 tracker = store.get_or_create_for_turn(output.turn_id, output.turn_revision) if store else None
                 if tracker is not None:
                     tracker.record_stt(request.elapsed_s)
-            self.queue_out.put(output)
+            self.queue_out.put(self.output_for_queue(output, request.source))
             return True
 
     def _request_is_current(self, request: _TranscriptionRequest) -> bool:

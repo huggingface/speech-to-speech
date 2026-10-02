@@ -18,6 +18,7 @@ from speech_to_speech.pipeline.messages import (
     AssistantToolCallPart,
     _normalize_assistant_output_fields,
 )
+from speech_to_speech.pipeline.speaker_metadata import SpeakerAttribution
 
 
 class PipelineEvent(BaseModel):
@@ -69,6 +70,7 @@ class PartialTranscriptionEvent(PipelineEvent):
 class TranscriptionCompletedEvent(PipelineEvent):
     type: Literal["transcription_completed"] = "transcription_completed"
     transcript: str
+    speaker_attribution: SpeakerAttribution | None = None
     language_code: Optional[str] = None
     turn_id: str | None = None
     turn_revision: int | None = None
