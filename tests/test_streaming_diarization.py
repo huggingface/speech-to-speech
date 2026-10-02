@@ -82,6 +82,41 @@ def test_from_pretrained_rejects_incompatible_checkpoint(monkeypatch):
     assert calls[0]["output_loading_info"] is True
 
 
+@pytest.mark.parametrize("available,expected", [((), "cpu"), (("mps",), "mps"), (("cuda", "mps"), "cuda")])
+def test_from_pretrained_defaults_to_available_accelerator(monkeypatch, available, expected):
+    from transformers import AutoModelForAudioFrameClassification, AutoProcessor
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: "cuda" in available)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: "mps" in available)
+    model = Model()
+    moves = []
+
+    def move(device):
+        moves.append(device)
+        model.device = device
+        return model
+
+    monkeypatch.setattr(model, "to", move, raising=False)
+    monkeypatch.setattr(AutoProcessor, "from_pretrained", lambda *args, **kwargs: Processor())
+    monkeypatch.setattr(AutoModelForAudioFrameClassification, "from_pretrained", lambda *args, **kwargs: (model, {}))
+
+    diarizer = StreamingDiarizer.from_pretrained("example/model")
+
+    assert diarizer.model is model
+    assert moves == [expected]
+
+
+def test_from_pretrained_rejects_unsupported_device_before_downloading(monkeypatch):
+    from transformers import AutoProcessor
+
+    def download(*args, **kwargs):
+        pytest.fail("Invalid device must be rejected before loading the checkpoint")
+
+    monkeypatch.setattr(AutoProcessor, "from_pretrained", download)
+    with pytest.raises(ValueError, match="Nemotron diarization supports device"):
+        StreamingDiarizer.from_pretrained("example/model", device="tpu")
+
+
 @pytest.mark.parametrize("block_size", [1, 3, 13, 18, 10000])
 def test_arbitrary_boundaries_preserve_cache_overlap_and_timestamps(block_size):
     diarizer = make_diarizer()

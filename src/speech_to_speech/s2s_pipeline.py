@@ -54,6 +54,7 @@ from speech_to_speech.pipeline.transcript_logging import (
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.utils.thread_manager import ThreadManager
+from speech_to_speech.utils.utils import resolve_device
 from speech_to_speech.VAD.vad_handler import VADHandler
 
 # Ensure that the necessary NLTK resources are available
@@ -401,12 +402,23 @@ def _build_handlers(
     side_handlers: list[Any] = []
     if module_kwargs.diarization_model_name:
         from speech_to_speech.diarization import StreamingDiarizer
+        from speech_to_speech.diarization.streaming import DIARIZATION_DEVICES
         from speech_to_speech.diarization.worker import DiarizationWorker
 
+        diarization_device = resolve_device(
+            module_kwargs.device or module_kwargs.diarization_device,
+            DIARIZATION_DEVICES,
+            "Nemotron diarization",
+        )
+        if diarization_device == "cpu":
+            logger.warning(
+                "Diarization is using CPU; sustained speech can outpace inference and disable speaker labels "
+                "until reconnect. CUDA or MPS is recommended for live sessions."
+            )
         diarizer = StreamingDiarizer.from_pretrained(
             module_kwargs.diarization_model_name,
             revision=module_kwargs.diarization_revision,
-            device=module_kwargs.device or module_kwargs.diarization_device,
+            device=diarization_device,
             dtype=module_kwargs.diarization_dtype,
             streaming_mode=module_kwargs.diarization_streaming_mode,
             threshold=module_kwargs.diarization_threshold,
@@ -416,7 +428,7 @@ def _build_handlers(
         diarizer.warmup()
         logger.info(
             "Diarization ready: device=%s mode=%s; speaker labels will accompany completed transcriptions",
-            module_kwargs.device or module_kwargs.diarization_device,
+            diarization_device,
             module_kwargs.diarization_streaming_mode,
         )
         vad.diarization_worker = DiarizationWorker(diarizer, stop_event)

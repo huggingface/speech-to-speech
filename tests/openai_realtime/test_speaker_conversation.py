@@ -200,7 +200,20 @@ def test_disabled_diarization_preserves_plain_transcript(service, conn_id, runti
     assert result.speaker_attribution is None
 
 
-def test_builder_loads_and_warms_separate_models_per_pipeline(monkeypatch):
+@pytest.mark.parametrize(
+    "device_flags,available,expected",
+    [
+        (["--diarization_device", "mps"], (), "mps"),
+        ([], ("cuda", "mps"), "cuda"),
+        ([], ("mps",), "mps"),
+        ([], (), "cpu"),
+        (["--diarization_device", "cpu"], ("cuda",), "cpu"),
+        (["--device", "cuda:1", "--diarization_device", "cpu"], (), "cuda:1"),
+        (["--device", "cpu", "--diarization_device", "cuda"], ("cuda",), "cpu"),
+        (["--device", "auto", "--diarization_device", "cpu"], ("cuda",), "cuda"),
+    ],
+)
+def test_builder_loads_and_warms_separate_models_per_pipeline(monkeypatch, caplog, device_flags, available, expected):
     from types import SimpleNamespace
 
     from speech_to_speech import s2s_pipeline
@@ -217,6 +230,8 @@ def test_builder_loads_and_warms_separate_models_per_pipeline(monkeypatch):
         return model
 
     monkeypatch.setattr(StreamingDiarizer, "from_pretrained", load)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: "cuda" in available)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: "mps" in available)
     monkeypatch.setattr(s2s_pipeline, "VADHandler", lambda *args, **kwargs: SimpleNamespace())
     monkeypatch.setattr(s2s_pipeline, "create_backend_handler", lambda *args: SimpleNamespace())
     args = s2s_pipeline.parse_arguments(
@@ -225,8 +240,7 @@ def test_builder_loads_and_warms_separate_models_per_pipeline(monkeypatch):
             "fixture",
             "--diarization_revision",
             "preview",
-            "--diarization_device",
-            "mps",
+            *device_flags,
             "--tts",
             "pocket",
         ]
@@ -245,9 +259,10 @@ def test_builder_loads_and_warms_separate_models_per_pipeline(monkeypatch):
     ]
     assert len(constructed) == len(warmed) == 2
     assert units[0].handlers[0].diarization_worker is not units[1].handlers[0].diarization_worker
-    assert constructed[0][2]["device"] == "mps"
+    assert all(model[2]["device"] == expected for model in constructed)
     assert constructed[0][2]["revision"] == "preview"
     assert constructed[0][2]["streaming_mode"] == "low_latency"
+    assert ("Diarization is using CPU" in caplog.text) == (expected == "cpu")
 
 
 def test_diarization_requires_stt_and_valid_threshold():

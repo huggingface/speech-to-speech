@@ -1,22 +1,18 @@
 """Real Transformers API smoke tests; no checkpoint downloads or GPU required.
 
-Run with the supporting Transformers branch/release installed. The regular
-application environment may predate that API, in which case this module skips.
+The application requires Transformers 5.18.0 or newer, which includes the model.
 """
 
 import numpy as np
 import pytest
-
-pytest.importorskip("transformers.models.nemotron3_diarization")
-
-from transformers import (  # noqa: E402
+from transformers import (
     Nemotron3DiarizationConfig,
     Nemotron3DiarizationForAudioFrameClassification,
     Nemotron3DiarizationProcessor,
     NemotronAsrStreamingFeatureExtractor,
 )
 
-from speech_to_speech.diarization import StreamingDiarizer  # noqa: E402
+from speech_to_speech.diarization import StreamingDiarizer
 
 
 def make_real_diarizer(mode):

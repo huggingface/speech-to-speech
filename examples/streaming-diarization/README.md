@@ -8,23 +8,28 @@ or establish a speaker's real-world identity.
 
 ## Setup
 
-The model implementation was merged in
-[Transformers PR #49056](https://github.com/huggingface/transformers/pull/49056).
-Until a compatible Transformers package release is available, install the
-tested merge commit in an environment for the full application:
+Transformers 5.18.0 includes the model implementation from
+[PR #49056](https://github.com/huggingface/transformers/pull/49056).
+The application requires that release or newer and pins 5.18.0 on macOS.
+Install normally; no source checkout or dependency override is needed:
 
 ```bash
 uv venv .venv-diarized-pipeline
-uv pip install --python .venv-diarized-pipeline/bin/python \
-  --overrides examples/streaming-diarization/transformers-pr-overrides.txt -e .
+uv pip install --python .venv-diarized-pipeline/bin/python -e .
 
 .venv-diarized-pipeline/bin/speech-to-speech local --mac-optimal-settings --diarization
 ```
 
 `--diarization` selects the official model's main branch and
-`low_latency` streaming mode. The Mac preset selects MPS; without a device
-setting, diarization defaults to CPU. On NVIDIA hardware, use
-`--diarization_device cuda`. The model loads once **per pipeline**, so
+`low_latency` streaming mode. Diarization defaults to `auto`, selecting CUDA,
+then MPS, then CPU according to availability. The Mac preset selects MPS.
+`--device` overrides the diarization device along with other components;
+`--diarization_device` can select a device for diarization alone.
+CUDA or MPS is recommended for live sessions. CPU may keep up initially but
+fall behind as the retained speaker cache grows during sustained speech,
+overflowing the worker queue. Explicit `--diarization_device cpu` remains
+available, and startup logs warn whenever CPU is selected.
+The model loads once **per pipeline**, so
 increasing the pipeline count also increases model memory usage. An STT backend
 is required. Omit both `--diarization` and `--diarization_model_name` to
 disable speaker attribution.
@@ -75,7 +80,7 @@ pytest tests/test_streaming_diarization.py tests/test_diarization_transformers.p
   tests/test_diarization_worker.py tests/openai_realtime/test_speaker_conversation.py -q
 ```
 
-These tests cover streaming boundaries, cache retention, VAD integration,
-speaker metadata delivery, and failure handling. The Transformers-specific
-tests require the model implementation and use small, randomly initialized
-weights; the other tests do not download a checkpoint.
+These tests cover streaming boundaries, cache retention, device selection,
+VAD integration, speaker metadata delivery, and failure handling. The
+Transformers-specific tests run against the released model implementation
+using small, randomly initialized weights. No checkpoint is downloaded.

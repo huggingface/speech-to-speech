@@ -172,6 +172,12 @@ def test_diarization_shortcut_preserves_custom_model():
     assert args.module_kwargs.diarization_revision is None
 
 
+def test_diarization_defaults_to_automatic_device_selection():
+    args = parse_arguments(["--diarization"])
+
+    assert args.module_kwargs.diarization_device == "auto"
+
+
 def test_diarization_shortcut_preserves_explicit_settings():
     args = parse_arguments(
         [

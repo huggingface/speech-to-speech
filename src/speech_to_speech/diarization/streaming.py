@@ -7,6 +7,10 @@ from typing import Any
 import numpy as np
 import torch
 
+from speech_to_speech.utils.utils import resolve_device
+
+DIARIZATION_DEVICES = ("cuda", "mps", "cpu")
+
 
 @dataclass(frozen=True)
 class SpeakerSegment:
@@ -55,7 +59,7 @@ class StreamingDiarizer:
         model_id: str,
         *,
         revision: str | None = None,
-        device: str = "cpu",
+        device: str = "auto",
         dtype: str = "float32",
         streaming_mode: str = "low_latency",
         threshold: float = 0.5,
@@ -64,6 +68,7 @@ class StreamingDiarizer:
 
         if dtype not in {"float32", "float16", "bfloat16"}:
             raise ValueError("dtype must be float32, float16, or bfloat16")
+        device = resolve_device(device, DIARIZATION_DEVICES, "Nemotron diarization")
         processor = AutoProcessor.from_pretrained(model_id, revision=revision)
         model, loading_info = AutoModelForAudioFrameClassification.from_pretrained(
             model_id, revision=revision, dtype=getattr(torch, dtype), output_loading_info=True

@@ -22,7 +22,13 @@ class ModuleArguments:
         },
     )
     diarization_revision: Optional[str] = field(default=None, metadata={"help": "Diarization checkpoint revision."})
-    diarization_device: str = field(default="cpu", metadata={"help": "Diarization device: cpu, mps, or cuda."})
+    diarization_device: str = field(
+        default="auto",
+        metadata={
+            "help": "Diarization device: auto, cuda, mps, or cpu. Auto selects CUDA, then MPS, then CPU. "
+            "The global --device overrides this setting. CUDA or MPS is recommended for live sessions."
+        },
+    )
     diarization_dtype: str = field(default="float32", metadata={"choices": ("float32", "float16", "bfloat16")})
     diarization_streaming_mode: str = field(
         default="low_latency",
