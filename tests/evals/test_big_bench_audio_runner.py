@@ -27,6 +27,7 @@ from speech_to_speech.pipeline.events import (
     SpeechStoppedEvent,
     TranscriptionCompletedEvent,
 )
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 ITEM = EvalItem(id=7, category="web_of_lies", official_answer="Yes", file_name="data/question_7.mp3")
 
@@ -213,41 +214,89 @@ async def test_speech_items_detect_a_split_before_the_next_response(monkeypatch,
 
 
 @pytest.mark.parametrize("after_response", [False, True])
-async def test_final_transcription_then_reopen_uses_new_item_identity(monkeypatch, after_response):
-    service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event())
+async def test_final_transcription_reopen_is_one_item_until_response(monkeypatch, after_response):
+    tracker = SpeculativeTurnTracker()
+    service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event(), speculative_turns=tracker)
     sid = service.register()
     try:
-        events = []
-        for event in (
-            SpeechStartedEvent(turn_id="first", turn_revision=0),
-            SpeechStoppedEvent(turn_id="first", turn_revision=0),
-            TranscriptionCompletedEvent(transcript="First premise.", turn_id="first", turn_revision=0),
-            SpeechStartedEvent(turn_id="first", turn_revision=1, reopened=True),
-        ):
-            events += service.dispatch_pipeline_event(sid, event)
-        events += service.dispatch_pipeline_event(sid, AssistantOutputEvent(text="Final answer: Yes"))
+        turn_id, revision = tracker.start_turn()
+        events = service.dispatch_pipeline_event(sid, SpeechStartedEvent(turn_id=turn_id, turn_revision=revision))
+        events += service.dispatch_pipeline_event(sid, SpeechStoppedEvent(turn_id=turn_id, turn_revision=revision))
+        assert (
+            service.dispatch_pipeline_event(
+                sid, TranscriptionCompletedEvent(transcript="First premise.", turn_id=turn_id, turn_revision=revision)
+            )
+            == []
+        )
+
+        candidate = tracker.begin_reopen_candidate(turn_id, revision)
+        assert candidate == revision + 1
+        assert tracker.confirm_reopen_candidate(turn_id, revision, candidate)
+        # Reopening a finalized STT hypothesis keeps the externally open input
+        # item; it does not emit another speech onset or publish the old text.
+        assert (
+            service.dispatch_pipeline_event(
+                sid, SpeechStartedEvent(turn_id=turn_id, turn_revision=candidate, reopened=True)
+            )
+            == []
+        )
+        events += service.dispatch_pipeline_event(sid, SpeechStoppedEvent(turn_id=turn_id, turn_revision=candidate))
+        assert (
+            service.dispatch_pipeline_event(
+                sid, TranscriptionCompletedEvent(transcript="Full question.", turn_id=turn_id, turn_revision=candidate)
+            )
+            == []
+        )
+        events += service.dispatch_pipeline_event(
+            sid, AssistantOutputEvent(text="Final answer: Yes", turn_id=turn_id, turn_revision=candidate)
+        )
         events += service.encode_audio_chunk(sid, b"\x01\x00" * 320)
         events += service.finish_response(sid)
-        # Repeating the current input identity must not be mistaken for a split
-        # just because a speculative revision used another ID earlier.
-        events += service.dispatch_pipeline_event(
-            sid,
-            SpeechStartedEvent(
-                turn_id="second" if after_response else "first", turn_revision=2, reopened=not after_response
-            ),
-        )
+        # Public output commits the question, so subsequent speech is a new turn.
+        assert tracker.begin_reopen_candidate(turn_id, candidate) is None
+        if after_response:
+            next_turn, next_revision = tracker.start_turn()
+            events += service.dispatch_pipeline_event(
+                sid, SpeechStartedEvent(turn_id=next_turn, turn_revision=next_revision)
+            )
+
         wire = [event.model_dump(exclude_none=True) for event in events]
         ids = [event["item_id"] for event in wire if event["type"] == "input_audio_buffer.speech_started"]
-        assert ids[0] != ids[1]
-        assert (ids[1] != ids[2]) == after_response
+        assert len(ids) == (2 if after_response else 1)
+        assert len(set(ids)) == len(ids)
+        assert [
+            event["transcript"]
+            for event in wire
+            if event["type"] == "conversation.item.input_audio_transcription.completed"
+        ] == ["Full question."]
         socket = install(monkeypatch, FakeSocket(wire, respond_after=4))
         result = await run_item(config(), ITEM, pcm_for(config()))
+        assert result.input_transcript == "Full question."
         assert result.reply == "Final answer: Yes"
-        assert bool(result.error) == after_response
+        assert result.error == ("split_turn (2 input items)" if after_response else None)
         assert aggregate([result])["totals"]["correct"] == int(not after_response)
         assert socket.closed
     finally:
         service.unregister(sid)
+
+
+@pytest.mark.parametrize("after_response", [False, True])
+async def test_legacy_input_id_changes_before_response_do_not_flag_a_split(monkeypatch, after_response):
+    # Older engines released the input ID after final STT, so a speculative
+    # reopen could announce a replacement before any public response existed.
+    events = [
+        {"type": "input_audio_buffer.speech_started", "item_id": "original"},
+        {"type": "conversation.item.input_audio_transcription.completed", "transcript": "First premise."},
+        {"type": "input_audio_buffer.speech_started", "item_id": "replacement"},
+        *transcript_events("Final answer: Yes"),
+        {"type": "input_audio_buffer.speech_started", "item_id": "next" if after_response else "replacement"},
+    ]
+    socket = install(monkeypatch, FakeSocket(events, respond_after=4))
+    result = await run_item(config(), ITEM, pcm_for(config()))
+    assert result.reply == "Final answer: Yes"
+    assert result.error == ("split_turn (2 input items)" if after_response else None)
+    assert aggregate([result])["totals"]["correct"] == int(not after_response)
+    assert socket.closed
 
 
 @pytest.mark.parametrize("recovers", [False, True])

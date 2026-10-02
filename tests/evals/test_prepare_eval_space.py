@@ -7,7 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import huggingface_hub.hf_api
-from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi
+import pytest
+from huggingface_hub import CommitInfo, CommitOperationAdd, CommitOperationDelete, HfApi
 
 
 def test_space_update_removes_source_deleted_in_the_next_revision(monkeypatch, tmp_path):
@@ -38,7 +39,12 @@ def test_space_update_removes_source_deleted_in_the_next_revision(monkeypatch, t
                 remote.add(op.path_in_repo)
             elif isinstance(op, CommitOperationDelete):
                 remote.discard(op.path_in_repo)
-        return SimpleNamespace()
+        return CommitInfo(
+            commit_url="https://huggingface.co/spaces/review-user/s2s-big-bench-audio-dev/commit/" + "1" * 40,
+            commit_message=kwargs["commit_message"],
+            commit_description="",
+            oid="1" * 40,
+        )
 
     monkeypatch.setattr(module, "ROOT", repo)
     monkeypatch.setattr(module, "HfApi", lambda: api)
@@ -47,6 +53,14 @@ def test_space_update_removes_source_deleted_in_the_next_revision(monkeypatch, t
     monkeypatch.setattr(api, "repo_info", lambda *args, **kwargs: SimpleNamespace(private=True))
     monkeypatch.setattr(api, "list_repo_files", lambda *args, **kwargs: list(remote))
     monkeypatch.setattr(api, "create_commit", commit)
+    # upload_folder validates README metadata through HTTP before building adds.
+    # Stub that boundary while retaining the real add/delete operation builder.
+    monkeypatch.setattr(api, "_validate_yaml", lambda *args, **kwargs: None)
+
+    def unexpected_request():
+        pytest.fail("Space synchronization test attempted to contact the Hub")
+
+    monkeypatch.setattr(huggingface_hub.hf_api, "get_session", unexpected_request)
     monkeypatch.setattr(huggingface_hub.hf_api, "is_xet_available", lambda: False, raising=False)
     monkeypatch.setattr(sys, "argv", [str(source_script)])
     module.main()  # Uses the actual HfApi.upload_folder operation builder; no network.
