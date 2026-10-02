@@ -116,8 +116,11 @@ class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
             )
 
     def _voice_clone_prompt_for(self, language: str | None) -> Any:
-        if language:
+        if language and self.language_voice_clone_prompts:
+            from omnivoice.utils.lang_map import LANG_NAME_TO_ID
+
             code = language.lower()
+            code = LANG_NAME_TO_ID.get(code, code)
             for key in (code, code.split("-")[0]):
                 if key in self.language_voice_clone_prompts:
                     return self.language_voice_clone_prompts[key]
