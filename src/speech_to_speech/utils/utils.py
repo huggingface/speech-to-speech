@@ -5,7 +5,6 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
-import torch
 
 if TYPE_CHECKING:
     from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
@@ -47,6 +46,8 @@ def is_npu_available() -> bool:
     ``torch.npu`` only exists once ``torch_npu`` has been imported, so the import
     is attempted lazily here and stays invisible to CUDA/MPS/CPU-only installs.
     """
+    import torch
+
     if not hasattr(torch, "npu"):
         try:
             import torch_npu  # noqa: F401
@@ -61,6 +62,11 @@ TORCH_DEVICES = ("cuda", "npu", "xpu", "mps", "cpu")
 
 
 def _is_device_available(device_type: str) -> bool:
+    # torch is imported here rather than at module level: this module is also
+    # used by lightweight paths (CLI, Realtime API, LLM helpers) that never
+    # touch a device, and importing torch costs seconds.
+    import torch
+
     if device_type == "cuda":
         return torch.cuda.is_available()
     if device_type == "npu":
