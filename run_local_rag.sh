@@ -18,6 +18,8 @@ exec .venv/bin/speech-to-speech local \
   --responses_api_api_key dummy \
   --model_name ajou-vis \
   --qwen3_tts_speaker Sohee \
+  --qwen3_tts_coalesce_inputs False \
+  --stream_batch_sentences 1 \
   --local_audio_block_mic_during_playback \
   --port 8766 \
   "$@" 2>&1 | tee -a run_local.log

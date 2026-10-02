@@ -128,6 +128,14 @@ class Qwen3TTSHandlerArguments:
             "help": "Upper cap for Qwen3-TTS codec tokens. The handler estimates a per-utterance budget from the text and clamps it to this ceiling (~12 tokens per second of audio). Raise this above 1536 if you want to allow longer utterances."
         },
     )
+    qwen3_tts_coalesce_inputs: bool = field(
+        default=True,
+        metadata={
+            "help": "Combine already-queued text chunks of the same response into one synthesis call. "
+            "Set False to synthesize sentence by sentence: each generation stays short (less risk of "
+            "runaway or stalled long generations) and the first audio of later sentences starts sooner."
+        },
+    )
     qwen3_tts_blocksize: int = field(
         default=512,
         metadata={"help": "Audio chunk size in samples for streaming output. Default is 512."},

@@ -130,6 +130,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         mlx_quantization: Optional[str] = None,
         streaming_chunk_size: int | None = None,
         max_new_tokens: int = DEFAULT_QWEN3_TTS_MAX_NEW_TOKENS,
+        coalesce_inputs: bool = True,
         blocksize: int = 512,
         gen_kwargs: dict[str, Any] | None = None,
         cancel_scope: CancelScope | None = None,
@@ -156,6 +157,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.ref_cache_dir = self._normalize_optional_path(ref_cache_dir)
         self.mlx_quantization = self._normalize_mlx_quantization(mlx_quantization)
         self.max_new_tokens = max_new_tokens
+        self.coalesce_inputs = coalesce_inputs
         self.blocksize = blocksize
         self.dtype: torch.dtype | None | str = None
         self.gen_kwargs = gen_kwargs or {}
@@ -761,6 +763,9 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
 
     def _coalesce_pending_tts_input(self, current_input: TTSInput) -> tuple[str, Optional[str]]:
         """Combine already-queued text chunks before the next TTS synthesis call."""
+        if not getattr(self, "coalesce_inputs", True):
+            # 문장 단위 합성: 대기 중인 다음 문장은 큐에 남겨두고 이번 문장만 합성
+            return current_input.text, current_input.language_code
         if not hasattr(self.queue_in, "mutex") or not hasattr(self.queue_in, "queue"):
             return current_input.text, current_input.language_code
 
