@@ -93,6 +93,10 @@ class FireRedVadIterator:
             postprocessor.min_silence_frame = min_silence_frame
 
     def reset_states(self) -> None:
+        self._input_samples = 0
+        self._frame_end_samples: list[int] = []
+        self._last_speech_frame_end_sample: int | None = None
+        self.last_speech_end_sample: int | None = None
         self._tail = np.zeros(0, dtype=np.float32)
         self.triggered = False
         self.buffer = []
@@ -146,11 +150,17 @@ class FireRedVadIterator:
         samples = x.detach().cpu().contiguous().view(-1).numpy().astype(np.float32, copy=False)
         # FireRed fbank trains on int16 PCM. Incoming audio is Silero-scale [-1, 1].
         audio = np.concatenate((self._tail, samples * 32768.0))
+        self._input_samples += len(samples)
+        self._frame_end_samples = []
         if len(audio) < _FIRERED_WINDOW_SAMPLES:
             self._tail = audio
             return []
         # detect_chunk restarts fbank, so feed complete 400-sample windows at a 160-sample hop.
         n_frames = (len(audio) - _FIRERED_WINDOW_SAMPLES) // _FIRERED_HOP_SAMPLES + 1
+        frame_base = self._input_samples - len(audio)
+        self._frame_end_samples = [
+            frame_base + _FIRERED_WINDOW_SAMPLES + index * _FIRERED_HOP_SAMPLES for index in range(n_frames)
+        ]
         chunk_end = _FIRERED_WINDOW_SAMPLES + (n_frames - 1) * _FIRERED_HOP_SAMPLES
         results = self.streamer.detect_chunk(audio[:chunk_end])
         self._tail = audio[n_frames * _FIRERED_HOP_SAMPLES :]
@@ -194,6 +204,7 @@ class FireRedVadIterator:
                     self._candidate_speech_samples = 0
             if frame.is_speech_start and not self.triggered:
                 self.triggered = True
+                self._last_speech_frame_end_sample = self._frame_end_samples[frame_index]
                 # Locate the first candidate hop relative to this input chunk. The
                 # remaining hops and analysis tail have already consumed audio too.
                 candidate_prefix_samples = (
@@ -212,7 +223,9 @@ class FireRedVadIterator:
                 self._candidate_speech_samples = 0
             elif self.triggered and self._frame_is_speech(frame):
                 self.active_speech_samples += _FIRERED_HOP_SAMPLES
+                self._last_speech_frame_end_sample = self._frame_end_samples[frame_index]
             if frame.is_speech_end and self.triggered:
+                self.last_speech_end_sample = self._last_speech_frame_end_sample
                 if not chunk_in_buffer:
                     self.buffer.append(x)
                 ended_utterance = self._end_utterance()

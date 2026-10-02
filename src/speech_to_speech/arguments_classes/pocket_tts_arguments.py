@@ -6,7 +6,7 @@ class PocketTTSHandlerArguments:
     pocket_tts_device: str = field(
         default="cpu",
         metadata={
-            "help": "The device type on which the Pocket TTS model will run. Options: 'cpu', 'cuda', 'mps'. Default is 'cpu'."
+            "help": "The device type on which the Pocket TTS model will run. Options: 'auto' (first available of CUDA, NPU, XPU, MPS, CPU), 'cuda', 'npu', 'xpu', 'mps', or 'cpu'. Default is 'cpu'."
         },
     )
     pocket_tts_voice: str = field(

@@ -11,7 +11,7 @@ class OmniVoiceTTSHandlerArguments:
     omnivoice_device: str = field(
         default="auto",
         metadata={
-            "help": "Device passed to OmniVoice: 'auto', 'cuda', 'cuda:0', 'mps', 'xpu', or 'cpu'. Default is 'auto'."
+            "help": "Device passed to OmniVoice: 'auto', 'cuda', 'cuda:0', 'npu', 'xpu', 'mps', or 'cpu'. Default is 'auto'."
         },
     )
     omnivoice_dtype: Literal["float16", "bfloat16", "float32"] = field(

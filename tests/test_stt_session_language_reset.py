@@ -86,10 +86,9 @@ def _handler(cls, extra, *, start_language, last_language):
 
 
 # Expected `last_language` after a session ends, per configured `start_language`.
-# Parakeet's existing "auto" fallback is explicitly outside issue #555's scope.
 _EXPECTED_AFTER_RESET = {
     # handler class: {start_language: expected last_language}
-    "ParakeetTDTSTTHandler": {None: "en", "auto": "auto", "de": "de"},
+    "ParakeetTDTSTTHandler": {None: None, "auto": None, "de": None},
     "_default": {None: None, "auto": None, "de": "de"},
 }
 

@@ -9,6 +9,7 @@ import numpy as np
 
 from speech_to_speech.pipeline.messages import PIPELINE_END, PartialTranscription, Transcription, VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 
 
@@ -177,6 +178,18 @@ def test_stt_handler_uses_per_endpoint_processing_delay():
     assert queue_out.get_nowait() == PIPELINE_END
 
 
+def test_stale_final_input_discards_pending_vad_measurement():
+    revisions = SpeculativeTurnTracker()
+    revisions.observe("turn_1", 1)
+    handler = _handler(revisions, Queue(), Queue())
+    store = TurnLatencyStore()
+    handler.turn_latency_store = store
+    store.get_or_create_for_turn("turn_1", 0).vad_decision_s = 0.3
+
+    assert not handler.should_process_input(_vad_audio(revision=0, mode="final"))
+    assert store._pending_turn == {}
+
+
 def test_stt_handler_drops_output_that_became_stale_during_processing():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
@@ -234,6 +247,7 @@ def test_stt_handler_bulk_drops_queued_progressives_after_final_emit():
     for _ in range(3):
         queue_in.put(_vad_audio(revision=0, mode="progressive"))
     queue_in.put(_vad_audio(turn_id="turn_2", revision=0, mode="progressive"))
+    tracker.start_turn()
 
     assert not handler.should_process_input(_vad_audio(revision=0, mode="progressive"))
     remaining = queue_in.get_nowait()
@@ -277,14 +291,11 @@ def test_stt_handler_bulk_drops_progressives_queued_before_matching_final():
     queue_in.put(_vad_audio(revision=0, mode="progressive"))
     queue_in.put(_vad_audio(revision=0, mode="final"))
     queue_in.put(_vad_audio(turn_id="turn_2", revision=0, mode="progressive"))
+    tracker.start_turn()
 
-    assert handler._drop_stale_queued_inputs() == 1
-    first = queue_in.get_nowait()
-    second = queue_in.get_nowait()
+    assert handler._drop_stale_queued_inputs() == 2
+    remaining = queue_in.get_nowait()
 
-    assert isinstance(first, VADAudio)
-    assert first.mode == "final"
-    assert first.turn_id == "turn_1"
-    assert isinstance(second, VADAudio)
-    assert second.turn_id == "turn_2"
+    assert isinstance(remaining, VADAudio)
+    assert remaining.turn_id == "turn_2"
     assert queue_in.empty()
