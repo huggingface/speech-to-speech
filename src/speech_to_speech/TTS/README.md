@@ -90,27 +90,37 @@ speech-to-speech serve \
 ```
 
 Behavior:
-- Uses `faster-qwen3-tts` on non-macOS platforms, defaulting to the GGML backend. Pass `--qwen3_tts_backend torch` to use the CUDA-graphs backend instead.
+- Uses `faster-qwen3-tts` on all platforms, defaulting to the GGML backend (Metal on Apple Silicon). Pass `--qwen3_tts_backend torch` to use the CUDA-graphs backend instead.
 - Supports GGML quantization selection via `--qwen3_tts_ggml_quantization BF16|Q8_0|Q4_K_M|F32`.
 - Accepts a local talker/codec GGUF pair via `--qwen3_tts_gguf_talker_path` and `--qwen3_tts_gguf_codec_path`.
 - Automatically caches `.spk` and `.rvq` voice references when GGML voice cloning uses raw reference audio. Set `--qwen3_tts_ref_cache_dir` to override the default `~/.cache/faster-qwen3-tts/qwentts_refs` location.
 - Reuses precomputed GGML references via `--qwen3_tts_ref_spk` and the optional `--qwen3_tts_ref_rvq`.
-- Uses `mlx-audio` on Apple Silicon and auto-maps `Qwen/...` model IDs to `mlx-community/...`, defaulting to the `6bit` MLX variant unless the model name already pins a suffix.
-- Supports MLX quantization overrides on Apple Silicon via `--qwen3_tts_mlx_quantization bf16|4bit|6bit|8bit`.
 - Keeps the existing voice-clone/custom-voice/voice-design handler flow intact.
 - Defaults to the CustomVoice model with speaker `Aiden`, so no reference audio is required. Voice-clone/base models can still use `--qwen3_tts_ref_audio`.
+
+#### Migrating macOS Qwen3 configurations
+
+Native Apple Silicon Python on macOS 14+ installs the Metal runtime with the normal package dependencies. Intel Macs and older macOS versions are not covered by the upstream Metal wheel. Both normal defaults and `--mac-optimal-settings` use `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`, speaker `Aiden`, and Q8_0 GGUF weights. Q8_0 keeps the Mac setup quantized after the previous 6-bit MLX default; choose `Q4_K_M` for a smaller model. Other platforms retain BF16 by default. Explicit quantization overrides are honored. No local GGUF paths are required: the upstream resolver downloads talker and codec weights from `Serveurperso/Qwen3-TTS-GGUF` on first use.
+
+- Remove `--qwen3_tts_backend mlx` (or replace it with `ggml`).
+- Remove `--qwen3_tts_mlx_quantization`; use `--qwen3_tts_ggml_quantization` instead. MLX quantization labels do not map directly to GGUF quantizations.
+- Replace `mlx-community/Qwen3-TTS-…-6bit` (or another MLX suffix) with the corresponding `Qwen/Qwen3-TTS-…` model ID. Old MLX options/model IDs fail with migration guidance rather than silently changing their meaning. Apply the same changes to JSON configuration keys.
+- The default streaming chunk is now 8 codec steps on Mac, matching other GGML installations; an explicit chunk size remains honored. GGML uses its native text-prefill layout; `non_streaming_mode=False` is not supported and upstream warns when it is requested.
+- `mlx-audio` remains installed for Parakeet STT and Kokoro TTS. MLX LM settings are unchanged.
+
+See the [upstream GGML/Metal requirements](https://github.com/andimarafioti/faster-qwen3-tts/blob/main/docs/ggml-backend.md).
 
 Install notes for Linux GGML:
 - The default PyPI `qwentts-cpp-python` wheel targets CUDA 12.8 and `manylinux_2_39` (for example, Ubuntu 24.04).
 - If that wheel does not match your CUDA runtime or glibc, install one of the Hugging Face wheelhouse builds before installing `speech-to-speech`.
 
 ```bash
-pip install "qwentts-cpp-python==0.3.1+cu130" \
+pip install "qwentts-cpp-python==0.4.2+cu130" \
   -f https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/tree/main/whl/cu130
 pip install speech-to-speech
 ```
 
-Available wheelhouse directories include `cu124`, `cu128`, `cu130`, and `cpu`.
+A compatible native wheel must be version 0.4.2 or newer; if unavailable for your platform, follow the upstream source-build instructions. Available wheelhouse directories include `cu124`, `cu128`, `cu130`, and `cpu`.
 
 Select a quantized GGUF from the public model resolver:
 
@@ -161,7 +171,7 @@ speech-to-speech serve \
 
 Raw `--qwen3_tts_ref_audio` and cached `--qwen3_tts_ref_spk`/`--qwen3_tts_ref_rvq` inputs are mutually exclusive. `.rvq` input requires both `.spk` and reference text.
 
-Example for Apple Silicon using the default 6-bit MLX variant:
+Example for Apple Silicon using the default Q8_0 GGML weights:
 
 ```bash
 speech-to-speech serve \
@@ -170,26 +180,26 @@ speech-to-speech serve \
   --qwen3_tts_speaker Aiden
 ```
 
-You can override the default and select `bf16`, `4bit`, or `8bit` explicitly:
+You can reduce model memory further with `Q4_K_M`:
 
 ```bash
 speech-to-speech serve \
   --tts qwen3 \
   --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
-  --qwen3_tts_mlx_quantization 4bit \
+  --qwen3_tts_ggml_quantization Q4_K_M \
   --qwen3_tts_speaker Aiden
 ```
 
-To benchmark the Apple Silicon MLX variants side by side:
+To benchmark GGML variants side by side:
 
 ```bash
-.venv/bin/python benchmark_tts.py \
+.venv/bin/python scripts/benchmark_tts.py \
   --handlers qwen3 \
   --iterations 3 \
-  --qwen3_mlx_quantizations bf16 4bit 6bit 8bit
+  --qwen3_ggml_quantizations BF16 Q8_0 Q4_K_M
 ```
 
-This will run separate benchmark entries for `qwen3[bf16]`, `qwen3[4bit]`, `qwen3[6bit]`, and `qwen3[8bit]`.
+This will run separate benchmark entries for `qwen3[BF16]`, `qwen3[Q8_0]`, and `qwen3[Q4_K_M]`.
 
 ### 6) OpenAI-compatible endpoint (`--tts openai`)
 
@@ -245,7 +255,7 @@ For auto voice, omit `--omnivoice_ref_audio`, `--omnivoice_voice_clone_prompt`, 
 
 Supported upstream device values include CUDA (`cuda` or `cuda:0`), Apple Silicon (`mps`), and Intel GPU (`xpu`). Choose `float16`, `bfloat16`, or `float32` with `--omnivoice_dtype` according to device support.
 
-The `speech-to-speech[omnivoice]` dependency set is supported on Linux, Windows, and macOS. On non-macOS platforms, `faster-qwen3-tts>=0.4.0` and OmniVoice share Transformers 5, so the extra can be installed alongside the built-in Qwen3 backend. Linux uses Qwen3's GGML extra by default; install a matching `qwentts-cpp-python` wheel as described above when the default CUDA 12.8 / `manylinux_2_39` wheel does not match the host. Intel XPU requires the matching Intel PyTorch build.
+The `speech-to-speech[omnivoice]` dependency set is supported on Linux, Windows, and macOS. On non-macOS platforms, `faster-qwen3-tts>=0.5.3` and OmniVoice share Transformers 5, so the extra can be installed alongside the built-in Qwen3 backend. Linux uses Qwen3's GGML extra by default; install a matching `qwentts-cpp-python` wheel as described above when the default CUDA 12.8 / `manylinux_2_39` wheel does not match the host. Intel XPU requires the matching Intel PyTorch build.
 
 OmniVoice returns complete 24 kHz float arrays. This handler downsamples them to 16 kHz, clips to `int16`, and then emits fixed-size blocks. It is playback chunking rather than model streaming: upstream `generate()` is blocking, so time to first audio includes synthesis of the entire utterance, and an interruption during generation discards the result after the blocking call returns. Upstream reports real-time factors as low as 0.025 in its accelerated benchmarks, but actual latency depends on the device, dtype, diffusion-step count, and text length.
 

@@ -28,7 +28,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DEFAULT_SAMPLE_RATE = 16000
-VALID_QWEN3_MLX_QUANTIZATIONS = ("bf16", "4bit", "6bit", "8bit")
+VALID_QWEN3_GGML_QUANTIZATIONS = ("BF16", "Q8_0", "Q4_K_M", "F32")
 
 
 class BenchmarkResult:
@@ -219,20 +219,20 @@ def benchmark_handler(
     return result
 
 
-def normalize_qwen3_mlx_quantizations(values: List[str] | None) -> List[str]:
+def normalize_qwen3_ggml_quantizations(values: List[str] | None) -> List[str]:
     if not values:
         return []
 
     normalized = []
     seen = set()
     for value in values:
-        quantization = str(value).strip().lower()
-        if quantization in ("default", "none", ""):
-            quantization = "bf16"
-        if quantization not in VALID_QWEN3_MLX_QUANTIZATIONS:
+        quantization = str(value).strip().upper()
+        if quantization in ("DEFAULT", "NONE", ""):
+            quantization = "BF16"
+        if quantization not in VALID_QWEN3_GGML_QUANTIZATIONS:
             raise ValueError(
-                "Unsupported qwen3 MLX quantization "
-                f"{value!r}. Supported values: {', '.join(VALID_QWEN3_MLX_QUANTIZATIONS)}"
+                "Unsupported qwen3 GGML quantization "
+                f"{value!r}. Supported values: {', '.join(VALID_QWEN3_GGML_QUANTIZATIONS)}"
             )
         if quantization in seen:
             continue
@@ -243,7 +243,7 @@ def normalize_qwen3_mlx_quantizations(values: List[str] | None) -> List[str]:
 
 def build_benchmark_targets(args) -> List[tuple[str, str, Dict[str, Any]]]:
     targets = []
-    qwen3_quantizations = normalize_qwen3_mlx_quantizations(args.qwen3_mlx_quantizations)
+    qwen3_quantizations = normalize_qwen3_ggml_quantizations(args.qwen3_ggml_quantizations)
 
     for handler_name in args.handlers:
         if handler_name == "qwen3" and qwen3_quantizations:
@@ -252,7 +252,7 @@ def build_benchmark_targets(args) -> List[tuple[str, str, Dict[str, Any]]]:
                     (
                         f"qwen3[{quantization}]",
                         "qwen3",
-                        {"mlx_quantization": quantization},
+                        {"ggml_quantization": quantization},
                     )
                 )
             continue
@@ -362,12 +362,12 @@ def main():
         help="Language code to pass to TTS handlers (default: en)",
     )
     parser.add_argument(
-        "--qwen3_mlx_quantizations",
+        "--qwen3_ggml_quantizations",
         nargs="+",
         default=None,
         help=(
-            "Optional list of Apple Silicon MLX Qwen3-TTS quantizations to benchmark "
-            "as separate variants. Supported values: bf16, 4bit, 6bit, 8bit."
+            "Optional list of GGML Qwen3-TTS quantizations to benchmark "
+            "as separate variants. Supported values: BF16, Q8_0, Q4_K_M, F32."
         ),
     )
 

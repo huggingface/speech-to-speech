@@ -39,7 +39,7 @@ uv sync
 ```
 
 The first run downloads the Gemma GGUF, its multimodal projector, and the local
-MLX Qwen3-TTS model.
+GGML Qwen3-TTS model.
 
 ## Terminal 1: serve Gemma with llama.cpp
 
@@ -76,7 +76,7 @@ uv run speech-to-speech serve \
     --responses_api_api_key "" \
     --responses_api_audio_content_type input_audio \
     --responses_api_stream \
-    --qwen3_tts_mlx_quantization 6bit \
+    --qwen3_tts_ggml_quantization Q8_0 \
     --min_silence_ms 300
 ```
 
@@ -150,5 +150,5 @@ uv run speech-to-speech talk \
 - **Turns end too early**: raise `--min_silence_ms` to `500` or `700`. Higher
   values add the same amount of endpointing latency after the user stops.
 - **Memory pressure**: stop other local models. Keep `-np 1`, and use
-  `--qwen3_tts_mlx_quantization 4bit` if the 6-bit TTS model leaves too little
+  `--qwen3_tts_ggml_quantization Q4_K_M` if the Q8_0 TTS model leaves too little
   headroom.
