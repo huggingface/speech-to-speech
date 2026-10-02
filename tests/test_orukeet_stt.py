@@ -197,3 +197,37 @@ def test_orukeet_reports_detected_language_per_final(
     assert english[0].text == "Hello, how are you doing today?"
     assert english[0].language_code == "en"
     assert handler.last_language == "en"
+
+
+def test_orukeet_reports_greek_with_real_language_detection(monkeypatch: pytest.MonkeyPatch) -> None:
+    text = "Καλημέρα σας. Θα ήθελα να μάθω περισσότερα για αυτό το προϊόν."
+
+    class FakeASRModel:
+        @classmethod
+        def restore_from(cls, path: str) -> FakeASRModel:
+            return cls()
+
+        def to(self, device: str) -> FakeASRModel:
+            return self
+
+        def transcribe(self, audio: Any) -> list[str]:
+            return [text]
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(hf_hub_download=lambda *args, **kwargs: "/tmp/orukeet-v0.1.0.nemo"),
+    )
+    _install_fake_nemo(monkeypatch, FakeASRModel)
+
+    # Keep the real detector so missing candidates cannot be hidden by a mock.
+    args = parse_arguments(["--stt", "orukeet", "--orukeet_device", "cpu"])
+    handler = create_backend_handler(args.stt_backend, _context())
+
+    events = list(handler.process(_vad_audio()))
+
+    assert len(events) == 1
+    assert isinstance(events[0], Transcription)
+    assert events[0].text == text
+    assert events[0].language_code == "el"
+    assert handler.last_language == "el"

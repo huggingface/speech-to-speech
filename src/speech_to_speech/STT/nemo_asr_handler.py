@@ -39,6 +39,7 @@ TEXT_DETECTION_LANGUAGES = [
     "hu",
     "ro",
     "bg",
+    "el",
     "hr",
     "sl",
     "sr",
