@@ -26,6 +26,17 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
     start_language: Any = None
     last_language: Any = None
 
+    def output_for_queue(self, output: STTOut, source_input: STTIn) -> STTOut:
+        # The background worker overlaps inference with STT. Resolve only now,
+        # without waiting: a late result is explicitly incomplete, not a reason
+        # to stall the response or attach metadata from a different revision.
+        if isinstance(output, Transcription):
+            attribution = source_input.speaker_attribution
+            if source_input.speaker_pending is not None:
+                attribution = source_input.speaker_pending.resolve()
+            return output.model_copy(update={"speaker_attribution": attribution})
+        return output
+
     def should_process_input(self, item: STTIn) -> bool:
         mode = getattr(item, "mode", None)
         turn_id = getattr(item, "turn_id", None)

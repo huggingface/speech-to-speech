@@ -9,6 +9,10 @@ from rich.console import Console
 
 from speech_to_speech.LLM.utils import WHISPER_LANGUAGE_TO_LLM_LANGUAGE
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
+from speech_to_speech.pipeline.language_detection import (
+    detect_language_from_text,
+    warm_language_detector,
+)
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.utils.utils import resolve_device
@@ -19,6 +23,34 @@ console = Console()
 SAMPLE_RATE = 16000
 
 SUPPORTED_LANGUAGES = ["en"]
+TEXT_DETECTION_LANGUAGES = [
+    "en",
+    "de",
+    "fr",
+    "es",
+    "it",
+    "pt",
+    "nl",
+    "pl",
+    "ru",
+    "uk",
+    "cs",
+    "sk",
+    "hu",
+    "ro",
+    "bg",
+    "el",
+    "hr",
+    "sl",
+    "sr",
+    "da",
+    "no",
+    "sv",
+    "fi",
+    "et",
+    "lv",
+    "lt",
+]
 SUPPORTED_DEVICES = ("cuda", "npu", "cpu")
 _NEMOTRON_LANG_TAG = re.compile(r"\s*<([A-Za-z]{2})(?:-[A-Za-z]{2})?>\s*$")
 
@@ -77,6 +109,7 @@ class NemoASRSTTHandler(BaseSTTHandler):
     """Speech to text with a NeMo ASR checkpoint through ASRModel.transcribe."""
 
     _detects_utterance_language = False
+    _detect_language_from_text = False
 
     def setup(
         self,
@@ -84,21 +117,38 @@ class NemoASRSTTHandler(BaseSTTHandler):
         device: str = "auto",
         language: str = "en",
         gen_kwargs: dict | None = None,
+        checkpoint_filename: str | None = None,
+        checkpoint_revision: str | None = None,
+        detect_language_from_text: bool = False,
     ) -> None:
         logger.info("Loading NeMo ASR STT model: %s", model_name)
         self.device = resolve_device(device, SUPPORTED_DEVICES, "NeMo ASR")
         self.start_language = (language or "").strip() or "en"
         self.model_name = model_name
         self._detects_utterance_language = _is_nemotron_multilingual(model_name)
-        if not self._detects_utterance_language:
+        self._detect_language_from_text = detect_language_from_text
+        if not self._detects_utterance_language and not detect_language_from_text:
             _warn_reported_language(self.start_language)
         self.language = _reported_language_code(self.start_language)
         self.last_language = self.language
         self.gen_kwargs = dict(gen_kwargs or {})
+        if detect_language_from_text:
+            self._language_detector = warm_language_detector(tuple(TEXT_DETECTION_LANGUAGES))
 
         from nemo.collections.asr.models import ASRModel
 
-        self.model = ASRModel.from_pretrained(model_name=model_name)
+        if checkpoint_filename is None:
+            self.model = ASRModel.from_pretrained(model_name=model_name)
+        else:
+            filename = checkpoint_filename.strip()
+            if not filename:
+                raise ValueError(
+                    "checkpoint_filename is empty; pass a .nemo filename or omit the argument to use from_pretrained"
+                )
+            from huggingface_hub import hf_hub_download
+
+            path = hf_hub_download(model_name, filename, revision=checkpoint_revision)
+            self.model = ASRModel.restore_from(path)
         if hasattr(self.model, "to"):
             self.model = self.model.to(self.device)
         self.warmup()
@@ -134,6 +184,13 @@ class NemoASRSTTHandler(BaseSTTHandler):
             if detected is not None:
                 language_code = detected
                 self.last_language = detected
+        elif self._detect_language_from_text and vad_audio.mode != "progressive":
+            detected = detect_language_from_text(text, getattr(self, "_language_detector", None))
+            if detected is not None:
+                language_code = detected
+                self.last_language = detected
+            else:
+                language_code = self.last_language or self.language
         if vad_audio.mode == "progressive":
             yield PartialTranscription(
                 text=text,

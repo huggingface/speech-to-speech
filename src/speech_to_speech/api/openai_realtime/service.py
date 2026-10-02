@@ -711,6 +711,8 @@ class RealtimeService:
 
         cfg = st.runtime_config
         transcript = event.transcript
+        if event.speaker_attribution is not None:
+            transcript = event.speaker_attribution.for_llm(transcript)
         user_item_id = accounting.user_item_id if accounting is not None else None
         if transcript:
             if accounting is not None and user_item_id:

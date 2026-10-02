@@ -455,6 +455,8 @@ class _StaticVADIterator:
         last_utterance_active_speech_samples: int = 0,
     ) -> None:
         self.triggered = triggered
+        self.threshold = 0.5
+        self.min_silence_samples = 0
         self.speech_pad_samples = 0
         self._vad_output = vad_output
         self.buffer = buffer_chunks or []
@@ -500,6 +502,8 @@ def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
     handler.smart_turn_max_wait_ms = 2000
     handler.smart_turn_incomplete_delay_ms = 600
     handler.iterator = iterator
+    handler._configured_threshold = iterator.threshold
+    handler._configured_min_silence_samples = iterator.min_silence_samples
     handler.audio_enhancement = False
     handler.last_process_time = 0.0
     handler._total_samples = 0
