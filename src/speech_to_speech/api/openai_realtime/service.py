@@ -212,6 +212,8 @@ class ConnState(BaseModel):
     current_response_turn_id: Optional[str] = None
     current_response_turn_revision: Optional[int] = None
     response_failed: bool = False
+    response_incomplete: bool = False
+    response_incomplete_reason: Literal["max_output_tokens", "content_filter"] | None = None
     response_error_type: Optional[str] = None
     current_item_id: Optional[str] = None
     content_index: int = 0

@@ -148,6 +148,8 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_response_turn_id = None
         st.current_response_turn_revision = None
         st.response_failed = False
+        st.response_incomplete = False
+        st.response_incomplete_reason = None
         st.response_error_type = None
         st.current_item_id = None
         st.content_index = 0
@@ -952,6 +954,9 @@ class ResponseHandler(RealtimeBaseHandler):
         if st.in_response:
             if status == "completed" and st.response_failed:
                 status = "failed"
+            elif status == "completed" and st.response_incomplete:
+                status = "incomplete"
+                reason = st.response_incomplete_reason
             resp_id, _ = self._ensure_response(conn_id)
             wants_audio = response_wants_audio(st.current_response_params)
             if wants_audio and st.pending_text_outputs:
@@ -1247,6 +1252,9 @@ class ResponseHandler(RealtimeBaseHandler):
         st = self._state(conn_id)
         response_was_missing = st.current_response_id is None
         self._ensure_response(conn_id, event.response_key)
+        if event.status == "incomplete":
+            st.response_incomplete = True
+            st.response_incomplete_reason = event.reason
         events = self.finish_audio_output(conn_id, event.response_key)
         events.extend(
             [
