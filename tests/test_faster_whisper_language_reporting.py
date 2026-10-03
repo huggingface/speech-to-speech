@@ -287,3 +287,16 @@ def test_segment_text_is_joined_and_stripped(handler_module):
     )
 
     assert run(handler)[0].text == "Hello  there."
+
+
+def test_timing_logs_only_final_transcriptions(handler_module):
+    handler = make_handler(handler_module)
+    handler._times = [0.01]
+
+    final = run(handler)
+    audio = vad_audio()
+    audio.mode = "progressive"
+    partial = list(handler.process(audio))
+
+    assert handler.should_log_timing(final[0])
+    assert not handler.should_log_timing(partial[0])
