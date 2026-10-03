@@ -227,7 +227,7 @@ class TestClientEventDispatch:
                     }
                 )
                 time.sleep(0.1)
-                cid = service.connection_ids[0]
+                cid = list(service._conns)[0]
                 assert service._state(cid).runtime_config.session.audio.output.voice == "coral"
 
     def test_session_update_receives_session_updated_confirmation(self, setup):
@@ -306,7 +306,7 @@ class TestClientEventDispatch:
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 st = service._state(conn_id)
                 request = GenerateResponseRequest(runtime_config=st.runtime_config)
                 st.tool_followup_prefetch_request = request
@@ -366,7 +366,7 @@ class TestClientEventDispatch:
                 ws.receive_json()
                 ws.send_json({"type": "response.create"})
                 assert created_send_started.wait(timeout=1.0)
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 response_key = service._state(conn_id).current_response_key
                 text_output_queue.put(
                     AssistantToolCallReadyEvent(
@@ -405,7 +405,7 @@ class TestClientEventDispatch:
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 st = service._state(conn_id)
                 origin_key = "response_origin"
                 st.generation_done_tool_calls[origin_key] = {"call_1"}
@@ -531,7 +531,7 @@ class TestClientEventDispatch:
                 assert state.response_pending is False
                 assert state.pending_response_keys == set()
                 assert service.turn_latency_store._trackers == {}
-                assert service.turn_latency_store.active_session_count == 0
+                assert len(service.turn_latency_store._session_keys) == 0
 
                 ws.send_json({"type": "response.create"})
                 assert ws.receive_json()["type"] == "response.created"
@@ -747,7 +747,7 @@ class TestSendLoop:
                 assert state.in_response is False
                 assert pending_key in state.closed_response_keys
                 assert service.turn_latency_store._trackers == {}
-                assert service.turn_latency_store.active_session_count == 0
+                assert len(service.turn_latency_store._session_keys) == 0
                 assert not response_playing.is_set()
 
                 output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=stale_generation))
@@ -945,7 +945,7 @@ class TestSendLoop:
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 stale_generation = cancel_scope.generation
                 service.response._ensure_response(conn_id, "cancelled")
                 ws.send_json({"type": "response.cancel"})
@@ -1229,7 +1229,7 @@ class TestSendLoop:
                 created = ws.receive_json()
                 assert created["type"] == "response.created"
                 assert created["response"]["output_modalities"] == ["text"]
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 response_key = service._state(conn_id).current_response_key
 
                 # Side channel first, then the ordered stream catches up.
@@ -1517,7 +1517,7 @@ class TestCleanup:
             time.sleep(0.3)
 
             assert unit.session is None
-            assert unit.service.connection_ids == []
+            assert list(unit.service._conns) == []
             transaction.claim()
             assert cleanup == []
             assert unit.service.total_usage.input_tokens == 17

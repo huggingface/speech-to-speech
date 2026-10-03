@@ -358,7 +358,7 @@ def test_cancelled_inflight_llm_cannot_recreate_latency_tracker(service, conn_id
     assert service.turn_latency_store._trackers == {}
     service.close_response_key(conn_id, request.response_key)
     service.unregister(conn_id)
-    assert service.turn_latency_store.active_session_count == 0
+    assert len(service.turn_latency_store._session_keys) == 0
     assert service.turn_latency_store._trackers == {}
 
 
@@ -433,7 +433,7 @@ def test_terminal_response_emits_one_latency_record(service, conn_id, caplog, st
     assert len(done) == 1
     assert done[0].response.status == status
     assert service.turn_latency_store._trackers == {}
-    assert service.turn_latency_store.active_session_count == 0
+    assert len(service.turn_latency_store._session_keys) == 0
 
 
 @pytest.mark.parametrize("new_turn,revision,reopened", [("turn_2", 0, False), ("turn_1", 1, True)])
@@ -484,7 +484,7 @@ def test_unregister_clears_unfinished_measurements_before_session_reuse(service,
     service.unregister(conn_id)
     assert service.turn_latency_store._trackers == {}
     assert service.turn_latency_store._pending_turn == {}
-    assert service.turn_latency_store.active_session_count == 0
+    assert len(service.turn_latency_store._session_keys) == 0
 
     new_conn_id = service.register()
     try:

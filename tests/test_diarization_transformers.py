@@ -51,7 +51,7 @@ def test_real_processor_and_tiny_model_cover_complete_audio(mode, length):
     segments.extend(diarizer.finish())
     assert diarizer.processed_seconds == length / 16000
     assert all(0 <= segment.start < segment.end <= length / 16000 for segment in segments)
-    assert diarizer.buffered_samples == 0
+    assert len(diarizer._buffer) == 0
     assert not diarizer.active_speakers
 
 

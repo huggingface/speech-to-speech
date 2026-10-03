@@ -18,7 +18,7 @@ from speech_to_speech.arguments_classes.responses_api_language_model_arguments i
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 from speech_to_speech.backend_registry import BackendSelection
 from speech_to_speech.cli import main, parse_command, parse_talk_arguments
-from speech_to_speech.pipeline.transcript_logging import log_transcripts_enabled, set_log_transcripts
+from speech_to_speech.pipeline.transcript_logging import set_log_transcripts, transcript_for_log
 from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments, prepare_all_args, prepare_module_args
 
 
@@ -470,11 +470,11 @@ def test_main_wires_talk_transcript_logging_before_client_start(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["speech-to-speech", "talk", "--log-transcripts"])
 
     def warning():
-        assert log_transcripts_enabled() is True
+        assert transcript_for_log("probe") == "probe"
         events.append("warning")
 
     def run_client(config):
-        assert log_transcripts_enabled() is True
+        assert transcript_for_log("probe") == "probe"
         events.append(("client", config.log_transcripts))
 
     monkeypatch.setattr("speech_to_speech.cli.warn_if_log_transcripts_enabled", warning)

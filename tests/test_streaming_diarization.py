@@ -124,12 +124,12 @@ def test_arbitrary_boundaries_preserve_cache_overlap_and_timestamps(block_size):
     segments = []
     for start in range(0, len(audio), block_size):
         segments.extend(diarizer.push(audio[start : start + block_size], sample_rate=20))
-        assert diarizer.buffered_samples < diarizer.processor.num_samples_per_audio_chunk
+        assert len(diarizer._buffer) < diarizer.processor.num_samples_per_audio_chunk
     segments.extend(diarizer.finish())
     assert segments == [SpeakerSegment(0, 0, 0.8), SpeakerSegment(1, 0.4, 1.1)]
     assert diarizer.processed_seconds == 3.05
     assert diarizer.active_speakers == ()
-    assert diarizer.buffered_samples == 0
+    assert len(diarizer._buffer) == 0
     calls = diarizer.processor.calls
     assert calls[0][1:] == (True, False)
     assert calls[-1][1:] == (False, True)
@@ -180,7 +180,7 @@ def test_invalid_input_does_not_mutate_session(audio, rate):
     diarizer = make_diarizer()
     with pytest.raises(ValueError):
         diarizer.push(audio, sample_rate=rate)
-    assert diarizer.buffered_samples == 0
+    assert len(diarizer._buffer) == 0
     assert not diarizer.processor.calls
 
 
@@ -201,7 +201,7 @@ def test_utterance_boundary_preserves_speaker_cache_but_restarts_audio_windows()
     cache = diarizer._cache
     assert cache is not None
     assert diarizer.processed_seconds == 0
-    assert diarizer.buffered_samples == 0
+    assert len(diarizer._buffer) == 0
     diarizer.push(np.ones(3, dtype=np.float32), sample_rate=20)
     diarizer.finish_utterance()
     assert diarizer.model.caches[-1] == cache

@@ -81,7 +81,6 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         self,
         model_name: Optional[str] = None,
         device: str = "auto",
-        compute_type: str = "float16",
         language: Optional[str] = None,
         gen_kwargs: dict[str, Any] = {},
         enable_live_transcription: bool = False,
@@ -95,7 +94,6 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                 - MPS: "mlx-community/parakeet-tdt-0.6b-v3"
                 - CUDA/CPU: "nvidia/parakeet-tdt-0.6b-v3"
             device: Device to use ("auto", "cuda", "npu", "mps", "cpu")
-            compute_type: Compute precision ("float16", "float32")
             language: Legacy language preference (ignored by Parakeet decoders)
             gen_kwargs: Additional generation kwargs
         """
@@ -124,7 +122,6 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                 model_name = "nvidia/parakeet-tdt-0.6b-v3"
 
         self.model_name = model_name
-        self.compute_type = compute_type
 
         logger.info(f"Loading Parakeet TDT model: {model_name} on {self.device}")
 
@@ -200,10 +197,8 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                 # Convert to mx.array and call decode_chunk directly
                 audio_mx = mx.array(dummy_audio, dtype=mx.float32)
                 _ = self.model.decode_chunk(audio_mx, verbose=False)
-            elif self.backend == "nano_parakeet":
-                _ = self.model.transcribe(dummy_audio)
             else:
-                _ = self.model.transcribe([dummy_audio], batch_size=1, verbose=False)
+                _ = self.model.transcribe(dummy_audio)
 
             logger.info("Model warmed up and ready")
         except Exception as e:
