@@ -201,10 +201,10 @@ def _validate_realtime_websocket_support() -> None:
 def _validate_darwin_dependency_pins() -> None:
     expected_versions = {
         "miniaudio": "1.61",
-        "mlx": "0.32.0",
+        "mlx": "0.32.3",
         "mlx-audio": "0.4.7",
         "mlx-lm": "0.31.3",
-        "mlx-metal": "0.32.0",
+        "mlx-metal": "0.32.3",
         "sounddevice": "0.5.3",
         "transformers": "5.18.0",
     }
