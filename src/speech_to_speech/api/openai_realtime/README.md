@@ -83,13 +83,34 @@ flowchart LR
 | `conversation.item.created` | Acknowledges injected `input_text` from `conversation.item.create`. |
 | `conversation.item.input_audio_transcription.delta` | Incremental transcript text for the active input-audio content part (when live transcription is enabled). |
 | `conversation.item.input_audio_transcription.completed` | Final transcript for the user turn (with duration usage). |
+| `speech_to_speech.input_audio_transcription.snapshot` | Cumulative, replaceable speculative transcript hypothesis for the active input item (opt-in via `session.extensions`). |
 | `response.created` | Emitted when an explicit response is accepted or before the first implicit text, tool, audio, or terminal event (response is `in_progress`). |
 | `response.output_audio.delta` | Base64 PCM audio chunk from TTS. |
 | `response.output_audio.done` | Audio stream complete for the current output item. |
 | `response.output_audio_transcript.delta` | Incremental assistant transcript suffix for the current audio output item. |
 | `response.output_audio_transcript.done` | Full assistant transcript, emitted once when the output item closes. On cancellation, it contains the accumulated partial transcript. |
 | `response.function_call_arguments.done` | Tool call with `call_id`, `name`, and JSON `arguments`. |
-| `response.done` | Response finished (`completed`, `cancelled` with reason `turn_detected` or `client_cancelled`). |
+| `response.done` | Response finished: `completed`, `cancelled`, `incomplete`, or `failed`. See terminal status details below. |
+
+### Terminal status details
+
+For the Chat Completions and Responses LLM backends, an explicit provider token
+limit or content filter ends the response with `status: "incomplete"` and
+`status_details.reason: "max_output_tokens"` or `"content_filter"`. Provider
+failures end it with `status: "failed"`; a top-level `error` event carries the
+message. This applies to streaming and non-streaming requests, including direct
+audio input. Partial output can reach the client, but the pipeline rolls back
+history for incomplete and failed responses.
+
+Cancellation retains `status: "cancelled"` with reason `"turn_detected"` or
+`"client_cancelled"`. A compatible provider that closes its stream without a
+terminal signal keeps the existing completion behavior and logs a warning.
+
+Run the provider status regression tests without a model server or GPU:
+
+```bash
+uv run pytest tests/test_provider_response_status.py -q
+```
 
 ### Official Agents SDK compatibility
 
@@ -122,6 +143,29 @@ protocol layer. No custom SDK transport is used.
 ### Input transcription semantics
 
 Internal partial transcriptions are cumulative hypotheses. Before emitting `conversation.item.input_audio_transcription.delta`, the Realtime server compares consecutive hypotheses at normalized word boundaries and holds back the newest matching word. Only confirmed growth beyond the per-item committed prefix reaches the append-only wire stream; unstable casing and edge punctuation are left to the final transcript. If a later hypothesis revises a word that was already emitted, that partial is withheld because the protocol has no transcript-retraction event, but subsequent hypotheses can resume the stream when they extend the committed prefix. Clients should treat `conversation.item.input_audio_transcription.completed` as authoritative and replace any rendered partial for the same `item_id` with its final `transcript`. Turn metadata routes out-of-order completions to their originating item, and bundled clients retain each unresolved item's transcript until completion so later deltas and empty authoritative completions remain correct.
+
+### Speculative input transcription snapshots
+
+Standard Realtime clients receive only append-only `conversation.item.input_audio_transcription.delta` events and the authoritative `conversation.item.input_audio_transcription.completed` event.
+
+Because local progressive STT models generate cumulative hypotheses that may revise earlier words, the server also provides an opt-in extension event: `speech_to_speech.input_audio_transcription.snapshot`.
+
+Clients negotiate opt-in by advertising the extension in `session.update`:
+
+```json
+{
+  "type": "session.update",
+  "session": {
+    "type": "realtime",
+    "extensions": ["speech_to_speech.input_audio_transcription.snapshot"]
+  }
+}
+```
+
+When opted in:
+- The server emits `speech_to_speech.input_audio_transcription.snapshot` with the latest cumulative hypothesis on every progressive update, even when word revisions cause append-only deltas to be temporarily withheld.
+- Snapshots are display-only and keyed by `item_id`. A newer snapshot replaces any earlier snapshot for the same item.
+- Bundled clients combine both streams: standard deltas maintain stable committed text, snapshots provide real-time speculative display without duplicating words, and `completed.transcript` authoritatively replaces all state and releases per-item memory.
 
 ### Transcript event compatibility
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -53,6 +54,7 @@ from speech_to_speech.pipeline.messages import (
     ResponsePrefetchTransaction,
 )
 from speech_to_speech.pipeline.transcript_logging import log_exception
+from speech_to_speech.pipeline.turn_latency import TURN_LATENCY_METADATA_KEY
 from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
 
 if TYPE_CHECKING:
@@ -118,6 +120,11 @@ class ResponseHandler(RealtimeBaseHandler):
             self._service.total_usage.audio_duration_s,
         )
         st.response_usage.reset()
+        if self._service.speculative_turns is not None:
+            self._service.speculative_turns.close(
+                st.current_response_turn_id,
+                st.current_response_turn_revision,
+            )
         completed_with_tools = bool(st.pending_function_calls)
         if (
             status == "completed"
@@ -138,7 +145,11 @@ class ResponseHandler(RealtimeBaseHandler):
                 st.completed_tool_response_keys.pop(completed_response_key, None)
         st.current_response_id = None
         st.current_response_key = None
+        st.current_response_turn_id = None
+        st.current_response_turn_revision = None
         st.response_failed = False
+        st.response_incomplete = False
+        st.response_incomplete_reason = None
         st.response_error_type = None
         st.current_item_id = None
         st.content_index = 0
@@ -310,6 +321,8 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_response_params = event.response
         st.current_response_id = _generate_id("resp")
         st.current_response_key = request.response_key
+        st.current_response_turn_id = request.turn_id
+        st.current_response_turn_revision = request.turn_revision
         st.response_created_pending_key = request.response_key
         self._start_item(conn_id)
         logger.debug("Standard response.create claimed internal tool follow-up prefetch")
@@ -462,7 +475,23 @@ class ResponseHandler(RealtimeBaseHandler):
             status_details = RealtimeResponseStatus(type=status, reason=reason, error=error)  # type: ignore[arg-type]
 
         rp = st.current_response_params
-        metadata = rp.metadata if rp and rp.metadata else None
+        metadata = dict(rp.metadata) if rp and rp.metadata else {}
+        if status != "in_progress":
+            # Terminal latency metadata is server-owned, even when no measurement exists.
+            metadata.pop(TURN_LATENCY_METADATA_KEY, None)
+        if status != "in_progress" and st.current_response_key is not None and len(metadata) < 16:
+            tracker = self._service.turn_latency_store.get_response(st.current_response_key)
+            if tracker is not None and tracker.turn_id is not None:
+                latency_value = json.dumps(
+                    tracker.metadata_payload(
+                        response_key=st.current_response_key,
+                        status=status,
+                    ),
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                if len(latency_value) <= 512:
+                    metadata[TURN_LATENCY_METADATA_KEY] = latency_value
 
         voice: str | None = None
         if rp and rp.audio and rp.audio.output and rp.audio.output.voice:
@@ -488,7 +517,7 @@ class ResponseHandler(RealtimeBaseHandler):
             status_details=status_details,
             audio=Audio(output=AudioOutput(voice=voice)),  # type: ignore[arg-type]
             conversation_id=conversation_id,
-            metadata=metadata,
+            metadata=metadata or None,
             output_modalities=output_modalities,
             output=self._build_output_items(conn_id, status),
             usage=RealtimeResponseUsage(
@@ -821,6 +850,8 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_response_params = event.response
         st.current_response_id = _generate_id("resp")
         st.current_response_key = request.response_key
+        st.current_response_turn_id = request.turn_id
+        st.current_response_turn_revision = request.turn_revision
         st.response_created_pending_key = request.response_key
         self._start_item(conn_id)
 
@@ -923,6 +954,9 @@ class ResponseHandler(RealtimeBaseHandler):
         if st.in_response:
             if status == "completed" and st.response_failed:
                 status = "failed"
+            elif status == "completed" and st.response_incomplete:
+                status = "incomplete"
+                reason = st.response_incomplete_reason
             resp_id, _ = self._ensure_response(conn_id)
             wants_audio = response_wants_audio(st.current_response_params)
             if wants_audio and st.pending_text_outputs:
@@ -1007,14 +1041,19 @@ class ResponseHandler(RealtimeBaseHandler):
                 logger.debug("Dropping stale assistant output for turn=%s rev=%s", event.turn_id, event.turn_revision)
                 return []
         st = self._state(conn_id)
-        events: list[ServerEvent] = []
+        if st.current_response_turn_id is None and event.turn_id is not None:
+            st.current_response_turn_id = event.turn_id
+            st.current_response_turn_revision = event.turn_revision
+        # Accepting this output commits the turn it answers. The user item that
+        # prompted it is permanent from here, so it is published first.
+        events: list[ServerEvent] = self._service.audio.resolve_input_terminals(conn_id)
         output_sequence = event.output_sequence
         if output_sequence is not None:
             if output_sequence < st.next_assistant_output_sequence:
                 # The side channel already exposed this tool call. Its ordered
                 # copy still marks the point where preceding audio is complete.
                 if any(isinstance(part, AssistantToolCallPart) for part in event.parts):
-                    return self._finish_current_message_output(conn_id, event.response_key)
+                    return events + self._finish_current_message_output(conn_id, event.response_key)
                 logger.debug("Dropping duplicate assistant output sequence %d", output_sequence)
                 return events
             if output_sequence > st.next_assistant_output_sequence:
@@ -1213,6 +1252,9 @@ class ResponseHandler(RealtimeBaseHandler):
         st = self._state(conn_id)
         response_was_missing = st.current_response_id is None
         self._ensure_response(conn_id, event.response_key)
+        if event.status == "incomplete":
+            st.response_incomplete = True
+            st.response_incomplete_reason = event.reason
         events = self.finish_audio_output(conn_id, event.response_key)
         events.extend(
             [

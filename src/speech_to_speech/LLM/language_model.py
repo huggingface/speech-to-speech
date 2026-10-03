@@ -676,6 +676,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             try:
                 with bind_active_turn_latency_tracker(tracker):
                     for chunk in self._generate(active_chat, language_code, gen, ctx, runtime_config, response):
+                        chunk.selected_language = request.selected_language
                         chunk.response_key = request.response_key
                         chunk.prefetch_transaction = request.prefetch_transaction
                         new_parts = [part.model_copy(deep=True) for part in chunk.parts]
@@ -722,6 +723,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     cancel_generation=ctx.cancel_generation,
                     response_key=request.response_key,
                     prefetch_transaction=request.prefetch_transaction,
+                    selected_language=request.selected_language,
                 )
                 ctx.output_parts.extend(part.model_copy(deep=True) for part in trailing_chunk.parts)
             if commit_allowed:

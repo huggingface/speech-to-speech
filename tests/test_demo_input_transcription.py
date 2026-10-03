@@ -176,6 +176,64 @@ if (client._userTranscriptByItem.has("item_1")) throw new Error("empty final did
 """,
         id="empty-final-clears-partial",
     ),
+    pytest.param(
+        """
+await deliver({ type: "input_audio_buffer.speech_started", item_id: "item_1" });
+await deliver({
+  type: "speech_to_speech.input_audio_transcription.snapshot",
+  item_id: "item_1",
+  transcript: "hello brave",
+});
+await deliver({
+  type: "conversation.item.input_audio_transcription.delta",
+  item_id: "item_1",
+  delta: "hello",
+});
+await deliver({
+  type: "speech_to_speech.input_audio_transcription.snapshot",
+  item_id: "item_1",
+  transcript: "hello brave new",
+});
+await deliver({
+  type: "conversation.item.input_audio_transcription.completed",
+  item_id: "item_1",
+  transcript: "hello brave new world",
+});
+
+assertEqual(transcripts, [
+  { role: "user", text: "hello brave", partial: true, itemId: "item_1" },
+  { role: "user", text: "hello brave", partial: true, itemId: "item_1" },
+  { role: "user", text: "hello brave new", partial: true, itemId: "item_1" },
+  { role: "user", text: "hello brave new world", partial: false, itemId: "item_1" },
+], "speculative snapshot stream events");
+if (client._userTranscriptByItem.has("item_1")) throw new Error("completed item deltas not pruned");
+if (client._userSnapshotByItem.has("item_1")) throw new Error("completed item snapshots not pruned");
+""",
+        id="snapshots-combine-with-deltas",
+    ),
+    pytest.param(
+        """
+await deliver({
+  type: "speech_to_speech.input_audio_transcription.snapshot",
+  item_id: "item_1",
+  transcript: "snapshot 1",
+});
+await deliver({
+  type: "speech_to_speech.input_audio_transcription.snapshot",
+  item_id: "item_2",
+  transcript: "snapshot 2",
+});
+await deliver({
+  type: "conversation.item.input_audio_transcription.completed",
+  item_id: "item_1",
+  transcript: "final 1",
+});
+
+if (client._userSnapshotByItem.has("item_1")) throw new Error("completed item_1 snapshot not pruned");
+if (client._userSnapshotByItem.get("item_2") !== "snapshot 2") throw new Error("overlapping item_2 snapshot lost");
+""",
+        id="overlapping-snapshots-pruned-by-item",
+    ),
 ]
 
 

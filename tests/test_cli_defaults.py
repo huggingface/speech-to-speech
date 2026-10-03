@@ -32,6 +32,7 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_profile():
     assert module_args.mac_optimal_settings is False
     assert module_args.llm_backend == "responses-api"
     assert module_args.tts == "qwen3"
+    assert module_args.detect_llm_output_language is False
     assert module_args.log_level == "info"
     assert module_args.enable_live_transcription is True
     assert module_args.live_transcription_update_interval == 0.5
@@ -66,8 +67,20 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_profile():
     assert qwen3_args.qwen3_tts_mlx_quantization == "6bit"
 
 
+def test_parse_arguments_enables_llm_output_language_detection():
+    args = parse_arguments(["--detect_llm_output_language"])
+
+    assert args.module_kwargs.detect_llm_output_language is True
+
+
 def test_server_defaults_to_loopback():
     assert RealtimeServerArguments().host == "127.0.0.1"
+
+
+def test_parse_talk_arguments_keeps_retry_timeout_field_name():
+    config = parse_talk_arguments(["--connection-retry-timeout", "12.5"])
+
+    assert config.connection_retry_timeout_s == 12.5
 
 
 def test_vad_firered_flag_is_accepted():
@@ -138,6 +151,51 @@ def test_mac_optimal_settings_preserves_explicit_component_device():
 def test_noncanonical_mac_optimal_settings_flags_are_rejected(flag):
     with pytest.raises(ValueError, match=flag):
         parse_arguments([flag])
+
+
+def test_mac_diarization_shortcut():
+    args = parse_arguments(["--mac-optimal-settings", "--diarization"], command="local")
+
+    assert args.module_kwargs.mac_optimal_settings is True
+    assert args.module_kwargs.diarization_model_name == "nvidia/Nemotron-3-Diarization"
+    assert args.module_kwargs.diarization_revision is None
+    assert args.module_kwargs.diarization_streaming_mode == "low_latency"
+    assert args.module_kwargs.diarization_device == "mps"
+    assert args.module_kwargs.stt == "parakeet-tdt"
+    assert args.module_kwargs.llm_backend == "mlx-lm"
+
+
+def test_diarization_shortcut_preserves_custom_model():
+    args = parse_arguments(["--diarization", "--diarization_model_name", "custom/model"])
+
+    assert args.module_kwargs.diarization_model_name == "custom/model"
+    assert args.module_kwargs.diarization_revision is None
+
+
+def test_diarization_defaults_to_automatic_device_selection():
+    args = parse_arguments(["--diarization"])
+
+    assert args.module_kwargs.diarization_device == "auto"
+
+
+def test_diarization_shortcut_preserves_explicit_settings():
+    args = parse_arguments(
+        [
+            "--mac-optimal-settings",
+            "--diarization",
+            "--diarization_revision",
+            "custom-ref",
+            "--diarization_device",
+            "cpu",
+        ]
+    )
+
+    assert args.module_kwargs.diarization_revision == "custom-ref"
+    assert args.module_kwargs.diarization_device == "cpu"
+
+
+def test_diarization_is_opt_in():
+    assert parse_arguments([]).module_kwargs.diarization_model_name is None
 
 
 # -- ParsedArguments dataclass tests ------------------------------------------

@@ -22,8 +22,8 @@ class ParakeetTDTSTTHandlerArguments:
     parakeet_tdt_device: str = field(
         default="auto",
         metadata={
-            "help": "Device to run the model on. 'auto' will use MPS on macOS and CUDA otherwise. "
-            "Options: 'auto', 'cuda', 'mps', 'cpu'. Default is 'auto'."
+            "help": "Device to run the model on. 'auto' will use MPS on macOS, otherwise CUDA, then NPU, then CPU. "
+            "Options: 'auto', 'cuda', 'npu', 'mps', 'cpu'. Default is 'auto'."
         },
     )
     parakeet_tdt_compute_type: str = field(
@@ -33,7 +33,7 @@ class ParakeetTDTSTTHandlerArguments:
     parakeet_tdt_language: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Target language code for transcription. If not specified, the model will "
-            "auto-detect the language. Supports 25 European languages."
+            "help": "Accepted for compatibility with existing commands. Parakeet decoders always select the language "
+            "automatically; this value does not constrain transcription or replace detected language metadata."
         },
     )

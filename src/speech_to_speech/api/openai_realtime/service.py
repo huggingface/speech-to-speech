@@ -14,6 +14,7 @@ from openai.types.realtime import (
     ConversationItemTruncateEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferCommitEvent,
+    InputAudioBufferCommittedEvent,
     InputAudioBufferSpeechStartedEvent,
     InputAudioBufferSpeechStoppedEvent,
     OutputAudioBufferClearEvent,
@@ -52,7 +53,11 @@ from speech_to_speech.api.openai_realtime.handlers import (
     ResponseHandler,
     SessionHandler,
 )
-from speech_to_speech.api.openai_realtime.input_state import InputItemState
+from speech_to_speech.api.openai_realtime.input_state import (
+    InputItemState,
+    PendingInputTerminal,
+    SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
+)
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.pipeline.events import (
@@ -115,10 +120,12 @@ ServerEvent = Union[
     RealtimeErrorEvent,
     InputAudioBufferSpeechStartedEvent,
     InputAudioBufferSpeechStoppedEvent,
+    InputAudioBufferCommittedEvent,
     ConversationItemCreatedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
+    SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
     ResponseCreatedEvent,
     ResponseDoneEvent,
     ResponseAudioDeltaEvent,
@@ -196,9 +203,17 @@ class ConnState(BaseModel):
     closed_response_keys: dict[str, None] = Field(default_factory=dict)
     audio_buffer_has_data: bool = False
     audio_remainder: bytes = b""
+    input_audio_resampler: Any = None
+    input_audio_resampler_rate: int | None = None
     current_response_id: Optional[str] = None
     current_response_key: Optional[str] = None
+    # Stable response ownership. Unlike speculative_user_turn_id/revision,
+    # these do not change when newer user speech arrives mid-response.
+    current_response_turn_id: Optional[str] = None
+    current_response_turn_revision: Optional[int] = None
     response_failed: bool = False
+    response_incomplete: bool = False
+    response_incomplete_reason: Literal["max_output_tokens", "content_filter"] | None = None
     response_error_type: Optional[str] = None
     current_item_id: Optional[str] = None
     content_index: int = 0
@@ -207,6 +222,10 @@ class ConnState(BaseModel):
     # to their originating protocol item and keep append-only state per item.
     input_item_by_turn_revision: dict[tuple[str, int | None], str] = Field(default_factory=dict)
     input_items: dict[str, InputItemState] = Field(default_factory=dict)
+    # An input item stays speculative until its turn is committed. Its stop and
+    # transcription terminals wait here so a revision the pipeline later
+    # supersedes never reaches a client that cannot retract it.
+    pending_input_terminals: dict[str, PendingInputTerminal] = Field(default_factory=dict)
     input_audio_duration_s: float = 0.0
     last_item_id: Optional[str] = None
     current_response_params: RealtimeResponseCreateParams | None = None
@@ -313,7 +332,13 @@ class RealtimeService:
         self._chat_size = chat_size
         self.speculative_turns = speculative_turns
         self.turn_latency_store = turn_latency_store or TurnLatencyStore()
+        if speculative_turns is not None:
+            speculative_turns.wait_observer = self.turn_latency_store.record_smart_wait
         self._default_instructions = default_instructions
+        # None means the active backend does not declare a complete language set.
+        self.stt_supported_languages: set[str] | None = None
+        self.tts_supported_languages: set[str] | None = None
+        self.stt_auto_reset_supported: bool = True
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
 
@@ -439,7 +464,7 @@ class RealtimeService:
     def append_pcm(self, conn_id: str, pcm_bytes: bytes, src_rate: int) -> list[bytes]:
         return self.audio.append_pcm(conn_id, pcm_bytes, src_rate)
 
-    def handle_audio_commit(self, conn_id: str) -> RealtimeErrorEvent | None:
+    def handle_audio_commit(self, conn_id: str) -> tuple[list[bytes], RealtimeErrorEvent | None]:
         return self.audio.handle_audio_commit(conn_id)
 
     def begin_audio_response(
@@ -544,6 +569,7 @@ class RealtimeService:
                 AssistantResponseDoneEvent,
                 AssistantToolCallReadyEvent,
                 ResponseGenerationDoneEvent,
+                ResponseFailedEvent,
             ),
         ):
             return False
@@ -581,7 +607,7 @@ class RealtimeService:
         if is_stale is None:
             return None
         if is_stale:
-            if isinstance(event, TranscriptionCompletedEvent):
+            if isinstance(event, (TranscriptionCompletedEvent, TranscriptionFailedEvent)):
                 self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
             logger.info(
                 "Ignoring stale %s for turn=%s rev=%s",
@@ -620,6 +646,7 @@ class RealtimeService:
                 AssistantResponseDoneEvent,
                 AssistantToolCallReadyEvent,
                 ResponseGenerationDoneEvent,
+                ResponseFailedEvent,
             ),
         ):
             return False
@@ -632,6 +659,7 @@ class RealtimeService:
                 AssistantResponseDoneEvent,
                 AssistantToolCallReadyEvent,
                 ResponseGenerationDoneEvent,
+                ResponseFailedEvent,
             ),
         ):
             is_latest: bool | None
@@ -676,6 +704,8 @@ class RealtimeService:
 
         cfg = st.runtime_config
         transcript = event.transcript
+        if event.speaker_attribution is not None:
+            transcript = event.speaker_attribution.for_llm(transcript)
         if transcript:
             if same_speculative_turn and st.speculative_user_item_id:
                 replaced = cfg.chat.replace_user_message_text(st.speculative_user_item_id, transcript)
@@ -716,17 +746,43 @@ class RealtimeService:
         else:
             self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
 
-        return [*completed_events]
+        # The chat now holds this revision's text, but the client only learns
+        # about the user item once the turn is committed. A revision superseded
+        # before then is replaced in the chat and discarded here.
+        self.audio.hold_input_terminal(
+            conn_id,
+            completed_events[0].item_id,
+            event.turn_id,
+            event.turn_revision,
+            terminal=completed_events[0],
+        )
+        return self.audio.resolve_input_terminals(conn_id)
 
     def _on_transcription_failed(self, conn_id: str, event: TranscriptionFailedEvent) -> list[ServerEvent]:
         """Surface a final STT failure without creating conversation or LLM work."""
+        self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
         st = self._state(conn_id)
         current_input_item_id = st.current_input_item_id
         failed_events = self.conversation.on_transcription_failed(conn_id, event)
-        owns_current_input = failed_events and failed_events[0].item_id == current_input_item_id
+        if not failed_events:
+            return []
+        owns_current_input = failed_events[0].item_id == current_input_item_id
         if owns_current_input and self.should_listen is not None:
             self.should_listen.set()
-        return [*failed_events]
+        if event.turn_id is not None and event.turn_id == st.speculative_user_turn_id:
+            if st.speculative_user_item_id is not None:
+                st.runtime_config.chat.remove_user_message(st.speculative_user_item_id)
+                st.speculative_user_item_id = None
+            st.response_usage.audio_duration_s -= st.speculative_audio_duration_s
+            st.speculative_audio_duration_s = 0.0
+        self.audio.hold_input_terminal(
+            conn_id,
+            failed_events[0].item_id,
+            event.turn_id,
+            event.turn_revision,
+            terminal=failed_events[0],
+        )
+        return self.audio.resolve_input_terminals(conn_id)
 
     def _on_audio_input_completed(self, conn_id: str, event: AudioInputCompletedEvent) -> list[ServerEvent]:
         """Record final input audio and queue its realtime LM request."""
@@ -767,7 +823,7 @@ class RealtimeService:
             )
             st.mark_response_pending(request.response_key)
             queue.put(request)
-        return []
+        return self.audio.resolve_input_terminals(conn_id)
 
     # ── Metrics ────────────────────────────────────
 

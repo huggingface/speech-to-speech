@@ -14,6 +14,7 @@ from transformers.models.qwen3_asr.processing_qwen3_asr import LANGUAGE_CODE_TO_
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -36,17 +37,6 @@ def language_to_code(language: Optional[str]) -> Optional[str]:
     if normalized in LANGUAGE_CODE_TO_NAME:
         return normalized
     return _LANGUAGE_NAME_TO_CODE.get(normalized)
-
-
-def resolve_device(device: str) -> str:
-    """Turn ``auto`` into CUDA, then MPS, then CPU; keep an explicit choice as is."""
-    if device != "auto":
-        return device
-    if torch.cuda.is_available():
-        return "cuda"
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
 
 
 def resolve_torch_dtype(torch_dtype: str, device: str) -> torch.dtype:
@@ -84,7 +74,7 @@ class Qwen3ASRSTTHandler(BaseSTTHandler):
         gen_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
         logger.info("Loading Qwen3-ASR STT model: %s", model_name)
-        self.device = resolve_device(device)
+        self.device = resolve_device(device, TORCH_DEVICES, "Qwen3-ASR")
         self.torch_dtype = resolve_torch_dtype(torch_dtype, self.device)
         self.prompt = prompt or None
         self.gen_kwargs = dict(gen_kwargs or {})
@@ -134,20 +124,30 @@ class Qwen3ASRSTTHandler(BaseSTTHandler):
         detected = parsed.get("language") if isinstance(parsed, dict) else None
         return text, detected
 
-    def _final_language_code(self, detected: Optional[str]) -> str:
-        if self.forced_language is not None:
-            return self.forced_language
+    def _final_language_code(
+        self,
+        detected: Optional[str],
+        request_language: Optional[str] = None,
+        *,
+        explicit_auto: bool = False,
+    ) -> str:
+        if request_language is None and not explicit_auto:
+            request_language = self.forced_language
+        if request_language is not None:
+            return request_language
         code = language_to_code(detected)
         if code is not None:
             self.last_language = code
         elif detected:
             logger.warning("Qwen3-ASR detected unsupported language: %s", detected)
-        return f"{self.last_language or DEFAULT_LANGUAGE}-auto"
+        fallback = None if explicit_auto else self.last_language
+        return f"{code or fallback or DEFAULT_LANGUAGE}-auto"
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         progressive = vad_audio.mode == "progressive"
-        request_language = self.forced_language
-        if request_language is None and progressive:
+        selected = vad_audio.runtime_config.selected_language if vad_audio.runtime_config else None
+        request_language = self.forced_language if selected is None else None if selected == "auto" else selected
+        if request_language is None and progressive and selected != "auto":
             request_language = self.last_language
         audio = np.asarray(vad_audio.audio, dtype=np.float32)
 
@@ -168,7 +168,7 @@ class Qwen3ASRSTTHandler(BaseSTTHandler):
             )
             return
 
-        language_code = self._final_language_code(detected)
+        language_code = self._final_language_code(detected, request_language, explicit_auto=selected == "auto")
         console.print(f"[yellow]USER: {text}")
         logger.debug("Language Code Qwen3-ASR: %s", language_code)
         yield Transcription(
@@ -176,5 +176,5 @@ class Qwen3ASRSTTHandler(BaseSTTHandler):
             language_code=language_code,
             turn_id=vad_audio.turn_id,
             turn_revision=vad_audio.turn_revision,
-            speech_stopped_at_s=vad_audio.created_at_s,
+            speech_stopped_at_s=vad_audio.speech_end_at_s,
         )

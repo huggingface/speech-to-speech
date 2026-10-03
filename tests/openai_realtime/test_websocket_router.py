@@ -33,6 +33,7 @@ from speech_to_speech.pipeline.events import (
     ResponseFailedEvent,
     ResponseGenerationDoneEvent,
     SpeechStartedEvent,
+    SpeechStoppedEvent,
     TokenUsageEvent,
     TranscriptionCompletedEvent,
     TranscriptionFailedEvent,
@@ -667,6 +668,34 @@ class TestSendLoop:
                 msg = ws.receive_json()
                 assert msg["type"] == "input_audio_buffer.speech_started"
                 assert msg["audio_start_ms"] == 0
+
+    def test_failed_transcription_reaches_client_after_reopen_grace(self, setup):
+        app, service, _, _, text_output_queue, *_ = setup
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                text_output_queue.put(SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
+                started = ws.receive_json()
+                assert started["type"] == "input_audio_buffer.speech_started"
+
+                tracker.start_reopen_grace("turn_1", 0, grace_s=0.05)
+                text_output_queue.put(SpeechStoppedEvent(turn_id="turn_1", turn_revision=0))
+                text_output_queue.put(TranscriptionFailedEvent(message="STT failed", turn_id="turn_1", turn_revision=0))
+
+                stopped = ws.receive_json()
+                committed = ws.receive_json()
+                created = ws.receive_json()
+                failed = ws.receive_json()
+                assert [stopped["type"], committed["type"], created["type"], failed["type"]] == [
+                    "input_audio_buffer.speech_stopped",
+                    "input_audio_buffer.committed",
+                    "conversation.item.created",
+                    "conversation.item.input_audio_transcription.failed",
+                ]
+                assert started["item_id"] == stopped["item_id"] == failed["item_id"]
+                assert tracker.is_committed("turn_1", 0)
 
     def test_barge_in_discard_clears_after_response_done(self, setup):
         """After barge-in sets discarding=True, __RESPONSE_DONE__ must clear it back to False."""
@@ -1673,3 +1702,56 @@ class TestPool:
             data = client.get("/v1/usage").json()
             assert data["errors_by_type"] == {"foo": 2, "bar": 1}
             assert data["total_errors"] == 3
+
+
+@pytest.mark.parametrize("reason", ["max_output_tokens", "content_filter"])
+def test_partial_incomplete_response_drains_audio_before_done(setup, reason):
+    app, _, _, output_queue, _, _, _, _, cancel_scope = setup
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()  # session.created
+            output_rate = 24000
+            ws.send_json(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "audio": {"output": {"format": {"type": "audio/pcm", "rate": output_rate}}},
+                    },
+                }
+            )
+            assert ws.receive_json()["type"] == "session.updated"
+            response_key = "incomplete_response"
+            generation = cancel_scope.generation
+            for item in [
+                AssistantOutputEvent(text="partial response", response_key=response_key, cancel_generation=generation),
+                AudioOutput(audio=_pcm_bytes(256), response_key=response_key, cancel_generation=generation),
+                AudioOutput(audio=_pcm_bytes(128), response_key=response_key, cancel_generation=generation),
+                AssistantResponseDoneEvent(
+                    response_key=response_key,
+                    cancel_generation=generation,
+                    status="incomplete",
+                    reason=reason,
+                ),
+                AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key, cancel_generation=generation),
+            ]:
+                output_queue.put(item)
+
+            messages = []
+            while not messages or messages[-1]["type"] != "response.done":
+                messages.append(ws.receive_json())
+            response = messages[-1]["response"]
+            assert response["status"] == "incomplete"
+            assert response["status_details"]["reason"] == reason
+            assert response["status_details"].get("error") is None
+            assert not any(message["type"] == "error" for message in messages)
+            pcm = b"".join(
+                base64.b64decode(message["delta"])
+                for message in messages
+                if message["type"] == "response.output_audio.delta"
+            )
+            # The router may batch chunks; count samples instead of deltas.
+            assert len(pcm) == round(384 * output_rate / 16000) * 2
+            assert sum(message["type"] == "response.output_audio.done" for message in messages) == 1
+            parsed = parse_wire_events(messages)
+            assert_response_lifecycle_contract(parsed, wants_audio=True, expected_status="incomplete")

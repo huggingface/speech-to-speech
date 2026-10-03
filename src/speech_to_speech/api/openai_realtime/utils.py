@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.signal import firwin, lfilter, resample_poly
+from scipy.signal import firwin, lfilter
 
 
 class StreamingPcm16Resampler:
@@ -59,6 +59,12 @@ class StreamingPcm16Resampler:
         # output at the duration of real input, excluding this padding.
         return self._filter(np.zeros(self._delay + self._down, dtype=np.float64))
 
+    @property
+    def pending_output_samples(self) -> int:
+        """Output samples withheld until the input stream is finished."""
+        target = (self._input_samples * self.to_rate + self.from_rate - 1) // self.from_rate
+        return max(0, target - self._output_samples)
+
     def _filter(self, upsampled: np.ndarray) -> bytes:
         filtered, self._filter_state = lfilter(
             self._taps,
@@ -81,13 +87,3 @@ class StreamingPcm16Resampler:
             output = output[:remaining]
         self._output_samples += output.size
         return np.clip(np.round(output), -32768, 32767).astype("<i2").tobytes()
-
-
-def resample(audio_int16: bytes, from_rate: int, to_rate: int) -> bytes:
-    """Resample int16 PCM audio between sample rates using polyphase filtering."""
-    if from_rate == to_rate:
-        return audio_int16
-    samples = np.frombuffer(audio_int16, dtype=np.int16).astype(np.float32) / 32768.0
-    gcd = np.gcd(to_rate, from_rate)
-    resampled = resample_poly(samples, up=to_rate // gcd, down=from_rate // gcd)
-    return np.clip(resampled * 32768, -32768, 32767).astype(np.int16).tobytes()

@@ -16,6 +16,7 @@ from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
+from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,7 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.should_listen = should_listen
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
-        self.device = device
+        self.device = resolve_device(device, TORCH_DEVICES, "Facebook MMS TTS")
         self.torch_dtype = getattr(torch, torch_dtype)
         self.stream = stream
         self.chunk_size = chunk_size
@@ -162,7 +163,14 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
             speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
-        language_code = tts_input.language_code
+        language_code = tts_input.tts_language_code
+        selected = tts_input.selected_language
+        if selected not in (None, "auto") and language_code not in WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE:
+            # A detected language without an MMS checkpoint keeps the session language.
+            language_code = selected
+        runtime_config = tts_input.runtime_config
+        if language_code is None and runtime_config is not None and tts_input.selected_language == "auto":
+            language_code = self._initial_language
         text = tts_input.text
 
         console.print(f"[green]ASSISTANT: {text}")

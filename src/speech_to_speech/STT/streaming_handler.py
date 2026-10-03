@@ -235,6 +235,7 @@ class _Commit:
     turn_revision: int | None
     done: Event
     boundary_queued_at_s: float
+    completed_at_s: float | None = None
     result: str | None = None
     language: str | None = None
     error: str | None = None
@@ -753,10 +754,11 @@ class _StreamingSession:
                 committed_prefixes[active_commit.turn_id] = combined
             active_commit.result = combined
             active_commit.language = event.language
+            active_commit.completed_at_s = perf_counter()
             logger.info(
                 "%s VAD commit to final transcript completed in %.3fs turn=%s rev=%s",
                 self.protocol.name,
-                perf_counter() - active_commit.boundary_queued_at_s,
+                active_commit.completed_at_s - active_commit.boundary_queued_at_s,
                 active_commit.turn_id,
                 active_commit.turn_revision,
             )
@@ -1044,7 +1046,7 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
                 message=commit.error,
                 turn_id=vad_audio.turn_id,
                 turn_revision=vad_audio.turn_revision,
-                speech_stopped_at_s=vad_audio.created_at_s,
+                speech_stopped_at_s=vad_audio.speech_end_at_s,
             )
             return
         if self.speculative_turns is not None and not self.speculative_turns.is_latest(
@@ -1052,12 +1054,17 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
             vad_audio.turn_revision,
         ):
             return
+        if commit.completed_at_s is not None:
+            store = getattr(self, "turn_latency_store", None)
+            tracker = store.get_or_create_for_turn(vad_audio.turn_id, vad_audio.turn_revision) if store else None
+            if tracker is not None:
+                tracker.record_stt(commit.completed_at_s - commit.boundary_queued_at_s)
         yield Transcription(
             text=commit.result or "",
             language_code=commit.language,
             turn_id=vad_audio.turn_id,
             turn_revision=vad_audio.turn_revision,
-            speech_stopped_at_s=vad_audio.created_at_s,
+            speech_stopped_at_s=vad_audio.speech_end_at_s,
         )
 
     def on_session_end(self) -> None:
