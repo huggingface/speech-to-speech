@@ -206,10 +206,12 @@ def test_stale_final_stt_discards_only_superseded_revision(
     service, conn_id, final_stt_event, caplog, stt_finishes_after_reopen
 ):
     service.speculative_turns = SpeculativeTurnTracker()
+    service.speculative_turns.start_turn()
     service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
     if not stt_finishes_after_reopen:
         stale = final_stt_event("turn_1", 0, "Old transcript")
 
+    service.speculative_turns.observe("turn_1", 1)
     service.dispatch_pipeline_event(
         conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True, interrupt_response=False)
     )
@@ -242,6 +244,7 @@ def test_stale_final_stt_discards_only_superseded_revision(
 def test_stt_worker_discards_latency_when_revision_changes_during_inference(service, conn_id, caplog):
     speculative_turns = SpeculativeTurnTracker()
     service.speculative_turns = speculative_turns
+    speculative_turns.start_turn()
     service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
     store = service.turn_latency_store
     unrelated = store.get_or_create_for_turn("other_turn", 0)
@@ -551,6 +554,8 @@ def test_multiple_qwen_segments_keep_first_audio_timings_in_terminal_log(service
 
 @pytest.mark.parametrize("followup_status", ["completed", "cancelled"])
 def test_tool_followup_logs_distinct_responses_in_same_turn(service, conn_id, caplog, followup_status):
+    service.speculative_turns = SpeculativeTurnTracker()
+    service.speculative_turns.start_turn()
     request = _queue_turn(service, conn_id)
     original_tracker = service.turn_latency_store.get_response(request.response_key)
     original_tracker.vad_decision_s = 0.2
@@ -564,6 +569,8 @@ def test_tool_followup_logs_distinct_responses_in_same_turn(service, conn_id, ca
         conn_id,
         AssistantOutputEvent(
             response_key=request.response_key,
+            turn_id=request.turn_id,
+            turn_revision=request.turn_revision,
             parts=[
                 AssistantToolCallPart(
                     tool={"type": "function_call", **call.model_dump(include={"id", "call_id", "name", "arguments"})}

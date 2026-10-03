@@ -194,7 +194,22 @@ class AudioHandler(RealtimeBaseHandler):
         if started_turn_id is not None and pending.turn_id != started_turn_id:
             return "publish"
         st = self._state(conn_id)
-        unanswered = pending.input_closed and not (st.in_response or st.response_pending)
+        active_owns_turn = st.in_response and (
+            st.current_response_turn_id is None
+            or (st.current_response_turn_id, st.current_response_turn_revision)
+            == (pending.turn_id, pending.turn_revision)
+        )
+        pending_owns_turn = False
+        for response_key in st.pending_response_keys:
+            response_latency = self._service.turn_latency_store.get_response(response_key)
+            if response_latency is None or (response_latency.turn_id, response_latency.turn_revision) == (
+                pending.turn_id,
+                pending.turn_revision,
+            ):
+                pending_owns_turn = True
+                break
+        has_response = active_owns_turn or pending_owns_turn
+        unanswered = pending.input_closed and not has_response
         if unanswered or isinstance(pending.transcription, ConversationItemInputAudioTranscriptionFailedEvent):
             # No output will commit this turn: its transcription failed, was
             # empty, or its response ended without output. The item cannot
@@ -203,6 +218,10 @@ class AudioHandler(RealtimeBaseHandler):
             committed = turns.try_commit_if_latest_after_reopen_grace(pending.turn_id, pending.turn_revision)
             if committed is None:
                 return "hold"
+            if committed and not has_response:
+                # Terminal-only input has no response completion to retire its
+                # commitment. Retire that record once the input is final.
+                turns.close(pending.turn_id, pending.turn_revision)
             return "publish" if committed else "discard"
         if turns.is_committed(pending.turn_id, pending.turn_revision):
             return "publish"
@@ -344,12 +363,17 @@ class AudioHandler(RealtimeBaseHandler):
             response.discard_tool_followup_prefetch(conn_id)
             st.generation_done_tool_calls.clear()
             st.completed_tool_response_keys.clear()
-        is_reopen = bool(event.reopened and event.turn_id is not None and event.turn_id == st.speculative_turn_id)
+        is_reopen = bool(event.reopened and event.turn_id is not None)
         preserve_active_response = st.in_response
-        previous_input_item_id = (
-            st.input_item_by_turn_revision.get((event.turn_id, st.speculative_turn_revision))
-            if is_reopen and event.turn_id is not None
-            else None
+        # Reopen ownership comes from the protocol item's turn mapping, not a
+        # second mutable copy of the tracker's current revision.
+        previous_input_item_id = next(
+            (
+                item_id
+                for (turn_id, _revision), item_id in st.input_item_by_turn_revision.items()
+                if is_reopen and turn_id == event.turn_id
+            ),
+            None,
         )
         previous_input_item = st.input_items.get(previous_input_item_id) if previous_input_item_id is not None else None
         if previous_input_item_id is not None and previous_input_item is not None:
@@ -370,8 +394,6 @@ class AudioHandler(RealtimeBaseHandler):
             )
         if not is_reopen:
             st.response_usage.turns += 1
-        st.speculative_turn_id = event.turn_id
-        st.speculative_turn_revision = event.turn_revision
         # A reopened revision is still the same externally open speech item.
         # Keep cancellation and revision bookkeeping above, but do not reset
         # a generic client's audio onset with another speech_started event.

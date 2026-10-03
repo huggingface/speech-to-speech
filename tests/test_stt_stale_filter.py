@@ -299,3 +299,24 @@ def test_stt_handler_bulk_drops_progressives_queued_before_matching_final():
     assert isinstance(remaining, VADAudio)
     assert remaining.turn_id == "turn_2"
     assert queue_in.empty()
+
+
+def test_stt_does_not_restart_expired_tracker_processing_delay(monkeypatch):
+    clock = [10.0]
+    monkeypatch.setattr("speech_to_speech.pipeline.speculative_turns.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.STT.base_stt_handler.monotonic", lambda: clock[0])
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    tracker.segment_finalized(1000, output_hold_ms=2000, processing_delay_ms=600)
+    clock[0] = 10.7
+    handler = _handler(tracker, Queue(), Queue())
+    item = _vad_audio(mode="final", processing_delay_s=0.6)
+    result = []
+    thread = Thread(target=lambda: result.append(handler.should_process_input(item)))
+    thread.start()
+    thread.join(timeout=0.2)
+    completed_without_new_wait = not thread.is_alive()
+    tracker.start_turn()
+    thread.join(timeout=1.0)
+    assert completed_without_new_wait
+    assert result == [True]

@@ -9,7 +9,7 @@ import torch
 
 from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
 from speech_to_speech.pipeline.messages import VADAudio
-from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnPhase
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.VAD.smart_turn import SmartTurnResult
 from speech_to_speech.VAD.vad_handler import VADHandler
@@ -356,12 +356,12 @@ def test_commit_after_new_turn_does_not_resurrect_superseded_turn():
     ],
 )
 def test_commit_if_latest_variants_keep_untracked_turn_out_of_committed_state(commit_method):
-    """An untracked turn reports success before a session cursor exists."""
+    """Tagged work cannot succeed after its session cursor was reset."""
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
     tracker.reset()
 
-    assert getattr(tracker, commit_method)("turn_1", 0) is True
+    assert getattr(tracker, commit_method)("turn_1", 0) is False
     assert not tracker.is_committed("turn_1", 0)
 
 
@@ -383,13 +383,10 @@ def test_vad_direct_reopen_path_uses_tracker_candidate_protocol():
     handler = object.__new__(VADHandler)
     handler.enable_realtime_transcription = True
     handler._speech_started_emitted = False
-    handler._current_turn_id = "turn_1"
-    handler._current_turn_revision = 0
-    handler._last_final_audio_ms = 1000
+    tracker.segment_finalized(1000)
     handler.speculative_reopen_ms = 1200
     handler.unanswered_reopen_ms = 1200
     handler.speculative_turns = tracker
-    handler._pending_reopen_candidate = None
 
     turn_id, revision, reopened = handler._ensure_turn_for_speech_start(1100)
 
@@ -405,13 +402,10 @@ def test_vad_reopens_speculative_turn_when_live_transcription_disabled():
     handler = object.__new__(VADHandler)
     handler.enable_realtime_transcription = False
     handler._speech_started_emitted = False
-    handler._current_turn_id = "turn_1"
-    handler._current_turn_revision = 0
-    handler._last_final_audio_ms = 1000
+    tracker.segment_finalized(1000)
     handler.speculative_reopen_ms = 1200
     handler.unanswered_reopen_ms = 1200
     handler.speculative_turns = tracker
-    handler._pending_reopen_candidate = None
 
     turn_id, revision, reopened = handler._ensure_turn_for_speech_start(1100)
 
@@ -427,12 +421,9 @@ def test_vad_starts_new_turn_after_committed_turn_would_have_reopened():
     handler = object.__new__(VADHandler)
     handler.enable_realtime_transcription = False
     handler._speech_started_emitted = False
-    handler._current_turn_id = "turn_1"
-    handler._current_turn_revision = 0
-    handler._last_final_audio_ms = 1000
+    tracker.segment_finalized(1000)
     handler.speculative_reopen_ms = 1200
     handler.speculative_turns = tracker
-    handler._pending_reopen_candidate = None
 
     turn_id, revision, reopened = handler._ensure_turn_for_speech_start(1100)
 
@@ -522,13 +513,8 @@ def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
     handler._log_speech_ends = 0
     handler._log_progressive_yields = 0
     handler._speech_started_emitted = False
-    handler._current_turn_id = None
-    handler._current_turn_revision = None
     handler._speculative_audio_prefix = None
     handler._speculative_raw_audio_prefix = None
-    handler._last_final_wall_time = None
-    handler._last_final_audio_ms = None
-    handler._pending_reopen_candidate = None
     handler.short_segment_merge_ms = 0
     handler._pending_short_segment = None
     handler._streaming_pre_speech = bytearray()
@@ -574,9 +560,7 @@ def test_vad_pending_reopen_starts_before_active_speech_threshold():
     handler = _vad_handler_for_iterator(iterator)
     tracker = handler.speculative_turns
     tracker.observe("turn_1", 0)
-    handler._current_turn_id = "turn_1"
-    handler._current_turn_revision = 0
-    handler._last_final_audio_ms = 0
+    tracker.segment_finalized(0)
 
     assert list(handler.process(_audio_bytes())) == []
 
@@ -942,8 +926,7 @@ def test_continuation_bar_inactive_when_turn_committed():
 
     assert outputs == []
     assert handler.text_output_queue.empty()
-    assert handler._current_turn_id == "turn_1"
-    assert handler._current_turn_revision == 0
+    assert handler.speculative_turns.current_turn() == ("turn_1", 0)
     assert tracker.is_committed("turn_1", 0)
 
 
@@ -955,7 +938,7 @@ def test_entry_bar_unchanged_for_new_speech():
 
     assert outputs == []
     assert handler.text_output_queue.empty()
-    assert handler._current_turn_id is None
+    assert handler.speculative_turns.current_turn() == (None, None)
 
 
 def test_confirmed_segment_not_discarded_at_finalization():
@@ -996,12 +979,13 @@ def test_continuation_threshold_clamping():
 def test_vad_reopens_unanswered_turn_after_grace_window():
     handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
     handler.unanswered_reopen_ms = 8000
+    handler.speculative_turns.configure_reopen(8000)
     tracker = handler.speculative_turns
 
     outputs = _drive_final_segment(handler)
     assert len(outputs) == 1
     assert (outputs[0].turn_id, outputs[0].turn_revision) == ("turn_1", 0)
-    assert handler._last_final_audio_ms is not None
+    assert tracker.phase == TurnPhase.SOFT_ENDED
     while not handler.text_output_queue.empty():
         handler.text_output_queue.get_nowait()
 
@@ -1022,6 +1006,7 @@ def test_vad_reopens_unanswered_turn_after_grace_window():
 def test_vad_does_not_reopen_committed_turn():
     handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
     handler.unanswered_reopen_ms = 8000
+    handler.speculative_turns.configure_reopen(8000)
     tracker = handler.speculative_turns
 
     outputs = _drive_final_segment(handler)
@@ -1045,6 +1030,7 @@ def test_vad_does_not_reopen_committed_turn():
 def test_vad_new_turn_after_unanswered_cap():
     handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
     handler.unanswered_reopen_ms = 8000
+    handler.speculative_turns.configure_reopen(8000)
 
     outputs = _drive_final_segment(handler)
     assert len(outputs) == 1
@@ -1434,3 +1420,25 @@ def test_firered_preserves_candidate_audio_through_handler(speech_pad_ms, silent
     streamed = np.frombuffer(b"".join(sink.audio), dtype=np.int16)
     np.testing.assert_array_equal(streamed, pcm[expected_start : expected_start + len(audio)])
     np.testing.assert_array_equal(audio, pcm[expected_start : expected_start + len(audio)].astype(np.float32) / 32768)
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_observe_cannot_advance_an_accepted_revision(closed):
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    tracker.commit("turn_1", 0)
+    if closed:
+        tracker.close("turn_1", 0)
+
+    tracker.observe("turn_1", 1)
+
+    assert tracker.current_turn() == ("turn_1", 0)
+    assert tracker.is_latest("turn_1", 0)
+    assert not tracker.commit_if_latest_after_pending_reopen("turn_1", 1)
+    assert not tracker.is_committed("turn_1", 1)
+
+
+def test_tagged_work_is_stale_before_a_cursor_exists():
+    tracker = SpeculativeTurnTracker()
+    assert not tracker.is_latest("turn_999", 0)
+    assert tracker.is_latest(None, None)

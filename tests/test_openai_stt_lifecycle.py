@@ -629,20 +629,23 @@ def test_pending_final_limit_rejects_overflow_and_preserves_accepted_order(handl
 
 def test_stale_pending_final_releases_space_before_queue_limit_is_checked(handler_factory, monkeypatch):
     tracker = SpeculativeTurnTracker()
-    active, latest = ControlledOperation("active"), ControlledOperation("latest")
+    active, latest = ControlledOperation("active", ignore_cancel=True), ControlledOperation("latest")
     latest.release.set()
     handler = handler_factory(active, latest, tracker=tracker)
     monkeypatch.setattr(handler, "_MAX_PENDING_FINAL_REQUESTS", 1)
-    assert list(handler.process(audio(turn="active"))) == []
+    active_turn, _ = tracker.start_turn()
+    assert list(handler.process(audio(turn=active_turn))) == []
     assert active.started.wait(1)
-    assert list(handler.process(audio(turn="pending"))) == []
-    tracker.observe("pending", 1)
-    assert list(handler.process(audio(turn="pending", revision=1))) == []
+    pending_turn, _ = tracker.start_turn()
+    assert list(handler.process(audio(turn=pending_turn))) == []
+    tracker.segment_finalized(100)
+    assert tracker.speech_started(100) == (pending_turn, 1, True)
+    assert list(handler.process(audio(turn=pending_turn, revision=1))) == []
     assert len(handler._pending_finals) == 1
     assert handler.queue_out.empty()
     active.release.set()
     output = handler.queue_out.get(timeout=1)
-    assert (output.turn_id, output.turn_revision) == ("pending", 1)
+    assert (output.turn_id, output.turn_revision) == (pending_turn, 1)
     assert output.text == "latest"
     assert handler.queue_out.empty()
 

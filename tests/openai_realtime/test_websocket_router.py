@@ -676,6 +676,7 @@ class TestSendLoop:
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()  # session.created
+                tracker.start_turn()
                 text_output_queue.put(SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
                 started = ws.receive_json()
                 assert started["type"] == "input_audio_buffer.speech_started"
@@ -695,7 +696,9 @@ class TestSendLoop:
                     "conversation.item.input_audio_transcription.failed",
                 ]
                 assert started["item_id"] == stopped["item_id"] == failed["item_id"]
-                assert tracker.is_committed("turn_1", 0)
+                assert tracker.phase.value == "closed"
+                assert tracker._committed == set()
+                assert tracker.begin_reopen_candidate("turn_1", 0) is None
 
     def test_barge_in_discard_clears_after_response_done(self, setup):
         """After barge-in sets discarding=True, __RESPONSE_DONE__ must clear it back to False."""
@@ -815,7 +818,9 @@ class TestSendLoop:
                 ws.receive_json()  # session.created
                 conn_id = next(iter(service._conns))
                 requests = []
+                tracker.start_turn()
                 for revision in (0, 1):
+                    tracker.observe("turn_1", revision)
                     service.dispatch_pipeline_event(
                         conn_id,
                         SpeechStartedEvent(
