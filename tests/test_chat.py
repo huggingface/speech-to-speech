@@ -216,18 +216,6 @@ class TestAddItemEviction:
         assert "call_cid_1" in chat._pending_tool_calls
         assert chat._pending_tool_calls["call_cid_1"] is fc
 
-    def test_add_function_call_none_call_id_auto_generates(self):
-        chat = Chat(size=5)
-        fc = RealtimeConversationItemFunctionCall(
-            type="function_call",
-            call_id=None,
-            name="f",
-            arguments="{}",
-        )
-        chat.add_item(fc)
-        assert fc.call_id is not None
-        assert fc.call_id.startswith("call_")
-
     def test_eviction_when_exceeding_size(self):
         chat = Chat(size=1)
         chat.add_item(_user("t1"))
@@ -251,9 +239,35 @@ class TestAddItemEviction:
         chat.add_item(_user("t2"))
         chat.trim_if_needed()
         assert chat._user_turn_count == 1
+        assert len(chat.buffer) == 1
         remaining_types = [e.type for e in chat.buffer]
         assert "message" in remaining_types
         assert chat.buffer[0].content[0].text == "t2"
+
+    def test_eviction_preserves_recent_turns_with_tool_history(self):
+        chat = Chat(size=2)
+        chat.add_item(_user("t1"))
+        chat.add_item(_assistant("r1"))
+        chat.add_item(_user("t2"))
+        chat.add_item(_assistant("let me check"))
+        chat.add_item(_fc("c2"))
+        chat.add_item(_fco("c2"))
+        chat.add_item(_assistant("here"))
+
+        chat.add_item(_user("t3"))
+        chat.trim_if_needed()
+
+        assert chat._user_turn_count == 2
+        user_texts = [e.content[0].text for e in chat.buffer if isinstance(e, RealtimeConversationItemUserMessage)]
+        assert user_texts == ["t2", "t3"]
+        assert [e.type for e in chat.buffer] == [
+            "message",
+            "message",
+            "function_call",
+            "function_call_output",
+            "message",
+            "message",
+        ]
 
     def test_eviction_removes_late_output_with_its_call(self):
         chat = Chat(size=2)
@@ -371,6 +385,9 @@ class TestAppendToolOutput:
         assert any(
             isinstance(e, RealtimeConversationItemFunctionCallOutput) and e.call_id == "call_cx" for e in chat.buffer
         )
+        assert "call_cx" not in chat._pending_tool_calls
+        types = [e.type for e in chat.buffer]
+        assert types.index("function_call") < types.index("function_call_output")
 
     def test_reinjection_sets_status(self):
         chat = Chat(size=1)
@@ -391,6 +408,7 @@ class TestAppendToolOutput:
         chat = Chat(size=5)
         with pytest.raises(ChatItemError, match="unknown_id"):
             chat.append_tool_output("unknown_id", _fco("unknown_id"))
+        assert chat.buffer == []
 
 
 # ===================================================================
@@ -494,18 +512,6 @@ class TestAddItem:
         assert len(chat.buffer) == 0
         assert "call_c1" in chat._pending_tool_calls
         assert chat._pending_tool_calls["call_c1"] is fc
-
-    def test_function_call_missing_call_id_auto_generates(self):
-        chat = Chat(size=5)
-        fc = RealtimeConversationItemFunctionCall(
-            type="function_call",
-            call_id=None,
-            name="f",
-            arguments="{}",
-        )
-        chat.add_item(fc)
-        assert fc.call_id is not None
-        assert fc.call_id.startswith("call_")
 
     def test_function_call_none_call_id_auto_generates(self):
         chat = Chat(size=5)
