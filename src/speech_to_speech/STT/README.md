@@ -124,9 +124,10 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - Model flag: `--nemotron_streaming_model_name`
 - Default model: `nvidia/nemotron-speech-streaming-en-0.6b`
 - Override: `nvidia/nemotron-3.5-asr-streaming-0.6b` for multilingual
+- Override: [`mehdi-hf/nemotron-asr-streaming-farsi`](https://huggingface.co/mehdi-hf/nemotron-asr-streaming-farsi) for Persian, with NeMo Speech 3.0 or newer and Python 3.11 or newer
 - Language flag: `--nemotron_streaming_language` (default `en`). Fallback if the model does not emit a tag. The English-only checkpoint always reports this value. Nemotron 3.5 detects language per utterance (`target_lang=auto`), strips `<xx-XX>` from the text, and reports the detected code on the final transcription.
 - Device flag: `--nemotron_streaming_device` (default `auto`)
-- The pipeline transcribes each VAD utterance with NeMo `ASRModel.transcribe` (offline API)
+- The English and multilingual checkpoints use NeMo `ASRModel.transcribe`. The Persian checkpoint uses cache-aware inference with the trained `fa-IR` prompt and always reports `fa`.
 
 ## Language Abbreviations (ISO-style codes seen in STT handlers)
 
@@ -241,6 +242,9 @@ speech-to-speech serve --stt nemotron-streaming
 # Mixed-language sessions with the multilingual checkpoint:
 speech-to-speech serve --stt nemotron-streaming \
   --nemotron_streaming_model_name nvidia/nemotron-3.5-asr-streaming-0.6b
+# Persian speech:
+speech-to-speech serve --stt nemotron-streaming \
+  --nemotron_streaming_model_name mehdi-hf/nemotron-asr-streaming-farsi
 ```
 
 The English-only checkpoint reports `--nemotron_streaming_language` on every
@@ -248,4 +252,25 @@ final transcription. Nemotron 3.5 detects the language of each utterance,
 strips the `<xx-XX>` tag from the text, and reports that code for
 `--enable_lang_prompt` and language-sensitive TTS.
 
-The pipeline transcribes VAD utterances with NeMo `ASRModel.transcribe` (offline API).
+The Persian checkpoint requires `pip install "nemo_toolkit[asr]>=3.0"` and
+Python 3.11 or newer. It downloads the `.nemo` checkpoint and uses the trained
+`fa-IR` prompt with 1.12 seconds of look-ahead. Each VAD window starts with fresh
+encoder and decoder caches; the last chunk flushes the remaining output.
+Progressive VAD windows produce partial transcripts, and final windows report
+language code `fa`, regardless of `--nemotron_streaming_language`. These windows
+are processed independently rather than sharing caches across VAD events.
+Ordinary NeMo `transcribe()` is unsuitable for this checkpoint because its
+dataloader can randomly select an untrained language prompt.
+
+To run the real-checkpoint integration test from a source checkout, use a
+Persian recording of at least one second:
+
+```bash
+FARSI_ASR_TEST_AUDIO=/path/to/persian.wav \
+  python -m pytest tests/test_nemotron_farsi_integration.py -q
+```
+
+The test checks repeated final decoding, partial output, turn metadata, silence,
+and session language reset. Set `FARSI_ASR_TEST_DEVICE=cuda` to test on a GPU,
+`FARSI_ASR_TEST_MODEL=/path/to/model.nemo` to use a local checkpoint, or
+`FARSI_ASR_TEST_EXPECTED_TEXT` to assert an exact transcript.
