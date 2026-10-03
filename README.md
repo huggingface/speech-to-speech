@@ -200,7 +200,7 @@ pip install "speech-to-speech[nemo]"            # Parakeet Unified, Nemotron, an
 pip install "speech-to-speech[mlx-lm]"          # mlx-vlm support for vision models on macOS
 ```
 
-Moonshine is retained in [`archive/`](./archive) for the optional STT benchmark; it is not registered in the CLI.
+Deprecated implementations, including MeloTTS, live in [`archive/`](./archive) and are no longer wired into the CLI.
 
 **Note on DeepFilterNet:** DeepFilterNet, used for optional audio enhancement in VAD, requires `numpy<2` and conflicts with Pocket TTS, which requires `numpy>=2`. Install it manually only in environments where you are not using Pocket TTS.
 
