@@ -1100,6 +1100,52 @@ async def test_audio_client_waits_for_an_active_response_before_tool_follow_up()
     await coordinator.close()
 
 
+@pytest.mark.parametrize("turn_end", ["answered", "empty_answer", "refused_before_output", "refused_after_output"])
+async def test_audio_client_holds_tool_follow_up_until_user_turn_ends(turn_end):
+    release = asyncio.Event()
+
+    async def executor(_name, _arguments):
+        await release.wait()
+        return "result"
+
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn,
+        RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor),
+    )
+    coordinator.handle_event(response_created("response_1"))
+    coordinator.handle_event(response_done(output=[function_call("call_1")]))
+    coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.speech_started", item_id="item_2"))
+
+    def refuse():
+        # The model refuses a question asked while the call has no output.
+        # The turn stays open, and speech can resume without another start.
+        coordinator.handle_event(response_created("response_refused"))
+        coordinator.handle_event(response_done("response_refused", status="failed"))
+
+    if turn_end == "refused_before_output":
+        refuse()
+    release.set()
+    # The output reaches the conversation, but nothing talks over the user.
+    await wait_until(lambda: len(conn.sent) == 1)
+    if turn_end == "refused_after_output":
+        refuse()
+    coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.committed", item_id="item_1"))
+    await asyncio.sleep(0.01)
+    assert [event["type"] for event in conn.sent] == ["conversation.item.create"]
+
+    # The user item commits once the turn cannot reopen.
+    coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.committed", item_id="item_2"))
+    if turn_end in {"answered", "empty_answer"}:
+        output = [SimpleNamespace(type="message")] if turn_end == "answered" else []
+        coordinator.handle_event(response_created("response_2"))
+        coordinator.handle_event(response_done("response_2", output=output))
+    await asyncio.sleep(0.01)
+    # Only an answer the user heard makes the follow-up unnecessary.
+    assert [event["type"] for event in conn.sent][1:] == ([] if turn_end == "answered" else ["response.create"])
+    await coordinator.close()
+
+
 async def test_audio_client_one_follow_up_covers_all_queued_tool_outputs():
     conn = RecordingConnection()
     coordinator = _ToolCallCoordinator(
@@ -1177,7 +1223,8 @@ async def test_audio_client_waits_for_all_tool_flushes_before_follow_up():
     await coordinator.close()
 
 
-async def test_audio_client_waits_for_response_lifecycle_after_follow_up_collision():
+@pytest.mark.parametrize("user_turn", [False, True])
+async def test_audio_client_waits_for_response_lifecycle_after_follow_up_collision(user_turn):
     conn = RecordingConnection()
     coordinator = _ToolCallCoordinator(
         conn,
@@ -1186,6 +1233,8 @@ async def test_audio_client_waits_for_response_lifecycle_after_follow_up_collisi
     coordinator.handle_event(response_done(output=[function_call("call_1")]))
     await wait_until(lambda: len(conn.sent) == 2)
     create_id = conn.sent[-1]["event_id"]
+    if user_turn:
+        coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.speech_started", item_id="item_2"))
 
     coordinator.handle_event(
         SimpleNamespace(
@@ -1201,10 +1250,17 @@ async def test_audio_client_waits_for_response_lifecycle_after_follow_up_collisi
     assert len(conn.sent) == 2
     assert coordinator._queued_follow_ups == 1
 
+    if user_turn:
+        coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.committed", item_id="item_2"))
     coordinator.handle_event(response_created("response_implicit"))
-    coordinator.handle_event(response_done("response_implicit"))
-    await wait_until(lambda: len(conn.sent) == 3)
-    assert conn.sent[-1]["type"] == "response.create"
+    coordinator.handle_event(response_done("response_implicit", output=[SimpleNamespace(type="message")]))
+    if user_turn:
+        # The answer to the turn started after the output, so it used it.
+        await asyncio.sleep(0.01)
+        assert len(conn.sent) == 2
+    else:
+        await wait_until(lambda: len(conn.sent) == 3)
+        assert conn.sent[-1]["type"] == "response.create"
     await coordinator.close()
 
 

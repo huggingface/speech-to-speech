@@ -505,6 +505,15 @@ class _ToolCallCoordinator:
         self._pending_create_follow_ups = 0
         self._pending_create_saw_response = False
         self._waiting_for_response_after_collision = False
+        # Follow-ups wait from a user's speech until their item commits, after
+        # which the turn cannot reopen. If the turn's answer completes with
+        # output, it saw the outputs delivered before it started, so their
+        # follow-ups drop.
+        self._user_turn_open = False
+        self._user_turn_item_id: str | None = None
+        self._awaiting_turn_answer = False
+        self._turn_answer_id: str | None = None
+        self._turn_answer_follow_ups = 0
         self._next_create_sequence = 0
         self._tool_batches: dict[str, _ToolResponseBatch] = {}
         self._tool_batch_order: list[str] = []
@@ -527,8 +536,12 @@ class _ToolCallCoordinator:
                 self._pending_create_saw_response = False
                 self._queued_follow_ups -= self._pending_create_follow_ups
                 self._pending_create_follow_ups = 0
-            elif self._pending_create_id is not None:
-                self._pending_create_saw_response = True
+            else:
+                if self._pending_create_id is not None:
+                    self._pending_create_saw_response = True
+                if self._awaiting_turn_answer:
+                    self._turn_answer_id = self._active_response_id
+                    self._turn_answer_follow_ups = self._queued_follow_ups
         elif event.type == "response.output_item.added":
             item = getattr(event, "item", None)
             if getattr(item, "type", None) == "function_call":
@@ -551,6 +564,14 @@ class _ToolCallCoordinator:
             self._handle_response_done(event.response)
         elif event.type == "error":
             self._handle_error(event.error)
+        elif event.type == "input_audio_buffer.speech_started":
+            self._user_turn_open = True
+            self._user_turn_item_id = getattr(event, "item_id", None)
+            self._awaiting_turn_answer = True
+        elif event.type == "input_audio_buffer.committed":
+            if self._user_turn_open and self._user_turn_item_id in (None, getattr(event, "item_id", None)):
+                self._user_turn_open = False
+                self._kick_follow_up()
         elif event.type == "conversation.item.input_audio_transcription.completed":
             if self._waiting_for_response_after_collision:
                 self._waiting_for_response_after_collision = False
@@ -608,6 +629,14 @@ class _ToolCallCoordinator:
             self._active_response_id = None
         self._waiting_for_response_after_collision = False
         status = getattr(response, "status", None)
+        if response_id is not None and response_id == self._turn_answer_id:
+            # A failed, cancelled or empty answer did not give the user the outputs.
+            if status == "completed" and getattr(response, "output", None):
+                self._queued_follow_ups = max(0, self._queued_follow_ups - self._turn_answer_follow_ups)
+                self._pending_create_follow_ups = min(self._pending_create_follow_ups, self._queued_follow_ups)
+                self._awaiting_turn_answer = False
+            self._turn_answer_id = None
+            self._turn_answer_follow_ups = 0
         if isinstance(response_id, str) and response_id and status == "completed":
             output = getattr(response, "output", None) or []
             calls = [
@@ -806,6 +835,7 @@ class _ToolCallCoordinator:
                 or self._active_response_id is not None
                 or self._pending_create_id is not None
                 or self._waiting_for_response_after_collision
+                or self._user_turn_open
             ):
                 return
             self._next_create_sequence += 1

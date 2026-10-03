@@ -153,10 +153,14 @@ async def test_late_client_tool_followup_does_not_commit_unfinished_speech(monke
         assert tracker.phase == TurnPhase.LISTENING
         tool_release.set()
         for _ in range(100):
-            if any(p["type"] == "response.create" for p in sent):
+            if sent:
                 break
             await asyncio.sleep(0.01)
-        assert [p["type"] for p in sent] == ["conversation.item.create", "response.create"]
+        await asyncio.sleep(0.05)
+        # The packaged client submits the output but does not talk over the user.
+        assert [p["type"] for p in sent] == ["conversation.item.create"]
+        # Another Realtime client can still request a reply during speech.
+        coordinator.handle_event(service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create")))
         followup = prompts.get_nowait()
         service.dispatch_pipeline_event(
             conn_id,
