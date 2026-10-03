@@ -569,6 +569,8 @@ def test_tool_followup_logs_distinct_responses_in_same_turn(service, conn_id, ca
         conn_id,
         AssistantOutputEvent(
             response_key=request.response_key,
+            turn_id=request.turn_id,
+            turn_revision=request.turn_revision,
             parts=[
                 AssistantToolCallPart(
                     tool={"type": "function_call", **call.model_dump(include={"id", "call_id", "name", "arguments"})}

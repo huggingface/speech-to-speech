@@ -213,7 +213,9 @@ class ResponseHandler(RealtimeBaseHandler):
         if origin_response_key is None or queue is None:
             return False
 
-        turn_id, turn_revision, speech_stopped_at_s = self._service.current_input_turn(conn_id)
+        turn_id, turn_revision, speech_stopped_at_s = self._service.response_input_turn(
+            conn_id, origin_call_ids=st.generation_done_tool_calls[origin_response_key]
+        )
         request = GenerateResponseRequest(
             runtime_config=st.runtime_config,
             turn_id=turn_id,
@@ -830,7 +832,7 @@ class ResponseHandler(RealtimeBaseHandler):
 
         cfg = st.runtime_config
         queue = self._queue(conn_id)
-        turn_id, turn_revision, speech_stopped_at_s = self._service.current_input_turn(conn_id)
+        turn_id, turn_revision, speech_stopped_at_s = self._service.response_input_turn(conn_id)
         request = GenerateResponseRequest(
             runtime_config=cfg,
             response=event.response,
@@ -1133,6 +1135,14 @@ class ResponseHandler(RealtimeBaseHandler):
                 if not _early_tool_call or not wants_audio:
                     events.extend(self._finish_current_message_output(conn_id, event.response_key))
                 tool = part.tool
+                accounting = st.input_turn_accounting.get(event.turn_id) if event.turn_id is not None else None
+                st.input_turn_by_call_id[tool.call_id] = (
+                    event.turn_id,
+                    event.turn_revision,
+                    accounting.speech_stopped_at_s if accounting is not None else None,
+                )
+                while len(st.input_turn_by_call_id) > 128:
+                    st.input_turn_by_call_id.pop(next(iter(st.input_turn_by_call_id)))
                 function_item_id = tool.id or _generate_id("item")
                 output_idx, function_item_id = self._output_part_context(
                     conn_id,

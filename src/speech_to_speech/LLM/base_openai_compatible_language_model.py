@@ -1008,7 +1008,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self._apply_config(active_chat, instructions, wants_audio, language_name=lang_name)
 
         audio_b64 = self._audio_to_wav_base64(request.audio, request.audio_sample_rate)
-        audio_message = active_chat.add_item(make_user_audio_message(audio_b64))
+        audio_message = make_user_audio_message(audio_b64)
+        if request.input_item_id is not None:
+            audio_message.id = request.input_item_id
+        active_chat.add_item(audio_message)
         optional_kwargs = self._build_audio_optional_kwargs(response, req_tools, req_tool_choice)
 
         transactional_user_message_id: str | None = None

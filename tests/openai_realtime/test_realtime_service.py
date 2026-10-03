@@ -1950,9 +1950,10 @@ class TestHandleResponseCreate:
         response = service.handle_response_create(conn_id, create_event)
         assert isinstance(response, ResponseCreatedEvent)
         request = text_prompt_queue.get_nowait()
-        assert request.turn_id == "turn_1"
-        assert request.turn_revision == 2
-        assert request.speech_stopped_at_s == 123.0
+        # Client text is new input without a speech-turn association. Only
+        # a create over the unchanged spoken input inherits its timing.
+        expected = ("turn_1", 2, 123.0) if new_input == "none" else (None, None, None)
+        assert (request.turn_id, request.turn_revision, request.speech_stopped_at_s) == expected
 
         processor = LMOutputProcessor.__new__(LMOutputProcessor)
         processor.setup()
@@ -2513,6 +2514,10 @@ class TestFinishAudioResponse:
             metadata[TURN_LATENCY_METADATA_KEY] = "client-value-must-not-win"
         service.speculative_turns = SpeculativeTurnTracker()
         service.speculative_turns.observe("turn_1", 1)
+        service.dispatch_pipeline_event(
+            conn_id, TranscriptionCompletedEvent(transcript="Hello", turn_id="turn_1", turn_revision=1)
+        )
+        service.close_pending_responses(conn_id)
         created = service.handle_response_create(
             conn_id, ResponseCreateEvent(type="response.create", response={"metadata": metadata})
         )
@@ -6005,4 +6010,4 @@ class TestTurnLifecycleOwnership:
         user_items = [item for item in runtime_config.chat.buffer if getattr(item, "role", None) == "user"]
         assert [item.content[0].text for item in user_items] == ["first turn", "revised second turn"]
         assert set(service._state(conn_id).input_turn_accounting) == {"turn_2"}
-        assert service.current_input_turn(conn_id)[:2] == ("turn_2", 1)
+        assert service.response_input_turn(conn_id)[:2] == ("turn_2", 1)

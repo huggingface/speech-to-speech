@@ -377,6 +377,8 @@ class GenerateResponseRequest(PipelineMessage):
     response: RealtimeResponseCreateParams | None = None
     audio: np.ndarray | None = None
     audio_sample_rate: int = 16000
+    # Stable chat identity for direct audio input, assigned before generation.
+    input_item_id: str | None = None
     language_code: Optional[str] = None
     turn_id: str | None = None
     turn_revision: int | None = None

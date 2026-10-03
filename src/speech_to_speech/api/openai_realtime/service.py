@@ -19,6 +19,8 @@ from openai.types.realtime import (
     InputAudioBufferSpeechStoppedEvent,
     OutputAudioBufferClearEvent,
     RealtimeConversationItemFunctionCall,
+    RealtimeConversationItemFunctionCallOutput,
+    RealtimeConversationItemUserMessage,
     RealtimeError,
     RealtimeErrorEvent,
     RealtimeSessionCreateRequest,
@@ -189,6 +191,9 @@ class GlobalUsageMetrics(UsageMetrics):
         return sum(self.errors_by_type.values())
 
 
+InputTurnReference = tuple[str | None, int | None, float | None]
+
+
 class InputTurnAccounting(BaseModel):
     """Chat and usage attributed to an input turn, independent of its lifecycle."""
 
@@ -262,6 +267,11 @@ class ConnState(BaseModel):
     # The tracker owns the current turn and revision. This map holds only the
     # chat/usage effects that a later accepted revision may replace.
     input_turn_accounting: dict[str, InputTurnAccounting] = Field(default_factory=dict)
+    # Immutable ownership of supplied input, not a second lifecycle cursor.
+    # Speech onset never updates these; only supplied input and accepted tool
+    # calls establish which turn a later generation can actually answer.
+    input_turn_by_item_id: dict[str, InputTurnReference] = Field(default_factory=dict)
+    input_turn_by_call_id: dict[str, InputTurnReference] = Field(default_factory=dict)
     # Client conversation.item.create items that arrived while a response was
     # generating. Applying them mid-generation races the LLM handler's chat
     # write-back (cross-thread), so they are buffered here and flushed in order
@@ -672,13 +682,34 @@ class RealtimeService:
             return not is_latest
         return not self.speculative_turns.is_latest(turn_id, turn_revision)
 
-    def current_input_turn(self, conn_id: str) -> tuple[str | None, int | None, float | None]:
-        """Read lifecycle identity from the tracker and its input timing here."""
-        if self.speculative_turns is None:
-            return None, None, None
-        turn_id, revision = self.speculative_turns.current_turn()
-        accounting = self._state(conn_id).input_turn_accounting.get(turn_id) if turn_id is not None else None
-        return turn_id, revision, accounting.speech_stopped_at_s if accounting is not None else None
+    def response_input_turn(self, conn_id: str, *, origin_call_ids: set[str] | None = None) -> InputTurnReference:
+        """Resolve generation ownership from supplied conversation input.
+
+        A listening cursor is not input to generation. Tool continuations keep
+        their call's ownership, including an explicitly unassociated origin.
+        Unknown client input must not inherit an older speech association.
+        """
+        st = self._state(conn_id)
+        if origin_call_ids is not None:
+            references = {st.input_turn_by_call_id.get(call_id, (None, None, None)) for call_id in origin_call_ids}
+            return references.pop() if len(references) == 1 else (None, None, None)
+        for item in reversed(st.runtime_config.chat.copy().buffer):
+            if isinstance(item, RealtimeConversationItemFunctionCallOutput):
+                return st.input_turn_by_call_id.get(item.call_id, (None, None, None))
+            if isinstance(item, RealtimeConversationItemUserMessage):
+                return st.input_turn_by_item_id.get(item.id or "", (None, None, None))
+        return None, None, None
+
+    def record_input_turn(
+        self, conn_id: str, item_id: str, turn_id: str | None, revision: int | None, stopped_at_s: float | None
+    ) -> None:
+        """Attach the supplied revision to its chat item; never advance lifecycle."""
+        st = self._state(conn_id)
+        retained_ids = {item.id for item in st.runtime_config.chat.copy().buffer}
+        st.input_turn_by_item_id = {
+            key: value for key, value in st.input_turn_by_item_id.items() if key in retained_ids
+        }
+        st.input_turn_by_item_id[item_id] = (turn_id, revision, stopped_at_s)
 
     def _input_turn_accounting(self, conn_id: str, turn_id: str | None) -> InputTurnAccounting | None:
         if turn_id is None:
@@ -724,6 +755,11 @@ class RealtimeService:
                 item = cfg.chat.add_item(make_user_message(transcript))
                 if accounting is not None:
                     accounting.user_item_id = item.id
+            supplied_item_id = accounting.user_item_id if accounting is not None else item.id
+            if supplied_item_id is not None:
+                self.record_input_turn(
+                    conn_id, supplied_item_id, event.turn_id, event.turn_revision, event.speech_stopped_at_s
+                )
         elif accounting is not None and user_item_id:
             cfg.chat.remove_user_message(user_item_id)
             accounting.user_item_id = None
@@ -805,8 +841,13 @@ class RealtimeService:
 
         queue = self.text_prompt_queue
         if queue:
+            input_item_id = _generate_id("msg")
+            self.record_input_turn(
+                conn_id, input_item_id, event.turn_id, event.turn_revision, event.speech_stopped_at_s
+            )
             request = GenerateResponseRequest(
                 runtime_config=st.runtime_config,
+                input_item_id=input_item_id,
                 audio=event.audio,
                 audio_sample_rate=event.audio_sample_rate,
                 turn_id=event.turn_id,
