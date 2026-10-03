@@ -93,9 +93,7 @@ def test_faster_whisper_times_only_the_final_branch(monkeypatch) -> None:
     handler._times = [0.01]
 
     final = list(handler.process(VADAudio(audio=np.zeros(1600, dtype=np.float32))))
-    partial = list(
-        handler.process(VADAudio(audio=np.zeros(1600, dtype=np.float32), mode="progressive"))
-    )
+    partial = list(handler.process(VADAudio(audio=np.zeros(1600, dtype=np.float32), mode="progressive")))
 
     assert handler.should_log_timing(final[0])
     assert not handler.should_log_timing(partial[0])
