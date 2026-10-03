@@ -385,6 +385,7 @@ def test_responses_terminal_event_does_not_require_nested_status(status):
 def test_incomplete_terminal_waits_for_reopen_decision(confirm_reopen):
     from speech_to_speech.pipeline.events import AssistantResponseDoneEvent
     from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+    from tests.reopen_dispatch import pending_dispatch
 
     tracker = SpeculativeTurnTracker()
     service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event(), speculative_turns=tracker)
@@ -398,16 +399,19 @@ def test_incomplete_terminal_waits_for_reopen_decision(confirm_reopen):
         status="incomplete",
         reason="max_output_tokens",
     )
-    assert service.should_defer_pipeline_event(terminal)
-    assert service.try_dispatch_pipeline_event(conn, terminal) is None
-    assert not service._state(conn).in_response
+
+    with pending_dispatch(service, conn, terminal) as dispatch:
+        assert not service._state(conn).in_response
+        if confirm_reopen:
+            assert tracker.confirm_reopen_candidate(turn_id, revision, candidate)
+        else:
+            tracker.cancel_reopen_candidate(turn_id, candidate)
+        events = dispatch.result(timeout=1.0)
+
     if confirm_reopen:
-        assert tracker.confirm_reopen_candidate(turn_id, revision, candidate)
-        assert service.try_dispatch_pipeline_event(conn, terminal) == []
+        assert events == []
         assert not service._state(conn).response_incomplete
     else:
-        tracker.cancel_reopen_candidate(turn_id, candidate)
-        events = service.try_dispatch_pipeline_event(conn, terminal)
         assert [event.type for event in events] == ["response.created"]
         done = next(event.response for event in service.finish_response(conn) if event.type == "response.done")
         assert done.status == "incomplete"

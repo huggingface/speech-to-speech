@@ -120,10 +120,6 @@ class StreamingDiarizer:
     def processed_seconds(self) -> float:
         return min(self._frames * self._hop, self._samples) / self.sample_rate
 
-    @property
-    def buffered_samples(self) -> int:
-        return len(self._buffer)
-
     def push(self, audio: np.ndarray, *, sample_rate: int) -> list[SpeakerSegment]:
         if self._finished:
             raise RuntimeError("This session is finished; call reset before feeding more audio")

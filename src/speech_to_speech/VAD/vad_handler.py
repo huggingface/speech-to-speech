@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from queue import Queue
 from threading import Event
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -29,8 +29,6 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from speech_to_speech.diarization.worker import DiarizationWorker
-
-VADInput: TypeAlias = bytes | tuple[bytes, RuntimeConfig]
 
 
 @dataclass
@@ -197,7 +195,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._current_turn_revision: int | None = None
         self._speculative_audio_prefix: np.ndarray | None = None
         self._speculative_raw_audio_prefix: np.ndarray | None = None
-        self._last_final_wall_time: float | None = None
         self._last_final_audio_ms: int | None = None
         self._pending_reopen_candidate: tuple[str, int, int] | None = None
         self._pending_short_segment: _PendingShortSegment | None = None
@@ -249,7 +246,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._speculative_audio_prefix = None
         self._speculative_raw_audio_prefix = None
         self._speculative_speaker_prefix = None
-        self._last_final_wall_time = None
         self._last_final_audio_ms = None
         return self._current_turn_id, self._current_turn_revision
 
@@ -956,7 +952,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 self._speculative_audio_prefix = output_array
                 self._speculative_speaker_prefix = speaker_pending
                 self._speculative_raw_audio_prefix = analysis_audio
-                self._last_final_wall_time = time.time()
                 self._last_final_audio_ms = end_ms
                 # The grace only delays response commits. Resumed speech
                 # follows the existing candidate/revision flow and makes
@@ -1042,7 +1037,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._current_turn_revision = None
         self._speculative_audio_prefix = None
         self._speculative_raw_audio_prefix = None
-        self._last_final_wall_time = None
         self._last_final_audio_ms = None
         self._pending_reopen_candidate = None
         self.speculative_turns.reset()

@@ -21,7 +21,6 @@ from speech_to_speech.backend_registry import (
     HandlerContext,
     build_backend_registry,
     create_backend_handler,
-    select_backend,
 )
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -394,7 +393,8 @@ def test_test_backend_only_needs_config_factory_and_registry_entry():
         [BackendSpec("fake", "stt", FakeArguments, factory, config_prefix="fake")],
     )
     parsed_config = FakeArguments(fake_option="selected")
-    selection = select_backend(registry, "fake", parsed_config)
+    spec = registry["fake"]
+    selection = BackendSelection(spec, spec.normalize(parsed_config))
 
     assert create_backend_handler(selection, _context()) == "handler"
     assert selection.config == {"option": "selected", "gen_kwargs": {}}
@@ -843,3 +843,42 @@ def test_dependency_error_names_backend_and_required_extra():
 
     with pytest.raises(ImportError, match=r"optional.*tts.*speech-to-speech\[optional-extra\]"):
         create_backend_handler(selection, _context())
+
+
+@pytest.mark.parametrize("option", ["--live_transcription_min_silence_ms", "--parakeet_tdt_compute_type"])
+def test_removed_ineffective_options_are_rejected(option):
+    with pytest.raises(ValueError, match=option):
+        parse_arguments([option, "500" if "silence" in option else "float32"])
+
+
+def test_lightning_whisper_uses_only_its_supported_options(monkeypatch, caplog):
+    captured = {}
+
+    class FakeHandler:
+        def __init__(self, *_args, setup_kwargs, **_kwargs):
+            captured.update(setup_kwargs)
+
+    monkeypatch.setattr("speech_to_speech.backend_registry._load_handler", lambda *_args: FakeHandler)
+    args = parse_arguments(
+        [
+            "--stt",
+            "whisper-mlx",
+            "--stt_model_name",
+            "large-v3",
+            "--language",
+            "de",
+            "--stt_torch_dtype",
+            "float32",
+            "--stt_compile_mode",
+            "default",
+            "--stt_gen_max_new_tokens",
+            "64",
+        ]
+    )
+    create_backend_handler(args.stt_backend, _context())
+
+    assert captured == {"model_name": "large-v3", "device": "mps", "language": "de"}
+    assert "Ignoring options for inactive backends" in caplog.text
+    assert "--stt_torch_dtype" in caplog.text
+    assert "--stt_compile_mode" in caplog.text
+    assert "--stt_gen_max_new_tokens" in caplog.text

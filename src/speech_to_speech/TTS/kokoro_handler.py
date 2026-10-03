@@ -162,7 +162,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
             # Get or create the pipeline for our language and preload the voice
             # This avoids the voice being reloaded on every generate() call
             self._pipeline = self.model._get_pipeline(self.lang_code)
-            self._voice_tensor = self._pipeline.load_voice(self.voice)
+            self._pipeline.load_voice(self.voice)
             logger.info(f"Preloaded voice: {self.voice}")
 
             # Preload voices for common languages to avoid download delays during inference
@@ -185,7 +185,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
             from kokoro import KPipeline
 
             self.backend = "kokoro"
-            self.pipeline = KPipeline(lang_code=self.lang_code, device=self.device)
+            self.pipeline = KPipeline(lang_code=self.lang_code, repo_id=model_name, device=self.device)
             logger.info("Native Kokoro pipeline loaded successfully")
         except ImportError as e:
             raise ImportError(
@@ -309,11 +309,10 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     )
                     try:
                         new_pipeline = self.model._get_pipeline(new_lang_code)
-                        new_voice_tensor = new_pipeline.load_voice(new_voice)
+                        new_pipeline.load_voice(new_voice)
                         self.lang_code = new_lang_code
                         self.voice = new_voice
                         self._pipeline = new_pipeline
-                        self._voice_tensor = new_voice_tensor
                     except Exception as e:
                         logger.warning(
                             f"Failed to switch language/voice: {e}. Keeping current language: {self.lang_code}"
@@ -384,7 +383,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 self.voice = new_voice
                 from kokoro import KPipeline
 
-                self.pipeline = KPipeline(lang_code=self.lang_code, device=self.device)
+                self.pipeline = KPipeline(lang_code=self.lang_code, repo_id=self.model_name, device=self.device)
 
         console.print(f"[green]ASSISTANT: {llm_sentence}")
 
@@ -425,11 +424,11 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         if self.backend == "mlx":
             try:
                 self._pipeline = self.model._get_pipeline(self.lang_code)
-                self._voice_tensor = self._pipeline.load_voice(self.voice)
+                self._pipeline.load_voice(self.voice)
             except Exception as e:
                 logger.warning(f"Failed to restore initial voice/language on session end: {e}")
         else:
             from kokoro import KPipeline
 
-            self.pipeline = KPipeline(lang_code=self.lang_code, device=self.device)
+            self.pipeline = KPipeline(lang_code=self.lang_code, repo_id=self.model_name, device=self.device)
         logger.debug("Kokoro TTS session state reset")

@@ -460,10 +460,11 @@ def test_cli_builds_a_qwen3_asr_handler_from_its_flags(monkeypatch: pytest.Monke
 
 def test_registry_normalizes_qwen3_asr_arguments() -> None:
     from speech_to_speech.arguments_classes.qwen3_asr_stt_arguments import Qwen3ASRSTTHandlerArguments
-    from speech_to_speech.backend_registry import STT_BACKENDS, select_backend
+    from speech_to_speech.backend_registry import STT_BACKENDS, BackendSelection
 
     config = Qwen3ASRSTTHandlerArguments(qwen3_asr_language="fr", qwen3_asr_gen_max_new_tokens=64)
-    selection = select_backend(STT_BACKENDS, "qwen3-asr", config)
+    spec = STT_BACKENDS["qwen3-asr"]
+    selection = BackendSelection(spec, spec.normalize(config))
 
     assert selection.config["model_name"] == "Qwen/Qwen3-ASR-0.6B-hf"
     assert selection.config["device"] == "auto"

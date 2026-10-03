@@ -763,11 +763,6 @@ export class S2sRealtimeClient extends EventTarget {
     this._transport?.requestResponse();
   }
 
-  /** @param {string} dataUrl */
-  sendUserImage(dataUrl) {
-    this._session?.addImage(dataUrl, { triggerResponse: false });
-  }
-
   /** @param {boolean} muted */
   setMuted(muted) {
     this._muted = muted;

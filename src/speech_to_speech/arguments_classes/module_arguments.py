@@ -105,12 +105,6 @@ class ModuleArguments:
         default=0.5,
         metadata={"help": "Update interval for live transcription in seconds (default: 0.5s = 500ms)"},
     )
-    live_transcription_min_silence_ms: int = field(
-        default=500,
-        metadata={
-            "help": "Minimum silence duration (ms) before ending speech when live transcription is enabled (default: 500ms)"
-        },
-    )
     enable_llm_proxy: bool = field(
         default=False,
         metadata={

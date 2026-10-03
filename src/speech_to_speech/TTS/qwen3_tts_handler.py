@@ -140,7 +140,6 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
         self.should_listen = should_listen
-        self.requested_device = device
         self.ref_audio = ref_audio
         self.ref_spk = self._normalize_optional_path(ref_spk)
         self.ref_rvq = self._normalize_optional_path(ref_rvq)

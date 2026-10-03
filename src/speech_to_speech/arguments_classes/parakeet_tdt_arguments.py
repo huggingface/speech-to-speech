@@ -26,10 +26,6 @@ class ParakeetTDTSTTHandlerArguments:
             "Options: 'auto', 'cuda', 'npu', 'mps', 'cpu'. Default is 'auto'."
         },
     )
-    parakeet_tdt_compute_type: str = field(
-        default="float16",
-        metadata={"help": "Compute type for the model. Options: 'float16', 'float32'. Default is 'float16'."},
-    )
     parakeet_tdt_language: Optional[str] = field(
         default=None,
         metadata={

@@ -172,26 +172,26 @@ class TestFactoryHelpers:
 
 
 # ===================================================================
-# 3. TestInitChat
+# 3. TestSystemMessages
 # ===================================================================
 
 
-class TestInitChat:
+class TestSystemMessages:
     def test_sets_init_chat_message(self):
         chat = Chat(size=5)
         sys_msg = _system("Be concise.")
-        chat.init_chat(sys_msg)
+        chat.add_item(sys_msg)
         assert chat.init_chat_message is sys_msg
 
     def test_overwrite_replaces_previous(self):
         chat = Chat(size=5)
-        chat.init_chat(_system("first"))
-        chat.init_chat(_system("second"))
+        chat.add_item(_system("first"))
+        chat.add_item(_system("second"))
         assert chat.init_chat_message.content[0].text == "second"
 
     def test_system_message_not_in_buffer(self):
         chat = Chat(size=5)
-        chat.init_chat(_system("system"))
+        chat.add_item(_system("system"))
         assert chat.buffer == []
 
 
@@ -401,7 +401,7 @@ class TestAppendToolOutput:
 class TestAddItem:
     # -- System message --
 
-    def test_system_message_routed_to_init_chat(self):
+    def test_system_message_stored_outside_turn_buffer(self):
         chat = Chat(size=5)
         sys_msg = _system("You are an expert.")
         chat.add_item(sys_msg)
@@ -638,7 +638,7 @@ class TestToResponseApiChat:
 
     def test_system_message_serialized(self):
         chat = Chat(size=5)
-        chat.init_chat(_system("Be brief."))
+        chat.add_item(_system("Be brief."))
         result = chat.to_responses_api_chat()
         assert len(result) == 1
         assert result[0]["role"] == "system"
@@ -653,7 +653,7 @@ class TestToResponseApiChat:
             role="system",
             content=[SystemContent(type="input_text", text="")],
         )
-        chat.init_chat(sys_msg)
+        chat.add_item(sys_msg)
         result = chat.to_responses_api_chat()
         assert result[0]["content"][0]["text"] == "A helpful AI assistant."
 
@@ -766,7 +766,7 @@ class TestToResponseApiChat:
 
     def test_full_mixed_conversation(self):
         chat = Chat(size=10)
-        chat.init_chat(_system("You are helpful."))
+        chat.add_item(_system("You are helpful."))
         chat.add_item(_user("Call my tool"))
         chat.add_item(_fc("c1", "tool_a", '{"x": 1}'))
         fco = _fco("c1", '{"y": 2}')
@@ -794,7 +794,7 @@ class TestToTransformersChat:
 
     def test_system_message(self):
         chat = Chat(size=5)
-        chat.init_chat(_system("Be concise."))
+        chat.add_item(_system("Be concise."))
         result = chat.to_transformers_chat()
         assert result == [{"role": "system", "content": "Be concise."}]
 
@@ -887,7 +887,7 @@ class TestToTransformersChat:
 
     def test_full_mixed_conversation(self):
         chat = Chat(size=10)
-        chat.init_chat(_system("System prompt"))
+        chat.add_item(_system("System prompt"))
         chat.add_item(_user("Do it"))
         chat.add_item(_fc("c1", "action", '{"a": 1}'))
         chat.add_item(_fco("c1", "done"))
@@ -958,7 +958,7 @@ class TestCopyAndReset:
     def test_copy_preserves_init_chat_message(self):
         chat = Chat(size=5)
         sys_msg = _system("Keep it short.")
-        chat.init_chat(sys_msg)
+        chat.add_item(sys_msg)
         clone = chat.copy()
         assert clone.init_chat_message is sys_msg
 
@@ -984,7 +984,7 @@ class TestCopyAndReset:
 
     def test_reset_clears_everything(self):
         chat = Chat(size=5)
-        chat.init_chat(_system("sys"))
+        chat.add_item(_system("sys"))
         chat.add_item(_user("u"))
         chat.add_item(_fc("c1"))
         assert len(chat.buffer) > 0
@@ -1456,7 +1456,7 @@ class TestCompaction:
     def test_init_message_unchanged_after_compaction(self):
         chat = Chat(size=2)
         sys_msg = _system("system prompt")
-        chat.init_chat(sys_msg)
+        chat.add_item(sys_msg)
         compactor = _make_stub_compactor()
         for i in range(3):
             chat.add_item(_user(f"u{i}"))
@@ -1497,7 +1497,7 @@ class TestCompaction:
 class TestBuildActiveChat:
     def _default(self) -> Chat:
         chat = Chat(size=4)
-        chat.init_chat(make_system_message("default system"))
+        chat.add_item(make_system_message("default system"))
         chat.add_item(_user("default question"))
         return chat
 
