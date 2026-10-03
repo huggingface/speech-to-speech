@@ -72,6 +72,47 @@ def _handler(
     )
 
 
+def test_final_input_gate_records_vad_settle_on_the_pending_turn():
+    tracker = SpeculativeTurnTracker()
+    queue_in = Queue()
+    queue_out = Queue()
+    handler = _handler(tracker, queue_in, queue_out, final_revision_settle_s=0.05)
+    store = TurnLatencyStore()
+    handler.turn_latency_store = store
+
+    assert handler.should_process_input(_vad_audio(mode="progressive"))
+    assert store.pending_for_turn("turn_1", 0) is None
+
+    # A gate that returned immediately stays out of the line entirely.
+    quiet = _handler(SpeculativeTurnTracker(), Queue(), Queue())
+    quiet.turn_latency_store = store
+    assert quiet.should_process_input(_vad_audio(turn_id="turn_quiet", mode="final"))
+    assert store.pending_for_turn("turn_quiet", 0) is None
+
+    assert handler.should_process_input(_vad_audio(mode="final"))
+    pending = store.pending_for_turn("turn_1", 0)
+    assert pending is not None
+    assert pending.vad_settle_s is not None
+    assert pending.vad_settle_s >= 0.05
+
+
+def test_superseded_revision_drops_its_pending_latency_slot():
+    """A progressive update opens a pending slot; if the revision is then
+    superseded no transcription will ever consume it."""
+    tracker = SpeculativeTurnTracker()
+    queue_in = Queue()
+    queue_out = Queue()
+    handler = _handler(tracker, queue_in, queue_out)
+    store = TurnLatencyStore()
+    handler.turn_latency_store = store
+    store.get_or_create_for_turn("turn_1", 0).record_mlx_lock_wait(0.01, "ParakeetSTT-Progressive")
+
+    tracker.observe("turn_1", 1)
+    assert not handler.should_process_input(_vad_audio(revision=0, mode="final"))
+
+    assert store.pending_for_turn("turn_1", 0) is None
+
+
 def test_stt_handler_drops_stale_queued_audio_without_processing():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 1)

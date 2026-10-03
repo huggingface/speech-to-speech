@@ -105,7 +105,7 @@ def acquire_mlx_lock(timeout: float | None = None, handler_name: str = "Unknown"
     wait_s = perf_counter() - start
     tracker = active_turn_latency_tracker()
     if tracker is not None:
-        tracker.record_mlx_lock_wait(wait_s)
+        tracker.record_mlx_lock_wait(wait_s, handler_name)
 
     if acquired:
         depth = _record_lock_acquired(handler_name)
@@ -149,6 +149,10 @@ def release_mlx_lock(handler_name: str = "Unknown") -> None:
     try:
         depth, hold_s = _record_lock_released(handler_name)
         _mlx_lock.release()
+        if hold_s is not None and depth == 0:
+            tracker = active_turn_latency_tracker()
+            if tracker is not None:
+                tracker.record_mlx_lock_hold(hold_s, handler_name)
         if hold_s is not None and depth == 0 and hold_s >= 0.25:
             logger.info("%s: MLX lock released after holding %.2fs", handler_name, hold_s)
         else:
