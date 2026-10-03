@@ -173,8 +173,9 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                         cleanup_only=True,
                     )
                 return
-            self._notify_generation_done(lm_output, response_key, succeeded=lm_output.error is None)
-            if lm_output.error is None and self._detected_assistant_language and self._tts_runtime_config is not None:
+            succeeded = lm_output.error is None and lm_output.status == "completed"
+            self._notify_generation_done(lm_output, response_key, succeeded=succeeded)
+            if succeeded and self._detected_assistant_language and self._tts_runtime_config is not None:
                 self._tts_runtime_config.last_assistant_language = self._detected_assistant_language
             if lm_output.error:
                 yield ResponseFailedEvent(
@@ -186,6 +187,8 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 )
             else:
                 yield AssistantResponseDoneEvent(
+                    status=lm_output.status,
+                    reason=lm_output.reason,
                     response_key=response_key,
                     turn_id=lm_output.turn_id,
                     turn_revision=lm_output.turn_revision,
@@ -268,7 +271,12 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                         config.last_assistant_language if config is not None else None
                     )
                 elif selected is not None:
-                    self._response_tts_language = selected
+                    # STT keeps the named selection. TTS follows a confident
+                    # detection of this response's first spoken text, and
+                    # otherwise the selection. TTS keeps the selection for a
+                    # detected language it cannot speak.
+                    detected = self._detected_assistant_language if self.detect_llm_output_language else None
+                    self._response_tts_language = detected or selected
                 self._response_language_resolved = True
             selected = self._response_selected_language
             yield TTSInput(

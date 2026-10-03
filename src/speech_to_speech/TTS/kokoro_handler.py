@@ -73,6 +73,9 @@ KOKORO_LANG_DEFAULT_VOICES = {
     "z": "zf_xiaobei",  # Chinese female
 }
 
+# Codes with a native Kokoro voice; the other map entries fall back to English.
+KOKORO_NATIVE_LANGUAGES = frozenset({"en", "ja", "zh", "fr", "es", "it", "pt", "hi"})
+
 
 class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
     """
@@ -258,6 +261,10 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         runtime_config = tts_input.runtime_config
         response = tts_input.response
         language_code = tts_input.tts_language_code
+        selected = tts_input.selected_language
+        if selected not in (None, "auto") and language_code not in KOKORO_NATIVE_LANGUAGES:
+            # A detected language without a native voice keeps the session language.
+            language_code = selected
         text = tts_input.text
 
         if (

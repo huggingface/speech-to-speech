@@ -167,6 +167,20 @@ def test_farsi_empty_audio_does_not_decode(farsi_model):
     assert calls == []
 
 
+def test_farsi_language_is_not_overridden_by_text_detection(farsi_model, monkeypatch):
+    def unexpected_detection(*args, **kwargs):
+        pytest.fail("Persian-only checkpoint must not use text language detection")
+
+    monkeypatch.setattr("speech_to_speech.STT.nemo_asr_handler.warm_language_detector", unexpected_detection)
+    monkeypatch.setattr("speech_to_speech.STT.nemo_asr_handler.detect_language_from_text", unexpected_detection)
+    handler = object.__new__(NemoASRSTTHandler)
+    handler.setup(model_name=FARSI_MODEL, device="cpu", detect_language_from_text=True)
+
+    assert handler._detect_language_from_text is False
+    event = list(handler.process(VADAudio(audio=np.zeros(16000, dtype=np.float32))))[0]
+    assert event.language_code == "fa"
+
+
 def test_farsi_warmup_failure_prevents_startup(farsi_model, monkeypatch):
     def fail(self, audio):
         raise RuntimeError("inference failed")

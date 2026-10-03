@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 from threading import Event
 from types import SimpleNamespace
@@ -139,3 +140,16 @@ def test_chattts_rejects_an_unsupported_device(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(ValueError, match="ChatTTS supports device 'auto' or one of: cuda, npu, mps, cpu; got 'xpu'"):
         handler.setup(Event(), device="xpu")
     assert _FakeChat.loads == []
+
+
+def test_importing_device_helpers_does_not_import_torch() -> None:
+    # The CLI, Realtime API and LLM helpers import this module without touching a
+    # device, so it must not pay the multi-second torch import at module load.
+    code = (
+        "import sys\n"
+        "import speech_to_speech.utils.utils\n"
+        "import speech_to_speech.cli\n"
+        "assert 'torch' not in sys.modules, 'torch was imported'\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

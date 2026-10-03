@@ -41,6 +41,10 @@ def _split_top_level_calls(source: str) -> List[str]:
     nested parens, strings with ')' chars, etc. are handled correctly.
     """
     tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    # Offset of each line in *source*, to slice calls out by token position.
+    line_offsets = [0]
+    for line in io.StringIO(source).readlines():
+        line_offsets.append(line_offsets[-1] + len(line))
     calls: List[str] = []
     i = 0
 
@@ -80,7 +84,8 @@ def _split_top_level_calls(source: str) -> List[str]:
             i += 1
             continue
 
-        calls.append(tokenize.untokenize(tokens[start : end + 1]).strip())
+        (start_row, start_col), (end_row, end_col) = tokens[start].start, tokens[end].end
+        calls.append(source[line_offsets[start_row - 1] + start_col : line_offsets[end_row - 1] + end_col])
         i = end + 1
 
     return calls

@@ -171,6 +171,7 @@ class Qwen3ASRSTTHandler(BaseSTTHandler):
         language_code = self._final_language_code(detected, request_language, explicit_auto=selected == "auto")
         console.print(f"[yellow]USER: {text}")
         logger.debug("Language Code Qwen3-ASR: %s", language_code)
+        self._record_final_stt(vad_audio, perf_counter() - start)
         yield Transcription(
             text=text,
             language_code=language_code,

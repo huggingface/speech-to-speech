@@ -54,6 +54,7 @@ from speech_to_speech.pipeline.transcript_logging import (
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.utils.thread_manager import ThreadManager
+from speech_to_speech.utils.utils import resolve_device
 from speech_to_speech.VAD.vad_handler import VADHandler
 
 # Ensure that the necessary NLTK resources are available
@@ -87,6 +88,7 @@ def _mac_preset_defaults(llm_backend: str) -> dict[str, Any]:
         "llm_backend": "mlx-lm",
         "tts": "qwen3",
         "stt_device": "mps",
+        "diarization_device": "mps",
         "paraformer_stt_device": "mps",
         "facebook_mms_device": "mps",
         "qwen3_tts_device": "mps",
@@ -265,6 +267,8 @@ def parse_arguments(
         )
 
     module_kwargs = by_type[ModuleArguments]
+    if module_kwargs.diarization and module_kwargs.diarization_model_name is None:
+        module_kwargs.diarization_model_name = "nvidia/Nemotron-3-Diarization"
     module_kwargs.stt = _stt_name
     module_kwargs.llm_backend = _llm_name
     module_kwargs.tts = _tts_name
@@ -323,6 +327,10 @@ def check_mac_settings(module_kwargs: ModuleArguments) -> None:
 
 
 def prepare_module_args(module_kwargs: ModuleArguments, llm_backend: BackendSelection) -> None:
+    if module_kwargs.diarization_model_name and module_kwargs.stt == "none":
+        raise ValueError("Speaker-aware conversation requires an STT backend; --stt none does not produce transcripts.")
+    if module_kwargs.diarization_model_name and not 0 < module_kwargs.diarization_threshold < 1:
+        raise ValueError("--diarization_threshold must be between 0 and 1.")
     if module_kwargs.tts is None:
         module_kwargs.tts = "qwen3"
     if module_kwargs.stt == "none" and not llm_backend.spec.capabilities.supports_audio_input:
@@ -390,6 +398,41 @@ def _build_handlers(
             "speculative_turns": speculative_turns,
         },
     )
+
+    side_handlers: list[Any] = []
+    if module_kwargs.diarization_model_name:
+        from speech_to_speech.diarization import StreamingDiarizer
+        from speech_to_speech.diarization.streaming import DIARIZATION_DEVICES
+        from speech_to_speech.diarization.worker import DiarizationWorker
+
+        diarization_device = resolve_device(
+            module_kwargs.device or module_kwargs.diarization_device,
+            DIARIZATION_DEVICES,
+            "Nemotron diarization",
+        )
+        if diarization_device == "cpu":
+            logger.warning(
+                "Diarization is using CPU; sustained speech can outpace inference and disable speaker labels "
+                "until reconnect. CUDA or MPS is recommended for live sessions."
+            )
+        diarizer = StreamingDiarizer.from_pretrained(
+            module_kwargs.diarization_model_name,
+            revision=module_kwargs.diarization_revision,
+            device=diarization_device,
+            dtype=module_kwargs.diarization_dtype,
+            streaming_mode=module_kwargs.diarization_streaming_mode,
+            threshold=module_kwargs.diarization_threshold,
+        )
+        if diarizer.sample_rate != vad_handler_kwargs.sample_rate:
+            raise ValueError("Diarization and VAD must use the same audio sample rate.")
+        diarizer.warmup()
+        logger.info(
+            "Diarization ready: device=%s mode=%s; speaker labels will accompany completed transcriptions",
+            diarization_device,
+            module_kwargs.diarization_streaming_mode,
+        )
+        vad.diarization_worker = DiarizationWorker(diarizer, stop_event)
+        side_handlers.append(vad.diarization_worker)
 
     needs_notifier = not stt_backend.spec.capabilities.bypasses_transcription_notifier
     stt_queue_out: Queue[Any] = stt_output_queue if needs_notifier else text_prompt_queue
@@ -461,7 +504,7 @@ def _build_handlers(
         tts_context,
     )
 
-    return [vad, *speech_input_handlers, lm, lm_processor, tts]
+    return [vad, *side_handlers, *speech_input_handlers, lm, lm_processor, tts]
 
 
 def _stt_session_languages(selection: BackendSelection, handler: Any) -> set[str] | None:

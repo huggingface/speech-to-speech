@@ -17,6 +17,7 @@ from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEv
 from speech_to_speech.pipeline.handler_types import VADIn, VADOut
 from speech_to_speech.pipeline.messages import VADAudio
 from speech_to_speech.pipeline.queue_types import TextEventItem
+from speech_to_speech.pipeline.speaker_metadata import PendingSpeakerAttribution
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.utils import int2float
 from speech_to_speech.VAD.vad_iterator import VADIterator
@@ -25,6 +26,9 @@ if TYPE_CHECKING:
     from speech_to_speech.VAD.firered_vad_iterator import FireRedVadIterator
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from speech_to_speech.diarization.worker import DiarizationWorker
 
 VADInput: TypeAlias = bytes | tuple[bytes, RuntimeConfig]
 
@@ -163,6 +167,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             )
         else:
             raise ValueError(f"Unknown VAD backend {vad!r}. Choose silero or firered.")
+        # session.update may override these; on_session_end restores the configured values.
+        self._configured_threshold = self.iterator.threshold
+        self._configured_min_silence_samples = self.iterator.min_silence_samples
         self.audio_enhancement = audio_enhancement
         if audio_enhancement:
             if not HAS_DF:
@@ -196,6 +203,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._pending_short_segment: _PendingShortSegment | None = None
         self.streaming_stt_sink: Any | None = None
         self._streaming_pre_speech = bytearray()
+        self.diarization_worker: DiarizationWorker | None = None
+        self._diarization_streaming = False
+        self._speculative_speaker_prefix: PendingSpeakerAttribution | None = None
 
     @property
     def _audio_ms(self) -> int:
@@ -238,6 +248,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._current_turn_id, self._current_turn_revision = self.speculative_turns.start_turn()
         self._speculative_audio_prefix = None
         self._speculative_raw_audio_prefix = None
+        self._speculative_speaker_prefix = None
         self._last_final_wall_time = None
         self._last_final_audio_ms = None
         return self._current_turn_id, self._current_turn_revision
@@ -415,6 +426,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             logger.exception("VAD: failed to enqueue a streaming STT audio chunk")
 
     def _discard_streaming_utterance(self) -> None:
+        worker = getattr(self, "diarization_worker", None)
+        if worker is not None and self._diarization_streaming:
+            worker.discard_utterance()
+            self._diarization_streaming = False
         sink = getattr(self, "streaming_stt_sink", None)
         if sink is None:
             return
@@ -436,6 +451,31 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         if self._speculative_audio_prefix is None:
             return current_segment
         return np.concatenate((self._speculative_audio_prefix, current_segment))
+
+    def _stream_diarization(self, audio: np.ndarray, vad_output: list[torch.Tensor] | None, *, active: bool) -> None:
+        worker = getattr(self, "diarization_worker", None)
+        if worker is None or not active:
+            return
+        if not self._diarization_streaming:
+            # Use the iterator's actual onset buffer, including its exact
+            # pre-roll. Subsequent chunks are deltas, never progressive repeats.
+            onset = vad_output if vad_output else self.iterator.speech_buffer()
+            if onset:
+                audio = torch.cat(onset).cpu().numpy()
+            self._diarization_streaming = True
+        worker.append_audio(audio, self._total_samples - len(audio))
+
+    def _speaker_pending(self, segment_samples: int) -> PendingSpeakerAttribution | None:
+        worker = getattr(self, "diarization_worker", None)
+        if worker is None:
+            return None
+        current = worker.finalize(max(0, self._total_samples - segment_samples), self._total_samples)
+        self._diarization_streaming = False
+        prefix = getattr(self, "_speculative_speaker_prefix", None)
+        offset = (
+            len(self._speculative_audio_prefix) / self.sample_rate if self._speculative_audio_prefix is not None else 0
+        )
+        return current.with_prefix(prefix, offset)
 
     def _combined_raw_turn_audio(self, current_segment: np.ndarray) -> np.ndarray:
         if self._speculative_raw_audio_prefix is None:
@@ -647,14 +687,16 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         audio_int16 = np.frombuffer(audio_chunk, dtype=np.int16)
         self._total_samples += len(audio_int16)
         audio_float32 = int2float(audio_int16)
-
         was_triggered = self.iterator.triggered
         received_at_s = time.perf_counter()
         vad_output = self.iterator(torch.from_numpy(audio_float32))
         decision_at_s = time.perf_counter()
         is_triggered_now = self.iterator.triggered
 
-        if getattr(self, "streaming_stt_sink", None) is not None and self._pending_short_segment is not None:
+        if (
+            getattr(self, "streaming_stt_sink", None) is not None
+            or getattr(self, "diarization_worker", None) is not None
+        ) and self._pending_short_segment is not None:
             # Expiry follows the new segment's start, not the advancing clock
             # while it is speaking. Clear rejected PCM before forwarding more.
             if vad_output:
@@ -673,6 +715,12 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             or is_triggered_now
             or bool(vad_output)
             or self._pending_short_segment is not None,
+        )
+
+        self._stream_diarization(
+            audio_float32,
+            vad_output,
+            active=was_triggered or is_triggered_now or bool(vad_output) or self._pending_short_segment is not None,
         )
 
         # Deferred speech_started: only emit once active VAD speech reaches the valid speech threshold.
@@ -894,6 +942,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
                 output_array = self._combined_turn_audio(array)
+                speaker_pending = self._speaker_pending(len(array))
                 combined_duration_s = len(output_array) / self.sample_rate
                 if self.text_output_queue:
                     self.text_output_queue.put(
@@ -905,6 +954,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         )
                     )
                 self._speculative_audio_prefix = output_array
+                self._speculative_speaker_prefix = speaker_pending
                 self._speculative_raw_audio_prefix = analysis_audio
                 self._last_final_wall_time = time.time()
                 self._last_final_audio_ms = end_ms
@@ -921,6 +971,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 self._commit_streaming_turn(turn_id, turn_revision)
                 yield VADAudio(
                     audio=output_array,
+                    speaker_pending=speaker_pending,
                     runtime_config=runtime_config,
                     mode="final",
                     turn_id=turn_id,
@@ -969,11 +1020,19 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         return enhanced.numpy().squeeze()
 
     def on_session_end(self):
+        worker = getattr(self, "diarization_worker", None)
+        if worker is not None:
+            worker.reset_session()
+        self._diarization_streaming = False
+        self._speculative_speaker_prefix = None
         streaming_stt_sink = getattr(self, "streaming_stt_sink", None)
         if streaming_stt_sink is not None:
             streaming_stt_sink.cancel_session()
         self._streaming_pre_speech.clear()
         self.iterator.reset_states()
+        self.iterator.threshold = self._configured_threshold
+        self.iterator.min_silence_samples = self._configured_min_silence_samples
+        self._last_turn_detection = None
         self._pending_short_segment = None
         self.iterator.buffer = []
         self.last_process_time = 0.0

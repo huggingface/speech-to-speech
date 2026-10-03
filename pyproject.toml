@@ -47,8 +47,8 @@ dependencies = [
     "torch>=2.4.0; platform_system != 'Darwin'",
     "torchaudio==2.11.0; platform_system == 'Darwin'",
     "torchaudio>=2.4.0; platform_system != 'Darwin'",
-    "transformers==5.14.1; platform_system == 'Darwin'",
-    "transformers>=5.15.1,<6; platform_system != 'Darwin'",
+    "transformers==5.18.0; platform_system == 'Darwin'",
+    "transformers>=5.18.0,<6; platform_system != 'Darwin'",
     "uvicorn>=0.30.0",
     "websockets>=12.0",
     "nano-parakeet>=0.2.0; platform_system != 'Darwin'",
@@ -94,6 +94,9 @@ paraformer = [
     "funasr>=1.2.7",
     "modelscope>=1.17.1",
     "onnxruntime<1.24; python_version < '3.11'",
+]
+sensevoice = [
+    "funasr>=1.1.6",
 ]
 pocket = [
     "pocket-tts>=2.0.0",

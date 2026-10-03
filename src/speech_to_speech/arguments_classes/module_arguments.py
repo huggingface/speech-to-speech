@@ -11,6 +11,32 @@ _PROXY_LLM_BACKENDS = ", ".join(name for name, spec in LLM_BACKENDS.items() if s
 
 @dataclass
 class ModuleArguments:
+    diarization: bool = field(
+        default=False,
+        metadata={"help": "Enable speaker-aware conversation with Nemotron 3 Diarization."},
+    )
+    diarization_model_name: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Optional Transformers streaming diarization checkpoint. Adds session-local speaker metadata to LLM input."
+        },
+    )
+    diarization_revision: Optional[str] = field(default=None, metadata={"help": "Diarization checkpoint revision."})
+    diarization_device: str = field(
+        default="auto",
+        metadata={
+            "help": "Diarization device: auto, cuda, mps, or cpu. Auto selects CUDA, then MPS, then CPU. "
+            "The global --device overrides this setting. CUDA or MPS is recommended for live sessions."
+        },
+    )
+    diarization_dtype: str = field(default="float32", metadata={"choices": ("float32", "float16", "bfloat16")})
+    diarization_streaming_mode: str = field(
+        default="low_latency",
+        metadata={"choices": ("low_latency", "very_low_latency", "ultra_low_latency")},
+    )
+    diarization_threshold: float = field(
+        default=0.5, metadata={"help": "Speaker activity probability cutoff, between 0 and 1."}
+    )
     detect_llm_output_language: bool = field(
         default=False,
         metadata={

@@ -21,6 +21,7 @@ from openai.types.responses.response_function_tool_call import ResponseFunctionT
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.pipeline.speaker_metadata import PendingSpeakerAttribution, SpeakerAttribution
 from speech_to_speech.pipeline.transcript_logging import log_exception
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,8 @@ class VADAudio(PipelineMessage):
 
     tag: Literal["vad_audio"] = "vad_audio"
     audio: np.ndarray
+    speaker_attribution: SpeakerAttribution | None = None
+    speaker_pending: PendingSpeakerAttribution | None = Field(default=None, exclude=True, repr=False)
     runtime_config: RuntimeConfig | None = None
     mode: Literal["progressive", "final"] | None = None
     turn_id: str | None = None
@@ -75,6 +78,7 @@ class Transcription(PipelineMessage):
 
     tag: Literal["transcription"] = "transcription"
     text: str
+    speaker_attribution: SpeakerAttribution | None = None
     language_code: Optional[str] = None
     turn_id: str | None = None
     turn_revision: int | None = None
@@ -180,13 +184,18 @@ class TokenUsage(PipelineMessage):
     response_key: str | None = Field(default=None, exclude=True, repr=False)
 
 
+ResponseIncompleteReason: TypeAlias = Literal["max_output_tokens", "content_filter"]
+
+
 class EndOfResponse(PipelineMessage):
     """Sentinel marking the end of a response.
 
-    ``error`` is set when generation could not start (e.g. an out-of-band
-    response whose ``input`` failed validation); the output processor turns it
+    ``error`` is set when generation fails; the output processor turns it
     into a ``response.done(status="failed")`` while still closing the response
     normally for pipeline cleanup.
+
+    ``status`` and ``reason`` describe a provider limit or filter that cut the
+    reply short. An error takes precedence over this incomplete status.
     """
 
     tag: Literal["end_of_response"] = "end_of_response"
@@ -195,6 +204,8 @@ class EndOfResponse(PipelineMessage):
     cancel_generation: int | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
     error: str | None = None
+    status: Literal["completed", "incomplete"] = "completed"
+    reason: ResponseIncompleteReason | None = None
     cleanup_only: bool = False
 
 

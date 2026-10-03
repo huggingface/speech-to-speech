@@ -166,6 +166,12 @@ class TestExtractFromText:
         assert "do.b" in names
         assert len(calls) == 2
 
+    def test_indented_multiline_code_block(self):
+        text = "Here:\n<code>\n    do.a(x=1)\n    do.b()\n</code>\nDone."
+        outside, calls = extract_function_calls_from_text(text, block_regex=self.CODE_BLOCK_REGEX)
+        assert [c.function_name for c in calls] == ["do.a", "do.b"]
+        assert calls[0].parameters == {"x": 1}
+
     def test_multiple_code_blocks(self):
         text = "Step 1\n<code>a.first()</code>\nStep 2\n<code>b.second()</code>\nDone"
         outside, calls = extract_function_calls_from_text(text, block_regex=self.CODE_BLOCK_REGEX)
