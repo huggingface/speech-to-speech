@@ -1,3 +1,4 @@
+import subprocess
 import sys
 from copy import deepcopy
 from dataclasses import dataclass, fields, replace
@@ -812,20 +813,31 @@ def test_global_device_does_not_reach_mlx_audio_whisper_setup(monkeypatch):
     }
 
 
-def test_factories_keep_backend_modules_lazy():
-    module_names = [
-        "speech_to_speech.STT.whisper_stt_handler",
-        "speech_to_speech.LLM.language_model",
-        "speech_to_speech.TTS.chatTTS_handler",
-        "speech_to_speech.TTS.omnivoice_handler",
-    ]
-    for module_name in module_names:
-        sys.modules.pop(module_name, None)
+def test_registry_import_keeps_backend_modules_lazy():
+    # A fresh process observes the initial import without clearing its evidence
+    # or disturbing the backend modules used by other tests.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+import speech_to_speech.backend_registry
 
-    assert STT_BACKENDS["whisper"].create_handler is not None
-    assert LLM_BACKENDS["transformers"].create_handler is not None
-    assert TTS_BACKENDS["chatTTS"].create_handler is not None
-    assert all(module_name not in sys.modules for module_name in module_names)
+eager_backends = [
+    name for name in sys.modules
+    if name.startswith(("speech_to_speech.STT.", "speech_to_speech.TTS."))
+    or (name.startswith("speech_to_speech.LLM.") and name.endswith("language_model"))
+]
+assert not eager_backends, f"Registry imported backend modules: {eager_backends}"
+""",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_dependency_error_names_backend_and_required_extra():
