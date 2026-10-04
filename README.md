@@ -736,8 +736,9 @@ turn drops older work that has not committed; accepted output can finish.
 
 Each response belongs to the input supplied to generation. The server records that
 ownership on conversation items and accepted tool calls. A tool follow-up keeps its
-originating input's turn; client input without a speech-turn association stays
-untagged. A response cannot borrow the identity of speech still being recorded.
+originating input's turn until a newer turn closes, then moves to that turn so a
+late tool result is still spoken. Client input without a speech-turn association
+stays untagged. A response cannot borrow the identity of speech still being recorded.
 These input records do not control turn state, reopening, or deadlines.
 
 The server holds `input_audio_buffer.speech_stopped` and the final transcription while a turn can still

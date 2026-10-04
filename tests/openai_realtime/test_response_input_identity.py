@@ -13,7 +13,13 @@ from openai.types.realtime.conversation_item import RealtimeConversationItemFunc
 from speech_to_speech.api.openai_realtime.audio_client import RealtimeAudioClientConfig, _ToolCallCoordinator
 from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.LLM.chat import make_user_audio_message
-from speech_to_speech.pipeline.events import AssistantOutputEvent, AudioInputCompletedEvent, TranscriptionCompletedEvent
+from speech_to_speech.pipeline.events import (
+    AssistantOutputEvent,
+    AudioInputCompletedEvent,
+    SpeechStartedEvent,
+    SpeechStoppedEvent,
+    TranscriptionCompletedEvent,
+)
 from speech_to_speech.pipeline.messages import AssistantToolCallPart
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnPhase
 from speech_to_speech.VAD.vad_handler import VADHandler
@@ -181,7 +187,8 @@ async def test_late_client_tool_followup_does_not_commit_unfinished_speech(monke
 
 @pytest.mark.parametrize("prefetch", [False, True])
 @pytest.mark.parametrize("associated", [False, True])
-def test_tool_continuation_keeps_accepted_origin_while_new_speech_is_listening(runtime_config, prefetch, associated):
+@pytest.mark.parametrize("newer_turn", ["listening", "closed"])
+def test_tool_continuation_keeps_origin_until_newer_turn_closes(runtime_config, prefetch, associated, newer_turn):
     tracker, prompts = SpeculativeTurnTracker(), Queue()
     service = RealtimeService(text_prompt_queue=prompts, speculative_turns=tracker)
     conn_id = service.register()
@@ -220,6 +227,13 @@ def test_tool_continuation_keeps_accepted_origin_while_new_speech_is_listening(r
     unfinished_id, _, _ = tracker.speech_started(200)
     if not prefetch:
         service.finish_response(conn_id, response_key=origin.response_key)
+    if newer_turn == "closed":
+        # The newer turn transcribes empty, so nothing answers it and it closes.
+        newer = {"turn_id": unfinished_id, "turn_revision": 0}
+        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(interrupt_response=False, **newer))
+        tracker.segment_finalized(300)
+        service.dispatch_pipeline_event(conn_id, SpeechStoppedEvent(duration_s=0.1, **newer))
+        service.dispatch_pipeline_event(conn_id, TranscriptionCompletedEvent(transcript="", **newer))
     service.handle_conversation_item_create(
         conn_id,
         ConversationItemCreateEvent.model_validate(
@@ -238,18 +252,22 @@ def test_tool_continuation_keeps_accepted_origin_while_new_speech_is_listening(r
     else:
         service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
     request = prompts.get_nowait()
-    assert (request.turn_id, request.turn_revision, request.speech_stopped_at_s) == (
-        origin_id,
-        revision,
-        123.0 if associated else None,
-    )
-    assert not tracker.is_committed(unfinished_id, 0)
-    assert tracker.phase == TurnPhase.LISTENING
+    if newer_turn == "closed" and associated:
+        # No one is speaking, so the late result moves to the closed turn
+        # instead of being dropped as stale.
+        assert tracker.phase == TurnPhase.CLOSED
+        expected = (unfinished_id, 0, None)
+    else:
+        expected = (origin_id, revision, 123.0 if associated else None)
+    assert (request.turn_id, request.turn_revision, request.speech_stopped_at_s) == expected
+    if newer_turn == "listening":
+        assert not tracker.is_committed(unfinished_id, 0)
+        assert tracker.phase == TurnPhase.LISTENING
     if prefetch:
         # Prefetch output is held until the client claims the response.
         service.finish_response(conn_id, response_key=origin.response_key)
         service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
-    service.dispatch_pipeline_event(
+    events = service.dispatch_pipeline_event(
         conn_id,
         AssistantOutputEvent(
             text="Sunny",
@@ -258,6 +276,10 @@ def test_tool_continuation_keeps_accepted_origin_while_new_speech_is_listening(r
             turn_revision=request.turn_revision,
         ),
     )
+    if newer_turn == "closed":
+        assert "response.output_audio_transcript.delta" in [event.type for event in events]
+        service.unregister(conn_id)
+        return
     assert not tracker.is_committed(unfinished_id, 0)
     assert tracker.phase == TurnPhase.LISTENING
     tracker.segment_finalized(300, output_hold_ms=800, processing_delay_ms=600)

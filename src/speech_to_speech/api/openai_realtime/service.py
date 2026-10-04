@@ -79,7 +79,7 @@ from speech_to_speech.pipeline.events import (
 )
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
 from speech_to_speech.pipeline.queue_types import TextPromptItem
-from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnPhase
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.utils.utils import _generate_id
@@ -686,19 +686,35 @@ class RealtimeService:
         """Resolve generation ownership from supplied conversation input.
 
         A listening cursor is not input to generation. Tool continuations keep
-        their call's ownership, including an explicitly unassociated origin.
+        their call's ownership until a newer turn closes; an explicitly
+        unassociated origin stays untagged.
         Unknown client input must not inherit an older speech association.
         """
         st = self._state(conn_id)
+        reference: InputTurnReference = (None, None, None)
         if origin_call_ids is not None:
             references = {st.input_turn_by_call_id.get(call_id, (None, None, None)) for call_id in origin_call_ids}
-            return references.pop() if len(references) == 1 else (None, None, None)
-        for item in reversed(st.runtime_config.chat.copy().buffer):
-            if isinstance(item, RealtimeConversationItemFunctionCallOutput):
-                return st.input_turn_by_call_id.get(item.call_id, (None, None, None))
-            if isinstance(item, RealtimeConversationItemUserMessage):
-                return st.input_turn_by_item_id.get(item.id or "", (None, None, None))
-        return None, None, None
+            if len(references) == 1:
+                reference = references.pop()
+        else:
+            for item in reversed(st.runtime_config.chat.copy().buffer):
+                if isinstance(item, RealtimeConversationItemFunctionCallOutput):
+                    reference = st.input_turn_by_call_id.get(item.call_id, (None, None, None))
+                    break
+                if isinstance(item, RealtimeConversationItemUserMessage):
+                    reference = st.input_turn_by_item_id.get(item.id or "", (None, None, None))
+                    break
+        turns = self.speculative_turns
+        if turns is None or reference[0] is None:
+            return reference
+        # Once a newer turn has closed (answered, empty or failed), no speech
+        # is waiting on this response, so it moves to that turn instead of
+        # being dropped as stale with its origin. Read the turn before the
+        # phase: speech that starts in between shows as LISTENING.
+        current = turns.current_turn()
+        if current == reference[:2] or turns.phase != TurnPhase.CLOSED:
+            return reference
+        return current[0], current[1], None
 
     def record_input_turn(
         self, conn_id: str, item_id: str, turn_id: str | None, revision: int | None, stopped_at_s: float | None
