@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter, OrderedDict
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import Any
 
 from speech_to_speech.baseHandler import BaseHandler
@@ -122,6 +122,9 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
 
         if wait_for_stability:
             item_delay_s = max(0.0, getattr(item, "processing_delay_s", 0.0) - self._item_age_s(item))
+            processing_deadline = self.speculative_turns.processing_deadline(turn_id, turn_revision)
+            if processing_deadline is not None:
+                item_delay_s = max(0.0, processing_deadline - monotonic())
             wait_started_at_s = perf_counter()
             is_latest = self.speculative_turns.is_latest_after_stability_window(
                 turn_id,

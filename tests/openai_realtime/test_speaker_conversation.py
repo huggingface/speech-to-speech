@@ -152,7 +152,7 @@ def test_reopened_audio_offsets_prefix_without_inventing_gap_speech(monkeypatch)
     result = vad._speaker_pending(4000).resolve()
     assert [(i.speaker, i.start, i.end) for i in result.intervals] == [(0, 0, 0.5), (1, 1, 1.25)]
     assert prefix.intervals[0].end == 0.5
-    vad._start_new_turn()
+    vad._ensure_turn_for_speech_start(2000)
     assert vad._speculative_speaker_prefix is None
 
 
@@ -323,7 +323,7 @@ def test_compact_speaker_tag_survives_history_eviction(service, conn_id, runtime
         )
         assert wire[0].transcript == f"hello {turn}"
         if first_item_id is None:
-            first_item_id = service._state(conn_id).speculative_user_item_id
+            first_item_id = runtime_config.chat.buffer[-1].id
         runtime_config.chat.trim_if_needed()
 
     assert all(item.id != first_item_id for item in runtime_config.chat.buffer)

@@ -727,6 +727,22 @@ gated by `--smart_turn_max_wait_ms` (2 seconds by default). If speech resumes du
 reopened as a newer revision, the accumulated audio is re-emitted, and work from the previous revision is
 discarded before it reaches the user.
 
+The turn tracker owns the conversation order and the `LISTENING`, `SOFT_ENDED`,
+`ANSWERING`, and `CLOSED` states. VAD supplies speech boundaries and Smart Turn timing;
+the tracker decides whether resumed speech reopens the current turn. The unanswered
+reopen cap uses streamed-audio time, so a push-to-talk pause with no audio does not
+advance it. Processing and output holds use wall-clock deadlines. Starting a newer
+turn drops older work that has not committed; accepted output can finish.
+
+Each response belongs to the input supplied to generation. The server records that
+ownership on conversation items and accepted tool calls. A tool follow-up keeps its
+originating input's turn. If a user message follows the tool call, the follow-up
+answers that message's turn; if a newer turn closed without one, it moves to that
+turn, so a late tool result is still spoken. Client input without a speech-turn
+association stays untagged. A response cannot borrow the identity of speech still
+being recorded.
+These input records do not control turn state, reopening, or deadlines.
+
 The server holds `input_audio_buffer.speech_stopped` and the final transcription while a turn can still
 reopen. Resumed speech keeps the same open item and live transcription deltas
 continue. Once the turn commits, the client receives one stop, an input-buffer commitment, the created
@@ -772,9 +788,31 @@ Issues and PRs are welcome. Good starting points are the [open issues](https://g
 For local development:
 
 ```bash
-uv sync
-pytest
-ruff check
+uv sync --group dev
+uv run pytest tests -q
+uv run ruff check src tests
+uv run ruff format --check src tests
+uv run mypy src
+```
+
+To check turn ordering, Smart Turn timing, and Realtime routing on CPU:
+
+```bash
+CUDA_VISIBLE_DEVICES='' uv run pytest -q \
+  tests/test_speculative_turns.py \
+  tests/test_smart_turn.py tests/test_stt_stale_filter.py \
+  tests/test_audio_input_notifier.py tests/test_lm_output_processor.py \
+  tests/openai_realtime/test_response_input_identity.py \
+  tests/openai_realtime/test_realtime_service.py \
+  tests/openai_realtime/test_speculative_turn_protocol.py
+```
+
+The response-input tests include a delayed tool completing during synthetic speech,
+using the packaged client coordinator, service, and VAD handler with mocked model
+output and VAD probabilities. Run that reproduction alone with:
+
+```bash
+CUDA_VISIBLE_DEVICES='' uv run pytest tests/openai_realtime/test_response_input_identity.py -q -s
 ```
 
 ## Star History

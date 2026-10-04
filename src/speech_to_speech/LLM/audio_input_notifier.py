@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from queue import Queue
-from time import perf_counter
+from time import monotonic, perf_counter
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.events import AudioInputCompletedEvent
@@ -34,6 +34,9 @@ class AudioInputNotifier(BaseHandler[VADAudio, LLMIn]):
         if item.turn_id is None or item.turn_revision is None:
             return True
         remaining_delay_s = max(0.0, item.processing_delay_s - (perf_counter() - item.created_at_s))
+        processing_deadline = self.speculative_turns.processing_deadline(item.turn_id, item.turn_revision)
+        if processing_deadline is not None:
+            remaining_delay_s = max(0.0, processing_deadline - monotonic())
         wait_started_at_s = perf_counter()
         is_latest = self.speculative_turns.is_latest_after_stability_window(
             item.turn_id,
