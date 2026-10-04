@@ -1,11 +1,4 @@
-"""Tests that Parakeet reports a forced language distinctly from a detected one.
-
-`_resolve_language()` must report `start_language` as-is when pinned, and tag a
-detected language with `-auto` so `resolve_auto_language()` treats it as changeable
-between turns — matching the convention used in FasterWhisperSTTHandler.
-
-`nano_parakeet` is an optional extra, so it is stubbed and these tests run anywhere.
-"""
+"""Parakeet reports detected languages with -auto and ignores configured preferences."""
 
 from __future__ import annotations
 
@@ -40,6 +33,7 @@ def handler_module(monkeypatch):
     monkeypatch.delitem(sys.modules, "speech_to_speech.STT.parakeet_tdt_handler", raising=False)
 
     module = importlib.import_module("speech_to_speech.STT.parakeet_tdt_handler")
+    monkeypatch.setattr(module, "warm_language_detector", lambda candidates: None)
 
     yield module
 
@@ -58,12 +52,13 @@ def make_handler(handler_module, *, language="en", model_text="Hello there"):
     return handler
 
 
-def test_pinned_language_is_reported_as_is(handler_module):
+def test_configured_language_is_not_reported_when_detection_fails(handler_module, monkeypatch):
     handler = make_handler(handler_module, language="fr")
+    monkeypatch.setattr(handler, "_detect_language_from_text", lambda text: None)
 
     outputs = list(handler.process(VADAudio(audio=np.zeros(16000, dtype=np.float32), turn_id="t1", turn_revision=0)))
 
-    assert outputs[0].language_code == "fr"
+    assert outputs[0].language_code is None
 
 
 def test_detected_language_is_reported_with_the_auto_suffix(handler_module, monkeypatch):
@@ -75,31 +70,32 @@ def test_detected_language_is_reported_with_the_auto_suffix(handler_module, monk
     assert outputs[0].language_code == "de-auto"
 
 
-def test_auto_suffix_depends_on_the_request_not_the_detection(handler_module, monkeypatch):
-    """A pinned request never gets `-auto`, even if detection would say otherwise."""
+def test_configured_language_does_not_override_detection(handler_module, monkeypatch):
+    """Parakeet cannot constrain decoding to the configured language."""
     handler = make_handler(handler_module, language="fr")
     monkeypatch.setattr(handler, "_detect_language_from_text", lambda text: "de")
 
     outputs = list(handler.process(VADAudio(audio=np.zeros(16000, dtype=np.float32), turn_id="t1", turn_revision=0)))
 
-    assert outputs[0].language_code == "fr"
+    assert outputs[0].language_code == "de-auto"
 
 
-@pytest.mark.parametrize("value", ["auto", "AUTO", " auto ", "", "none", "null", None])
+@pytest.mark.parametrize("value", ["auto", "AUTO", " auto ", "", "  ", "none", "NONE", "null", "NULL", None, 123])
 def test_auto_sentinels_are_normalized_to_none(handler_module, value):
     handler = make_handler(handler_module, language=value)
 
     assert handler.start_language is None
 
 
-def test_detection_failure_falls_back_to_last_language(handler_module, monkeypatch):
+def test_detection_failure_does_not_report_a_previous_turn_language(handler_module, monkeypatch):
     handler = make_handler(handler_module, language=None)
     handler.last_language = "es"
     monkeypatch.setattr(handler, "_detect_language_from_text", lambda text: None)
 
     outputs = list(handler.process(VADAudio(audio=np.zeros(16000, dtype=np.float32), turn_id="t1", turn_revision=0)))
 
-    assert outputs[0].language_code == "es"
+    assert outputs[0].language_code is None
+    assert handler.last_language == "es"
 
 
 def test_last_language_updates_from_tagged_detected_code(handler_module, monkeypatch):
@@ -113,7 +109,7 @@ def test_last_language_updates_from_tagged_detected_code(handler_module, monkeyp
     assert handler.last_language == "fr"
 
 
-def test_pinned_language_whitespace_is_stripped(handler_module):
+def test_configured_language_whitespace_is_stripped(handler_module):
     handler = make_handler(handler_module, language="  fr  ")
 
     assert handler.start_language == "fr"

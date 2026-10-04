@@ -20,6 +20,8 @@ import speech_to_speech.api.openai_realtime.websocket_router as router_module
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
+from speech_to_speech.LLM.language_model import LanguageModelHandler
+from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
@@ -31,7 +33,9 @@ from speech_to_speech.pipeline.events import (
     ResponseFailedEvent,
     ResponseGenerationDoneEvent,
     SpeechStartedEvent,
+    SpeechStoppedEvent,
     TokenUsageEvent,
+    TranscriptionCompletedEvent,
     TranscriptionFailedEvent,
 )
 from speech_to_speech.pipeline.messages import (
@@ -43,6 +47,8 @@ from speech_to_speech.pipeline.messages import (
     GenerateResponseRequest,
     ResponsePrefetchTransaction,
 )
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 
 from .realtime_contract import (
     assert_response_lifecycle_contract,
@@ -221,7 +227,7 @@ class TestClientEventDispatch:
                     }
                 )
                 time.sleep(0.1)
-                cid = service.connection_ids[0]
+                cid = list(service._conns)[0]
                 assert service._state(cid).runtime_config.session.audio.output.voice == "coral"
 
     def test_session_update_receives_session_updated_confirmation(self, setup):
@@ -300,7 +306,7 @@ class TestClientEventDispatch:
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 st = service._state(conn_id)
                 request = GenerateResponseRequest(runtime_config=st.runtime_config)
                 st.tool_followup_prefetch_request = request
@@ -360,7 +366,7 @@ class TestClientEventDispatch:
                 ws.receive_json()
                 ws.send_json({"type": "response.create"})
                 assert created_send_started.wait(timeout=1.0)
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 response_key = service._state(conn_id).current_response_key
                 text_output_queue.put(
                     AssistantToolCallReadyEvent(
@@ -399,7 +405,7 @@ class TestClientEventDispatch:
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 st = service._state(conn_id)
                 origin_key = "response_origin"
                 st.generation_done_tool_calls[origin_key] = {"call_1"}
@@ -514,6 +520,8 @@ class TestClientEventDispatch:
                 state = service._state(conn_id)
                 assert state.response_pending is True
                 assert not service.text_prompt_queue.empty()
+                pending_key = next(iter(state.pending_response_keys))
+                assert pending_key in service.turn_latency_store._trackers
 
                 ws.send_json({"type": "response.cancel"})
                 time.sleep(0.1)
@@ -522,6 +530,8 @@ class TestClientEventDispatch:
                 assert service.text_prompt_queue.empty()
                 assert state.response_pending is False
                 assert state.pending_response_keys == set()
+                assert service.turn_latency_store._trackers == {}
+                assert len(service.turn_latency_store._session_keys) == 0
 
                 ws.send_json({"type": "response.create"})
                 assert ws.receive_json()["type"] == "response.created"
@@ -659,6 +669,37 @@ class TestSendLoop:
                 assert msg["type"] == "input_audio_buffer.speech_started"
                 assert msg["audio_start_ms"] == 0
 
+    def test_failed_transcription_reaches_client_after_reopen_grace(self, setup):
+        app, service, _, _, text_output_queue, *_ = setup
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                tracker.start_turn()
+                text_output_queue.put(SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
+                started = ws.receive_json()
+                assert started["type"] == "input_audio_buffer.speech_started"
+
+                tracker.start_reopen_grace("turn_1", 0, grace_s=0.05)
+                text_output_queue.put(SpeechStoppedEvent(turn_id="turn_1", turn_revision=0))
+                text_output_queue.put(TranscriptionFailedEvent(message="STT failed", turn_id="turn_1", turn_revision=0))
+
+                stopped = ws.receive_json()
+                committed = ws.receive_json()
+                created = ws.receive_json()
+                failed = ws.receive_json()
+                assert [stopped["type"], committed["type"], created["type"], failed["type"]] == [
+                    "input_audio_buffer.speech_stopped",
+                    "input_audio_buffer.committed",
+                    "conversation.item.created",
+                    "conversation.item.input_audio_transcription.failed",
+                ]
+                assert started["item_id"] == stopped["item_id"] == failed["item_id"]
+                assert tracker.phase.value == "closed"
+                assert tracker._committed == set()
+                assert tracker.begin_reopen_candidate("turn_1", 0) is None
+
     def test_barge_in_discard_clears_after_response_done(self, setup):
         """After barge-in sets discarding=True, __RESPONSE_DONE__ must clear it back to False."""
         app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
@@ -695,6 +736,7 @@ class TestSendLoop:
                 state = service._state(conn_id)
                 assert service.text_prompt_queue.qsize() == 1
                 pending_key = next(iter(state.pending_response_keys))
+                assert pending_key in service.turn_latency_store._trackers
 
                 text_output_queue.put(SpeechStartedEvent())
                 msg = ws.receive_json()
@@ -707,6 +749,8 @@ class TestSendLoop:
                 assert state.response_pending is False
                 assert state.in_response is False
                 assert pending_key in state.closed_response_keys
+                assert service.turn_latency_store._trackers == {}
+                assert len(service.turn_latency_store._session_keys) == 0
                 assert not response_playing.is_set()
 
                 output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=stale_generation))
@@ -764,6 +808,58 @@ class TestSendLoop:
                 assert state.in_response is False
                 assert state.response_pending is False
                 assert state.pending_response_keys == set()
+
+    def test_stale_pending_terminal_discards_only_its_latency_tracker(self, setup):
+        app, service, _, output_queue, *_ = setup
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                conn_id = next(iter(service._conns))
+                requests = []
+                tracker.start_turn()
+                for revision in (0, 1):
+                    tracker.observe("turn_1", revision)
+                    service.dispatch_pipeline_event(
+                        conn_id,
+                        SpeechStartedEvent(
+                            turn_id="turn_1", turn_revision=revision, interrupt_response=False, reopened=revision == 1
+                        ),
+                    )
+                    service.turn_latency_store.get_or_create_for_turn("turn_1", revision).record_stt(0.12)
+                    service.dispatch_pipeline_event(
+                        conn_id,
+                        TranscriptionCompletedEvent(transcript="Hello", turn_id="turn_1", turn_revision=revision),
+                    )
+                    requests.append(service.text_prompt_queue.get_nowait())
+                stale, current = requests
+
+                # The stale LLM request produces a cleanup-only terminal which
+                # passes through the output processor and TTS to the router.
+                handler = object.__new__(LanguageModelHandler)
+                handler.cancel_scope = None
+                handler.speculative_turns = tracker
+                processor = object.__new__(LMOutputProcessor)
+                processor.setup(speculative_turns=tracker)
+                tts = object.__new__(Qwen3TTSHandler)
+                tts.speculative_turns = tracker
+                for chunk in handler.process(stale):
+                    for terminal in processor.process(chunk):
+                        assert terminal.cleanup_only
+                        for output in tts.process(terminal):
+                            output_queue.put(tts.output_for_queue(output, terminal))
+
+                state = service._state(conn_id)
+                deadline = time.monotonic() + 2.0
+                while stale.response_key not in state.closed_response_keys and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+                assert stale.response_key in state.closed_response_keys
+                assert stale.response_key not in state.pending_response_keys
+                assert service.turn_latency_store.get_response(stale.response_key) is None
+                assert current.response_key in state.pending_response_keys
+                assert service.turn_latency_store.get_response(current.response_key).stt_s == 0.12
 
     def test_stale_cleanup_preserves_pending_token_usage_globally(self, setup):
         app, service, _, output_queue, *_ = setup
@@ -854,7 +950,7 @@ class TestSendLoop:
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 stale_generation = cancel_scope.generation
                 service.response._ensure_response(conn_id, "cancelled")
                 ws.send_json({"type": "response.cancel"})
@@ -1138,7 +1234,7 @@ class TestSendLoop:
                 created = ws.receive_json()
                 assert created["type"] == "response.created"
                 assert created["response"]["output_modalities"] == ["text"]
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 response_key = service._state(conn_id).current_response_key
 
                 # Side channel first, then the ordered stream catches up.
@@ -1426,7 +1522,7 @@ class TestCleanup:
             time.sleep(0.3)
 
             assert unit.session is None
-            assert unit.service.connection_ids == []
+            assert list(unit.service._conns) == []
             transaction.claim()
             assert cleanup == []
             assert unit.service.total_usage.input_tokens == 17
@@ -1611,3 +1707,56 @@ class TestPool:
             data = client.get("/v1/usage").json()
             assert data["errors_by_type"] == {"foo": 2, "bar": 1}
             assert data["total_errors"] == 3
+
+
+@pytest.mark.parametrize("reason", ["max_output_tokens", "content_filter"])
+def test_partial_incomplete_response_drains_audio_before_done(setup, reason):
+    app, _, _, output_queue, _, _, _, _, cancel_scope = setup
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()  # session.created
+            output_rate = 24000
+            ws.send_json(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "audio": {"output": {"format": {"type": "audio/pcm", "rate": output_rate}}},
+                    },
+                }
+            )
+            assert ws.receive_json()["type"] == "session.updated"
+            response_key = "incomplete_response"
+            generation = cancel_scope.generation
+            for item in [
+                AssistantOutputEvent(text="partial response", response_key=response_key, cancel_generation=generation),
+                AudioOutput(audio=_pcm_bytes(256), response_key=response_key, cancel_generation=generation),
+                AudioOutput(audio=_pcm_bytes(128), response_key=response_key, cancel_generation=generation),
+                AssistantResponseDoneEvent(
+                    response_key=response_key,
+                    cancel_generation=generation,
+                    status="incomplete",
+                    reason=reason,
+                ),
+                AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key, cancel_generation=generation),
+            ]:
+                output_queue.put(item)
+
+            messages = []
+            while not messages or messages[-1]["type"] != "response.done":
+                messages.append(ws.receive_json())
+            response = messages[-1]["response"]
+            assert response["status"] == "incomplete"
+            assert response["status_details"]["reason"] == reason
+            assert response["status_details"].get("error") is None
+            assert not any(message["type"] == "error" for message in messages)
+            pcm = b"".join(
+                base64.b64decode(message["delta"])
+                for message in messages
+                if message["type"] == "response.output_audio.delta"
+            )
+            # The router may batch chunks; count samples instead of deltas.
+            assert len(pcm) == round(384 * output_rate / 16000) * 2
+            assert sum(message["type"] == "response.output_audio.done" for message in messages) == 1
+            parsed = parse_wire_events(messages)
+            assert_response_lifecycle_contract(parsed, wants_audio=True, expected_status="incomplete")

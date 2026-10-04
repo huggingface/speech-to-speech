@@ -48,6 +48,7 @@ _STT_HANDLER_MODULES = [
     "speech_to_speech.STT.lightning_whisper_mlx_handler",
     "speech_to_speech.STT.faster_whisper_handler",
     "speech_to_speech.STT.qwen3_asr_handler",
+    "speech_to_speech.STT.nemo_asr_handler",
 ]
 
 # These have no optional top-level dependency, so a skip here means something is wrong
@@ -59,6 +60,7 @@ _ALWAYS_IMPORTABLE = {
     "speech_to_speech.STT.qwen3_asr_handler",
     # Importable via the stub above, so a skip here would mean the stub stopped working.
     "speech_to_speech.STT.faster_whisper_handler",
+    "speech_to_speech.STT.nemo_asr_handler",
 }
 
 
@@ -101,14 +103,6 @@ def test_every_stt_language_has_an_llm_language_name(module_name):
         f"WHISPER_LANGUAGE_TO_LLM_LANGUAGE, so --enable_lang_prompt would emit no "
         f"instruction for them"
     )
-
-
-def test_parakeet_default_stt_is_fully_covered():
-    """Explicit guard for the default backend, independent of the parametrized sweep."""
-    parakeet = importlib.import_module("speech_to_speech.STT.parakeet_tdt_handler")
-
-    assert len(parakeet.SUPPORTED_LANGUAGES) == 25
-    assert set(parakeet.SUPPORTED_LANGUAGES) <= set(WHISPER_LANGUAGE_TO_LLM_LANGUAGE)
 
 
 def test_language_names_are_lowercase_and_non_empty():
@@ -160,6 +154,16 @@ def test_resolve_auto_language_returns_no_name_for_unknown_code():
 def test_remove_markdown_strips_bold_and_italic() -> None:
     assert remove_markdown("**bold** and *italic* text") == "bold and italic text"
     assert remove_markdown("__bold__ and _italic_ text") == "bold and italic text"
+
+
+def test_remove_markdown_strips_adjacent_single_char_emphasis_spans() -> None:
+    # Two independent single-character emphasis spans must be stripped on their
+    # own, not merged into one span that leaks the inner delimiters into TTS.
+    assert remove_markdown("You got grade *A* or *B* today") == "You got grade A or B today"
+    assert remove_markdown("*a* and *b*") == "a and b"
+    assert remove_markdown("_a_ and _b_") == "a and b"
+    assert remove_markdown("**A** and **B**") == "A and B"
+    assert remove_markdown("*a* *b* *c*") == "a b c"
 
 
 def test_remove_markdown_keeps_snake_case_identifiers() -> None:

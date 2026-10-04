@@ -1299,7 +1299,7 @@ def test_unconsumed_stale_commit_times_out_and_releases_later_turns(handler_type
         handler.start_turn("turn_1", 1)
         handler.append_audio(reopened_chunk)
         handler.commit_boundary("turn_1", 1)
-        tracker.observe("turn_2", 0)
+        assert tracker.start_turn() == ("turn_2", 0)
         handler.start_turn("turn_2", 0)
         handler.append_audio(b"\x03\x00" * 512)
         handler.commit_boundary("turn_2", 0)
@@ -1538,7 +1538,7 @@ def test_connection_failure_discards_reopened_revisions_of_the_same_turn(handler
     )
     assert len(factory.instances) == 1
 
-    tracker.observe("turn_2", 0)
+    assert tracker.start_turn() == ("turn_2", 0)
     handler.start_turn("turn_2", 0)
     handler.append_audio(b"\x03\x00" * 512)
     recovered = list(
@@ -1993,7 +1993,11 @@ def test_discarded_audio_cannot_contaminate_the_next_turn(handler_type, dialect,
 
 def test_stale_completed_revision_yields_exactly_one_llm_request_for_latest_revision() -> None:
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    llm_requests = Queue()
+    service = RealtimeService(text_prompt_queue=llm_requests, speculative_turns=tracker)
+    connection_id = service.register()
+    service._state(connection_id).runtime_config = RuntimeConfig()
+    tracker.start_turn()
     commit_count = 0
 
     def on_send(event: dict[str, Any], socket: _FakeSocket) -> None:
@@ -2003,7 +2007,8 @@ def test_stale_completed_revision_yields_exactly_one_llm_request_for_latest_revi
         elif event["type"] == "input_audio_buffer.commit":
             commit_count += 1
             if commit_count == 1:
-                tracker.observe("turn_1", 1)
+                tracker.segment_finalized(100)
+                assert tracker.speech_started(100) == ("turn_1", 1, True)
             socket.incoming.put(
                 json.dumps(
                     {
@@ -2047,10 +2052,6 @@ def test_stale_completed_revision_yields_exactly_one_llm_request_for_latest_revi
         setup_kwargs={"text_output_queue": transcription_events},
     )
     list(notifier.process(latest[0]))
-    llm_requests = Queue()
-    service = RealtimeService(text_prompt_queue=llm_requests, speculative_turns=tracker)
-    connection_id = service.register()
-    service._state(connection_id).runtime_config = RuntimeConfig()
     service.dispatch_pipeline_event(connection_id, transcription_events.get_nowait())
 
     request = llm_requests.get_nowait()

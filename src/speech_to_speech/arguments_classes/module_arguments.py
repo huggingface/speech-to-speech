@@ -11,6 +11,40 @@ _PROXY_LLM_BACKENDS = ", ".join(name for name, spec in LLM_BACKENDS.items() if s
 
 @dataclass
 class ModuleArguments:
+    diarization: bool = field(
+        default=False,
+        metadata={"help": "Enable speaker-aware conversation with Nemotron 3 Diarization."},
+    )
+    diarization_model_name: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Optional Transformers streaming diarization checkpoint. Adds session-local speaker metadata to LLM input."
+        },
+    )
+    diarization_revision: Optional[str] = field(default=None, metadata={"help": "Diarization checkpoint revision."})
+    diarization_device: str = field(
+        default="auto",
+        metadata={
+            "help": "Diarization device: auto, cuda, mps, or cpu. Auto selects CUDA, then MPS, then CPU. "
+            "The global --device overrides this setting. CUDA or MPS is recommended for live sessions."
+        },
+    )
+    diarization_dtype: str = field(default="float32", metadata={"choices": ("float32", "float16", "bfloat16")})
+    diarization_streaming_mode: str = field(
+        default="low_latency",
+        metadata={"choices": ("low_latency", "very_low_latency", "ultra_low_latency")},
+    )
+    diarization_threshold: float = field(
+        default=0.5, metadata={"help": "Speaker activity probability cutoff, between 0 and 1."}
+    )
+    detect_llm_output_language: bool = field(
+        default=False,
+        metadata={
+            "help": "Detect the language of each assistant text chunk before TTS and pass that code to the TTS "
+            "backend. Sends no code for an initial chunk that is too short or ambiguous to classify. "
+            "The detector is warmed at startup. Off by default."
+        },
+    )
     device: Optional[str] = field(
         default=None,
         metadata={"help": "If specified, overrides the device for all handlers."},
@@ -70,12 +104,6 @@ class ModuleArguments:
     live_transcription_update_interval: float = field(
         default=0.5,
         metadata={"help": "Update interval for live transcription in seconds (default: 0.5s = 500ms)"},
-    )
-    live_transcription_min_silence_ms: int = field(
-        default=500,
-        metadata={
-            "help": "Minimum silence duration (ms) before ending speech when live transcription is enabled (default: 500ms)"
-        },
     )
     enable_llm_proxy: bool = field(
         default=False,

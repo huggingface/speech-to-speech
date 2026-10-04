@@ -117,8 +117,9 @@ test("RealtimeSession covers the core GA flow over the stock WebSocket transport
   await waitFor(() => rawEvents.some((event) => event.type === "response.done" && event.response?.status === "completed"));
 
   const completedBeforeInterrupt = rawEvents.filter((event) => event.type === "response.done").length;
+  const audioBeforeInterrupt = audio.length;
   await post(server.http, "/test/start-audio");
-  await waitFor(() => audio.length > 1);
+  await waitFor(() => audio.length > audioBeforeInterrupt);
   session.interrupt();
   await waitFor(() => rawEvents.filter((event) => event.type === "response.done")
     .slice(completedBeforeInterrupt).some(

@@ -80,7 +80,8 @@ def test_final_paraformer_transcription_is_final(monkeypatch):
                 mode="final",
                 turn_id="turn_1",
                 turn_revision=2,
-                created_at_s=123.0,
+                created_at_s=124.0,
+                speech_end_at_s=123.0,
             )
         )
     )
