@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from speech_to_speech.pipeline.messages import (
     AssistantOutputPart,
     AssistantToolCallPart,
+    ResponseIncompleteReason,
     _normalize_assistant_output_fields,
 )
 from speech_to_speech.pipeline.speaker_metadata import SpeakerAttribution
@@ -168,6 +169,8 @@ class AssistantResponseDoneEvent(PipelineEvent):
     """Marks the end of ordered assistant output for one response."""
 
     type: Literal["assistant_response_done"] = "assistant_response_done"
+    status: Literal["completed", "incomplete"] = "completed"
+    reason: ResponseIncompleteReason | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
     turn_id: str | None = None
     turn_revision: int | None = None

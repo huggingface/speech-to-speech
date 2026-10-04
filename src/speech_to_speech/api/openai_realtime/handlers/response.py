@@ -148,6 +148,8 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_response_turn_id = None
         st.current_response_turn_revision = None
         st.response_failed = False
+        st.response_incomplete = False
+        st.response_incomplete_reason = None
         st.response_error_type = None
         st.current_item_id = None
         st.content_index = 0
@@ -956,6 +958,9 @@ class ResponseHandler(RealtimeBaseHandler):
         if st.in_response:
             if status == "completed" and st.response_failed:
                 status = "failed"
+            elif status == "completed" and st.response_incomplete:
+                status = "incomplete"
+                reason = st.response_incomplete_reason
             resp_id, _ = self._ensure_response(conn_id)
             wants_audio = response_wants_audio(st.current_response_params)
             if wants_audio and st.pending_text_outputs:
@@ -1018,24 +1023,14 @@ class ResponseHandler(RealtimeBaseHandler):
         conn_id: str,
         event: AssistantOutputEvent,
         *,
-        wait_for_pending_reopen: bool = True,
         _early_tool_call: bool = False,
-    ) -> list[ServerEvent] | None:
+    ) -> list[ServerEvent]:
         """Translate ordered assistant output into OpenAI Realtime events."""
         if self._service.speculative_turns:
-            commit_result: bool | None
-            if wait_for_pending_reopen:
-                commit_result = self._service.speculative_turns.commit_if_latest_after_reopen_grace(
-                    event.turn_id,
-                    event.turn_revision,
-                )
-            else:
-                commit_result = self._service.speculative_turns.try_commit_if_latest_after_reopen_grace(
-                    event.turn_id,
-                    event.turn_revision,
-                )
-            if commit_result is None:
-                return None
+            commit_result = self._service.speculative_turns.commit_if_latest_after_reopen_grace(
+                event.turn_id,
+                event.turn_revision,
+            )
             if not commit_result:
                 logger.debug("Dropping stale assistant output for turn=%s rev=%s", event.turn_id, event.turn_revision)
                 return []
@@ -1201,12 +1196,7 @@ class ResponseHandler(RealtimeBaseHandler):
             st.pending_early_tool_calls.pop(output_sequence, None)
             st.next_assistant_output_sequence = max(st.next_assistant_output_sequence, output_sequence + 1)
             if not _early_tool_call:
-                events.extend(
-                    self._flush_early_tool_calls(
-                        conn_id,
-                        wait_for_pending_reopen=wait_for_pending_reopen,
-                    )
-                )
+                events.extend(self._flush_early_tool_calls(conn_id))
         return events
 
     def on_assistant_tool_call_ready(
@@ -1221,12 +1211,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.pending_early_tool_calls[event.output_sequence] = event
         return self._flush_early_tool_calls(conn_id)
 
-    def _flush_early_tool_calls(
-        self,
-        conn_id: str,
-        *,
-        wait_for_pending_reopen: bool = True,
-    ) -> list[ServerEvent]:
+    def _flush_early_tool_calls(self, conn_id: str) -> list[ServerEvent]:
         st = self._state(conn_id)
         events: list[ServerEvent] = []
         while st.next_assistant_output_sequence in st.pending_early_tool_calls:
@@ -1242,11 +1227,8 @@ class ResponseHandler(RealtimeBaseHandler):
                     response_key=ready.response_key,
                     output_sequence=ready.output_sequence,
                 ),
-                wait_for_pending_reopen=wait_for_pending_reopen,
                 _early_tool_call=True,
             )
-            if emitted is None:
-                break
             events.extend(emitted)
         return events
 
@@ -1259,6 +1241,9 @@ class ResponseHandler(RealtimeBaseHandler):
         st = self._state(conn_id)
         response_was_missing = st.current_response_id is None
         self._ensure_response(conn_id, event.response_key)
+        if event.status == "incomplete":
+            st.response_incomplete = True
+            st.response_incomplete_reason = event.reason
         events = self.finish_audio_output(conn_id, event.response_key)
         events.extend(
             [

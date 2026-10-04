@@ -176,15 +176,6 @@ def build_backend_registry(kind: BackendKind, specs: Iterable[BackendSpec]) -> d
     return registry
 
 
-def select_backend(registry: Mapping[str, BackendSpec], name: str, config: Any) -> BackendSelection:
-    try:
-        spec = registry[name]
-    except KeyError as exc:
-        choices = ", ".join(registry)
-        raise ValueError(f"Unsupported backend {name!r}; choose one of: {choices}.") from exc
-    return BackendSelection(spec, spec.normalize(config))
-
-
 def _optional_dependency_error(selection: BackendSelection, exc: BaseException) -> ImportError | None:
     extra = selection.spec.required_extra
     if extra is None:

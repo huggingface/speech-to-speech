@@ -227,7 +227,7 @@ class TestClientEventDispatch:
                     }
                 )
                 time.sleep(0.1)
-                cid = service.connection_ids[0]
+                cid = list(service._conns)[0]
                 assert service._state(cid).runtime_config.session.audio.output.voice == "coral"
 
     def test_session_update_receives_session_updated_confirmation(self, setup):
@@ -306,7 +306,7 @@ class TestClientEventDispatch:
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 st = service._state(conn_id)
                 request = GenerateResponseRequest(runtime_config=st.runtime_config)
                 st.tool_followup_prefetch_request = request
@@ -366,7 +366,7 @@ class TestClientEventDispatch:
                 ws.receive_json()
                 ws.send_json({"type": "response.create"})
                 assert created_send_started.wait(timeout=1.0)
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 response_key = service._state(conn_id).current_response_key
                 text_output_queue.put(
                     AssistantToolCallReadyEvent(
@@ -405,7 +405,7 @@ class TestClientEventDispatch:
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 st = service._state(conn_id)
                 origin_key = "response_origin"
                 st.generation_done_tool_calls[origin_key] = {"call_1"}
@@ -531,7 +531,7 @@ class TestClientEventDispatch:
                 assert state.response_pending is False
                 assert state.pending_response_keys == set()
                 assert service.turn_latency_store._trackers == {}
-                assert service.turn_latency_store.active_session_count == 0
+                assert len(service.turn_latency_store._session_keys) == 0
 
                 ws.send_json({"type": "response.create"})
                 assert ws.receive_json()["type"] == "response.created"
@@ -750,7 +750,7 @@ class TestSendLoop:
                 assert state.in_response is False
                 assert pending_key in state.closed_response_keys
                 assert service.turn_latency_store._trackers == {}
-                assert service.turn_latency_store.active_session_count == 0
+                assert len(service.turn_latency_store._session_keys) == 0
                 assert not response_playing.is_set()
 
                 output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=stale_generation))
@@ -950,7 +950,7 @@ class TestSendLoop:
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 stale_generation = cancel_scope.generation
                 service.response._ensure_response(conn_id, "cancelled")
                 ws.send_json({"type": "response.cancel"})
@@ -1234,7 +1234,7 @@ class TestSendLoop:
                 created = ws.receive_json()
                 assert created["type"] == "response.created"
                 assert created["response"]["output_modalities"] == ["text"]
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 response_key = service._state(conn_id).current_response_key
 
                 # Side channel first, then the ordered stream catches up.
@@ -1522,7 +1522,7 @@ class TestCleanup:
             time.sleep(0.3)
 
             assert unit.session is None
-            assert unit.service.connection_ids == []
+            assert list(unit.service._conns) == []
             transaction.claim()
             assert cleanup == []
             assert unit.service.total_usage.input_tokens == 17
@@ -1707,3 +1707,56 @@ class TestPool:
             data = client.get("/v1/usage").json()
             assert data["errors_by_type"] == {"foo": 2, "bar": 1}
             assert data["total_errors"] == 3
+
+
+@pytest.mark.parametrize("reason", ["max_output_tokens", "content_filter"])
+def test_partial_incomplete_response_drains_audio_before_done(setup, reason):
+    app, _, _, output_queue, _, _, _, _, cancel_scope = setup
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()  # session.created
+            output_rate = 24000
+            ws.send_json(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "audio": {"output": {"format": {"type": "audio/pcm", "rate": output_rate}}},
+                    },
+                }
+            )
+            assert ws.receive_json()["type"] == "session.updated"
+            response_key = "incomplete_response"
+            generation = cancel_scope.generation
+            for item in [
+                AssistantOutputEvent(text="partial response", response_key=response_key, cancel_generation=generation),
+                AudioOutput(audio=_pcm_bytes(256), response_key=response_key, cancel_generation=generation),
+                AudioOutput(audio=_pcm_bytes(128), response_key=response_key, cancel_generation=generation),
+                AssistantResponseDoneEvent(
+                    response_key=response_key,
+                    cancel_generation=generation,
+                    status="incomplete",
+                    reason=reason,
+                ),
+                AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key, cancel_generation=generation),
+            ]:
+                output_queue.put(item)
+
+            messages = []
+            while not messages or messages[-1]["type"] != "response.done":
+                messages.append(ws.receive_json())
+            response = messages[-1]["response"]
+            assert response["status"] == "incomplete"
+            assert response["status_details"]["reason"] == reason
+            assert response["status_details"].get("error") is None
+            assert not any(message["type"] == "error" for message in messages)
+            pcm = b"".join(
+                base64.b64decode(message["delta"])
+                for message in messages
+                if message["type"] == "response.output_audio.delta"
+            )
+            # The router may batch chunks; count samples instead of deltas.
+            assert len(pcm) == round(384 * output_rate / 16000) * 2
+            assert sum(message["type"] == "response.output_audio.done" for message in messages) == 1
+            parsed = parse_wire_events(messages)
+            assert_response_lifecycle_contract(parsed, wants_audio=True, expected_status="incomplete")

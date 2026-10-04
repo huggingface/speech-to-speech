@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from queue import Queue
 from threading import Event
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -29,8 +29,6 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from speech_to_speech.diarization.worker import DiarizationWorker
-
-VADInput: TypeAlias = bytes | tuple[bytes, RuntimeConfig]
 
 
 @dataclass

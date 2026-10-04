@@ -167,7 +167,7 @@ def test_turn_latency_store_pop_and_clear_session() -> None:
     store.clear_session("sess_1")
     assert store.pop("resp_b", session_id="sess_1") is None
     assert store.get_or_create_for_turn("turn_9", 0).stt_s is None
-    assert store.active_session_count == 0
+    assert len(store._session_keys) == 0
 
 
 def test_response_lookup_does_not_create_or_revive_trackers() -> None:
@@ -180,7 +180,7 @@ def test_response_lookup_does_not_create_or_revive_trackers() -> None:
     store.discard_response("resp_a", session_id="sess_1")
     assert store.get_response("resp_a") is None
     assert store._trackers == {}
-    assert store.active_session_count == 0
+    assert len(store._session_keys) == 0
 
 
 def test_clear_session_keeps_pending_while_other_sessions_active() -> None:
@@ -194,10 +194,10 @@ def test_clear_session_keeps_pending_while_other_sessions_active() -> None:
 
     assert store.pop("resp_a", session_id="sess_1") is None
     assert store.get_or_create_for_turn("turn_9", 0).stt_s == 0.1
-    assert store.active_session_count == 1
+    assert len(store._session_keys) == 1
 
     assert store.pop("resp_b", session_id="sess_2") is not None
-    assert store.active_session_count == 0
+    assert len(store._session_keys) == 0
 
     store.clear_session("sess_2")
     assert store.get_or_create_for_turn("turn_9", 0).stt_s is None

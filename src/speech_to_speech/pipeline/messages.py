@@ -184,13 +184,18 @@ class TokenUsage(PipelineMessage):
     response_key: str | None = Field(default=None, exclude=True, repr=False)
 
 
+ResponseIncompleteReason: TypeAlias = Literal["max_output_tokens", "content_filter"]
+
+
 class EndOfResponse(PipelineMessage):
     """Sentinel marking the end of a response.
 
-    ``error`` is set when generation could not start (e.g. an out-of-band
-    response whose ``input`` failed validation); the output processor turns it
+    ``error`` is set when generation fails; the output processor turns it
     into a ``response.done(status="failed")`` while still closing the response
     normally for pipeline cleanup.
+
+    ``status`` and ``reason`` describe a provider limit or filter that cut the
+    reply short. An error takes precedence over this incomplete status.
     """
 
     tag: Literal["end_of_response"] = "end_of_response"
@@ -199,6 +204,8 @@ class EndOfResponse(PipelineMessage):
     cancel_generation: int | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
     error: str | None = None
+    status: Literal["completed", "incomplete"] = "completed"
+    reason: ResponseIncompleteReason | None = None
     cleanup_only: bool = False
 
 
@@ -399,7 +406,3 @@ class GenerateResponseRequest(PipelineMessage):
 
 AUDIO_RESPONSE_DONE: Final[bytes] = b"__RESPONSE_DONE__"
 PIPELINE_END: Final[bytes] = b"END"
-
-PipelineEndSentinel: TypeAlias = Literal[b"END"]
-AudioResponseDoneSentinel: TypeAlias = Literal[b"__RESPONSE_DONE__"]
-SentinelMessage: TypeAlias = PipelineEndSentinel | AudioResponseDoneSentinel

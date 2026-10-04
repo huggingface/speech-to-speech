@@ -183,11 +183,6 @@ class TurnLatencyStore:
         self._turn_responses: dict[tuple[str, int], str] = {}
         self._session_keys: dict[str, set[str]] = defaultdict(set)
 
-    @property
-    def active_session_count(self) -> int:
-        with self._lock:
-            return len(self._session_keys)
-
     @staticmethod
     def _turn_key(turn_id: str, turn_revision: int | None) -> tuple[str, int]:
         return turn_id, 0 if turn_revision is None else turn_revision

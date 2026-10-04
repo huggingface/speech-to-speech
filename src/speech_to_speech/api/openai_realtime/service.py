@@ -143,8 +143,6 @@ ServerEvent = Union[
     ResponseTextDoneEvent,
 ]
 
-RealtimeEvent = Union[ClientEvent, ServerEvent]
-
 
 _UsageMetricsT = TypeVar("_UsageMetricsT", bound="UsageMetrics")
 
@@ -224,6 +222,8 @@ class ConnState(BaseModel):
     current_response_turn_id: Optional[str] = None
     current_response_turn_revision: Optional[int] = None
     response_failed: bool = False
+    response_incomplete: bool = False
+    response_incomplete_reason: Literal["max_output_tokens", "content_filter"] | None = None
     response_error_type: Optional[str] = None
     current_item_id: Optional[str] = None
     content_index: int = 0
@@ -427,10 +427,6 @@ class RealtimeService:
             session_id=conn_id,
         )
 
-    @property
-    def connection_ids(self) -> list[str]:
-        return list(self._conns)
-
     # ── Client event parsing ─────────────────────
 
     @staticmethod
@@ -561,41 +557,6 @@ class RealtimeService:
 
     def dispatch_pipeline_event(self, conn_id: str, event: PipelineEvent) -> list[ServerEvent]:
         """Route an internal pipeline event to the appropriate handler."""
-        events = self._dispatch_pipeline_event(conn_id, event, wait_for_pending_reopen=True)
-        return [] if events is None else events
-
-    def try_dispatch_pipeline_event(self, conn_id: str, event: PipelineEvent) -> list[ServerEvent] | None:
-        """Non-blocking dispatch.
-
-        Returns ``None`` when dispatch must be retried after a speculative
-        reopen candidate resolves.
-        """
-        return self._dispatch_pipeline_event(conn_id, event, wait_for_pending_reopen=False)
-
-    def should_defer_pipeline_event(self, event: PipelineEvent) -> bool:
-        if self.speculative_turns is None or not isinstance(
-            event,
-            (
-                AssistantOutputEvent,
-                AssistantResponseDoneEvent,
-                AssistantToolCallReadyEvent,
-                ResponseGenerationDoneEvent,
-                ResponseFailedEvent,
-            ),
-        ):
-            return False
-        return self.speculative_turns.has_pending_reopen_or_grace(
-            getattr(event, "turn_id", None),
-            getattr(event, "turn_revision", None),
-        )
-
-    def _dispatch_pipeline_event(
-        self,
-        conn_id: str,
-        event: PipelineEvent,
-        *,
-        wait_for_pending_reopen: bool,
-    ) -> list[ServerEvent] | None:
         # Provider-reported usage is billable accounting, not client-visible
         # assistant output. Cancellation must not make it stale.
         if isinstance(event, TokenUsageEvent):
@@ -614,10 +575,7 @@ class RealtimeService:
                 logger.info("Ignoring %s after response failure", event.type)
                 return []
 
-        is_stale = self._is_stale_turn_event(event, wait_for_pending_reopen=wait_for_pending_reopen)
-        if is_stale is None:
-            return None
-        if is_stale:
+        if self._is_stale_turn_event(event):
             if isinstance(event, (TranscriptionCompletedEvent, TranscriptionFailedEvent)):
                 self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
             logger.info(
@@ -629,11 +587,7 @@ class RealtimeService:
             return []
 
         if isinstance(event, AssistantOutputEvent):
-            return self.response.on_assistant_output(
-                conn_id,
-                event,
-                wait_for_pending_reopen=wait_for_pending_reopen,
-            )
+            return self.response.on_assistant_output(conn_id, event)
         if isinstance(event, AssistantResponseDoneEvent):
             return self.response.on_assistant_response_done(conn_id, event)
         handler = self._pipeline_dispatch.get(type(event))
@@ -642,7 +596,7 @@ class RealtimeService:
             return []
         return handler(conn_id, event)
 
-    def _is_stale_turn_event(self, event: PipelineEvent, *, wait_for_pending_reopen: bool = True) -> bool | None:
+    def _is_stale_turn_event(self, event: PipelineEvent) -> bool:
         if self.speculative_turns is None:
             return False
         if not isinstance(
@@ -672,13 +626,7 @@ class RealtimeService:
                 ResponseFailedEvent,
             ),
         ):
-            is_latest: bool | None
-            if wait_for_pending_reopen:
-                is_latest = self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
-            else:
-                is_latest = self.speculative_turns.try_is_latest_after_reopen_grace(turn_id, turn_revision)
-            if is_latest is None:
-                return None
+            is_latest = self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
             return not is_latest
         return not self.speculative_turns.is_latest(turn_id, turn_revision)
 
