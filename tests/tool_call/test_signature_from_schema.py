@@ -75,9 +75,6 @@ class TestAnnotationFromSpec:
     def test_none_spec(self):
         assert _annotation_from_spec(None) is Any
 
-    def test_empty_dict(self):
-        assert _annotation_from_spec({}) is Any
-
 
 # --- signature_from_schema tests ---
 

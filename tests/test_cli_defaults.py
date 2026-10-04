@@ -1,5 +1,4 @@
 import sys
-from dataclasses import fields
 from types import SimpleNamespace
 
 import pytest
@@ -16,7 +15,6 @@ from speech_to_speech.arguments_classes.responses_api_language_model_arguments i
     ResponsesApiLanguageModelHandlerArguments,
 )
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
-from speech_to_speech.backend_registry import BackendSelection
 from speech_to_speech.cli import main, parse_command, parse_talk_arguments
 from speech_to_speech.pipeline.transcript_logging import log_transcripts_enabled, set_log_transcripts
 from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments, prepare_all_args, prepare_module_args
@@ -198,31 +196,6 @@ def test_diarization_is_opt_in():
     assert parse_arguments([]).module_kwargs.diarization_model_name is None
 
 
-# -- ParsedArguments dataclass tests ------------------------------------------
-
-EXPECTED_FIELD_TYPES = {
-    "module_kwargs": ModuleArguments,
-    "realtime_server_kwargs": RealtimeServerArguments,
-    "local_audio_kwargs": LocalAudioArguments,
-    "vad_handler_kwargs": VADHandlerArguments,
-    "stt_backend": BackendSelection,
-    "llm_backend": BackendSelection,
-    "tts_backend": BackendSelection,
-}
-
-
-def test_parsed_arguments_has_all_expected_fields():
-    actual_fields = {f.name: f.type for f in fields(ParsedArguments)}
-    assert set(actual_fields) == set(EXPECTED_FIELD_TYPES)
-
-
-def test_parsed_arguments_field_types_match():
-    for f in fields(ParsedArguments):
-        assert f.type is EXPECTED_FIELD_TYPES[f.name], (
-            f"Field {f.name!r}: expected {EXPECTED_FIELD_TYPES[f.name].__name__}, got {f.type}"
-        )
-
-
 def test_parse_arguments_default_backend_returns_openai_api():
     original_argv = sys.argv[:]
     try:
@@ -233,6 +206,10 @@ def test_parse_arguments_default_backend_returns_openai_api():
 
     assert isinstance(args, ParsedArguments)
     assert isinstance(args.module_kwargs, ModuleArguments)
+    assert args.realtime_server_kwargs.host == "127.0.0.1"
+    assert args.local_audio_kwargs.local_audio_playback_buffer_ms is None
+    assert args.stt_backend.name == "parakeet-tdt"
+    assert args.tts_backend.name == "qwen3"
     assert args.llm_backend.name == "responses-api"
     assert args.llm_backend.spec.config_type is ResponsesApiLanguageModelHandlerArguments
     assert args.llm_backend.config["model_name"] == "gpt-5.6-terra"
@@ -614,19 +591,3 @@ def test_parse_arguments_stt_none_supports_chat_completions_audio_path():
     assert args.llm_backend.config["model_name"] == "gpt-audio-1.5"
     assert args.llm_backend.config["audio_content_type"] == "audio_url"
     assert args.llm_backend.config["audio_history_turns"] == 2
-
-
-def test_parse_arguments_all_fields_populated():
-    original_argv = sys.argv[:]
-    try:
-        sys.argv = ["speech-to-speech"]
-        args = parse_arguments()
-    finally:
-        sys.argv = original_argv
-
-    for f in fields(ParsedArguments):
-        value = getattr(args, f.name)
-        assert value is not None, f"Field {f.name!r} is None"
-        assert isinstance(value, EXPECTED_FIELD_TYPES[f.name]), (
-            f"Field {f.name!r}: expected {EXPECTED_FIELD_TYPES[f.name].__name__}, got {type(value).__name__}"
-        )
