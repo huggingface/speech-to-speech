@@ -98,9 +98,9 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
             gen_kwargs: Additional generation kwargs
         """
         self.gen_kwargs = gen_kwargs
-        self.start_language = language
+        self.start_language = self._normalize_language(language)
         self.last_language = None
-        if language and language != "auto":
+        if self.start_language:
             logger.warning("Parakeet does not accept a language constraint; ignoring configured language %r", language)
         self._language_detector = warm_language_detector(tuple(SUPPORTED_LANGUAGES))
         self.enable_live_transcription = enable_live_transcription
@@ -299,12 +299,13 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                         lock_scope_s = perf_counter() - lock_scope_start_s
 
                 try:
-                    language_code = self._detect_language_from_text(pred_text) if pred_text else None
+                    language_code = self._resolve_language(pred_text) if pred_text else None
                 except Exception:
                     logger.exception("Parakeet language detection failed; leaving language unset")
                     language_code = None
-                if language_code and language_code in SUPPORTED_LANGUAGES:
-                    self.last_language = language_code
+                base_code = language_code.removesuffix("-auto") if language_code else None
+                if base_code and base_code in SUPPORTED_LANGUAGES:
+                    self.last_language = base_code
                 else:
                     language_code = None
 
@@ -365,6 +366,20 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
             Detected language code or None if detection fails
         """
         return detect_language_from_text(text, getattr(self, "_language_detector", None))
+
+    def _resolve_language(self, pred_text: str) -> Optional[str]:
+        """Report detected language as automatic; configured preferences cannot force Parakeet."""
+        detected_lang = self._detect_language_from_text(pred_text)
+        logger.debug("Parakeet detected language: %s", detected_lang)
+        return f"{detected_lang}-auto" if detected_lang else None
+
+    def _normalize_language(self, language: Optional[str]) -> Optional[str]:
+        if not isinstance(language, str):
+            return None
+        language = language.strip()
+        if not language or language.lower() in ("auto", "none", "null"):
+            return None
+        return language
 
     @contextmanager
     def _compute_lock_context(self, handler_name: str, timeout: float) -> Iterator[bool]:

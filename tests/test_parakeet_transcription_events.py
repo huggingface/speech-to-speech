@@ -143,7 +143,7 @@ def test_process_yields_final_transcript(monkeypatch):
     assert len(result) == 1
     assert isinstance(result[0], Transcription)
     assert result[0].text == "I am here."
-    assert result[0].language_code == "en"
+    assert result[0].language_code == "en-auto"
 
 
 @pytest.mark.parametrize("backend", ["nano_parakeet", "mlx"])
@@ -188,7 +188,7 @@ def test_configured_language_does_not_relabel_decoded_text(monkeypatch, backend,
     assert len(calls) == 1
     assert calls[0][0] == ("transcribe" if backend == "nano_parakeet" else "decode_chunk")
     assert result[0].text == text
-    assert result[0].language_code == detected_language
+    assert result[0].language_code == (f"{detected_language}-auto" if detected_language else None)
 
 
 def test_mlx_live_final_detects_combined_text_without_using_configured_language(monkeypatch):
@@ -228,7 +228,7 @@ def test_mlx_live_final_detects_combined_text_without_using_configured_language(
 
     assert calls == [(8000, False)]
     assert result[0].text == "This is a complete English sentence."
-    assert result[0].language_code == "en"
+    assert result[0].language_code == "en-auto"
 
 
 @pytest.mark.parametrize("backend", ["nano_parakeet", "mlx"])
@@ -269,7 +269,7 @@ def test_session_auto_reset_does_not_report_setup_language(
         handler.process(VADAudio(audio=np.zeros(16000, dtype=np.float32), runtime_config=runtime_config, mode="final"))
     )
 
-    assert result[0].language_code == expected_language
+    assert result[0].language_code == (f"{expected_language}-auto" if expected_language else None)
     assert handler.last_language == expected_language
 
 

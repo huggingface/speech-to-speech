@@ -30,6 +30,7 @@ class ParakeetTDTSTTHandlerArguments:
         default=None,
         metadata={
             "help": "Accepted for compatibility with existing commands. Parakeet decoders always select the language "
-            "automatically; this value does not constrain transcription or replace detected language metadata."
+            "automatically; this value does not constrain transcription or replace detected language metadata. "
+            "Use 'auto' or leave unset for automatic language detection."
         },
     )
