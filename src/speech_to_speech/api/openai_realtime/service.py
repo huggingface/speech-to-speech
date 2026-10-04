@@ -686,8 +686,8 @@ class RealtimeService:
         """Resolve generation ownership from supplied conversation input.
 
         A listening cursor is not input to generation. Tool continuations keep
-        their call's ownership until a newer turn closes; an explicitly
-        unassociated origin stays untagged.
+        their call's ownership unless a user message follows the call, or a
+        newer turn closes without one; an unassociated origin stays untagged.
         Unknown client input must not inherit an older speech association.
         """
         st = self._state(conn_id)
@@ -697,20 +697,31 @@ class RealtimeService:
             if len(references) == 1:
                 reference = references.pop()
         else:
+            tool_reference: InputTurnReference | None = None
             for item in reversed(st.runtime_config.chat.copy().buffer):
                 if isinstance(item, RealtimeConversationItemFunctionCallOutput):
-                    reference = st.input_turn_by_call_id.get(item.call_id, (None, None, None))
-                    break
+                    if tool_reference is None:
+                        tool_reference = st.input_turn_by_call_id.get(item.call_id, (None, None, None))
+                    continue
                 if isinstance(item, RealtimeConversationItemUserMessage):
+                    # A message that follows the tool call is input this
+                    # response answers too, so it takes that message's turn.
                     reference = st.input_turn_by_item_id.get(item.id or "", (None, None, None))
                     break
+                if isinstance(item, RealtimeConversationItemFunctionCall) and tool_reference is not None:
+                    reference = tool_reference
+                    break
+            else:
+                if tool_reference is not None:
+                    reference = tool_reference
         turns = self.speculative_turns
         if turns is None or reference[0] is None:
             return reference
-        # Once a newer turn has closed (answered, empty or failed), no speech
-        # is waiting on this response, so it moves to that turn instead of
-        # being dropped as stale with its origin. Read the turn before the
-        # phase: speech that starts in between shows as LISTENING.
+        # Once a newer turn has closed (for example after an empty or failed
+        # transcript), no speech is waiting on this response, so it moves to
+        # that turn instead of being dropped as stale with its origin. Read
+        # the turn before the phase: speech that starts in between shows as
+        # LISTENING.
         current = turns.current_turn()
         if current == reference[:2] or turns.phase != TurnPhase.CLOSED:
             return reference

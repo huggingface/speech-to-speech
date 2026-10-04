@@ -16,6 +16,7 @@ from speech_to_speech.LLM.chat import make_user_audio_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AudioInputCompletedEvent,
+    ResponseFailedEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TranscriptionCompletedEvent,
@@ -185,10 +186,13 @@ async def test_late_client_tool_followup_does_not_commit_unfinished_speech(monke
         service.unregister(conn_id)
 
 
-@pytest.mark.parametrize("prefetch", [False, True])
 @pytest.mark.parametrize("associated", [False, True])
-@pytest.mark.parametrize("newer_turn", ["listening", "closed"])
-def test_tool_continuation_keeps_origin_until_newer_turn_closes(runtime_config, prefetch, associated, newer_turn):
+@pytest.mark.parametrize(
+    ("newer_turn", "prefetch"),
+    # A newer transcript discards a prefetch, so a question only meets explicit follow-ups.
+    [("listening", False), ("listening", True), ("closed", False), ("closed", True), ("question", False)],
+)
+def test_tool_continuation_turn_after_newer_speech(runtime_config, prefetch, associated, newer_turn):
     tracker, prompts = SpeculativeTurnTracker(), Queue()
     service = RealtimeService(text_prompt_queue=prompts, speculative_turns=tracker)
     conn_id = service.register()
@@ -227,13 +231,22 @@ def test_tool_continuation_keeps_origin_until_newer_turn_closes(runtime_config, 
     unfinished_id, _, _ = tracker.speech_started(200)
     if not prefetch:
         service.finish_response(conn_id, response_key=origin.response_key)
-    if newer_turn == "closed":
-        # The newer turn transcribes empty, so nothing answers it and it closes.
+    if newer_turn != "listening":
+        # "closed": the newer turn transcribes empty, so nothing answers it and it closes.
+        # "question": the model refuses it while the tool call has no output.
         newer = {"turn_id": unfinished_id, "turn_revision": 0}
         service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(interrupt_response=False, **newer))
         tracker.segment_finalized(300)
         service.dispatch_pipeline_event(conn_id, SpeechStoppedEvent(duration_s=0.1, **newer))
-        service.dispatch_pipeline_event(conn_id, TranscriptionCompletedEvent(transcript="", **newer))
+        transcript = "And hotels?" if newer_turn == "question" else ""
+        service.dispatch_pipeline_event(conn_id, TranscriptionCompletedEvent(transcript=transcript, **newer))
+        if newer_turn == "question":
+            refused = prompts.get_nowait()
+            message = "Cannot generate a response while function call outputs are pending."
+            service.dispatch_pipeline_event(
+                conn_id, ResponseFailedEvent(message=message, response_key=refused.response_key, **newer)
+            )
+            service.finish_response(conn_id, response_key=refused.response_key)
     service.handle_conversation_item_create(
         conn_id,
         ConversationItemCreateEvent.model_validate(
@@ -257,6 +270,9 @@ def test_tool_continuation_keeps_origin_until_newer_turn_closes(runtime_config, 
         # instead of being dropped as stale.
         assert tracker.phase == TurnPhase.CLOSED
         expected = (unfinished_id, 0, None)
+    elif newer_turn == "question":
+        # The follow-up's chat holds the unanswered question, so it answers that turn.
+        expected = (unfinished_id, 0, None)
     else:
         expected = (origin_id, revision, 123.0 if associated else None)
     assert (request.turn_id, request.turn_revision, request.speech_stopped_at_s) == expected
@@ -276,7 +292,7 @@ def test_tool_continuation_keeps_origin_until_newer_turn_closes(runtime_config, 
             turn_revision=request.turn_revision,
         ),
     )
-    if newer_turn == "closed":
+    if newer_turn != "listening":
         assert "response.output_audio_transcript.delta" in [event.type for event in events]
         service.unregister(conn_id)
         return
