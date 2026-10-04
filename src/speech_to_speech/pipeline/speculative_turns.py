@@ -94,15 +94,6 @@ class SpeculativeTurnTracker:
             self._wait_for_pending_reopen_locked(turn_id, revision, self._PENDING_REOPEN_WAIT_TIMEOUT_S)
             return self._is_relevant_locked(turn_id, revision)
 
-    def try_is_latest_after_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool | None:
-        """Return ``None`` when a matching reopen candidate is unresolved."""
-        if turn_id is None or revision is None:
-            return True
-        with self._condition:
-            if self._has_pending_reopen_locked(turn_id, revision):
-                return None
-            return self._is_relevant_locked(turn_id, revision)
-
     def is_latest_after_reopen_grace(self, turn_id: str | None, revision: int | None) -> bool:
         if turn_id is None or revision is None:
             return True
@@ -110,42 +101,11 @@ class SpeculativeTurnTracker:
             self._wait_for_reopen_gate_locked(turn_id, revision)
             return self._is_relevant_locked(turn_id, revision)
 
-    def try_is_latest_after_reopen_grace(self, turn_id: str | None, revision: int | None) -> bool | None:
-        if turn_id is None or revision is None:
-            return True
-        with self._condition:
-            if (
-                self._has_pending_reopen_locked(turn_id, revision)
-                or self._reopen_grace_remaining_locked(
-                    turn_id,
-                    revision,
-                )
-                > 0
-            ):
-                return None
-            return self._is_relevant_locked(turn_id, revision)
-
-    def commit_if_latest_after_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool:
-        if turn_id is None or revision is None:
-            return True
-        with self._condition:
-            self._wait_for_pending_reopen_locked(turn_id, revision, self._PENDING_REOPEN_WAIT_TIMEOUT_S)
-            return self._commit_locked(turn_id, revision)
-
     def commit_if_latest_after_reopen_grace(self, turn_id: str | None, revision: int | None) -> bool:
         if turn_id is None or revision is None:
             return True
         with self._condition:
             self._wait_for_reopen_gate_locked(turn_id, revision)
-            return self._commit_locked(turn_id, revision)
-
-    def try_commit_if_latest_after_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool | None:
-        """Return ``None`` when a matching reopen candidate is unresolved."""
-        if turn_id is None or revision is None:
-            return True
-        with self._condition:
-            if self._has_pending_reopen_locked(turn_id, revision):
-                return None
             return self._commit_locked(turn_id, revision)
 
     def try_commit_if_latest_after_reopen_grace(self, turn_id: str | None, revision: int | None) -> bool | None:
@@ -162,25 +122,6 @@ class SpeculativeTurnTracker:
             ):
                 return None
             return self._commit_locked(turn_id, revision)
-
-    def has_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool:
-        if turn_id is None or revision is None:
-            return False
-        with self._condition:
-            return self._has_pending_reopen_locked(turn_id, revision)
-
-    def has_pending_reopen_or_grace(self, turn_id: str | None, revision: int | None) -> bool:
-        if turn_id is None or revision is None:
-            return False
-        with self._condition:
-            return (
-                self._has_pending_reopen_locked(turn_id, revision)
-                or self._reopen_grace_remaining_locked(
-                    turn_id,
-                    revision,
-                )
-                > 0
-            )
 
     def start_reopen_grace(self, turn_id: str | None, revision: int | None, grace_s: float) -> None:
         if turn_id is None or revision is None or grace_s <= 0:
@@ -342,17 +283,6 @@ class SpeculativeTurnTracker:
             self._pending_reopen = None
             logger.debug("Cancelled speculative reopen candidate for turn %s", turn_id)
             self._condition.notify_all()
-
-    def wait_for_pending_reopen(
-        self,
-        turn_id: str | None,
-        revision: int | None,
-        timeout_s: float = _PENDING_REOPEN_WAIT_TIMEOUT_S,
-    ) -> None:
-        if turn_id is None or revision is None:
-            return
-        with self._condition:
-            self._wait_for_pending_reopen_locked(turn_id, revision, timeout_s)
 
     def _commit_locked(self, turn_id: str, revision: int) -> bool:
         committed = self._committed_reference_locked(turn_id, revision)

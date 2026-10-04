@@ -8,7 +8,6 @@ import base64
 import json
 from queue import Queue
 from threading import Event, Thread
-from time import sleep
 
 import numpy as np
 import pytest
@@ -4085,70 +4084,26 @@ class TestDispatchPipelineEvent:
         assert service._state(conn_id).response_usage.output_tokens == 5
         service.unregister(conn_id)
 
-    def test_try_dispatch_assistant_text_defers_pending_reopen(self, runtime_config, should_listen):
+    def test_dispatch_assistant_text_waits_for_reopen_grace(self, runtime_config, should_listen):
+        from tests.reopen_dispatch import pending_dispatch
+
         tracker = SpeculativeTurnTracker()
         service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
         conn_id = service.register()
         service._state(conn_id).runtime_config = runtime_config
         tracker.observe("turn_1", 0)
-        candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
-
+        tracker.start_reopen_grace("turn_1", 0, grace_s=0.2)
         event = AssistantOutputEvent(text="latest", turn_id="turn_1", turn_revision=0)
 
-        assert service.try_dispatch_pipeline_event(conn_id, event) is None
-        assert service._state(conn_id).current_response_id is None
+        with pending_dispatch(service, conn_id, event) as dispatch:
+            assert service._state(conn_id).current_response_id is None
+            events = dispatch.result(timeout=1.0)
 
-        tracker.cancel_reopen_candidate("turn_1", candidate_revision)
-        events = service.try_dispatch_pipeline_event(conn_id, event)
-
-        assert events is not None
         assert len(events) == 4
         assert isinstance(events[0], ResponseCreatedEvent)
         assert isinstance(events[3], ResponseAudioTranscriptDeltaEvent)
         assert events[3].delta == "latest"
         assert tracker.is_committed("turn_1", 0)
-        service.unregister(conn_id)
-
-    def test_try_dispatch_assistant_text_defers_reopen_grace(self, runtime_config, should_listen):
-        tracker = SpeculativeTurnTracker()
-        service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
-        conn_id = service.register()
-        service._state(conn_id).runtime_config = runtime_config
-        tracker.observe("turn_1", 0)
-        tracker.start_reopen_grace("turn_1", 0, grace_s=0.05)
-
-        event = AssistantOutputEvent(text="latest", turn_id="turn_1", turn_revision=0)
-
-        assert service.should_defer_pipeline_event(event)
-        assert service.try_dispatch_pipeline_event(conn_id, event) is None
-        assert service._state(conn_id).current_response_id is None
-
-        sleep(0.06)
-        events = service.try_dispatch_pipeline_event(conn_id, event)
-
-        assert events is not None
-        assert len(events) == 4
-        assert isinstance(events[0], ResponseCreatedEvent)
-        assert isinstance(events[3], ResponseAudioTranscriptDeltaEvent)
-        assert events[3].delta == "latest"
-        assert tracker.is_committed("turn_1", 0)
-        service.unregister(conn_id)
-
-    def test_try_dispatch_token_usage_ignores_pending_reopen(self, runtime_config, should_listen):
-        tracker = SpeculativeTurnTracker()
-        service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
-        conn_id = service.register()
-        service._state(conn_id).runtime_config = runtime_config
-        tracker.observe("turn_1", 0)
-        candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
-
-        event = TokenUsageEvent(input_tokens=10, output_tokens=5, turn_id="turn_1", turn_revision=0)
-
-        assert service.try_dispatch_pipeline_event(conn_id, event) == []
-        assert service._state(conn_id).response_usage.input_tokens == 10
-
-        assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
-        assert service._state(conn_id).response_usage.output_tokens == 5
         service.unregister(conn_id)
 
     # -- partial_transcription --
@@ -5045,6 +5000,8 @@ class TestDispatchPipelineEvent:
 
     @pytest.mark.parametrize("confirm_reopen", [False, True])
     def test_response_failure_waits_for_reopen_decision(self, service, conn_id, confirm_reopen):
+        from tests.reopen_dispatch import pending_dispatch
+
         tracker = SpeculativeTurnTracker()
         service.speculative_turns = tracker
         turn_id, revision = tracker.start_turn()
@@ -5053,16 +5010,17 @@ class TestDispatchPipelineEvent:
             message="provider failed", response_key="response-1", turn_id=turn_id, turn_revision=revision
         )
 
-        assert service.should_defer_pipeline_event(failure)
-        assert service.try_dispatch_pipeline_event(conn_id, failure) is None
-        assert service._state(conn_id).current_response_id is None
+        with pending_dispatch(service, conn_id, failure) as dispatch:
+            assert service._state(conn_id).current_response_id is None
+            if confirm_reopen:
+                assert tracker.confirm_reopen_candidate(turn_id, revision, candidate)
+            else:
+                tracker.cancel_reopen_candidate(turn_id, candidate)
+            events = dispatch.result(timeout=1.0)
+
         if confirm_reopen:
-            assert tracker.confirm_reopen_candidate(turn_id, revision, candidate)
-            assert service.try_dispatch_pipeline_event(conn_id, failure) == []
+            assert events == []
         else:
-            tracker.cancel_reopen_candidate(turn_id, candidate)
-            events = service.try_dispatch_pipeline_event(conn_id, failure)
-            assert events is not None
             assert [event.type for event in events] == ["response.created", "error"]
 
     def test_response_failed_emits_error_and_failed_done(self, service, conn_id):

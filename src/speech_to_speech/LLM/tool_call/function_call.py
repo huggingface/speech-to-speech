@@ -293,24 +293,6 @@ def parse_function_call(function_string: str, pattern_to_match: list[str] = []) 
     return _parse_function_exprs(expressions, pattern_to_match)
 
 
-def parse_multiple_functions(function_strings: List[str]) -> List[FunctionToolCall]:
-    """Parse multiple function call strings.
-
-    Args:
-        function_strings: List of function call strings.
-
-    Returns:
-        List of FunctionToolCall objects.
-    """
-    results: List[FunctionToolCall] = []
-    for func_str in function_strings:
-        try:
-            results.extend(parse_function_call(func_str))
-        except Exception:
-            continue
-    return results
-
-
 def extract_function_calls_from_text(text: str, block_regex: str = ".*") -> Tuple[str, List[FunctionToolCall]]:
     """Extract function calls from delimited code blocks inside *text*.
 

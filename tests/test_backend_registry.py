@@ -22,7 +22,6 @@ from speech_to_speech.backend_registry import (
     HandlerContext,
     build_backend_registry,
     create_backend_handler,
-    select_backend,
 )
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -395,7 +394,8 @@ def test_test_backend_only_needs_config_factory_and_registry_entry():
         [BackendSpec("fake", "stt", FakeArguments, factory, config_prefix="fake")],
     )
     parsed_config = FakeArguments(fake_option="selected")
-    selection = select_backend(registry, "fake", parsed_config)
+    spec = registry["fake"]
+    selection = BackendSelection(spec, spec.normalize(parsed_config))
 
     assert create_backend_handler(selection, _context()) == "handler"
     assert selection.config == {"option": "selected", "gen_kwargs": {}}
@@ -855,3 +855,9 @@ def test_dependency_error_names_backend_and_required_extra():
 
     with pytest.raises(ImportError, match=r"optional.*tts.*speech-to-speech\[optional-extra\]"):
         create_backend_handler(selection, _context())
+
+
+@pytest.mark.parametrize("option", ["--live_transcription_min_silence_ms", "--parakeet_tdt_compute_type"])
+def test_removed_ineffective_options_are_rejected(option):
+    with pytest.raises(ValueError, match=option):
+        parse_arguments([option, "500" if "silence" in option else "float32"])

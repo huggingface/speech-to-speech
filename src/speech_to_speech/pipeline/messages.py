@@ -404,7 +404,3 @@ class GenerateResponseRequest(PipelineMessage):
 
 AUDIO_RESPONSE_DONE: Final[bytes] = b"__RESPONSE_DONE__"
 PIPELINE_END: Final[bytes] = b"END"
-
-PipelineEndSentinel: TypeAlias = Literal[b"END"]
-AudioResponseDoneSentinel: TypeAlias = Literal[b"__RESPONSE_DONE__"]
-SentinelMessage: TypeAlias = PipelineEndSentinel | AudioResponseDoneSentinel
