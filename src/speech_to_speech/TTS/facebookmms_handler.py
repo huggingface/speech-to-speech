@@ -98,7 +98,7 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 f"facebook/mms-tts-{WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE[language_code]}"
             )
             logger.info(f"Loading model: {resolved_model_name}")
-            self.model = VitsModel.from_pretrained(resolved_model_name, torch_dtype=self.torch_dtype).to(self.device)  # type: ignore[arg-type]
+            self.model = VitsModel.from_pretrained(resolved_model_name).to(self.device)  # type: ignore[arg-type]
             self.tokenizer = AutoTokenizer.from_pretrained(resolved_model_name)
             self.model_name = resolved_model_name
             self.language = language_code

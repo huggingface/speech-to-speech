@@ -136,14 +136,12 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
             else:
                 model_name = "hexgrad/Kokoro-82M"
 
-        self.model_name = model_name
-
         logger.info(f"Loading Kokoro model: {model_name} on {self.device}")
 
         if self.device == "mps":
             self._setup_mlx(model_name)
         else:
-            self._setup_kokoro(model_name)
+            self._setup_kokoro()
 
         self._initial_voice = self.voice
         self._initial_lang_code = self.lang_code
@@ -179,13 +177,13 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 "mlx-audio is required for Kokoro TTS on Apple Silicon. Install with: pip install mlx-audio"
             ) from e
 
-    def _setup_kokoro(self, model_name: str) -> None:
+    def _setup_kokoro(self) -> None:
         """Setup for CUDA/CPU using native kokoro library."""
         try:
             from kokoro import KPipeline
 
             self.backend = "kokoro"
-            self.pipeline = KPipeline(lang_code=self.lang_code, repo_id=model_name, device=self.device)
+            self.pipeline = KPipeline(lang_code=self.lang_code, device=self.device)
             logger.info("Native Kokoro pipeline loaded successfully")
         except ImportError as e:
             raise ImportError(
@@ -383,7 +381,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 self.voice = new_voice
                 from kokoro import KPipeline
 
-                self.pipeline = KPipeline(lang_code=self.lang_code, repo_id=self.model_name, device=self.device)
+                self.pipeline = KPipeline(lang_code=self.lang_code, device=self.device)
 
         console.print(f"[green]ASSISTANT: {llm_sentence}")
 
@@ -430,5 +428,5 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         else:
             from kokoro import KPipeline
 
-            self.pipeline = KPipeline(lang_code=self.lang_code, repo_id=self.model_name, device=self.device)
+            self.pipeline = KPipeline(lang_code=self.lang_code, device=self.device)
         logger.debug("Kokoro TTS session state reset")

@@ -13,13 +13,12 @@ from speech_to_speech.TTS.kokoro_handler import KokoroTTSHandler
 from speech_to_speech.utils import utils
 
 
-@pytest.mark.parametrize("model_name", [None, "acme/custom-kokoro"])
-def test_auto_npu_reaches_kokoro_initial_and_rebuilt_pipelines(monkeypatch: pytest.MonkeyPatch, model_name) -> None:
-    pipeline_devices: list[tuple[str, str, str]] = []
+def test_auto_npu_reaches_kokoro_initial_and_rebuilt_pipelines(monkeypatch: pytest.MonkeyPatch) -> None:
+    pipeline_devices: list[tuple[str, str]] = []
 
     class FakePipeline:
-        def __init__(self, *, lang_code: str, repo_id: str, device: str) -> None:
-            pipeline_devices.append((lang_code, repo_id, device))
+        def __init__(self, *, lang_code: str, device: str) -> None:
+            pipeline_devices.append((lang_code, device))
 
         def __call__(self, *_args: object, **_kwargs: object) -> Iterator[tuple[object, object, object]]:
             return iter(())
@@ -32,14 +31,9 @@ def test_auto_npu_reaches_kokoro_initial_and_rebuilt_pipelines(monkeypatch: pyte
     monkeypatch.setattr(kokoro_handler.console, "print", lambda *_args, **_kwargs: None)
 
     handler = KokoroTTSHandler.__new__(KokoroTTSHandler)
-    handler.setup(Event(), device="auto", model_name=model_name)
+    handler.setup(Event(), device="auto")
     list(handler._process_kokoro("Bonjour", language_code="fr"))
     handler.on_session_end()
 
     assert handler.device == "npu"
-    expected_model = model_name or "hexgrad/Kokoro-82M"
-    assert pipeline_devices == [
-        ("b", expected_model, "npu"),
-        ("f", expected_model, "npu"),
-        ("b", expected_model, "npu"),
-    ]
+    assert pipeline_devices == [("b", "npu"), ("f", "npu"), ("b", "npu")]

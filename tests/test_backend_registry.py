@@ -849,36 +849,3 @@ def test_dependency_error_names_backend_and_required_extra():
 def test_removed_ineffective_options_are_rejected(option):
     with pytest.raises(ValueError, match=option):
         parse_arguments([option, "500" if "silence" in option else "float32"])
-
-
-def test_lightning_whisper_uses_only_its_supported_options(monkeypatch, caplog):
-    captured = {}
-
-    class FakeHandler:
-        def __init__(self, *_args, setup_kwargs, **_kwargs):
-            captured.update(setup_kwargs)
-
-    monkeypatch.setattr("speech_to_speech.backend_registry._load_handler", lambda *_args: FakeHandler)
-    args = parse_arguments(
-        [
-            "--stt",
-            "whisper-mlx",
-            "--stt_model_name",
-            "large-v3",
-            "--language",
-            "de",
-            "--stt_torch_dtype",
-            "float32",
-            "--stt_compile_mode",
-            "default",
-            "--stt_gen_max_new_tokens",
-            "64",
-        ]
-    )
-    create_backend_handler(args.stt_backend, _context())
-
-    assert captured == {"model_name": "large-v3", "device": "mps", "language": "de"}
-    assert "Ignoring options for inactive backends" in caplog.text
-    assert "--stt_torch_dtype" in caplog.text
-    assert "--stt_compile_mode" in caplog.text
-    assert "--stt_gen_max_new_tokens" in caplog.text

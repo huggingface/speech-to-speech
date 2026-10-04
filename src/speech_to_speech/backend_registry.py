@@ -19,7 +19,6 @@ from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import (
 )
 from speech_to_speech.arguments_classes.kokoro_tts_arguments import KokoroTTSHandlerArguments
 from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
-from speech_to_speech.arguments_classes.lightning_whisper_mlx_arguments import LightningWhisperSTTHandlerArguments
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
     MLXAudioWhisperSTTHandlerArguments,
 )
@@ -218,13 +217,10 @@ def _simple_handler_factory(
     attach_speculative_turns: bool = False,
     context_kwargs: bool = False,
     pass_assistant_language_flag: bool = False,
-    pass_generation_kwargs: bool = True,
 ) -> HandlerFactory:
     def create(context: HandlerContext, config: Mapping[str, Any]) -> Any:
         handler_class = _load_handler(module_name, class_name)
         setup_kwargs = dict(config)
-        if not pass_generation_kwargs:
-            setup_kwargs.pop("gen_kwargs", None)
         if context_kwargs:
             setup_kwargs.update(
                 cancel_scope=context.cancel_scope,
@@ -369,12 +365,11 @@ STT_BACKENDS = build_backend_registry(
         BackendSpec(
             "whisper-mlx",
             "stt",
-            LightningWhisperSTTHandlerArguments,
+            WhisperSTTHandlerArguments,
             _simple_handler_factory(
                 "speech_to_speech.STT.lightning_whisper_mlx_handler",
                 "LightningWhisperSTTHandler",
                 attach_speculative_turns=True,
-                pass_generation_kwargs=False,
             ),
             config_prefix="stt",
             required_extra="whisper-mlx",

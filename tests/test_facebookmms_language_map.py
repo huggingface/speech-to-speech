@@ -64,35 +64,3 @@ def test_common_stt_languages_resolve_to_mms_models() -> None:
     assert WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE["mr"] == "mar"
     assert WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE["ms"] == "zlm"
     assert WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE["kn"] == "kan"
-
-
-def test_configured_dtype_survives_model_language_changes_and_session_reset(monkeypatch):
-    from threading import Event
-    from types import SimpleNamespace
-
-    import torch
-
-    from speech_to_speech.TTS import facebookmms_handler
-    from speech_to_speech.TTS.facebookmms_handler import FacebookMMSTTSHandler
-
-    loaded = []
-    model = SimpleNamespace(to=lambda _device: model)
-
-    def load_model(model_name, *, torch_dtype):
-        loaded.append((model_name, torch_dtype))
-        return model
-
-    monkeypatch.setattr(facebookmms_handler, "VitsModel", SimpleNamespace(from_pretrained=load_model))
-    monkeypatch.setattr(facebookmms_handler, "AutoTokenizer", SimpleNamespace(from_pretrained=lambda _name: object()))
-    monkeypatch.setattr(FacebookMMSTTSHandler, "warmup", lambda self: None)
-    handler = FacebookMMSTTSHandler.__new__(FacebookMMSTTSHandler)
-
-    handler.setup(Event(), device="cpu", torch_dtype="float16")
-    handler.load_model("es")
-    handler.on_session_end()
-
-    assert loaded == [
-        ("facebook/mms-tts-eng", torch.float16),
-        ("facebook/mms-tts-spa", torch.float16),
-        ("facebook/mms-tts-eng", torch.float16),
-    ]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from time import perf_counter
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
 import numpy as np
 import torch
@@ -43,7 +43,10 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
         self,
         model_name: str = "distil-large-v3",
         device: str = "mps",
+        torch_dtype: str = "float16",
+        compile_mode: Optional[str] = None,
         language: Optional[str] = None,
+        gen_kwargs: dict[str, Any] = {},
     ) -> None:
         if len(model_name.split("/")) > 1:
             model_name = model_name.split("/")[-1]
@@ -58,6 +61,7 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
 
+        # 2 warmup steps for no compile or compile mode with CUDA graphs capture
         n_steps = 1
         dummy_input = np.array([0] * 512)
 
