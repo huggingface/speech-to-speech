@@ -77,7 +77,7 @@ from speech_to_speech.pipeline.messages import (
     ResponsePrefetchTransaction,
     TTSInput,
 )
-from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnPhase
 from speech_to_speech.pipeline.turn_latency import TURN_LATENCY_METADATA_KEY
 
 # ---------------------------------------------------------------------------
@@ -3001,25 +3001,21 @@ class TestResponseDoneOutputItems:
 class TestDispatchPipelineEvent:
     # -- speech_started --
 
+    @pytest.mark.parametrize("tracked", [False, True])
     def test_transcription_failure_emits_error_without_llm_work(
-        self,
-        service,
-        conn_id,
-        text_prompt_queue,
-        should_listen,
+        self, service, conn_id, text_prompt_queue, should_listen, tracked
     ):
+        tracker = SpeculativeTurnTracker() if tracked else None
+        service.speculative_turns = tracker
+        if tracker is not None:
+            tracker.speech_started(0)
         should_listen.clear()
-        started = service.dispatch_pipeline_event(
-            conn_id,
-            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
-        )
+        started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
+        if tracker is not None:
+            tracker.segment_finalized(1000)
         events = service.dispatch_pipeline_event(
             conn_id,
-            TranscriptionFailedEvent(
-                message="transcription request timed out",
-                turn_id="turn_1",
-                turn_revision=0,
-            ),
+            TranscriptionFailedEvent(message="transcription request timed out", turn_id="turn_1", turn_revision=0),
         )
 
         assert len(events) == 1
@@ -3036,6 +3032,10 @@ class TestDispatchPipelineEvent:
         assert state.input_items == {}
         assert state.input_item_by_turn_revision == {}
         assert state.response_pending is False
+        if tracker is not None:
+            assert tracker.phase == TurnPhase.CLOSED
+            assert tracker._committed == set()
+            assert tracker.begin_reopen_candidate("turn_1", 0) is None
 
     def test_stale_transcription_failure_does_not_reenable_listening(self, runtime_config):
         text_prompt_queue = Queue()
@@ -4671,33 +4671,43 @@ class TestDispatchPipelineEvent:
         assert state.input_audio_duration_s == 0.0
         assert state.response_usage.audio_duration_s == 2.5
 
+    @pytest.mark.parametrize("tracked", [False, True])
     def test_empty_transcription_completed_emits_event_without_response(
-        self,
-        service,
-        conn_id,
-        runtime_config,
-        text_prompt_queue,
+        self, service, conn_id, runtime_config, text_prompt_queue, tracked
     ):
-        service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
-        service.dispatch_pipeline_event(
-            conn_id,
-            SpeechStoppedEvent(duration_s=1.1),
-        )
+        tracker = SpeculativeTurnTracker() if tracked else None
+        service.speculative_turns = tracker
+        turn = {"turn_id": "turn_1", "turn_revision": 0} if tracked else {}
+        if tracker is not None:
+            tracker.speech_started(0)
+        started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(**turn))
+        if tracker is not None:
+            tracker.segment_finalized(1100)
+        service.dispatch_pipeline_event(conn_id, SpeechStoppedEvent(duration_s=1.1, **turn))
         events = service.dispatch_pipeline_event(
-            conn_id,
-            TranscriptionCompletedEvent(transcript="", language_code="en"),
+            conn_id, TranscriptionCompletedEvent(transcript="", language_code="en", **turn)
         )
 
-        assert len(events) == 1
-        evt = events[0]
+        assert len(events) == (4 if tracked else 1)
+        evt = events[-1]
         assert isinstance(evt, ConversationItemInputAudioTranscriptionCompletedEvent)
+        assert evt.item_id == started[0].item_id
         assert evt.transcript == ""
         assert evt.usage.seconds == 1.1
         assert text_prompt_queue.empty()
         assert runtime_config.chat.buffer == []
-        assert service._state(conn_id).response_pending is False
+        state = service._state(conn_id)
+        assert state.response_pending is False
+        assert state.input_items == {}
+        if tracker is not None:
+            assert tracker.phase == TurnPhase.CLOSED
+            assert tracker._committed == set()
+            assert tracker.begin_reopen_candidate("turn_1", 0) is None
 
-    def test_revised_transcription_replaces_speculative_user_message(self, runtime_config, should_listen):
+    @pytest.mark.parametrize("previous_turn", [False, True])
+    def test_revised_transcription_replaces_speculative_user_message(
+        self, runtime_config, should_listen, previous_turn
+    ):
         text_prompt_queue = Queue()
         tracker = SpeculativeTurnTracker()
         service = RealtimeService(
@@ -4707,38 +4717,49 @@ class TestDispatchPipelineEvent:
         )
         conn_id = service.register()
         service._state(conn_id).runtime_config = runtime_config
-        assert tracker.start_turn() == ("turn_1", 0)
+        if previous_turn:
+            tracker.start_turn()
+            service.dispatch_pipeline_event(
+                conn_id, TranscriptionCompletedEvent(transcript="previous turn", turn_id="turn_1", turn_revision=0)
+            )
+            text_prompt_queue.get_nowait()
+            service.close_pending_responses(conn_id)
+        turn_id, revision = tracker.start_turn()
+        assert revision == 0
 
         service.dispatch_pipeline_event(
             conn_id,
-            SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
+            SpeechStartedEvent(turn_id=turn_id, turn_revision=0),
         )
         service.dispatch_pipeline_event(
             conn_id,
-            SpeechStoppedEvent(duration_s=1.0, turn_id="turn_1", turn_revision=0),
+            SpeechStoppedEvent(duration_s=1.0, turn_id=turn_id, turn_revision=0),
         )
         service.dispatch_pipeline_event(
             conn_id,
-            TranscriptionCompletedEvent(transcript="hello", turn_id="turn_1", turn_revision=0),
+            TranscriptionCompletedEvent(transcript="hello", turn_id=turn_id, turn_revision=0),
         )
 
-        tracker.observe("turn_1", 1)
+        tracker.observe(turn_id, 1)
         service.dispatch_pipeline_event(
             conn_id,
-            SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
+            SpeechStartedEvent(turn_id=turn_id, turn_revision=1, reopened=True),
         )
         service.dispatch_pipeline_event(
             conn_id,
-            SpeechStoppedEvent(duration_s=2.0, turn_id="turn_1", turn_revision=1),
+            SpeechStoppedEvent(duration_s=2.0, turn_id=turn_id, turn_revision=1),
         )
         service.dispatch_pipeline_event(
             conn_id,
-            TranscriptionCompletedEvent(transcript="hello again", turn_id="turn_1", turn_revision=1),
+            TranscriptionCompletedEvent(transcript="hello again", turn_id=turn_id, turn_revision=1),
         )
 
         user_items = [item for item in runtime_config.chat.buffer if getattr(item, "role", None) == "user"]
-        assert len(user_items) == 1
-        assert user_items[0].content[0].text == "hello again"
+        assert [item.content[0].text for item in user_items] == (
+            ["previous turn", "hello again"] if previous_turn else ["hello again"]
+        )
+        assert set(service._state(conn_id).input_turn_accounting) == {turn_id}
+        assert service.response_input_turn(conn_id)[:2] == (turn_id, 1)
         first_req = text_prompt_queue.get_nowait()
         second_req = text_prompt_queue.get_nowait()
         assert first_req.turn_revision == 0
@@ -5950,64 +5971,3 @@ class TestTurnLifecycleOwnership:
 
         assert tracker.current_turn() == (None, None)
         assert tracker.phase is None
-
-    @pytest.mark.parametrize("failed", [False, True])
-    def test_terminal_only_input_retires_commitment_and_blocks_reopen(self, runtime_config, failed):
-        tracker = SpeculativeTurnTracker()
-        queue = Queue()
-        service = RealtimeService(text_prompt_queue=queue, speculative_turns=tracker)
-        conn_id = service.register()
-        service._state(conn_id).runtime_config = runtime_config
-        assert tracker.start_turn() == ("turn_1", 0)
-        started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
-        service.dispatch_pipeline_event(conn_id, SpeechStoppedEvent(duration_s=1.0, turn_id="turn_1", turn_revision=0))
-        terminal = (
-            TranscriptionFailedEvent(message="failed", turn_id="turn_1", turn_revision=0)
-            if failed
-            else TranscriptionCompletedEvent(transcript="", turn_id="turn_1", turn_revision=0)
-        )
-
-        events = service.dispatch_pipeline_event(conn_id, terminal)
-
-        assert events[-1].item_id == started[0].item_id
-        assert events[-1].type == (
-            "conversation.item.input_audio_transcription.failed"
-            if failed
-            else "conversation.item.input_audio_transcription.completed"
-        )
-        assert queue.empty()
-        assert tracker.phase.value == "closed"
-        assert tracker._committed == set()
-        assert tracker.begin_reopen_candidate("turn_1", 0) is None
-        tracker.observe("turn_1", 1)
-        assert tracker.current_turn() == ("turn_1", 0)
-        assert tracker.is_latest("turn_1", 0)
-        assert not tracker.is_latest("turn_1", 1)
-        assert service._state(conn_id).input_items == {}
-
-    def test_new_turn_keeps_previous_chat_and_replaces_only_its_own_revision(self, runtime_config):
-        tracker = SpeculativeTurnTracker()
-        queue = Queue()
-        service = RealtimeService(text_prompt_queue=queue, speculative_turns=tracker)
-        conn_id = service.register()
-        service._state(conn_id).runtime_config = runtime_config
-        for turn_id, revision, transcript in [
-            ("turn_1", 0, "first turn"),
-            ("turn_2", 0, "second turn"),
-            ("turn_2", 1, "revised second turn"),
-        ]:
-            if revision == 0:
-                assert tracker.start_turn() == (turn_id, revision)
-            else:
-                tracker.observe(turn_id, revision)
-            service.dispatch_pipeline_event(
-                conn_id, SpeechStartedEvent(turn_id=turn_id, turn_revision=revision, reopened=revision > 0)
-            )
-            service.dispatch_pipeline_event(
-                conn_id, TranscriptionCompletedEvent(transcript=transcript, turn_id=turn_id, turn_revision=revision)
-            )
-
-        user_items = [item for item in runtime_config.chat.buffer if getattr(item, "role", None) == "user"]
-        assert [item.content[0].text for item in user_items] == ["first turn", "revised second turn"]
-        assert set(service._state(conn_id).input_turn_accounting) == {"turn_2"}
-        assert service.response_input_turn(conn_id)[:2] == ("turn_2", 1)

@@ -796,7 +796,7 @@ To check turn ordering, Smart Turn timing, and Realtime routing on CPU:
 
 ```bash
 CUDA_VISIBLE_DEVICES='' uv run pytest -q \
-  tests/test_turn_lifecycle.py tests/test_speculative_turns.py \
+  tests/test_speculative_turns.py \
   tests/test_smart_turn.py tests/test_stt_stale_filter.py \
   tests/test_audio_input_notifier.py tests/test_lm_output_processor.py \
   tests/openai_realtime/test_response_input_identity.py \

@@ -142,24 +142,12 @@ class SpeculativeTurnTracker:
                 self._phase = TurnPhase.SOFT_ENDED
                 self._condition.notify_all()
 
-    def processing_delay_remaining(self, turn_id: str | None, revision: int | None) -> float:
-        with self._condition:
-            if turn_id is None or revision is None or not self._is_current_locked(turn_id, revision):
-                return 0.0
-            if self._processing_deadline is None:
-                return 0.0
-            return max(0.0, self._processing_deadline - time.monotonic())
-
     def processing_deadline(self, turn_id: str | None, revision: int | None) -> float | None:
         """Return the monotonic deadline, or None for legacy unfinalized input."""
         with self._condition:
             if turn_id is None or revision is None or not self._is_current_locked(turn_id, revision):
                 return None
             return self._processing_deadline
-
-    def commit_current(self, turn_id: str, revision: int) -> bool:
-        """Accept relevant output once its pending reopen and hold have resolved."""
-        return self.try_commit_if_latest_after_reopen_grace(turn_id, revision) is True
 
     def start_turn(self) -> tuple[str, int]:
         """Advance the conversation cursor and return the new turn metadata."""
