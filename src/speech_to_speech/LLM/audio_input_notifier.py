@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from queue import Queue
-from time import perf_counter
+from time import monotonic, perf_counter
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.events import AudioInputCompletedEvent
@@ -34,11 +34,26 @@ class AudioInputNotifier(BaseHandler[VADAudio, LLMIn]):
         if item.turn_id is None or item.turn_revision is None:
             return True
         remaining_delay_s = max(0.0, item.processing_delay_s - (perf_counter() - item.created_at_s))
-        return self.speculative_turns.is_latest_after_stability_window(
+        processing_deadline = self.speculative_turns.processing_deadline(item.turn_id, item.turn_revision)
+        if processing_deadline is not None:
+            remaining_delay_s = max(0.0, processing_deadline - monotonic())
+        wait_started_at_s = perf_counter()
+        is_latest = self.speculative_turns.is_latest_after_stability_window(
             item.turn_id,
             item.turn_revision,
             remaining_delay_s,
         )
+        store = getattr(self, "turn_latency_store", None)
+        if store is not None and remaining_delay_s > 0:
+            store.record_smart_wait(
+                item.turn_id,
+                item.turn_revision,
+                wait_started_at_s,
+                min(perf_counter(), wait_started_at_s + remaining_delay_s),
+            )
+        if not is_latest and store is not None:
+            store.discard_pending_turn(item.turn_id, item.turn_revision)
+        return is_latest
 
     def process(self, vad_audio: VADAudio) -> Iterator[LLMIn]:
         audio_duration_s = len(vad_audio.audio) / self.sample_rate if self.sample_rate else 0.0
@@ -56,7 +71,7 @@ class AudioInputNotifier(BaseHandler[VADAudio, LLMIn]):
                 audio_duration_s=audio_duration_s,
                 turn_id=vad_audio.turn_id,
                 turn_revision=vad_audio.turn_revision,
-                speech_stopped_at_s=vad_audio.created_at_s,
+                speech_stopped_at_s=vad_audio.speech_end_at_s,
             )
         )
         # RealtimeService owns conversation state and constructs the request.

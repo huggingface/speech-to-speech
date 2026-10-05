@@ -19,6 +19,7 @@ from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel
 
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
+from speech_to_speech.LLM.tool_call.signature_from_schema import signature_from_schema
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,10 @@ def _split_top_level_calls(source: str) -> List[str]:
     nested parens, strings with ')' chars, etc. are handled correctly.
     """
     tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    # Offset of each line in *source*, to slice calls out by token position.
+    line_offsets = [0]
+    for line in io.StringIO(source).readlines():
+        line_offsets.append(line_offsets[-1] + len(line))
     calls: List[str] = []
     i = 0
 
@@ -79,7 +84,8 @@ def _split_top_level_calls(source: str) -> List[str]:
             i += 1
             continue
 
-        calls.append(tokenize.untokenize(tokens[start : end + 1]).strip())
+        (start_row, start_col), (end_row, end_col) = tokens[start].start, tokens[end].end
+        calls.append(source[line_offsets[start_row - 1] + start_col : line_offsets[end_row - 1] + end_col])
         i = end + 1
 
     return calls
@@ -192,16 +198,18 @@ class FunctionToolCall(BaseModel):
         self,
         function_tools: list[FunctionTool] | None = None,
     ) -> ResponseFunctionToolCall:
-        positional = {k for k in self.parameters if _POSITIONAL_RE.match(k)}
-        if positional:
-            logger.warning(
-                "Dropping positional arguments for '%s': %s",
-                self.function_name,
-                positional,
-            )
+        positional_keys = [k for k in self.parameters if _POSITIONAL_RE.match(k)]
         arguments = {k: v for k, v in self.parameters.items() if not _POSITIONAL_RE.match(k)}
 
-        if function_tools is not None:
+        if function_tools is None:
+            # Without the tool schema there is no parameter order to bind against.
+            if positional_keys:
+                logger.warning(
+                    "Dropping positional arguments for '%s': %s",
+                    self.function_name,
+                    set(positional_keys),
+                )
+        else:
             tool = next(
                 (t for t in function_tools if t.name == self.function_name),
                 None,
@@ -213,6 +221,24 @@ class FunctionToolCall(BaseModel):
             schema = tool.parameters if isinstance(tool.parameters, dict) else {}
             properties = schema.get("properties", {})
             required = set(schema.get("required", []))
+
+            # The tool prompt shows a Python signature built by signature_from_schema,
+            # so a positional call binds against that same parameter order.
+            if positional_keys:
+                parameter_names = list(signature_from_schema(schema).parameters)
+                if len(positional_keys) > len(parameter_names):
+                    raise ValueError(
+                        f"Too many positional arguments for '{self.function_name}': "
+                        f"got {len(positional_keys)}, expected at most {len(parameter_names)}"
+                    )
+                bound = {}
+                for key, name in zip(positional_keys, parameter_names):
+                    if name in arguments:
+                        raise ValueError(
+                            f"Parameter '{name}' of '{self.function_name}' got both a positional and a named value"
+                        )
+                    bound[name] = self.parameters[key]
+                arguments = {**bound, **arguments}
 
             undeclared = {k for k in arguments if k not in properties}
             if undeclared:
@@ -265,24 +291,6 @@ def parse_function_call(function_string: str, pattern_to_match: list[str] = []) 
         )
 
     return _parse_function_exprs(expressions, pattern_to_match)
-
-
-def parse_multiple_functions(function_strings: List[str]) -> List[FunctionToolCall]:
-    """Parse multiple function call strings.
-
-    Args:
-        function_strings: List of function call strings.
-
-    Returns:
-        List of FunctionToolCall objects.
-    """
-    results: List[FunctionToolCall] = []
-    for func_str in function_strings:
-        try:
-            results.extend(parse_function_call(func_str))
-        except Exception:
-            continue
-    return results
 
 
 def extract_function_calls_from_text(text: str, block_regex: str = ".*") -> Tuple[str, List[FunctionToolCall]]:

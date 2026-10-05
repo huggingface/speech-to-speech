@@ -8,6 +8,10 @@ from typing import Any
 from openai import Stream
 from openai.types.responses import (
     ResponseCompletedEvent,
+    ResponseErrorEvent,
+    ResponseFailedEvent,
+    ResponseFunctionToolCall,
+    ResponseIncompleteEvent,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
     ResponseTextDeltaEvent,
@@ -18,6 +22,7 @@ from speech_to_speech.LLM.base_openai_compatible_language_model import (
     AssistantMessage,
     BaseOpenAICompatibleHandler,
     ProviderEvent,
+    ProviderResponseEnd,
     TextDelta,
     ToolCall,
     Usage,
@@ -34,6 +39,21 @@ from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn
 from speech_to_speech.LLM.responses_items import AssembledAssistant, AssembledToolCall, ResponsesSegmentAssembler
 
 logger = logging.getLogger(__name__)
+
+
+def _response_end(response: Any, *, status: str | None = None) -> ProviderResponseEnd:
+    status = status or getattr(response, "status", None)
+    if status == "incomplete":
+        reason = getattr(getattr(response, "incomplete_details", None), "reason", None)
+        if reason not in ("max_output_tokens", "content_filter"):
+            # Compatible servers may omit the reason or use an extension.
+            # Preserve the status without inventing a Realtime reason.
+            reason = None
+        return ProviderResponseEnd(status="incomplete", reason=reason)
+    if status == "failed":
+        error = getattr(response, "error", None)
+        return ProviderResponseEnd(status="failed", error=getattr(error, "message", None))
+    return ProviderResponseEnd()
 
 
 class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
@@ -175,24 +195,35 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
 
     def _iter_stream_events(self, api_response: Stream) -> Iterator[ProviderEvent]:
         assembler = ResponsesSegmentAssembler()
+        saw_terminal = False
         for raw_event in api_response:
             if isinstance(raw_event, ResponseTextDeltaEvent):
                 yield TextDelta(text=raw_event.delta)
             elif isinstance(raw_event, ResponseOutputItemDoneEvent):
+                if isinstance(raw_event.item, ResponseFunctionToolCall) and raw_event.item.status == "incomplete":
+                    continue
                 for assembled in assembler.feed_item(raw_event.item):
                     yield from self._provider_events_from_assembled(assembled)
-            elif isinstance(raw_event, ResponseCompletedEvent):
+            elif isinstance(raw_event, (ResponseCompletedEvent, ResponseIncompleteEvent, ResponseFailedEvent)):
+                saw_terminal = True
                 usage = getattr(raw_event.response, "usage", None)
                 if usage:
                     yield Usage(input_tokens=usage.input_tokens or 0, output_tokens=usage.output_tokens or 0)
+                yield _response_end(raw_event.response, status=raw_event.type.removeprefix("response."))
+            elif isinstance(raw_event, ResponseErrorEvent):
+                saw_terminal = True
+                yield ProviderResponseEnd(status="failed", error=raw_event.message)
         for assembled in assembler.finish():
             yield from self._provider_events_from_assembled(assembled)
+        if not saw_terminal:
+            logger.warning("Responses stream ended without a terminal event")
 
     def _iter_response_events(self, api_response: Any) -> Iterator[ProviderEvent]:
         assembler = ResponsesSegmentAssembler()
         usage = api_response.usage
         if usage:
             yield Usage(input_tokens=usage.input_tokens or 0, output_tokens=usage.output_tokens or 0)
+        yield _response_end(api_response)
         for message in api_response.output:
             for assembled in assembler.feed_item(message):
                 yield from self._provider_events_from_assembled(assembled)

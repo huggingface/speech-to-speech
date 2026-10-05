@@ -5,7 +5,7 @@ import logging
 import threading
 from collections.abc import Callable, Sequence
 from copy import deepcopy
-from typing import Any, Literal, Union
+from typing import Any, Literal, Union, cast
 
 from openai.types.realtime import ConversationItem
 from openai.types.realtime.conversation_item import (
@@ -113,7 +113,7 @@ def leading_reasoning_of(item: object) -> tuple[ReasoningRecord, ...]:
 
 
 def _leading_reasoning_params(item: object) -> list[ResponseInputItemParam]:
-    return [deepcopy(record.payload) for record in leading_reasoning_of(item)]
+    return [cast(ResponseInputItemParam, deepcopy(record.payload)) for record in leading_reasoning_of(item)]
 
 
 CompactFn = Callable[[ResponseInputParam], CompactionResult]
@@ -250,10 +250,6 @@ class Chat:
             return
 
         raise ChatItemError(f"No function_call with call_id '{call_id}' found in conversation history.")
-
-    def init_chat(self, message: RealtimeConversationItemSystemMessage) -> None:
-        with self._lock:
-            self.init_chat_message = message
 
     def history_anchor_id(self) -> str | None:
         """Anchor identifying the current end of the conversation.

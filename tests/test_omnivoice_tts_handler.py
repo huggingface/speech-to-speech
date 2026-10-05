@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 from typing import Any
@@ -9,7 +10,9 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+from openai.types.realtime import RealtimeSessionCreateRequest
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -49,6 +52,7 @@ def make_handler(
     handler = OmniVoiceTTSHandler.__new__(OmniVoiceTTSHandler)
     handler.model = model
     handler.voice_clone_prompt = voice_clone_prompt
+    handler.language_voice_clone_prompts = {}
     handler.instruct = instruct
     handler.language = language
     handler.num_steps = 32
@@ -128,6 +132,71 @@ def test_setup_loads_saved_voice_clone_prompt_once(monkeypatch: pytest.MonkeyPat
     assert model.generate_calls[0]["voice_clone_prompt"] is saved_prompt
 
 
+def install_fake_omnivoice(monkeypatch: pytest.MonkeyPatch, model: FakeModel) -> None:
+    class FakeOmniVoice:
+        @classmethod
+        def from_pretrained(cls, *_args: Any, **_kwargs: Any) -> FakeModel:
+            return model
+
+    monkeypatch.setitem(
+        sys.modules,
+        "omnivoice",
+        SimpleNamespace(OmniVoice=FakeOmniVoice, VoiceClonePrompt=SimpleNamespace(load=lambda _path: object())),
+    )
+
+    monkeypatch.setitem(sys.modules, "omnivoice.utils.lang_map", SimpleNamespace(LANG_NAME_TO_ID={"french": "fr"}))
+
+
+def test_ref_voices_dir_clones_the_reference_for_each_utterance_language(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    model = FakeModel()
+    install_fake_omnivoice(monkeypatch, model)
+    for code, transcript in {"fr": "Bonjour.", "es": "Hola."}.items():
+        (tmp_path / f"{code}.wav").write_bytes(b"")
+        (tmp_path / f"{code}.txt").write_text(f"{transcript}\n", encoding="utf-8")
+    handler = OmniVoiceTTSHandler.__new__(OmniVoiceTTSHandler)
+
+    handler.setup(Event(), ref_audio="default.wav", ref_text="Hello.", ref_voices_dir=str(tmp_path))
+    for language in ("fr", "es-419", "de", None):
+        list(handler.process(TTSInput(text="Ahoy.", language_code=language)))
+
+    assert [call["ref_text"] for call in model.create_prompt_calls] == ["Hello.", "Hola.", "Bonjour."]
+    prompts = handler.language_voice_clone_prompts
+    assert [call["voice_clone_prompt"] for call in model.generate_calls] == [
+        prompts["fr"],
+        prompts["es"],
+        handler.voice_clone_prompt,
+        handler.voice_clone_prompt,
+    ]
+
+
+@pytest.mark.parametrize("language", ["fr", "French", "fReNcH"])
+def test_ref_voices_dir_uses_pinned_language_name_or_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, language: str
+) -> None:
+    model = FakeModel()
+    install_fake_omnivoice(monkeypatch, model)
+    (tmp_path / "fr.wav").write_bytes(b"")
+    (tmp_path / "fr.txt").write_text("Bonjour.", encoding="utf-8")
+    handler = OmniVoiceTTSHandler.__new__(OmniVoiceTTSHandler)
+
+    handler.setup(Event(), ref_audio="default.wav", ref_text="Hello.", ref_voices_dir=str(tmp_path), language=language)
+    list(handler.process(TTSInput(text="Bonjour.", language_code="es")))
+
+    assert model.generate_calls[0]["voice_clone_prompt"] is handler.language_voice_clone_prompts["fr"]
+    assert model.generate_calls[0]["language"] == language
+
+
+def test_ref_voices_dir_rejects_a_reference_without_transcript(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    install_fake_omnivoice(monkeypatch, FakeModel())
+    (tmp_path / "fr.wav").write_bytes(b"")
+    handler = OmniVoiceTTSHandler.__new__(OmniVoiceTTSHandler)
+
+    with pytest.raises(ValueError, match="fr.txt"):
+        handler.setup(Event(), ref_voices_dir=str(tmp_path))
+
+
 @pytest.mark.parametrize(
     ("voice_clone_prompt", "instruct", "expected_key"),
     [
@@ -175,6 +244,20 @@ def test_process_resamples_clips_and_pads_16khz_blocks(monkeypatch: pytest.Monke
     assert len(chunks) == 1
     assert chunks[0].dtype == np.int16
     np.testing.assert_array_equal(chunks[0], np.array([32767, -32768, 16384, 0], dtype=np.int16))
+
+
+def test_session_language_overrides_setup_only_for_selected_request() -> None:
+    model = FakeModel()
+    handler = make_handler(model, language="en")
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "es"}}})
+    )
+
+    list(handler.process(TTSInput(text="Hola.", language_code="es", runtime_config=config)))
+    list(handler.process(TTSInput(text="Hello.")))
+
+    assert [call["language"] for call in model.generate_calls] == ["es", "en"]
+    assert handler.language == "en"
 
 
 def test_process_drops_audio_when_cancelled_during_blocking_generation() -> None:

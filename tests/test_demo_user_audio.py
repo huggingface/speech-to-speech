@@ -1,18 +1,21 @@
+import json
 import shutil
 import subprocess
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _run_node(script: str) -> None:
+def _run_node(script: str, *node_options: str) -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required for demo client tests")
     subprocess.run(
-        [node, "--input-type=module", "-e", script],
+        [node, *node_options, "--input-type=module", "-e", script],
         cwd=REPO_ROOT,
         check=True,
         capture_output=True,
@@ -131,6 +134,8 @@ client._onTransportEvent({
   item_id: "item_audio_only",
   audio_start_ms: 40,
 });
+// The SDK emits audio_interrupted after dispatching the raw speech event.
+client._interruptPlayback();
 for (let i = 0; i < 3; i++) client._onMicChunk(frame.buffer);
 client._onTransportEvent({
   type: "input_audio_buffer.speech_stopped",
@@ -268,16 +273,43 @@ if (spawned !== 1 || view._activeUserBubble !== bubble) {
 
 
 def test_audio_asset_version_propagates_to_the_worklets():
-    index = (REPO_ROOT / "demo/index.html").read_text()
-    main = (REPO_ROOT / "demo/main.js").read_text()
-    client = (REPO_ROOT / "demo/s2s-realtime-client.js").read_text()
+    module_scripts = []
 
-    version = "audio-24k-v1"
-    assert f"main.js?v={version}" in index
-    assert f"s2s-realtime-client.js?v={version}" in main
-    assert f'AUDIO_WORKLET_VERSION = "{version}"' in client
-    assert 'versionedAudioWorkletUrl("mic-capture.js", base)' in client
-    assert 'versionedAudioWorkletUrl("audio-playback.js", base)' in client
+    class ModuleScriptParser(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            attributes = dict(attrs)
+            if tag == "script" and attributes.get("type") == "module" and attributes.get("src"):
+                module_scripts.append(attributes["src"])
+
+    parser = ModuleScriptParser()
+    parser.feed((REPO_ROOT / "demo/index.html").read_text())
+    main_scripts = [src for src in module_scripts if Path(urlparse(src).path).name == "main.js"]
+    assert len(main_scripts) == 1
+
+    # Parse the module's real import URLs without booting the demo UI. Quote
+    # style, declaration formatting and worklet helper names are irrelevant.
+    _run_node(
+        """
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+import { SourceTextModule } from "node:vm";
+
+const indexUrl = pathToFileURL(`${process.cwd()}/demo/index.html`);
+const mainUrl = new URL(MAIN_SCRIPT, indexUrl);
+const main = new SourceTextModule(readFileSync(mainUrl, "utf8"));
+const clientUrls = main.dependencySpecifiers
+  .map((specifier) => new URL(specifier, mainUrl))
+  .filter((url) => url.pathname.endsWith("/s2s-realtime-client.js"));
+assert.equal(clientUrls.length, 1);
+
+const { AUDIO_WORKLET_VERSION } = await import(clientUrls[0].href);
+assert.ok(AUDIO_WORKLET_VERSION);
+assert.equal(mainUrl.searchParams.get("v"), AUDIO_WORKLET_VERSION);
+assert.equal(clientUrls[0].searchParams.get("v"), AUDIO_WORKLET_VERSION);
+""".replace("MAIN_SCRIPT", json.dumps(main_scripts[0])),
+        "--experimental-vm-modules",
+    )
 
 
 def test_mic_capture_reports_and_resamples_to_24khz_without_changing_pitch():
@@ -309,7 +341,7 @@ const processor = new CaptureProcessor({
   processorOptions: {
     chunkMs: 40,
     targetRate: 24000,
-    version: "audio-24k-v1",
+    version: "audio-24k-v2",
   },
 });
 processor.port.onmessage({ data: { kind: "probe" } });
@@ -319,7 +351,7 @@ if (!config) throw new Error("capture worklet did not report its configuration")
 if (config.inputRate !== 48000 || config.outputRate !== 24000) {
   throw new Error(`unexpected sample-rate handshake: ${JSON.stringify(config)}`);
 }
-if (config.version !== "audio-24k-v1") {
+if (config.version !== "audio-24k-v2") {
   throw new Error(`unexpected worklet version: ${config.version}`);
 }
 

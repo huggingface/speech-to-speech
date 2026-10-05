@@ -237,7 +237,7 @@ class TestSDKSessionUpdate:
             )
             await asyncio.sleep(0.2)
 
-            cid = server_env.service.connection_ids[0]
+            cid = list(server_env.service._conns)[0]
             s = server_env.service._state(cid).runtime_config.session
             assert s.audio.output.voice == "alloy"
             assert s.instructions == "You are a helpful robot"
@@ -282,6 +282,14 @@ class TestSDKVoiceTurn:
             assert event.type == SPEECH_STOPPED
             assert event.audio_end_ms == 0
             assert event.item_id == item_id
+            committed = await _recv(conn)
+            created = await _recv(conn)
+            assert committed.type == "input_audio_buffer.committed"
+            assert created.type == "conversation.item.created"
+            assert committed.item_id == created.item.id == item_id
+            assert committed.previous_item_id is None
+            assert created.previous_item_id is None
+            assert created.item.content[0].type == "input_audio"
 
             server_env.text_output_queue.put(TranscriptionCompletedEvent(transcript="hello"))
             event = await _recv(conn)
@@ -629,13 +637,11 @@ class TestPackagedAudioClient:
         try:
             await wait_until(
                 lambda: (
-                    bool(server_env.service.connection_ids)
-                    and bool(
-                        server_env.service._state(server_env.service.connection_ids[0]).runtime_config.session.tools
-                    )
+                    bool(list(server_env.service._conns))
+                    and bool(server_env.service._state(list(server_env.service._conns)[0]).runtime_config.session.tools)
                 )
             )
-            conn_id = server_env.service.connection_ids[0]
+            conn_id = list(server_env.service._conns)[0]
             chat = server_env.service._state(conn_id).runtime_config.chat
             chat.add_item(
                 RealtimeConversationItemFunctionCall(
@@ -844,6 +850,8 @@ class TestSDKPhantomSpeech:
             server_env.text_output_queue.put(SpeechStoppedEvent())
             event = await _recv(conn)
             assert event.type == SPEECH_STOPPED
+            assert (await _recv(conn)).type == "input_audio_buffer.committed"
+            assert (await _recv(conn)).type == "conversation.item.created"
 
             server_env.text_output_queue.put(SpeechStartedEvent())
             event = await _recv(conn)
@@ -852,6 +860,8 @@ class TestSDKPhantomSpeech:
             server_env.text_output_queue.put(SpeechStoppedEvent(duration_s=2.0))
             event = await _recv(conn)
             assert event.type == SPEECH_STOPPED
+            assert (await _recv(conn)).type == "input_audio_buffer.committed"
+            assert (await _recv(conn)).type == "conversation.item.created"
 
             server_env.output_queue.put(_pcm_bytes(256))
             event = await _recv(conn)
@@ -1170,7 +1180,9 @@ class TestSDKMultiTurn:
             await _recv(conn)
 
             server_env.text_output_queue.put(SpeechStoppedEvent())
-            await _recv(conn)
+            assert (await _recv(conn)).type == SPEECH_STOPPED
+            assert (await _recv(conn)).type == "input_audio_buffer.committed"
+            assert (await _recv(conn)).type == "conversation.item.created"
 
             server_env.text_output_queue.put(TranscriptionCompletedEvent(transcript="hi"))
             await _recv(conn)
@@ -1196,7 +1208,9 @@ class TestSDKMultiTurn:
 
             # Turn 2
             server_env.text_output_queue.put(SpeechStoppedEvent())
-            await _recv(conn)
+            assert (await _recv(conn)).type == SPEECH_STOPPED
+            assert (await _recv(conn)).type == "input_audio_buffer.committed"
+            assert (await _recv(conn)).type == "conversation.item.created"
 
             server_env.text_output_queue.put(TranscriptionCompletedEvent(transcript="bye"))
             await _recv(conn)

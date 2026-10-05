@@ -8,7 +8,9 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+from openai.types.realtime import RealtimeSessionCreateRequest
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.backend_registry import HandlerContext, create_backend_handler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, VADAudio
@@ -18,7 +20,6 @@ from speech_to_speech.STT import qwen3_asr_handler
 from speech_to_speech.STT.qwen3_asr_handler import (
     Qwen3ASRSTTHandler,
     language_to_code,
-    resolve_device,
     resolve_torch_dtype,
 )
 
@@ -89,13 +90,48 @@ def _handler(
     return handler
 
 
+def test_session_language_overrides_setup_without_mutating_handler():
+    processor = _FakeProcessor(language="Spanish", text="hola")
+    handler = _handler(language="en", processor=processor)
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(
+            type="realtime",
+            audio={"input": {"transcription": {"language": "es"}}},
+        )
+    )
+
+    outputs = list(handler.process(VADAudio(audio=np.zeros(160, dtype=np.float32), runtime_config=config)))
+
+    assert processor.requests[-1]["language"] == "es"
+    assert outputs[0].language_code == "es"
+    assert handler.forced_language == "en"
+
+
+def test_session_auto_resets_setup_language_for_qwen3_asr():
+    processor = _FakeProcessor(language="Spanish", text="hola")
+    handler = _handler(language="en", processor=processor)
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(
+            type="realtime",
+            audio={"input": {"transcription": {"language": "auto"}}},
+        )
+    )
+
+    outputs = list(handler.process(VADAudio(audio=np.zeros(160, dtype=np.float32), runtime_config=config)))
+
+    assert processor.requests[-1]["language"] is None
+    assert outputs[0].language_code == "es-auto"
+    assert handler.forced_language == "en"
+
+
 def _vad_audio(mode: str = "final", seconds: float = 2.0, revision: int = 1) -> VADAudio:
     return VADAudio(
         audio=np.zeros(int(16000 * seconds), dtype=np.float32),
         mode=mode,
         turn_id="turn_1",
         turn_revision=revision,
-        created_at_s=123.0,
+        created_at_s=124.0,
+        speech_end_at_s=123.0,
     )
 
 
@@ -130,26 +166,6 @@ def _hardware(monkeypatch: pytest.MonkeyPatch, *, cuda: bool, mps: bool = False,
     monkeypatch.setattr(qwen3_asr_handler.torch.cuda, "is_available", lambda: cuda)
     monkeypatch.setattr(qwen3_asr_handler.torch.cuda, "is_bf16_supported", lambda: bf16)
     monkeypatch.setattr(qwen3_asr_handler.torch.backends.mps, "is_available", lambda: mps)
-
-
-def test_resolve_device_auto_prefers_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
-    _hardware(monkeypatch, cuda=True, mps=True)
-    assert resolve_device("auto") == "cuda"
-
-
-def test_resolve_device_auto_uses_mps_when_cuda_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    _hardware(monkeypatch, cuda=False, mps=True)
-    assert resolve_device("auto") == "mps"
-
-
-def test_resolve_device_auto_falls_back_to_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
-    _hardware(monkeypatch, cuda=False, mps=False)
-    assert resolve_device("auto") == "cpu"
-
-
-def test_resolve_device_keeps_explicit_choice(monkeypatch: pytest.MonkeyPatch) -> None:
-    _hardware(monkeypatch, cuda=True)
-    assert resolve_device("cpu") == "cpu"
 
 
 @pytest.mark.parametrize(
@@ -222,6 +238,23 @@ def test_progressive_before_any_final_uses_auto_detection() -> None:
     list(handler.process(_vad_audio("progressive")))
 
     assert handler.processor.requests[0]["language"] is None
+
+
+@pytest.mark.parametrize("language", ["auto", "AUTO", " auto ", "", " "])
+def test_session_reset_restores_auto_detection_for_next_client(language: str) -> None:
+    processor = _FakeProcessor(language="German")
+    handler = _handler(language=language, processor=processor)
+
+    list(handler.process(_vad_audio("final")))
+    list(handler.process(_vad_audio("progressive")))
+    handler.on_session_end()
+
+    processor.language = "French"
+    list(handler.process(_vad_audio("progressive")))
+    result = list(handler.process(_vad_audio("final")))
+
+    assert [request["language"] for request in processor.requests] == [None, "de", None, None]
+    assert result[0].language_code == "fr-auto"
 
 
 def test_forced_language_is_passed_on_every_request_and_reported() -> None:
@@ -427,10 +460,11 @@ def test_cli_builds_a_qwen3_asr_handler_from_its_flags(monkeypatch: pytest.Monke
 
 def test_registry_normalizes_qwen3_asr_arguments() -> None:
     from speech_to_speech.arguments_classes.qwen3_asr_stt_arguments import Qwen3ASRSTTHandlerArguments
-    from speech_to_speech.backend_registry import STT_BACKENDS, select_backend
+    from speech_to_speech.backend_registry import STT_BACKENDS, BackendSelection
 
     config = Qwen3ASRSTTHandlerArguments(qwen3_asr_language="fr", qwen3_asr_gen_max_new_tokens=64)
-    selection = select_backend(STT_BACKENDS, "qwen3-asr", config)
+    spec = STT_BACKENDS["qwen3-asr"]
+    selection = BackendSelection(spec, spec.normalize(config))
 
     assert selection.config["model_name"] == "Qwen/Qwen3-ASR-0.6B-hf"
     assert selection.config["device"] == "auto"

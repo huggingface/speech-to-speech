@@ -13,7 +13,7 @@ class Qwen3TTSHandlerArguments:
     qwen3_tts_device: str = field(
         default="cuda",
         metadata={
-            "help": "Preferred device for Qwen3-TTS. Options: 'cuda', 'cpu', 'mps', 'auto'. Default is 'cuda'. On Apple Silicon the mlx-audio backend is selected automatically."
+            "help": "Device for the Qwen3-TTS torch backend: 'cuda' or 'auto'. Default is 'cuda'. The GGML backend picks its own device, and on Apple Silicon the mlx-audio backend is selected automatically."
         },
     )
     qwen3_tts_dtype: str = field(
