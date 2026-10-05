@@ -105,3 +105,45 @@ async def test_item_failure_preserves_and_uploads_other_results(monkeypatch, tmp
     assert report["totals"]["correct"] == 3
     error = report["items"][1]["error"]
     assert error.startswith("provider unavailable" if stage == "engine" else "audio_load_failed:")
+
+
+@pytest.mark.parametrize("limit, expected_count", [(None, 1000), (4, 4)])
+async def test_full_manifest_reaches_every_selected_item_and_the_report(monkeypatch, tmp_path, limit, expected_count):
+    destination = tmp_path / "full.json"
+    argv = ["run", "--subset", "full", "--out", str(destination)]
+    if limit is not None:
+        argv.extend(["--limit", str(limit)])
+    args = cli.build_parser().parse_args(argv)
+    full = load_subset("full")
+    completed = []
+
+    @asynccontextmanager
+    async def ready_server(*args):
+        yield
+
+    async def run_item(config, item, pcm):
+        completed.append(item.id)
+        return ItemResult(
+            id=item.id,
+            category=item.category,
+            official_answer=item.official_answer,
+            extracted=item.official_answer,
+            correct=True,
+            audio_out_bytes=100,
+        )
+
+    def runner_config(args, url):
+        return RunnerConfig(url=url, settle_s=0)
+
+    monkeypatch.setattr(cli, "_server", ready_server)
+    monkeypatch.setattr(cli, "_runner_config", runner_config)
+    monkeypatch.setattr(runner, "resolve_audio", lambda item, subset: item.id)
+    monkeypatch.setattr(runner, "load_pcm16_mono", lambda path: b"\x00\x00")
+    monkeypatch.setattr(runner, "run_item", run_item)
+
+    assert await cli._run(args, []) == 0
+    assert completed == [item.id for item in full.items[:expected_count]]
+    report = json.loads(destination.read_text())
+    assert report["subset"]["name"] == "full"
+    assert report["totals"]["n"] == report["totals"]["correct"] == expected_count
+    assert [item["id"] for item in report["items"]] == completed

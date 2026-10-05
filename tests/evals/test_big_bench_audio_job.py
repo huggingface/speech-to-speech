@@ -11,6 +11,7 @@ import pytest
 
 from speech_to_speech.evals.big_bench_audio import __main__ as cli
 from speech_to_speech.evals.big_bench_audio import job
+from speech_to_speech.evals.big_bench_audio.dataset import load_subset
 
 
 @pytest.fixture(autouse=True)
@@ -173,3 +174,13 @@ def test_startup_failure_without_log_returns_failure_without_hub_upload(monkeypa
     assert job.main() == 2
     assert not Path(captured["args"].spawn_log).exists()
     assert not Path(captured["args"].out).exists()
+
+
+def test_full_job_selects_all_1000_questions_without_a_limit(monkeypatch):
+    monkeypatch.setenv("S2S_SUBSET", "full")
+    captured = capture_launch(monkeypatch)
+
+    assert job.main() == 0
+    args = captured["args"]
+    assert args.subset == "full" and args.limit is None
+    assert len(load_subset(args.subset).head(args.limit)) == 1000

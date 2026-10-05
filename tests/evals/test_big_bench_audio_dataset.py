@@ -139,3 +139,22 @@ def test_windows_style_file_names_are_normalized():
 
 def test_subset_defaults_to_the_pinned_dataset():
     assert Subset(name="x", items=()).dataset == DATASET_REPO_ID
+
+
+def test_full_manifest_covers_all_questions_and_contains_the_smoke_sample():
+    full = load_subset("full")
+    vibe = load_subset("vibe")
+    stats = describe(full)
+
+    assert full.dataset == vibe.dataset and full.revision == vibe.revision
+    assert len(full) == len({item.id for item in full.items}) == 1000
+    assert stats.by_category == dict.fromkeys(CATEGORIES, 250)
+    by_id = {item.id: item for item in full.items}
+    assert all(by_id[item.id] == item for item in vibe.items)
+
+
+def test_vibe_can_be_reproduced_from_full_metadata_with_its_recorded_seed():
+    full = load_subset("full")
+    vibe = load_subset("vibe")
+
+    assert build_subset(40, items=list(full.items), seed=vibe.seed).items == vibe.items

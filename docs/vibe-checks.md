@@ -1,6 +1,6 @@
 # Big Bench Audio system tests
 
-The harness streams a revision-pinned sample of
+The harness streams a revision-pinned selection of
 [ArtificialAnalysis/big_bench_audio](https://huggingface.co/datasets/ArtificialAnalysis/big_bench_audio)
 through the engine's Realtime WebSocket API. Each recording gets a fresh session.
 It exercises VAD, speech recognition, the language model, and speech synthesis.
@@ -8,7 +8,9 @@ It exercises VAD, speech recognition, the language model, and speech synthesis.
 The bundled `vibe` subset has 40 questions: ten each for formal fallacies,
 navigation, object counting, and web of lies. Questions alternate categories,
 so `--limit 4` is a small smoke test covering all four. The manifest pins the
-dataset commit and official answers. Model weights and hosted providers are
+dataset commit and official answers. The bundled `full` manifest contains all
+1,000 questions from the same revision, 250 per category. Select `full` to run
+the whole benchmark. Model weights and hosted providers are
 not immutable; hold the server settings fixed and run comparisons close together.
 
 ## Development on Hugging Face
@@ -58,8 +60,8 @@ leave time for model downloads, initialization, and all questions.
 
 | Environment variable | Default | Purpose |
 |---|---|---|
-| `S2S_LIMIT` | all 40 | Number of questions |
-| `S2S_SUBSET` | `vibe` | Bundled subset or manifest path |
+| `S2S_LIMIT` | all selected questions | Truncate the selected manifest |
+| `S2S_SUBSET` | `vibe` | `vibe` (40), `full` (1,000), or a manifest path |
 | `S2S_LABEL` | Job ID | Report label |
 | `S2S_PUSH_TO_HUB` | unset | Private dataset for reports/logs |
 | `S2S_COMPARE` | unset | Baseline file or `owner/repo:reports/file.json` |
@@ -74,6 +76,39 @@ resolved at build time and runtime package versions are recorded in reports.
 The build argument `EXTRAS="kokoro supertonic"` installs extra backends.
 Model weights and evaluation audio download at runtime. The Space upload script creates the
 `source-revision.txt` required by the Dockerfile.
+
+## Run the whole benchmark
+
+Select `full` and leave `S2S_LIMIT` unset to run all 1,000 questions. Using the
+image and results variables above:
+
+```bash
+hf jobs run --detach --namespace "$HF_NAMESPACE" --flavor a10g-large --timeout 12h --secrets HF_TOKEN \
+    -e S2S_SUBSET=full \
+    -e S2S_PUSH_TO_HUB="$EVAL_RESULTS" \
+    "$EVAL_IMAGE" vibe-check
+```
+
+This uses the same runner, model settings, and reports as the 40-question sample.
+It streams questions sequentially at real time. Expect hours of GPU and provider
+usage; 12 hours is an example budget, not a measured full-run duration. Choose a
+budget for your configuration. The final report is written after all questions;
+checkpoint/resume is not implemented. To smoke-test this selection first, add
+`-e S2S_LIMIT=4` and use a shorter timeout.
+
+For local use:
+
+```bash
+python -m speech_to_speech.evals.big_bench_audio run --subset full --dry-run
+python -m speech_to_speech.evals.big_bench_audio run --subset full \
+    --spawn --out /tmp/full.json -- --stt parakeet-tdt --tts qwen3
+```
+
+To expand to a custom sample, `build-subset --size 120 --seed 1 --out subset.json`
+creates a revision-pinned manifest. Pass its path to `run --subset subset.json`.
+For Jobs, include the file in the image or mount it into the Job and set
+`S2S_SUBSET` to its container path. Changing `S2S_LIMIT` never adds questions to
+a manifest.
 
 ## Model and prompt configurations
 

@@ -784,7 +784,8 @@ Other generation parameters can be set using the handler prefix plus `_gen_`, fo
 
 ## Big Bench Audio system tests
 
-Run a pinned 40-question audio sample through VAD, STT, the LLM, and TTS, with
+Run a pinned 40-question audio sample or all 1,000 Big Bench Audio questions
+through VAD, STT, the LLM, and TTS, with
 per-category answer accuracy, audio latency, and protocol failures in JSON reports.
 `Dockerfile.eval` and `scripts/prepare_eval_space.py` build a private HF Space image
 for GPU execution on Hugging Face Jobs. Start with four questions, then compare
