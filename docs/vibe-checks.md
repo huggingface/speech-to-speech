@@ -139,6 +139,17 @@ does not execute shell expressions or expand variables inside their values.
 
 ## Local use
 
+Outside the Docker image, install the evaluation dependencies into the engine
+environment first:
+
+```bash
+python -m pip install "soundfile>=0.13.0" "websockets>=14.0"
+```
+
+The decoder uses SoundFile and the evaluator uses the modern async WebSocket
+client. These requirements are installed by `Dockerfile.eval`; they do not
+change the engine's base dependencies.
+
 ```bash
 # Inspect the sample without downloading audio or loading models.
 python -m speech_to_speech.evals.big_bench_audio run --dry-run
