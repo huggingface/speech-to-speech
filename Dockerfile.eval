@@ -29,6 +29,6 @@ USER 1000
 # The engine sets TORCHINDUCTOR_CACHE_DIR inside its package; exercise that
 # import as the runtime user so cache permission errors fail the image build.
 RUN python -c "from speech_to_speech import s2s_pipeline; import torch._dynamo"
-# Keep the image-building Space healthy without loading models or using a GPU.
+# Only the built image is needed; the Space has no long-running application.
 # Jobs override this with `vibe-check`.
-CMD ["python", "-m", "http.server", "7860", "--directory", "/tmp"]
+CMD ["python", "-c", "print('Run vibe-check in a Hugging Face Job.')"]

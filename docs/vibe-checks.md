@@ -25,8 +25,20 @@ python scripts/prepare_eval_space.py --space-name s2s-big-bench-audio-dev
 The script uploads only tracked source and container files, records the Git
 revision, and removes stale files within the paths it manages while preserving
 unrelated Space files. It prints your launch command. Wait for the Space build to finish.
-The Space stays on CPU and only runs a small HTTP server; GPU inference happens
-in Jobs. This follows the [HF Docker Space image workflow](https://huggingface.co/docs/hub/jobs-images).
+The Space builds the container and exposes it through HF's image registry for
+Jobs. A [storage bucket](https://huggingface.co/docs/hub/storage-buckets) stores
+files but does not build or serve a runnable container image. This follows the
+[HF Docker Space image workflow](https://huggingface.co/docs/hub/jobs-images).
+The Space's default command prints a message and exits, so an app runtime error
+after a successful build is expected. It does not load models or run an idle
+server. Once the build logs confirm the image was pushed, the Space can be paused
+in its settings; Jobs need the built image, not a running Space. GPU inference
+happens in Jobs.
+
+An already-built image in another container registry can also be used: set
+`EVAL_IMAGE` to that registry reference and skip the Space upload. HF Space images
+use the latest build and can be removed by registry maintenance; rebuild the
+Space if Jobs report that the image was not found.
 
 Set your personal namespace and the image/results repositories:
 

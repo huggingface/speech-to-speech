@@ -1,6 +1,10 @@
-"""Upload the committed evaluation image to a private Space in your personal HF profile.
+"""Upload committed evaluation source to a private Docker Space for image builds.
 
     python scripts/prepare_eval_space.py --space-name s2s-big-bench-audio-dev
+
+The Space builds and hosts the container image for `hf jobs run`; it does not
+run evaluations or need a long-running app. A storage bucket can hold files but
+does not provide the Docker build and image-registry workflow.
 
 Commit source changes before uploading. Run the built image using `hf jobs run`.
 """
@@ -32,7 +36,7 @@ def prepare(destination: Path) -> str:
     (destination / "source-revision.txt").write_text(revision + "\n")
     readme = destination / "README.md"
     readme.write_text(
-        "---\ntitle: S2S Big Bench Audio Jobs image\nsdk: docker\napp_port: 7860\nlicense: apache-2.0\n---\n\n"
+        "---\ntitle: S2S Big Bench Audio Jobs image\nsdk: docker\nlicense: apache-2.0\n---\n\n"
         "Private development image for Hugging Face Jobs. The Space builds the image; "
         "run `vibe-check` in a GPU Job to evaluate the engine.\n\n"
         "The source revision is recorded in `source-revision.txt`.\n\n" + readme.read_text()
