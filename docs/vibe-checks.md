@@ -13,6 +13,27 @@ dataset commit and official answers. The bundled `full` manifest contains all
 the whole benchmark. Model weights and hosted providers are
 not immutable; hold the server settings fixed and run comparisons close together.
 
+## Question selection
+
+`vibe` is a deterministic stratified random sample, using seed `0`. The builder
+sorts each category/official-answer group by item ID, shuffles it with that seed,
+and selects ten questions per category while cycling through the answer groups.
+For formal fallacies, navigation, and web of lies this gives five questions per
+answer. Object counting includes ten different official counts. This deliberately
+balances answers rather than sampling uniformly from the entire dataset.
+The selected questions are interleaved by category and saved in the manifest;
+no new sample is drawn when an evaluation starts.
+
+Reproduce the 40-question selection from the pinned metadata with:
+
+```bash
+python -m speech_to_speech.evals.big_bench_audio build-subset \
+    --size 40 --name vibe --seed 0 --out /tmp/vibe.json
+```
+
+`full` includes every question at the same dataset revision. Its seed only affects
+ordering; it does not omit or sample any questions.
+
 ## Development on Hugging Face
 
 Commit the evaluation code, then create/update an image-building **private Docker

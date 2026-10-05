@@ -1,7 +1,7 @@
 {
   "schema": "big-bench-audio-subset/1",
   "name": "vibe",
-  "description": "40 items, balanced across the four categories and across the official answers within each. Round-robin ordered so --limit stays balanced.",
+  "description": "40 items, selected with seed 0 by stratified random sampling across categories and official answers. Ten per category; round-robin ordered so --limit stays balanced.",
   "dataset": "ArtificialAnalysis/big_bench_audio",
   "revision": "af7bb9c25b015792583ca4da3ee27ec62cb79fe6",
   "seed": 0,
