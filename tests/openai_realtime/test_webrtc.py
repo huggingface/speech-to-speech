@@ -1007,3 +1007,44 @@ async def test_visemes_use_current_webrtc_data_channel_before_media_audio():
     assert delivered[3]["item_id"] == delivered[1]["item"]["id"]
     assert delivered[4]["pcm"]
     assert not any(event["type"] == "response.output_audio.delta" for event in delivered)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["session-release", "transport-switch", "response-close"])
+async def test_viseme_send_rechecks_response_and_session_before_audio(change):
+    from speech_to_speech.api.openai_realtime.pipeline_unit import SessionState
+    from speech_to_speech.pipeline.visemes import Viseme
+
+    unit = _make_unit()
+    session_id = unit.service.register()
+    metadata_sent = asyncio.Event()
+    audio_sends = []
+
+    class ChangingTransport(_FakeTransport):
+        async def send_events(self, events):
+            await super().send_events(events)
+            if any(event.type == "speech_to_speech.output_audio.visemes" for event in events):
+                if change == "session-release":
+                    unit.session.released_at = time.time()
+                elif change == "transport-switch":
+                    unit.session.transport = _FakeTransport()
+                else:
+                    unit.service.finish_response(session_id, status="cancelled")
+                metadata_sent.set()
+
+        async def send_audio_chunk(self, *args, **kwargs):
+            audio_sends.append(args)
+
+    transport = ChangingTransport()
+    unit.session = SessionState(session_id=session_id, transport=transport)
+    app = router_module.create_app(pool=[unit], stop_event=ThreadingEvent())
+    unit.output_queue.put(
+        AudioOutput(
+            audio=b"\x01\x00" * 512,
+            visemes=[Viseme(viseme=21, start_s=0, end_s=0.032)],
+        )
+    )
+    async with app.router.lifespan_context(app):
+        await asyncio.wait_for(metadata_sent.wait(), timeout=1)
+        await asyncio.sleep(0.05)
+    assert audio_sends == []

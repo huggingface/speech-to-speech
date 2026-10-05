@@ -1043,6 +1043,7 @@ def create_app(
                         _discard_obsolete_response_key(unit, session_id, response_key)
                         continue
 
+                    audio_generation = _audio_generation(audio_chunk)
                     visemes = audio_chunk.visemes if isinstance(audio_chunk, AudioOutput) else []
                     audio_chunk = _to_audio_bytes(audio_chunk)
 
@@ -1100,6 +1101,17 @@ def create_app(
                                 )
                             )
                             await transport.send_events(events)
+                            # Sending metadata yields to cancellation and session
+                            # release. Never reopen that response with stale audio.
+                            if (
+                                session is None
+                                or unit.session is not session
+                                or session.released_at is not None
+                                or session.transport is not transport
+                                or _generation_is_discardable(unit, audio_generation)
+                                or unit.service._state(session_id).current_response_id != response_id
+                            ):
+                                continue
                         await transport.send_audio_chunk(
                             unit.service,
                             session_id,

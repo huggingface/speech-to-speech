@@ -1816,3 +1816,55 @@ def test_cancelled_audio_does_not_publish_visemes(setup):
             while not events or events[-1]["type"] != "response.done":
                 events.append(ws.receive_json())
             assert not any(event["type"] == "speech_to_speech.output_audio.visemes" for event in events)
+
+
+def test_cancellation_while_visemes_send_does_not_restart_audio(setup, monkeypatch):
+    from speech_to_speech.pipeline.visemes import Viseme
+
+    app, service, _, output_queue, _, _, _, _, scope = setup
+    visemes_sent = ThreadingEvent()
+    release_send = ThreadingEvent()
+    audio_sends = []
+    original_events = router_module.WebSocketTransport.send_events
+    original_audio = router_module.WebSocketTransport.send_audio_chunk
+
+    async def hold_after_visemes(transport, events):
+        await original_events(transport, events)
+        if any(event.type == "speech_to_speech.output_audio.visemes" for event in events):
+            visemes_sent.set()
+            while not release_send.is_set():
+                await asyncio.sleep(0.001)
+
+    async def observe_audio(transport, *args, **kwargs):
+        audio_sends.append(args)
+        await original_audio(transport, *args, **kwargs)
+
+    monkeypatch.setattr(router_module.WebSocketTransport, "send_events", hold_after_visemes)
+    monkeypatch.setattr(router_module.WebSocketTransport, "send_audio_chunk", observe_audio)
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()
+            ws.send_json({"type": "response.create"})
+            assert ws.receive_json()["type"] == "response.created"
+            conn_id = list(service._conns)[0]
+            response_key = service._state(conn_id).current_response_key
+            output_queue.put(
+                AudioOutput(
+                    audio=_pcm_bytes(256),
+                    response_key=response_key,
+                    cancel_generation=scope.generation,
+                    visemes=[Viseme(viseme=21, start_s=0, end_s=0.016)],
+                )
+            )
+            assert visemes_sent.wait(timeout=1)
+            try:
+                events = [ws.receive_json() for _ in range(3)]
+                assert events[-1]["type"] == "speech_to_speech.output_audio.visemes"
+                ws.send_json({"type": "response.cancel"})
+                while ws.receive_json()["type"] != "response.done":
+                    pass
+            finally:
+                release_send.set()
+            time.sleep(0.1)
+            assert audio_sends == []
+            assert not service._state(conn_id).in_response
