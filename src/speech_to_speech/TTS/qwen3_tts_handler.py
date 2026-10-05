@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 import math
 import re
+import time
+import os
 import tempfile
 import unicodedata
 from collections.abc import Callable
@@ -969,8 +971,15 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 "Set qwen3_tts_speaker or use a voice-clone model with ref_audio."
             )
 
+        logger.info(
+            "Qwen3-TTS synth: chars=%d speaker=%s language=%s max_tokens=%d gen_kwargs=%s text=%r",
+            len(text), speaker, self._effective_language(), utterance_max_new_tokens,
+            self.gen_kwargs, text[:40],
+        )
         if self.backend == "mlx":
-            yield from self._stream_mlx_generation(
+            dump_dir = os.environ.get("QWEN3_TTS_DUMP_DIR")
+            dumped: list[np.ndarray] = []
+            for chunk in self._stream_mlx_generation(
                 self.model.generate_custom_voice,
                 label="custom_voice_mlx",
                 max_tokens=utterance_max_new_tokens,
@@ -978,7 +987,17 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 speaker=speaker,
                 language=self._effective_language(),
                 instruct=self.instruct,
-            )
+            ):
+                if dump_dir and chunk is not None and not isinstance(chunk, bytes):
+                    dumped.append(np.asarray(chunk).copy())
+                yield chunk
+            if dump_dir and dumped:
+                # 진단용: 파이프라인이 실제로 만든 음성을 발화별 wav로 저장
+                import soundfile as sf
+                Path(dump_dir).mkdir(parents=True, exist_ok=True)
+                name = f"{time.strftime('%H%M%S')}_{len(text)}ch.wav"
+                sf.write(str(Path(dump_dir) / name), np.concatenate(dumped).astype(np.int16), 16000)
+                logger.info("Qwen3-TTS dump: %s (%r)", name, text[:30])
             return
 
         yield from self._stream(
