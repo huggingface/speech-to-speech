@@ -11,5 +11,6 @@ fi
 cd "$(dirname "$0")"
 exec .venv/bin/speech-to-speech talk \
   --url "$1" \
+  --api-key dummy \
   --block-mic-during-playback \
   2>&1 | tee -a run_talk_colab.log
