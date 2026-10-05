@@ -861,3 +861,68 @@ def test_dependency_error_names_backend_and_required_extra():
 def test_removed_ineffective_options_are_rejected(option):
     with pytest.raises(ValueError, match=option):
         parse_arguments([option, "500" if "silence" in option else "float32"])
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_viseme_stage_is_optional_and_connected_after_tts(monkeypatch, enabled):
+    contexts = {}
+
+    class DummyHandler:
+        def __init__(self, *_args, **kwargs):
+            self.queue_in = kwargs["queue_in"]
+            self.queue_out = kwargs["queue_out"]
+            self.setup_kwargs = kwargs.get("setup_kwargs", {})
+
+    def factory(name):
+        def build(context, _config):
+            contexts[name] = context
+            return object()
+
+        return build
+
+    monkeypatch.setattr(s2s_pipeline, "VADHandler", DummyHandler)
+    monkeypatch.setattr(s2s_pipeline, "TranscriptionNotifier", DummyHandler)
+    monkeypatch.setattr("speech_to_speech.LLM.lm_output_processor.LMOutputProcessor", DummyHandler)
+    monkeypatch.setattr("speech_to_speech.STV.w2v_stv_handler.Wav2Vec2STVHandler", DummyHandler)
+    specs = [BackendSpec(name, name, FakeArguments, factory(name)) for name in ("stt", "llm", "tts")]
+    output_queue = Queue()
+    cancel_scope = CancelScope()
+    handlers = s2s_pipeline._build_handlers(
+        stop_event=Event(),
+        should_listen=Event(),
+        recv_audio_chunks_queue=Queue(),
+        spoken_prompt_queue=Queue(),
+        stt_output_queue=Queue(),
+        text_prompt_queue=Queue(),
+        lm_response_queue=Queue(),
+        lm_processed_queue=Queue(),
+        send_audio_chunks_queue=output_queue,
+        text_output_queue=Queue(),
+        module_kwargs=ModuleArguments(enable_visemes=enabled, stv_device="cpu"),
+        vad_handler_kwargs=VADHandlerArguments(),
+        stt_backend=BackendSelection(specs[0], specs[0].normalize(FakeArguments())),
+        llm_backend=BackendSelection(specs[1], specs[1].normalize(FakeArguments())),
+        tts_backend=BackendSelection(specs[2], specs[2].normalize(FakeArguments())),
+        speculative_turns=SpeculativeTurnTracker(),
+        cancel_scope=cancel_scope,
+        pipeline_index=0,
+    )
+    if enabled:
+        assert handlers[-1].queue_in is contexts["tts"].queue_out
+        assert handlers[-1].queue_out is output_queue
+        assert handlers[-1].setup_kwargs["cancel_scope"] is cancel_scope
+    else:
+        assert contexts["tts"].queue_out is output_queue
+
+
+def test_viseme_cli_and_json_configuration(tmp_path):
+    import json
+
+    argv = ["--enable_visemes", "--stv_device", "cpu", "--stv_model_name", "custom/phonemes"]
+    config = tmp_path / "visemes.json"
+    config.write_text(json.dumps({"enable_visemes": True, "stv_device": "cpu", "stv_model_name": "custom/phonemes"}))
+    for args in (parse_arguments(argv), parse_arguments([str(config)])):
+        assert args.module_kwargs.enable_visemes
+        assert args.module_kwargs.stv_device == "cpu"
+        assert args.module_kwargs.stv_model_name == "custom/phonemes"
+    assert not parse_arguments([]).module_kwargs.enable_visemes

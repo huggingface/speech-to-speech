@@ -25,6 +25,7 @@ flowchart LR
         LLM["LLM"]
         Proc["LMOutputProcessor"]
         TTS["TTS"]
+        STV["Optional speech to visemes"]
     end
 
     Local --> WS
@@ -41,6 +42,8 @@ flowchart LR
     LLM -- "text + tools" --> Proc
     Proc -- "ordered events + usage + clean text" --> TTS
     TTS -- "ordered events + PCM audio" --> Router
+    TTS -. "when enabled" .-> STV
+    STV -. "audio + timed visemes" .-> Router
     VAD -- "speech_started/stopped" --> Router
     TN -- "transcription events" --> Router
     Router -- "server events (JSON)" --> WS
@@ -91,6 +94,14 @@ flowchart LR
 | `response.output_audio_transcript.done` | Full assistant transcript, emitted once when the output item closes. On cancellation, it contains the accumulated partial transcript. |
 | `response.function_call_arguments.done` | Tool call with `call_id`, `name`, and JSON `arguments`. |
 | `response.done` | Response finished: `completed`, `cancelled`, `incomplete`, or `failed`. See terminal status details below. |
+
+### Optional viseme output
+
+With `--enable_visemes`, an additional stage extracts mouth shapes from TTS audio.
+The existing WebSocket connection or WebRTC data channel receives
+`speech_to_speech.output_audio.visemes` JSON events before the matching audio.
+Standard Realtime audio events and the current endpoints stay unchanged. See the
+[viseme guide](../../STV/README.md) for the event schema, timing, and model limits.
 
 ### Terminal status details
 

@@ -957,3 +957,53 @@ async def _wait_for_release(server_env, timeout: float = 5.0) -> None:
             return
         await asyncio.sleep(0.05)
     raise AssertionError("failed WebRTC call left the pipeline unit claimed")
+
+
+@pytest.mark.asyncio
+async def test_visemes_use_current_webrtc_data_channel_before_media_audio():
+    from types import SimpleNamespace
+
+    from speech_to_speech.api.openai_realtime.pipeline_unit import SessionState
+    from speech_to_speech.pipeline.visemes import Viseme
+
+    unit = _make_unit()
+    session_id = unit.service.register()
+    delivered = []
+    rtc = object.__new__(WebRTCSession)
+    rtc._dc = SimpleNamespace(readyState="open", send=lambda value: delivered.append(json.loads(value)))
+    rtc._track = SimpleNamespace(write=lambda pcm: delivered.append({"type": "rtp-audio", "pcm": pcm}))
+    rtc._out_resampler = PcmResampler(WEBRTC_SAMPLE_RATE)
+
+    async def close():
+        pass
+
+    rtc.close = close
+    unit.session = SessionState(session_id=session_id, transport=rtc)
+    stop_event = ThreadingEvent()
+    app = router_module.create_app(pool=[unit], stop_event=stop_event)
+    unit.output_queue.put(
+        AudioOutput(
+            audio=b"\x01\x00" * 512,
+            visemes=[Viseme(viseme=21, start_s=0, end_s=0.032)],
+        )
+    )
+    unit.output_queue.put(AUDIO_RESPONSE_DONE)
+    async with app.router.lifespan_context(app):
+
+        async def wait_for_done():
+            while not any(event["type"] == "response.done" for event in delivered):
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_for_done(), timeout=2)
+    kinds = [event["type"] for event in delivered]
+    assert kinds[:5] == [
+        "response.created",
+        "response.output_item.added",
+        "response.content_part.added",
+        "speech_to_speech.output_audio.visemes",
+        "rtp-audio",
+    ]
+    assert delivered[3]["response_id"] == delivered[0]["response"]["id"]
+    assert delivered[3]["item_id"] == delivered[1]["item"]["id"]
+    assert delivered[4]["pcm"]
+    assert not any(event["type"] == "response.output_audio.delta" for event in delivered)
