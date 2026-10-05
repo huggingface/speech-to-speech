@@ -501,13 +501,10 @@ def test_streaming_preserves_text_tool_text_order():
         "message",
         "function_call_output",
     ]
-    assert [message["role"] for message in h._serialize(chat)] == [
-        "user",
-        "assistant",
-        "assistant",
-        "tool",
-        "assistant",
-    ]
+    messages = h._serialize(chat)
+    assert [message["role"] for message in messages] == ["user", "assistant", "tool", "assistant"]
+    assert messages[1]["content"] == "Before."
+    assert [tool_call["function"]["name"] for tool_call in messages[1]["tool_calls"]] == ["lookup"]
 
 
 def test_prefetch_defers_irreversible_chat_cleanup_until_claim():
