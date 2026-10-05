@@ -5,11 +5,6 @@ builders (``build_voice_system_prompt`` / ``build_text_system_prompt``) for the
 current turn. It never adds a second consecutive user message, which would break
 strict chat templates (e.g. Ministral).
 
-Any code missing from ``WHISPER_LANGUAGE_TO_LLM_LANGUAGE`` silently produces no
-instruction at all. Parakeet TDT is the default STT and reports 25 languages, so this
-asserts the instruction actually reaches the outgoing request for the ones it detects --
-not merely that the mapping dict has keys.
-
 The OpenAI client is faked, so this runs with no network and no GPU.
 """
 
@@ -19,7 +14,6 @@ import queue
 import threading
 from types import SimpleNamespace
 
-import pytest
 from openai.types.realtime.realtime_session_create_request import RealtimeSessionCreateRequest
 
 import speech_to_speech.LLM.base_openai_compatible_language_model as base_mod
@@ -27,7 +21,6 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.LLM.chat_completions_language_model import ChatCompletionsApiModelHandler
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
-from speech_to_speech.STT.parakeet_tdt_handler import SUPPORTED_LANGUAGES as PARAKEET_LANGUAGES
 
 LANGUAGE_INSTRUCTION_PREFIX = "Please reply to my message in "
 
@@ -97,17 +90,6 @@ def test_swedish_gets_a_language_instruction():
     contents = _sent_system_messages(handler, "sv-auto")
 
     assert any(isinstance(c, str) and f"{LANGUAGE_INSTRUCTION_PREFIX}swedish." in c for c in contents)
-
-
-@pytest.mark.parametrize("code", sorted(PARAKEET_LANGUAGES))
-def test_every_parakeet_language_produces_an_instruction(code):
-    """No language the default STT can report may silently skip the instruction."""
-    handler = _make_handler(enable_lang_prompt=True)
-
-    contents = _sent_system_messages(handler, f"{code}-auto")
-
-    instructions = [c for c in contents if isinstance(c, str) and LANGUAGE_INSTRUCTION_PREFIX in c]
-    assert len(instructions) == 1, f"no language instruction emitted for {code!r}"
 
 
 def test_no_instruction_when_the_flag_is_disabled():

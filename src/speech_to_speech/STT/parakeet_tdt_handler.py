@@ -81,7 +81,6 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         self,
         model_name: Optional[str] = None,
         device: str = "auto",
-        compute_type: str = "float16",
         language: Optional[str] = None,
         gen_kwargs: dict[str, Any] = {},
         enable_live_transcription: bool = False,
@@ -95,14 +94,13 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                 - MPS: "mlx-community/parakeet-tdt-0.6b-v3"
                 - CUDA/CPU: "nvidia/parakeet-tdt-0.6b-v3"
             device: Device to use ("auto", "cuda", "npu", "mps", "cpu")
-            compute_type: Compute precision ("float16", "float32")
             language: Legacy language preference (ignored by Parakeet decoders)
             gen_kwargs: Additional generation kwargs
         """
         self.gen_kwargs = gen_kwargs
-        self.start_language = language
+        self.start_language = self._normalize_language(language)
         self.last_language = None
-        if language and language != "auto":
+        if self.start_language:
             logger.warning("Parakeet does not accept a language constraint; ignoring configured language %r", language)
         self._language_detector = warm_language_detector(tuple(SUPPORTED_LANGUAGES))
         self.enable_live_transcription = enable_live_transcription
@@ -124,7 +122,6 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                 model_name = "nvidia/parakeet-tdt-0.6b-v3"
 
         self.model_name = model_name
-        self.compute_type = compute_type
 
         logger.info(f"Loading Parakeet TDT model: {model_name} on {self.device}")
 
@@ -200,10 +197,8 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                 # Convert to mx.array and call decode_chunk directly
                 audio_mx = mx.array(dummy_audio, dtype=mx.float32)
                 _ = self.model.decode_chunk(audio_mx, verbose=False)
-            elif self.backend == "nano_parakeet":
-                _ = self.model.transcribe(dummy_audio)
             else:
-                _ = self.model.transcribe([dummy_audio], batch_size=1, verbose=False)
+                _ = self.model.transcribe(dummy_audio)
 
             logger.info("Model warmed up and ready")
         except Exception as e:
@@ -304,12 +299,13 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                         lock_scope_s = perf_counter() - lock_scope_start_s
 
                 try:
-                    language_code = self._detect_language_from_text(pred_text) if pred_text else None
+                    language_code = self._resolve_language(pred_text) if pred_text else None
                 except Exception:
                     logger.exception("Parakeet language detection failed; leaving language unset")
                     language_code = None
-                if language_code and language_code in SUPPORTED_LANGUAGES:
-                    self.last_language = language_code
+                base_code = language_code.removesuffix("-auto") if language_code else None
+                if base_code and base_code in SUPPORTED_LANGUAGES:
+                    self.last_language = base_code
                 else:
                     language_code = None
 
@@ -371,6 +367,20 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         """
         return detect_language_from_text(text, getattr(self, "_language_detector", None))
 
+    def _resolve_language(self, pred_text: str) -> Optional[str]:
+        """Report detected language as automatic; configured preferences cannot force Parakeet."""
+        detected_lang = self._detect_language_from_text(pred_text)
+        logger.debug("Parakeet detected language: %s", detected_lang)
+        return f"{detected_lang}-auto" if detected_lang else None
+
+    def _normalize_language(self, language: Optional[str]) -> Optional[str]:
+        if not isinstance(language, str):
+            return None
+        language = language.strip()
+        if not language or language.lower() in ("auto", "none", "null"):
+            return None
+        return language
+
     @contextmanager
     def _compute_lock_context(self, handler_name: str, timeout: float) -> Iterator[bool]:
         if self.backend == "mlx":
@@ -404,6 +414,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
 
     def _show_progressive_transcription(self, audio_input: np.ndarray) -> str:
         """Run progressive transcription, print to console, and return the text."""
+        assert self.streaming_handler is not None, "Live transcription requires a streaming handler"
         result = self.streaming_handler.transcribe_incremental(audio_input)
         rich_text = Text()
         if result.fixed_text:

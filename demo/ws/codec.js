@@ -1,7 +1,6 @@
 // @ts-check
 /**
- * Pure, stateless helpers for the WebSocket realtime client: base64 <-> PCM
- * conversion for the audio frames on the wire, transcript extraction from a
+ * Pure, stateless helpers for the WebSocket realtime client: transcript extraction from a
  * `response.done` payload, and a tiny URL helper. Kept separate from the client
  * so the protocol/state logic stays readable.
  */
@@ -31,27 +30,4 @@ export function extractResponseTranscript(response) {
     }
   }
   return parts.join(" ").trim();
-}
-
-/** @param {ArrayBuffer} buf */
-export function base64FromArrayBuffer(buf) {
-  const bytes = new Uint8Array(buf);
-  // Chunked encoding so we don't blow up the call stack on long buffers.
-  let binary = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode.apply(null, /** @type {number[]} */ (
-      /** @type {unknown} */ (bytes.subarray(i, i + chunk))
-    ));
-  }
-  return btoa(binary);
-}
-
-/** @param {string} b64 */
-export function base64ToBytes(b64) {
-  const binary = atob(b64);
-  const len = binary.length;
-  const out = new Uint8Array(len);
-  for (let i = 0; i < len; i++) out[i] = binary.charCodeAt(i);
-  return out;
 }

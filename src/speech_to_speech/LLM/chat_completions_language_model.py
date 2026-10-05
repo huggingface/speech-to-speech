@@ -29,6 +29,7 @@ from speech_to_speech.LLM.base_openai_compatible_language_model import (
     AssistantMessage,
     BaseOpenAICompatibleHandler,
     ProviderEvent,
+    ProviderResponseEnd,
     TextDelta,
     ToolCall,
     Usage,
@@ -199,11 +200,20 @@ def _tool_calls_from_accum(tool_accum: dict[int, dict[str, str]]) -> Iterator[To
         )
 
 
+def _chat_response_end(finish_reason: str) -> ProviderResponseEnd:
+    if finish_reason == "length":
+        return ProviderResponseEnd(status="incomplete", reason="max_output_tokens")
+    if finish_reason == "content_filter":
+        return ProviderResponseEnd(status="incomplete", reason="content_filter")
+    return ProviderResponseEnd()
+
+
 def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Iterator[ProviderEvent]:
     """Normalize a streaming Chat Completions response."""
     tool_accum: dict[int, dict[str, str]] = {}
     usage: Usage | None = None
     text_segment = ""
+    ending: ProviderResponseEnd | None = None
 
     def flush_tools() -> Iterator[ProviderEvent]:
         nonlocal text_segment
@@ -232,6 +242,10 @@ def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Itera
             )
         if not chunk.choices:
             continue
+        finish_reason = getattr(chunk.choices[0], "finish_reason", None)
+        if finish_reason is not None:
+            ending = _chat_response_end(finish_reason)
+            yield ending
         delta = chunk.choices[0].delta
         text_piece = delta.content or getattr(delta, "refusal", None)
         continuing_tool = bool(tool_accum)
@@ -245,7 +259,9 @@ def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Itera
         if not continuing_tool:
             accumulate_tools(delta.tool_calls)
 
-    if tool_accum:
+    if ending is None:
+        logger.warning("Chat Completions stream ended without a finish_reason")
+    if tool_accum and (ending is None or ending.status == "completed"):
         yield from flush_tools()
     if text_segment:
         yield AssistantMessage(content=[AssistantContent(type="output_text", text=text_segment)])
@@ -258,6 +274,10 @@ def _iter_chat_response_events(api_response: Any) -> Iterator[ProviderEvent]:
     usage = api_response.usage
     if usage:
         yield Usage(input_tokens=usage.prompt_tokens or 0, output_tokens=usage.completion_tokens or 0)
+    if api_response.choices:
+        finish_reason = getattr(api_response.choices[0], "finish_reason", None)
+        if finish_reason is not None:
+            yield _chat_response_end(finish_reason)
     message = api_response.choices[0].message if api_response.choices else None
     if message is None:
         return

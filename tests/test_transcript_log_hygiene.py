@@ -21,7 +21,6 @@ from speech_to_speech.pipeline.messages import (
     Transcription,
 )
 from speech_to_speech.pipeline.transcript_logging import (
-    log_transcripts_enabled,
     set_log_transcripts,
     transcript_for_log,
     warn_if_log_transcripts_enabled,
@@ -186,7 +185,7 @@ def test_tts_exceptions_follow_the_gate(caplog, enabled):
 
 
 def test_gate_is_off_by_default():
-    assert log_transcripts_enabled() is False
+    assert transcript_for_log("probe") == "chars=5"
 
 
 @pytest.mark.parametrize(
@@ -254,7 +253,7 @@ def test_startup_wires_the_gate_and_warns_before_processing(monkeypatch):
     original_warning = s2s_pipeline.warn_if_log_transcripts_enabled
 
     def record_warning():
-        assert log_transcripts_enabled() is True
+        assert transcript_for_log("probe") == "probe"
         events.append("warning")
         original_warning()
 
