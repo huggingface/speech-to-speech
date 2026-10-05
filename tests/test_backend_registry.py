@@ -861,3 +861,25 @@ def test_dependency_error_names_backend_and_required_extra():
 def test_removed_ineffective_options_are_rejected(option):
     with pytest.raises(ValueError, match=option):
         parse_arguments([option, "500" if "silence" in option else "float32"])
+
+
+def test_pocket_farsi_model_cli_routes_to_setup():
+    args = parse_arguments(
+        [
+            "--tts",
+            "pocket",
+            "--pocket_tts_model_name",
+            "mehdi-hf/pocket-tts-farsi-v2",
+            "--pocket_tts_voice",
+            "/voices/farsi.wav",
+            "--pocket_tts_temperature",
+            "0.3",
+            "--pocket_tts_eos_threshold",
+            "-2",
+        ]
+    )
+    assert args.tts_backend.name == "pocket"
+    assert args.tts_backend.config["model_name"] == "mehdi-hf/pocket-tts-farsi-v2"
+    assert args.tts_backend.config["voice"] == "/voices/farsi.wav"
+    assert args.tts_backend.config["temperature"] == 0.3
+    assert args.tts_backend.config["eos_threshold"] == -2.0

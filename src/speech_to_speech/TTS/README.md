@@ -57,6 +57,11 @@ speech-to-speech serve \
 Available preset voices include:
 `alba`, `marius`, `javert`, `jean`, `fantine`, `cosette`, `eponine`, `azelma`.
 
+For Persian speech, see the [Pocket TTS Farsi v2 setup](../../../README.md#pocket-tts-farsi-v2).
+Select `--pocket_tts_model_name mehdi-hf/pocket-tts-farsi-v2` and provide reference
+audio with `--pocket_tts_voice`. This requires the author's Pocket TTS fork and
+uses a separate G2P model to convert Persian text to phonemes.
+
 ### 4) Kokoro (`--tts kokoro`)
 
 Primary args prefix: `--kokoro_*`
