@@ -42,21 +42,10 @@ def test_pocket_tts_setup_loads_language(monkeypatch, setup_kwargs, expected_lan
     assert loaded_languages == [expected_language]
 
 
-def test_pocket_tts_custom_config(monkeypatch):
-    calls = []
-    model = SimpleNamespace(sample_rate=24000, get_state_for_audio_prompt=lambda voice: voice)
-    monkeypatch.setitem(
-        sys.modules,
-        "pocket_tts",
-        SimpleNamespace(
-            TTSModel=SimpleNamespace(
-                load_model=lambda **kwargs: calls.append(kwargs) or model,
-            )
-        ),
-    )
+def test_pocket_tts_rejects_unsupported_model():
     handler = PocketTTSHandler.__new__(PocketTTSHandler)
-    handler.setup(Event(), model_name="/models/custom.yaml")
-    assert calls == [{"config": "/models/custom.yaml"}]
+    with pytest.raises(ValueError, match="Unsupported"):
+        handler.setup(Event(), model_name="/models/custom.yaml")
 
 
 def test_farsi_requires_audio_reference():
@@ -414,3 +403,134 @@ def test_pocket_resampling_matches_whole_signal_across_chunk_boundaries(output_r
         assert np.array_equal(actual[: len(expected)], expected)
         assert np.all(actual[len(expected) :] == 0)
         assert len(actual) == ((len(expected) + handler.blocksize - 1) // handler.blocksize) * handler.blocksize
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("دمای هوا -۵ درجه است", "دمای هوا منفی پنج درجه است"),
+        ("دمای هوا −۵ درجه است", "دمای هوا منفی پنج درجه است"),
+        ("دمای هوا ۵ درجه است", "دمای هوا پنج درجه است"),
+        ("-5", "منفی پنج"),
+        ("−٥", "منفی پنج"),
+        ("(-۳٫۵٪)", "منفی سه ممیز پنج دهم درصد"),
+        ("−0.50", "منفی صفر ممیز پنج دهم"),
+        ("-۵٫۰۰", "منفی پنج"),
+        ("-۰۹۱۲", "منفی صفر نه یک دو"),
+        ("−1234567890123", "منفی یک دو سه چهار پنج شش هفت هشت نه صفر یک دو سه"),
+        ("۵-۱۰", "پنج ده"),
+        ("نسخه-۵", "نسخه پنج"),
+    ],
+)
+def test_persian_normalization_signed_numbers(text, expected):
+    from speech_to_speech.TTS.persian_normalization import normalize
+
+    assert normalize(text) == expected
+
+
+def _run_farsi_worker(handler, tts_input):
+    from queue import Queue
+
+    from speech_to_speech.pipeline.messages import PIPELINE_END, EndOfResponse
+
+    handler.stop_event = Event()
+    handler.queue_in = Queue()
+    handler.queue_out = Queue()
+    handler.pipeline_index = None
+    handler._times = []
+    handler.queue_in.put(tts_input)
+    handler.queue_in.put(
+        EndOfResponse(
+            turn_id=tts_input.turn_id,
+            turn_revision=tts_input.turn_revision,
+            cancel_generation=tts_input.cancel_generation,
+            response_key=tts_input.response_key,
+        )
+    )
+    handler.queue_in.put(PIPELINE_END)
+    handler.run()
+    return list(handler.queue_out.queue)
+
+
+@pytest.mark.parametrize("failure_stage", ["silent_retries", "g2p", "phoneme_validation", "pcm_conversion"])
+def test_farsi_worker_failure_finishes_realtime_response_as_failed(failure_stage):
+    from queue import Queue
+
+    import torch
+
+    from speech_to_speech.api.openai_realtime.service import RealtimeService
+    from speech_to_speech.pipeline.events import ResponseFailedEvent
+    from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput, TTSInput
+
+    handler, calls = _farsi_handler()
+    handler.phonemizer = lambda text: "salAm"
+    if failure_stage == "silent_retries":
+
+        def silent_stream(**kwargs):
+            calls.append(kwargs)
+            return iter([torch.zeros(2400)])
+
+        handler.model._generate_audio_stream_short_text = silent_stream
+    elif failure_stage == "g2p":
+
+        def failed_g2p(text):
+            raise RuntimeError("G2P failed")
+
+        handler.phonemizer = failed_g2p
+    elif failure_stage == "phoneme_validation":
+        handler.phonemizer = lambda text: "invalid!"
+    else:
+        handler._generate_audio = lambda *args: iter([object()])
+    tts_input = TTSInput(
+        text="سلام", response_key="farsi-response", turn_id="turn-1", turn_revision=2, cancel_generation=7
+    )
+    outputs = _run_farsi_worker(handler, tts_input)
+
+    assert len(outputs) == 3
+    failure, completion, shutdown = outputs
+    assert isinstance(failure, ResponseFailedEvent)
+    assert (failure.response_key, failure.turn_id, failure.turn_revision, failure.cancel_generation) == (
+        "farsi-response",
+        "turn-1",
+        2,
+        7,
+    )
+    assert isinstance(completion, AudioOutput)
+    assert completion.audio == AUDIO_RESPONSE_DONE
+    assert completion.response_key == failure.response_key
+    assert completion.cancel_generation == failure.cancel_generation
+    assert shutdown == PIPELINE_END
+    if failure_stage == "silent_retries":
+        assert len(calls) == 2
+
+    service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event())
+    conn_id = service.register()
+    try:
+        service.response._ensure_response(conn_id, tts_input.response_key)
+        events = service.dispatch_pipeline_event(conn_id, failure)
+        events.extend(service.finish_response(conn_id, response_key=completion.response_key))
+        done = [event for event in events if event.type == "response.done"]
+        assert len(done) == 1
+        assert done[0].response.status == "failed"
+        assert done[0].response.status_details.error.type == "response_failed"
+        assert not any(event.type == "response.output_audio.delta" for event in events)
+        assert not service._state(conn_id).in_response
+    finally:
+        service.unregister(conn_id)
+
+
+def test_farsi_cancelled_exception_does_not_report_failure():
+    from speech_to_speech.pipeline.cancel_scope import CancelScope
+    from speech_to_speech.pipeline.events import ResponseFailedEvent
+    from speech_to_speech.pipeline.messages import TTSInput
+
+    handler, _ = _farsi_handler()
+    handler.cancel_scope = CancelScope()
+
+    def interrupted_g2p(text):
+        handler.cancel_scope.cancel()
+        raise RuntimeError("Interrupted G2P")
+
+    handler.phonemizer = interrupted_g2p
+    outputs = _run_farsi_worker(handler, TTSInput(text="سلام", response_key="cancelled", cancel_generation=0))
+    assert not any(isinstance(output, ResponseFailedEvent) for output in outputs)

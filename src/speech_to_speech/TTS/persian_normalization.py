@@ -170,26 +170,28 @@ def _digits_one_by_one(digits: str) -> str:
 
 
 def _number_token_to_words(match: re.Match) -> str:
-    whole, frac = match.group(1), match.group(2)
+    sign, whole, frac = match.group(1), match.group(2), match.group(3)
+    prefix = "منفی " if sign else ""
     # A leading zero marks a digit string that is spoken, not counted: phone
     # numbers, national ids, "۰۹۱۲..." — read those one digit at a time.
     if len(whole) > MAX_NUMBER_DIGITS or (whole.startswith("0") and len(whole) > 1):
-        return " " + _digits_one_by_one(whole) + (" " + _digits_one_by_one(frac) if frac else "") + " "
+        return " " + prefix + _digits_one_by_one(whole) + (" " + _digits_one_by_one(frac) if frac else "") + " "
     whole = whole.lstrip("0") or "0"
     words = number_to_words(int(whole))
     if frac:
         frac = frac.rstrip("0")
         if not frac:
-            return " " + words + " "
+            return " " + prefix + words + " "
         unit = _FRACTION_UNITS.get(len(frac))
         if unit:
             words += " ممیز " + number_to_words(int(frac)) + " " + unit
         else:
             words += " ممیز " + _digits_one_by_one(frac)
-    return " " + words + " "
+    return " " + prefix + words + " "
 
 
-_NUMBER_RE = re.compile(r"(\d+)(?:[.](\d+))?")
+# A sign belongs to a number at a token boundary, not to a range like 5-10.
+_NUMBER_RE = re.compile(r"((?<!\w)[−-])?(\d+)(?:[.](\d+))?")
 
 
 def numbers_to_words(text: str) -> str:

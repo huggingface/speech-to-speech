@@ -7,6 +7,7 @@ the reference recording on first use. This checks synthesis, not pronunciation.
 import argparse
 import json
 from pathlib import Path
+from queue import Queue
 from threading import Event
 from time import perf_counter
 
@@ -22,6 +23,7 @@ REFERENCE = f"hf://{MODEL}/samples/prompt_short_sentence.wav"
 CASES = {
     "greeting": "سلام، حال شما چطور است؟",
     "numbers": "تا سال ۲۰۳۰ تغییر دهد.",
+    "negative_numbers": "دمای هوا −۵ درجه است.",
     "sentences": "مادر کتاب را روی میز اتاق گذاشت. پنجره را باز کرد.",
 }
 
@@ -46,6 +48,7 @@ def main() -> None:
 
     torch.manual_seed(args.seed)
     handler = PocketTTSHandler.__new__(PocketTTSHandler)
+    handler.queue_out = Queue()
     start = perf_counter()
     handler.setup(
         Event(),
@@ -74,6 +77,9 @@ def main() -> None:
         phonemes = handler.phonemizer(text)
         if not phonemes or any("\u0600" <= char <= "\u06ff" for char in phonemes):
             raise RuntimeError(f"{name}: G2P did not produce romanized phonemes")
+        if name == "negative_numbers":
+            assert phonemes == handler.phonemizer("دمای هوا منفی پنج درجه است.")
+            assert phonemes != handler.phonemizer("دمای هوا پنج درجه است.")
         start = perf_counter()
         first_audio_seconds = None
         blocks = []
@@ -83,6 +89,8 @@ def main() -> None:
             if first_audio_seconds is None:
                 first_audio_seconds = perf_counter() - start
             blocks.append(block)
+        if not handler.queue_out.empty():
+            raise RuntimeError(f"{name}: {handler.queue_out.get_nowait()}")
         elapsed = perf_counter() - start
         if not blocks:
             raise RuntimeError(f"{name}: synthesis returned no audio")

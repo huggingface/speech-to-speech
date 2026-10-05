@@ -36,7 +36,7 @@ class PocketTTSHandlerArguments:
     pocket_tts_model_name: str | None = field(
         default=None,
         metadata={
-            "help": "Optional model configuration. Use 'mehdi-hf/pocket-tts-farsi-v2' for Persian with automatic phoneme conversion. Overrides pocket_tts_language."
+            "help": "Optional Farsi model selection. Use 'mehdi-hf/pocket-tts-farsi-v2' for Persian with automatic phoneme conversion. Overrides pocket_tts_language."
         },
     )
     pocket_tts_temperature: float | None = field(

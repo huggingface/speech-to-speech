@@ -4,13 +4,14 @@ import logging
 import re
 from threading import Event
 from time import perf_counter
-from typing import Any, Iterator
+from typing import Any, Iterator, cast
 
 import numpy as np
 from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -59,7 +60,7 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
             sample_rate: Output sample rate (pocket-tts generates at 24kHz and will be resampled to this rate). Default 16kHz matches the pipeline's audio output.
             blocksize: Size of audio blocks to yield
             max_tokens: Token budget per synthesis chunk, capped at 18 for Farsi.
-            model_name: Optional custom config path or Pocket TTS Farsi v2 model ID.
+            model_name: Pocket TTS Farsi v2 model ID, or None for the selected language.
             temperature: Sampling temperature, or the model config default.
             eos_threshold: End-of-speech threshold, defaults to -2 for Farsi.
         """
@@ -73,6 +74,8 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.blocksize = blocksize
         if max_tokens <= 0:
             raise ValueError("Pocket TTS max_tokens must be positive")
+        if model_name not in {None, "mehdi-hf/pocket-tts-farsi-v2"}:
+            raise ValueError("Unsupported Pocket TTS model_name; use mehdi-hf/pocket-tts-farsi-v2 or select a language")
         self.model_name = model_name
         self.is_farsi = model_name == "mehdi-hf/pocket-tts-farsi-v2"
         self.max_tokens = min(max_tokens, 18) if self.is_farsi else max_tokens
@@ -96,22 +99,20 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
             load_kwargs["temp"] = temperature
         if eos_threshold is not None or self.is_farsi:
             load_kwargs["eos_threshold"] = -2.0 if eos_threshold is None else eos_threshold
-        if model_name:
-            config = model_name
-            if self.is_farsi:
-                from huggingface_hub import hf_hub_download
-                from pocket_tts.utils.config import Config
+        if self.is_farsi:
+            from huggingface_hub import hf_hub_download
+            from pocket_tts.utils.config import Config
 
-                required_flags = {
-                    "capitalize_first_letter",
-                    "append_terminal_punctuation",
-                    "pad_with_spaces_for_short_inputs",
-                }
-                if not required_flags.issubset(Config.model_fields):
-                    raise RuntimeError(
-                        "Pocket TTS Farsi requires the mallahyari/pocket-tts fork. See the Pocket TTS Farsi installation instructions in README.md."
-                    )
-                config = hf_hub_download(repo_id=model_name, filename="model.yaml")
+            required_flags = {
+                "capitalize_first_letter",
+                "append_terminal_punctuation",
+                "pad_with_spaces_for_short_inputs",
+            }
+            if not required_flags.issubset(Config.model_fields):
+                raise RuntimeError(
+                    "Pocket TTS Farsi requires the mallahyari/pocket-tts fork. See the Pocket TTS Farsi installation instructions in README.md."
+                )
+            config = hf_hub_download(repo_id="mehdi-hf/pocket-tts-farsi-v2", filename="model.yaml")
             self.model = TTSModel.load_model(config=config, **load_kwargs)
         else:
             self.model = TTSModel.load_model(language=self.language, **load_kwargs)
@@ -291,7 +292,9 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
         if speculative_turns:
             speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
-        gen = self.cancel_scope.generation if self.cancel_scope else None
+        gen = tts_input.cancel_generation
+        if gen is None and self.cancel_scope is not None:
+            gen = self.cancel_scope.generation
         language_code = tts_input.tts_language_code
         text = tts_input.text
         logger.debug(f"Received language code: {language_code}")
@@ -301,6 +304,29 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
         # Generate audio stream
         logger.debug("Generating audio: %s", transcript_for_log(text))
 
+        try:
+            yield from self._stream_pcm(text, gen)
+        except Exception:
+            if getattr(self, "phonemizer", None) is None:
+                raise
+            if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
+                logger.info("TTS generation cancelled (interruption)")
+                return
+            logger.exception("Pocket TTS Farsi synthesis failed")
+            self.queue_out.put(
+                cast(
+                    TTSOut,
+                    ResponseFailedEvent(
+                        message="Pocket TTS Farsi synthesis failed",
+                        turn_id=tts_input.turn_id,
+                        turn_revision=tts_input.turn_revision,
+                        cancel_generation=gen,
+                        response_key=tts_input.response_key,
+                    ),
+                )
+            )
+
+    def _stream_pcm(self, text: str, gen: int | None) -> Iterator[TTSOut]:
         pipeline_start = perf_counter()
         first_chunk = True
 
