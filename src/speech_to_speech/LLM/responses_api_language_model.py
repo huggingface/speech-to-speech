@@ -17,6 +17,7 @@ from openai.types.responses import (
     ResponseIncompleteEvent,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
+    ResponseReasoningItem,
     ResponseTextDeltaEvent,
 )
 
@@ -196,6 +197,7 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
 
     def _iter_stream_events(self, api_response: Stream) -> Iterator[ProviderEvent]:
         saw_terminal = False
+        history_item_ids: dict[int, str] = {}
         for raw_event in api_response:
             if isinstance(raw_event, ResponseTextDeltaEvent):
                 yield TextDelta(text=raw_event.delta)
@@ -204,22 +206,33 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
                 if isinstance(item, ResponseFunctionToolCall):
                     if item.status == "incomplete":
                         continue
-                    item.call_id = _generate_id("call")
-                    item.id = _generate_id("fc")
-                    yield ToolCall(item=item)
+                    event = self._tool_call(item)
+                    assert event.item.id is not None
+                    history_item_ids[raw_event.output_index] = event.item.id
+                    yield event
+                elif isinstance(item, ResponseReasoningItem):
+                    history_item_ids[raw_event.output_index] = item.id
+                    yield item
                 elif isinstance(item, ResponseOutputMessage):
-                    yield AssistantMessage(content=self._assistant_content(item.content))
+                    message_id = _generate_id("msg")
+                    history_item_ids[raw_event.output_index] = message_id
+                    yield AssistantMessage(content=self._assistant_content(item.content), id=message_id)
             elif isinstance(raw_event, (ResponseCompletedEvent, ResponseIncompleteEvent, ResponseFailedEvent)):
                 saw_terminal = True
                 usage = getattr(raw_event.response, "usage", None)
                 if usage:
                     yield Usage(input_tokens=usage.input_tokens or 0, output_tokens=usage.output_tokens or 0)
-                yield _response_end(raw_event.response, status=raw_event.type.removeprefix("response."))
+                ending = _response_end(raw_event.response, status=raw_event.type.removeprefix("response."))
+                ending.history_item_order = [history_item_ids[index] for index in sorted(history_item_ids)]
+                yield ending
             elif isinstance(raw_event, ResponseErrorEvent):
                 saw_terminal = True
                 yield ProviderResponseEnd(status="failed", error=raw_event.message)
         if not saw_terminal:
             logger.warning("Responses stream ended without a terminal event")
+            yield ProviderResponseEnd(
+                history_item_order=[history_item_ids[index] for index in sorted(history_item_ids)]
+            )
 
     def _iter_response_events(self, api_response: Any) -> Iterator[ProviderEvent]:
         usage = api_response.usage
@@ -228,9 +241,9 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         yield _response_end(api_response)
         for message in api_response.output:
             if isinstance(message, ResponseFunctionToolCall):
-                message.call_id = _generate_id("call")
-                message.id = _generate_id("fc")
-                yield ToolCall(item=message)
+                yield self._tool_call(message)
+            elif isinstance(message, ResponseReasoningItem):
+                yield message
             elif isinstance(message, ResponseOutputMessage):
                 yield AssistantMessage(content=self._assistant_content(message.content))
                 # Text-only keeps every character; the base applies remove_unspeechable
@@ -239,6 +252,15 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
                 yield TextDelta(text=raw)
             else:
                 logger.warning(f"Not supported message type: {message.type}")
+
+    @staticmethod
+    def _tool_call(item: ResponseFunctionToolCall) -> ToolCall:
+        # Realtime clients keep their existing local identifiers; manual
+        # Responses replay uses the untouched provider payload instead.
+        return ToolCall(
+            item=item.model_copy(update={"id": _generate_id("fc"), "call_id": _generate_id("call")}),
+            response_item=item,
+        )
 
     def on_session_end(self) -> None:
         logger.debug("OpenAI API language model session state reset")

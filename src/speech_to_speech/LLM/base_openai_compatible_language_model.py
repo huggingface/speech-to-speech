@@ -26,13 +26,14 @@ from openai.types.realtime.conversation_item import (
 from openai.types.realtime.realtime_conversation_item_assistant_message import (
     Content as AssistantContent,
 )
-from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import ResponseFunctionToolCall, ResponseReasoningItem
 from pydantic import BaseModel, ConfigDict, Field
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import (
     Chat,
     ChatItemError,
+    ResponsesFunctionCall,
     SupportedItem,
     build_active_chat,
     make_system_message,
@@ -88,12 +89,14 @@ class AssistantMessage(BaseModel):
     """A complete assistant turn to write back to history."""
 
     content: list[AssistantContent]
+    id: str | None = None
 
 
 class ToolCall(BaseModel):
-    """A complete function tool call (``call_id`` / ``id`` already regenerated)."""
+    """A complete function tool call."""
 
     item: ResponseFunctionToolCall
+    response_item: ResponseFunctionToolCall | None = None
 
 
 class Usage(BaseModel):
@@ -109,9 +112,11 @@ class ProviderResponseEnd(BaseModel):
     status: Literal["completed", "incomplete", "failed"] = "completed"
     reason: ResponseIncompleteReason | None = None
     error: str | None = None
+    # Responses output_index order, independent of item completion timing.
+    history_item_order: list[str] | None = None
 
 
-ProviderEvent = TextDelta | AssistantMessage | ToolCall | Usage | ProviderResponseEnd
+ProviderEvent = TextDelta | AssistantMessage | ToolCall | ResponseReasoningItem | Usage | ProviderResponseEnd
 SerializeFn = Callable[[Chat], Any]
 RequestFn = Callable[[Any, dict[str, Any]], Any]
 EventIteratorFn = Callable[[Any], Iterator[ProviderEvent]]
@@ -549,7 +554,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             prefetch_transaction=turn.prefetch_transaction,
         )
 
-    def _record_tool_call(self, state: _GenState, turn: _Turn, item: ResponseFunctionToolCall) -> Iterator[LLMOut]:
+    def _record_tool_call(self, state: _GenState, turn: _Turn, event: ToolCall) -> Iterator[LLMOut]:
         """Emit a tool call, persisting it (and any assistant text seen so far)
         to history *before* it is forwarded to the client.
 
@@ -563,6 +568,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         Out-of-band turns never touch the default conversation, and a stale turn
         records nothing (it is not forwarded to the client either)."""
+        item = event.item
         state.tools.append(item)
         fc_item = RealtimeConversationItemFunctionCall(
             type="function_call",
@@ -572,6 +578,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             id=item.id,
             status=item.status,
         )
+        if event.response_item is not None:
+            fc_item = ResponsesFunctionCall(
+                **fc_item.model_dump(exclude_unset=True), response_item=event.response_item.model_copy(deep=True)
+            )
         if self._turn_is_cancelled(turn) or not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
             logger.info("LLM generation cancelled (stale speculative turn)")
             return
@@ -636,8 +646,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     raise RuntimeError(event.error or "The language model provider reported a failed response.")
             elif isinstance(event, AssistantMessage):
                 state.pending.append(
-                    RealtimeConversationItemAssistantMessage(type="message", role="assistant", content=event.content)
+                    RealtimeConversationItemAssistantMessage(
+                        type="message", role="assistant", content=event.content, id=event.id
+                    )
                 )
+            elif isinstance(event, ResponseReasoningItem):
+                state.pending.append(event.model_copy(deep=True))
             elif isinstance(event, ToolCall):
                 if state.ending.status != "completed":
                     continue
@@ -652,7 +666,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         break
                     yield from _flush(sentence_batch)
                     sentence_batch = []
-                yield from self._record_tool_call(state, turn, event.item)
+                yield from self._record_tool_call(state, turn, event)
             elif isinstance(event, TextDelta):
                 if not turn.wants_audio:
                     # Text-only: forward verbatim. Keep every character (no
@@ -725,12 +739,16 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     raise RuntimeError(event.error or "The language model provider reported a failed response.")
             elif isinstance(event, AssistantMessage):
                 state.pending.append(
-                    RealtimeConversationItemAssistantMessage(type="message", role="assistant", content=event.content)
+                    RealtimeConversationItemAssistantMessage(
+                        type="message", role="assistant", content=event.content, id=event.id
+                    )
                 )
+            elif isinstance(event, ResponseReasoningItem):
+                state.pending.append(event.model_copy(deep=True))
             elif isinstance(event, ToolCall):
                 if state.ending.status != "completed":
                     continue
-                yield from self._record_tool_call(state, turn, event.item)
+                yield from self._record_tool_call(state, turn, event)
             elif isinstance(event, TextDelta):
                 # Text-only keeps every character verbatim; audio strips markdown
                 # and TTS-unfriendly symbols. Not per-delta here: each TextDelta
@@ -912,6 +930,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                             if recorded.id is not None:
                                 state.recorded_item_ids.add(recorded.id)
                         if can_commit:
+                            if state.ending.history_item_order is not None:
+                                original_chat.order_response_items(state.ending.history_item_order)
 
                             def cleanup_history() -> None:
                                 snapshot = original_chat.snapshot_history_cleanup()
