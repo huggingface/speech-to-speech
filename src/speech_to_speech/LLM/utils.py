@@ -1,4 +1,5 @@
 import base64
+import contextvars
 import io
 import logging
 import random
@@ -362,7 +363,8 @@ def run_generator_with_filler_sentences(
         finally:
             out_queue.put(_SENTINEL)
 
-    worker_thread = Thread(target=worker, daemon=True)
+    ctx = contextvars.copy_context()
+    worker_thread = Thread(target=ctx.run, args=(worker,), daemon=True)
     worker_thread.start()
 
     start_time = perf_counter()

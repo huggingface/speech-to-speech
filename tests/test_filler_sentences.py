@@ -12,6 +12,7 @@ from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.LLM.utils import run_generator_with_filler_sentences
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import AssistantOutputEvent
+from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import (
     AssistantTextPart,
     GenerateResponseRequest,
@@ -436,4 +437,34 @@ def test_shutdown_suppresses_filler(monkeypatch):
         if isinstance(out, LLMResponseChunk) and "Thinking..." in out.text
     ]
     assert len(filler_chunks) == 0
+
+
+def test_filler_worker_thread_preserves_logging_context():
+    captured_pipeline_id = []
+
+    def gen_fn():
+        captured_pipeline_id.append(pipeline_log_ctx.get())
+        yield LLMResponseChunk(text="Finished")
+
+    token = pipeline_log_ctx.set(7)
+    try:
+        chunks = list(
+            run_generator_with_filler_sentences(
+                gen_fn=gen_fn,
+                enable_filler_sentences=True,
+                filler_sentence_delay_s=0.05,
+                filler_sentences=["Thinking..."],
+                language_code="en",
+                runtime_config=None,
+                response=None,
+                turn_id="turn_contextvar_test",
+                turn_revision=1,
+            )
+        )
+    finally:
+        pipeline_log_ctx.reset(token)
+
+    assert captured_pipeline_id == [7]
+    assert any(isinstance(c, LLMResponseChunk) and c.text == "Finished" for c in chunks)
+
 
