@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from threading import Condition
 
@@ -48,7 +48,7 @@ class _PendingReopen:
     base_revision: int
     candidate_revision: int
     # Output stops waiting at this deadline; the candidate stays until VAD resolves it.
-    deadline: float = field(default=0.0, compare=False)
+    deadline: float
 
 
 @dataclass(frozen=True)
@@ -373,7 +373,11 @@ class SpeculativeTurnTracker:
             return False
         with self._condition:
             pending = self._pending_reopen
-            if pending != _PendingReopen(turn_id, base_revision, candidate_revision):
+            if pending is None or (pending.turn_id, pending.base_revision, pending.candidate_revision) != (
+                turn_id,
+                base_revision,
+                candidate_revision,
+            ):
                 return False
             if not self._is_current_locked(turn_id, base_revision) or self._blocks_reopen_locked(
                 turn_id,

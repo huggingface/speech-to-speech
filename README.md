@@ -816,13 +816,6 @@ output and VAD probabilities. Run that reproduction alone with:
 CUDA_VISIBLE_DEVICES='' uv run pytest tests/openai_realtime/test_response_input_identity.py -q -s
 ```
 
-To check that a held answer does not stop the server from receiving the audio
-that reopens its turn:
-
-```bash
-CUDA_VISIBLE_DEVICES='' uv run pytest tests/openai_realtime/test_websocket_router.py -q -k held_answer
-```
-
 ## Star History
 
 [![Star History Chart](assets/star-history.svg)](https://github.com/huggingface/speech-to-speech/stargazers)

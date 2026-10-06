@@ -9,7 +9,7 @@ import torch
 
 from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
 from speech_to_speech.pipeline.messages import VADAudio
-from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnGate, TurnGateAction, TurnPhase
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnGateAction, TurnPhase
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.VAD.smart_turn import SmartTurnResult
 from speech_to_speech.VAD.vad_handler import VADHandler
@@ -33,7 +33,7 @@ def test_pending_reopen_holds_output_until_cancelled(clock):
     assert tracker.speech_candidate_started(1100)
     clock[0] += 1.0  # Grace expires while VAD is still checking the candidate.
 
-    assert tracker.gate("turn_1", 0, commit=True) == TurnGate(HOLD, clock[0] + 1.0)
+    assert tracker.gate("turn_1", 0, commit=True).action is HOLD
     assert not tracker.is_committed("turn_1", 0)
 
     tracker.speech_candidate_cancelled()

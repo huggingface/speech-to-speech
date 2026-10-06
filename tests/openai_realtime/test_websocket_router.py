@@ -724,8 +724,11 @@ class TestSendLoop:
                 output_queue.put(AssistantOutputEvent(text="Revised answer.", turn_id="turn_1", turn_revision=1))
 
                 messages = [ws.receive_json()]
-                while "Revised answer." not in str(messages[-1]):
+                for _ in range(10):
+                    if "Revised answer." in str(messages[-1]):
+                        break
                     messages.append(ws.receive_json())
+                assert "Revised answer." in str(messages[-1])
                 assert messages[0]["type"] == "input_audio_buffer.speech_started"
                 assert "Stale answer." not in str(messages)
                 assert not tracker.is_committed("turn_1", 0)
