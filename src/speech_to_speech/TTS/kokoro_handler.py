@@ -73,6 +73,9 @@ KOKORO_LANG_DEFAULT_VOICES = {
     "z": "zf_xiaobei",  # Chinese female
 }
 
+# Codes with a native Kokoro voice; the other map entries fall back to English.
+KOKORO_NATIVE_LANGUAGES = frozenset({"en", "ja", "zh", "fr", "es", "it", "pt", "hi"})
+
 
 class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
     """
@@ -133,14 +136,12 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
             else:
                 model_name = "hexgrad/Kokoro-82M"
 
-        self.model_name = model_name
-
         logger.info(f"Loading Kokoro model: {model_name} on {self.device}")
 
         if self.device == "mps":
             self._setup_mlx(model_name)
         else:
-            self._setup_kokoro(model_name)
+            self._setup_kokoro()
 
         self._initial_voice = self.voice
         self._initial_lang_code = self.lang_code
@@ -159,7 +160,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
             # Get or create the pipeline for our language and preload the voice
             # This avoids the voice being reloaded on every generate() call
             self._pipeline = self.model._get_pipeline(self.lang_code)
-            self._voice_tensor = self._pipeline.load_voice(self.voice)
+            self._pipeline.load_voice(self.voice)
             logger.info(f"Preloaded voice: {self.voice}")
 
             # Preload voices for common languages to avoid download delays during inference
@@ -176,7 +177,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 "mlx-audio is required for Kokoro TTS on Apple Silicon. Install with: pip install mlx-audio"
             ) from e
 
-    def _setup_kokoro(self, model_name: str) -> None:
+    def _setup_kokoro(self) -> None:
         """Setup for CUDA/CPU using native kokoro library."""
         try:
             from kokoro import KPipeline
@@ -258,6 +259,10 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         runtime_config = tts_input.runtime_config
         response = tts_input.response
         language_code = tts_input.tts_language_code
+        selected = tts_input.selected_language
+        if selected not in (None, "auto") and language_code not in KOKORO_NATIVE_LANGUAGES:
+            # A detected language without a native voice keeps the session language.
+            language_code = selected
         text = tts_input.text
 
         if (
@@ -287,6 +292,20 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         else:
             yield from self._process_kokoro(text, language_code)
 
+    def _lang_and_voice_for(self, language_code: str) -> tuple[str, str]:
+        """Pick the Kokoro language and voice for a reply in ``language_code``.
+
+        The English entries in the map point at British English, so an American
+        English setup keeps its own variant. Returning to the setup language
+        restores the configured voice instead of that language's default voice.
+        """
+        new_lang_code = WHISPER_LANGUAGE_TO_KOKORO_LANG.get(language_code, self.lang_code)
+        if new_lang_code == "b" and self._initial_lang_code in ("a", "b"):
+            new_lang_code = self._initial_lang_code
+        if new_lang_code == self._initial_lang_code:
+            return new_lang_code, self._initial_voice
+        return new_lang_code, KOKORO_LANG_DEFAULT_VOICES.get(new_lang_code, self.voice)
+
     def _process_mlx(self, llm_sentence: str, language_code: Optional[str] = None) -> Iterator[np.ndarray]:
         """Process using MLX backend with Apple Silicon optimizations."""
         from scipy.signal import resample_poly
@@ -294,19 +313,17 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         gen = self.cancel_scope.generation if self.cancel_scope else None
         with MLXLockContext(handler_name="KokoroTTS", timeout=10.0):
             if language_code is not None:
-                new_lang_code = WHISPER_LANGUAGE_TO_KOKORO_LANG.get(language_code, self.lang_code)
+                new_lang_code, new_voice = self._lang_and_voice_for(language_code)
                 if new_lang_code != self.lang_code:
-                    new_voice = KOKORO_LANG_DEFAULT_VOICES.get(new_lang_code, self.voice)
                     logger.info(
                         f"Language change detected: {self.lang_code} -> {new_lang_code}, voice: {self.voice} -> {new_voice}"
                     )
                     try:
                         new_pipeline = self.model._get_pipeline(new_lang_code)
-                        new_voice_tensor = new_pipeline.load_voice(new_voice)
+                        new_pipeline.load_voice(new_voice)
                         self.lang_code = new_lang_code
                         self.voice = new_voice
                         self._pipeline = new_pipeline
-                        self._voice_tensor = new_voice_tensor
                     except Exception as e:
                         logger.warning(
                             f"Failed to switch language/voice: {e}. Keeping current language: {self.lang_code}"
@@ -367,9 +384,8 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
         if language_code is not None:
-            new_lang_code = WHISPER_LANGUAGE_TO_KOKORO_LANG.get(language_code, self.lang_code)
+            new_lang_code, new_voice = self._lang_and_voice_for(language_code)
             if new_lang_code != self.lang_code:
-                new_voice = KOKORO_LANG_DEFAULT_VOICES.get(new_lang_code, self.voice)
                 logger.info(
                     f"Language change detected: {self.lang_code} -> {new_lang_code}, voice: {self.voice} -> {new_voice}"
                 )
@@ -418,7 +434,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         if self.backend == "mlx":
             try:
                 self._pipeline = self.model._get_pipeline(self.lang_code)
-                self._voice_tensor = self._pipeline.load_voice(self.voice)
+                self._pipeline.load_voice(self.voice)
             except Exception as e:
                 logger.warning(f"Failed to restore initial voice/language on session end: {e}")
         else:

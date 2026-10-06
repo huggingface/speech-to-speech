@@ -528,11 +528,18 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     tts_input.response_assistant_language_code if use_detected_language else tts_input.tts_language_code
                 )
                 if (
-                    use_detected_language
+                    (use_detected_language or selected == "auto")
                     and "qwen3-tts" in self.model.lower()
                     and language not in QWEN3_TTS_LANGUAGE_CODES
                 ):
                     language = None
+                elif (
+                    selected not in (None, "auto")
+                    and "qwen3-tts" in self.model.lower()
+                    and language not in QWEN3_TTS_LANGUAGE_CODES
+                ):
+                    # A detected language Qwen3 cannot speak keeps the session language.
+                    language = selected
                 if language is None and use_detected_language:
                     language = self.language
                 elif language is None and selected == "auto" and "qwen3-tts" in self.model.lower():
@@ -776,7 +783,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         on_first_source_audio: Callable[[], None] | None = None,
     ) -> Iterator[np.ndarray]:
         resampler = _StreamingFIRResampler(source_rate, PIPELINE_SAMPLE_RATE)
-        sample_remainder = np.empty(0, dtype=np.int16)
+        sample_remainder: np.ndarray = np.empty(0, dtype=np.int16)
         for samples in sample_chunks:
             if on_first_source_audio is not None and samples.size:
                 on_first_source_audio()

@@ -15,6 +15,7 @@ from openai.types.realtime import ConversationItemCreateEvent, ResponseCreateEve
 from openai.types.realtime.conversation_item import RealtimeConversationItemFunctionCall
 
 import speech_to_speech.LLM.language_model as language_model_module
+import speech_to_speech.STT.qwen3_asr_handler as qwen3_asr_module
 import speech_to_speech.TTS.qwen3_tts_handler as qwen3_tts_module
 from speech_to_speech.LLM.language_model import LanguageModelHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
@@ -42,6 +43,7 @@ from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 from speech_to_speech.VAD.smart_turn import SmartTurnResult
+from tests.test_qwen3_asr_transcription_events import _handler as _qwen3_asr_handler
 from tests.test_speculative_turns import (
     _audio_bytes,
     _StaticSmartTurnAnalyzer,
@@ -206,10 +208,12 @@ def test_stale_final_stt_discards_only_superseded_revision(
     service, conn_id, final_stt_event, caplog, stt_finishes_after_reopen
 ):
     service.speculative_turns = SpeculativeTurnTracker()
+    service.speculative_turns.start_turn()
     service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
     if not stt_finishes_after_reopen:
         stale = final_stt_event("turn_1", 0, "Old transcript")
 
+    service.speculative_turns.observe("turn_1", 1)
     service.dispatch_pipeline_event(
         conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True, interrupt_response=False)
     )
@@ -242,6 +246,7 @@ def test_stale_final_stt_discards_only_superseded_revision(
 def test_stt_worker_discards_latency_when_revision_changes_during_inference(service, conn_id, caplog):
     speculative_turns = SpeculativeTurnTracker()
     service.speculative_turns = speculative_turns
+    speculative_turns.start_turn()
     service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
     store = service.turn_latency_store
     unrelated = store.get_or_create_for_turn("other_turn", 0)
@@ -356,7 +361,7 @@ def test_cancelled_inflight_llm_cannot_recreate_latency_tracker(service, conn_id
     assert service.turn_latency_store._trackers == {}
     service.close_response_key(conn_id, request.response_key)
     service.unregister(conn_id)
-    assert service.turn_latency_store.active_session_count == 0
+    assert len(service.turn_latency_store._session_keys) == 0
     assert service.turn_latency_store._trackers == {}
 
 
@@ -431,7 +436,7 @@ def test_terminal_response_emits_one_latency_record(service, conn_id, caplog, st
     assert len(done) == 1
     assert done[0].response.status == status
     assert service.turn_latency_store._trackers == {}
-    assert service.turn_latency_store.active_session_count == 0
+    assert len(service.turn_latency_store._session_keys) == 0
 
 
 @pytest.mark.parametrize("new_turn,revision,reopened", [("turn_2", 0, False), ("turn_1", 1, True)])
@@ -482,7 +487,7 @@ def test_unregister_clears_unfinished_measurements_before_session_reuse(service,
     service.unregister(conn_id)
     assert service.turn_latency_store._trackers == {}
     assert service.turn_latency_store._pending_turn == {}
-    assert service.turn_latency_store.active_session_count == 0
+    assert len(service.turn_latency_store._session_keys) == 0
 
     new_conn_id = service.register()
     try:
@@ -548,6 +553,8 @@ def test_multiple_qwen_segments_keep_first_audio_timings_in_terminal_log(service
 
 @pytest.mark.parametrize("followup_status", ["completed", "cancelled"])
 def test_tool_followup_logs_distinct_responses_in_same_turn(service, conn_id, caplog, followup_status):
+    service.speculative_turns = SpeculativeTurnTracker()
+    service.speculative_turns.start_turn()
     request = _queue_turn(service, conn_id)
     original_tracker = service.turn_latency_store.get_response(request.response_key)
     original_tracker.vad_decision_s = 0.2
@@ -561,6 +568,8 @@ def test_tool_followup_logs_distinct_responses_in_same_turn(service, conn_id, ca
         conn_id,
         AssistantOutputEvent(
             response_key=request.response_key,
+            turn_id=request.turn_id,
+            turn_revision=request.turn_revision,
             parts=[
                 AssistantToolCallPart(
                     tool={"type": "function_call", **call.model_dump(include={"id", "call_id", "name", "arguments"})}
@@ -672,3 +681,44 @@ def test_faster_whisper_silent_final_leaves_no_pending_stt(service, monkeypatch)
 
     assert list(handler.process(final)) == []
     assert service.turn_latency_store._pending_turn == {}
+
+
+def test_qwen3_asr_final_stt_reaches_response_log_without_progressive_time(service, conn_id, monkeypatch, caplog):
+    handler = _qwen3_asr_handler()
+    handler.turn_latency_store = service.turn_latency_store
+    # Advance the handler's clock by 0.1s per second of audio sent to the model.
+    clock = [10.0]
+    monkeypatch.setattr(qwen3_asr_module, "perf_counter", lambda: clock[0])
+    request = handler.processor.apply_transcription_request
+
+    def timed_request(audio, *args, **kwargs):
+        clock[0] += 0.1 * len(audio) / 16000
+        return request(audio, *args, **kwargs)
+
+    handler.processor.apply_transcription_request = timed_request
+    notifier = object.__new__(TranscriptionNotifier)
+    notifier.setup(text_output_queue=Queue(), should_listen=Event())
+    service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
+
+    for seconds in (1, 2):
+        progressive = VADAudio(
+            audio=np.zeros(16000 * seconds, dtype=np.float32), mode="progressive", turn_id="turn_1", turn_revision=0
+        )
+        list(handler.process(progressive))
+    assert service.turn_latency_store._pending_turn == {}
+
+    final = VADAudio(audio=np.zeros(16000 * 3, dtype=np.float32), mode="final", turn_id="turn_1", turn_revision=0)
+    for transcription in handler.process(final):
+        list(notifier.process(transcription))
+    service.dispatch_pipeline_event(conn_id, notifier.text_output_queue.get_nowait())
+    response = service.text_prompt_queue.get_nowait()
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=response.response_key))
+    with caplog.at_level(logging.INFO, logger=LATENCY_LOGGER):
+        service.finish_response(conn_id, response_key=response.response_key)
+
+    lines = _latency_lines(caplog)
+    assert len(lines) == 1
+    assert lines[0].startswith("Turn turn_1 rev=0 latency: stt=0.30s llm=n/a ")
+    assert lines[0].endswith(f"response_key={response.response_key}")
+    assert service.turn_latency_store._pending_turn == {}
+    assert service.turn_latency_store._trackers == {}

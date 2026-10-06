@@ -185,6 +185,7 @@ def _validate_default_handler_imports() -> None:
 
 
 def _validate_runtime_dependency_imports() -> None:
+    importlib.import_module("transformers.models.nemotron3_diarization.modeling_nemotron3_diarization")
     importlib.import_module("faster_qwen3_tts")
     if sys.platform == "darwin":
         importlib.import_module("qwentts_cpp")
@@ -201,12 +202,12 @@ def _validate_realtime_websocket_support() -> None:
 def _validate_darwin_dependency_pins() -> None:
     expected_versions = {
         "miniaudio": "1.61",
-        "mlx": "0.32.0",
+        "mlx": "0.32.3",
         "mlx-audio": "0.4.7",
         "mlx-lm": "0.31.3",
-        "mlx-metal": "0.32.0",
+        "mlx-metal": "0.32.3",
         "sounddevice": "0.5.3",
-        "transformers": "5.15.1",
+        "transformers": "5.18.0",
     }
     mismatches = []
     for package_name, expected_version in expected_versions.items():

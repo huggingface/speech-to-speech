@@ -111,7 +111,7 @@ globalThis.window = globalThis;
 globalThis.requestAnimationFrame = () => 1;
 globalThis.document = { documentElement: { style: { setProperty() {}, removeProperty() {} } } };
 
-const { S2sRealtimeClient } = await import("./demo/s2s-realtime-client.js");
+const { AUDIO_WORKLET_VERSION, S2sRealtimeClient } = await import("./demo/s2s-realtime-client.js");
 
 async function setupAudio(captureConfig) {
   const modules = [];
@@ -163,9 +163,14 @@ const good = await setupAudio({
   kind: "capture-config",
   inputRate: 48000,
   outputRate: 24000,
-  version: "audio-24k-v2",
+  version: AUDIO_WORKLET_VERSION,
 });
-if (good.modules.length !== 2 || good.modules.some((url) => !url.endsWith("?v=audio-24k-v2"))) {
+const workletUrls = good.modules.map((url) => new URL(url));
+const workletNames = workletUrls.map((url) => url.pathname.split("/").at(-1));
+if (JSON.stringify(workletNames) !== JSON.stringify(["mic-capture.js", "audio-playback.js"])) {
+  throw new Error(`unexpected audio worklets: ${JSON.stringify(good.modules)}`);
+}
+if (workletUrls.some((url) => url.searchParams.get("v") !== AUDIO_WORKLET_VERSION)) {
   throw new Error(`audio worklets were not versioned: ${JSON.stringify(good.modules)}`);
 }
 const capture = good.nodes.find((node) => node.name === "mic-capture");

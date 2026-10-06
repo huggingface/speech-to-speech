@@ -53,6 +53,7 @@ from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
 from speech_to_speech.pipeline.messages import (
     EndOfResponse,
     LLMResponseChunk,
+    ResponseIncompleteReason,
     ResponsePrefetchTransaction,
     TokenUsage,
 )
@@ -102,7 +103,15 @@ class Usage(BaseModel):
     output_tokens: int
 
 
-ProviderEvent = TextDelta | AssistantMessage | ToolCall | Usage
+class ProviderResponseEnd(BaseModel):
+    """An explicit provider terminal, separate from stream exhaustion."""
+
+    status: Literal["completed", "incomplete", "failed"] = "completed"
+    reason: ResponseIncompleteReason | None = None
+    error: str | None = None
+
+
+ProviderEvent = TextDelta | AssistantMessage | ToolCall | Usage | ProviderResponseEnd
 SerializeFn = Callable[[Chat], Any]
 RequestFn = Callable[[Any, dict[str, Any]], Any]
 EventIteratorFn = Callable[[Any], Iterator[ProviderEvent]]
@@ -142,6 +151,7 @@ class _GenState(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     output_emitted: bool = False
+    ending: ProviderResponseEnd = Field(default_factory=ProviderResponseEnd)
 
 
 class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
@@ -620,11 +630,17 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 cancelled = True
                 break
 
-            if isinstance(event, AssistantMessage):
+            if isinstance(event, ProviderResponseEnd):
+                state.ending = event
+                if event.status == "failed":
+                    raise RuntimeError(event.error or "The language model provider reported a failed response.")
+            elif isinstance(event, AssistantMessage):
                 state.pending.append(
                     RealtimeConversationItemAssistantMessage(type="message", role="assistant", content=event.content)
                 )
             elif isinstance(event, ToolCall):
+                if state.ending.status != "completed":
+                    continue
                 # Flush any pending spoken text before emitting the tool call.
                 if printable_text.strip():
                     sentence_batch.append(remove_markdown(printable_text.strip()))
@@ -703,11 +719,17 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 logger.info("LLM generation cancelled (interruption)")
                 cancelled = True
                 break
-            if isinstance(event, AssistantMessage):
+            if isinstance(event, ProviderResponseEnd):
+                state.ending = event
+                if event.status == "failed":
+                    raise RuntimeError(event.error or "The language model provider reported a failed response.")
+            elif isinstance(event, AssistantMessage):
                 state.pending.append(
                     RealtimeConversationItemAssistantMessage(type="message", role="assistant", content=event.content)
                 )
             elif isinstance(event, ToolCall):
+                if state.ending.status != "completed":
+                    continue
                 yield from self._record_tool_call(state, turn, event.item)
             elif isinstance(event, TextDelta):
                 # Text-only keeps every character verbatim; audio strips markdown
@@ -863,6 +885,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
             can_commit = (
                 error_message is None
+                and state.ending.status == "completed"
                 and generation_completed
                 and not self._turn_is_cancelled(turn)
                 and self._turn_is_latest(turn.turn_id, turn.turn_revision)
@@ -930,6 +953,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 cancel_generation=turn.gen,
                 response_key=turn.response_key,
                 error=error_message,
+                status="incomplete" if generation_completed and state.ending.status == "incomplete" else "completed",
+                reason=state.ending.reason if generation_completed and state.ending.status == "incomplete" else None,
             )
             return history_committed
         finally:
@@ -1008,7 +1033,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self._apply_config(active_chat, instructions, wants_audio, language_name=lang_name)
 
         audio_b64 = self._audio_to_wav_base64(request.audio, request.audio_sample_rate)
-        audio_message = active_chat.add_item(make_user_audio_message(audio_b64))
+        audio_message = make_user_audio_message(audio_b64)
+        if request.input_item_id is not None:
+            audio_message.id = request.input_item_id
+        active_chat.add_item(audio_message)
         optional_kwargs = self._build_audio_optional_kwargs(response, req_tools, req_tool_choice)
 
         transactional_user_message_id: str | None = None

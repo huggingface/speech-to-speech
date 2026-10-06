@@ -214,10 +214,6 @@ class Chat:
 
         raise ChatItemError(f"No function_call with call_id '{call_id}' found in conversation history.")
 
-    def init_chat(self, message: RealtimeConversationItemSystemMessage) -> None:
-        with self._lock:
-            self.init_chat_message = message
-
     def history_anchor_id(self) -> str | None:
         """Anchor identifying the current end of the conversation.
 

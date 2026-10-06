@@ -559,7 +559,7 @@ class TestProxyConfigFollowsBackendSettings:
             ChatCompletionsLanguageModelHandlerArguments,
         )
         from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
-        from speech_to_speech.backend_registry import LLM_BACKENDS, select_backend
+        from speech_to_speech.backend_registry import LLM_BACKENDS, BackendSelection
         from speech_to_speech.s2s_pipeline import build_llm_proxy_config
 
         module_kwargs = ModuleArguments(enable_llm_proxy=True, llm_backend="chat-completions")
@@ -568,7 +568,8 @@ class TestProxyConfigFollowsBackendSettings:
             responses_api_base_url="https://router.huggingface.co/v1",
             responses_api_api_key="hf_secret",
         )
-        selection = select_backend(LLM_BACKENDS, "chat-completions", lm_kwargs)
+        spec = LLM_BACKENDS["chat-completions"]
+        selection = BackendSelection(spec, spec.normalize(lm_kwargs))
 
         config = build_llm_proxy_config(module_kwargs, selection)
 

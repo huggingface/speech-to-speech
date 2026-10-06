@@ -237,7 +237,7 @@ class TestSDKSessionUpdate:
             )
             await asyncio.sleep(0.2)
 
-            cid = server_env.service.connection_ids[0]
+            cid = list(server_env.service._conns)[0]
             s = server_env.service._state(cid).runtime_config.session
             assert s.audio.output.voice == "alloy"
             assert s.instructions == "You are a helpful robot"
@@ -637,13 +637,11 @@ class TestPackagedAudioClient:
         try:
             await wait_until(
                 lambda: (
-                    bool(server_env.service.connection_ids)
-                    and bool(
-                        server_env.service._state(server_env.service.connection_ids[0]).runtime_config.session.tools
-                    )
+                    bool(list(server_env.service._conns))
+                    and bool(server_env.service._state(list(server_env.service._conns)[0]).runtime_config.session.tools)
                 )
             )
-            conn_id = server_env.service.connection_ids[0]
+            conn_id = list(server_env.service._conns)[0]
             chat = server_env.service._state(conn_id).runtime_config.chat
             chat.add_item(
                 RealtimeConversationItemFunctionCall(
