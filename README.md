@@ -87,7 +87,7 @@ The [LLM weights alone are approximately **8 GB**](https://huggingface.co/Qwen/Q
 
 ### Local speech with a hosted LLM
 
-Run speech recognition and synthesis locally on Apple Silicon or Linux/NVIDIA while a hosted LLM generates replies. The speech backends select MLX automatically on Apple Silicon.
+Run speech recognition and synthesis locally on Apple Silicon or Linux/NVIDIA while a hosted LLM generates replies. On Apple Silicon, Parakeet selects MLX and Qwen3-TTS selects GGML/Metal.
 
 Budget approximately **8 GB of available memory for the local speech pipeline**: unified memory on Apple Silicon (**16 GB total recommended**) or GPU VRAM on NVIDIA, with separate system RAM. Leave room for the operating system and other apps.
 
@@ -167,21 +167,21 @@ On Linux, the Qwen3-TTS GGML backend comes from `faster-qwen3-tts[ggml]`. Its de
 
 ```bash
 # CUDA 13.x
-pip install "qwentts-cpp-python==0.4.2+cu130" \
+pip install "qwentts-cpp-python==0.5.0+cu130" \
   -f https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/tree/main/whl/cu130
 
 # CUDA 12.4
-pip install "qwentts-cpp-python==0.4.2+cu124" \
+pip install "qwentts-cpp-python==0.5.0+cu124" \
   -f https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/tree/main/whl/cu124
 
 # CPU-only fallback
-pip install "qwentts-cpp-python==0.4.2+cpu" \
+pip install "qwentts-cpp-python==0.5.0+cpu" \
   -f https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/tree/main/whl/cpu
 
 pip install speech-to-speech
 ```
 
-These examples require a matching wheel version 0.4.2 or newer. If your wheelhouse does not provide one, follow the [upstream source-build instructions](https://github.com/andimarafioti/faster-qwen3-tts/blob/main/docs/ggml-backend.md).
+These examples require a matching wheel version 0.5.0 or newer. If your wheelhouse does not provide one, follow the [upstream source-build instructions](https://github.com/andimarafioti/faster-qwen3-tts/blob/main/docs/ggml-backend.md).
 
 To use the previous CUDA-graphs implementation instead of GGML, pass `--qwen3_tts_backend torch`.
 
@@ -568,7 +568,7 @@ speech-to-speech local \
     --tts qwen3
 ```
 
-The speech backends automatically select MLX on Apple Silicon or CUDA/GGML on NVIDIA. Change `--stt` and `--tts` to use other speech backends, or `-hf` to use another supported GGUF model; keep the server alias and `--model_name` matched.
+Parakeet automatically selects MLX on Apple Silicon or CUDA on NVIDIA; Qwen3-TTS uses GGML on both, with Metal on Apple Silicon. Change `--stt` and `--tts` to use other speech backends, or `-hf` to use another supported GGUF model; keep the server alias and `--model_name` matched.
 
 The [Q4_0 LLM weights are approximately **4.6 GB**](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q4_0.gguf). The example uses one 8k context and disables reasoning for faster replies; `--no-mmproj` skips the image/audio projector because STT supplies text. Increase context or concurrency only as needed, leaving memory for speech. Stop both processes with `Ctrl+C` in their respective terminals.
 
@@ -661,7 +661,7 @@ speech-to-speech serve \
 
 The handler converts OmniVoice's completed 24 kHz float output into the pipeline's 16 kHz `int16` blocks. OmniVoice does not currently expose incremental audio through `generate()`, so the first block is available only after the full utterance has been synthesized. See the [TTS component guide](./src/speech_to_speech/TTS/README.md#6-omnivoice---tts-omnivoice) for saved prompts, voice design, devices, latency, and all backend flags.
 
-The `omnivoice` extra is supported on Linux, Windows, and macOS. On non-macOS platforms, both OmniVoice and the built-in Qwen3 backend share Transformers 5 through `faster-qwen3-tts>=0.5.3`, so installing this extra keeps the default Qwen3 path available. Linux uses Qwen3's GGML extra by default; see the [CUDA note](#cuda-note-for-qwen3-tts) if its CUDA 12.8 / `manylinux_2_39` native wheel does not match your host.
+The `omnivoice` extra is supported on Linux, Windows, and macOS. On non-macOS platforms, both OmniVoice and the built-in Qwen3 backend share Transformers 5 through `faster-qwen3-tts>=0.5.4`, so installing this extra keeps the default Qwen3 path available. Linux uses Qwen3's GGML extra by default; see the [CUDA note](#cuda-note-for-qwen3-tts) if its CUDA 12.8 / `manylinux_2_39` native wheel does not match your host.
 
 > [!WARNING]
 > OmniVoice's code is Apache-2.0, but its pretrained weights are CC-BY-NC and are not licensed for commercial use. Use voice cloning only with authorization and consent; do not use it for impersonation, fraud, scams, or other illegal or unethical activity.
